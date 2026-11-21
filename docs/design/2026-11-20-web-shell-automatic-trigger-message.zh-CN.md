@@ -36,7 +36,9 @@ Web Shell 目前把所有 user 角色记录都交给普通 `UserMessage` 气泡�
 
 ### document 导出的版本化 source 投影
 
-离线回放把持久化的 cron subtype 恢复为 `DaemonTextTranscriptBlock.meta.source`。已发布的 V1 刻意排除这段 metadata，因此无法在真实导出的自动输入上启用新展示。不能原地放宽 V1：V2 仅允许既有 user block 携带可选的 `meta.source: 'cron'`，其 schema 从未修改的 V1 派生，新的 HTML 输出采用 V2。V1 的产生方和读取方仍保持封闭的字段集合，不接受该新增字段；renderer 同时接受 V1 与 V2，其它版本值仍被拒绝。V2 标签不带 timestamp、source record ID 或其它外围 metadata，既有 forbidden-field 防护门仍只允许 exporter 构造的单键对象。这里改变的是向外的 HTML document envelope，不改变调度、transcript 持久化、回放 metadata 生成或 daemon API；`rendererVersion` 仍然是精确的 CLI 版本或内容 hash，不与 schemaVersion 混同。
+离线回放把持久化的 cron subtype 恢复为 `DaemonTextTranscriptBlock.meta.source`。已发布的 V1 刻意排除这段 metadata，因此无法在真实导出的自动输入上启用新展示。不能原地放宽 V1：V2 仅允许既有 user block 携带可选的 `meta.source: 'cron'`，其 schema 从未修改的 V1 派生，新的 HTML 输出采用 V2。V1 的产生方和读取方仍保持封闭的字段集合，不接受该新增字段；renderer 同时接受 V1 与 V2，其它版本值仍被拒绝。V2 标签不带 timestamp、source record ID 或其它外围 metadata，既有 forbidden-field 防护门仍只允许 exporter 构造的单键对象。这里改变的是向外的 HTML document envelope，不改变调度、transcript 持久化、回放 metadata 生成或 daemon API；`rendererVersion` 仍然是精确的 CLI 版本或内容 hash，不与之混同的是 document 的 `schemaVersion`。
+
+`build.mjs` 在该身份旁生成 `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION`。本地源码构建支持 V2；委托 renderer 默认输出 V1，使已经发布的旧 runtime 始终能打开导出的 document。若委托的 renderer 已支持 V2，必须由调用方显式设置 `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION=2`，并为同一受支持 runtime 固定 renderer 身份与 JS/CSS 的 SRI 摘要。体积预算在注入身份后测量，不再测量带占位符的中间文本。
 
 ### 自动触发展示
 
@@ -90,10 +92,11 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - `packages/web-shell/client/i18n.test.ts` — 本地化消息目录覆盖。
 - `packages/web-shell/client/components/MessageItem.dom.test.tsx` — props 传递和 source 更新覆盖。
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` — 组件行为与回归覆盖。
-- `packages/web-templates/src/export-html/build.mjs` — 针对新增展示及既有静态导出行为，实测并调整 renderer 体积上限。
+- `packages/web-templates/src/export-html/build.mjs` — schema 能力上限生成、委托兼容性和实际产物的体积测量。
+- `packages/web-templates/src/index.ts` — 向 HTML formatter 暴露 renderer 的 schema 能力上限。
 - `packages/cli/src/ui/utils/export/export-transcript-document.ts` — 保留 V1 表示形式，增加 V2 及其派生 schema，以承载规范化的 cron 路由标签，且不带出外围 metadata。
 - `packages/cli/src/ui/utils/export/index.ts` — 在既有 V1 接口旁导出两个版本的工厂与 document 类型。
-- `packages/cli/src/ui/utils/export/formatters/html.ts` — 产出 V2 HTML 数据结构，并在读取时校验两种受支持的版本。
+- `packages/cli/src/ui/utils/export/formatters/html.ts` — 按 renderer 声明的 schema 上限选择 HTML 版本，并在读取时校验两种受支持的版本。
 - `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 来源与 metadata 边界、非 cron 来源以及 V1 兼容性覆盖。
 - `packages/cli/src/ui/utils/export/formatters/html.test.ts` — 产品端 V2 输出与旧 V1 渲染覆盖。
 - `packages/web-templates/src/export-html/src/document-main.tsx` — 接受 V1 与 V2，拒绝其它 schema 版本。
@@ -102,15 +105,16 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 
 ## 验证计划
 
-实测 renderer JavaScript 为 **2,152,570 字节**，分离的组件 CSS 为 **2,427,140 字节**。告警基线为 **2,152,570**，硬上限为 **2,153,000 字节**，为工具链差异保留 430 字节。此前的实测还曾在旧的 `2,152,549` 告警基线上产生真实超额告警，因而在正常尺寸检查之外，也验证了后续增长会触发告警。
+身份注入后实测 renderer JavaScript 为 **2,152,990 字节**，其中包含 reader 对 user metadata 的边界校验及附件引用校验；分离的组件 CSS 为 **2,427,188 字节**。告警基线即实测的 **2,152,990**，硬上限为 **2,153,420 字节**，为工具链差异保留 430 字节。这里按真实产物重新校准基线，不用旧的占位文本峰值掩盖 metadata 校验带来的体积增长。
 
 - 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、内置渲染惰性、附件、编辑、来源、内容、附件数与编辑态变化时在解析前收起旧详情、空内容、document 展开，以及以 `Loop tick — ` 开头的真实指令在 interactive 和 document 视图中的保留。验证自动触发标题在所有支持的 catalog 中均已本地化。
 - 验证现有 `MessageItem` 仅改变 source 时会更新转发的 props，并验证普通长消息在 source 变为自动来源后恢复紧凑状态。
-- 运行用户消息、自动触发 predicate 及全部支持 catalog 的聚焦测试，再执行贡献流程要求的仓库 build 与 typecheck。实测最终 renderer 字节，把运行时告警阈值设为该值，硬上限保留其上方 430 字节，保证告警阈值严格小于硬上限；同时验证当前尺寸不告警以及未来增长会告警。
+- 运行用户消息、自动触发 predicate 及全部支持 catalog 的聚焦测试，再执行贡献流程要求的仓库 build 与 typecheck。在身份注入后实测 renderer 字节，与文档记录的告警峰值对照，并在该峰值上方恰好 430 字节设置硬上限，保证告警阈值严格小于硬上限；同时验证当前尺寸不告警以及未来增长会告警。
 - 在桌面与移动宽度断言日历与摘要同处一行，带详情的展开按钮也处在同一行。完整短 echo 在自身摘要内换行可读，自动头部样式不污染 per-run 共享样式，且页面没有横向溢出。
 - 覆盖固定数量文件的各字段更新、没有宿主覆盖时的 per-run 优先级、observer 清理，以及展开 → 编辑 → 取消 → 收起 → 再次展开。
 - 用同一组 cron、loop、普通和 per-run fixture 对 baseline 与修改后构建运行 Playwright 场景，在桌面与移动宽度截取紧凑和展开状态，并断言 document 无横向溢出。
 - document 导出断言持久化 cron 记录的 `schemaVersion: 2`，其 user block 仅含 `meta.source: 'cron'`，普通与 `goal_runtime` 输入不携带该字段。覆盖额外 timestamp 被拒绝、V1 拒绝新增标签，以及旧 V1 HTML 的生成。重新生成真实 HTTP 导出，验证 V2 标记、紧凑展示和全局折叠/展开。
+- 使用 pre-V2 委托身份及实际已发布资源的 SRI，断言输出的 V1 不新增 metadata，并可由该已发布 renderer 打开。负对照中，同一信封改标为 V2 必须被该 renderer 拒绝。委托用例后恢复默认 V2 writer，并校验不支持或未匹配的 schema 上限配置被拒绝。
 - 保留面向模型的 JSONL 内容与回放 source 断言作为回归证据；这些层不需要生产改动。
 
 ## 验收标准
@@ -120,7 +124,7 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - 普通用户消息与结构化 per-run 定时任务消息保持当前展示。
 - 内置路径在关闭展开区时延后默认富文本 parser，而宿主提供的替换或脱敏渲染保持对消息正文的完全控制。
 - 附件、编辑、重试、source 元数据、既有时间戳语义、turn 边界和 tool-call 导航继续工作。
-- 静态 V2 document 输出携带规范化 cron 路由标签而不带出外围 metadata，旧 V1 文档保持可读；默认包含详细展示文本，且无需交互式触发控件。
+- 当前本地 V2 renderer 的输出携带规范化 cron 路由标签而不带出外围 metadata；pre-V2 委托输出兼容的 V1。reader 接受 V1 与 V2、拒绝未知版本，默认包含详细展示文本，且无需交互式触发控件。
 - 聚焦测试与浏览器检查通过，桌面和移动宽度均无横向溢出。
 
 ## 未决问题

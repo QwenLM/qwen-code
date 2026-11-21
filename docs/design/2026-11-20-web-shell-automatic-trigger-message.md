@@ -36,7 +36,9 @@ The existing `ScheduledTaskRunMessage` handles the structured prompt of an indep
 
 ### Versioned document-export source projection
 
-Offline replay restores a persisted cron subtype to `DaemonTextTranscriptBlock.meta.source`. Published V1 deliberately excludes that metadata, so V1 cannot show the automatic-trigger presentation for a real exported wakeup. Do not widen V1 in place: V2 permits only an optional user-block `meta.source: 'cron'`, derived from the unmodified V1 schema and used by new HTML output. The V1 producer and reader retain their existing closed field set and do not accept it; the renderer accepts both V1 and V2 documents and rejects other versions. The V2 tag carries no timestamp, source record ID, or other surrounding metadata, and the forbidden-field gate still admits only the exporter-generated single-key object. This changes the outbound HTML document envelope, not scheduling, transcript persistence, replay metadata generation, or daemon APIs. It does not change the meaning of `rendererVersion`, which remains an exact CLI version or content hash.
+Offline replay restores a persisted cron subtype to `DaemonTextTranscriptBlock.meta.source`. Published V1 deliberately excludes that metadata, so V1 cannot show the automatic-trigger presentation for a real exported wakeup. Do not widen V1 in place: V2 permits only an optional user-block `meta.source: 'cron'`, derived from the unmodified V1 schema and used by new HTML output. The V1 producer and reader retain their existing closed field set and do not accept it; the renderer accepts both V1 and V2 documents and rejects other versions. The V2 tag carries no timestamp, source record ID, or other surrounding metadata, and the forbidden-field gate still admits only the exporter-generated single-key object. This changes the outbound HTML document envelope, not scheduling, transcript persistence, replay metadata generation, or daemon APIs. It does not change the meaning of `rendererVersion`, which remains an exact CLI version or content hash and is not the document's `schemaVersion`.
+
+`build.mjs` emits `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION` alongside that identity. A local source build supports V2. A delegated renderer defaults to V1 so its previously published runtime can still open every exported document. To delegate a V2-capable renderer, the caller must explicitly set `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION=2` and pin the renderer identity plus JS/CSS SRI hashes for that same capable runtime. The build measures the asset after injecting its identity, not the placeholder-bearing intermediate text.
 
 ### Automatic-trigger presentation
 
@@ -67,18 +69,17 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 
 ## Key design decisions
 
-| Decision                                                  | Rationale                                                                                                                                                                   |
-| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Change the `UserMessage` variant, not the transcript role | User-role entries remain turn starts, while existing edit, delete, retry, timeline, and tool-call consumers continue to see the same message.                               |
-| Integrate inside `UserMessage`                            | This preserves attachments, custom content rendering, editing, failure handling, and the per-run card without a parallel message path.                                      |
-| Prefer the existing per-run card                          | Its structured task name, cron, task ID, trigger, and session mode are more informative than a generic automatic card.                                                      |
-| Use one source-neutral visible label                      | Replay maps persisted automatic records to `cron`; the UI must not relabel the same tick after reload.                                                                      |
-| Keep the existing outer timestamp only                    | The available value is a projection/execution timestamp, not necessarily the scheduler fire time, and a second card timestamp would duplicate and overstate it.             |
-| Suppress redundant short-echo disclosure                  | The compact echo is already complete and the full model instruction is unavailable to this projection, so a full-instructions control would be both useless and misleading. |
-| Construct detail content on demand                        | Long sessions should not parse or host-render every hidden instruction merely to show a compact summary.                                                                    |
-| Do not group by wakeup ID                                 | Self-paced rearming creates a new one-shot ID, so it is not a stable loop-chain identity.                                                                                   |
-
-| Version the export instead of widening V1 | The V1 allowlist is a safety contract. V2 carries the existing canonical cron routing tag on user blocks, with no other metadata, and the renderer supports reading both formats. |
+| Decision                                                  | Rationale                                                                                                                                                                                                                                |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Change the `UserMessage` variant, not the transcript role | User-role entries remain turn starts, while existing edit, delete, retry, timeline, and tool-call consumers continue to see the same message.                                                                                            |
+| Integrate inside `UserMessage`                            | This preserves attachments, custom content rendering, editing, failure handling, and the per-run card without a parallel message path.                                                                                                   |
+| Prefer the existing per-run card                          | Its structured task name, cron, task ID, trigger, and session mode are more informative than a generic automatic card.                                                                                                                   |
+| Use one source-neutral visible label                      | Replay maps persisted automatic records to `cron`; the UI must not relabel the same tick after reload.                                                                                                                                   |
+| Keep the existing outer timestamp only                    | The available value is a projection/execution timestamp, not necessarily the scheduler fire time, and a second card timestamp would duplicate and overstate it.                                                                          |
+| Suppress redundant short-echo disclosure                  | The compact echo is already complete and the full model instruction is unavailable to this projection, so a full-instructions control would be both useless and misleading.                                                              |
+| Construct detail content on demand                        | Long sessions should not parse or host-render every hidden instruction merely to show a compact summary.                                                                                                                                 |
+| Do not group by wakeup ID                                 | Self-paced rearming creates a new one-shot ID, so it is not a stable loop-chain identity.                                                                                                                                                |
+| Version the export instead of widening V1                 | The V1 allowlist is a safety contract. V2 carries only the existing canonical cron routing tag. The writer follows the renderer's declared schema ceiling: the current local renderer emits V2, and a pre-V2 delegate keeps emitting V1. |
 
 ## Files affected
 
@@ -91,27 +92,29 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 - `packages/web-shell/client/i18n.test.ts` — localized catalog coverage.
 - `packages/web-shell/client/components/MessageItem.dom.test.tsx` — prop forwarding and source-update coverage.
 - `packages/web-shell/client/components/messages/UserMessage.test.tsx` — component behavior and regression coverage.
-- `packages/web-templates/src/export-html/build.mjs` — measured renderer budget for the added presentation and existing static-export behavior.
+- `packages/web-templates/src/export-html/build.mjs` — schema-capability generation, delegation compatibility, and emitted-asset budget measurement.
+- `packages/web-templates/src/index.ts` — expose the renderer schema ceiling to the HTML formatter.
 - `packages/cli/src/ui/utils/export/export-transcript-document.ts` — preserve the V1 representation and add V2 plus its derived schema for the canonical cron routing tag, without admitting surrounding metadata.
 - `packages/cli/src/ui/utils/export/index.ts` — export both versioned factories and document types alongside the existing V1 interface.
-- `packages/cli/src/ui/utils/export/formatters/html.ts` — produce V2 HTML envelopes and validate either supported version on read.
+- `packages/cli/src/ui/utils/export/formatters/html.ts` — select the HTML schema version from the renderer's declared ceiling and validate either supported version on read.
 - `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 source and metadata-boundary coverage, non-cron sources, and V1 compatibility.
-- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — product V2 output and legacy V1 rendering coverage.
+- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — default and delegated schema ceilings, standalone and legacy HTML output, and invalid configuration coverage.
 - `packages/web-templates/src/export-html/src/document-main.tsx` — accept V1 and V2 while rejecting other schema versions.
 - `docs/design/web-shell/chat-transcript-contract-prevalidation.md` — synchronized allowlist, versioning, and schema-production rules.
 - `packages/web-shell/client/e2e/web-shell.automatic-trigger-message.spec.ts` — deterministic browser coverage and screenshots.
 
 ## Validation plan
 
-The renderer measures **2,152,570 bytes** of JavaScript and **2,427,140 bytes** of separated component CSS. The warning baseline is **`2,152,570`**, and the hard ceiling is **`2,153,000` bytes**, preserving 430 bytes for toolchain variance. A build also produced a real above-baseline warning under the previous `2,152,549` threshold, so future-growth warning generation is exercised in addition to the normal-size check.
+After identity injection, the renderer measures **2,152,990 bytes** of JavaScript, including its user-metadata boundary and attachment-reference checks, and **2,427,188 bytes** of separated component CSS. The warning baseline is the measured **`2,152,990`**, with a hard ceiling of **`2,153,420` bytes**, preserving 430 bytes for toolchain variance. The rebaseline reflects the emitted metadata-validation work rather than hiding its growth behind the earlier placeholder measurement.
 
 - Unit-test both `cron` and `loop`, ordinary/unknown sources, per-run priority, disclosure, short-echo suppression, lazy built-in rendering, attachments, editing, source, content, and attachment-count changes that synchronously collapse the outgoing detail before parser work, empty content, document expansion, and preservation of real `Loop tick — ` prefixed instructions in interactive and document views. Verify that the automatic-trigger title is localized for every supported catalog.
 - Verify that changing only the source on an existing `MessageItem` updates the forwarded props, and that an ordinary expanded message becomes compact when its source becomes automatic.
-- Run the focused Web Shell suites for user messages, automatic-trigger predicates, and all supported catalogs, then the repository build and typecheck required by the contributor workflow. Measure the final renderer bytes and set the runtime warning to that measured value, with a hard ceiling exactly 430 bytes above it. Keep the warning strictly below the ceiling and exercise no-warning-at-current-size and future-growth warning behavior.
+- Run the focused Web Shell suites for user messages, automatic-trigger predicates, and all supported catalogs, then the repository build and typecheck required by the contributor workflow. Measure the emitted renderer bytes after identity injection, compare them with the documented warning peak, and keep the hard ceiling exactly 430 bytes above that peak. Keep the warning strictly below the ceiling and exercise no-warning-at-current-size and future-growth warning behavior.
 - Assert that the calendar and summary stay on one flex row and, for detailed input, the disclosure stays on that row too, at desktop and phone widths. Keep complete short-echo labels wrapped and readable, continue isolating variant selection from shared per-run styling, and assert there is no horizontal page overflow.
 - Cover every same-count attachment field update, the no-host per-run priority path, observer cleanup, and expand → edit → cancel → collapsed → reopen.
 - Run a Playwright scenario with the same cron, loop, ordinary, and per-run fixtures against the baseline and changed build. Capture compact and expanded states at desktop and mobile widths and assert no horizontal document overflow.
 - Assert V2 `schemaVersion: 2` for a persisted cron record, only `meta.source: 'cron'` on its user block, and no metadata on ordinary or `goal_runtime` inputs. Verify timestamp rejection, rejection of the new tag in V1, and generation of legacy V1 HTML. Regenerate an actual HTTP export and verify its V2 marker, compact state, and global collapse/expand behavior.
+- Delegate the pre-V2 identity with its actual published SRI, assert a V1 envelope without added metadata, and open it with the published renderer. As a negative control, the same envelope labelled V2 must be rejected by that renderer. Restore the default V2 writer after the delegation case and reject unsupported or unpaired schema-ceiling configuration.
 - Keep model-facing JSONL content and replay source assertions as regression evidence; no production changes are expected in those layers.
 
 ## Acceptance criteria
@@ -121,7 +124,7 @@ The renderer measures **2,152,570 bytes** of JavaScript and **2,427,140 bytes** 
 - Ordinary user messages and structured per-run scheduled-task messages retain their current presentation.
 - Built-in closed disclosures defer the default rich-content parser, while host-provided replacement or redaction rendering retains its complete ownership of the message body.
 - Attachments, editing, retry, source metadata, existing timestamp semantics, turn boundaries, and tool-call navigation continue to work.
-- Static V2 document output carries the canonical cron routing tag without surrounding metadata, keeps V1 documents readable, and includes detailed display text by default without an interactive trigger disclosure.
+- The current local V2 renderer carries the canonical cron routing tag without surrounding metadata; a pre-V2 delegate writes compatible V1 instead. Readers accept V1 and V2, reject unknown versions, and include detailed display text by default without an interactive trigger disclosure.
 - Focused tests and browser checks pass at desktop and mobile widths without horizontal overflow.
 
 ## Open questions

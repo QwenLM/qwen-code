@@ -677,6 +677,76 @@ describe('ExportTranscriptDocument browser gate', () => {
     }
   });
 
+  it.each([
+    {
+      caseName: 'V1 with injected cron metadata',
+      schemaVersion: 1,
+      meta: { source: 'cron' },
+    },
+    {
+      caseName: 'V2 with a non-canonical source',
+      schemaVersion: 2,
+      meta: { source: 'loop' },
+    },
+    {
+      caseName: 'V2 with extra user metadata',
+      schemaVersion: 2,
+      meta: { source: 'cron', additionalKey: 'not-allowed' },
+    },
+  ])(
+    'rejects $caseName from a static document reader',
+    async ({ schemaVersion, meta }) => {
+      const document = createExportTranscriptDocumentV1(
+        [record('metadata-error', null, 'user', 'Untrusted metadata marker')],
+        {
+          startTime: '2026-08-16T00:00:00.000Z',
+          metadata: {
+            sessionId: 'metadata-error',
+            startTime: '2026-08-16T00:00:00.000Z',
+            exportTime: EXPORTED_AT,
+            cwd: '/workspace/project',
+            promptCount: 1,
+            uniqueFiles: [],
+          },
+        },
+        { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+      );
+      const invalidDocument = {
+        ...document,
+        schemaVersion,
+        blocks: document.blocks.map((block, index) =>
+          index === 0 ? { ...block, meta } : block,
+        ),
+      };
+      const html = replaceDocumentEnvelope(
+        renderExportTranscriptDocumentToHtml(document),
+        invalidDocument,
+      );
+
+      browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      const probe = await installNetworkAndCspProbe(page);
+      await page.setContent(html, { waitUntil: 'load' });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to open this chat export',
+      );
+      expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+      expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
+      await page.close();
+      await browser.close();
+      browser = undefined;
+    },
+  );
+
   it('fails closed when the CDN renderer is unavailable or fails integrity', async () => {
     const document = createExportTranscriptDocumentV1(
       [record('cdn-error', null, 'user', 'CDN error probe')],

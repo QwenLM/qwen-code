@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { EXPORT_TRANSCRIPT_RENDERER_VERSION } from '@qwen-code/web-templates';
 import type { ExportSessionData } from '../types.js';
 import { createExportTranscriptDocumentV1 } from '../export-transcript-document.js';
@@ -47,7 +50,113 @@ const records = [
   },
 ];
 
+function createBuilderEnvironment() {
+  const env = { ...process.env };
+  delete env['QWEN_EXPORT_RENDERER_IDENTITY'];
+  delete env['QWEN_EXPORT_RENDERER_INTEGRITY'];
+  delete env['QWEN_EXPORT_RENDERER_CSS_INTEGRITY'];
+  delete env['QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION'];
+  return env;
+}
+
+afterAll(() => {
+  const templatesDir = join(process.cwd(), '../web-templates');
+  const result = spawnSync(process.execPath, ['build.mjs'], {
+    cwd: templatesDir,
+    env: createBuilderEnvironment(),
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  expect(result.error).toBeUndefined();
+  expect(result.status).toBe(0);
+  expect(result.signal).toBeNull();
+  expect(
+    readFileSync(
+      join(templatesDir, 'src/generated/exportTranscriptDocumentTemplate.ts'),
+      'utf8',
+    ),
+  ).toContain('EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION: 1 | 2 = 2');
+  for (const extension of ['js', 'css']) {
+    expect(
+      readFileSync(
+        join(
+          templatesDir,
+          `src/export-html/dist/export-transcript-document.${extension}`,
+        ),
+        'utf8',
+      ).length,
+    ).toBeGreaterThan(0);
+  }
+});
+
 describe('HTML export formatter', () => {
+  it.each([false, true])(
+    'emits the declared schema ceiling when delegated=%s',
+    { timeout: 90_000 },
+    (delegated) => {
+      const templatesDir = join(process.cwd(), '../web-templates');
+      const env = createBuilderEnvironment();
+      if (delegated) {
+        Object.assign(env, {
+          QWEN_EXPORT_RENDERER_IDENTITY: '0.28.3+88485ce86a090982',
+          QWEN_EXPORT_RENDERER_INTEGRITY:
+            'sha384-RmZTu+dlEMG0jEt1MPe6uwIFPUR0wy3BVWW/vf8HIJwf0DvYK5GVg9c8F+mo3xei',
+          QWEN_EXPORT_RENDERER_CSS_INTEGRITY:
+            'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
+        });
+      }
+      const result = spawnSync(process.execPath, ['build.mjs'], {
+        cwd: templatesDir,
+        env,
+        encoding: 'utf8',
+        timeout: 60_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBe(0);
+      expect(result.signal).toBeNull();
+      const template = readFileSync(
+        join(templatesDir, 'src/generated/exportTranscriptDocumentTemplate.ts'),
+        'utf8',
+      );
+      expect(template).toContain(
+        `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION: 1 | 2 = ${delegated ? 1 : 2};`,
+      );
+      const identity = delegated
+        ? '0.28.3+88485ce86a090982'
+        : EXPORT_TRANSCRIPT_RENDERER_VERSION;
+      expect(template).toContain(JSON.stringify(identity));
+      expect(result.stderr).not.toContain(
+        'Document export renderer JS exceeds',
+      );
+    },
+  );
+
+  it('rejects a schema ceiling that is not paired with a delegated renderer', () => {
+    const templatesDir = join(process.cwd(), '../web-templates');
+    const assetPaths = [
+      join(templatesDir, 'src/generated/exportTranscriptDocumentTemplate.ts'),
+      join(templatesDir, 'src/export-html/dist/export-transcript-document.js'),
+      join(templatesDir, 'src/export-html/dist/export-transcript-document.css'),
+    ];
+    const assets = assetPaths.map((path) => readFileSync(path, 'utf8'));
+    const result = spawnSync(process.execPath, ['build.mjs'], {
+      cwd: templatesDir,
+      env: {
+        ...createBuilderEnvironment(),
+        QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION: '1',
+      },
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      'QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION requires QWEN_EXPORT_RENDERER_IDENTITY.',
+    );
+    expect(assetPaths.map((path) => readFileSync(path, 'utf8'))).toEqual(
+      assets,
+    );
+  });
+
   it('uses the version-bound document renderer for the product export path', () => {
     const html = toHtml(sessionData, records);
     const secondHtml = toHtml(sessionData, records);

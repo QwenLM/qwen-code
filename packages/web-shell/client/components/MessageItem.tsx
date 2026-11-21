@@ -779,13 +779,28 @@ function areToolListsEqual(
 const jsonCache = new WeakMap<object, string>();
 
 function stableImagesEqual(
-  a: Array<{ data: string; mimeType: string }> | undefined,
-  b: Array<{ data: string; mimeType: string }> | undefined,
+  a:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
+  b:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;
   return a.every(
-    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+    (img, i) =>
+      img.data === b[i].data &&
+      img.mimeType === b[i].mimeType &&
+      img.attachmentId === b[i].attachmentId,
   );
 }
 

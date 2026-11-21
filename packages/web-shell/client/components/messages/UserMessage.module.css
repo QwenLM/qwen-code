@@ -226,7 +226,8 @@
   flex-wrap: nowrap;
 }
 
-.automaticTriggerToggle {
+.automaticTriggerHeader .automaticTriggerToggle {
+  margin-top: 0;
   margin-left: auto;
   white-space: nowrap;
 }

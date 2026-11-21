@@ -108,10 +108,18 @@ function completedTurnEvents(): WebShellDaemonScenario['events'] {
   ];
 }
 
-async function expectNoHorizontalOverflow(page: Page): Promise<void> {
+async function expectNoHorizontalOverflow(cards: Locator): Promise<void> {
+  expect(await cards.count()).toBeGreaterThan(0);
   expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
+    await cards.evaluateAll((elements) =>
+      elements.every((element) => {
+        const rect = element.getBoundingClientRect();
+        return (
+          rect.left >= -1 &&
+          rect.right <= window.innerWidth + 1 &&
+          element.scrollWidth <= element.clientWidth + 1
+        );
+      }),
     ),
   ).toBe(true);
 }
@@ -166,7 +174,7 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
   const compactHeight = (await cron.boundingBox())?.height;
   expect(compactHeight).toBeDefined();
   expect(compactHeight!).toBeLessThan(140);
-  await expectNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(cards);
   const desktopPath = testInfo.outputPath('automatic-desktop.png');
   await page.screenshot({ path: desktopPath, animations: 'disabled' });
   await testInfo.attach('automatic-desktop', {
@@ -183,7 +191,7 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
     '[data-web-shell-automatic-trigger-instructions]',
   );
   await expect(instructions).toBeVisible();
-  await expect(instructions).toHaveText(cronPrompt);
+  expect(await instructions.innerText()).toBe(cronPrompt);
   await expect(
     instructions.locator('a[href="https://example.test/releases/2026-11-20"]'),
   ).toHaveCount(1);
@@ -197,7 +205,7 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
 
   await page.setViewportSize({ width: 390, height: 844 });
   await loop.scrollIntoViewIfNeeded();
-  await expectNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(cards);
   const mobilePath = testInfo.outputPath('automatic-mobile.png');
   await page.screenshot({ path: mobilePath, animations: 'disabled' });
   await testInfo.attach('automatic-mobile', {
@@ -209,7 +217,7 @@ test('cron and loop prompts use compact expandable cards @smoke', async ({
   await expect(
     loop.locator('[data-web-shell-automatic-trigger-instructions]'),
   ).toHaveText(loopPrompt);
-  await expectNoHorizontalOverflow(page);
+  await expectNoHorizontalOverflow(cards);
   const expandedPath = testInfo.outputPath('automatic-mobile-expanded.png');
   await page.screenshot({ path: expandedPath, animations: 'disabled' });
   await testInfo.attach('automatic-mobile-expanded', {
@@ -321,6 +329,7 @@ test('canceling automatic-input edit restores the compact card @smoke', async ({
   const bubble = page.locator('[data-web-shell-user-bubble]');
   const editor = bubble.getByRole('textbox', { name: 'Edit message' });
   await expect(editor).toHaveValue(loopPrompt);
+  await editor.fill(`${loopPrompt}\nDiscard this unsaved edit.`);
   await bubble.getByRole('button', { name: 'cancel', exact: true }).click();
   await expect(editor).toHaveCount(0);
   await expect(card).toBeVisible();
@@ -344,6 +353,7 @@ async function expectAutomaticHeaderOnOneRow(card: Locator): Promise<void> {
     }
     const icon = svg.parentElement.getBoundingClientRect();
     const heading = summary.parentElement.getBoundingClientRect();
+    const card = element.getBoundingClientRect();
     const button = element.querySelector('[aria-expanded]');
     const toggle = button?.getBoundingClientRect();
     return {
@@ -362,14 +372,29 @@ async function expectAutomaticHeaderOnOneRow(card: Locator): Promise<void> {
       onOneRow:
         icon.right <= heading.left &&
         Math.min(icon.bottom, heading.bottom) > Math.max(icon.top, heading.top),
-      toggleOnSameRow: !toggle
-        ? true
-        : icon.right <= toggle.left &&
-          Math.min(icon.bottom, toggle.bottom) > Math.max(icon.top, toggle.top),
+      toggleOnSameRow: toggle
+        ? icon.right <= toggle.left &&
+          Math.min(icon.bottom, toggle.bottom) > Math.max(icon.top, toggle.top)
+        : null,
+      headingClearOfToggle: toggle ? heading.right <= toggle.left : null,
+      toggleInsideCard: toggle ? toggle.right <= card.right : null,
+      toggleVerticallyCentered: toggle
+        ? Math.abs(
+            (toggle.top + toggle.bottom) / 2 - (icon.top + icon.bottom) / 2,
+          ) <= 1
+        : null,
     };
   });
   expect(layout.onOneRow, JSON.stringify(layout)).toBe(true);
-  expect(layout.toggleOnSameRow, JSON.stringify(layout)).toBe(true);
+  if (layout.toggleOnSameRow !== null) {
+    expect(layout.toggleOnSameRow, JSON.stringify(layout)).toBe(true);
+    expect(layout.headingClearOfToggle, JSON.stringify(layout)).toBe(true);
+    expect(layout.toggleInsideCard, JSON.stringify(layout)).toBe(true);
+    expect(layout.toggleVerticallyCentered, JSON.stringify(layout)).toBe(true);
+  } else {
+    expect(layout.headingClearOfToggle).toBeNull();
+    expect(layout.toggleInsideCard).toBeNull();
+  }
 }
 
 test('keeps the automatic-trigger calendar with its summary @smoke', async ({
@@ -391,6 +416,8 @@ test('keeps the automatic-trigger calendar with its summary @smoke', async ({
   );
   await expect(cronCard).toBeVisible();
   await expect(echoCard).toBeVisible();
+  await expect(cronCard.locator('[aria-expanded]')).toBeVisible();
+  await expect(echoCard.locator('[aria-expanded]')).toHaveCount(0);
   await expectAutomaticHeaderOnOneRow(cronCard);
   await expectAutomaticHeaderOnOneRow(echoCard);
   await page.setViewportSize({ width: 390, height: 844 });

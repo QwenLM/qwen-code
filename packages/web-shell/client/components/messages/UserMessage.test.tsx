@@ -1078,6 +1078,66 @@ describe('UserMessage', () => {
     }
   });
 
+  it.each(['images', 'files'] as const)(
+    'keeps automatic details expanded when one %s attachment is replaced',
+    (kind) => {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const view = (attachments: {
+        images?: Array<{ data: string; mimeType: string }>;
+        files?: Array<{ name: string; mimeType: string; text: string }>;
+      }) => (
+        <UserMessage
+          content="Instructions with attachments"
+          source="cron"
+          {...attachments}
+        />
+      );
+      const initial =
+        kind === 'images'
+          ? {
+              images: [
+                { data: 'data:image/png;base64,YQ==', mimeType: 'image/png' },
+              ],
+            }
+          : {
+              files: [{ name: 'one.txt', mimeType: 'text/plain', text: 'one' }],
+            };
+      const replacement =
+        kind === 'images'
+          ? {
+              images: [
+                { data: 'data:image/png;base64,Yg==', mimeType: 'image/png' },
+              ],
+            }
+          : {
+              files: [{ name: 'two.txt', mimeType: 'text/plain', text: 'two' }],
+            };
+      act(() => root.render(view(initial)));
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-automatic-trigger-message] button',
+      );
+      act(() => toggle?.click());
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      act(() => root.render(view(replacement)));
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(
+        container.querySelector(
+          '[data-web-shell-automatic-trigger-instructions]',
+        )?.textContent,
+      ).toBe('Instructions with attachments');
+      if (kind === 'images') {
+        expect(container.querySelector('img')?.getAttribute('src')).toBe(
+          'data:image/png;base64,Yg==',
+        );
+      } else {
+        expect(container.textContent).toContain('two.txt');
+      }
+    },
+  );
+
   it('collapses a files attachment update before parsing it again', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -1154,6 +1214,26 @@ describe('UserMessage', () => {
       ...container.querySelectorAll<HTMLButtonElement>('button'),
     ].find((button) => button.textContent === 'Show more');
     expect(toggle).toBeDefined();
+  });
+
+  it('disconnects the ordinary observer when becoming an automatic card', () => {
+    const disconnect = vi.fn();
+    const observer = vi.fn(() => ({ observe: vi.fn(), disconnect }));
+    vi.stubGlobal('ResizeObserver', observer);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const view = (source?: string) => (
+      <UserMessage content="Long message\nwith details" source={source} />
+    );
+    act(() => root.render(view()));
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(disconnect).not.toHaveBeenCalled();
+
+    act(() => root.render(view('cron')));
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(observer).toHaveBeenCalledTimes(1);
   });
 
   it('restores the baseline ResizeObserver after each test', () => {
