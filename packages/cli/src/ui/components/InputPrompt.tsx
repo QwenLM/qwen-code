@@ -16,8 +16,10 @@ import {
   useRef,
 } from 'react';
 import {
+  collapsePastes,
   expandPendingPastePlaceholders,
   framePasteExpansion,
+  restorePasteDraft,
   unframeClipboardPastes,
 } from '../utils/paste-placeholders.js';
 import { Box, Text } from 'ink';
@@ -508,6 +510,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Needed because handleSubmitAndClear is passed into useInputHistory as
   // onSubmit, so we can't reference inputHistory directly here without a cycle.
   const resetHistoryNavRef = useRef<() => void>(() => {});
+  const pendingPastesBeforeHistoryRef = useRef<Map<string, string> | undefined>(
+    undefined,
+  );
 
   const handleSubmitAndClear = useCallback(
     (submittedValue: string, deferUntilIdle = false) => {
@@ -515,6 +520,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // A submission supersedes any clipboard read still in flight; the late
       // read checks this epoch before inserting into the cleared buffer.
       submitEpochRef.current += 1;
+      pendingPastesBeforeHistoryRef.current = undefined;
       // Expand any large paste placeholders to their full content before submitting
       const submittedPrompt = submittedValue;
       const pasteExpansions =
@@ -621,16 +627,42 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
       uiActions.invalidateSubmittedPromptProvenance();
-      // History holds the submitted (framed) value; recall restores the
-      // user's own characters, not the model-facing attribution.
-      const restored = unframeClipboardPastes(newText);
+      // Recall restores the user's own characters, not model-facing framing;
+      // a collapsed paste also recovers the map back to its raw body.
+      let restored = unframeClipboardPastes(newText);
+      const recalledItem = uiState.history?.findLast(
+        (item) =>
+          item.type === 'user' &&
+          item.sentToModel !== false &&
+          (item.recallText ?? item.text) === newText,
+      );
+      const recalledPastes =
+        recalledItem?.type === 'user' &&
+        recalledItem.pasteExpansions instanceof Map &&
+        recalledItem.pasteExpansions.size > 0
+          ? recalledItem.pasteExpansions
+          : undefined;
+      if (recalledPastes) {
+        pendingPastesBeforeHistoryRef.current ??= new Map(pendingPastes);
+        const collapsed = collapsePastes(restored, recalledPastes);
+        const draft = restorePasteDraft(
+          collapsed.text,
+          collapsed.pasteExpansions,
+          pendingPastesBeforeHistoryRef.current,
+        );
+        restored = draft.text;
+        setPendingPastes(draft.pasteExpansions);
+      } else if (!recalledItem && pendingPastesBeforeHistoryRef.current) {
+        setPendingPastes(new Map(pendingPastesBeforeHistoryRef.current));
+        pendingPastesBeforeHistoryRef.current = undefined;
+      }
       // The refill replaces the buffer, so a clipboard read started before
       // the recall must not land at the recalled prompt's cursor.
       submitEpochRef.current += 1;
       buffer.setText(restored);
       setHistoryRestoredText(restored);
     },
-    [buffer, uiActions],
+    [buffer, pendingPastes, setPendingPastes, uiActions, uiState.history],
   );
 
   const inputHistory = useInputHistory({
