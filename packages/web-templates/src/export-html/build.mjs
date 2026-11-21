@@ -186,8 +186,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // 2,149,864 bytes. The forbidden-input guard passes. The warning retains a
 // 713-byte margin above CI. The initial automatic-trigger presentation measured
 // 2,151,571 JS bytes; round this ceiling up to 2,152,000. With the final source
-// predicates and host-renderer compatibility closure it measures 2,151,698 JS
-// bytes, leaving 302 bytes above local output and 2,136 bytes above CI.
+// predicates and host-renderer compatibility closure it measures 2,151,778 JS
+// bytes, leaving 222 bytes above local output and 2,136 bytes above CI.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_152_000;
 
 // Modules that must not be reachable from the document entry, checked against

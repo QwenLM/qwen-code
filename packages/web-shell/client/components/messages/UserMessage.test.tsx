@@ -762,6 +762,7 @@ describe('UserMessage', () => {
   it.each([true, false])(
     'uses document expansion=%s for automatic input without controls',
     (documentExpanded) => {
+      const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
       const container = render(
         <TranscriptRenderModeProvider value="document">
           <TranscriptDocumentExpandedProvider value={documentExpanded}>
@@ -781,6 +782,7 @@ describe('UserMessage', () => {
           '[data-web-shell-automatic-trigger-instructions]',
         ) !== null,
       ).toBe(documentExpanded);
+      expect(parse).toHaveBeenCalledTimes(documentExpanded ? 1 : 0);
       expect(container.querySelector('button')).toBeNull();
       if (documentExpanded) {
         expect(container.textContent).toContain('full exported loop input');
@@ -795,6 +797,7 @@ describe('UserMessage', () => {
     const root = createRoot(container);
     mounted.push({ root, container });
     const content = 'ordinary prompt\nwith details';
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
     const view = (source?: string) => (
       <I18nProvider language="en">
         <UserMessage content={content} source={source} />
@@ -806,6 +809,8 @@ describe('UserMessage', () => {
     ].find((button) => button.textContent === 'Show more');
     act(() => genericToggle?.click());
     expect(container.textContent).toContain('Collapse');
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
 
     act(() => root.render(view('cron')));
     const automaticToggle = container.querySelector<HTMLButtonElement>(
@@ -817,6 +822,44 @@ describe('UserMessage', () => {
         '[data-web-shell-automatic-trigger-instructions]',
       ),
     ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('collapses changed automatic content without re-parsing it', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (content: string) => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source="cron" />
+      </I18nProvider>
+    );
+    act(() => root.render(view('First automatic instruction')));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
+
+    act(() => root.render(view('Second automatic instruction')));
+    const nextToggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(nextToggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-summary]')
+        ?.textContent,
+    ).toBe('Second automatic instruction');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
   });
 
   it('keeps readonly automatic instructions behind a disclosure', () => {

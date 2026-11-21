@@ -421,10 +421,16 @@ export const UserMessage = memo(function UserMessage({
     isAutomaticTriggerSource(source)
       ? source
       : undefined;
+  const expansionGenerationKey = `${source}:${images?.length ?? 0}:${editing}:${content}`;
+  const previousExpansionGeneration = useRef(expansionGenerationKey);
+  const newExpansionGeneration =
+    previousExpansionGeneration.current !== expansionGenerationKey;
+  previousExpansionGeneration.current = expansionGenerationKey;
+  const interactiveDetailsExpanded = newExpansionGeneration ? false : expanded;
   const automaticInstructionsExpanded =
     !automaticTriggerSource ||
     (!isDetailFreeAutomaticEcho(content) &&
-      (documentMode ? documentExpanded : expanded));
+      (documentMode ? documentExpanded : interactiveDetailsExpanded));
   const renderedContent = useMemo(() => {
     if (scheduledTaskRun) {
       return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
@@ -508,7 +514,7 @@ export const UserMessage = memo(function UserMessage({
     <AutomaticTriggerMessage
       source={automaticTriggerSource}
       content={content}
-      expanded={documentMode ? documentExpanded : expanded}
+      expanded={documentMode ? documentExpanded : interactiveDetailsExpanded}
       onToggle={() => setExpanded((value) => !value)}
     >
       {renderedContent}
