@@ -523,6 +523,8 @@ describe('WebFetchTool', () => {
           expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
         } else {
           expect(result.persistedOutputFiles).toBeUndefined();
+          expect(result.llmContent).toContain(summary.trim());
+          expect(fs.readFileSync(originalArtifact!, 'utf8')).toBe(body);
         }
         const [finalized] = await finalizeToolResponses(
           { ...mockConfig, getToolOutputBatchBudget: () => 2_000 } as Config,
@@ -550,6 +552,8 @@ describe('WebFetchTool', () => {
         } else {
           expect(artifact).not.toBe(originalArtifact);
           expect(saved).toBe(result.llmContent);
+          expect(saved).toContain(summary.trim());
+          expect(saved).not.toBe(body);
           expect(output).toContain(
             `Full extracted text saved to: ${originalArtifact}. Page in`,
           );
@@ -559,6 +563,20 @@ describe('WebFetchTool', () => {
         expect(output.length).toBeLessThanOrEqual(2_000);
       },
     );
+
+    it('keeps a spilled success recoverable when its metadata header exceeds 4 KB', async () => {
+      const longUrl = `https://example.com/large?${'x'.repeat(5_000)}`;
+      stubFetch({
+        contentType: 'text/plain',
+        body: Buffer.from('word '.repeat(30_000)),
+      });
+      mockGenerateContent.mockResolvedValue({ text: 'Summary' });
+
+      const result = await run(longUrl);
+
+      expect(result.llmContent).toContain('Full extracted text saved to:');
+      expect(isPersistedOutputStub(result.llmContent as string)).toBe(true);
+    });
 
     it('keeps default result budgets without shrinking side-query input', async () => {
       stubFetch({

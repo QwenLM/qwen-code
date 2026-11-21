@@ -80,7 +80,6 @@ export const PERSISTED_OUTPUT_ARTIFACTS_PREFIX =
 
 export const WEB_FETCH_URL_PREFIX = 'URL: ';
 export const WEB_FETCH_SAVED_TEXT_PREFIX = 'Full extracted text saved to: ';
-const WEB_FETCH_HEADER_LIMIT = 4 * 1024;
 
 /**
  * Whether this tool result already paid to move its bytes to a file, so the
@@ -102,11 +101,7 @@ export function isPersistedOutputStub(content: string): boolean {
     // fetched content. Do not match the body, which may quote the phrase.
     const headerEnd = content.indexOf('\n\n');
     const savedAt = content.indexOf(`\n${WEB_FETCH_SAVED_TEXT_PREFIX}`);
-    if (
-      savedAt >= 0 &&
-      savedAt < WEB_FETCH_HEADER_LIMIT &&
-      (headerEnd === -1 || savedAt < headerEnd)
-    ) {
+    if (savedAt >= 0 && (headerEnd === -1 || savedAt < headerEnd)) {
       return true;
     }
   }
