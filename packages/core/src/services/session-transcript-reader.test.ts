@@ -5077,6 +5077,90 @@ describe('SessionTranscriptReader', () => {
     }
   });
 
+  it.each([false, true])(
+    'does not let frozen projection retention evict the current index after an in-place truncation (statFault=%s)',
+    async (statFaultArm) => {
+      const bigText = 'x'.repeat(256 * 1024);
+      const { file, authority } = await openManagedFixture([
+        { uuid: 'u1', parent: null, text: 'short prompt' },
+        { uuid: 'a1', parent: 'u1', text: bigText },
+        ...Array.from({ length: 18 }, (_, i) => ({
+          uuid: `u${i + 2}`,
+          parent: i ? `u${i + 1}` : 'a1',
+          text: `filler ${i}`,
+        })),
+      ]);
+      let closed = false;
+      try {
+        const reader = newReader();
+        await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+        const physicalBytes =
+          getSessionTranscriptIndexCacheStatsForTest().byteSize;
+        setSessionTranscriptIndexCacheMaxBytesForTest(1);
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+          physicalBytes + 1024,
+        );
+        clearSessionTranscriptIndexCacheEntriesForTest();
+        const first = await reader.readPage(sessionId, { limit: 1 });
+        const oldState = first.nextCursorState!;
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
+          256 * 1024 * 1024,
+        );
+        await authority.close();
+        closed = true;
+        let releaseDecode: (() => void) | undefined;
+        const decodeBlocked = new Promise<void>((resolve) => {
+          releaseDecode = resolve;
+        });
+        projectionReads.pause = decodeBlocked;
+        projectionReads.count = 0;
+        const frozenRead = readAfter(reader, oldState, { limit: 1 });
+        await vi.waitFor(() => expect(projectionReads.count).toBe(1));
+        // Truncate the last record's wrapper pair IN PLACE (same inode):
+        // the current full index is shorter than the frozen snapshot at
+        // the same identity — the live index, not a historical prefix.
+        const raw = await fs.readFile(file, 'utf8');
+        const lines = raw.trimEnd().split('\n');
+        const kept = lines.slice(0, lines.length - 2).join('\n') + '\n';
+        await fs.truncate(file, Buffer.byteLength(kept));
+        await reader.readPage(sessionId, { limit: 1 });
+        const liveTotal =
+          getSessionTranscriptIndexCacheStatsForTest().byteSize - physicalBytes;
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+        setSessionTranscriptIndexCacheMaxBytesForTest(
+          physicalBytes + liveTotal,
+        );
+        setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+        const builds = countBuilds(file);
+        if (statFaultArm) {
+          // The next stat is the frozen reclaim context's: a transient
+          // failure must refuse retention, not reclaim blind.
+          statFault.failNextWith = 'EIO';
+        }
+        releaseDecode!();
+        await frozenRead;
+        // The current index survives the refused retention.
+        expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+        expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+          physicalBytes + liveTotal,
+        );
+        await reader.readPage(sessionId, { limit: 1 });
+        expect(builds.count).toBe(0);
+        // The frozen cursor now lies beyond the truncated file: the door
+        // guard rejects it (the first frozen read passed its guard before
+        // the truncation, which is why its retention accounting ran).
+        await expect(
+          readAfter(reader, oldState, { limit: 1 }),
+        ).rejects.toMatchObject({
+          name: 'SessionTranscriptSnapshotUnavailableError',
+        });
+      } finally {
+        if (!closed) await authority.close();
+      }
+    },
+  );
+
   it('accounts for retained projection hints in the cache byte estimate', async () => {
     const reader = newReader();
     const estimateFor = async (targetSessionId: string, suffix: string) => {

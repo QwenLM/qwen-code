@@ -468,6 +468,148 @@ describe('persisted hook turn pages', () => {
     });
     expect(read).toHaveBeenCalled();
   });
+  it('reclaims the old oversized entry at hook retention when the new physical index is already cached', async () => {
+    append(event('one'));
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchorOld = await reader.readTurnIndexPage(sessionId);
+    const oldPhysical = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // Retain the old aggregate into the oversized class.
+    setSessionTranscriptIndexCacheMaxBytesForTest(oldPhysical);
+    await reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchorOld.snapshot,
+    });
+    const oldTotal = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    expect(oldTotal).toBeGreaterThan(oldPhysical);
+    // Append and admit the new physical index into the SHARED class, so
+    // the admission door does not preempt the hook retention's reclaim.
+    setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+    append();
+    await write();
+    await reader.readTurnIndexPage(sessionId);
+    const newPhysical =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldTotal;
+    // The aggregate bytes are identical (same turn, same executions), so
+    // the crossed entry's total is known before retention.
+    const newTotal = newPhysical + (oldTotal - oldPhysical);
+    setSessionTranscriptIndexCacheMaxBytesForTest(newPhysical);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newTotal + 100);
+    const read = vi.fn();
+    setSessionTranscriptSelectedLineReadHookForTest(read);
+    expect(await reader.readTurnHooksPage(sessionId, promptId)).toMatchObject({
+      totalExecutions: 1,
+      coverage: 'recorded',
+    });
+    // The retention reclaimed the old oversized entry and retained the
+    // new aggregate.
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      newTotal,
+    );
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
+    read.mockClear();
+    await reader.readTurnHooksPage(sessionId, promptId);
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('excludes the growing frozen entry from its own reclaim scan', async () => {
+    append(event('one'));
+    for (let i = 0; i < 40; i++) {
+      const tail = append();
+      tail.message = {
+        role: 'user',
+        parts: [{ text: `tail ${i} ${'x'.repeat(200)}` }],
+      };
+    }
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    const extra = append();
+    extra.message = { role: 'user', parts: [{ text: 'x'.repeat(16384) }] };
+    await write();
+    await reader.readTurnIndexPage(sessionId);
+    const liveBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    // Both physical indexes fit exactly; the aggregate does not fit on
+    // top. The frozen entry is itself shorter than the live file, so
+    // without the self-exclusion the reclaim scan would evict the entry
+    // it is about to grow.
+    setSessionTranscriptIndexCacheMaxBytesForTest(oldBytes + liveBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    const build = vi.fn();
+    setSessionTranscriptIndexBuildCompleteHookForTest(build);
+    expect(
+      await reader.readTurnHooksPage(sessionId, promptId, {
+        snapshot: anchor.snapshot,
+      }),
+    ).toMatchObject({ totalExecutions: 1, coverage: 'recorded' });
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes + liveBytes,
+    );
+    await reader.readTurnIndexPage(sessionId);
+    expect(build).not.toHaveBeenCalled();
+  });
+  it('does not let frozen hook retention evict the current index after an in-place truncation', async () => {
+    append(event('one'));
+    for (let i = 0; i < 40; i++) {
+      const tail = append();
+      tail.message = {
+        role: 'user',
+        parts: [{ text: `tail ${i} ${'x'.repeat(200)}` }],
+      };
+    }
+    await write();
+    const reader = new SessionTranscriptReader(cwd);
+    const anchor = await reader.readTurnIndexPage(sessionId);
+    const oldBytes = getSessionTranscriptIndexCacheStatsForTest().byteSize;
+    // Pause the frozen aggregation on its first line read; while it is
+    // suspended, truncate the tail in place (same inode) and cache the
+    // current snapshot. The truncated file's full index is shorter than
+    // the frozen snapshot at the same identity — it is the live index,
+    // not a historical prefix.
+    let releaseRead: (() => void) | undefined;
+    const readBlocked = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    let paused = false;
+    setSessionTranscriptSelectedLineReadHookForTest(async () => {
+      if (!paused) {
+        paused = true;
+        await readBlocked;
+      }
+    });
+    const frozenHook = reader.readTurnHooksPage(sessionId, promptId, {
+      snapshot: anchor.snapshot,
+    });
+    await vi.waitFor(() => expect(paused).toBe(true));
+    const raw = await fs.readFile(file, 'utf8');
+    const lines = raw.trimEnd().split('\n');
+    const kept = lines.slice(0, 30).join('\n') + '\n';
+    await fs.truncate(file, Buffer.byteLength(kept));
+    await reader.readTurnIndexPage(sessionId);
+    const liveBytes =
+      getSessionTranscriptIndexCacheStatsForTest().byteSize - oldBytes;
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    // Room for both physical indexes exactly; the frozen aggregate on top
+    // does not fit, and the oversized class cannot take the crossing.
+    setSessionTranscriptIndexCacheMaxBytesForTest(oldBytes + liveBytes);
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+    const build = vi.fn();
+    setSessionTranscriptIndexBuildCompleteHookForTest(build);
+    releaseRead!();
+    expect(await frozenHook).toMatchObject({
+      totalExecutions: 1,
+      coverage: 'recorded',
+    });
+    // The current index survives the refused retention.
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(2);
+    expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+      oldBytes + liveBytes,
+    );
+    await reader.readTurnIndexPage(sessionId);
+    expect(build).not.toHaveBeenCalled();
+  });
   it('reclaims a superseded entry when a hook aggregate crosses into a full oversized class', async () => {
     append(event('one'));
     await write();
