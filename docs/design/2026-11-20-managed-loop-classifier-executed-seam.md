@@ -46,71 +46,58 @@ A new executed test drives `loopClassifierResponse` against hostile bodies and a
 
 Retire `loopClassifierWiring`, `loopClassifierScope`, the writer-name set and the target-wrapper set, the ten classifier assertions in the pin test, the hostile control and the isolated allow-site case. Keep everything in the pin test that is not about the classifier decision, and keep the separate minted-id face (`mintedIdWiring`, `mintedScheduleId`, the fake-createdId pins) untouched.
 
-Replace the retired inventories with one bounded delegation pin, judged by a single named-clause predicate that a hostile-source control executes clause by clause. The pin judges **properties, not spellings** — the first version of it did not, and review round 1 measured both failure directions (below). It requires: two delegations whose call ids compare **as a set**; two **distinct** callbacks; one delegation in each loop arm's own fake, keyed on the arm flag rather than on the id, so a delegation parked in the durable failover fake or in the sibling arm is caught while exchanging the two ids between the arms is not; the first argument the callback's own `body`, which the callback must neither rebind nor shadow; the result bound and returned inside a gate that **reads** that binding — any `if` whose test reads it, so truthiness, `!= null`, `typeof`, a coercion and both undefined comparisons are the same gate — with the branch's returns collected **stopping at every function boundary** (function, method, accessor, constructor) and every one of them required to read that binding — reading something else alongside it is allowed, because under the gate a `?? other` fallback is dead code; no write to that binding in the callback's own body, where a write is **any write context's target subtree** (an assignment's left side, a for-of/for-in initializer, an increment operand), so destructuring, parenthesized and cast targets are covered without enumerating wrappers; no return outside such a gate whose expression reads that binding, which would swallow the fall-through however it is spelled — a bare identifier, a `??` fallback, a spread or a shorthand key all read it, while a property key that merely shares the name does not; and, confined to the two loop callbacks, no `respond_in_schema` answer and no answer element that is not a `fakeToolCall` with a literal tool name. The answer inventory is judged **per element**, not per `toolCalls` property, because both arms legitimately build `toolCalls` for the cron fixtures. Every clause exists because a measured shape satisfied the weaker form it replaces, and the control carries each of those shapes plus the behaviour-preserving rewrites as positive controls.
+Replace the retired inventories with one small **placement** pin, judged by a single named-clause predicate that a hostile-source control executes clause by clause. It checks where the delegation sits and that nothing answers beside it — seven clauses, no data-flow analysis:
 
-The rule that keeps this from becoming the scanner again: **acceptance is judged by property, detection may be bounded.** An acceptance that lists spellings prices a correct rewrite as a defect, so every acceptance here is a property; a detector that lists spellings only misses shapes, which is a disclosed residual rather than a blocked author. Gate polarity is the one place this is visible — acceptance takes any gate that reads the binding, and a separate bounded detector flags the literal `X === undefined` form returning X from its then branch.
+- two delegations, each passing a **literal** call id, the ids compared **as a set**;
+- the two delegations in **distinct** callbacks;
+- each delegation inside a `startFakeOpenAIServer` callback, one in each loop arm, keyed on the arm flag rather than on the id;
+- **one fake per arm**, so a second fake wrapped in the same flag cannot lend its arm to a delegation parked in the durable failover server;
+- the first argument the callback's own `body` parameter;
+- inside a loop arm's fake — **including any closure it declares** — no `respond_in_schema` answer, and no `toolCalls` element that is not a `fakeToolCall` with a literal tool name. The inventory is judged **per element**, not per property, because both arms legitimately build `toolCalls` for the cron fixtures.
 
-Four limits are disclosed rather than chased, all measured on the committed runner rather than inferred. The pin is **structural**: a fast-lane approximation of what the packaged arms prove behaviourally, not a second copy of the decision. A write to the bound name from a nested function that is actually invoked is outside `no-rebinding`, which keys on the callback's own body. A response returned from a helper called inside the callback carries no `toolCalls` property at the call site, so the answer inventory cannot see it — the retired file-wide count did see that one, and also reddened on a legitimate third arm; confining the inventory trades that reach for not pricing a correct fake as a defect. And an **alias** of the binding (`const alias = classified; return alias;`) is not tracked: following aliases transitively is the unbounded data-flow problem this PR refuses to re-enter, so the fall-through clause judges the binding's own name.
+The fake inventory keys the arm on the callback; a delegation's own arm is the nearest flag around it, so one gated by the sibling arm's flag inside this arm's fake is not credited to it. A second fake borrowing the arm is caught by the count, which is why that clause is a count and not a second copy of the arm multiset. Every clause has a hostile case that was measured to pass the weaker form it replaces, and the behaviour-preserving rewrites — arm order, id exchange, every gate spelling, an arrow-const decision, a legitimate third fake, a legitimate cron answer — are positive controls.
+
+### What the pin deliberately does not cover
+
+Three review rounds measured what happens when a fast structural pin tries to judge data flow. Round 1 found six shapes, round 2 six more in the clauses round 1 had just added, round 3 eleven more in the clauses round 2 had just added — every closure produced a fresh evasion and a fresh false red, because recognising provenance, gates, rebindings and fall-through by AST is hand-written semantic analysis over an unbounded rewrite space. That is the same treadmill this PR exists to end for the decision, re-entered one level up.
+
+So the data-flow clauses are **retired by decision**, and the following are explicitly not covered by the fast pin. Each was measured to read `[]` against the committed predicate before retirement, so none is a silent gap:
+
+| Not covered                                    | Example measured shape                                                                                         |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| the result being returned at all               | an arm binds the decision and discards it                                                                      |
+| the gate's presence, spelling or polarity      | `if (classified === undefined) return classified;`, `undefined === classified`, a return from the wrong branch |
+| a rebinding of the bound name                  | `classified = undefined`, destructuring, for-of, `++`, `delete`, `Object.assign`                               |
+| the fall-through after the gate                | `return classified;`, `return classified ?? fixture;`, a direct return of the call                             |
+| provenance beyond the parameter's name         | `body` rebound or shadowed before the call                                                                     |
+| an alias of the bound name                     | `const alias = classified; return alias;`                                                                      |
+| an answer built by a helper the callback calls | `return bypass(body);` — no `toolCalls` property at the call site                                              |
+
+The packaged arms own all of these behaviourally, and that ownership is measured rather than asserted: with only the skill arm's delegation changed, discarding the decision's result and swallowing the fall-through each fail the packaged skill arm, while the committed delegation passes. The fast pin is a cheap smoke check on placement; it is not a second copy of the decision and not a substitute for the arms.
 
 ## Key design decisions
 
 - **One function parameterized by call id, not two copies.** The two blocks are already identical apart from the id; duplicating them is what lets a fix reach one arm and miss the other. Parameterizing also makes "an arm answers under the other's id" a direction the executed test can assert.
 - **Return the whole response, not just the answer.** Asserting the answer alone would leave the tool name and the call id unpinned, and pinning them separately would repeat the mapping weakness that scattered assertions have shown before. One deep-equality on the response pins the mapping.
-- **Keep a delegation pin, drop the decision inventories.** The fast suite cannot run the packaged arms, so "the fake actually delegates" needs a cheap assertion. The unbounded family lived _inside_ the decision, and executing it removes that family outright. The wiring around it is a smaller but still real surface — round 1 measured both failure directions against the first pin, tabulated below — so the pin is kept small, judged by property, and explicitly subordinate to the packaged arms rather than presented as complete.
+- **Keep a placement pin, drop the decision inventories and the data-flow clauses.** The fast suite cannot run the packaged arms, so "the fake delegates from the right place" needs a cheap assertion. The unbounded family lived _inside_ the decision, and executing it removes that family outright. Three review rounds then showed that judging the wiring's data flow by AST re-enters the same family one level up, so the pin stops at placement and the arms own the behaviour.
 - **Retire the scanner rather than keep it as a second opinion.** Two guards for one behaviour drift apart, and the scanner's maintenance cost was the thing this change removes. Its historical record stays in the #17594 design doc.
-- **`undefined` keeps its exact meaning.** It means "not a block side query, fall through to the rest of the fake". The delegation must not convert it into a response, and must not swallow the fall-through path.
+- **`undefined` keeps its exact meaning.** It means "not a block side query, fall through to the rest of the fake". The delegation must not convert it into a response, and must not swallow the fall-through path. That invariant is owned by the executed decision test and the packaged arms; the fast pin no longer claims to check it.
 
-## Review round 1: the first delegation pin was itself a shape pin
+## Three review rounds, and where they led
 
-The first version of the replacement pin keyed on spellings and on source order, so it reproduced the treadmill it was meant to end — on both sides. Every shape below was measured with the committed predicate and the corrected one over the same runner text, the committed runner reading `[]` under both.
+Every shape below was measured against the predicate then committed, on the real runner text, before anything was changed. The committed runner read `[]` throughout.
 
-| Direction           | Shape                                                                   | First pin                  | Corrected pin            |
-| ------------------- | ----------------------------------------------------------------------- | -------------------------- | ------------------------ |
-| missed              | hand-built `toolCalls` element in a loop callback                       | `[]`                       | `no-loop-hand-built`     |
-| missed              | `toolCalls` source that is not an inline array (and its shorthand form) | `[]`                       | `no-loop-hand-built`     |
-| missed              | computed tool name on a `fakeToolCall` element                          | `[]`                       | `no-loop-hand-built`     |
-| missed              | fabricated body argument, or another binding than `body`                | `[]`                       | `argument-provenance`    |
-| missed              | rebinding write between the binding and the guard                       | `[]`                       | `no-rebinding`           |
-| missed              | return from a class method or getter inside the guard's branch          | `[]`                       | `result-returned`        |
-| missed              | delegation parked in a dead class member inside the callback            | `[]`                       | `arm-scoping`            |
-| missed              | delegation moved into the durable failover fake                         | `[]`                       | `arm-scoping`            |
-| missed              | fall-through swallowed by a return after the guard                      | `[]`                       | `fall-through-preserved` |
-| missed              | the same swallow spelled `classified ?? fixture` or `{ ...classified }` | `[]`                       | `fall-through-preserved` |
-| false red           | `if (loopFire)` block moved above `if (loopSkill)`                      | `call-ids`                 | `[]`                     |
-| false red           | the two call ids exchanged between the arms                             | `call-ids`                 | `[]`                     |
-| reversed in round 2 | `return loopClassifierResponse(...) ?? { content: 'fixture' }`          | `result-bound`             | `fall-through-preserved` |
-| false red           | `=== undefined` gate returning from the else branch                     | `returned-under-own-guard` | `[]`                     |
-| false red           | the decision spelled as an arrow const                                  | `single-answer-site`       | `[]`                     |
-| false red           | a legitimate third fake answering a title side query                    | `single-answer-site`       | `[]`                     |
+**Round 1** (bot review on the PR) found six issues in the first replacement pin: it missed hand-built and computed-name answers, a fabricated body argument, a rebinding write, returns from class members, a delegation parked in another arm's fake and a swallowed fall-through; and it reddened on six behaviour-preserving rewrites — arm-block order, id exchange, a nullish-fallback return, an inverted undefined gate, an arrow-const decision, and a legitimate third fake answering a title query.
 
-The disposition was to judge properties rather than spellings — ids as a set, arms as a multiset keyed on the arm flag, either gate polarity, an answer inventory confined to the loop callbacks and judged per element — and to add a bounded clause for each measured miss. One acceptance from this round did not survive round 2: the directly returned call expression, which the packaged arm showed to be behaviour-breaking. Shapes that are not valid TypeScript were excluded by measurement: a setter returning a value is `TS2408`, and a constructor returning the delegated value is `TS2322`/`TS2409`, so neither is used as a fixture; the setter's function-boundary disjunct is witnessed instead by a write from a setter, which must **not** count as a rebinding of the callback's binding.
+**Round 2** (17-agent local review) found six more in the corrected pin: eleven non-bare write spellings, a return exempted by another binding's gate, a rebound or shadowed `body`, five equivalent gate spellings priced as defects, an alias, and — reversed on packaged-arm evidence — round 1's acceptance of a direct return, which fails the skill arm both bare and with a `??` fallback.
 
-## Review round 2: the corrected pin still tracked bindings by name in narrow positions
+**Round 3** (17-agent local review) found eleven more in _those_ clauses: `delete` and in-place API writes, a second gate returning another binding, an arm flag borrowed by a nested `if`, a block-scoped shadow of the bound name, the commuted `undefined === classified`, a non-enclosing `body` shadow priced as a defect, a return from the wrong branch, and an answer built one closure down. Zero Criticals; the undirected audit named the cause directly — the wiring pin had become hand-written semantic analysis over an unbounded rewrite space.
 
-A second full review of the corrected pin measured six more shapes, all reproduced before any fix. Four were false negatives in clauses round 1 had just added — three fixed, the alias one disclosed instead; one was a false-positive family; and one of round 1's own acceptances turned out to be wrong.
+Two of round 3's shapes were placement bugs rather than data flow, and are fixed in the reduced pin: the borrowed arm flag (now `one-fake-per-arm`, with the arm keyed on the callback) and the answer one closure down (the inventory now walks every enclosing function). The rest are the retired data-flow checks listed above.
 
-| Direction        | Shape                                                                                                                                                  | Before                                      | After                    |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------- | ------------------------ |
-| missed           | eleven non-bare write spellings (array/object destructuring, rename, parenthesized, `as`, non-null, for-of, for-of pattern, for-in, `++`, prefix `++`) | `[]`                                        | `no-rebinding`           |
-| missed           | return of the binding inside **another** binding's gate, either polarity                                                                               | `[]`                                        | `fall-through-preserved` |
-| missed           | `body` rebound or shadowed before the call                                                                                                             | `[]`                                        | `argument-provenance`    |
-| false red        | gate spelled `if (classified)`, `!= null`, `!== null`, `typeof`, `Boolean()`                                                                           | `result-returned`, `fall-through-preserved` | `[]`                     |
-| wrongly accepted | bare direct return, and `?? { content: 'fixture' }` on one                                                                                             | `[]`                                        | `fall-through-preserved` |
-| disclosed        | an alias of the binding returned outside the gate                                                                                                      | `[]`                                        | `[]` (residual)          |
+The decision, taken by the maintainer after round 3, was to stop growing the pin and shrink it to placement. Two measurements supported it: the pin had grown to roughly 370 lines of AST analysis guarding a two-line delegation, and each round's fixes had produced the next round's findings. The reduced pin is about 150 lines and scans the runner in a median 63.9 ms against 95.6 ms for the round-2 version, measured over seven runs of `classifierDelegation` alone.
 
-The last acceptance was reversed on measurement, not on argument. Round 1 had accepted both direct-return forms as behaviour-preserving; the packaged skill arm was run three times at the same head with only the skill arm's delegation changed:
-
-```
-committed delegation                 rc=0   modelRounds 6, cronCreate true
-?? { content: 'fixture' } on the call rc=1   Error: Cron tool loop-cron-create was never called
-bare direct return                    rc=1   Error: Managed Turn terminal event did not become ready
-```
-
-Both forms terminate the callback, so a non-block request never reaches the arm's own fixtures. They are hostile cases now, and the runner was restored byte-equal after each arm.
-
-One mutation survived this round and was attributed rather than papered over: requiring each return in the gate's branches to read the binding **and nothing else** had no isolating fixture, and measurement showed why — it reddened `return classified ?? other`, a dead fallback under the gate. The over-constraint was removed and that shape became a positive control, instead of inventing a fixture to justify a rule that prices a correct rewrite as a defect.
-
-The write fix is the shape the retired scanner never reached: instead of enumerating target wrappers, the inventory walks **every write context's target subtree**, which covers destructuring, parentheses and casts at once because they are just nodes in that subtree. The gate fix is the same move on the acceptance side. The exemption that had been a global set of return positions is now keyed by the gate's test names, so another binding's gate cannot exempt a return of this one.
+One earlier mutation survived and was attributed rather than papered over: a constraint requiring each return in a gate's branches to read the binding _and nothing else_ had no isolating fixture, because it false-reddened `return classified ?? other` — a dead fallback under the gate. It was removed rather than justified with an invented fixture. That was the same signal the third round confirmed at scale.
 
 ## Files affected
 
@@ -130,9 +117,9 @@ Only #17673 item 1. Items 2–6 (derived degeneration threshold, cross-language 
 
 The change is test-infrastructure only, so the load-bearing evidence is: the executed decision test reddens on each hostile direction under mutation (an additive fallback, a fabricated schema, a wrong call id, a dropped gate); every clause of the delegation pin reddens when that clause alone is deleted or narrowed back, including the clauses that accept a behaviour-preserving rewrite; the retired inventories' absence does not weaken any surviving pin; and both packaged arms still pass after a rebuild, with the fire arm's scheduled/fired/completed witness intact.
 
-The delegation pin's clauses are witnessed one at a time rather than as a block: deleting a whole clause can be killed by a sibling clause while a one-token narrowing of it ships green, which is how the first pin's `guard.returns.includes(...)` and `guard.name` checks survived review round 1's own mutations.
+The placement pin's clauses are witnessed one at a time rather than as a block: deleting a whole clause can be killed by a sibling clause while a one-token narrowing of it ships green.
 
-Where a fast-lane judgement and a reviewer's claim about behaviour disagree, the packaged arm decides. Round 2 reversed one of round 1's acceptances that way, with a three-arm run at one head and a byte-equal restore after each.
+Where a fast-lane judgement and a reviewer's claim about behaviour disagree, the packaged arm decides. Round 2 reversed one of round 1's acceptances that way, and the scope reduction was justified the same way: with only the skill arm's delegation changed, discarding the decision's result and swallowing the fall-through each fail the packaged arm, while the committed delegation passes. Every arm run restored the runner byte-equal.
 
 ## Open questions
 

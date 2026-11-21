@@ -26,8 +26,6 @@ import {
   isBinaryExpression,
   isCallExpression,
   isConstructorDeclaration,
-  isForInStatement,
-  isForOfStatement,
   isFunctionDeclaration,
   isFunctionExpression,
   isGetAccessorDeclaration,
@@ -35,16 +33,11 @@ import {
   isIfStatement,
   isMethodDeclaration,
   isNoSubstitutionTemplateLiteral,
-  isPostfixUnaryExpression,
-  isPrefixUnaryExpression,
-  isPropertyAccessExpression,
   isPropertyAssignment,
-  isReturnStatement,
   isSetAccessorDeclaration,
   isShorthandPropertyAssignment,
   isStringLiteral,
   isVariableDeclaration,
-  isVariableDeclarationList,
   isVariableStatement,
   ScriptTarget,
   SyntaxKind,
@@ -127,19 +120,15 @@ const literalText = (node) =>
     ? node.text
     : undefined;
 
-// The classifier delegation, as structure. The decision itself is executed
-// elsewhere, so nothing here pins the decision's internals; what is pinned is
-// the wiring the executed test cannot reach, and the packaged arms own that
-// wiring behaviourally. Judged by property, not spelling: the ids compare as a
-// set, the arms as a multiset, a gate is any `if` whose test reads the binding,
-// a write is any write context's target subtree, and the answer inventory is
-// confined to the two loop callbacks so a legitimate third arm is not a
-// violation. Each clause exists because a measured shape satisfied the weaker
-// form it replaces — a hand-built or computed-name answer element, a fabricated
-// or rebound body argument, a rebinding write in any spelling, a return from a
-// method or closure inside the gate's branch, a return exempted by another
-// binding's gate, a delegation parked in another arm's fake, and a swallowed
-// fall-through.
+// The classifier delegation, as placement. The decision itself is executed
+// elsewhere; what is pinned here is only where the delegation sits and that
+// nothing answers beside it. Three review rounds measured that every data-flow
+// clause layered on top of this — provenance through rebinds and shadows, gate
+// recognition, fall-through tracking — grew a fresh evasion and a fresh false
+// red for each one closed, because it is hand-written semantic analysis over an
+// unbounded rewrite space. Those checks are retired by decision, not by
+// oversight: the packaged arms own the wiring behaviourally, and the design
+// record enumerates what this pin deliberately does not cover.
 const classifierDelegation = (text) => {
   const file = createSourceFile('runner.ts', text, ScriptTarget.Latest, true);
   const isFn = (node) =>
@@ -156,10 +145,6 @@ const classifierDelegation = (text) => {
     }
     return undefined;
   };
-  const fnKey = (node) => {
-    const fn = enclosingFn(node);
-    return fn === undefined ? -1 : fn.pos;
-  };
   const isFakeCallback = (fn) => {
     const parent = fn?.parent;
     return (
@@ -170,11 +155,11 @@ const classifierDelegation = (text) => {
       parent.arguments[0] === fn
     );
   };
-  // The arm a callback belongs to is the flag guarding its block, so a
-  // delegation moved into the failover fake or the sibling arm is caught even
-  // though it keeps the right call id.
+  // The nearest enclosing arm flag. Called with the callback for the fake
+  // inventory and with the delegation itself for its arm, so a delegation
+  // gated by the sibling flag inside this arm's fake is not credited to it.
   const armFlag = (node) => {
-    for (let current = node.parent; current; current = current.parent) {
+    for (let current = node?.parent; current; current = current.parent) {
       if (
         isIfStatement(current) &&
         isIdentifier(current.expression) &&
@@ -186,124 +171,54 @@ const classifierDelegation = (text) => {
     }
     return undefined;
   };
+  // Anywhere inside a loop arm's fake, including a closure it declares: an
+  // answer built one function down is still an answer that arm can send.
+  const inLoopArm = (node) => {
+    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
+      if (isFakeCallback(fn) && armFlag(fn) !== undefined) return true;
+    }
+    return false;
+  };
   const calls = [];
-  const guards = [];
-  const writes = [];
-  const returns = [];
+  const fakeArms = [];
   const loopAnswerSites = [];
   const loopHandBuilt = [];
-  const bodyShadows = [];
-  const invertedGuards = [];
-  // pos -> the guard test names that exempt a return there, so a return of the
-  // delegated binding inside ANOTHER binding's guard is not exempt.
-  const guardReturnPositions = new Map();
-  // Returns inside one branch, stopping at every function boundary: a closure
-  // or method declared in the branch returns from itself, not the callback.
-  const branchReturns = (branch) => {
-    const found = [];
-    const walk = (node) => {
-      if (isReturnStatement(node) && node.expression !== undefined) {
-        found.push({ names: readNames(node.expression), pos: node.pos });
-      }
-      forEachChild(node, (child) => {
-        if (!isFn(child)) walk(child);
-      });
-    };
-    if (branch !== undefined) walk(branch);
-    return found;
-  };
   const isFakeToolCall = (node) =>
     isCallExpression(node) &&
     isIdentifier(node.expression) &&
     node.expression.text === 'fakeToolCall';
-  // The names a subtree reads. A property key is not a read of the binding; a
-  // shorthand key is, and a computed key is not an Identifier so it stays
-  // collected. Used for return expressions, guard tests and write targets
-  // alike, so none of the three is judged by a hand-listed spelling.
-  const readNames = (node) => {
-    const names = new Set();
-    const walk = (child) => {
-      if (isIdentifier(child)) {
-        const parent = child.parent;
-        const isKey =
-          parent !== undefined &&
-          parent.name === child &&
-          (isPropertyAssignment(parent) || isPropertyAccessExpression(parent));
-        if (!isKey) names.add(child.text);
-      }
-      forEachChild(child, walk);
-    };
-    if (node !== undefined) walk(node);
-    return names;
-  };
-  // Every context that writes a binding, by subtree rather than by spelling:
-  // an assignment's left side (so destructuring, parenthesized and cast
-  // targets are covered without enumerating wrappers), a for-of/for-in
-  // initializer that is not a declaration, and an increment/decrement operand.
-  const writeTarget = (node) => {
-    if (
-      isBinaryExpression(node) &&
-      node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
-      node.operatorToken.kind <= SyntaxKind.LastAssignment
-    ) {
-      return node.left;
-    }
-    if (isForOfStatement(node) || isForInStatement(node)) {
-      return isVariableDeclarationList(node.initializer)
-        ? undefined
-        : node.initializer;
-    }
-    if (
-      isPostfixUnaryExpression(node) ||
-      (isPrefixUnaryExpression(node) &&
-        (node.operator === SyntaxKind.PlusPlusToken ||
-          node.operator === SyntaxKind.MinusMinusToken))
-    ) {
-      return node.operand;
-    }
-    return undefined;
-  };
   const visit = (node) => {
-    const fn = fnKey(node);
-    const arm = armFlag(node);
-    const inLoop = arm !== undefined && isFakeCallback(enclosingFn(node));
+    if (isFn(node) && isFakeCallback(node)) {
+      const arm = armFlag(node);
+      if (arm !== undefined) fakeArms.push(arm);
+    }
     if (
       isCallExpression(node) &&
       isIdentifier(node.expression) &&
       node.expression.text === 'loopClassifierResponse'
     ) {
-      // Recorded so the judgement can tell a returned call from a bound one;
-      // a direct return still terminates the callback, which the fall-through
-      // clause judges.
-      const parent = node.parent;
-      const directReturn =
-        isReturnStatement(parent) ||
-        (isBinaryExpression(parent) &&
-          parent.operatorToken.kind === SyntaxKind.QuestionQuestionToken &&
-          isReturnStatement(parent.parent));
+      const fn = enclosingFn(node);
       calls.push({
         callId: literalText(node.arguments[1]),
         arg0: isIdentifier(node.arguments[0])
           ? node.arguments[0].text
           : undefined,
-        boundTo: isVariableDeclaration(parent)
-          ? parent.name.getText(file)
-          : undefined,
-        directReturn,
-        fn,
-        fake: isFakeCallback(enclosingFn(node)),
-        arm,
+        fn: fn === undefined ? -1 : fn.pos,
+        fake: isFakeCallback(fn),
+        // The nearest flag around the delegation itself, so one gated by the
+        // sibling arm's flag inside this arm's fake is not credited to it.
+        arm: armFlag(node),
       });
     }
-    // Answer constructions inside a loop callback, by element rather than by
+    // Answer constructions inside a loop arm's fake, by element rather than by
     // call spelling: a hand-built element is invisible to a fakeToolCall count,
     // and a non-inline toolCalls source cannot be enumerated at all.
-    if (inLoop) {
+    if (inLoopArm(node)) {
       if (
         isFakeToolCall(node) &&
         literalText(node.arguments[0]) === 'respond_in_schema'
       ) {
-        loopAnswerSites.push(fn);
+        loopAnswerSites.push(node.pos);
       }
       if (
         (isPropertyAssignment(node) || isShorthandPropertyAssignment(node)) &&
@@ -314,7 +229,7 @@ const classifierDelegation = (text) => {
           ? undefined
           : node.initializer;
         if (source === undefined || !isArrayLiteralExpression(source)) {
-          loopHandBuilt.push(fn);
+          loopHandBuilt.push(node.pos);
         } else {
           for (const element of source.elements) {
             // A computed tool name is as unattributable as a hand-built
@@ -323,81 +238,16 @@ const classifierDelegation = (text) => {
               !isFakeToolCall(element) ||
               literalText(element.arguments[0]) === undefined
             ) {
-              loopHandBuilt.push(fn);
+              loopHandBuilt.push(element.pos);
             }
           }
         }
       }
     }
-    const target = writeTarget(node);
-    if (target !== undefined) {
-      for (const name of readNames(target)) writes.push({ name, fn });
-    }
-    // A local `body` shadows the callback's own request body, so a delegation
-    // naming `body` would no longer be fed the request. The declared name may
-    // be a binding pattern, so it is read as a subtree like everything else.
-    if (isVariableDeclaration(node) && readNames(node.name).has('body')) {
-      bodyShadows.push(fn);
-    }
-    if (isReturnStatement(node) && node.expression !== undefined) {
-      returns.push({ names: readNames(node.expression), fn, pos: node.pos });
-    }
-    // A gate is any `if` whose test reads a name, whichever way round it is
-    // spelled: truthiness, `!= null`, `typeof`, a coercion and both undefined
-    // comparisons are the same gate on a value that is an object or undefined.
-    if (isIfStatement(node)) {
-      // Acceptance is spelling-agnostic, so an inverted gate would otherwise
-      // pass. Detect the literal `X === undefined` form that returns X from
-      // its THEN branch — it answers undefined — without narrowing acceptance.
-      const test = node.expression;
-      if (
-        isBinaryExpression(test) &&
-        (test.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken ||
-          test.operatorToken.kind === SyntaxKind.EqualsEqualsToken) &&
-        isIdentifier(test.left) &&
-        isIdentifier(test.right) &&
-        test.right.text === 'undefined'
-      ) {
-        invertedGuards.push({
-          name: test.left.text,
-          fn,
-          thenReturns: branchReturns(node.thenStatement).map(
-            (entry) => entry.names,
-          ),
-        });
-      }
-      const testNames = readNames(node.expression);
-      if (testNames.size > 0) {
-        const found = [
-          ...branchReturns(node.thenStatement),
-          ...branchReturns(node.elseStatement),
-        ];
-        for (const entry of found) {
-          const exempt = guardReturnPositions.get(entry.pos) ?? new Set();
-          for (const name of testNames) exempt.add(name);
-          guardReturnPositions.set(entry.pos, exempt);
-        }
-        guards.push({
-          names: testNames,
-          fn,
-          returns: found.map((entry) => entry.names),
-        });
-      }
-    }
     forEachChild(node, visit);
   };
   visit(file);
-  return {
-    calls,
-    guards,
-    writes,
-    returns,
-    bodyShadows,
-    invertedGuards,
-    loopAnswerSites,
-    loopHandBuilt,
-    guardReturnPositions,
-  };
+  return { calls, fakeArms, loopAnswerSites, loopHandBuilt };
 };
 
 // The pin's judgement, named clause by clause so one predicate serves both the
@@ -419,77 +269,22 @@ const delegationViolations = (delegation) => {
   // One delegation per loop arm, judged on the arms rather than on which id
   // each arm happens to pass: the ids are labels nothing else reads, so
   // exchanging them between the arms is behaviour-preserving.
-  const arms = delegation.calls.map((call) => call.arm);
   if (
     delegation.calls.some((call) => !call.fake) ||
-    [...arms].sort().join() !== 'loopFire,loopSkill'
+    [...delegation.calls.map((call) => call.arm)].sort().join() !==
+      'loopFire,loopSkill'
   ) {
     violations.push('arm-scoping');
   }
-  for (const call of delegation.calls) {
-    // Naming `body` is not provenance: the callback must not rebind or shadow
-    // it, or the decision is fed something other than the request.
-    if (
-      call.arg0 !== 'body' ||
-      delegation.writes.some(
-        (write) => write.name === 'body' && write.fn === call.fn,
-      ) ||
-      delegation.bodyShadows.includes(call.fn)
-    ) {
-      violations.push('argument-provenance');
-    }
-    // A direct return terminates the callback, so a non-block request never
-    // reaches the arm's own fixtures — measured on the packaged skill arm,
-    // which fails under both the bare and the `??` form.
-    if (call.directReturn) {
-      violations.push('fall-through-preserved');
-      continue;
-    }
-    if (typeof call.boundTo !== 'string') {
-      violations.push('result-returned');
-      continue;
-    }
-    // The gate must read the delegated binding, and every return in its
-    // branches must read that binding: a branch that can return a value
-    // ignoring the decision does not answer with it. Reading something else
-    // alongside it is fine — under the gate a `?? other` fallback is dead.
-    const ownGuard = delegation.guards.some(
-      (guard) =>
-        guard.names.has(call.boundTo) &&
-        guard.fn === call.fn &&
-        guard.returns.length > 0 &&
-        guard.returns.every((names) => names.has(call.boundTo)),
-    );
-    if (!ownGuard) violations.push('result-returned');
-    if (
-      delegation.invertedGuards.some(
-        (guard) =>
-          guard.name === call.boundTo &&
-          guard.fn === call.fn &&
-          guard.thenReturns.some((names) => names.has(call.boundTo)),
-      )
-    ) {
-      violations.push('gate-polarity');
-    }
-    if (
-      delegation.writes.some(
-        (write) => write.name === call.boundTo && write.fn === call.fn,
-      )
-    ) {
-      violations.push('no-rebinding');
-    }
-    // Returning the binding outside a gate that reads it swallows the
-    // fall-through: a non-block request would answer the decision instead.
-    if (
-      delegation.returns.some(
-        (ret) =>
-          ret.fn === call.fn &&
-          ret.names.has(call.boundTo) &&
-          !delegation.guardReturnPositions.get(ret.pos)?.has(call.boundTo),
-      )
-    ) {
-      violations.push('fall-through-preserved');
-    }
+  // One fake per arm: a second fake wrapped in the same flag would let a
+  // delegation sit in the durable failover server while borrowing the arm.
+  // The count is enough — which arms the two delegations sit in is already
+  // judged by arm-scoping, so a multiset here would be a second copy of it.
+  if (delegation.fakeArms.length !== 2) {
+    violations.push('one-fake-per-arm');
+  }
+  if (delegation.calls.some((call) => call.arg0 !== 'body')) {
+    violations.push('argument-provenance');
   }
   if (delegation.loopAnswerSites.length > 0) {
     violations.push('no-loop-answer-site');
@@ -4167,13 +3962,9 @@ describe('managed-agent-server e2e runner', () => {
   // its clauses is witnessed rather than assumed: on the committed runner every
   // clause is satisfied by both the strong and the weak form, so weakening one
   // would otherwise stay green. Every hostile shape below was measured to pass
-  // the weaker predicate it replaces. The positive controls exist so the pin
-  // cannot price a behaviour-preserving rewrite as a defect; each was measured
-  // to redden under an earlier form of this predicate. Shapes that are not
-  // valid TypeScript (a setter or constructor returning the delegated value)
-  // are deliberately absent. Two forms an earlier round accepted as equivalent
-  // — a bare direct return and a `??` fallback on one — are hostile here: the
-  // packaged skill arm fails under both, so they swallow the fall-through.
+  // the weaker predicate it replaces, and the positive controls are rewrites
+  // that must stay green. The pin judges placement only; the data-flow shapes
+  // earlier rounds pinned here are covered by the packaged arms instead.
   it('executes the delegation predicate against hostile wiring', () => {
     const decision = [
       "function classifierBlockAnswer(p) { return p && 'shouldBlock' in p ? { shouldBlock: false } : undefined; }",
@@ -4195,19 +3986,9 @@ describe('managed-agent-server e2e runner', () => {
       "');\nif (classified !== undefined) return classified;";
     const SKILL = delegates('loop-classifier');
     const FIRE = delegates('loop-fire-classifier');
-    const bound =
-      "const classified = loopClassifierResponse(body, 'loop-classifier');";
     const good = [decision, skill(SKILL), fire(FIRE)].join('\n');
     const withSkill = (lines) =>
       [decision, skill(lines), fire(FIRE)].join('\n');
-    const parked = (member) => withSkill('class K { ' + member + ' }\nvoid K;');
-    const memberReturn = (member) =>
-      withSkill(
-        bound +
-          '\nif (classified !== undefined) { class K { ' +
-          member +
-          ' } void K; }',
-      );
     const answer = (element) =>
       withSkill(
         SKILL + "\nif (body['x']) return { toolCalls: [" + element + '] };',
@@ -4226,15 +4007,9 @@ describe('managed-agent-server e2e runner', () => {
       // Both arms passing one id leaves the two answers indistinguishable.
       ['call-ids', [decision, skill(SKILL), fire(SKILL)].join('\n')],
       // Both delegations served by ONE fake, the sibling arm's fake silent.
-      // The nested flag keeps the arm multiset intact so only the callback
-      // count is at stake.
       [
         'distinct-callbacks',
-        [
-          decision,
-          skill(SKILL + '\nif (loopFire) {\n' + FIRE + '\n}'),
-          fire(''),
-        ].join('\n'),
+        [decision, skill(SKILL + '\n' + FIRE), fire('')].join('\n'),
       ],
       // Delegations left in dead top-level helpers: nothing is wired.
       [
@@ -4260,6 +4035,19 @@ describe('managed-agent-server e2e runner', () => {
           fire(FIRE),
         ].join('\n'),
       ],
+      // The same, with the failover fake wrapped in the arm's flag so it
+      // borrows the arm: the arm now holds two fakes.
+      [
+        'one-fake-per-arm',
+        [
+          decision,
+          'if (loopSkill) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\n}',
+          skill(''),
+          fire(FIRE),
+        ].join('\n'),
+      ],
       // Both delegations inside the fire arm, each in its own callback.
       [
         'arm-scoping',
@@ -4275,9 +4063,26 @@ describe('managed-agent-server e2e runner', () => {
       ],
       // A delegation parked in a dead class member inside the callback: the
       // member is a function boundary, so the callback never delegates.
-      ['arm-scoping', parked('m() { ' + SKILL + ' }')],
-      ['arm-scoping', parked('get m() { ' + SKILL + ' }')],
-      ['arm-scoping', parked('constructor() { ' + SKILL + ' }')],
+      ['arm-scoping', withSkill('class K { m() { ' + SKILL + ' } }\nvoid K;')],
+      [
+        'arm-scoping',
+        withSkill('class K { get m() { ' + SKILL + ' } }\nvoid K;'),
+      ],
+      [
+        'arm-scoping',
+        withSkill('class K { constructor() { ' + SKILL + ' } }\nvoid K;'),
+      ],
+      // A setter is a function boundary too; its body cannot return a value,
+      // so the parked delegation here discards the call instead.
+      [
+        'arm-scoping',
+        withSkill(
+          "class K { set m(v) { loopClassifierResponse(body, 'loop-classifier'); } }\nvoid K;",
+        ),
+      ],
+      // The delegation gated by the SIBLING arm's flag inside this arm's fake:
+      // it only runs when the other arm is on, so this arm does not delegate.
+      ['arm-scoping', withSkill('if (loopFire) {\n' + SKILL + '\n}')],
       // A fabricated body: the decision is fed a block schema of the arm's
       // own making, so every structured side query gets an allow.
       [
@@ -4288,156 +4093,19 @@ describe('managed-agent-server e2e runner', () => {
       ],
       // Some other binding than the callback's own request body.
       ['argument-provenance', withSkill(SKILL.replace('(body,', '(payload,'))],
-      // The result is neither bound nor returned.
-      [
-        'result-returned',
-        withSkill("loopClassifierResponse(body, 'loop-classifier');"),
-      ],
-      // The guard's branch returns a different binding.
-      [
-        'result-returned',
-        withSkill(bound + '\nif (classified !== undefined) return other;'),
-      ],
-      // A guard on another binding happens to return the bound name.
-      [
-        'result-returned',
-        withSkill(bound + '\nif (other !== undefined) return classified;'),
-      ],
-      // The branch can also return something other than the decision.
-      [
-        'result-returned',
-        withSkill(
-          bound +
-            '\nif (classified !== undefined) { if (flag) return other; return classified; }',
-        ),
-      ],
-      // A closure inside the branch returns from the closure, not the callback.
-      [
-        'result-returned',
-        withSkill(
-          bound +
-            '\nif (classified !== undefined) { const emit = () => { return classified; }; void emit; }',
-        ),
-      ],
-      // A class method or getter inside the branch likewise returns from
-      // itself; both shapes are valid TypeScript.
-      ['result-returned', memberReturn('m() { return classified; }')],
-      ['result-returned', memberReturn('get m() { return classified; }')],
-      // The same-named guard and return live in the SIBLING callback.
-      [
-        'result-returned',
-        [
-          decision,
-          skill(bound),
-          fire(FIRE + '\nif (classified !== undefined) return classified;'),
-        ].join('\n'),
-      ],
-      // A rebinding write between the binding and the guard, in every context
-      // that writes a binding — the retired scanner enumerated these targets
-      // one wrapper at a time; the subtree walk covers them without a list.
-      ...[
-        'classified = undefined;',
-        '[classified] = [undefined];',
-        '({ classified } = { classified: undefined });',
-        '({ x: classified } = { x: undefined });',
-        '(classified) = undefined;',
-        '(classified as any) = undefined;',
-        'classified! = undefined;',
-        'for (classified of [undefined]) {}',
-        'for ([classified] of [[undefined]]) {}',
-        'for (classified in { a: 1 }) {}',
-        'classified++;',
-        '++classified;',
-      ].map((write) => [
-        'no-rebinding',
-        withSkill(
-          "let classified = loopClassifierResponse(body, 'loop-classifier');\n" +
-            write +
-            '\nif (classified !== undefined) return classified;',
-        ),
-      ]),
-      // A return of the binding inside ANOTHER binding's gate is not exempt.
-      [
-        'fall-through-preserved',
-        withSkill(SKILL + '\nif (other !== undefined) return classified;'),
-      ],
-      [
-        'fall-through-preserved',
-        withSkill(
-          SKILL +
-            '\nif (other === undefined) { void 0; } else { return classified; }',
-        ),
-      ],
-      // An inverted gate answers undefined; acceptance stays spelling-agnostic
-      // and this literal form is detected separately.
-      [
-        'gate-polarity',
-        withSkill(bound + '\nif (classified === undefined) return classified;'),
-      ],
-      // Naming `body` is not provenance if the callback rebinds or shadows it.
-      [
-        'argument-provenance',
-        withSkill(
-          "body = { tools: [{ function: { name: 'respond_in_schema', parameters: { properties: { shouldBlock: { type: 'boolean' } } } } }] };\n" +
-            SKILL,
-        ),
-      ],
-      [
-        'argument-provenance',
-        withSkill('{ const body = { tools: [] };\n' + SKILL + '\n}'),
-      ],
-      [
-        'argument-provenance',
-        withSkill(
-          '{ const { body } = { body: { tools: [] } };\n' + SKILL + '\n}',
-        ),
-      ],
-      [
-        'argument-provenance',
-        withSkill(
-          '{ const { x: body } = { x: { tools: [] } };\n' + SKILL + '\n}',
-        ),
-      ],
-      // A direct return terminates the callback. The packaged skill arm fails
-      // under both: the `??` form with "Cron tool loop-cron-create was never
-      // called", the bare form with "Managed Turn terminal event did not
-      // become ready".
-      [
-        'fall-through-preserved',
-        withSkill("return loopClassifierResponse(body, 'loop-classifier');"),
-      ],
-      [
-        'fall-through-preserved',
-        withSkill(
-          "return loopClassifierResponse(body, 'loop-classifier') ?? { content: 'fixture' };",
-        ),
-      ],
-      // The fall-through is swallowed: a non-block request answers the
-      // decision instead of reaching the arm's own fixtures. The binding need
-      // not be returned bare for that to happen.
-      [
-        'fall-through-preserved',
-        withSkill(SKILL + '\nvoid body;\nreturn classified;'),
-      ],
-      [
-        'fall-through-preserved',
-        withSkill(
-          SKILL + "\nvoid body;\nreturn classified ?? { content: 'fixture' };",
-        ),
-      ],
-      [
-        'fall-through-preserved',
-        withSkill(SKILL + '\nvoid body;\nreturn { ...classified };'),
-      ],
-      [
-        'fall-through-preserved',
-        withSkill(SKILL + '\nvoid body;\nreturn { classified };'),
-      ],
       // A bypass sibling answers non-block side queries with an allow.
       [
         'no-loop-answer-site',
         answer(
           "fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')",
+        ),
+      ],
+      // The same bypass one closure down, which a direct-body scan misses.
+      [
+        'no-loop-answer-site',
+        withSkill(
+          SKILL +
+            "\nconst bypass = () => ({ toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] });\nif (body['x']) return bypass();",
         ),
       ],
       // The same bypass hand-built, which no fakeToolCall count can see.
@@ -4484,23 +4152,23 @@ describe('managed-agent-server e2e runner', () => {
       ['arm order', [decision, fire(FIRE), skill(SKILL)].join('\n')],
       // The two ids exchanged between the arms; nothing else reads them.
       ['ids exchanged', [decision, skill(FIRE), fire(SKILL)].join('\n')],
-      // The gate spelled the other way round, returning from the else branch.
-      [
-        'else gate',
-        withSkill(
-          bound +
-            '\nif (classified === undefined) { void 0; } else { return classified; }',
-        ),
-      ],
-      // Every other spelling of the same gate on a value that is an object or
-      // undefined; each of these reddened under the hand-listed gate forms.
+      // Every spelling of the gate: the pin no longer judges the gate at all,
+      // so none of these can be priced as a defect.
       ...[
+        'if (classified !== undefined) return classified;',
+        'if (classified === undefined) { void 0; } else { return classified; }',
         'if (classified) return classified;',
         'if (classified != null) return classified;',
-        'if (classified !== null) return classified;',
         "if (typeof classified !== 'undefined') return classified;",
         'if (Boolean(classified)) return classified;',
-      ].map((gate) => ['gate spelling', withSkill(bound + '\n' + gate)]),
+        'return classified ?? other;',
+      ].map((gate) => [
+        'gate spelling',
+        withSkill(
+          "const classified = loopClassifierResponse(body, 'loop-classifier');\n" +
+            gate,
+        ),
+      ]),
       // The decision itself spelled as an arrow const.
       [
         'arrow-const decision',
@@ -4514,7 +4182,7 @@ describe('managed-agent-server e2e runner', () => {
         ].join('\n'),
       ],
       // A legitimate third fake answering a title side query outside the loop
-      // arms: the inventory is confined to the loop callbacks.
+      // arms: the inventory is confined to the loop fakes.
       [
         'third arm',
         good +
@@ -4529,41 +4197,13 @@ describe('managed-agent-server e2e runner', () => {
             "\nif (body['x']) return { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };",
         ),
       ],
-      // Under the gate the binding is defined, so a fallback alongside it is
-      // dead code and the return still answers with the decision.
-      [
-        'dead fallback under the gate',
-        withSkill(
-          bound + '\nif (classified !== undefined) return classified ?? other;',
-        ),
-      ],
-      // A property key that happens to share the binding's name is not a read
-      // of it, so the fall-through clause is not the one that judges these.
-      [
-        'key named like the binding',
-        withSkill(SKILL + "\nvoid body;\nreturn { classified: 'fixture' };"),
-      ],
-      [
-        'property access named like the binding',
-        withSkill(SKILL + '\nvoid body;\nreturn { content: body.classified };'),
-      ],
-      // A write from a class member is not a rebinding of the callback's own
-      // binding: the member is a function boundary.
-      [
-        'member write',
-        withSkill(
-          "let classified = loopClassifierResponse(body, 'loop-classifier');\nclass K { set m(v) { classified = undefined; } }\nvoid K;\nif (classified !== undefined) return classified;",
-        ),
-      ],
     ];
     for (const [label, source] of equivalent) {
       expect(delegationViolations(classifierDelegation(source)), label).toEqual(
         [],
       );
     }
-  });
-
-  // The fake-side minted-id extraction is executed, not counted as source
+  }); // The fake-side minted-id extraction is executed, not counted as source
   // spelling: dropping the structured call-id filter or replacing the
   // extraction with a fabricated literal reddens these directions, while a
   // behaviour-preserving consolidation into the helper stays green.
