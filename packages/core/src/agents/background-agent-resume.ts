@@ -39,6 +39,7 @@ import {
   getInitialChatHistory,
 } from '../core/environmentContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
+import { MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH } from '../hooks/types.js';
 import type { PermissionMode, StopHookOutput } from '../hooks/types.js';
 import { approvalModeToPermissionMode } from '../hooks/permission-mode.js';
 import {
@@ -1240,14 +1241,6 @@ export class BackgroundAgentResumeService {
         resolvedMode,
         signal: bgAbortController.signal,
       });
-      const additionalContext = contextState.get('hook_context');
-      if (additionalContext) {
-        // hook_context feeds systemPrompt; the initial user turn needs it too.
-        contextState.set(
-          'task_prompt',
-          `${String(contextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
-        );
-      }
       const bgEmitter = subagent.getCore().getEventEmitter();
       let liveToolCallCount = 0;
 
@@ -1343,13 +1336,6 @@ export class BackgroundAgentResumeService {
                 resolvedMode,
                 signal: turnAbortController.signal,
               });
-              const additionalContext = turnContextState.get('hook_context');
-              if (additionalContext) {
-                turnContextState.set(
-                  'task_prompt',
-                  `${String(turnContextState.get('task_prompt'))}\n\n${String(additionalContext)}`,
-                );
-              }
             }
             shouldFireStartHook = false;
 
@@ -1942,6 +1928,21 @@ export class BackgroundAgentResumeService {
     );
   }
 
+  private appendSubagentStartContext(
+    contextState: ContextState,
+    additionalContext: string,
+  ): void {
+    // hook_context feeds systemPrompt; the user turn needs the context too.
+    const boundedContext = additionalContext.slice(
+      0,
+      MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+    );
+    contextState.set(
+      'task_prompt',
+      `${String(contextState.get('task_prompt'))}\n\n${boundedContext}`,
+    );
+  }
+
   private async applySubagentStartHook(
     contextState: ContextState,
     opts: {
@@ -1967,6 +1968,7 @@ export class BackgroundAgentResumeService {
       const additionalContext = startHookOutput?.getAdditionalContext();
       if (additionalContext) {
         contextState.set('hook_context', additionalContext);
+        this.appendSubagentStartContext(contextState, additionalContext);
       }
     } catch (hookError) {
       debugLogger.warn(

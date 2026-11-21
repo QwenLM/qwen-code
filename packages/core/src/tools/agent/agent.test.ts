@@ -66,7 +66,10 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
-import { PermissionMode } from '../../hooks/types.js';
+import {
+  MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH,
+  PermissionMode,
+} from '../../hooks/types.js';
 import {
   runWithAgentConfiguredToolAllowlist,
   runWithAgentContext,
@@ -3782,7 +3785,9 @@ describe('AgentTool', () => {
       vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
         getAdditionalContext: vi.fn().mockReturnValue('Fork context'),
       } as never);
-      mockContextState.get = vi.fn().mockReturnValue('Fork directive');
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Fork directive' : undefined,
+      );
 
       await runFork(forkParams('some task'));
 
@@ -4443,13 +4448,32 @@ describe('AgentTool', () => {
 
     it('appends additionalContext to the initial task prompt', async () => {
       startOutput('Extra context from hook');
-      mockContextState.get = vi.fn().mockReturnValue('Original task');
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Original task' : undefined,
+      );
 
       await runFg();
 
       expect(mockContextState.set).toHaveBeenCalledWith(
         'task_prompt',
         'Original task\n\nExtra context from hook',
+      );
+    });
+
+    it('caps additionalContext before appending it to the task prompt', async () => {
+      const longContext = 'x'.repeat(
+        MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH + 100,
+      );
+      startOutput(longContext);
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Original task' : undefined,
+      );
+
+      await runFg();
+
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        `Original task\n\n${'x'.repeat(MAX_USER_PROMPT_EXPANSION_ADDITIONAL_CONTEXT_LENGTH)}`,
       );
     });
 
@@ -4461,6 +4485,10 @@ describe('AgentTool', () => {
       expect(mockContextState.set).not.toHaveBeenCalledWith(
         'hook_context',
         expect.stringMatching(/.+/),
+      );
+      expect(mockContextState.set).not.toHaveBeenCalledWith(
+        'task_prompt',
+        expect.stringContaining('undefined'),
       );
     });
 
@@ -5860,7 +5888,9 @@ describe('AgentTool', () => {
       vi.mocked(hookSystem.fireSubagentStartEvent).mockResolvedValue({
         getAdditionalContext: vi.fn().mockReturnValue('Background context'),
       } as never);
-      mockContextState.get = vi.fn().mockReturnValue('Watch for changes');
+      mockContextState.get = vi.fn((key: string) =>
+        key === 'task_prompt' ? 'Watch for changes' : undefined,
+      );
 
       await launch();
 
