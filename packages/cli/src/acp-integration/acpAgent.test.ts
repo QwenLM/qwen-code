@@ -16140,11 +16140,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('loads persisted workflow snapshots into the session task history', async () => {
+  it('recovers workflow history only on the first workflow-inclusive tasks request', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
+    const siblingSessionId = '22222222-2222-2222-2222-222222222222';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.isWorkflowsEnabled.mockReturnValue(true);
-    Object.assign(innerConfig, {
+    const taskRegistries = {
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         getAll: vi.fn().mockReturnValue([]),
       }),
@@ -16157,7 +16158,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getWorkflowRunRegistry: vi.fn().mockReturnValue({
         list: vi.fn().mockReturnValue([]),
       }),
-    });
+    };
+    Object.assign(innerConfig, taskRegistries);
     const persistedSnapshot = {
       runId: 'wf_saved',
       description: 'Review and fix',
@@ -16177,8 +16179,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       endTime: 2_000,
     };
     mockListWorkflowSnapshots
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([persistedSnapshot]);
+      .mockResolvedValueOnce([persistedSnapshot])
+      .mockResolvedValueOnce([persistedSnapshot])
+      .mockResolvedValueOnce([]);
 
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -16193,17 +16196,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const siblingConfig = await setupSessionMocks(siblingSessionId);
+    siblingConfig.isWorkflowsEnabled.mockReturnValue(true);
+    Object.assign(siblingConfig, taskRegistries);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(mockClaimInterruptedWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
     const legacyTasks = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionTasks,
       { sessionId },
     );
-    const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
-      sessionId,
-      includeWorkflows: true,
-    });
-
     expect(legacyTasks).toMatchObject({ sessionId, tasks: [] });
-    expect(tasks).toMatchObject({
+    expect(mockClaimInterruptedWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
+
+    const readWorkflowTasks = (id = sessionId) =>
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
+        sessionId: id,
+        includeWorkflows: true,
+      });
+    innerConfig.isWorkflowsEnabled.mockReturnValue(false);
+    await expect(readWorkflowTasks()).resolves.toMatchObject({
+      sessionId,
+      tasks: [],
+    });
+    expect(mockClaimInterruptedWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+
+    let finishRecovery!: () => void;
+    mockClaimInterruptedWorkflowRuns.mockImplementationOnce(
+      () =>
+        new Promise<[]>((resolve) => {
+          finishRecovery = () => resolve([]);
+        }),
+    );
+    const first = readWorkflowTasks();
+    const concurrent = readWorkflowTasks(siblingSessionId);
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
+    finishRecovery();
+    const workflowTasks = {
       sessionId,
       tasks: [
         {
@@ -16214,10 +16247,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           isHistorical: true,
         },
       ],
+    };
+    await expect(first).resolves.toMatchObject(workflowTasks);
+    await expect(concurrent).resolves.toMatchObject({
+      ...workflowTasks,
+      sessionId: siblingSessionId,
     });
-    expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(2);
-    // A run the previous process left unfinished becomes history before the
-    // session first reads it.
+    await expect(readWorkflowTasks()).resolves.toMatchObject({
+      sessionId,
+      tasks: [],
+    });
+    expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(3);
     expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
     expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledWith(innerConfig);
     expect(
@@ -20685,6 +20725,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const { isWorkflowRunPersistenceActive } = await import(
+      '@qwen-code/qwen-code-core/agents/workflow-run-registry.js'
+    );
+    mockClaimInterruptedWorkflowRun.mockImplementationOnce(
+      async (config: Config, runId: string) => {
+        expect(isWorkflowRunPersistenceActive(config, runId)).toBe(false);
+      },
+    );
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -20707,6 +20755,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         action: 'delete-history',
       }),
     ).resolves.toEqual({ changed: true });
+    expect(mockClaimInterruptedWorkflowRun).toHaveBeenCalledWith(
+      innerConfig,
+      'wf_abcd',
+    );
     expect(lastSessionMock!.deleteWorkflowHistory).toHaveBeenCalledWith(
       'wf_abcd',
     );
