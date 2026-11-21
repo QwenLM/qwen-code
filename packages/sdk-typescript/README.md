@@ -284,7 +284,8 @@ Things to know:
   need them. Without `onMessage`, every message is answered `refused`.
 - Call `close()` before exiting, including from your own signal handlers. A
   process killed without closing leaves its record behind until a Qwen Code
-  session lists the directory and sees the process is gone.
+  session lists the directory and sees the process is gone. Concurrent calls
+  wait for the same inbox and registry cleanup and report the same outcome.
 - UNIX domain sockets only: Windows is not supported yet.
 
 The record schema, wire format and receipt states are documented in

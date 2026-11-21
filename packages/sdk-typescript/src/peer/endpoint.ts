@@ -338,6 +338,7 @@ export class PeerEndpoint {
   private recordFile!: string;
   private exitHook: (() => void) | undefined;
   private closed = false;
+  private closePromise: Promise<void> | undefined;
   private readonly sends = new Map<string, TrackedSend>();
   private readonly answered = new Map<string, PeerDeliveryStatus>();
 
@@ -628,10 +629,14 @@ export class PeerEndpoint {
    * call more than once.
    */
   async close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     if (this.closed) return;
     this.beginClose();
-    await this.inbox.close();
-    await removeOwnRecord(this.recordFile, this.sessionId);
+    this.closePromise = (async () => {
+      await this.inbox.close();
+      await removeOwnRecord(this.recordFile, this.sessionId);
+    })();
+    return this.closePromise;
   }
 
   private closeSync(): void {
