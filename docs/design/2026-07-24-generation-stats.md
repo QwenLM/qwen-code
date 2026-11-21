@@ -1,5 +1,7 @@
 # Generation timing metrics in `/stats`
 
+[English](2026-07-24-generation-stats.md) | [简体中文](2026-07-24-generation-stats.zh-CN.md)
+
 > A later GenAI alignment adds the independent
 > `gen_ai.response.time_to_first_chunk` Span attribute alongside the existing
 > private `ttft_ms`. This document's `ApiResponseEvent.ttft_ms` data flow and
