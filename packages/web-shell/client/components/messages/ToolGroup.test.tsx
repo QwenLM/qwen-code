@@ -180,6 +180,58 @@ describe('ReadFile output availability', () => {
 });
 
 describe('tool header description direction', () => {
+  it.each([
+    [
+      'write_file',
+      'WriteFile: Writing to مجلد/ملف.ts',
+      { file_path: '/workspace/مجلد/ملف.ts' },
+    ],
+    [
+      'edit',
+      'Edit: Create مجلد/ملف.ts',
+      { file_path: '/workspace/مجلد/ملف.ts' },
+    ],
+    [
+      'list_directory',
+      `ListFiles: مجلد/...${'/intermediate'.repeat(5)}/src`,
+      { path: `/workspace/مجلد${'/intermediate'.repeat(10)}/src` },
+    ],
+  ] as const)(
+    'uses explicit provenance for the %s compact and expanded header',
+    (toolName, title, args) => {
+      for (const forceExpanded of [false, true]) {
+        const props = { workspaceCwd: '/workspace', forceExpanded };
+        const inDetail = forceExpanded && toolName === 'list_directory';
+        const machine = renderToolLine(
+          makeTool({ toolName, title, args, titleIsMachine: true }),
+          props,
+          {},
+          'ar',
+        );
+        expect(
+          machine.querySelector(
+            inDetail
+              ? '[class*="expandedCardDetail"] bdi[dir="ltr"]'
+              : 'bdi[class*="lineArg"][dir="ltr"]',
+          ),
+        ).not.toBeNull();
+        const prose = renderToolLine(
+          makeTool({ toolName, title, args, titleIsMachine: false }),
+          props,
+          {},
+          'ar',
+        );
+        const proseLabel = prose.querySelector(
+          inDetail
+            ? 'span[class*="expandedCardDetail"][dir="auto"]'
+            : 'span[class*="lineArg"][dir="auto"]',
+        );
+        expect(proseLabel).not.toBeNull();
+        expect(proseLabel?.querySelector('bdi')).toBeNull();
+      }
+    },
+  );
+
   it.each(['CustomTool', 'mcp__server__lookup', 'Shell'])(
     'keeps Arabic semantic %s descriptions auto-direction',
     (toolName) => {

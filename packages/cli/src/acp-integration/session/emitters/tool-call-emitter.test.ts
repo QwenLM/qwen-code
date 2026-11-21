@@ -19,6 +19,10 @@ import type {
   AnyToolInvocation,
 } from '@qwen-code/qwen-code-core';
 import { Kind, ToolNames } from '@qwen-code/qwen-code-core';
+import { EditTool } from '@qwen-code/qwen-code-core/tools/edit.js';
+import { LSTool } from '@qwen-code/qwen-code-core/tools/ls.js';
+import { WriteFileTool } from '@qwen-code/qwen-code-core/tools/write-file.js';
+import path from 'node:path';
 import type { Part } from '@google/genai';
 
 // Helper to create mock message parts for tests
@@ -1063,6 +1067,75 @@ describe('ToolCallEmitter', () => {
   });
 
   describe('resolveToolMetadata', () => {
+    it.each([
+      [WriteFileTool, 'WriteFile: Writing to ', { content: 'demo' }],
+      [EditTool, 'Edit: Create ', { old_string: '', new_string: 'demo' }],
+      [LSTool, 'ListFiles: ', {}],
+    ] as const)(
+      'stamps machine text from the built-in invocation %p',
+      async (Tool, prefix, params) => {
+        const cwd = path.resolve('title-provenance-fixture');
+        const filePath =
+          Tool === LSTool
+            ? path.join(
+                cwd,
+                'مجلد',
+                ...Array<string>(10).fill('intermediate'),
+                'src',
+              )
+            : path.join(cwd, 'مجلد', 'ملف.ts');
+        const shown =
+          Tool === LSTool
+            ? path.join(
+                'مجلد',
+                '...',
+                ...Array<string>(5).fill('intermediate'),
+                'src',
+              )
+            : path.join('مجلد', 'ملف.ts');
+        const config = {
+          getTargetDir: () => cwd,
+          getProjectRoot: () => cwd,
+          getFileSystemService: () => ({}),
+        } as Config;
+        const tool = new Tool(config);
+        vi.mocked(mockToolRegistry.getTool).mockReturnValue(tool);
+        await emitter.emitStart({
+          toolName: Tool.Name,
+          callId: 'machine',
+          args:
+            Tool === LSTool
+              ? { path: filePath }
+              : { file_path: filePath, ...params },
+        });
+        expect(sendUpdateSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            title: prefix + shown,
+            _meta: expect.objectContaining({ titleIsMachine: true }),
+          }),
+        );
+      },
+    );
+
+    it('marks a failed built-in invocation’s explicit replacement as prose', async () => {
+      const mockTool = createMockTool({ displayName: 'Edit' });
+      vi.mocked(mockTool.build).mockImplementation(() => {
+        throw new Error('Invalid edit');
+      });
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      await emitter.emitStart({
+        toolName: ToolNames.EDIT,
+        callId: 'prose',
+        args: { description: 'Create مجلد/ملف.ts' },
+      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Edit: Create مجلد/ملف.ts',
+          _meta: expect.objectContaining({ titleIsMachine: false }),
+        }),
+      );
+    });
+
     it('uses persisted metadata without a Config in direct replay', () => {
       const context: SessionEmitterContext = {
         sessionId: 'persisted-session',
@@ -1077,6 +1150,7 @@ describe('ToolCallEmitter', () => {
         }),
       ).toEqual({
         title: 'read_file: Read the persisted file',
+        titleIsMachine: false,
         locations: [],
         kind: 'other',
       });

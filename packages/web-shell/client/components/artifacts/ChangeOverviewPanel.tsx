@@ -39,7 +39,7 @@ export function ChangeOverviewPanel({
   workspaceCwd: string;
   sessionId?: string;
 }) {
-  const { t } = useI18n();
+  const { t, isRtl } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const {
     gitAvailable,
@@ -75,12 +75,14 @@ export function ChangeOverviewPanel({
     // Ctrl+Home/End scrolls the document; swallowing them here would turn
     // navigation into a scope change.
     if (event.altKey || event.ctrlKey || event.metaKey) return;
+    const forwardKey = isRtl ? 'ArrowLeft' : 'ArrowRight';
+    const backwardKey = isRtl ? 'ArrowRight' : 'ArrowLeft';
     let next: number;
     switch (event.key) {
-      case 'ArrowRight':
+      case forwardKey:
         next = (index + 1) % units.length;
         break;
-      case 'ArrowLeft':
+      case backwardKey:
         next = (index - 1 + units.length) % units.length;
         break;
       case 'Home':

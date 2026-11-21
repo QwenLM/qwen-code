@@ -212,6 +212,7 @@ export interface TodoPlanSnapshot {
  */
 export interface ResolvedToolMetadata {
   title: string;
+  titleIsMachine?: boolean;
   locations: ToolCallLocation[];
   kind: ToolKind;
 }

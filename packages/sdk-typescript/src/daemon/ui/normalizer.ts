@@ -1363,6 +1363,7 @@ function normalizeToolUpdate(
     extractToolLifecycle(update)?.toolName;
   const toolKind = getString(update, 'kind');
   const explicitTitle = getString(update, 'title');
+  const titleIsMachine = metadata?.['titleIsMachine'];
   const title =
     explicitTitle ??
     (getString(update, 'sessionUpdate') === 'tool_call'
@@ -1439,6 +1440,9 @@ function normalizeToolUpdate(
     ...(durationMs !== undefined && durationMs >= 0 ? { durationMs } : {}),
     ...(status ? { status } : {}),
     ...(title ? { title } : {}),
+    ...(explicitTitle && typeof titleIsMachine === 'boolean'
+      ? { titleIsMachine }
+      : {}),
     ...(toolName ? { toolName } : {}),
     ...(toolKind ? { toolKind } : {}),
     ...(content !== undefined ? { content } : {}),

@@ -345,6 +345,7 @@ export function isMachineToolDescription(
   workspaceCwd?: string,
 ): boolean {
   if (!description) return false;
+  if (tool.titleIsMachine !== undefined) return tool.titleIsMachine;
   const explicit = tool.args?.description;
   // ACP can use explicit prose as the title when an invocation cannot be
   // built; it is not machine text even when it matches the machine framing.
