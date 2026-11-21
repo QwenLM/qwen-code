@@ -703,7 +703,7 @@ describe('release workflow', () => {
     '@qwen-code/audio-capture':
       '::notice::Skipping @qwen-code/audio-capture; it publishes only from QwenLM/qwen-code',
     '@qwen-code/channel-msteams':
-      '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true',
+      '::notice::Skipping @qwen-code/channel-msteams; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true to re-enable it (bootstrap complete)',
     '@qwen-code/external-context-mem0':
       '::notice::Skipping @qwen-code/external-context-mem0; set NPM_EXTERNAL_CONTEXT_MEM0_TRUSTED_PUBLISHING_ENABLED=true',
   };

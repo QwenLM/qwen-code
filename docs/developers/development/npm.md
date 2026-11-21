@@ -112,7 +112,7 @@ overwritten by a retry.
 
 ### Failure Handling
 
-If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging.
+If any step in the release workflow fails, it will automatically create a new issue in the repository with the labels `bug` and a type-specific failure label (e.g., `nightly-failure`, `preview-failure`). The issue will contain a link to the failed workflow run for easy debugging. A push-time version refusal opens no issue; it is reported inline on the failed step instead.
 
 ### When a release sits in the queue
 

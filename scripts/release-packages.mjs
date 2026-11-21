@@ -43,14 +43,12 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       );
       continue;
     }
-    // npm can only bind trusted publishing to a package that already exists,
-    // so Teams stays out until its one-time bootstrap publish is done.
     if (
       name === '@qwen-code/channel-msteams' &&
       process.env.PUBLISH_CHANNEL_MSTEAMS !== 'true'
     ) {
       console.error(
-        `::notice::Skipping ${name}; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true after its bootstrap publish`,
+        `::notice::Skipping ${name}; set NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED=true to re-enable it (bootstrap complete)`,
       );
       continue;
     }
