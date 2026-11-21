@@ -22,6 +22,7 @@ import {
   findLatestAutoMemorySnapshot,
 } from '../memory/request-context.js';
 import { markCompressedHistory } from '../core/environmentContext.js';
+import { isBareTextPart } from '../utils/typed-prompt.js';
 import {
   clearApiHistoryDirectoryContext,
   getApiHistoryPromptId,
@@ -382,6 +383,9 @@ export class SessionApiHistoryAccumulator {
         // ACP records local command input as user and its output as a system
         // result. Neither belongs in model history. TUI invocations fence off
         // earlier input, including custom commands submitted to the model.
+        // The input part may carry the typed-prompt mark; the serve prompt
+        // ledger's `isLocalSlashCommandResult` mirrors these conditions and
+        // must change with them.
         if (
           payload?.phase === 'result' &&
           payload.sentToModel !== true &&
@@ -394,8 +398,7 @@ export class SessionApiHistoryAccumulator {
           previous.subtype === undefined &&
           previous.message?.role === 'user' &&
           parts?.length === 1 &&
-          typeof parts[0].text === 'string' &&
-          Object.keys(parts[0]).length === 1 &&
+          isBareTextPart(parts[0]) &&
           parts[0].text === payload.rawCommand
         ) {
           this.history.pop();

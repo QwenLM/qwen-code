@@ -5566,6 +5566,43 @@ describe('Session', () => {
       );
     });
 
+    it('hands core an attachment-first prompt with only its instruction marked (#9455)', async () => {
+      const send = useSharedRounds([text('ok'), finished()]);
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'check this log' },
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///app.log',
+              mimeType: 'text/plain',
+              text: 'line1\nline2',
+            },
+          },
+        ],
+        _meta: { 'qwen.daemon.submittedPrompt': 'check this log' },
+      });
+
+      expect(send).toHaveBeenCalledOnce();
+      const [parts, , , options] = send.mock.calls[0] as [
+        Part[],
+        unknown,
+        unknown,
+        Record<string, unknown>,
+      ];
+      // The shared round passes the person's words on as `humanInput`, which
+      // is what makes core mark a request, and the attachment comes first.
+      expect(options).toMatchObject({ humanInput: { text: 'check this log' } });
+      const marked = (core.markFirstTextPartUnlessMarked(parts) as Part[])
+        .filter((part) => core.isTypedPrompt(part))
+        .map((part) => part.text ?? '');
+      expect(marked).toHaveLength(1);
+      expect(marked[0]).toContain('check this log');
+      expect(marked[0]).not.toContain('line1');
+    });
+
     it.each([
       ['the Stop hook reached its cap', 'cap'],
       ['the guard gave way to a queued prompt', 'queued'],
@@ -26683,6 +26720,97 @@ describe('Session', () => {
       }
     });
 
+    describe('typed-prompt mark (#9455)', () => {
+      /** Texts of the sent parts that carry the typed-prompt mark. */
+      const markedTexts = () =>
+        firstSentMessage()
+          .filter((part) => core.isTypedPrompt(part))
+          .map((part) => part.text);
+
+      /** Sends `prompt` with `editor.ts` readable as a referenced file. */
+      async function promptWithEditorFile(
+        prompt: Parameters<typeof session.prompt>[0]['prompt'],
+      ) {
+        const readManyFilesSpy = vi
+          .spyOn(core, 'readManyFiles')
+          .mockResolvedValue({
+            contentParts:
+              '\n--- Content from referenced files ---\nContent from @editor.ts:\nexport const answer = 42;\n--- End of content ---',
+            files: [],
+          } as Awaited<ReturnType<typeof core.readManyFiles>>);
+        const targetDir = await fs.realpath(
+          await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-typed-')),
+        );
+        try {
+          await fs.writeFile(
+            path.join(targetDir, 'editor.ts'),
+            'editor',
+            'utf8',
+          );
+          mockConfig.getTargetDir = vi.fn().mockReturnValue(targetDir);
+          await session.prompt({ sessionId: 'test-session-id', prompt });
+        } finally {
+          readManyFilesSpy.mockRestore();
+          await fs.rm(targetDir, { recursive: true, force: true });
+        }
+      }
+
+      const editorLink = {
+        type: 'resource_link' as const,
+        name: 'editor.ts',
+        uri: 'file://editor.ts',
+      };
+
+      beforeEach(() => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+      });
+
+      it('marks the text of a prompt with nothing attached', async () => {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'port the parser' }],
+        });
+        expect(markedTexts()).toEqual(['port the parser']);
+      });
+
+      it('marks the instruction and not the referenced file content', async () => {
+        await promptWithEditorFile([
+          { type: 'text', text: 'Reverse the string "hello"' },
+          editorLink,
+        ]);
+        const marked = markedTexts();
+        expect(marked).toHaveLength(1);
+        expect(marked[0]).toContain('Reverse the string "hello"');
+        expect(marked[0]).not.toContain('export const answer');
+      });
+
+      it('marks nothing for a model-only prompt', async () => {
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'original question' }],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-prompt-id',
+          },
+          undefined,
+          '<realtime_delegation>private model context</realtime_delegation>',
+        );
+        expect(firstSentMessage().length).toBeGreaterThan(0);
+        expect(markedTexts()).toEqual([]);
+      });
+
+      it('marks nothing for a prompt that holds only an attachment', async () => {
+        await promptWithEditorFile([editorLink]);
+        expect(firstSentMessage().length).toBeGreaterThan(0);
+        expect(markedTexts()).toEqual([]);
+      });
+    });
+
     describe('conversation_finished telemetry (#4602 review)', () => {
       it('emits conversation_finished once when a turn completes normally', async () => {
         const finishedSpy = vi
@@ -41616,6 +41744,50 @@ describe('Session', () => {
         expect(publishedActivities).toEqual(['idle', 'running']);
       });
 
+      it('leaves the text of a runtime Goal continuation unmarked (#9455)', async () => {
+        // The continuation is written by the Goal runtime, not by the person,
+        // so compaction must not keep it as their words.
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-typed',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            tokensUsed: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-typed' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(firstSentMessage().length).toBeGreaterThan(0);
+        expect(
+          firstSentMessage().some((part) => core.isTypedPrompt(part)),
+        ).toBe(false);
+      });
+
       it('stamps a Goal turn’s tool results with the permit, and its own reads as bookkeeping', async () => {
         // The evidence catalog derives provenance from this stamp: an
         // unstamped tool result yields no catalog entry at all, so an ACP
@@ -45726,7 +45898,9 @@ describe('Session', () => {
         });
 
         expect(readManyFilesSpy).not.toHaveBeenCalled();
-        expect(firstSentMessage()).toEqual([{ text: 'Check this file' }]);
+        expect(firstSentMessage()).toEqual([
+          core.markTypedPrompt({ text: 'Check this file' }),
+        ]);
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
@@ -45755,7 +45929,9 @@ describe('Session', () => {
         });
 
         const message = firstSentMessage();
-        expect(message[0]).toEqual({ text: 'Use @ext:browser now' });
+        expect(message[0]).toEqual(
+          core.markTypedPrompt({ text: 'Use @ext:browser now' }),
+        );
         const sentText = textParts(message).join('\n');
         expect(sentText).toContain(
           '--- Extension: Browser (untrusted third-party content) ---',
@@ -45790,7 +45966,9 @@ describe('Session', () => {
       });
 
       const message = firstSentMessage();
-      expect(message[0]).toEqual({ text: 'Use @mcp:demo now' });
+      expect(message[0]).toEqual(
+        core.markTypedPrompt({ text: 'Use @mcp:demo now' }),
+      );
       const sentText = textParts(message).join('\n');
       expect(sentText).toContain('--- MCP Server: demo ---');
       expect(sentText).toContain('- Resources: 1');
