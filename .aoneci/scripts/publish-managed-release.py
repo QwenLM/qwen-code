@@ -423,6 +423,9 @@ def main():
     print(f"verified release {args.release_id} at {args.source_sha}")
 
     server_key = f"dist/managedagent/java/qwen-managed-agent-server-{args.release_id}.jar"
+    server_pom_key = f"dist/managedagent/java/qwen-managed-agent-server-{args.release_id}.pom"
+    sdk_jar_key = f"dist/managedagent/java/sdk/qwencode-sdk-{plan['sdkVersion']}.jar"
+    sdk_pom_key = f"dist/managedagent/java/sdk/qwencode-sdk-{plan['sdkVersion']}.pom"
     runtime_key = f"dist/managedagent/runtime/{args.release_id}/qwen-runtime-{args.release_id}.tar.gz"
     manifest_key = f"dist/managedagent/releases/{args.release_id}/release-manifest.json"
 
@@ -431,11 +434,11 @@ def main():
     if not args.skip_oss:
         oss_name, access_key, secret, security_token = resolve_oss_credentials(args.repo, server_key)
         print(f"credentials ok: OSS identity {oss_name}, Maven repository {MAVEN_REPO_ID}")
-        for key in (runtime_key, manifest_key):
+        for key in (server_pom_key, sdk_jar_key, sdk_pom_key, runtime_key, manifest_key):
             if oss_head(key, access_key, secret, security_token) == 200:
                 fail(f"OSS object already exists, refusing to overwrite: {key}")
     else:
-        print("OSS credential check skipped; runtime archive and manifest will be CI artifacts only")
+        print("OSS credential check skipped; all artifacts remain as CI artifacts only")
 
     maven_username = os.environ.get("MAVEN_USERNAME", "")
     maven_password = os.environ.get("MAVEN_PASSWORD", "")
@@ -468,10 +471,16 @@ def main():
     if oss_name:
         oss_put(server_key, plan["serverJar"], access_key, secret, security_token)
         oss_verify(server_key, plan["hashes"]["serverJarSha256"], access_key, secret, security_token)
+        oss_put(server_pom_key, plan["serverPom"], access_key, secret, security_token)
+        oss_verify(server_pom_key, plan["hashes"]["serverPomSha256"], access_key, secret, security_token)
+        oss_put(sdk_jar_key, plan["sdkJar"], access_key, secret, security_token)
+        oss_verify(sdk_jar_key, plan["hashes"]["sdkJarSha256"], access_key, secret, security_token)
+        oss_put(sdk_pom_key, plan["sdkPom"], access_key, secret, security_token)
+        oss_verify(sdk_pom_key, plan["hashes"]["sdkPomSha256"], access_key, secret, security_token)
         oss_put(runtime_key, plan["runtimeTar"], access_key, secret, security_token)
         oss_verify(runtime_key, plan["hashes"]["runtimeTarSha256"], access_key, secret, security_token)
     else:
-        print("OSS upload skipped; server JAR and runtime archive remain as CI artifacts")
+        print("OSS upload skipped; all artifacts remain as CI artifacts")
 
     manifest = {
         "releaseId": args.release_id,
@@ -480,6 +489,9 @@ def main():
         "bucket": BUCKET,
         "objects": ({
             "serverJar": {"key": server_key, "sha256": plan["hashes"]["serverJarSha256"]},
+            "serverPom": {"key": server_pom_key, "sha256": plan["hashes"]["serverPomSha256"]},
+            "sdkJar": {"key": sdk_jar_key, "sha256": plan["hashes"]["sdkJarSha256"]},
+            "sdkPom": {"key": sdk_pom_key, "sha256": plan["hashes"]["sdkPomSha256"]},
             "runtime": {"key": runtime_key, "sha256": plan["hashes"]["runtimeTarSha256"]},
         } if oss_name else {}),
         "maven": {
