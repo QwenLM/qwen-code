@@ -28,6 +28,10 @@ import { useChatNavigationVisible } from '../hooks/useChatNavigationVisible';
 import { useI18n } from '../i18n';
 import { TurnCallsProvider, useOpenTurnCalls } from '../turnCallsContext';
 import { SESSION_TIMELINE_MIN_VISIBLE_ENTRIES } from '../constants/sessions';
+import {
+  indexedEntries,
+  turnLabelForOrdinal,
+} from '../daemon/session/turn-navigation-store';
 import { ModReplyRowsProvider } from './messages/ModAssistantMessage';
 
 interface ReadingAnchor {
@@ -76,14 +80,22 @@ export function followRangeFromRows(
   return { start, end, current: current ?? firstVisible! };
 }
 
+// Marks rows of a turn the index does not know when the overlay reads the
+// follow range. Real ordinals are never negative.
+const UNKNOWN_TURN = -1;
+
 export interface TranscriptViewportProps extends MessageListProps {
   approvalOverlayActive?: boolean;
+  pinnedPrompt?: boolean;
 }
 
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
   TranscriptViewportProps
->(function TranscriptViewport({ approvalOverlayActive, ...props }, ref) {
+>(function TranscriptViewport(
+  { approvalOverlayActive, pinnedPrompt, ...props },
+  ref,
+) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -115,10 +127,12 @@ export const TranscriptViewport = forwardRef<
     selectSearchHit,
     continueLive,
   } = viewport;
+  const turnNavigation =
+    viewport.navigation.mode === 'ready' ||
+    viewport.navigation.mode === 'loading';
   const globalNavigation =
     !props.hideSessionTimeline &&
-    (viewport.navigation.mode === 'ready' ||
-      viewport.navigation.mode === 'loading') &&
+    turnNavigation &&
     viewport.navigation.effectiveTurnCount >=
       SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
   const root = useRef<HTMLDivElement>(null);
@@ -206,7 +220,8 @@ export const TranscriptViewport = forwardRef<
   };
 
   const blockOrdinal = useMemo(() => {
-    if (!globalNavigation) return undefined;
+    if (!globalNavigation && !(pinnedPrompt && turnNavigation))
+      return undefined;
     const navigation = viewport.navigation;
     const map = new Map<string, number>();
     for (const page of navigation.indexPages.values())
@@ -218,43 +233,114 @@ export const TranscriptViewport = forwardRef<
       if (turn.blockId) map.set(turn.blockId, navigation.totalTurns + index);
     });
     return map;
-  }, [globalNavigation, viewport.navigation]);
-  const [follow, setFollow] = useState<TurnFollowRange | undefined>(undefined);
+  }, [globalNavigation, pinnedPrompt, turnNavigation, viewport.navigation]);
+  // The prompt row of a long turn can leave the virtualizer's overscan, so the
+  // mounted rows alone cannot say which turn they belong to.
+  const turnOrdinal = useMemo(() => {
+    if (!blockOrdinal) return undefined;
+    // `null` marks the blocks of a turn the index does not know yet, such as
+    // a turn streaming in another tab. They must not borrow the turn before.
+    const map = new Map<string, number | null>();
+    let ordinal: number | null | undefined;
+    for (const message of messages) {
+      const ids = message.sourceBlockIds ?? [];
+      let mapped: number | undefined;
+      for (const id of ids) mapped = blockOrdinal.get(id) ?? mapped;
+      if (mapped !== undefined) ordinal = mapped;
+      // A `!command` row is not a turn in the index, so it stays in the
+      // turn before it, as on the rail. An agent's @-mention or message is a
+      // user-role row inside a turn, never a turn head in the index, so it
+      // keeps the turn too.
+      else if (message.role === 'user' && !message.agentMessage) ordinal = null;
+      if (ordinal !== undefined) for (const id of ids) map.set(id, ordinal);
+    }
+    return map;
+  }, [blockOrdinal, messages]);
+  // `pinnedTurn` is the turn whose prompt the overlay shows: undefined while
+  // that prompt row is on screen or the turn at the reading line is unknown.
+  const [follow, setFollow] = useState<
+    (TurnFollowRange & { pinnedTurn: number | undefined }) | undefined
+  >(undefined);
   const followFrame = useRef<number | undefined>(undefined);
   const updateFollow = useCallback(() => {
     const scroll = scroller();
-    if (!scroll || !blockOrdinal || !navigationVisible) {
+    if (
+      !scroll ||
+      !blockOrdinal ||
+      !turnOrdinal ||
+      !(navigationVisible || pinnedPrompt)
+    ) {
       setFollow(undefined);
       return;
     }
     const rect = scroll.getBoundingClientRect();
-    const next = followRangeFromRows(
-      rows().map((row) => {
-        let ordinal: number | undefined;
-        for (const id of row.dataset.sourceBlockIds?.split(',') ?? []) {
-          const mapped = blockOrdinal.get(id);
-          if (
-            mapped !== undefined &&
-            (ordinal === undefined || mapped < ordinal)
-          )
-            ordinal = mapped;
-        }
-        const bounds = row.getBoundingClientRect();
-        return { top: bounds.top, bottom: bounds.bottom, ordinal };
-      }),
+    const measured = rows().map((row) => {
+      const ids = row.dataset.sourceBlockIds?.split(',') ?? [];
+      let ordinal: number | undefined;
+      let unknownTurn = false;
+      for (const id of ids) {
+        const mapped = turnOrdinal.get(id);
+        if (mapped === null) unknownTurn = true;
+        else if (
+          mapped !== undefined &&
+          (ordinal === undefined || mapped < ordinal)
+        )
+          ordinal = mapped;
+      }
+      const bounds = row.getBoundingClientRect();
+      return {
+        top: bounds.top,
+        bottom: bounds.bottom,
+        ordinal,
+        unknownTurn: unknownTurn && ordinal === undefined,
+        // A turn's collapse and outputs rows carry its prompt's block id too.
+        prompts: row.dataset.messageRowKey?.startsWith('msg:')
+          ? ids.map((id) => blockOrdinal.get(id))
+          : [],
+      };
+    });
+    const range = followRangeFromRows(measured, rect.top, rect.bottom);
+    // The rail keeps carrying a turn forward over unknown rows. The overlay
+    // reads the same rule with unknown rows marked, so it names no prompt
+    // when the reading line is in a turn the index does not know.
+    const reading = followRangeFromRows(
+      measured.map((row) =>
+        row.unknownTurn ? { ...row, ordinal: UNKNOWN_TURN } : row,
+      ),
       rect.top,
       rect.bottom,
-    );
+    )?.current;
+    const promptInView =
+      range !== undefined &&
+      measured.some(
+        (row) =>
+          row.prompts.includes(range.current) &&
+          row.bottom > rect.top &&
+          row.top < rect.bottom,
+      );
+    const next = range && {
+      ...range,
+      pinnedTurn:
+        promptInView || reading === UNKNOWN_TURN ? undefined : range.current,
+    };
     setFollow((previous) =>
       previous &&
       next &&
       previous.start === next.start &&
       previous.end === next.end &&
-      previous.current === next.current
+      previous.current === next.current &&
+      previous.pinnedTurn === next.pinnedTurn
         ? previous
         : next,
     );
-  }, [scroller, rows, blockOrdinal, navigationVisible]);
+  }, [
+    scroller,
+    rows,
+    blockOrdinal,
+    turnOrdinal,
+    navigationVisible,
+    pinnedPrompt,
+  ]);
   const scheduleFollow = useCallback(() => {
     if (followFrame.current !== undefined) return;
     followFrame.current = requestAnimationFrame(() => {
@@ -389,6 +475,19 @@ export const TranscriptViewport = forwardRef<
     };
   }, [messages, viewKey, historical, viewport.target, capture, rows, scroller]);
 
+  const pinnedTurn = pinnedPrompt ? follow?.pinnedTurn : undefined;
+  const pinnedLabel = useMemo(
+    () =>
+      pinnedTurn === undefined
+        ? undefined
+        : turnLabelForOrdinal(
+            viewport.navigation,
+            indexedEntries(viewport.navigation.indexPages),
+            pinnedTurn,
+          ),
+    [pinnedTurn, viewport.navigation],
+  );
+
   const load = (direction: 'older' | 'newer') => {
     if (loadFrame.current !== undefined) return;
     const intent = scrollIntent.current;
@@ -520,28 +619,6 @@ export const TranscriptViewport = forwardRef<
         }}
       >
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {(loading || viewport.error) && (
-            <div className="absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
-              {loading && (
-                <span role="status">{t('history.loadingEarlier')}</span>
-              )}
-              {viewport.error && (
-                <span role="alert">
-                  {t('history.viewError')}{' '}
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => {
-                      anchor.current = capture();
-                      viewport.retry(refreshAnchor);
-                    }}
-                  >
-                    {t('history.retry')}
-                  </Button>
-                </span>
-              )}
-            </div>
-          )}
           <TurnCallsProvider
             onOpen={openTurnCalls ? openViewportTurnCalls : undefined}
           >
@@ -604,6 +681,46 @@ export const TranscriptViewport = forwardRef<
               />
             </ModReplyRowsProvider>
           </TurnCallsProvider>
+          {(loading || viewport.error || pinnedLabel) && (
+            // One column, so the pinned prompt always starts below the
+            // history banner, whatever height the banner wraps to.
+            <div className={styles.topStack} data-transcript-top-stack>
+              {(loading || viewport.error) && (
+                <div className="pointer-events-auto z-10 max-w-[50%] rounded-lg border bg-background px-3 py-1 text-xs text-muted-foreground">
+                  {loading && (
+                    <span role="status">{t('history.loadingEarlier')}</span>
+                  )}
+                  {viewport.error && (
+                    <span role="alert">
+                      {t('history.viewError')}{' '}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => {
+                          anchor.current = capture();
+                          viewport.retry(refreshAnchor);
+                        }}
+                      >
+                        {t('history.retry')}
+                      </Button>
+                    </span>
+                  )}
+                </div>
+              )}
+              {pinnedLabel && (
+                // Not aria-hidden: when the prompt row has left the mounted
+                // window, this is the only copy of the prompt in the DOM.
+                <div className={styles.pinnedPrompt}>
+                  <div
+                    className={styles.pinnedPromptText}
+                    data-pinned-turn-prompt={pinnedTurn}
+                  >
+                    {pinnedLabel}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {deletion && !historical && (
             <MessageDeletionToolbar controls={deletion} />
           )}

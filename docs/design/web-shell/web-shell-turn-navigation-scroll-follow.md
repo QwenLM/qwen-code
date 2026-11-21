@@ -60,13 +60,19 @@ snapshot and passes it to `GlobalTurnNavigation` as
 `follow?: { start: number; end: number; current: number }`.
 
 Mapping rows to ordinals: the snapshot's `locations` map (`turnId → blockId`)
-is inverted, and index pages give `turnId → ordinal`. Provisional turns map to
-`totalTurns + index`. Each rendered transcript row carries
-`data-source-block-ids`; a row's ordinal is the smallest mapped ordinal among
-its block ids. Rows whose blocks do not map (assistant output, tool cards)
-inherit the previous mapped row's ordinal, walking top-down; rows above the
-first mapped row belong to the turn before it (`first - 1`, clamped at 0).
-This mirrors how the in-list timeline propagates the current turn id across a
+is inverted, and index pages give `turnId → ordinal` (`blockOrdinal`).
+Provisional turns map to `totalTurns + index`. `turnOrdinal` then walks
+`messages` in order and gives every block the ordinal of the turn it belongs
+to, so a mounted output row keeps its turn after the turn's prompt row has
+left the virtualizer's overscan. A user message whose block is not in
+`blockOrdinal` starts a turn the index does not know yet; its blocks are
+marked unknown and do not take the previous turn's ordinal. Each rendered
+transcript row carries `data-source-block-ids`; a row's ordinal is the
+smallest `turnOrdinal` value among its block ids. `blockOrdinal` is used
+directly only to find the prompt row of a turn. Rows with no ordinal inherit
+the previous mapped row's ordinal, walking top-down; rows above the first
+mapped row belong to the turn before it (`first - 1`, clamped at 0). This
+mirrors how the in-list timeline propagates the current turn id across a
 turn's rows.
 
 The follow range recomputes:
@@ -79,9 +85,12 @@ The follow range recomputes:
 - when the transcript scroller resizes (floating panels, window resizes), via
   a `ResizeObserver` on the scroller element.
 
-While the rail is hidden below its width threshold, both the follow
-recomputation and the `follow` prop are gated off: a boxless element drops
-`scrollTop` writes, and nothing may re-window a rail that is not painted.
+While the rail is hidden below its width threshold, the `follow` prop is gated
+off: a boxless element drops `scrollTop` writes, and nothing may re-window a
+rail that is not painted. The follow recomputation still runs when the
+viewport has the `pinnedPrompt` prop, because the pinned turn prompt reads the
+same range while the rail is hidden. See
+[web-shell-pinned-turn-prompt.md](web-shell-pinned-turn-prompt.md).
 
 `GlobalTurnNavigation` renders the effective current ordinal as
 `selected?.ordinal` while a click selection is still loading, otherwise

@@ -33,7 +33,7 @@
 
 `TranscriptViewport` 根据 DOM 与导航 snapshot 计算跟随区间，以 `follow?: { start: number; end: number; current: number }` 传给 `GlobalTurnNavigation`。
 
-行到序号的映射：反转 snapshot 的 `locations` 映射（`turnId → blockId`），再由 index page 得到 `turnId → ordinal`；provisional 轮次映射为 `totalTurns + index`。每个已渲染 transcript 行带有 `data-source-block-ids`；行的序号取其 block id 中最小的已映射序号。块未映射的行（助手输出、工具卡片）自上而下继承上一个已映射行的序号；位于首个已映射行之前的行属于其前一个轮次（`first - 1`，下限为 0）。这与内嵌时间轴把当前 turn id 传播到同一轮次各行的做法一致。
+行到序号的映射：反转 snapshot 的 `locations` 映射（`turnId → blockId`），再由 index page 得到 `turnId → ordinal`（`blockOrdinal`）；provisional 轮次映射为 `totalTurns + index`。`turnOrdinal` 随后按顺序遍历 `messages`，为每个 block 赋予其所属轮次的序号，因此即使轮次的提示行已离开虚拟列表的 overscan，已挂载的输出行仍保留其轮次。若某条用户消息的 block 不在 `blockOrdinal` 中，它开始的是索引尚未知晓的轮次；该轮次的 block 被标记为未知，不会沿用上一轮次的序号。每个已渲染 transcript 行带有 `data-source-block-ids`；行的序号取其 block id 中最小的 `turnOrdinal` 值。`blockOrdinal` 只直接用于找出轮次的提示行。没有序号的行自上而下继承上一个已映射行的序号；位于首个已映射行之前的行属于其前一个轮次（`first - 1`，下限为 0）。这与内嵌时间轴把当前 turn id 传播到同一轮次各行的做法一致。
 
 跟随区间在以下时机重算：
 
@@ -41,7 +41,7 @@
 - `messages`、view key 或序号映射变化后的布局阶段（流式增长、历史页载入、视图切换），
 - transcript 滚动容器尺寸变化时（浮动面板、窗口调整），经容器上的 `ResizeObserver` 触发。
 
-轨条在宽度阈值以下隐藏时，跟随重算与 `follow` prop 同时关闭：无盒模型元素会丢弃 `scrollTop` 写入，未被绘制的轨条不允许被重开窗。
+轨条在宽度阈值以下隐藏时，`follow` prop 关闭：无盒模型元素会丢弃 `scrollTop` 写入，未被绘制的轨条不允许被重开窗。当视口带有 `pinnedPrompt` prop 时，跟随重算仍会运行，因为轨条隐藏时固定的轮次提示也读取同一区间。参见 [web-shell-pinned-turn-prompt.zh-CN.md](web-shell-pinned-turn-prompt.zh-CN.md)。
 
 `GlobalTurnNavigation` 计算有效当前序号：点击选择仍在加载时取 `selected?.ordinal`，否则取 `follow?.current ?? selected?.ordinal`。选中刻度还会丢弃过时的跟随区间，让被点序号在整个跳转期间持有标记；跳转落地后由阅读线接管。当前刻度沿用现有 `sessionTimelineButtonCurrent` 样式并接管 `aria-current`。落在 `follow.start..end` 内的序号额外附加 `sessionTimelineButtonInRange`（及 `data-in-current-range`），与内嵌时间轴完全一致。仅当当前刻度离开可视窗口时，布局副作用才让轨条视口贴边滚动到刚好可见，因此用户浏览轨条本身永远不会被争抢。
 

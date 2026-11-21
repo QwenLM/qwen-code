@@ -802,7 +802,7 @@ function sessionUpdateEvent(
   };
 }
 
-function getPlaywrightBaseURL(): string {
+export function getPlaywrightBaseURL(): string {
   const port = process.env['PLAYWRIGHT_PORT'] ?? '5174';
   return process.env['PLAYWRIGHT_BASE_URL'] ?? `http://127.0.0.1:${port}`;
 }
