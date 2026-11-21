@@ -82,7 +82,14 @@ function addRemote(dir: string, name: string, ...push: string[]): string {
 /** A clone of `remote` standing in for another developer. */
 function cloneOf(remote: string): string {
   const clone = tmpDir('qwen-gitclone-');
-  git(clone, 'clone', '-q', remote, '.');
+  // `-c` pins the line endings of the checkout itself: setting
+  // `core.autocrlf` afterwards is too late, because the checkout already
+  // rewrote every LF to CRLF under a host config that enables it (the Git for
+  // Windows default). Those CRLF bytes are then committed verbatim and pulled
+  // into the workspace repo, where they turn a non-conflicting stash pop into
+  // a conflict over line endings alone.
+  git(clone, '-c', 'core.autocrlf=false', 'clone', '-q', remote, '.');
+  git(clone, 'config', 'core.autocrlf', 'false');
   git(clone, 'config', 'user.email', 'other@example.com');
   git(clone, 'config', 'user.name', 'Other');
   git(clone, 'config', 'commit.gpgsign', 'false');
