@@ -715,7 +715,7 @@ public class JdbcManagedActionStore
         List<String[]> reserved = jdbc.query(
                         "SELECT request_digest, result_operation_key FROM ma_request_receipt WHERE"
                                 + " namespace = 'ACTION_DECISION' AND tenant_key = ? AND"
-                                + " decision_scope_key = ?",
+                                + " scope_key = ?",
                 (r, row) -> new String[]{r.getString(1), r.getString(2)}, ManagedSchemaKeys.key(tenantId), actionScope);
         if (!reserved.isEmpty()) {
             if (!decision.equals(reserved.getFirst()[0])) {
