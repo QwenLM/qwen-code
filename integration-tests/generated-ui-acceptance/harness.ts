@@ -657,9 +657,9 @@ export async function saveOutcome(
       (status) => status !== 'saving',
       timeoutMs,
     );
+    if (previous === 'saving') return 'saving';
     await observation.evaluate((tracker) => tracker.reset());
     await change();
-    if (previous === 'saving') return 'saving';
     const outcome = await settle(
       () => observation.evaluate((tracker) => tracker.outcome()),
       (status) => status !== undefined && status !== 'saving',

@@ -395,7 +395,10 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
       'save-failed',
       'save-unavailable',
       'stale-acknowledgement',
-      'delayed-resave',
+      'late-acknowledgement',
+      'delayed-undo-save',
+      'undo-not-saved',
+      'shared-card-state',
     ] as const)(
       'checks checklist progress and undo persistence: %s',
       async (mode) => {
@@ -407,13 +410,16 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             <input id="new-item"><select id="filter"><option value="all">All</option><option value="open">Open</option><option value="done">Done</option></select>
             <button id="add">Add</button><button id="undo">Undo</button><p id="empty" ${mode === 'hidden-empty' ? 'style="display:none"' : ''}>Empty</p><ul id="items"></ul>
             <script>
-              const key = 'checklist-' + new URL(location.href).searchParams.get('session');
-              const saved = JSON.parse(localStorage.getItem(key) || 'null');
               const mode = ${JSON.stringify(mode)};
+              const session = new URL(location.href).searchParams.get('session');
+              const key = 'checklist-' + (mode === 'shared-card-state' ? 'fixture-card' : session);
+              const saved = JSON.parse(localStorage.getItem(key) || 'null');
               const bar = frameElement.parentElement.querySelector('[role="status"]');
               if (mode === 'save-unavailable') bar.dataset.generatedUiSave = 'unavailable';
+              if (mode === 'stale-acknowledgement' && !saved) bar.dataset.generatedUiSave = 'saved';
               let items = saved?.items || [];
               let history = saved?.history || [];
+              let pendingRenameReceipt = false;
               const byId = id => document.getElementById(id);
               const snapshot = () => JSON.parse(JSON.stringify(items));
               function applyFilter() {
@@ -447,33 +453,51 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                 });
                 applyFilter();
               }
-              function commit() {
+              function commit(delay = 0) {
                 render();
                 if (mode === 'save-unavailable') return;
                 const announce = mode !== 'unacknowledged' &&
-                  (mode !== 'stale-acknowledgement' || saved || !bar.dataset.generatedUiSave);
+                  ((mode !== 'stale-acknowledgement' && mode !== 'late-acknowledgement') || saved);
                 const json = JSON.stringify({
                   items: mode === 'progress-loss' ? items.map(item => ({ ...item, done: false })) : items,
                   history: mode === 'history-loss' ? [] : history,
                 });
-                const notesChecked = list => list?.some(item => item.text === 'Notes' && item.done);
-                const delay = mode === 'delayed-resave' && notesChecked(saved?.items) && notesChecked(items) ? 2500 : 0;
                 if (announce) bar.dataset.generatedUiSave = 'saving';
                 setTimeout(() => {
                   localStorage.setItem(key, json);
                   if (announce) bar.dataset.generatedUiSave = mode === 'save-failed' ? 'failed' : 'saved';
                 }, delay);
+                if (mode === 'late-acknowledgement' && !saved &&
+                    items.some(item => item.text === 'Agenda (edited)')) {
+                  if (!items.some(item => item.text === 'Notes' && item.done)) {
+                    pendingRenameReceipt = true;
+                  } else if (pendingRenameReceipt) {
+                    // The rename's receipt lands during the final check.
+                    pendingRenameReceipt = false;
+                    bar.dataset.generatedUiSave = 'saving';
+                    setTimeout(() => { bar.dataset.generatedUiSave = 'saved'; }, 150);
+                  }
+                }
               }
               byId('add').onclick = () => {
                 if (${JSON.stringify(mode)} === 'inert-add') return;
                 history.push(snapshot()); items.push({ text: byId('new-item').value, done: false }); byId('new-item').value = ''; commit();
               };
               byId('filter').onchange = applyFilter;
-              byId('undo').onclick = () => { if (history.length) { items = history.pop(); commit(); } };
+              byId('undo').onclick = () => {
+                if (!history.length) return;
+                items = history.pop();
+                if (saved && mode === 'undo-not-saved') render();
+                else commit(saved && mode === 'delayed-undo-save' ? 2500 : 0);
+              };
               render();
             </script>`;
           await context.route('http://acceptance.test/**', async (route) => {
             const url = new URL(route.request().url());
+            if (url.pathname.endsWith('/generated-ui/state/fixture-card')) {
+              await route.fulfill({ json: null });
+              return;
+            }
             await route.fulfill({
               contentType: 'text/html',
               body:
@@ -484,7 +508,9 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
                       if (supplied) sessionStorage.setItem('daemon-token', supplied);
                       history.replaceState(null, '', location.pathname + location.search);
                       if (sessionStorage.getItem('daemon-token') === ${JSON.stringify(token)}) {
-                        document.body.insertAdjacentHTML('beforeend', '<div data-testid="mcp-app"><span role="status"></span><iframe name="view" src="/view' + location.search + '"></iframe></div>');
+                        const session = location.pathname.split('/').pop();
+                        void fetch(location.pathname + '/generated-ui/state/fixture-card');
+                        document.body.insertAdjacentHTML('beforeend', '<div data-testid="mcp-app"><span role="status"></span><iframe name="view" src="/view?session=' + session + '"></iframe></div>');
                       }
                     </script></body>`,
             });
@@ -518,14 +544,25 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
               .isChecked();
             return reload(options);
           });
+          const branchSession = vi.fn(async (source: string) => {
+            const sessionId = String(++starts);
+            await page.evaluate(
+              ([sourceId, branchId]) => {
+                const saved = localStorage.getItem('checklist-' + sourceId);
+                if (saved) localStorage.setItem('checklist-' + branchId, saved);
+              },
+              [source, sessionId],
+            );
+            return { sessionId };
+          });
           const env = {
             page,
             context,
             cardTimeoutMs: 10_000,
-            daemon: { token },
+            daemon: { token, client: { branchSession } },
             startSession: async () => {
               await page.goto(
-                `http://acceptance.test/?session=${++starts}#token=${token}`,
+                `http://acceptance.test/session/${++starts}#token=${token}`,
               );
             },
             waitForCard: (index: number) => waitForCardOn(page, index),
@@ -570,29 +607,41 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             return;
           }
           expect(checkedBeforeReload).toBe(true);
-          expect(reopenedAuthenticated).toBe(true);
-          for (const id of ['persists-after-reload', 'persists-after-reopen']) {
-            expect(status(id)).toBe(
-              mode === 'progress-loss' ||
-                mode === 'history-loss' ||
-                mode === 'save-unavailable'
+          const restoresAfterReload =
+            mode !== 'progress-loss' &&
+            mode !== 'history-loss' &&
+            mode !== 'save-unavailable';
+          const persistedUndo =
+            restoresAfterReload && mode !== 'undo-not-saved';
+          expect(reopenedAuthenticated).toBe(restoresAfterReload);
+          expect(status('persists-after-reload')).toBe(
+            restoresAfterReload ? 'pass' : 'fail',
+          );
+          expect(status('persists-after-reopen')).toBe(
+            !restoresAfterReload
+              ? 'not-applicable'
+              : mode === 'undo-not-saved'
                 ? 'fail'
                 : 'pass',
-            );
-          }
+          );
           for (const id of [
             'add',
             'check-and-filter',
             'delete',
             'repeated-undo',
-            'isolated-across-sessions',
           ]) {
-            expect(status(id)).toBe(
-              id === 'isolated-across-sessions' && mode === 'save-unavailable'
-                ? 'not-applicable'
-                : 'pass',
-            );
+            expect(status(id)).toBe('pass');
           }
+          expect(status('isolated-across-sessions')).toBe(
+            !persistedUndo
+              ? 'not-applicable'
+              : mode === 'shared-card-state'
+                ? 'fail'
+                : 'pass',
+          );
+          expect(branchSession.mock.calls).toEqual(
+            persistedUndo ? [['1']] : [],
+          );
           expect(status('edit')).toBe(
             mode === 'no-edit' || mode === 'inert-edit' ? 'fail' : 'pass',
           );
@@ -600,7 +649,8 @@ describe.runIf(process.env['QWEN_GENERATED_UI_ACCEPTANCE'] === '1')(
             mode === 'unacknowledged' ||
               mode === 'save-failed' ||
               mode === 'save-unavailable' ||
-              mode === 'stale-acknowledgement'
+              mode === 'stale-acknowledgement' ||
+              mode === 'late-acknowledgement'
               ? 'fail'
               : 'pass',
           );

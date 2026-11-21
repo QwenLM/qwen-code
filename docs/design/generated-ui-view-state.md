@@ -289,12 +289,13 @@ Step 3:
 - Replay through the real daemon, Web Shell and Chromium: the reference
   checklist restores its items, checked state and undo history from
   `ui.state`, and the persistence, save acknowledgement and isolation pins
-  pass; all other pins are unchanged.
+  pass; all other pins are unchanged. A branch inherits state for the same
+  card ID, then restores a different value from its source after an edit.
 - Evaluator tests with a controlled host: the save acknowledgement passes when
-  the host shows a fresh `saved` outcome for the last change. It fails on any
+  the host shows a fresh `saved` outcome for the first Add. It fails on any
   other outcome or when items persisted without a fresh outcome. It does not
-  apply when nothing persisted and the host showed no outcome. A delayed
-  re-save after testing undo must complete before the harness opens a new tab.
+  apply when nothing persisted and the host showed no outcome. The new tab
+  must restore the undone state, including when saving the undo was delayed.
 - A live run of the checklist case with the gating model, reported in the PR.
 
 ## Acceptance criteria
