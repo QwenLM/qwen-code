@@ -139,6 +139,44 @@ async def _start_query(transport: FakeTransport) -> Query:
 
 
 @pytest.mark.asyncio
+async def test_initialize_carries_the_control_request_budget() -> None:
+    # The CLI bounds its deferred initialize reply below the client's budget,
+    # so the payload must carry it rather than leaving the CLI to assume 60 s.
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            timeout=TimeoutOptions(
+                can_use_tool=0.05,
+                control_request=30.0,
+                stream_close=0.05,
+            )
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+    await query._ensure_started()
+
+    init_request = await _wait_for_request(transport, "initialize")
+    assert init_request["request"]["timeout"] == {"controlRequest": 30_000}
+
+    transport.push(
+        {
+            "type": "control_response",
+            "response": {
+                "subtype": "success",
+                "request_id": init_request["request_id"],
+                "response": {},
+            },
+        }
+    )
+    await _wait_for(
+        lambda: any(payload.get("type") == "user" for payload in transport.writes)
+    )
+    await query.close()
+
+
+@pytest.mark.asyncio
 async def test_unknown_control_request_returns_error_response() -> None:
     transport = FakeTransport()
     query = await _start_query(transport)

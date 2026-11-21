@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from inspect import Parameter, Signature, iscoroutinefunction, signature
@@ -98,11 +99,30 @@ class TimeoutOptions:
                 raise ValueError(f"timeout.{name} must be a positive number")
             return float(raw)
 
-        return cls(
+        options = cls(
             can_use_tool=_read("can_use_tool", 60.0),
             control_request=_read("control_request", 60.0),
             stream_close=_read("stream_close", 60.0),
         )
+        options.validate_control_request_serializable()
+        return options
+
+    def control_request_milliseconds(self) -> float:
+        return self.control_request * 1000
+
+    def validate_control_request_serializable(self) -> None:
+        """Reject a control-request budget the initialize payload cannot carry.
+
+        The CLI parses that payload with the strict `JSON.parse`, which rejects
+        the non-standard `Infinity` literal and would kill the session at
+        startup. The millisecond product overflows for a finite number of
+        seconds, and `can_use_tool`/`stream_close` never reach the wire, so they
+        keep accepting `inf` as "wait indefinitely".
+        """
+        if not math.isfinite(self.control_request_milliseconds()):
+            raise ValueError(
+                "timeout.control_request is too large to serialize in milliseconds"
+            )
 
 
 class QueryOptionsDict(TypedDict, total=False):

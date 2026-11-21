@@ -382,6 +382,7 @@ export interface CLIControlInitializeRequest {
   hooks?: HookRegistration[] | null;
   timeout?: {
     canUseTool?: number;
+    controlRequest?: number;
   };
   /**
    * SDK MCP servers config

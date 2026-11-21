@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, cast, get_args
@@ -247,6 +248,39 @@ def test_timeout_rejects_negative_value() -> None:
 def test_timeout_rejects_boolean_value() -> None:
     with pytest.raises(TypeError, match=r"timeout\.stream_close must be a positive"):
         TimeoutOptions.from_mapping({"stream_close": True})
+
+
+def test_timeout_rejects_non_finite_control_request() -> None:
+    # ``float("inf")`` is the familiar "no timeout" idiom, but the initialize
+    # payload is serialized as JSON and the CLI parses it with the strict
+    # ``JSON.parse``, which rejects the ``Infinity`` literal — the session
+    # would die at startup with a parser error instead of a clear message.
+    pattern = r"timeout\.control_request is too large to serialize"
+    with pytest.raises(ValueError, match=pattern):
+        TimeoutOptions.from_mapping({"control_request": float("inf")})
+
+
+def test_timeout_rejects_control_request_that_overflows_in_milliseconds() -> None:
+    # Finite seconds can still serialize to the rejected ``Infinity`` literal
+    # once the payload multiplies them by 1000.
+    pattern = r"timeout\.control_request is too large to serialize"
+    with pytest.raises(ValueError, match=pattern):
+        TimeoutOptions.from_mapping({"control_request": 1e306})
+
+
+def test_timeout_keeps_infinite_local_only_budgets() -> None:
+    # ``can_use_tool`` and ``stream_close`` only feed local ``asyncio.wait_for``
+    # calls, where ``inf`` means "wait indefinitely"; they never reach the wire.
+    options = TimeoutOptions.from_mapping(
+        {"can_use_tool": float("inf"), "stream_close": float("inf")}
+    )
+    assert math.isinf(options.can_use_tool)
+    assert math.isinf(options.stream_close)
+
+
+def test_timeout_rejects_oversized_control_request_built_directly() -> None:
+    with pytest.raises(ValueError, match=r"too large to serialize"):
+        TimeoutOptions(control_request=1e306).validate_control_request_serializable()
 
 
 def test_rejects_invalid_max_tool_calls() -> None:
