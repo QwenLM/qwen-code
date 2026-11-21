@@ -805,7 +805,33 @@ fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
         || url.as_str() == "about:srcdoc"
         || lock(origin)
             .as_ref()
-            .is_some_and(|allowed| is_same_origin(url, allowed))
+            .is_some_and(|allowed| is_same_origin(url, allowed) || is_mcp_app_sandbox(url, allowed))
+}
+
+/// Frames of the MCP App sandbox (packages/web-shell generated UI). The Web
+/// Shell rewrites 127.0.0.1 to localhost for its same-origin sandbox iframe,
+/// the daemon's 302 target is an ephemeral `<uuid>.localhost:<port>` sandbox
+/// listener, and data-mode guest documents load over data: URLs. All of
+/// these resolve to loopback or perform no network fetch, matching the
+/// browser Web Shell where the same frames load (QwenLM/qwen-code#16766).
+fn is_mcp_app_sandbox(url: &Url, origin: &Url) -> bool {
+    if url.scheme() == "data" {
+        return true;
+    }
+    if url.port_or_known_default() != origin.port_or_known_default() {
+        return is_ephemeral_sandbox_host(url);
+    }
+    url.scheme() == origin.scheme()
+        && matches!(url.host_str(), Some("localhost") | Some("[::1]"))
+}
+
+/// `*.localhost` resolves to loopback on macOS and Windows; the daemon
+/// registers the ephemeral sandbox listener under such a host.
+fn is_ephemeral_sandbox_host(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url
+            .host_str()
+            .is_some_and(|host| host.ends_with(".localhost"))
 }
 
 fn is_bootstrap_url(url: &Url) -> bool {
@@ -1200,7 +1226,6 @@ mod tests {
             "about:blank",
             "about:config",
             "about:srcdoc/other",
-            "data:text/html,<p>preview</p>",
             "blob:http://127.0.0.1:49152/preview",
             "file:///etc/passwd",
             "javascript:alert(1)",
@@ -1210,6 +1235,54 @@ mod tests {
                 "unexpectedly allowed {url}",
             );
         }
+    }
+
+    #[test]
+    fn allows_mcp_app_sandbox_frames() {
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
+        for url in [
+            // Same-origin sandbox iframe; the Web Shell rewrites the host to
+            // the loopback alias.
+            "http://localhost:49152/mcp-app-sandbox?hostOrigin=http%3A%2F%2F127.0.0.1%3A49152",
+            "http://[::1]:49152/mcp-app-sandbox",
+            // Ephemeral sandbox listener the daemon 302-redirects to.
+            "http://a1b2c3d4-0000-0000-0000-000000000000.localhost:53211/mcp-app-sandbox",
+            // Data-mode guest document.
+            "data:text/html;base64,PHNjcmlwdD5jb25zb2xlLmxvZygnb2snKTwvc2NyaXB0Pg==",
+        ] {
+            assert!(
+                is_allowed_navigation(&Url::parse(url).expect("url"), &origin),
+                "unexpectedly denied {url}",
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_app_sandbox_allowances_do_not_leak() {
+        let origin = Mutex::new(Some(Url::parse("http://127.0.0.1:49152/").expect("origin")));
+        for url in [
+            // Loopback alias on a foreign port is not the daemon.
+            "http://localhost:53211/other-service",
+            // A *.localhost subdomain on the daemon's own port is not the
+            // ephemeral listener.
+            "http://other.localhost:49152/",
+            // https is not the daemon's scheme.
+            "https://localhost:49152/mcp-app-sandbox",
+        ] {
+            assert!(
+                !is_allowed_navigation(&Url::parse(url).expect("url"), &origin),
+                "unexpectedly allowed {url}",
+            );
+        }
+    }
+
+    #[test]
+    fn data_guests_require_the_origin_to_be_recorded() {
+        let origin = Mutex::new(None);
+        assert!(!is_allowed_navigation(
+            &Url::parse("data:text/html,<p>guest</p>").expect("data"),
+            &origin,
+        ));
     }
 
     #[test]
