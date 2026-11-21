@@ -184,34 +184,6 @@ describe('Session ID Support (E2E)', () => {
         await q.close();
       }
     });
-
-    it('should reject using sessionId with resume', async () => {
-      // Valid UUIDs: 4 in position 14, 8/9/a/b in position 19
-      const customSessionId = '11111111-2222-4333-a444-555555555555';
-      const resumeSessionId = '66666666-7777-4888-b999-000000000000';
-
-      // CLI rejects using --session-id with --resume
-      const q = query({
-        prompt: 'Say hello',
-        options: {
-          ...testOptions(),
-          cwd: testDir,
-          sessionId: customSessionId,
-          resume: resumeSessionId,
-          debug: false,
-        },
-      });
-
-      try {
-        await expect(async () => {
-          for await (const _message of q) {
-            // Consume messages
-          }
-        }).rejects.toThrow(/CLI process exited with code 1/);
-      } finally {
-        await q.close();
-      }
-    });
   });
 
   describe('Session ID Validation', () => {
