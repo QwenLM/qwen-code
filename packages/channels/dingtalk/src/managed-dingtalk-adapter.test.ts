@@ -666,12 +666,22 @@ describe('managed DingTalk adapter inbound', () => {
   });
 
   it('drops a deterministically refused admission visibly, never re-driving it', async () => {
-    const { adapter, plane, fake } = await connectedAdapter();
+    const lines: string[] = [];
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), {
+      log: (line) => lines.push(line),
+    });
     plane.setRefuseSubmit({ status: 400 });
     fake.push('msg-poison', messageData({ msgId: 'msg-poison' }));
     await adapter.tick();
     expect(plane.submitAttempts()).toBe(1);
     expect(plane.submit).toHaveLength(0);
+    // "Visibly" is the half a silent drop would also satisfy: the operator must
+    // be told which event was skipped, without the payload being echoed.
+    const refusal = lines.filter((line) =>
+      line.includes('admission of dingtalk:msg-poison was refused (400)'),
+    );
+    expect(refusal).toHaveLength(1);
+    expect(refusal[0]).not.toContain('session=');
     // The claim is gone, so a later tick never re-drives it.
     await adapter.tick();
     expect(plane.submitAttempts()).toBe(1);
@@ -847,6 +857,41 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
+  it('a failure on a later segment settles only that segment, leaving the prefix delivered (R12)', async () => {
+    const hooks: { beforeSend?: () => void } = {};
+    const { adapter, plane, fake } = await connectedAdapter(tempCwd(), hooks);
+    // beforeSend runs after the send is recorded and before the failure check,
+    // so flipping the behaviour on the second call fails that segment alone.
+    // A single behaviour flag set up front kills segment 0 instead, which is
+    // why the partial-delivery shape had no witness.
+    hooks.beforeSend = () => {
+      if (fake.sent.length >= 2) fake.setBehavior('transient');
+    };
+    plane.enqueue([delivery('d-partial', 3)]);
+    await adapter.tick();
+
+    expect(fake.sent.map((entry) => entry.text)).toEqual([
+      'segment 0',
+      'segment 1',
+    ]);
+    // The delivered prefix keeps its own per-ordinal receipt; the failure
+    // settles the delivery unknown with no ordinal, so the tail stays
+    // re-drivable instead of the whole reply being recorded as never sent.
+    expect(
+      plane.receipts.map(
+        (entry) =>
+          [
+            (entry.receipt as { ordinal?: number }).ordinal,
+            (entry.receipt as { outcome: string }).outcome,
+          ] as const,
+      ),
+    ).toEqual([
+      [0, 'accepted'],
+      [undefined, 'unknown'],
+    ]);
+    await adapter.disconnect();
+  });
+
   it('caps the persisted outbound ledger at the shared limit (R1-3)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     // Receipt answers are lost so every sent segment stays in the ledger.
@@ -943,20 +988,27 @@ describe('managed DingTalk adapter outbox', () => {
 
   it('uses the newest webhook learned from a later inbound message', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
+    const hook = (session: string): string =>
+      `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
+    // An older webhook must already be cached for the same conversation, or a
+    // first-wins cache would pass this case too: one frame into an empty map
+    // cannot tell newest-wins from first-wins.
+    fake.push(
+      'msg-4',
+      messageData({ msgId: 'msg-4', sessionWebhook: hook('old') }),
+    );
+    await adapter.tick();
+    expect(
+      JSON.parse(readFileSync(adapter.stateFile, 'utf8')).webhooks['conv-1'],
+    ).toBe(hook('old'));
     fake.push(
       'msg-5',
-      messageData({
-        msgId: 'msg-5',
-        sessionWebhook:
-          'https://oapi.dingtalk.com/robot/sendBySession?session=new',
-      }),
+      messageData({ msgId: 'msg-5', sessionWebhook: hook('new') }),
     );
     await adapter.tick();
     plane.enqueue([delivery('d-5', 1)]);
     await adapter.tick();
-    expect(fake.sent[0]!.webhook).toBe(
-      'https://oapi.dingtalk.com/robot/sendBySession?session=new',
-    );
+    expect(fake.sent[0]!.webhook).toBe(hook('new'));
     await adapter.disconnect();
   });
 
@@ -1203,10 +1255,15 @@ describe('managed DingTalk adapter outbox', () => {
 describe('managed DingTalk adapter review fixes', () => {
   it('drops a group frame under the private-chat policy (R1-7)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    fake.push(
-      'msg-group',
-      messageData({ msgId: 'msg-group', conversationType: '2' }),
-    );
+    // The drop is a policy decision after acceptance, so the frame must still
+    // be acked: an unacked frame would be redelivered forever and would also
+    // satisfy a bare "nothing was submitted" assertion.
+    expect(
+      fake.push(
+        'msg-group',
+        messageData({ msgId: 'msg-group', conversationType: '2' }),
+      ),
+    ).toBe(true);
     await adapter.tick();
     expect(plane.submit).toHaveLength(0);
     await adapter.disconnect();
