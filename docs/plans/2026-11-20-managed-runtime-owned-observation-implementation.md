@@ -103,6 +103,15 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 `-Dspotbugs.skip=true` is needed for this focused lane only: the full `verify` lifecycle trips a **pre-existing** SpotBugs `NP_NULL_ON_SOME_PATH` finding in `ToolPublicationAdmissionStore.acknowledgementReceiptCatalog`, a file this PR does not touch (last changed by the merged #17907). The gate still runs in CI.
 
+### Real MySQL 8.4 — fault matrix (LANDED)
+
+The Java halves of the remaining fault cases were witnessed on a fresh disposable 8.4.11 instance (port 3307, own socket/datadir, shut down and deleted after the run), same focused recipe as above, in two batches — **158 failsafe assertions, 0 failures**:
+
+- **Batch 1 (115):** `RuntimeHarnessDrainMySqlIT` 69 (re-attach-then-drain), `WakeRecoveryMySqlIT` 30 (staged wake arm + seal/`recordPending` hint guards), `ManagedRuntimeRetentionGuardMySqlIT` 12 (retention refuses with live background work), `RuntimeStageMySqlIT` 4 (staging transaction, detach→seal fence, watermark/hard-cap/terminal slot, retirement). `WakeSealStampTest` 12 on H2 rode the surefire leg.
+- **Batch 2 (43):** `HostedCleanupRetentionMySqlIT` 19 (cleanup-debt retention with a background-held head), `WorkspaceRecoveryMySqlIT` 12 (recovery `ready` arm), `JdbcRuntimeBrokerMySqlIT` 9 (broker persistence / single-puller claim), `ManagedSchemaMySqlIT` 3 (schema additions).
+
+This covers the MySQL half of the fault matrix; the daemon-level witness (the full eligibility → detach → staged-wake → drain cycle through a real daemon, worker and Broker) remains below.
+
 ### §7 measurement — worker/applier half (LANDED)
 
 `scripts/measure-background-observation.mjs` (run after `npm run build`; ~8 min, dominated by the 10,000-observation drain) prints a JSON report per measurement. Capture lanes run over an in-memory resource store to isolate capture overhead from store I/O; the drain commits through a real on-disk session authority. Local numbers (Apple Silicon, node 24, loopback):
@@ -117,7 +126,7 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 ### Remaining fault cases
 
-- **Re-attach/drain with an in-flight pull, first observation while suspended, detach→seal window, monitor policy stops while suspended, bounds/watermark wake, suspension eligibility matrix, worker loss, fencing across Broker restart/replica, deleting a suspended Session** — the Java halves are covered on H2 by `RuntimeStageStoreTest`, `RuntimeObservationPullerTest`, `WakeSealStampTest`, `SessionRecoveryServiceTest`, `HostedCleanupDebtStoreTest` and `RuntimeBrokerServiceTest`; each still needs its MySQL 8.4 run plus the daemon-level E2E.
+- **Re-attach/drain with an in-flight pull, first observation while suspended, detach→seal window, monitor policy stops while suspended, bounds/watermark wake, suspension eligibility matrix, worker loss, fencing across Broker restart/replica, deleting a suspended Session** — the Java halves are covered on H2 by `RuntimeStageStoreTest`, `RuntimeObservationPullerTest`, `WakeSealStampTest`, `SessionRecoveryServiceTest`, `HostedCleanupDebtStoreTest` and `RuntimeBrokerServiceTest`, and witnessed on real MySQL 8.4 above; each still needs the daemon-level E2E.
 - **Daemon-level suspension E2E** — the eligibility → detach → staged-wake → drain cycle through a real daemon, worker and Broker (the Slice 3 production-enablement gate).
 - **§7 measurement — Broker/daemon half** — pull cost/latency (long-poll connections per Broker, CPU per idle pull, observation→wake→turn-start and exit→settlement timing), staging rows/bytes under loud output while suspended, and the drain burst of silent loads; these set the pull wait (`pullWaitMs`, currently 2,000), the staged-bytes watermark (4 MiB) and the hard cap (16 MiB) (§11 open question 1). The worker/applier half is landed above.
 

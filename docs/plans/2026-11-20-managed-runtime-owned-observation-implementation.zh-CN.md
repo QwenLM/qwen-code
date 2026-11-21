@@ -103,6 +103,15 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 仅该聚焦车道需要 `-Dspotbugs.skip=true`：完整 `verify` 生命周期会撞上 `ToolPublicationAdmissionStore.acknowledgementReceiptCatalog` 里**既有**的 SpotBugs `NP_NULL_ON_SOME_PATH`，该文件本 PR 未触碰（最后改动来自已合并的 #17907）。该门在 CI 仍会跑。
 
+### 真实 MySQL 8.4 — 故障矩阵（已落地）
+
+剩余故障用例的 Java 半已在一次性 8.4.11 实例上见证（3307 端口、独立 socket/datadir，跑完 shutdown 并删除），配方同上，分两批——**158 条 failsafe 断言，0 失败**：
+
+- **批 1（115）：** `RuntimeHarnessDrainMySqlIT` 69（re-attach-then-drain）、`WakeRecoveryMySqlIT` 30（暂存 wake 臂 + seal/`recordPending` 提示守卫）、`ManagedRuntimeRetentionGuardMySqlIT` 12（活跃后台工作下 retention 拒绝）、`RuntimeStageMySqlIT` 4（staging 事务、detach→seal 围栏、水位/硬上限/terminal 槽、退役）。`WakeSealStampTest` 12 在 H2 上随 surefire 腿跑。
+- **批 2（43）：** `HostedCleanupRetentionMySqlIT` 19（background-held head 的 cleanup-debt retention）、`WorkspaceRecoveryMySqlIT` 12（恢复 `ready` 臂）、`JdbcRuntimeBrokerMySqlIT` 9（broker 持久化/单拉取者 claim）、`ManagedSchemaMySqlIT` 3（schema 新增）。
+
+这覆盖了故障矩阵的 MySQL 半；daemon 级见证（经真实 daemon、worker、Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 全循环）仍见下方。
+
 ### §7 度量 — worker/applier 半（已落地）
 
 `scripts/measure-background-observation.mjs`（`npm run build` 后运行；约 8 分钟，主要是 10,000 条观测的 drain）逐项打印 JSON 报告。采集 lane 跑在内存资源 store 上以把采集开销与 store I/O 隔离；drain 经真实落盘 session authority 提交。本机数值（Apple Silicon、node 24、loopback）：
@@ -117,7 +126,7 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 
 ### 剩余故障用例
 
-- **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖；各自仍需 MySQL 8.4 运行与 daemon 级 E2E。
+- **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖，并已在真实 MySQL 8.4 上见证（见上）；各自仍需 daemon 级 E2E。
 - **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。
 - **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
 
