@@ -106,11 +106,11 @@ export interface ApiUserPromptOptions {
    * parts are all per-turn `<system-reminder>`s or `<task-notification>`
    * envelopes, with at least one envelope (#9608).
    *
-   * ACP rewind sets this: the daemon's notification drain sends
-   * `[...systemReminders, ...notificationParts]` as one user entry that never
-   * produced a client-visible turn or a per-prompt file-history snapshot, so
-   * counting it inflates the rewindable count and shifts every cut point
-   * after it.
+   * An ordinal rewind surface may opt into this when its notification drain
+   * sends `[...systemReminders, ...notificationParts]` as one user entry that
+   * never produced a client-visible turn or a per-prompt file-history
+   * snapshot, so counting it would inflate the rewindable count and shift
+   * every cut point after it.
    *
    * The TUI must NOT set it: there, queued notifications ride into history
    * inside the next genuine user message's parts, and such a mixed entry

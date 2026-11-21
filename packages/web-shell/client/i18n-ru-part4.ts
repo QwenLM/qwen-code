@@ -178,6 +178,7 @@ export const RU_PART4: Record<
   'background.running': 'Выполняются фоновые задачи',
   'background.task': 'Фоновая задача',
   'background.peer': 'Сообщение из другой сессии',
+  'background.teammate': 'Отчёт участника команды',
   'background.details': 'Подробности',
   'background.processing': (v) => `Обработка результатов: ${v?.label ?? ''}`,
   'background.source': 'Источник',

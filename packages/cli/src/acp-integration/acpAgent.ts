@@ -335,7 +335,11 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, registerCreateSubSessionTool } from './session/Session.js';
+import {
+  Session,
+  registerCreateSubSessionTool,
+  SESSION_DISPOSE_ABORT_REASON,
+} from './session/Session.js';
 import { acpModRowSites } from './session/acp-mod-session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { applyRestoredSessionApprovalMode } from './session-approval-mode-persistence.js';
@@ -4269,6 +4273,14 @@ class QwenAgent implements Agent {
     this.workspaceGenerationControllers.clear();
 
     const configs = new Set<Config>([this.config, ...this.initializingConfigs]);
+    // Landing a peer report must wait for the cancel to settle: cancelling a
+    // delivery turn re-queues its report when the turn unwinds, and that is not
+    // a microtask — the turn can be parked on an admission round trip, so
+    // flushing right after `cancelPendingPrompt()` resolves would iterate a
+    // queue that does not hold it yet, and the re-queued report would only be
+    // unshifted back after the flush sealed it and the writer close below made
+    // its landing a silent no-op.
+    const peerFlushes: Array<Promise<void>> = [];
     for (const session of this.sessions.values()) {
       try {
         session.beginCloseIfAvailable();
@@ -4280,13 +4292,53 @@ class QwenAgent implements Agent {
         );
       }
       session.cancelMcpAppCalls();
-      void session.cancelPendingPrompt().catch((error) => {
-        debugLogger.debug(
-          `Session ${session.getId()} cancel during managed shutdown failed: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+      peerFlushes.push(
+        session
+          .cancelPendingPrompt(SESSION_DISPOSE_ABORT_REASON)
+          .catch((error) => {
+            debugLogger.debug(
+              `Session ${session.getId()} cancel during managed shutdown failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          })
+          .then(async () => {
+            // `cancelPendingPrompt()` aborts the controller; it does not await
+            // the cancelled delivery turn, which re-queues its report as it
+            // unwinds. Bound the settle wait the same way the stored-session
+            // close path does, and run the flush even when it throws or times
+            // out: a bound that swallowed the flush would lose the very report
+            // the cancel preserved.
+            try {
+              await waitForSessionDrain(
+                session.waitForActiveTurnsToSettle(),
+                SESSION_DRAIN_TIMEOUT_MS,
+                'close',
+              );
+            } catch (error) {
+              debugLogger.debug(
+                `Session ${session.getId()} turn settle during managed shutdown failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+            try {
+              // Queued teammate reports are already marked read in the on-disk
+              // mailbox, so land them here: the writer-close loop below runs
+              // before `dispose()`, and `appendRecord` is a silent no-op once
+              // it has closed. Awaited, because the flush now stops the
+              // leader-inbox poll and drains it first — sealing before that
+              // intake settles is what lost the report.
+              await session.flushPendingPeerNotifications?.();
+            } catch (error) {
+              debugLogger.debug(
+                `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          }),
+      );
       configs.add(session.getConfig());
     }
     for (const pending of this.pendingConfigCleanup.values()) {
@@ -4294,32 +4346,35 @@ class QwenAgent implements Agent {
     }
 
     const configList = [...configs];
-    const writerTerminals: Array<Promise<void>> = [];
-    for (const config of configList) {
-      // A Managed session's Runtime worker stops before its log is handed
-      // off, so no call outlives the log; other writers close at once.
-      if (config.getSessionExecutionEngine?.() === 'managed') {
-        writerTerminals.push(
-          Promise.resolve()
-            .then(() => config.closeManagedRuntime())
-            .catch((error: unknown) => {
-              debugLogger.error(
-                '[ACP] Managed Runtime worker shutdown error:',
-                error,
-              );
-            })
-            .then(() => config.closeSessionWriter({ handoff: true })),
-        );
-        continue;
-      }
-      try {
-        writerTerminals.push(config.closeSessionWriter({ handoff: true }));
-      } catch (error) {
-        writerTerminals.push(Promise.reject(error));
-      }
-    }
-    const writerShutdown = Promise.allSettled(writerTerminals).then(
-      (results) => {
+    const writerShutdown = Promise.allSettled(peerFlushes)
+      .then(() => {
+        const writerTerminals: Array<Promise<void>> = [];
+        for (const config of configList) {
+          // A Managed session's Runtime worker stops before its log is handed
+          // off, so no call outlives the log; other writers close at once.
+          if (config.getSessionExecutionEngine?.() === 'managed') {
+            writerTerminals.push(
+              Promise.resolve()
+                .then(() => config.closeManagedRuntime())
+                .catch((error: unknown) => {
+                  debugLogger.error(
+                    '[ACP] Managed Runtime worker shutdown error:',
+                    error,
+                  );
+                })
+                .then(() => config.closeSessionWriter({ handoff: true })),
+            );
+            continue;
+          }
+          try {
+            writerTerminals.push(config.closeSessionWriter({ handoff: true }));
+          } catch (error) {
+            writerTerminals.push(Promise.reject(error));
+          }
+        }
+        return Promise.allSettled(writerTerminals);
+      })
+      .then((results) => {
         const failures = results.flatMap((result) =>
           result.status === 'rejected' ? [result.reason] : [],
         );
@@ -4329,8 +4384,7 @@ class QwenAgent implements Agent {
             'Managed session writer shutdown failed',
           );
         }
-      },
-    );
+      });
     return { configs: configList, writerShutdown };
   }
 
@@ -5109,7 +5163,7 @@ class QwenAgent implements Agent {
         (async () => {
           try {
             session.cancelMcpAppCalls();
-            await session.cancelPendingPrompt();
+            await session.cancelPendingPrompt(SESSION_DISPOSE_ABORT_REASON);
           } catch (err) {
             debugLogger.debug(
               `Session ${sessionId} cancel during close failed: ${
@@ -5194,6 +5248,18 @@ class QwenAgent implements Agent {
           // Session multi-agent records deferred behind the turn that just
           // settled land now, while the recorder still accepts writes.
           await session.flushDeferredExternalRecords?.();
+          try {
+            await session.flushPendingPeerNotifications?.();
+          } catch (error) {
+            // A failed peer flush must not abort the close: the recorder
+            // finalization and close below are what release the writer lock.
+            // The quiesce path already logs its own errors.
+            debugLogger.debug(
+              `Session ${sessionId} peer notification flush before close failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
           recorder?.finalize();
           let flushError: unknown;
           try {

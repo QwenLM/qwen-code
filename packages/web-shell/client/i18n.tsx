@@ -2912,6 +2912,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'background.running': 'Background tasks running',
   'background.task': 'Background task',
   'background.peer': 'Cross-session message',
+  'background.teammate': 'Teammate report',
   'background.details': 'View details',
   'background.processing': (v) => `Processing ${v?.label ?? ''} results`,
   'background.source': 'Source',

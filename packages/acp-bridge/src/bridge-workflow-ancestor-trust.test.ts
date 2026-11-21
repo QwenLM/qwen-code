@@ -68,6 +68,7 @@ describe('workflow ancestor trust bridge dispatch', () => {
         cancelForPrompt: () => undefined,
         cancelWorkflowApproval: () => undefined,
         policy: 'first-responder',
+        vote: vi.fn(),
       },
       0,
       Infinity,

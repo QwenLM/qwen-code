@@ -73,6 +73,13 @@ export interface TeammateExitedEvent {
   name: string;
   status: AgentStatus;
   timestamp: number;
+  /**
+   * Set when this exit is part of a team teardown, where one `cleanup()`
+   * publishes an exit for every surviving teammate in a row. Consumers that
+   * turn an exit into a model turn must coalesce the burst; consumers that
+   * reconstruct membership still see one event per teammate.
+   */
+  teardown?: boolean;
 }
 
 export interface MessageSentEvent {

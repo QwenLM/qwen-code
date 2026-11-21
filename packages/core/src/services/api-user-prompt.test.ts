@@ -128,9 +128,9 @@ describe('isApiUserPrompt', () => {
     });
   });
 
-  describe('excludeTaskNotifications (the ACP binding, #9608)', () => {
+  describe('excludeTaskNotifications (the ACP binding)', () => {
     const NOTIFICATION =
-      '<task-notification>\n<task-id>agent-1</task-id>\n<status>completed</status>\n</task-notification>';
+      '<task-notification>\nbackground result\n</task-notification>';
     const envelopeEntry = (): Content => user(NOTIFICATION);
     const deliveredEntry = (): Content => ({
       // A delivered ACP notification turn: per-turn reminders ride in the

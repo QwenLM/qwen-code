@@ -2806,6 +2806,7 @@ export const ZH: Messages = {
   'background.running': '后台任务执行中',
   'background.task': '后台任务',
   'background.peer': '跨会话消息',
+  'background.teammate': '队友报告',
   'background.details': '查看详情',
   'background.processing': (v) => `正在处理 ${v?.label ?? ''} 结果`,
   'background.source': '来源',

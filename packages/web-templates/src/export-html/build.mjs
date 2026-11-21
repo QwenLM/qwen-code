@@ -186,6 +186,16 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
+//
+// The Agent Team peer reports and session approvals (#15658: the teammate chip
+// on background notifications and task rows, its `background.teammate` label
+// across two locales, and the identity map the adapter builds so the
+// turn-started marker is not anonymous) measured 2,148,411 JS bytes in CI on
+// the same lane whose stacked sibling head measured 2,148,174 — a +237 delta
+// for this PR's own copy. Applied to that 2,149,864-byte CI measurement, this
+// tree projects 2,150,101 (476 below the warning) and 2,151,384 locally (193
+// below the ceiling). Third-party inputs and the forbidden-input guard are
+// unchanged and the CSS asset is separate.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
 
 // Modules that must not be reachable from the document entry, checked against

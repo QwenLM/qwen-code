@@ -46,6 +46,8 @@ interface SystemMessageProps {
   variant: 'info' | 'error' | 'warning';
   source?: string;
   data?: unknown;
+  /** Teammate (Agent Team peer) author, rendered as an `@name` chip. */
+  teammate?: { name: string };
   images?: Array<{ data: string; mimeType: string }>;
   files?: Array<{
     name: string;
@@ -162,6 +164,7 @@ export const SystemMessage = memo(function SystemMessage({
   variant,
   source,
   data,
+  teammate,
   images,
   files,
   onShowContextDetail,
@@ -262,10 +265,17 @@ export const SystemMessage = memo(function SystemMessage({
         >
           <MarkerIcon aria-hidden="true" />
         </span>
+        {teammate && (
+          <span className={styles.teammateChip} title={teammate.name}>
+            @{teammate.name}
+          </span>
+        )}
         <span className="shrink-0 text-muted-foreground">
           {t(
             turn?.kind === 'peer' || backgroundTask?.fromSession
-              ? 'background.peer'
+              ? teammate
+                ? 'background.teammate'
+                : 'background.peer'
               : turn?.kind === 'agent'
                 ? 'background.agent'
                 : 'background.task',
@@ -440,13 +450,15 @@ export const SystemMessage = memo(function SystemMessage({
   };
   const taskStatus = stringField('status');
   const taskNotificationLabel =
-    taskStatus === 'completed'
-      ? t('system.taskCompleted')
-      : taskStatus === 'failed'
-        ? t('system.taskFailed')
-        : taskStatus === 'cancelled'
-          ? t('system.taskCancelled')
-          : t('system.taskNotification');
+    teammate && stringField('kind') === 'peer'
+      ? t('background.teammate')
+      : taskStatus === 'completed'
+        ? t('system.taskCompleted')
+        : taskStatus === 'failed'
+          ? t('system.taskFailed')
+          : taskStatus === 'cancelled'
+            ? t('system.taskCancelled')
+            : t('system.taskNotification');
   const taskNotificationTone =
     taskStatus === 'completed'
       ? 'success'
@@ -527,6 +539,11 @@ export const SystemMessage = memo(function SystemMessage({
         >
           <TaskNotificationIcon aria-hidden="true" />
         </span>
+        {teammate && (
+          <span className={styles.teammateChip} title={teammate.name}>
+            @{teammate.name}
+          </span>
+        )}
         <div
           className={`min-w-0 flex-1${taskI18nText ? ' truncate' : ''}`}
           title={taskI18nText}
