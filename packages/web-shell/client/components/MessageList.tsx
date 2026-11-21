@@ -777,7 +777,104 @@ function findFinalAnswerIndex(
   return -1;
 }
 
-function collectFinalAssistantTurnIds(
+/**
+ * Rows the collapsed turn keeps as its answer.
+ *
+ * A background task can start inside a turn that is still active; its result
+ * marker (`background_notification_turn_started`) is injected into the turn and
+ * the model's reply to it lands right after the marker. That reply
+ * acknowledges the background result rather than answering the turn, so taking
+ * it as the final answer folds the real deliverable into the collapsed steps
+ * (#13998). When no execution work separates the reply from the marker, prefer
+ * the answer above the marker and keep the reply only as a fallback.
+ *
+ * This is deliberately separate from `findFinalAnswerIndex`: that one also
+ * feeds `turnAwaitsBackgroundSummary`, where a reply after a background
+ * notification is the expected summary narration and must keep the turn open
+ * while the grace window runs.
+ */
+function findFinalAnswerIndexForDisplay(
+  items: readonly DisplayItem[],
+  start: number,
+  end: number,
+  includeBackgroundNotifications = true,
+): number {
+  // A `background_notification` row stays a candidate by default: a turn whose
+  // only content is the notification (no assistant reply) must still render its
+  // result instead of nothing. The marker rule below is what keeps a real
+  // reply from being replaced by a notice.
+  const answerIdx = findFinalAnswerIndex(
+    items,
+    start,
+    end,
+    includeBackgroundNotifications,
+  );
+  if (answerIdx < 0) return answerIdx;
+  let markerIdx = -1;
+  for (let i = answerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    // Tool work between the marker and the reply means the model kept going
+    // after the background result, so the reply is a real follow-up answer.
+    // A mid-turn injected message does the same: the turn continued on its own
+    // after the answer above it.
+    if (
+      isExecutionWorkStep(item) ||
+      (item.type === 'message' &&
+        item.message.role === 'system' &&
+        isMidTurnInjectedDebugMessage(item.message))
+    )
+      return answerIdx;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      markerIdx = i;
+      break;
+    }
+  }
+  if (markerIdx < 0) return answerIdx;
+  // A second marker above this one means more than one background result
+  // landed in this turn, so there is no lone acknowledgement to fold back in:
+  // the deliverable is whichever answer precedes the FIRST notice, and only
+  // when the rows between are notices rather than a real reply. Only assistant
+  // rows count as the deliverable — a `background_notification` candidate left
+  // by the default scan would render a `<task-notification>` bubble as the
+  // turn's answer and hide the reply under it.
+  let earliestMarker = markerIdx;
+  for (let i = markerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    if (
+      item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'background_notification_turn_started'
+    ) {
+      earliestMarker = i;
+    }
+  }
+  if (earliestMarker !== markerIdx) {
+    const deliverable = findFinalAnswerIndex(
+      items,
+      start,
+      earliestMarker - 1,
+      false,
+    );
+    return deliverable >= 0 ? deliverable : answerIdx;
+  }
+  // Assistant rows only, like the multi-marker branch above and the footer map
+  // in `collectFinalAssistantTurnIds`: letting the sub-search elect a
+  // `background_notification` row would render a `<task-notification>` bubble
+  // as the answer and leave the footer with no assistant row to key on.
+  const answerAboveMarker = findFinalAnswerIndex(
+    items,
+    start,
+    markerIdx - 1,
+    false,
+  );
+  return answerAboveMarker >= 0 ? answerAboveMarker : answerIdx;
+}
+
+export function collectFinalAssistantTurnIds(
   items: readonly DisplayItem[],
   {
     isResponding,
@@ -817,7 +914,11 @@ function collectFinalAssistantTurnIds(
       continue;
     }
     const turnHead = items[start];
-    const answerIdx = findFinalAnswerIndex(items, start, end, false);
+    // Must match what `applyTurnCollapse` keeps visible, or the footer controls
+    // (copy, rating, branch, sources) land on the folded acknowledgement while
+    // the deliverable renders without them. The `false` keeps a
+    // `background_notification` row out: only assistant rows are mapped here.
+    const answerIdx = findFinalAnswerIndexForDisplay(items, start, end, false);
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
     if (
@@ -2112,7 +2213,7 @@ export function applyTurnCollapse(
       pendingApprovalCallId,
     );
 
-    const answerIdx = findFinalAnswerIndex(items, start, end);
+    const answerIdx = findFinalAnswerIndexForDisplay(items, start, end);
     const answerStartIdx = findAnswerStartIndex(items, start, answerIdx);
     const exchangeAnswers: Array<[number, number]> = [];
     const keepExchangeAnswer = (from: number, to: number) => {
