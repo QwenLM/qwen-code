@@ -200,6 +200,23 @@
   position: relative;
 }
 
+/* Floating todo chip for the pane's own session — mirrors the main view's
+   bottomPanels (absolute over the footer, centered). */
+.bottomPanels {
+  position: absolute;
+  bottom: calc(100% + var(--web-shell-bottom-panel-gap, 6px));
+  right: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.bottomPanels > * {
+  pointer-events: auto;
+}
+
 .approval {
   margin-bottom: 8px;
 }
