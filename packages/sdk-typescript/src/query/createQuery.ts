@@ -3,7 +3,6 @@
  */
 
 import type { SDKUserMessage } from '../types/protocol.js';
-import { serializeJsonLine } from '../utils/jsonLines.js';
 import { ProcessTransport } from '../transport/ProcessTransport.js';
 import { prepareSpawnInfo, type SpawnInfo } from '../utils/cliPath.js';
 import { Query } from './Query.js';
@@ -110,21 +109,15 @@ export function query({
       parent_tool_use_id: null,
     };
 
-    (async () => {
-      try {
-        await queryInstance.initialized;
-        // Skip writing if transport has already exited with an error
-        if (transport.exitError) {
-          return;
-        }
-        transport.write(serializeJsonLine(message));
-      } catch (err) {
-        // Only log error if it's not due to transport already being closed
-        if (!transport.exitError) {
-          logger.error('Error sending single-turn prompt:', err);
-        }
+    async function* singlePrompt(): AsyncGenerator<SDKUserMessage> {
+      yield message;
+    }
+    queryInstance.streamInput(singlePrompt()).catch((err) => {
+      // Only log error if it's not due to transport already being closed
+      if (!transport.exitError) {
+        logger.error('Error sending single-turn prompt:', err);
       }
-    })();
+    });
   } else {
     queryInstance
       .streamInput(prompt as AsyncIterable<SDKUserMessage>)
