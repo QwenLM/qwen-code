@@ -4319,16 +4319,6 @@ class QwenAgent implements Agent {
               );
             }
             try {
-              // `cancelPendingPrompt` only aborts the controller; the delivery
-              // loop can still be parked on an admission or a mid-turn drain
-              // with the report already spliced out of the queue. Wait for the
-              // cancelled turn to settle before deciding the queue is final,
-              // bounded the way the per-session close path bounds it.
-              await waitForSessionDrain(
-                session.waitForActiveTurnsToSettle(),
-                SESSION_DRAIN_TIMEOUT_MS,
-                'close',
-              );
               // Queued teammate reports are already marked read in the on-disk
               // mailbox, so land them here: the writer-close loop below runs
               // before `dispose()`, and `appendRecord` is a silent no-op once
@@ -4337,16 +4327,10 @@ class QwenAgent implements Agent {
               // intake settles is what lost the report.
               await session.flushPendingPeerNotifications?.();
             } catch (error) {
-              // A synchronous throw here (drain-wait timeout or a flush
-              // failure) is contained so the surrounding loop keeps
+              // A flush failure is contained so the surrounding loop keeps
               // collecting Configs; the diagnostic is the guard's observable
-              // effect. A report the delivery loop still owns stays in the
-              // queue rather than being landed against a turn that has not
-              // settled. `dispose()` runs
-              // `#landUndrainedPeerNotifications` as the last resort; if the
-              // writer has already closed that write is a no-op, which is the
-              // residual window a timeout accepts — closing it needs the
-              // delivery loop itself to report completion, not a longer wait.
+              // effect. `dispose()` runs `#landUndrainedPeerNotifications` as
+              // the last resort.
               debugLogger.debug(
                 `Session ${session.getId()} peer notification flush during managed shutdown failed: ${
                   error instanceof Error ? error.message : String(error)

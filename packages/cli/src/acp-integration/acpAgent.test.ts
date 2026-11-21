@@ -33761,6 +33761,45 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('lands peer reports when the cancelled turn never settles during managed shutdown', async () => {
+    // A cancelled turn that never settles rejects the bounded wait. The flush
+    // must still run: the report was already marked read on disk, and the
+    // writer close below turns a later landing into a no-op. A second,
+    // duplicated wait would restart the bound and send the rejection into the
+    // flush's own guard, so the flush would never run at all.
+    const innerConfig = makeRestoreInnerConfig();
+    const liveSession = {
+      getId: vi.fn().mockReturnValue('persisted-1'),
+      getConfig: vi.fn().mockReturnValue(innerConfig),
+      beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
+      cancelMcpAppCalls: vi.fn(),
+      cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+      takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
+      waitForActiveTurnsToSettle: vi
+        .fn()
+        .mockRejectedValue(new Error('turn never settles')),
+      flushPendingPeerNotifications: vi.fn().mockResolvedValue(undefined),
+      dispose: vi.fn(),
+    };
+    const { agent, agentPromise } = await spawnAgent('expected-capability');
+    // `sessions` is private and the test seeds it to stand in for a load.
+    const sessions = (agent as unknown as { sessions: Map<string, unknown> })
+      .sessions;
+    sessions.set('persisted-1', liveSession);
+
+    await agent.beginManagedShutdown().writerShutdown;
+
+    expect(liveSession.flushPendingPeerNotifications).toHaveBeenCalledOnce();
+    expect(
+      liveSession.flushPendingPeerNotifications.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(innerConfig.closeSessionWriter).mock.invocationCallOrder[0],
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('still closes the writers when a peer flush throws during managed shutdown', async () => {
     const innerConfig = makeRestoreInnerConfig();
     const liveSession = {
