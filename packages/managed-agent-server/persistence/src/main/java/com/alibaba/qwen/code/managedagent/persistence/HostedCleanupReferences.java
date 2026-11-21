@@ -71,31 +71,32 @@ final class HostedCleanupReferences {
         // lock. A locking probe of a missing owner would gap-lock the index
         // other Sessions' commits insert into (design
         // 2026-11-03-managed-journal-commit-tenant-guard).
-        var previous = references(jdbc, scope, owner, false);
+        var previous = references(jdbc, tenant, session, owner, false);
         if (!previous.isEmpty()) {
-            previous = references(jdbc, scope, owner, true);
+            previous = references(jdbc, tenant, session, owner, true);
         }
         requireSameIdentity(previous, key, binding, generation);
         if ("confirmed".equals(payload.path("state").textValue())) {
-            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
+            jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                     + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_key = ? AND owner_revision = ?"
-                    + " AND resource_key = ? AND runtime_binding_key = ?", scope, owner, generation, key, binding);
+                    + " AND resource_key = ? AND runtime_binding_key = ?", tenant, session, owner, generation, key, binding);
         } else if (previous.isEmpty()) {
             try {
-                jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision,"
+                jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision,"
                         + " resource_key, tenant_id, workspace_id, session_id, journal_revision, resource_id,"
-                        + " gmt_create, runtime_binding_key) VALUES (?, 'HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        scope, owner, generation, key, tenant, workspace, session, revision, resourceId, now, binding);
+                        + " gmt_create, runtime_binding_key) VALUES ('HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        owner, generation, key, tenant, workspace, session, revision, resourceId, now, binding);
             } catch (DuplicateKeyException race) {
-                requireSameIdentity(references(jdbc, scope, owner, true), key, binding, generation);
+                requireSameIdentity(references(jdbc, tenant, session, owner, true), key, binding, generation);
             }
         }
     }
 
-    private static List<Map<String, Object>> references(JdbcTemplate jdbc, String scope, String owner, boolean lock) {
+    private static List<Map<String, Object>> references(JdbcTemplate jdbc, String tenant, String session, String owner,
+            boolean lock) {
         return jdbc.queryForList("SELECT resource_key, runtime_binding_key, owner_revision"
-                + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'HOSTED_CLEANUP'"
-                + " AND owner_key = ?" + (lock ? " FOR UPDATE" : ""), scope, owner);
+                + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'HOSTED_CLEANUP'"
+                + " AND owner_key = ?" + (lock ? " FOR UPDATE" : ""), tenant, session, owner);
     }
 
     private static void requireSameIdentity(List<Map<String, Object>> rows, String key, String binding,

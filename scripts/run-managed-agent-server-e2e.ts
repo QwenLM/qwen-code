@@ -879,7 +879,7 @@ function readCommandRewriteDomainRecords(
 ): Array<Record<string, unknown>> {
   const rows = runMysql(
     mysqlPort,
-    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.session_scope_key=sr.session_scope_key AND r.resource_id=sr.record_resource_id WHERE sr.session_scope_key=(SELECT session_scope_key FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
+    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.tenant_id=sr.tenant_id AND r.session_id=sr.session_id AND r.resource_id=sr.record_resource_id WHERE (sr.tenant_id, sr.session_id)=(SELECT tenant_id, session_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
   );
   return rows
     ? rows
