@@ -5434,6 +5434,10 @@ export const RESTART_RECOVERY_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
   key.startsWith('restartRecovery.'),
 );
 
+export const CHAT_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('chat.'),
+);
+
 const catalogs = new Map(eagerCatalogs);
 catalogs.set('en', EN);
 const pendingCatalogs = new Map<WebShellLanguage, Promise<void>>();

@@ -449,6 +449,13 @@ describe('ChatSurface', () => {
       banner?.querySelector('button')?.click();
     });
     expect(captured.editor?.submitDisabled).toBe(false);
+    // The ref half of the lock must clear too: a following submit must reach the
+    // controller. submitDisabled alone is state-driven and would stay green with
+    // the ref-clear line deleted.
+    await act(async () => {
+      onSubmit('hello', undefined, undefined, vi.fn(), undefined);
+    });
+    expect(controller.submit).toHaveBeenCalledTimes(2);
   });
 
   it('reports a rejected submit admission and keeps the draft', async () => {
