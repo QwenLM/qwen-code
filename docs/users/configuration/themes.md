@@ -31,6 +31,8 @@ Qwen Code comes with a selection of pre-defined themes, which you can list using
 3.  Using the arrow keys, select a theme. Some interfaces might offer a live preview or highlight as you select.
 4.  Confirm your selection to apply the theme.
 
+To skip the picker, pass the theme name: `/theme ANSI Light` or `/theme auto`. The name is not case-sensitive, and an unknown name lists the available themes instead of saving anything.
+
 **Note:** If a theme is defined in your `settings.json` file (either by name or by a file path), you must remove the `"ui.theme"` setting from the file before you can change the theme using the `/theme` command.
 
 ### Theme Persistence

@@ -152,7 +152,8 @@ import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
-import { C } from './theme.js';
+import { C, applyOpenTuiTheme } from './theme.js';
+import { getActiveOpenTuiTheme } from './theme-parity.js';
 import {
   ExtensionSettingInput,
   ExtensionPluginChoice,
@@ -993,6 +994,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           else notify('Session state was not re-keyed for the new session.');
         },
         getSessionStats,
+        applyActiveTheme: () => applyOpenTuiTheme(getActiveOpenTuiTheme()),
       }),
     [
       config,

@@ -117,6 +117,11 @@ export interface CommandContext {
     loadHistory: (history: HistoryItem[], mode?: 'expand') => void;
     /** Refreshes the static history display in Ink. */
     refreshStatic: () => void;
+    /**
+     * Called after a command changes the active theme. Ink reads the theme
+     * on every render; renderers that cache colors re-derive them here.
+     */
+    onThemeChanged?: () => void;
     toggleVimEnabled: () => Promise<boolean>;
     setMemoryFileCount: (count: number) => void;
     reloadCommands: () => void | Promise<void>;
