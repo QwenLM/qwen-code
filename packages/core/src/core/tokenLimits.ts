@@ -163,7 +163,7 @@ export function normalize(model: string): string {
   // model name. `modelId.ts` documents the same collision from the other side
   // ("Model IDs can legitimately contain colons").
   s = s.replace(
-    /:(?:free|beta|extended|thinking|online|nitro|floor|exacto|latest|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
+    /:(?:free|beta|extended|thinking|online|nitro|floor|exacto|latest|scout|maverick|\d+(?:\.\d+)?(?:x\d+)?b(?:-[\w.]+)*)$/,
     '',
   );
 

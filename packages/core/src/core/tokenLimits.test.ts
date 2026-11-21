@@ -67,6 +67,8 @@ describe('normalize', () => {
     expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
     expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
     expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
+    expect(normalize('llama4:scout')).toBe('llama4');
+    expect(normalize('llama4:maverick')).toBe('llama4');
   });
 
   it('should collapse whitespace to a single hyphen', () => {
