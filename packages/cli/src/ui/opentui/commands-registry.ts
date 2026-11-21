@@ -44,7 +44,7 @@ export type OpenTuiDialogRequest =
   | { dialog: 'trust' }
   | { dialog: 'permissions' }
   | { dialog: 'approval-mode' }
-  | { dialog: 'effort' }
+  | { dialog: 'effort'; openedFromFooter?: boolean }
   | { dialog: 'output-style' }
   | { dialog: 'delete' }
   | { dialog: 'resume'; matchedSessions?: SessionListItem[] }

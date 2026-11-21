@@ -9,7 +9,11 @@ import { exec, type ChildProcess } from 'child_process';
 import wrapAnsi from 'wrap-ansi';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
-import { getReasoningForDisplay } from '../../acp-integration/model-configuration.js';
+import {
+  getReasoningEffortsForConfig,
+  getReasoningForDisplay,
+} from '../../acp-integration/model-configuration.js';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { SessionMetrics } from '../contexts/SessionContext.js';
@@ -18,6 +22,7 @@ import {
   buildStatusLinePresetData,
   buildStatusLinePresetLines,
   DEFAULT_STATUS_LINE_PRESET_CONFIG,
+  formatModelWithReasoning,
   normalizeStatusLinePresetConfig,
   type StatusLinePresetConfig,
   type StatusLinePresetItemId,
@@ -266,6 +271,7 @@ export function useStatusLineState(
   hideContextIndicator: boolean;
   /** Command output is opaque and may refresh on a timer, unlike a preset. */
   commandSourced?: boolean;
+  reasoningSegment?: { text: string; effort: ReasoningEffort };
 } {
   const settingsStatusLineConfig = getStatusLineConfig(settings);
   const statusLineConfigOverride = uiState.statusLineConfigOverride;
@@ -337,6 +343,31 @@ export function useStatusLineState(
     generationConfig && getReasoningForDisplay(config, generationConfig);
   const reasoningEffortKey =
     reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
+  // The tier run inside the preset's model-with-reasoning item. The OpenTUI
+  // footer uses it to make only that substring clickable; a command status
+  // line has no such item, so it never yields a target.
+  const reasoningEfforts = statusLinePreset?.items.includes(
+    'model-with-reasoning',
+  )
+    ? getReasoningEffortsForConfig(config)
+    : [];
+  const reasoningSegment =
+    reasoningConfig &&
+    reasoningConfig.effort &&
+    // The displayed tier must be one the picker can preselect. A toggle-only
+    // model (empty ladder) or a stale tier outside a narrower ladder stays
+    // inert instead of opening a picker that would persist row 0.
+    reasoningEfforts.includes(reasoningConfig.effort)
+      ? {
+          text: formatModelWithReasoning(
+            currentModel
+              ? config.getModelsConfig().getModelDisplayName(currentModel)
+              : config.getModelDisplayName(),
+            reasoningConfig,
+          ),
+          effort: reasoningConfig.effort,
+        }
+      : undefined;
   const prevStateRef = useRef<{
     sessionId: string;
     promptTokenCount: number;
@@ -800,6 +831,7 @@ export function useStatusLineState(
   return {
     lines: output,
     commandSourced: statusLineConfig?.type === 'command',
+    reasoningSegment,
     useThemeColors: statusLinePreset?.useThemeColors === true,
     respectUserColors:
       statusLineConfig?.type === 'command' &&

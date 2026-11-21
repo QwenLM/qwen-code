@@ -22,13 +22,8 @@ import {
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { OutputStyleDefinition } from '@qwen-code/qwen-code-core/core/output-styles.js';
-import {
-  applyReasoningEffort,
-  REASONING_EFFORT_TIERS,
-} from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-effort.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
   getScopeItems,
   getScopeMessageForSetting,
@@ -38,6 +33,7 @@ import {
   loadSessionOutputStyles,
 } from '../commands/output-style-utils.js';
 import { formatEffortChangeMessage } from '../commands/effort-utils.js';
+import { useEffortCommand } from '../hooks/use-effort-command.js';
 import { EFFORT_DESCRIPTIONS } from '../components/EffortDialog.js';
 import {
   formatApprovalModeDescription,
@@ -601,20 +597,21 @@ export function OpenTuiApprovalModeDialog(props: {
 }
 
 export function OpenTuiEffortDialog(props: {
-  config?: Config;
+  config: Config;
   settings: LoadedSettings;
   onClose: () => void;
   notify?: (text: string, level?: 'info' | 'error') => void;
+  /** Footer entry: preselect the tier the footer currently displays. */
+  initialEffort?: ReasoningEffort;
   /** The popup region's row budget; the tier list windows from it. */
   availableTerminalHeight?: number;
 }) {
-  const { config, settings, onClose, notify } = props;
-  const tiers = config
-    ? [...getReasoningEffortsForConfig(config)]
-    : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
+  const { config, settings, onClose, notify, initialEffort } = props;
+  const { handleEffortSelect } = useEffortCommand(settings, config);
+  const tiers = [...getReasoningEffortsForConfig(config)];
   // Pre-select the live tier only when this model exposes it; an unset or
   // out-of-range effort starts at the top (ink EffortDialog parity).
-  const currentEffort = config?.getReasoningEffort?.();
+  const currentEffort = initialEffort ?? config.getReasoningEffort?.();
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
   const items: Array<LabeledItem<ReasoningEffort>> = tiers.map((tier) => ({
     key: tier,
@@ -664,22 +661,15 @@ export function OpenTuiEffortDialog(props: {
     maxItemsToShow: tierWindow.maxItemsToShow,
     onSelect: (effort) => {
       try {
-        // Apply at runtime (next turn) and persist for future sessions;
-        // provider adapters clamp the tier per model (ink useEffortCommand
-        // parity — the request pipeline reads the live config per request).
-        if (config) {
-          applyReasoningEffort(config, effort);
-        }
-        settings.setValue(
-          getPersistScopeForModelSelection(settings),
-          'model.reasoningEffort',
-          effort,
+        // Reuse the ink /effort path: apply at runtime, persist to the same
+        // scope, and leave static provider/global knobs untouched.
+        handleEffortSelect(effort);
+        notify?.(formatEffortChangeMessage(config, effort), 'info');
+      } catch (error) {
+        notify?.(
+          error instanceof Error ? error.message : String(error),
+          'error',
         );
-        // Read back after the apply: the message names what the provider
-        // actually clamped the tier to, not what the row asked for.
-        if (config) notify?.(formatEffortChangeMessage(config, effort));
-      } catch {
-        /* ignore */
       }
       onClose();
     },
