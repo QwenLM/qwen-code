@@ -62,9 +62,24 @@
 
 **切片 3 投产前仍剩：** 真实 worker 上的端到端挂起 E2E（经 daemon 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环），与 MySQL 8.4 故障矩阵一并属切片 4 验收。
 
-## 切片 4 — 验收与度量（未动）
+## 切片 4 — 验收与度量（进行中）
 
-设计 §7、§10。真实进程 + MySQL 8.4 故障矩阵（仅 H2 不算验收）：采集等价、Harness 重启、幂等投递、带在途 pull 的 re-attach/drain、挂起期间首条观测（transport 关、空 journal）、detach→seal 窗口、挂起期间 monitor 策略 stop、安静退出在一个 pull 间隔 + 一次 silent load 内结算、背压下强制 stop、边界/watermark wake、挂起资格矩阵、reclamation 拒绝、挂起期间 worker 丢失、跨 Broker 重启/副本的围栏、删除挂起 Session。度量确定 pull wait、staged-bytes watermark、hard cap、outbox 预算（设计 §11 开放问题）。
+设计 §7、§10。仅 H2 不算验收：staging、结算、wake 与故障用例还必须在 MySQL 8.4 + 真实 Harness/worker 上通过。
+
+### 已落地
+
+- **真实进程静默退出**（`packages/cli/src/serve/managed-background-delivery.process.test.ts`）：真实 `bash` 子进程在 publisher 已摘除时静默退出；worker 保留 terminal 条目，新 applier 以更新的 writer generation 重挂，记录带退出证据结算，并经分页闭包重构出**空**但有效的 manifest 链。这是 §10「Quiet exit」在真实管道（而非合成 sink 写入）上的用例。
+
+### 环境阻塞（需决策）
+
+本机未 provision 真实 MySQL 8.4：Homebrew `mysql` 为 26.7.0 且其 `mysqld` 加载失败（缺 `libprotobuf-lite.36.1.0.dylib`），`mysql@8.4` 未安装，且无 Docker。`*MySqlIT` 套件读 `mysql.url` / `mysql.user` / `mysql.password` 系统属性，并经 `IsolatedManagedSchemaMySqlTestDatabase` 建一次性库，因此需要一个可达的 8.4 实例（本机安装、远端主机或 CI）。
+
+### 剩余故障用例与各自缺口
+
+- **流中 Harness 重启** — 真实进程装置让连续输出跨过 256 KiB 段边界，再摘除并关闭首个 applier。实测：worker 始终未记到确认（`lastApplied` 保持 0），因为推送批次被整批拒绝、run 回退 held。下一步：先取到多 revision 批次被 publisher 拒绝的原因（run 会吞掉它），再断言逐字节精确。注意 partial flush 是**空闲** flush（`PARTIAL_FLUSH_MS` 每次写入都重置），因此低于一个段的稳定细流不会发布 revision——装置必须跨过段边界或制造停顿。
+- **背压下强制停止** — 需要一个在停止前不可能跑完的生产者（无界循环），否则进程会在 8 MiB run outbox 预算生效前就退出。`entryBytes` 计入整个 entry JSON（含携带的 `bytesBase64`），所以预算确实约束携带字节；错的是装置而非产品。
+- **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖；各自仍需 MySQL 8.4 运行与 daemon 级 E2E。
+- **§7 度量** — pull 成本/延迟、活跃输出下的 staging 行数与字节、1/100/10,000 条观测的 drain 成本、常驻等价性；这些确定 pull 等待、staged-bytes 水位线、硬上限与 outbox 预算（§11 开放问题 1 与 3）。
 
 ## 验证命令
 

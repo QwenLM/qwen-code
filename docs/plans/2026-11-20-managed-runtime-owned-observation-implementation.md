@@ -62,9 +62,24 @@ Verification: Java `WakeSealStampTest` 12/12, `SessionRecoveryServiceTest` 67/67
 
 **Remaining for Slice 3 production enablement:** an end-to-end suspension E2E on a real worker (the eligibility → detach → staged-wake → drain cycle through the daemon), which belongs to Slice 4 acceptance together with the MySQL 8.4 fault matrix.
 
-## Slice 4 — acceptance & measurement (untouched)
+## Slice 4 — acceptance & measurement (in progress)
 
-Design §7, §10. Real-process + MySQL 8.4 fault matrix (H2 alone is not acceptance): capture equivalence, Harness restart, idempotent delivery, re-attach/drain with in-flight pull, first observation while suspended (transport off, empty journal), detach→seal window, monitor policy stops while suspended, quiet exit settlement within one pull interval + one silent load, forced stop under backpressure, bounds/watermark wake, suspension eligibility matrix, reclamation refusal, worker loss while suspended, fencing across Broker restart/replica, deleting a suspended Session. Measurement sets the pull wait, staged-bytes watermark, hard cap, and outbox budgets (design §11 open questions).
+Design §7, §10. H2 alone is not acceptance: the staging, settlement, wake and fault cases must also pass on MySQL 8.4 with a real Harness and worker.
+
+### Landed
+
+- **Real-process quiet exit** (`packages/cli/src/serve/managed-background-delivery.process.test.ts`, commit pending in this slice): a real `bash` child exits silently while the publisher is detached; the worker holds the terminal entry, a fresh applier re-attaches at a newer writer generation, and the record settles with exit proof and a valid **empty** manifest chain reconstructed through its page closure. This is the §10 "Quiet exit" case on real pipes rather than synthetic sink writes.
+
+### Environment blocker (needs a decision)
+
+Real MySQL 8.4 is not provisioned on this machine: Homebrew `mysql` is 26.7.0 and its `mysqld` fails to load (`libprotobuf-lite.36.1.0.dylib` missing), `mysql@8.4` is not installed, and there is no Docker. The `*MySqlIT` suites read `mysql.url` / `mysql.user` / `mysql.password` system properties and create a disposable database via `IsolatedManagedSchemaMySqlTestDatabase`, so they need a reachable 8.4 instance (local install, a remote host, or CI).
+
+### Remaining fault cases and what each still needs
+
+- **Harness restart mid-stream** — the real-process harness stages continuous output across a 256 KiB segment boundary, then detaches and closes the first applier. Observed: the worker never records an acknowledgement (`lastApplied` stays 0) because a pushed batch is refused as a whole and the run flips back to held. Next step: capture the publisher refusal reason for a multi-revision batch (the run swallows it) before asserting byte-exactness. Note the partial flush is an **idle** flush (`PARTIAL_FLUSH_MS` re-arms on every write), so a steady trickle below one segment publishes no revision — the fixture must cross a segment boundary or pause.
+- **Forced stop under backpressure** — needs a producer that cannot finish before the stop (an unbounded loop), otherwise the process exits before the 8 MiB run outbox budget engages. `entryBytes` counts the whole entry JSON including carried `bytesBase64`, so the budget does bound carried bytes; the fixture, not the product, was wrong.
+- **Re-attach/drain with an in-flight pull, first observation while suspended, detach→seal window, monitor policy stops while suspended, bounds/watermark wake, suspension eligibility matrix, worker loss, fencing across Broker restart/replica, deleting a suspended Session** — the Java halves are covered by `RuntimeStageStoreTest`, `RuntimeObservationPullerTest`, `WakeSealStampTest`, `SessionRecoveryServiceTest`, `HostedCleanupDebtStoreTest` and `RuntimeBrokerServiceTest` on H2; each still needs its MySQL 8.4 run plus the daemon-level E2E.
+- **§7 measurement** — pull cost/latency, staging rows and bytes under loud output, drain cost at 1/100/10,000 observations, and resident equivalence; these set the pull wait, the staged-bytes watermark, the hard cap and the outbox budgets (§11 open questions 1 and 3).
 
 ## Verification commands
 
