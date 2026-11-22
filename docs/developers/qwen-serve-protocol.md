@@ -751,6 +751,8 @@ Both events live in the per-session SSE replay ring (they carry an `id`) so a cl
 
 Clients can feature-detect `session_turn_status` and poll `GET /session/:id/turns/current` or `GET /session/:id/turns/:promptId`. These routes require the live owning Session and never load or scan another workspace. Settled results are best-effort transcript records read from the active branch with a bounded scan; `prompt_not_found` means no result was found in the live queue, 64-entry terminal overlay, or bounded active window. `resultText` is the raw final parent-model answer after the last tool boundary, before optional message rewriting, and may be absent. Results over 32,768 UTF-16 code units include `resultTruncated: true` and `resultCode: "RESULT_TEXT_TRUNCATED"`.
 
+Clients can feature-detect `session_turn_feedback` and report a per-turn satisfied/not-satisfied mark with `POST /session/:id/feedback`, body `{"promptId": "<admitted prompt id>", "rating": "up" | "down"}`. The route is live-session-owner scoped like the turn-status reads: it requires the live owning Session and never falls back to another runtime. The owning ACP child maps `up` to `UserFeedbackRating.GOOD` (3) and `down` to `BAD` (1), fills `session_id`, `model`, and `approval_mode` from its own session Config, and hands the event to the same `logUserFeedback` pipeline the TUI uses — a local `ui_telemetry` chat record plus the usage-statistics-gated RUM upload. The response is `200 {"recorded": boolean}`; `recorded: false` means the session workspace's `ui.enableUserFeedback` setting suppressed collection. Invalid bodies return `400`. Clearing a mark is client-local and has no wire call. The standalone Web Shell offers the marks only when this tag is advertised; see `docs/design/web-shell/web-shell-assistant-feedback-telemetry.md`.
+
 ### `GET /health`
 
 Liveness probe. Default form returns `200 {"status":"ok"}` if the listener is up — cheap, no bridge access, suitable for high-frequency k8s/Compose liveness probes.
@@ -4467,7 +4469,7 @@ Cancellation: **none in v1**. The route does not listen for HTTP client disconne
 
 Capability tag: `session_mod_rows`. Bridge → ACP extMethod `qwen/control/session/mod_row`.
 
-Ask a live session's Mods for a transcript row this client draws, such as a block of the model's reply (`AssistantMessage`). The bridge declares the row sites the Web Shell draws in its `initialize` client capabilities (`_meta["qwen.modRows"]`), so the child runs each session's Mods on the `desktop` surface and offers those sites to their `ui.render` hooks.
+Ask a live session's Mods for a transcript row this client draws, such as a block of the model's reply (`AssistantMessage`) or of its thinking (`Thinking`, whose `props` are `{ "text": "…" }`). The bridge declares the row sites the Web Shell draws in its `initialize` client capabilities (`_meta["qwen.modRows"]`), so the child runs each session's Mods on the `desktop` surface and offers those sites to their `ui.render` hooks.
 
 Request body:
 

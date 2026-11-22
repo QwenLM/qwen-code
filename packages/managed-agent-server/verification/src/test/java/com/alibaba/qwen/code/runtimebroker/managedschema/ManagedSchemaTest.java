@@ -459,15 +459,14 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void retainsBytePreciseIdentitiesAndSeparatePublicUniqueness() throws Exception {
+    void retainsBytePreciseTenantScopedSessionIdentities() throws Exception {
         DataSource source = initialized();
         try (var connection = source.getConnection()) {
             session(connection, "tenant", "session", "PUBLIC");
             session(connection, "tenant", "session ", "PUBLIC");
             session(connection, "tenant", "SESSION", "PUBLIC");
             session(connection, "another", "session", "CONTROL");
-            assertThrows(
-                    SQLException.class, () -> session(connection, "third", "session", "PUBLIC"));
+            session(connection, "third", "session", "PUBLIC");
             try (var statement = connection.createStatement();
                     var result =
                             statement.executeQuery(

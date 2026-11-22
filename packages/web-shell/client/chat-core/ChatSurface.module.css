@@ -1,0 +1,40 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  position: relative;
+}
+
+.transcript {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* In-flow bottom sheet: the decision card takes the composer's place so the
+   transcript shrinks above it rather than being covered by a floating layer. */
+.decisionCard {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: center;
+  padding: 0 16px;
+}
+
+.admissionBanner {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+}
+
+.composer {
+  flex: 0 0 auto;
+}
+
+.composerHidden {
+  display: none;
+}

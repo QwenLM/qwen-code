@@ -17,9 +17,6 @@ CREATE TABLE ma_session (
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     version BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Optimistic concurrency version of the record.',
     CONSTRAINT pk_ma_session PRIMARY KEY (tenant_id, session_id),
-    public_session_id VARBINARY(512) GENERATED ALWAYS AS (CASE WHEN session_kind = 'PUBLIC' THEN session_id ELSE NULL END)
-        COMMENT 'Generated public Session identity enforcing global uniqueness for PUBLIC rows.',
-    CONSTRAINT uk_ma_session_public_session_id UNIQUE (public_session_id),
     deleted_at BIGINT UNSIGNED COMMENT 'Logical deletion time in Unix epoch milliseconds.',
     workspace_id VARBINARY(2048) COMMENT 'Workspace identity within the tenant.',
     workspace_generation BIGINT UNSIGNED COMMENT 'Workspace generation captured for this binding.',
@@ -388,7 +385,6 @@ CREATE TABLE ma_message (
     parts_json LONGTEXT NOT NULL COMMENT 'Ordered public content parts for the Item.',
     body_resource_key CHAR(64) COMMENT 'Resource containing an immutable message body when stored separately.',
     execution_key CHAR(64) COMMENT 'Hashed tool execution identity.',
-    tool_call_key CHAR(64) COMMENT 'Hashed tool-call identity associated with this Item.',
     policy_version VARBINARY(512) COMMENT 'Version of the tool-result projection policy.',
     CONSTRAINT ck_ma_message_revision CHECK (revision > 0),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
@@ -578,7 +574,6 @@ CREATE TABLE ma_output_capture (
     collected_bytes BIGINT UNSIGNED COMMENT 'Bytes accounted as collected by retention.',
     released_held_bytes BIGINT UNSIGNED  COMMENT 'Reserved byte capacity released by collection.',
     manifest_resource_key CHAR(64) COMMENT 'Resource containing the capture manifest.',
-    manifest_sha256 CHAR(64) COMMENT 'SHA-256 digest of the capture manifest.',
     seal_manifest_resource_key CHAR(64) COMMENT 'Resource containing the sealed output manifest.',
     seal_manifest_sha256 CHAR(64) COMMENT 'SHA-256 digest of the sealed output manifest.',
     gmt_create BIGINT UNSIGNED NOT NULL DEFAULT (CAST(UNIX_TIMESTAMP() AS DECIMAL(20, 0)) * 1000 + FLOOR(EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6)) / 1000)) COMMENT 'Record creation time in Unix epoch milliseconds.',
@@ -668,8 +663,6 @@ CREATE TABLE ma_request_receipt (
     semantic_revision BIGINT UNSIGNED COMMENT 'Channel ingress semantics revision included in deduplication.',
     action_id VARBINARY(512) COMMENT 'Public approval Action identity.',
     action_version BIGINT UNSIGNED COMMENT 'Version of the approval Action being addressed.',
-    decision_scope_key CHAR(64) GENERATED ALWAYS AS (CASE WHEN namespace = 'ACTION_DECISION' THEN RTRIM(scope_key) ELSE NULL END)
-        COMMENT 'Generated approval decision scope enforcing a single accepted decision.',
     mutation_attempt_sequence BIGINT UNSIGNED COMMENT 'Sequence identifying the admitted mutation attempt.',
     session_status_before VARCHAR(32) COMMENT 'Session status captured before the mutation.',
     result_operation_key CHAR(64) COMMENT 'Durable operation associated with the accepted request.',
@@ -677,7 +670,6 @@ CREATE TABLE ma_request_receipt (
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_request_receipt_business_key UNIQUE (receipt_key),
-    CONSTRAINT uk_ma_decision_slot UNIQUE (tenant_key, decision_scope_key),
     CONSTRAINT uk_ma_request UNIQUE (namespace, tenant_key, scope_key, idempotency_digest),
     CONSTRAINT ck_ma_request_namespace CHECK ((CASE namespace WHEN 'SESSION_COMMAND' THEN 15 WHEN 'SESSION_CREATE_MODE' THEN 19 WHEN 'SESSION_CREATE_ACTOR' THEN 20 WHEN 'AGENT_DEFINITION' THEN 16 WHEN 'AUTOMATION' THEN 10 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'PR_WATCH_INJECT' THEN 15 WHEN 'ACTION_DECISION' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'EXTERNAL_STORAGE' THEN 16 WHEN 'EXTERNAL_WORKSPACE' THEN 18 WHEN 'MEMORY' THEN 6 WHEN 'SIDE_QUERY' THEN 10 WHEN 'RESOURCE_ALLOCATE' THEN 17 ELSE -1 END = CHAR_LENGTH(namespace))),
     CONSTRAINT ck_ma_request_scope CHECK ((CASE scope_kind WHEN 'TENANT' THEN 6 WHEN 'ACTOR' THEN 5 WHEN 'SESSION' THEN 7 WHEN 'CHANNEL' THEN 7 ELSE -1 END = CHAR_LENGTH(scope_kind))),
@@ -719,7 +711,6 @@ CREATE TABLE ma_operation (
     target_cwd_relative VARCHAR(2048) COMMENT 'Requested working directory relative to the Workspace root.',
     expected_context_revision BIGINT UNSIGNED COMMENT 'Context revision required when admitting a directory change.',
     result_context_revision BIGINT UNSIGNED COMMENT 'Context revision produced by the completed directory change.',
-    payload_version INT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Version of the serialized payload format.',
     request_json LONGTEXT NOT NULL COMMENT 'Serialized operation request.',
     result_json LONGTEXT COMMENT 'Serialized durable result returned on completion or replay.',
     state VARCHAR(32) NOT NULL COMMENT 'Lifecycle state of this record.',
@@ -756,7 +747,7 @@ CREATE TABLE ma_operation (
     CONSTRAINT uk_ma_publication_operation UNIQUE (scope_key, publication_id, publication_command_id),
     CONSTRAINT uk_ma_operation_public_request UNIQUE (scope_key, operation_kind, target_key, actor_digest, idempotency_digest),
     CONSTRAINT uk_ma_operation_request UNIQUE (scope_key, operation_kind, target_key, actor_key, idempotency_digest),
-    CONSTRAINT ck_ma_operation_generation CHECK (claim_generation >= 0 AND attempt_count >= 0 AND payload_version > 0),
+    CONSTRAINT ck_ma_operation_generation CHECK (claim_generation >= 0 AND attempt_count >= 0),
     CONSTRAINT ck_ma_operation_kind CHECK ((CASE operation_kind WHEN 'CLOSE' THEN 5 WHEN 'ARCHIVE' THEN 7 WHEN 'DELETE' THEN 6 WHEN 'UNARCHIVE' THEN 9 WHEN 'RENAME' THEN 6 WHEN 'CWD_CHANGE' THEN 10 WHEN 'CONTEXT_COMPRESSION' THEN 19 WHEN 'ACTION_RESPONSE' THEN 15 WHEN 'TASK_CANCEL' THEN 11 WHEN 'CHILD_SESSION_START' THEN 19 WHEN 'CHILD_SESSION_CLOSE' THEN 19 WHEN 'CHILD_WORKSPACE' THEN 15 WHEN 'SESSION_WORKTREE' THEN 16 WHEN 'OUTPUT_UPLOAD' THEN 13 WHEN 'OUTPUT_VERIFY' THEN 13 WHEN 'OUTPUT_FINISH' THEN 13 WHEN 'OBJECT_PUT' THEN 10 WHEN 'TOOL_RESULT_PROJECTION' THEN 22 WHEN 'SESSION_RESOURCE_GC' THEN 19 WHEN 'CAPTURE_GC' THEN 10 WHEN 'WORKSPACE_OPERATOR_RECOVERY' THEN 27 WHEN 'WORKSPACE_RECOVERY' THEN 18 WHEN 'STORAGE_MIGRATION' THEN 17 WHEN 'CHANNEL_INGRESS' THEN 15 WHEN 'PR_WATCH_INJECT' THEN 15 WHEN 'WORKSPACE_CREATE' THEN 16 WHEN 'SUBMIT_INPUT' THEN 12 WHEN 'CANCEL' THEN 6 WHEN 'WORKSPACE_RETIREMENT' THEN 20 WHEN 'WORKSPACE_UPLOAD' THEN 16 ELSE -1 END = CHAR_LENGTH(operation_kind))),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_operation_id PRIMARY KEY (id),
@@ -764,8 +755,6 @@ CREATE TABLE ma_operation (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Durable lifecycle, publication, recovery, and other operations with fenced worker claims.';
 
 CREATE INDEX idx_ma_operation_due ON ma_operation (operation_kind, delivery_state, available_at);
-
-CREATE INDEX idx_ma_operation_claim ON ma_operation (operation_kind, state, claim_until);
 
 CREATE INDEX idx_ma_operation_target ON ma_operation (operation_kind, target_key, target_revision, state);
 
@@ -795,7 +784,6 @@ CREATE TABLE ma_operation_work (
     physical_key CHAR(64) COMMENT 'Canonical physical storage identity shared by logical aliases.',
     state VARCHAR(32) NOT NULL COMMENT 'Processing state of this operation target.',
     revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Revision of the stored record.',
-    payload_version INT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Version of the serialized payload format.',
     payload_json LONGTEXT NOT NULL COMMENT 'Serialized work or delivery payload.',
     evidence_resource_key CHAR(64) COMMENT 'Resource containing immutable completion or recovery evidence.',
     evidence_sha256 CHAR(64) COMMENT 'SHA-256 digest of the referenced evidence.',
@@ -1038,7 +1026,6 @@ CREATE TABLE ma_runtime_binding (
     INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class),
     INDEX qwen_runtime_storage_bindings_idx (storage_id, binding_id),
     drain_receipt_json LONGTEXT COMMENT 'Durable receipt of the Runtime drain operation.',
-    first_activation_journal_revision BIGINT UNSIGNED COMMENT 'Journal revision of the first activation associated with this binding.',
     CONSTRAINT uk_ma_runtime_binding_business_key UNIQUE (binding_id),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_runtime_binding_id PRIMARY KEY (id),
@@ -1233,16 +1220,12 @@ CREATE TABLE ma_delivery (
     source_session_id VARBINARY(512) COMMENT 'Session that produced the message or result.',
     target_session_id VARBINARY(512) COMMENT 'Session receiving a relayed message or child result.',
     source_scope_key CHAR(64) NOT NULL COMMENT 'Hashed source scope used for delivery lookup and uniqueness.',
-    source_record_key CHAR(64) COMMENT 'Source domain record associated with the delivery.',
-    source_revision BIGINT UNSIGNED COMMENT 'Source record revision captured by the delivery.',
     segment_id VARBINARY(512) COMMENT 'Identity of an external channel message segment.',
     segment_ordinal BIGINT UNSIGNED COMMENT 'Ordering position of a segment within the delivery.',
     segment_count INT UNSIGNED COMMENT 'Immutable number of segments in the channel delivery plan, used by the reconcile gate to prove the segment ledger complete.',
     creation_key VARBINARY(2048) COMMENT 'Original child-Session creation identity for child-result recovery.',
-    provider_id VARBINARY(2048) COMMENT 'External provider identity associated with the delivery.',
     provider_receipt_json LONGTEXT COMMENT 'Receipt returned by the external delivery provider.',
     request_digest CHAR(64) COMMENT 'Request digest used to reject conflicting retries.',
-    payload_version INT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Version of the serialized payload format.',
     payload_json LONGTEXT NOT NULL COMMENT 'Serialized work or delivery payload.',
     transport_state VARCHAR(32) NOT NULL COMMENT 'Progress of sending the delivery to its destination.',
     reception_state VARCHAR(32) NOT NULL COMMENT 'Progress of destination acceptance.',
@@ -1415,10 +1398,6 @@ CREATE INDEX idx_ma_occurrence_list ON ma_schedule_occurrence (tenant_id, schedu
 CREATE INDEX idx_ma_occurrence_outcome ON ma_schedule_occurrence (tenant_id, schedule_id, outcome, is_run_terminal, gmt_create, occurrence_key);
 
 CREATE INDEX idx_ma_occurrence_run ON ma_schedule_occurrence (tenant_id, run_id);
-
-CREATE INDEX idx_ma_work_page ON ma_operation_work (operation_key, work_kind, target_key);
-
-CREATE INDEX idx_ma_work_session_page ON ma_operation_work (operation_key, work_kind, session_id);
 
 CREATE INDEX idx_ma_work_pending ON ma_operation_work (operation_key, work_kind, session_id, state, target_key);
 
