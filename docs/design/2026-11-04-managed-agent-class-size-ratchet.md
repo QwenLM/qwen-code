@@ -6,7 +6,7 @@
 
 - Status: implemented; enforcement is verification-only. Receipt-helper extraction preserves runtime validation while tightening the ceilings.
 - Date: 2026-11-04; updated 2026-11-22
-- Scope: `packages/managed-agent-server` — current enforcement covers every Maven module's `src/main/java`; the original design baseline below names the two original source roots.
+- Scope: `packages/managed-agent-server` — the `persistence` and `runtime-broker` production sources.
 - Baseline: `origin/main` `14a5a2d98d`, after the store decomposition (#16090, #16142) and the broker extraction cluster landed.
 
 This resolves the open question left by the [structure review](2026-10-31-managed-agent-structure-review.md): whether to introduce the class-size ratchet gate before P1 (to stop regrowth) or only after the splits land. At introduction, the two headline god classes were decomposed — `ManagedAgentStore` is a 1,170-line facade and `ManagedSessionStore` a 357-line facade, and `RuntimeBrokerService` is a 4,270-line facade over nine collaborators — so the gate is introduced **after the splits land**, to lock in those gains. The structure review's acceptance criteria already name this gate: "P1 complete when no class in `persistence` or `runtime-broker` exceeds the agreed size ratchet."
@@ -15,9 +15,9 @@ Combining upstream's extraction of provisioning failure handling with the move o
 
 ## Current landed state (2026-11-22)
 
-The gate now covers every Maven module with a `src/main/java` source root, not only its original `persistence` and `runtime-broker` roots. The current global ceiling is **2,481 lines**, matching `ToolPublicationDataStore` as the current largest class and its per-class pin. The next-largest pin is `JdbcRuntimeBindingRepository` at 2,319 lines.
+The gate covers the `persistence/src/main/java` and `runtime-broker/src/main/java` roots. The current global ceiling is **2,481 lines**, matching `ToolPublicationDataStore` as the current largest class and its per-class pin. The next-largest pin is `JdbcRuntimeBindingRepository` at 2,319 lines.
 
-Adding the private `ossScope` helper grew `ToolPublicationDataStore` from 2,481 to 2,485 lines, above the then-current 2,483 ceiling. Moving the complete OSS object-key construction into `ToolPublicationObjectKeys` returns the store to 2,481 without changing the persisted key layout, and lowers both the global maximum and that class's pin from 2,483 to 2,481. The 4,216-line value and other class sizes below describe the original design baseline, not today's ceilings.
+Adding the private `ossScope` helper grew `ToolPublicationDataStore` from 2,481 to 2,485 lines, above the then-current 2,483 ceiling. Sharing the scope through `ToolPublicationContract` and completing the publication/slot path in `ToolPublicationObjectKeys` returns the store to 2,481 without changing the persisted key layout, and lowers both the global maximum and that class's pin from 2,483 to 2,481. The 4,216-line value and other class sizes below describe the original design baseline, not today's ceilings.
 
 ## Problem
 
@@ -25,7 +25,7 @@ The decomposition moved responsibilities out of the god classes, but nothing sto
 
 ## Design
 
-A single verification test, `ClassSizeRatchetTest` (in the `architecture` package next to `ModuleArchitectureTest`), walks every Maven module's `src/main/java` production source tree, counts source lines per top-level class, and enforces four rules against a pin resource, `class-size-ratchet.properties`:
+A single verification test, `ClassSizeRatchetTest` (in the `architecture` package next to `ModuleArchitectureTest`), walks the production source trees of `persistence/src/main/java` and `runtime-broker/src/main/java`, counts source lines per top-level class, and enforces four rules against a pin resource, `class-size-ratchet.properties`:
 
 1. **Global ceiling.** No class exceeds `GLOBAL_MAX_LINES` (2,481 currently; 4,216 in the original design baseline). This is the "agreed size ratchet" of the acceptance criteria, seeded at the then-current largest class and tightened as decompositions land. It only ever lowers.
 2. **Per-class ceiling.** Every class listed in the pin must have at most its pinned line count. The pin is seeded at each large class's current size, so a pinned class cannot grow at all.
@@ -38,7 +38,7 @@ Line counts count newline characters, matching `wc -l`; `package-info.java` and 
 
 - **`LARGE_CLASS_THRESHOLD = 800`.** A round line just below the smallest current large class (802). It captures every current aggregate and facade, and treats "reached 800 lines" as the point where a class becomes large enough to deserve an explicit, reviewed ceiling. Classes below it are free to change, so ordinary edits to small helpers do not trip the gate.
 - **`GLOBAL_MAX_LINES = 2481`.** This is the current maximum, matching `ToolPublicationDataStore` and its per-class pin; `JdbcRuntimeBindingRepository` is next at 2,319. It remains the backstop for every class, pinned or new, and tightens as classes are decomposed.
-- **Scope is every Maven module's `src/main/java`.** The original design introduced enforcement on `persistence` and `runtime-broker`; subsequent decomposition extended the same mechanism to all production sources in the reactor. The verification module still contains the gate and its pin resource.
+- **Scope is exactly `persistence` + `runtime-broker`.** These are the two modules the acceptance criteria name. The `runtime-*` provider modules (`runtime-http`/`host`/`local`/`external`/`kubernetes`/`ssh`/`static`) are separate top-level modules and out of scope; `contracts`, `control-plane`, `adapters`, and `server` are likewise not ratcheted here.
 
 ### Ratchet discipline
 
