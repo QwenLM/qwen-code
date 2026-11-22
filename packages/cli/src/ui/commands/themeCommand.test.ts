@@ -203,9 +203,10 @@ describe('themeCommand', () => {
 
     it('reports an error instead of success when the theme cannot be activated', () => {
       vi.spyOn(themeManager, 'setActiveTheme').mockReturnValue(false);
-      const { result, onThemeChanged } = run('ANSI');
+      const { result, settings, onThemeChanged } = run('ANSI');
 
       expect(onThemeChanged).not.toHaveBeenCalled();
+      expect(settings.user.settings.ui?.theme).toBeUndefined();
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
@@ -319,6 +320,71 @@ describe('themeCommand', () => {
       expect(themeManager.getActiveTheme().name).toBe(before);
       expect(result).toMatchObject({ type: 'message', messageType: 'error' });
       expect(content(result)).toContain('Unknown theme "Draculaa"');
+    });
+
+    it('switches to auto and saves it', () => {
+      const { result, setValue, settings } = run('auto');
+
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'ui.theme',
+        'auto',
+      );
+      expect(settings.user.settings.ui?.theme).toBe('auto');
+      expect(['Qwen Dark', 'Qwen Light']).toContain(
+        themeManager.getActiveTheme().name,
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Theme set to auto (user settings).',
+      });
+    });
+
+    it('accepts a custom theme defined only in system settings', () => {
+      const { result, setValue } = run(
+        'Brand',
+        makeSettings({
+          system: { ui: { customThemes: { Brand: { type: 'custom' } } } },
+        }),
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'ui.theme',
+        'Brand',
+      );
+      expect(result).toMatchObject({ messageType: 'info' });
+    });
+
+    it('treats a custom theme key that reads as a file path as unknown', () => {
+      const { result, setValue, settings } = run(
+        'night.json',
+        makeSettings({
+          user: { ui: { customThemes: { 'night.json': { type: 'custom' } } } },
+        }),
+      );
+
+      expect(setValue).not.toHaveBeenCalled();
+      expect(settings.user.settings.ui?.theme).toBeUndefined();
+      expect(content(result)).toContain('Unknown theme "night.json"');
+    });
+
+    it('keeps an aliased custom theme active after an unknown name', () => {
+      const settings = makeSettings({
+        user: {
+          ui: {
+            customThemes: { Alias: { name: 'Shown Name', type: 'custom' } },
+          },
+        },
+      });
+      run('alias', settings);
+      expect(themeManager.getActiveTheme().name).toBe('Shown Name');
+
+      const { result } = run('Draculaa', settings);
+
+      expect(result).toMatchObject({ messageType: 'error' });
+      expect(themeManager.getActiveTheme().name).toBe('Shown Name');
     });
 
     it('still refuses when NO_COLOR is set', () => {

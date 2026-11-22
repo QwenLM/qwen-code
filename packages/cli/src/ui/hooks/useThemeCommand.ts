@@ -55,8 +55,9 @@ export const useThemeCommand = (
     // The theme may temporarily change while navigating the list; keep the
     // original value to restore it if user cancels with Esc/Ctrl+C.
     setThemeBeforeDialogOpen(themeManager.getActiveTheme().name);
+    setThemeError(null);
     setIsThemeDialogOpen(true);
-  }, [addItem, config]);
+  }, [addItem, config, setThemeError]);
 
   const applyTheme = useCallback(
     (themeName: string | undefined) => {
@@ -92,6 +93,8 @@ export const useThemeCommand = (
         return;
       }
 
+      // Failed selections keep the dialog open so the error is shown.
+      let keepOpen = false;
       try {
         // Merge user and workspace custom themes (workspace takes precedence)
         const mergedCustomThemes = {
@@ -108,7 +111,7 @@ export const useThemeCommand = (
               themeName: themeName ?? '',
             }),
           );
-          setIsThemeDialogOpen(true);
+          keepOpen = true;
           return;
         }
         const { effective, applied } = applyThemeSetting(
@@ -120,12 +123,12 @@ export const useThemeCommand = (
           setThemeError(
             t('Theme "{{themeName}}" not found.', { themeName: effective }),
           );
-          setIsThemeDialogOpen(true);
+          keepOpen = true;
           return;
         }
         setThemeError(null);
       } finally {
-        setIsThemeDialogOpen(false); // Close the dialog
+        setIsThemeDialogOpen(keepOpen);
       }
     },
     [applyTheme, loadedSettings, setThemeError, themeBeforeDialogOpen],

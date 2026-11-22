@@ -94,4 +94,32 @@ describe('useThemeCommand', () => {
     expect(setValue).not.toHaveBeenCalled();
     expect(result.current.isThemeDialogOpen).toBe(false);
   });
+
+  it('keeps the dialog open with the error when a selection fails, and clears it on reopen', () => {
+    vi.spyOn(themeManager, 'setActiveTheme').mockReturnValue(false);
+    const user = { settings: { ui: {} } };
+    const settings = {
+      merged: { ui: {} },
+      user,
+      workspace: { settings: { ui: {} } },
+      forScope: () => user,
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const setThemeError = vi.fn<(error: string | null) => void>();
+
+    const { result } = renderHook(() =>
+      useThemeCommand(settings, setThemeError, vi.fn(), null),
+    );
+
+    act(() => result.current.openThemeDialog());
+    act(() => result.current.handleThemeSelect('ANSI', SettingScope.User));
+
+    expect(result.current.isThemeDialogOpen).toBe(true);
+    expect(setThemeError).toHaveBeenLastCalledWith(
+      expect.stringContaining('not found'),
+    );
+
+    act(() => result.current.openThemeDialog());
+    expect(setThemeError).toHaveBeenLastCalledWith(null);
+  });
 });
