@@ -8,7 +8,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -143,7 +142,7 @@ public final class ToolPublicationAdmissionStore {
         long revision = positiveCounter(publication.get("receipt_revision"));
         long sequence = positiveCounter(publication.get("receipt_sequence"));
         var head = jdbc.query("SELECT journal_revision, committed_sequence FROM ma_session_head"
-                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), ManagedSchemaKeys.key(text(key, "tenantId")), ManagedSchemaKeys.key(text(key, "sessionId")), text(key, "tenantId"), text(key, "sessionId")).getFirst();
+                + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_id = ? AND harness_session_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), text(key, "tenantId"), text(key, "sessionId")).getFirst();
         require(positiveCounter(head.get("journal_revision")) >= revision
                 && positiveCounter(head.get("committed_sequence")) >= sequence,
                 "Original receipt exceeds the committed Session head");
@@ -176,7 +175,9 @@ public final class ToolPublicationAdmissionStore {
                     ((Number) journal.get("byte_length")).longValue());
         }
         require(raw instanceof byte[], "Original receipt bytes are missing");
-        byte[] bytes = (byte[]) raw;
+        // Analyzer-visible null assertion for SpotBugs; require() above already
+        // throws ContractViolationException on null, so this never fires.
+        byte[] bytes = (byte[]) Objects.requireNonNull(raw, "Original receipt bytes are missing");
         require(bytes.length > 0 && bytes.length <= ManagedSessionStoreModels.MAX_TRANSACTION_BYTES
                 && bytes.length == positiveCounter(journal.get("byte_length"))
                 && ToolPublicationContract.sha256(bytes).equals(journal.get("record_digest")),
@@ -223,7 +224,8 @@ public final class ToolPublicationAdmissionStore {
             var resource = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
                     + " byte_length, sha256, storage_kind, inline_bytes, object_key, object_version_id, encryption_key_id,"
                     + " publish_command_id, state FROM ma_resource"
-                    + " WHERE session_scope_key = ? AND resource_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), sessionScope, resourceId).getFirst();
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                    text(key, "tenantId"), text(key, "sessionId"), resourceId).getFirst();
             require(text(key, "tenantId").equals(resource.get("tenant_id"))
                     && text(key, "workspaceId").equals(resource.get("workspace_id"))
                     && text(key, "sessionId").equals(resource.get("session_id"))
@@ -257,9 +259,10 @@ public final class ToolPublicationAdmissionStore {
                         "Original external admission resource conflicts");
             }
             var reference = jdbc.query("SELECT tenant_id, workspace_id, session_id, resource_id, journal_revision"
-                    + " FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'JOURNAL' AND owner_key = ?"
+                    + " FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'JOURNAL' AND owner_key = ?"
                     + " AND owner_revision = ? AND resource_id = ? AND journal_revision = ?" + suffix,
-                    (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), sessionScope, sessionScope, revision, resourceId, revision).getFirst();
+                    (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), text(key, "tenantId"), text(key, "sessionId"),
+                    sessionScope, revision, resourceId, revision).getFirst();
             require(text(key, "tenantId").equals(reference.get("tenant_id"))
                     && text(key, "workspaceId").equals(reference.get("workspace_id"))
                     && text(key, "sessionId").equals(reference.get("session_id"))
@@ -493,13 +496,12 @@ public final class ToolPublicationAdmissionStore {
 
     private void referenceCapturedResource(JsonNode key, CommitTransactionRequest request,
             JsonNode ref, byte[] bytes, String objectKey, String kind) {
-        String scopeKey = ManagedSessionStore.sessionScopeKey(text(key, "tenantId"), text(key, "sessionId"));
         String resourceId = text(ref, "resourceId");
         var rows = jdbc.query("SELECT state, kind, byte_length, sha256, capture_state, publish_command_id"
-                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
-                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? FOR UPDATE",
-                (row, index) -> ManagedSchemaRows.read(row), scopeKey, resourceId,
-                text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
+                        + " AND workspace_id = ? FOR UPDATE",
+                (row, index) -> ManagedSchemaRows.read(row), text(key, "tenantId"), text(key, "sessionId"), resourceId,
+                text(key, "workspaceId"));
         require(rows.size() == 1, "Captured receipt resource is missing");
         var row = rows.getFirst();
         require(kind.equals(row.get("kind")) && kind.equals(text(ref, "kind"))
@@ -515,9 +517,9 @@ public final class ToolPublicationAdmissionStore {
         require("PUBLISHED".equals(row.get("state")), "Receipt resource cannot be referenced");
         boolean inline = bytes.length <= ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
         require(inline || objectKey != null, "Large receipt resource has no object");
-        int changed = jdbc.update("UPDATE ma_resource SET storage_kind = ?, inline_bytes = ?, object_key = ?, publish_command_id = ?, state = 'REFERENCED', last_verified_at = " + ManagedSchemaTime.SQL_NOW + " WHERE session_scope_key = ? AND resource_id = ? AND state = 'PUBLISHED' AND capture_state = 'VERIFIED'",
+        int changed = jdbc.update("UPDATE ma_resource SET storage_kind = ?, inline_bytes = ?, object_key = ?, publish_command_id = ?, state = 'REFERENCED', last_verified_at = " + ManagedSchemaTime.SQL_NOW + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND state = 'PUBLISHED' AND capture_state = 'VERIFIED'",
                 inline ? "MYSQL_INLINE" : "TOOL_PUBLICATION", inline ? bytes : null,
-                inline ? null : objectKey, request.commandId(), scopeKey, resourceId);
+                inline ? null : objectKey, request.commandId(), text(key, "tenantId"), text(key, "sessionId"), resourceId);
         require(changed == 1, "Receipt resource changed during publication");
     }
 

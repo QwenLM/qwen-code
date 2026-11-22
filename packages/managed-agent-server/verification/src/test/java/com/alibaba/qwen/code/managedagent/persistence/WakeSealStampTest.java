@@ -15,6 +15,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import javax.sql.DataSource;
+
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Map;
@@ -33,11 +35,16 @@ class WakeSealStampTest {
     private String session;
     private long generation;
 
-    @BeforeEach
-    void setUp() throws Exception {
+    protected DataSource dataSource() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:wake-seal-stamp-" + UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+        return source;
+    }
+
+    @BeforeEach
+    void setUp() throws Exception {
+        var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         transaction = new TransactionTemplate(new DataSourceTransactionManager(source));

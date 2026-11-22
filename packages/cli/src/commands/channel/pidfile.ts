@@ -348,7 +348,12 @@ function writeInfoExclusive(info: ServiceInfo): void {
     }
 
     if (existing && isSameProcess(existing.pid, existing.procStart)) {
-      throw err; // A live record this side wrote: a genuine concurrent startup.
+      // A live record this side wrote: a genuine concurrent startup. Carry the
+      // holder out of the locked check so a caller retrying the exclusive
+      // create can distinguish a real holder from the transient starting race.
+      throw Object.assign(err as NodeJS.ErrnoException, {
+        channelServiceHolder: existing,
+      });
     }
 
     // A dead or invalid local record is transient: sweep it and retry the

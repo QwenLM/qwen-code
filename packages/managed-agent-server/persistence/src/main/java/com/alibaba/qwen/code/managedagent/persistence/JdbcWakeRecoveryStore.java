@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -100,7 +99,7 @@ public class JdbcWakeRecoveryStore
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
                         + " AND s.retired_at IS NULL"
                         + " AND h.workspace_id = COALESCE(s.workspace_id, ?)"
-                        + " ORDER BY h.wake_retry_at, h.tenant_key, h.harness_key LIMIT ?",
+                        + " ORDER BY h.wake_retry_at, h.tenant_id, h.harness_session_id LIMIT ?",
                 (row, index) -> new Candidate(row.getString("tenant_id"), row.getString("workspace_id"),
                         row.getString("session_id"), row.getLong("journal_revision"),
                         row.getLong("committed_sequence"), row.getLong("compacted_through_revision"),
@@ -124,13 +123,12 @@ public class JdbcWakeRecoveryStore
                 return false;
             }
             return jdbc.update("UPDATE ma_session_head h SET wake_retry_at = " + ManagedSchemaTime.SQL_NOW + " + " + RETRY_MS + " WHERE"
-                        + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
-                        + " AND h.session_id = ? AND h.workspace_id = ?"
+                        + " h.tenant_id = ? AND"
+                        + " h.harness_session_id = ? AND h.workspace_id = ?"
                         + " AND h.head_kind = 'MANAGED_SESSION' AND h.journal_revision = ?"
                         + " AND h.compacted_through_revision = 0"
                         + " AND h.is_wake_scan_pending = TRUE AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED,
-                ManagedSchemaKeys.key(candidate.tenantId()),
-                ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
         }));
     }
@@ -303,15 +301,14 @@ public class JdbcWakeRecoveryStore
     private boolean canResume(Candidate candidate) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id"
-                        + " WHERE h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
-                        + " AND h.session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
+                        + " WHERE h.tenant_id = ? AND"
+                        + " h.harness_session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
                         + " AND h.journal_revision = ? AND h.committed_sequence = ?"
                         + " AND h.compacted_through_revision = 0 AND h.is_wake_scan_pending = TRUE AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
                         + " AND s.retired_at IS NULL"
                         + " AND (s.workspace_id IS NULL OR s.workspace_id = ?)",
-                Long.class, ManagedSchemaKeys.key(candidate.tenantId()), ManagedSchemaKeys.key(candidate.sessionId()),
-                candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
+                Long.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
                 candidate.committedSequence(), candidate.workspaceId()) == 1;
     }
 
@@ -320,21 +317,19 @@ public class JdbcWakeRecoveryStore
         if (!pending) {
             String scopeKey = ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId());
             return jdbc.update("UPDATE ma_session_head SET is_wake_pending = FALSE, wake_head_revision = ?"
-                            + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                            + " AND session_id = ? AND workspace_id = ? AND journal_revision = ?"
+                            + " WHERE tenant_id = ? AND"
+                            + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
                             + " AND compacted_through_revision = 0"
                             + " AND NOT EXISTS (SELECT 1 FROM ma_runtime_stage"
                             + " WHERE runtime_session_key = ? AND is_wake_worthy = 1)",
-                    candidate.journalRevision(), ManagedSchemaKeys.key(candidate.tenantId()),
-                    ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                    candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
                     candidate.workspaceId(), candidate.journalRevision(), scopeKey) == 1;
         }
         return jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE, wake_head_revision = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND workspace_id = ? AND journal_revision = ?"
+                        + " WHERE tenant_id = ? AND"
+                        + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
                         + " AND compacted_through_revision = 0",
-                candidate.journalRevision(), ManagedSchemaKeys.key(candidate.tenantId()),
-                ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
     }
 

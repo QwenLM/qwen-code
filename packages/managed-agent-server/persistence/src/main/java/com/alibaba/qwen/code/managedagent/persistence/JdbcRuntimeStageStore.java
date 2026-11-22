@@ -346,13 +346,10 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                                 + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
                                 + " THEN ? ELSE wake_retry_at END,"
                                 + " gmt_modified = ?"
-                                + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
-                                + " AND tenant_id = ? AND session_id = ?",
+                                + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         nowMs,
                         nowMs,
                         nowMs,
-                        ManagedSchemaKeys.key(request.tenantId()),
-                        ManagedSchemaKeys.key(request.harnessSessionId()),
                         bytes(request.tenantId()),
                         bytes(request.harnessSessionId()));
             }
@@ -394,10 +391,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
         }
         transactions.executeWithoutResult(status -> {
             requireActiveWriter(tenantId, harnessSessionId, writerId, writerGeneration);
-            deleteStagedPrefix(
-                    ManagedSessionStore.sessionScopeKey(tenantId, harnessSessionId),
-                    executionCallId,
-                    throughSeq);
+            deleteStagedPrefix(tenantId, harnessSessionId, executionCallId, throughSeq);
         });
     }
 
@@ -414,11 +408,9 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             lockSessionAndHead(tenantId, harnessSessionId);
             List<Long> generations = jdbc.query(
                     "SELECT writer_generation FROM ma_session_head"
-                            + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
-                            + " AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                            + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                            + " FOR UPDATE",
                     (rs, index) -> rs.getLong("writer_generation"),
-                    ManagedSchemaKeys.key(tenantId),
-                    ManagedSchemaKeys.key(harnessSessionId),
                     bytes(tenantId),
                     bytes(harnessSessionId));
             if (generations.isEmpty() || writerGeneration < generations.getFirst()) {
@@ -428,27 +420,27 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                         "Detach writer generation is stale.",
                         false);
             }
-            String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, harnessSessionId);
             for (Map.Entry<String, Long> item : appliedThrough.entrySet()) {
                 if (item.getValue() != null && item.getValue() > 0) {
-                    deleteStagedPrefix(scopeKey, item.getKey(), item.getValue());
+                    deleteStagedPrefix(tenantId, harnessSessionId, item.getKey(), item.getValue());
                 }
             }
         });
     }
 
-    private void deleteStagedPrefix(String scopeKey, String executionCallId, long throughSeq) {
+    private void deleteStagedPrefix(String tenantId, String sessionId, String executionCallId, long throughSeq) {
         String callHash = RuntimeRequestKeys.valueKey(executionCallId);
         jdbc.update(
-                "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'"
+                "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'"
                         + " AND owner_key = ? AND owner_revision <= ?",
-                scopeKey,
+                bytes(tenantId),
+                bytes(sessionId),
                 callHash,
                 throughSeq);
         jdbc.update(
                 "DELETE FROM ma_runtime_stage WHERE runtime_session_key = ?"
                         + " AND execution_call_id_hash = ? AND delivery_seq <= ?",
-                scopeKey,
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 callHash,
                 throughSeq);
     }
@@ -462,8 +454,8 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
         long nowMs = databaseNowMillis();
         List<Boolean> valid = jdbc.query(
                 "SELECT state, writer_id, writer_generation, writer_lease_until FROM ma_session_head"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
-                        + " AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                        + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                        + " FOR UPDATE",
                 (rs, index) -> {
                     String state = rs.getString("state");
                     byte[] rawWriter = rs.getBytes("writer_id");
@@ -478,8 +470,6 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                             && !leaseNull
                             && leaseUntil > nowMs;
                 },
-                ManagedSchemaKeys.key(tenantId),
-                ManagedSchemaKeys.key(harnessSessionId),
                 bytes(tenantId),
                 bytes(harnessSessionId));
         if (valid.isEmpty() || !Boolean.TRUE.equals(valid.getFirst())) {
@@ -526,11 +516,9 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
         }
         List<String> headStates = jdbc.query(
                 "SELECT state FROM ma_session_head"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'"
-                        + " AND tenant_id = ? AND session_id = ? FOR UPDATE",
+                        + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'"
+                        + " FOR UPDATE",
                 (rs, index) -> rs.getString("state"),
-                ManagedSchemaKeys.key(tenantId),
-                ManagedSchemaKeys.key(sessionId),
                 bytes(tenantId),
                 bytes(sessionId));
         if (headStates.isEmpty()) {
@@ -612,13 +600,12 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             String state = isSegment ? "PUBLISHED" : "REFERENCED";
             try {
                 jdbc.update(
-                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id,"
+                        "INSERT INTO ma_resource (resource_key, tenant_id, workspace_id,"
                                 + " session_id, resource_id, kind, schema_version, byte_length, sha256,"
                                 + " storage_kind, inline_bytes, publish_command_id, state, gmt_create,"
-                                + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE',"
+                                + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE',"
                                 + " ?, ?, ?, ?, ?)",
                         resourceKey,
-                        scopeKey,
                         bytes(tenantId),
                         bytes(workspaceId),
                         bytes(sessionId),
@@ -639,10 +626,9 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             if (!isSegment) {
                 try {
                     jdbc.update(
-                            "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                            "INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                                     + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                                    + " resource_id, gmt_create) VALUES (?, 'RUNTIME_STAGE', ?, ?, ?, ?, ?, ?, ?, ?)",
-                            scopeKey,
+                                    + " resource_id, gmt_create) VALUES ('RUNTIME_STAGE', ?, ?, ?, ?, ?, ?, ?, ?)",
                             callHash,
                             deliverySeq,
                             resourceKey,

@@ -1680,7 +1680,7 @@ async function attemptedPendingWakeInput(session: HostedSession) {
 /** H4f × H4d-b: a stopped run's message inputs never start a turn; the
  * relay's stop settles them. */
 function isStoppedMessage(
-  session: HostedSession,
+  session: Pick<HostedSession, 'messagesStopped'>,
   source: string | undefined,
 ): boolean {
   return (
@@ -1717,6 +1717,27 @@ function pickWakeInputs(
     first ??= input;
   }
   return { first, earliestDeferred };
+}
+
+/**
+ * Where the control plane delivers wake inputs at their due time, it owns
+ * only deferred, unattempted ones. A due input is the pump's to run now, a
+ * stopped run's message waits for the relay's stop, and an attempted or
+ * non-wake input keeps its existing recovery.
+ */
+export function wakeDispatchOwnsInput(
+  session: Pick<HostedSession, 'messagesStopped'>,
+  input: PendingSessionInput,
+  projected: ReadonlyArray<{ readonly daemonPromptId?: string }>,
+  now: number,
+): boolean {
+  return (
+    isWakeInputSource(input.source) &&
+    !isStoppedMessage(session, input.source) &&
+    input.notBefore !== null &&
+    input.notBefore > now &&
+    !wakeHasPriorAttempt(projected, input.turnId)
+  );
 }
 
 /**
@@ -5147,20 +5168,11 @@ export function registerHostedHarnessSessionRoutes(
           ),
         );
         let blocked = pending.length > 0;
-        // Where the control plane delivers wake inputs at their due time, it
-        // owns only deferred, unattempted ones. A due input is the pump's to
-        // run now, a stopped run's message waits for the relay's stop, and an
-        // attempted or non-wake input keeps its existing recovery.
         if (blocked && session.stores?.supportsWakeDispatch?.()) {
           const projected = await session.managed.sink.project();
           const now = Date.now();
           blocked = pending.some(
-            (input) =>
-              !isWakeInputSource(input.source) ||
-              isStoppedMessage(session, input.source) ||
-              input.notBefore === null ||
-              input.notBefore <= now ||
-              wakeHasPriorAttempt(projected, input.turnId),
+            (input) => !wakeDispatchOwnsInput(session, input, projected, now),
           );
         }
         const certificateLost = await refreshBackgroundCertificate();

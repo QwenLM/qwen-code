@@ -19,7 +19,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRecoveryEvidence;
-import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -1495,8 +1494,8 @@ class WorkspaceRuntimeTest {
         try (var connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try (var lock = connection.prepareStatement("SELECT tenant_id FROM ma_tenant_guard"
-                    + " WHERE tenant_key = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
-                lock.setString(1, RuntimeRequestKeys.valueKey(session.tenantId()));
+                    + " WHERE tenant_id = ? AND guard_domain = 'runtime_placement' FOR UPDATE")) {
+                lock.setString(1, session.tenantId());
                 try (var rows = lock.executeQuery()) {
                     assertThat(rows.next()).isTrue();
                 }

@@ -57,16 +57,19 @@ vi.mock('ws', () => {
   return { default: FakeWebSocket };
 });
 
-vi.mock('axios', () => {
-  const post = vi.fn(async () => ({
-    data: { endpoint: 'wss://fake.invalid', ticket: 'tk' },
-  }));
-  const get = vi.fn(async () => ({
-    status: 200,
-    data: { access_token: 'token' },
-  }));
-  return { default: Object.assign(post, { get }) };
-});
+// Endpoint discovery is the wrapper's own bounded fetch (#17173 R11), so the
+// network boundary to fake here is fetch rather than the SDK's axios.
+const stubDiscovery = () =>
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes('gettoken')
+          ? { access_token: 'token' }
+          : { endpoint: 'wss://fake.invalid', ticket: 'tk' },
+    })),
+  );
 
 import { createManagedDingtalkDeps } from './managed-dingtalk-deps.js';
 
@@ -90,6 +93,7 @@ const socketCount = (): number => wsState.instances.length;
 
 beforeEach(() => {
   wsState.instances.length = 0;
+  stubDiscovery();
   vi.useFakeTimers();
   vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'info').mockImplementation(() => {});
@@ -99,6 +103,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 

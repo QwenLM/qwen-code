@@ -2,7 +2,7 @@
 
 [English](2026-11-17-worktree-carry-metadata.md) | [简体中文](2026-11-17-worktree-carry-metadata.zh-CN.md)
 
-- 状态：本 PR 实现 D1–D4；P6 U4/U5 继续由 #17237 跟踪。
+- 状态：D1–D4 已通过 [#17533](https://github.com/QwenLM/qwen-code/pull/17533) 合入，squash commit 为 [`17217d136a75a3070143cbded6de6b467039368c`](https://github.com/QwenLM/qwen-code/commit/17217d136a75a3070143cbded6de6b467039368c)；P6 U4/U5 与 P7 继续由 [#17237](https://github.com/QwenLM/qwen-code/issues/17237) 跟踪。
 - 基于：`2026-11-14-web-shell-codex-worktree-parity.md`（D3 dirty 携带、D6 handoff、D7 快照）
 - 跟踪：#17237「Carry metadata for the reaper (R9-6, deferred from #17228)」
 - 关联：#17228 评审评论 6900008905 / 4579730709
@@ -183,7 +183,29 @@ archive/unarchive 绑定。删除先校验 ownership，在会话记录已删除�
 ## 范围外（#17237 后续阶段）
 
 - P6 保留清扫（U4）与重开恢复（U5），设计 D7：按数量的 `worktree.maxRetained`
-  清扫与读回快照的入口。删除前快照（U3）**已在本 PR 落地**（D4）；清扫与恢复读取方
+  清扫与读回快照的入口。删除前快照（U3）**已通过 #17533 落地**（D4）；清扫与恢复读取方
   是 P6 剩余单元。U5 落地前，归档按 `sessionId` 键存于 sidecar 旁（chats 目录，归档会话
   为其 `archive/` 子目录）并在清理日志中点名；U4 落地前，无清理方修剪它。
 - P7 可配置 worktree 根（`worktree.root`）。
+
+## 交付与验证证据
+
+#17533 于 2026-11-20 08:46:56 UTC 以 squash 方式合入。验证对应的 PR head 为 `cfea959835ae3e1b2623c14dbef4cf54586dea04`；主线 squash commit 为 `17217d136a75a3070143cbded6de6b467039368c`。
+
+最终真实进程验证在 Linux + Node 24.22.1 + Git 2.39.5 上，通过 HTTP 驱动独立 daemon 实例，执行真实 Git 和文件系统操作。每个场景使用独立夹具，并检查真实 transcript 与最终文件系统状态：
+
+| 场景                     | 通过的检查 |
+| ------------------------ | ---------: |
+| `legacy-hidden-deletion` |      18/18 |
+| `legacy-ordinary-sparse` |      15/15 |
+| `injected-generic-error` |      13/13 |
+| `injected-stdin-epipe`   |      13/13 |
+| `rebase-pending`         |      14/14 |
+| `rebase-quit-clean`      |      15/15 |
+| **合计**                 |  **88/88** |
+
+独立原始证据审计通过 **27/27** 项检查。全量 build、bundle、根 typecheck、针对性测试及限定范围的 ESLint 在验证的 PR head 上通过；lint 排除范围仅限生成的 SDK JavaDoc 输出。离线夹具没有调用外部模型。这些结果不代表覆盖所有 Git、OS、sparse-index 或 Unicode/provider 组合。
+
+详见[最终验证报告](https://github.com/QwenLM/qwen-code/pull/17533#issuecomment-7033889550)与[独立合入后收尾审查](https://github.com/QwenLM/qwen-code/pull/17533#issuecomment-7034945521)。squash commit 对应的产品 CI [run 44705284375](https://github.com/QwenLM/qwen-code/actions/runs/44705284375) 已成功完成；其中完成的 Linux build、test 和 lint jobs 与上述运行时矩阵相互独立，skip 的条件性 jobs 不增加验证覆盖。
+
+延期的 U4/U5/P7 及覆盖建议（包括串行归档写入保护的覆盖评估）继续归入 #17237。覆盖建议不是现有保护已损坏的证据，本身也不构成启用并行归档写入的理由。

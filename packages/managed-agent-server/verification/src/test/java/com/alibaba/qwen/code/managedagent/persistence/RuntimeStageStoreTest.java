@@ -124,16 +124,15 @@ class RuntimeStageStoreTest {
         assertThat(stageStore.highestStagedSequence(callId)).isEqualTo(2L);
 
         // Segment is PUBLISHED without RUNTIME_STAGE ref; page + manifests are REFERENCED under RUNTIME_STAGE.
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         assertThat(jdbc.queryForObject(
-                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
-                String.class, scope, "seg-1")).isEqualTo("PUBLISHED");
+                "SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, TENANT, session, "seg-1")).isEqualTo("PUBLISHED");
         assertThat(jdbc.queryForObject(
-                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
-                String.class, scope, "man-1")).isEqualTo("REFERENCED");
+                "SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, TENANT, session, "man-1")).isEqualTo("REFERENCED");
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'",
-                Integer.class, scope)).isEqualTo(3);
+                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'",
+                Integer.class, TENANT, session)).isEqualTo(3);
 
         // Background :process row in ma_tool_execution is settled as completed.
         ToolExecutionRecord settledProcess = executionRepo.findByExecutionCallId(callId + ":process");
@@ -155,8 +154,8 @@ class RuntimeStageStoreTest {
         stageStore.acknowledgeStagedDeliveries(TENANT, session, "writer", writerGeneration, callId, 2L);
         assertThat(stageStore.listStagedDeliveries(TENANT, session, "writer", writerGeneration)).isEmpty();
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'",
-                Integer.class, scope)).isZero();
+                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'",
+                Integer.class, TENANT, session)).isZero();
     }
 
     @Test
@@ -254,8 +253,8 @@ class RuntimeStageStoreTest {
                 "SELECT COUNT(*) FROM ma_runtime_stage WHERE runtime_session_key = ?",
                 Integer.class, scope)).isZero();
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'RUNTIME_STAGE'",
-                Integer.class, scope)).isZero();
+                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'",
+                Integer.class, TENANT, session)).isZero();
 
         // A trailing stageBatch arriving after retirement settles :process without re-populating ma_runtime_stage.
         StageOutcome trailing = stageStore.stageBatch(new StageBatchRequest(

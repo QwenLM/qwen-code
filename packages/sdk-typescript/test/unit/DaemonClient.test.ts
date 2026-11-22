@@ -8284,6 +8284,65 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('rateSessionTurn', () => {
+    it('POSTs promptId and rating and returns the recorded answer', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: true }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn('s-1', 'prompt-1', 'up');
+      expect(result).toEqual({ recorded: true });
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/feedback');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'up',
+      });
+    });
+
+    it('sends the client identity header', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { recorded: false }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const result = await client.rateSessionTurn(
+        's-1',
+        'prompt-1',
+        'down',
+        'client-1',
+      );
+      expect(result).toEqual({ recorded: false });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        promptId: 'prompt-1',
+        rating: 'down',
+      });
+    });
+
+    it('throws on 404 (unknown session)', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(404, { error: 'unknown', sessionId: 's-1' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({ status: 404 });
+    });
+
+    it('surfaces the route label on failure', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { error: "`rating` must be 'up' or 'down'" }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rateSessionTurn('s-1', 'prompt-1', 'up'),
+      ).rejects.toMatchObject({
+        status: 400,
+        message: expect.stringContaining('POST /session/:id/feedback'),
+      });
+    });
+  });
+
   describe('setSessionConfigOption', () => {
     it.each(['acp-http', 'acp-ws'] as const)(
       'normalizes only Workflow mode persistence on %s',

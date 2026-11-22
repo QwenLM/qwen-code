@@ -126,16 +126,15 @@ class RuntimeStageMySqlIT {
                         terminalEntry(callId, 2L, "my-man-2", "success", false)))).committed()).isTrue();
         assertThat(stageStore.highestStagedSequence(callId)).isEqualTo(2L);
 
-        String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         assertThat(jdbc.queryForObject(
-                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
-                String.class, scope, "my-seg-1")).isEqualTo("PUBLISHED");
+                "SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, TENANT, session, "my-seg-1")).isEqualTo("PUBLISHED");
         assertThat(jdbc.queryForObject(
-                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
-                String.class, scope, "my-man-1")).isEqualTo("REFERENCED");
+                "SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                String.class, TENANT, session, "my-man-1")).isEqualTo("REFERENCED");
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
-                        + " AND owner_kind = 'RUNTIME_STAGE'", Integer.class, scope)).isEqualTo(3);
+                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                        + " AND owner_kind = 'RUNTIME_STAGE'", Integer.class, TENANT, session)).isEqualTo(3);
         assertThat(executionRepo.findByExecutionCallId(callId + PROCESS_SUFFIX).getExecutionStatus())
                 .isEqualTo("success");
         assertThat(headInt("is_wake_pending")).isEqualTo(1);
@@ -148,8 +147,8 @@ class RuntimeStageMySqlIT {
         assertThat(stageStore.listStagedDeliveries(TENANT, session, "writer", writerGeneration))
                 .isEmpty();
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
-                        + " AND owner_kind = 'RUNTIME_STAGE'", Integer.class, scope)).isZero();
+                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                        + " AND owner_kind = 'RUNTIME_STAGE'", Integer.class, TENANT, session)).isZero();
     }
 
     @Test
@@ -241,8 +240,8 @@ class RuntimeStageMySqlIT {
                 "SELECT COUNT(*) FROM ma_runtime_stage WHERE runtime_session_key = ?",
                 Integer.class, scope)).isZero();
         assertThat(jdbc.queryForObject(
-                "SELECT COUNT(*) FROM ma_resource_ref WHERE session_scope_key = ?"
-                        + " AND owner_kind = 'RUNTIME_STAGE'", Integer.class, scope)).isZero();
+                "SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                        + " AND owner_kind = 'RUNTIME_STAGE'", Integer.class, TENANT, session)).isZero();
 
         // A trailing batch after retirement settles the row without re-staging.
         StageOutcome trailing = stageStore.stageBatch(new StageBatchRequest(

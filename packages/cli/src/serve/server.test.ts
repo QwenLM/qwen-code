@@ -597,6 +597,7 @@ function fakeDaemonLog(): DaemonLogger {
     warn: vi.fn(),
     error: vi.fn(),
     raw: vi.fn(),
+    setPort: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
     getStatus: () => ({
@@ -715,6 +716,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_sub_session_send',
   'session_prompt',
   'session_turn_status',
+  'session_turn_feedback',
   'session_attachments',
   'session_attachment_chunk_upload',
   'session_attachment_list',
@@ -1614,6 +1616,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: SetSessionModelRequest;
     context?: BridgeClientRequestContext;
   }>;
+  feedbackCalls: Array<{
+    sessionId: string;
+    req: Parameters<AcpSessionBridge['rateSessionTurn']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
   setConfigOptionCalls: Array<{
     sessionId: string;
     req: Parameters<AcpSessionBridge['setSessionConfigOption']>[1];
@@ -1831,6 +1838,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setConfigOptionCalls: FakeBridge['setConfigOptionCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
@@ -2533,6 +2541,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     continueSessionContexts,
     sessionHooksCalls,
     setModelCalls,
+    feedbackCalls,
     setConfigOptionCalls,
     setLanguageCalls,
     setApprovalModeCalls,
@@ -2947,6 +2956,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async setSessionModel(sessionId, req, context) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return setModelImpl(sessionId, req, context);
+    },
+    async rateSessionTurn(sessionId, req, context) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
     },
     async setSessionConfigOption(sessionId, req, context) {
       setConfigOptionCalls.push({
@@ -17499,6 +17512,84 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/load and /resume', () => {
+    it('gzip-compresses large load responses when the client negotiates it (#6181)', async () => {
+      // Transcript-shaped replay: highly repetitive JSON past the 1 KiB
+      // compression threshold, like a real multi-megabyte session load.
+      const compactedReplay = Array.from({ length: 200 }, (_, i) => ({
+        id: i + 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'gzip-large',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'assistant message chunk with repeated transcript prose '.repeat(
+                4,
+              ),
+            },
+          },
+        },
+      }));
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: req.clientId ?? 'client-load',
+          state: {},
+          hasActivePrompt: false,
+          compactedReplay,
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      // `Accept-Encoding: identity` is set explicitly: superagent injects a
+      // default `Accept-Encoding: gzip, deflate` when the header is absent,
+      // which would negotiate compression on the "uncompressed" control
+      // request.
+      const identityRes = await request(app)
+        .post('/session/gzip-large/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Accept-Encoding', 'identity')
+        .send({});
+      expect(identityRes.status).toBe(200);
+      expect(identityRes.headers['content-encoding']).toBeUndefined();
+      const identityBytes = Buffer.byteLength(JSON.stringify(identityRes.body));
+
+      const gzipRes = await request(app)
+        .post('/session/gzip-large/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Accept-Encoding', 'gzip, deflate, br')
+        .send({})
+        .buffer(true)
+        .parse((response, callback) => {
+          const chunks: Buffer[] = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => callback(null, Buffer.concat(chunks)));
+        });
+      expect(gzipRes.status).toBe(200);
+      expect(gzipRes.headers['content-encoding']).toBe('gzip');
+      expect(String(gzipRes.headers['vary']).toLowerCase()).toContain(
+        'accept-encoding',
+      );
+      // superagent transparently inflates the gzip layer before the parse
+      // callback runs, so res.body is the decoded JSON bytes; the wire size
+      // is carried by the rewritten Content-Length header.
+      expect(gzipRes.body.byteLength).toBe(identityBytes);
+      expect(Number(gzipRes.headers['content-length'])).toBeLessThan(
+        identityBytes / 2,
+      );
+      expect(JSON.parse(gzipRes.body.toString('utf8'))).toEqual(
+        identityRes.body,
+      );
+    });
+
     it('reports resume as unsupported for virtual subagent sessions', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(

@@ -86,6 +86,34 @@ describe('ModRowAsker', () => {
     asker.watch(row('three'), () => {});
     expect(ask).toHaveBeenCalledOnce();
   });
+
+  it('keeps asking for reply rows once thinking rows are unhooked', async () => {
+    const { ask, pending } = asked();
+    const asker = new ModRowAsker(ask);
+    const thought = (text: string): DaemonModRow => ({
+      component: 'Thinking',
+      props: { text },
+    });
+    asker.watch(thought('plan'), () => {});
+    asker.watch(row('one'), () => {});
+    pending[0]!.answer({ status: 'unhooked' });
+    await settle();
+    asker.watch(thought('another plan'), () => {});
+    expect(ask.mock.calls.map(([asked]) => asked.component)).toEqual([
+      'Thinking',
+      'AssistantMessage',
+    ]);
+    pending[1]!.answer({
+      status: 'answered',
+      props: { text: '一', isFirstOfReply: true },
+    });
+    await settle();
+    expect(asker.answer(row('one'))).toEqual({
+      text: '一',
+      isFirstOfReply: true,
+    });
+    expect(ask).toHaveBeenCalledTimes(2);
+  });
 });
 
 it('classifies main replies and preserves continuation across thoughts and Mod logs', () => {
