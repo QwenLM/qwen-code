@@ -372,7 +372,7 @@ The container boundary check belongs inside: run the trusted copy of the preflig
 there — a pass writes the `boundary-gate.json` record the checker requires
 beside the declaration — and treat exit 4 as "this is not a boundary". The
 Docker recipe below mounts that copy at
-`/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary takes the same trusted
+`/trusted-scripts/verify-pr-prepare.mjs`, and a VM boundary takes the same trusted
 copy but runs **no `--require-isolation` gate** (a VM carries no observed
 container marker), so there is no in-boundary gate command and no
 `boundary-gate.json` to produce. Select `--execution vm` and its approval
@@ -429,7 +429,8 @@ in **Watch mode** below.
 
 The boundary and the model credential are separate problems: the container
 isolates PR code, and a host-side proxy keeps the real model key out of the
-container. `scripts/verify-pr-model-proxy.mjs` is that proxy — the same relay
+container.
+`scripts/verify-pr-model-proxy.mjs` is that proxy — the same relay
 rules as the CI lane's inline one (only `POST /chat/completions`, a per-run
 bearer token, a per-chunk idle watchdog), plus hop-by-hop request header
 stripping. The CI lane deliberately keeps its own inline copy.
@@ -794,7 +795,8 @@ from a request that did not ask for a standing watch.
 
 The gate is a shell command the scheduler runs outside the model: silence skips
 the fire with no model turn, and output delivers that JSON to the session. Run
-it through `scripts/verify-pr-watch-gate.mjs` instead of calling the probe
+it through
+`scripts/verify-pr-watch-gate.mjs` instead of calling the probe
 directly: the probe also reports comments and failed checks, and every
 non-empty gate output starts a turn whether or not the head moved. The wrapper
 forwards only `action: "resync"` (a moved head) and `action: "stop"`.
@@ -851,7 +853,18 @@ above. Before prepare, select `--execution container` for an unattended
 watch. Do not persist `--trust-pr-head` for unknown future heads or invent a
 fork approval: if the maintainer selects VM/host for this delivered head,
 stop for their explicit current decision, then resume with the approval path
-above. Then run prepare with the selected execution; it creates and prints
+above. A persisted snapshot installed before `--registration-nonce` existed
+cannot silently use the older head/round-only completion for a nonce-bearing
+new registration. Preserve that registration and pass its nonce explicitly:
+prefer the value printed by its exact `--start`. If that output is lost,
+**read only** its matching `inFlightHeads` entry, or a matching
+`verifiedHeads` entry after completion, in its trusted state JSON; then add
+`--registration-nonce <nonce>` to both normal completion and recovery
+release. A missing or wrong nonce still exits 3 without consuming a
+replacement registration or overwriting its verdict. An actual legacy entry
+without a nonce keeps the explicit migration behavior described above; a new
+nonce is never optional merely because the persisted prompt predates the
+flag. The helper never infers that identity on the caller's behalf. Then run prepare with the selected execution; it creates and prints
 the artifact directory `<dir>`, which you record at `--complete`. When prepare
 succeeds, compare the `head` line it printed (the trusted snapshot's
 `headRefOid`) with `<headSha>` before the battery: prepare checks the tree
@@ -1145,7 +1158,12 @@ ambiguous rather than verify a guessed PR. Then, in order:
    `--registration-nonce <nonce>` on completion or release: new live
    registrations and retained completed verdicts both check that identity.
    Keep registration ahead of any approval wait, then select the execution and
-   approval path above. Run prepare with `--execution container | vm | host`
+   approval path above. For a snapshot installed before
+   `--registration-nonce` existed, follow that same recovery rule: explicitly
+   supply the exact start's value, or **read only** the matching live/verified
+   nonce in its trusted state JSON if the output is lost. No nonce is inferred
+   ahead of `--complete` or `--release`; missing/stale values still refuse
+   replacement registrations and preserve their verdicts. Run prepare with `--execution container | vm | host`
    and its matching arguments; it creates and prints the artifact directory
    `<dir>`, which you record at `--complete`. When prepare succeeds, compare the `head` line it
    printed (the trusted snapshot's `headRefOid`) with `<H>` before the
@@ -2597,7 +2615,8 @@ at head is therefore a failed assertion attributed to `pr`, never an
 expected-red pass — that rule covers control cells, which exist to fail, not
 head behaviour the PR got wrong. Measured example: a round reproduced a
 regression, asserted that the head showed it, and published `blocked` over
-4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
+4382 passes and 0 failures. The CI publisher runs
+`verify-pr-check.mjs` before
 it trusts any verdict, so run it on the artifact dir before you finish, in
 either path. On the CI entry path (`$QWEN_VERIFY_CONTEXT` set) an absent
 `boundary.json` — or a container declaration whose gate record is absent —

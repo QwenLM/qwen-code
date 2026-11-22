@@ -110,6 +110,8 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 
 新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。`registrationNonce` 是记录在 in-flight 并随产生的 verified 保留的注册身份，没有平行批准文件或新的 next-round 命令。`--complete` 与 `--release` 接受匹配的 nonce；verified 的 replay 也只接受同一 nonce。瞬时 prepare 失败保留注册和 nonce，所以其重试可以沿用匹配评论。实际释放后再 `--start` 总是分配新 nonce：即使 head/round 相同，也需要新的评论标记。非评论容器重试或后续轮次在 complete/release 时仍须匹配 head/round 以及该注册的 nonce，但不需要公共批准标记。
 
+由旧保存 prompt 继续的 watch，不因其 prompt 旧而免于新注册的 nonce 要求。优先从该次 `--start` 的原始输出中取回 nonce。输出已丢失时，操作者可以只读可信 state 文件中的匹配 `inFlightHeads` 条目（完成或重放时则在 `verifiedHeads` 中查找），将读到的 nonce 显式填入 `--registration-nonce`，再执行 `--complete` 或 `--release`。命令不会替旧裸调用查询或静默补入当前值；只有真正无 nonce 的 legacy 条目可以省略。缺失或错误 nonce 仍拒绝，新旧注册不因此互相覆盖。
+
 无人值守 watch 不得编造宿主批准。它选择容器，或停下等待维护者，不能为未来未知 head 持久保存 `--trust-pr-head`。未带 `--execution` 的旧持久 watch prompt 保持容器默认值：既不会在 cursor 交付后被拒绝，也不会被提升为未经批准的宿主轮次。
 
 请求本地信任时说明：作者或仓库匹配不是自动豁免，标志信任的是当前完整 head。索要他人 fork 的批准时说明：评论记录不可信代码将在哪里运行；它位于 PR 可写产物树之外；不是代码评审或合并批准；并且在执行前而不是只在发布时检查。

@@ -770,6 +770,17 @@ describe('local container recipe pins', () => {
       '--state-root',
       '--attestation',
     ]);
+    const validToken = (token) => {
+      const unquoted =
+        token.startsWith('"') && token.endsWith('"') && token.length >= 2
+          ? token.slice(1, -1)
+          : token;
+      return (
+        unquoted.length > 0 &&
+        !/[`$;|&()"'[\]{}\\]/.test(unquoted) &&
+        (!/[<>]/.test(unquoted) || /^<[^<>]+>$/.test(unquoted))
+      );
+    };
     const validCoordinate = (raw) => {
       let text = raw.replace(/\s+/g, ' ').trim();
       if (text.endsWith(logSuffix)) {
@@ -783,9 +794,9 @@ describe('local container recipe pins', () => {
       const options = new Map();
       const positional = [];
       const tokens = text.split(' ').filter(Boolean);
+      if (!tokens.every(validToken)) return false;
       for (let index = 0; index < tokens.length; index += 1) {
         const token = tokens[index];
-        if (/[<>]/.test(token) && !/^<[^<>]+>$/.test(token)) return false;
         if (token === '--trust-pr-head') {
           if (options.has(token)) return false;
           options.set(token, true);
@@ -833,43 +844,224 @@ describe('local container recipe pins', () => {
       }
       return true;
     };
+    // This is a closed vocabulary for the documented calls, not a general
+    // shell parser. A different entry point, path, option, or value fails.
+    const placeholder = '<[A-Za-z0-9_./,:-]+>';
+    const value = String.raw`(?:[A-Za-z0-9_~./:+=-]+|${placeholder}|"(?:${placeholder}|\$rd)")`;
+    const repo = String.raw`(?:<owner>/<repo>|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)`;
+    const head = '(?:<headSha>|<40hex>|<H>)';
+    const round = '(?:<r>|[1-9][0-9]*)';
+    const stateRoot = ' --state-root "<trusted-dir>"';
+    const exact = (body) => new RegExp(`^${body.trim()}$`);
+    const validHelperArguments = (kind, raw, quotedGate = false) => {
+      let text = raw.replace(/\s+/g, ' ').trim();
+      const codeEnd = text.indexOf('`');
+      if (codeEnd >= 0) {
+        const explanation = text.slice(codeEnd + 1).trim();
+        if (
+          !/^[).,:]*\s*(?:[A-Za-z][A-Za-z0-9 .,()_:-]*)?$/.test(explanation)
+        ) {
+          return false;
+        }
+        text = text.slice(0, codeEnd);
+      }
+      if (
+        kind === 'prepare' &&
+        text.endsWith(logSuffix) &&
+        text.includes('--context-out')
+      ) {
+        text = text.slice(0, -logSuffix.length).trimEnd();
+      } else if (
+        kind === 'model-proxy' &&
+        text.endsWith(
+          '> ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err &',
+        )
+      ) {
+        text = text.slice(
+          0,
+          -'> ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err &'
+            .length,
+        );
+      } else if (kind === 'check' && text.endsWith('|| rc=$?')) {
+        text = text.slice(0, -'|| rc=$?'.length);
+      } else if (kind === 'credential-scan' && text.endsWith('|| exit 1')) {
+        text = text.slice(0, -'|| exit 1'.length);
+      }
+      if (quotedGate) {
+        if (kind !== 'watch-gate' || !text.trimEnd().endsWith('"')) {
+          return false;
+        }
+        text = text.trimEnd().slice(0, -1);
+      }
+      text = text.trim();
+      if (kind !== 'check' && text.includes('$(cat ')) return false;
+      text = text
+        .replace(
+          /"\$\(cat ~\/\.cache\/qwen-verify\/pr<n>\/pr\.sha256\)"/g,
+          '<digest>',
+        )
+        .replace(/(^|\s)--repo=/g, '$1--repo ')
+        .replaceAll('[--round <r>]', '--round <r>')
+        .replaceAll('[--artifact-dir <dir>]', '--artifact-dir <artifact-dir>')
+        .replaceAll('[--comment-id <id>]', '--comment-id <id>')
+        .replaceAll('<blocking head>', '<headSha>')
+        .replaceAll('<host snapshot>', '<host-snapshot>')
+        .replaceAll('<artifact dir>', '<artifact-dir>')
+        .replaceAll('<absolute qwen>', '<absolute-qwen>')
+        .replaceAll('pr<n>', 'prN')
+        .replaceAll('<owner>/<repo>', 'owner/repo');
+      if (kind === 'prepare') {
+        return (
+          validCoordinate(text) ||
+          text === '--require-isolation --artifact-dir <round-dir>'
+        );
+      }
+      if (kind === 'check') {
+        return exact(
+          String.raw` --context ${value} --context-sha256 <digest>(?: --context-root ${value})? ${value}`,
+        ).test(text);
+      }
+      if (kind === 'model-proxy') {
+        return exact(String.raw` --listen ${value}`).test(text);
+      }
+      if (kind === 'credential-scan') return text === '/work';
+      if (kind === 'watch-state') {
+        const start = exact(
+          String.raw` <n> --start --head ${head} --round ${round} --repo ${repo}(?:${stateRoot})?`,
+        );
+        const complete = exact(
+          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${value}(?: --artifact-dir ${value})?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
+        );
+        const release = exact(
+          String.raw` <n> --release --head ${head}(?: --round ${round})?(?: --registration-nonce <nonce>)? --repo ${repo}(?:${stateRoot})?`,
+        );
+        return start.test(text) || complete.test(text) || release.test(text);
+      }
+      if (kind === 'watch-gate') {
+        return (
+          exact(' <n> --check --claim').test(text) ||
+          exact(' <n> --release').test(text) ||
+          exact(` <n> --repo ${repo} --cli <absolute-qwen>`).test(text)
+        );
+      }
+      return false;
+    };
+    const trustedPath = (path) =>
+      !path.split('/').includes('..') &&
+      !path.includes('\\') &&
+      ([
+        `${script.slice(0, script.lastIndexOf('/') + 1)}`,
+        '<clone>/scripts/',
+        '/trusted-scripts/',
+        'scripts/',
+      ].some((prefix) => path.startsWith(prefix)) ||
+        /^verify-pr-[a-z-]+\.mjs$/.test(path));
     const onlyDocumentedPrepareCalls = (document) => {
-      const calls = [
-        ...document.matchAll(
-          /(?:^|&&)\s*(?:(\S+)\s+)?([^\s`]*verify-pr-prepare\.mjs)([^\n]*)/gm,
+      const source = document.replace(/\\\r?\n\s*/g, ' ');
+      const paths = [
+        ...source.matchAll(
+          /([^\s"'`]*verify-pr-[a-z-]+\.mjs)(?![A-Za-z0-9_-])/g,
         ),
       ];
-      const argumentsOf = (match) => {
-        const text = match[3].trimEnd();
-        // Drop only the final inline-code delimiter used in this recipe;
-        // preceding backticks remain visible to the hostile-input check.
-        return text.endsWith('`') ? text.slice(0, -1) : text;
+      if (paths.some((match) => !trustedPath(match[1]))) return false;
+      const interpreted = [
+        ...source.matchAll(
+          /(?:^|[\n;|`]|&&)\s*([^\s"'`|;&]+)\s+["']?[^\s"'`]*verify-pr-[a-z-]+\.mjs(?![A-Za-z0-9_-])/g,
+        ),
+      ];
+      if (interpreted.some((match) => match[1] !== 'node')) return false;
+      const entryPoints = [
+        ...source.matchAll(
+          /node\s+["']?[^\s"'`]*verify-pr-[a-z-]+\.mjs(?![A-Za-z0-9_-])/g,
+        ),
+      ];
+      const calls = [
+        ...source.matchAll(
+          /node\s+(["']?)([^\s"'`]*verify-pr-([a-z-]+)\.mjs)(?![A-Za-z0-9_-])\1([^\n]*)/g,
+        ),
+      ];
+      if (calls.length !== entryPoints.length) return false;
+      const invocationPaths = new Set(
+        calls.map((match) => match.index + match[0].indexOf(match[2])),
+      );
+      const bareReference = (match) => {
+        if (invocationPaths.has(match.index)) return true;
+        if (["'", '"'].includes(source[match.index - 1])) return false;
+        const opening = source.lastIndexOf('`', match.index - 1);
+        const closing = source.indexOf('`', match.index + match[1].length);
+        const inline = source.slice(opening + 1, closing).trim();
+        if (opening >= 0 && closing >= 0 && inline === match[1]) {
+          // Citation delimiters must not continue a shell or JavaScript expression.
+          const lineStart = source.lastIndexOf('\n', opening - 1) + 1;
+          const beforeInline = source.slice(lineStart, opening);
+          const prior = source.slice(0, opening).trimEnd().at(-1);
+          if (
+            beforeInline.trim() !== '' ||
+            ['(', '[', '{', '/', '"', "'", '&', '|', ';', '<', '>'].includes(
+              prior,
+            ) ||
+            /[|&;<>]+\s*(?:#[^\n]*\s*)*$/.test(source.slice(0, opening))
+          ) {
+            return false;
+          }
+          const following = source.slice(closing + 1).trimStart();
+          if (
+            /^[)\]}]/.test(following) ||
+            following.startsWith('/') ||
+            /^\.[A-Za-z_$]/.test(following)
+          ) {
+            return false;
+          }
+          const lineEnd = source.indexOf('\n', closing + 1);
+          const trailing = source
+            .slice(closing + 1, lineEnd < 0 ? source.length : lineEnd)
+            .trim();
+          return !/[;|&$<>]/.test(trailing);
+        }
+        const lineStart = source.lastIndexOf('\n', match.index) + 1;
+        const prefix = source
+          .slice(lineStart, match.index)
+          .replace(/^[[\s('"]+/, '');
+        const nextNewline = source.indexOf('\n', match.index + match[1].length);
+        const suffix = source
+          .slice(
+            match.index + match[1].length,
+            nextNewline < 0 ? source.length : nextNewline,
+          )
+          .replace(/[\s'")\],.:]+$/, '');
+        return prefix === '' && suffix === '';
       };
-      const coordinates = calls.filter(
-        (match) => !argumentsOf(match).trim().startsWith('--require-isolation'),
-      );
-      const gates = calls.filter((match) =>
-        argumentsOf(match).trim().startsWith('--require-isolation'),
-      );
-      const trustedPaths = new Set([
-        script,
-        '/trusted-scripts/verify-pr-prepare.mjs',
+      const prefixes = new Set([
+        '',
+        '`',
+        '`gate: "',
+        '(',
+        '(`',
+        'cd <pr-clone> &&',
+        '`cd <pr-clone> &&',
+        '(cd <pr-clone> &&',
+        '(`cd <pr-clone> &&',
+        'REVIEW_OPENAI_BASE_URL=<upstream-url>',
       ]);
       return (
-        calls.length === 4 &&
-        coordinates.length === 3 &&
-        gates.length === 1 &&
-        calls.every((match) => match[1] === 'node') &&
-        coordinates.every(
-          (match) =>
-            trustedPaths.has(match[2]) && validCoordinate(argumentsOf(match)),
-        ) &&
-        gates.every(
-          (match) =>
-            match[2] === '/trusted-scripts/verify-pr-prepare.mjs' &&
-            argumentsOf(match).replace(/\s+/g, ' ').trim() ===
-              '--require-isolation --artifact-dir <round-dir>',
-        )
+        calls.every((match) => {
+          const lineStart = source.lastIndexOf('\n', match.index) + 1;
+          const prefix = source.slice(lineStart, match.index).trim();
+          if (!prefixes.has(prefix) || !trustedPath(match[2])) return false;
+          return validHelperArguments(
+            match[3],
+            match[4],
+            prefix === '`gate: "',
+          );
+        }) &&
+        paths.every(bareReference) &&
+        calls.length === 24 &&
+        calls.filter((match) => match[3] === 'prepare').length === 4 &&
+        calls.filter((match) => match[3] === 'check').length === 3 &&
+        calls.filter((match) => match[3] === 'watch-state').length === 12 &&
+        calls.filter((match) => match[3] === 'watch-gate').length === 3 &&
+        calls.filter((match) => match[3] === 'model-proxy').length === 1 &&
+        calls.filter((match) => match[3] === 'credential-scan').length === 1
       );
     };
     expect(onlyDocumentedPrepareCalls(skill)).toBe(true);
@@ -939,6 +1131,176 @@ describe('local container recipe pins', () => {
       expect(
         onlyDocumentedPrepareCalls(changed.replace(basic.trim(), tail)),
       ).toBe(valid);
+    }
+    for (const hostileValue of ['<(/tmp/evil)', '/tmp/x>/tmp/hijacked']) {
+      expect(
+        onlyDocumentedPrepareCalls(
+          skill.replace(
+            '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
+            `--context-out ${hostileValue}`,
+          ),
+        ),
+        hostileValue,
+      ).toBe(false);
+    }
+    expect(
+      onlyDocumentedPrepareCalls(
+        `${skill}\nsudo -n true; node /tmp/payload/verify-pr-prepare.mjs ${basic.trim()}`,
+      ),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace(
+          invocation,
+          `${script.slice(0, script.lastIndexOf('/') + 1)}../verify-pr-prepare.mjs`,
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace(logged, `${logged} > /tmp/after`),
+      ),
+    ).toBe(false);
+    const helperCalls = [
+      ['prepare', invocation],
+      [
+        'check',
+        'node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>',
+      ],
+      [
+        'watch-state start',
+        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>',
+      ],
+      [
+        'watch-state complete',
+        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+      ],
+      [
+        'watch-state release',
+        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>',
+      ],
+      [
+        'watch-gate probe',
+        'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+      ],
+      [
+        'watch-gate CLI',
+        'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --repo <owner>/<repo> --cli <absolute qwen>',
+      ],
+      [
+        'watch-gate release',
+        'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release',
+      ],
+      [
+        'credential-scan',
+        'node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1',
+      ],
+    ];
+    for (const [family, call] of helperCalls) {
+      expect(skill, family).toContain(call);
+      expect(
+        onlyDocumentedPrepareCalls(
+          skill.replace(call, `${call} ; touch /tmp/should-not-write`),
+        ),
+        family,
+      ).toBe(false);
+    }
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace(
+          '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
+          '--context-out "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)"',
+        ),
+      ),
+    ).toBe(false);
+    const proxyLogging =
+      '> ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err &';
+    expect(skill, 'model-proxy').toContain(proxyLogging);
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace(
+          proxyLogging,
+          `${proxyLogging} ; touch /tmp/should-not-write`,
+        ),
+      ),
+      'model-proxy',
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace(
+          '"$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)"',
+          '"$(cat /tmp/evil)"',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(
+        `${skill}\nnode <trusted-clone>/scripts/verify-pr-unknown.mjs <n> --start`,
+      ),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(skill.replace('gate: "node ', 'node ')),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace('--cli <absolute qwen>"', '--cli <absolute qwen>'),
+      ),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(
+        `${skill}\n\`verify-pr-watch-state.mjs\`; touch /tmp/should-not-write`,
+      ),
+    ).toBe(false);
+    const dynamicImport =
+      'node -e \'import(`/trusted-scripts/verify-pr-watch-state.mjs`).then(function(m){m.startRound("/tmp/fake",{pr:1,head:"bbbbbbb",round:1})})\'';
+    for (const [label, hostile] of [
+      ['dynamic import', dynamicImport],
+      [
+        'command before dynamic import',
+        `touch /tmp/should-not-write; ${dynamicImport}`,
+      ],
+      [
+        'multiline dynamic import',
+        dynamicImport.replace('import(', 'import(\n'),
+      ],
+      [
+        'line-comment dynamic import',
+        dynamicImport.replace('import(', 'import(// continues\n'),
+      ],
+      ...['&&', '||', '|', '&', '|&', ';'].map((operator) => [
+        `shell continuation ${operator}`,
+        `touch /tmp/should-not-write ${operator}\n\`/trusted-scripts/verify-pr-watch-state.mjs\``,
+      ]),
+      ...['&&', '||', '|', '&', '|&', ';'].map((operator) => [
+        `commented shell continuation ${operator}`,
+        `touch /tmp/should-not-write ${operator} # continues\n\`/trusted-scripts/verify-pr-watch-state.mjs\``,
+      ]),
+      ...['&&', '||', '|', '&', '|&', ';'].map((operator) => [
+        `double-commented shell continuation ${operator}`,
+        `touch /tmp/should-not-write ${operator} # continues\n# still a comment\n\`/trusted-scripts/verify-pr-watch-state.mjs\``,
+      ]),
+      [
+        'multiline quoted dynamic import',
+        dynamicImport
+          .replace('import(', 'import(\n')
+          .replaceAll('`', '"')
+          .replace(').then', '\n).then'),
+      ],
+    ]) {
+      expect(onlyDocumentedPrepareCalls(`${skill}\n${hostile}`), label).toBe(
+        false,
+      );
+    }
+    expect(
+      onlyDocumentedPrepareCalls(`${skill}\n\`verify-pr-check.mjs\`.`),
+    ).toBe(true);
+    for (const interpreter of ['/bin/sh', '"/bin/sh"', "'/bin/sh'"]) {
+      expect(
+        onlyDocumentedPrepareCalls(
+          `${skill}\n${interpreter} <clone>/scripts/verify-pr-watch-gate.mjs <n> --check --claim`,
+        ),
+        interpreter,
+      ).toBe(false);
     }
     expect(skill).not.toMatch(
       /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)/,

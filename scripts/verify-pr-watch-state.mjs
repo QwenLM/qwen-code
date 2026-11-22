@@ -946,13 +946,20 @@ marker's directory when the start carried one, else an earlier verdict's
 directory for the same head, else none — a non-inconclusive verdict that
 resolves to none warns that it has no evidence directory. Each actual start
 allocates and prints registrationNonce; a comment approval must match the
-current registration's value. Repeat that exact value with
---registration-nonce on --complete and --release so a delayed call cannot
-consume a replacement registration or replay over its verdict. No nonce is
-inferred from current state for the caller. Only legacy entries without a
-stored nonce may use the explicit no-nonce migration path. Completion or
-release consumes the live marker, so a later start needs a fresh marked
-approval rather than replaying the old comment.
+current registration's value. The flag is REQUIRED for nonce-bearing
+registrations: it is shown in brackets only for the explicit legacy no-nonce
+migration path. Repeat that exact value with --registration-nonce on
+--complete and --release so a delayed call cannot consume a replacement
+registration or replay over its verdict. No nonce is inferred from current
+state for the owner of the call. A persisted watch that predates the flag
+must recover by passing, explicitly, the nonce printed by that exact --start;
+if its output is lost, read the matching inFlightHeads entry (or the
+verifiedHeads entry after completion) in its own trusted state file, then
+place that identity on --complete/--release. That recovery never grants
+missing/stale identities permission to consume a replacement registration.
+Only legacy entries without a stored nonce may use the explicit no-nonce
+migration path. Completion or release consumes the live marker, so a later
+start needs a fresh marked approval rather than replaying the old comment.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -1185,7 +1192,7 @@ function main(argv) {
       if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
       if (result.registrationMismatch) {
         process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; pass --registration-nonce printed by the exact --start (missing or stale identity cannot consume or replay a replacement registration)\n`,
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; pass --registration-nonce printed by the exact --start. For an older snapshot, read that registration's matching live or verified nonce in its trusted state file and pass it explicitly; missing or stale identity cannot consume or replay a replacement registration\n`,
         );
         return 3;
       }
@@ -1248,7 +1255,7 @@ function main(argv) {
       }
       if (result.registrationMismatch) {
         process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; refusing to consume a replacement registration with a stale or missing --registration-nonce\n`,
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; recover its own nonce from the exact start output or matching live state entry and pass --registration-nonce explicitly. Refusing to consume a replacement registration with stale or missing identity\n`,
         );
         return 3;
       }

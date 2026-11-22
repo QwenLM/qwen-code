@@ -287,6 +287,89 @@ describe('registration identity', () => {
         .status,
     ).toBe(2);
   });
+
+  it('recovers a persisted snapshot without inferring a replacement identity', () => {
+    const root = makeRoot();
+    const started = run(root, START);
+    expect(started.status).toBe(0);
+    const before = readState(root, 16866);
+    const nonce = before.inFlightHeads[0].registrationNonce;
+    expect(started.stdout).toContain(nonce);
+    const originalBytes = readFileSync(statePath(root, 16866), 'utf8');
+
+    const legacyCompletion = spawnSync(
+      process.execPath,
+      [SCRIPT, ...COMPLETE, '--state-root', root],
+      { encoding: 'utf8' },
+    );
+    expect(legacyCompletion.status).toBe(3);
+    expect(legacyCompletion.stderr).toContain(
+      'matching live or verified nonce',
+    );
+    expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(originalBytes);
+
+    const completed = run(root, [
+      ...COMPLETE,
+      '--registration-nonce',
+      nonce,
+      '--artifact-dir',
+      'round-evidence',
+      '--comment-id',
+      'round-comment',
+    ]);
+    expect(completed.status).toBe(0);
+    const replay = run(root, [...COMPLETE, '--registration-nonce', nonce]);
+    expect(replay.status).toBe(0);
+    expect(readState(root, 16866).verifiedHeads[0]).toMatchObject({
+      registrationNonce: nonce,
+      artifactDir: 'round-evidence',
+      commentId: 'round-comment',
+    });
+
+    const releaseRoot = makeRoot();
+    expect(run(releaseRoot, START).status).toBe(0);
+    const live = readState(releaseRoot, 16866);
+    const liveNonce = live.inFlightHeads[0].registrationNonce;
+    const legacyRelease = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '16866',
+        '--release',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--state-root',
+        releaseRoot,
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(legacyRelease.status).toBe(3);
+    expect(legacyRelease.stderr).toContain('matching live state entry');
+    expect(readState(releaseRoot, 16866)).toEqual(live);
+    expect(
+      run(releaseRoot, [
+        '16866',
+        '--release',
+        '--head',
+        HEAD,
+        '--round',
+        '11',
+        '--registration-nonce',
+        liveNonce,
+      ]).status,
+    ).toBe(0);
+    expect(readState(releaseRoot, 16866).inFlightHeads).toEqual([]);
+
+    const help = spawnSync(process.execPath, [SCRIPT, '--help'], {
+      encoding: 'utf8',
+    });
+    expect(help.status).toBe(0);
+    expect(help.stdout).toContain('inFlightHeads');
+    expect(help.stdout).toContain('verifiedHeads');
+    expect(help.stdout).toContain('exact --start');
+  });
 });
 
 describe('startRound', () => {

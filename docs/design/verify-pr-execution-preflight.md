@@ -136,6 +136,16 @@ operator must deliberately release and restart to allocate a nonce, then
 request a fresh marked approval; prepare never silently migrates an old
 comment into approval for the new registration.
 
+A watch continued from an old saved prompt is not a nonce exemption when its
+registration was created by the new implementation. Recover the nonce from
+that exact `--start` invocation's output. If that output is no longer
+available, an operator may read the matching entry in the trusted state
+file's `inFlightHeads` (or `verifiedHeads` for completion/replay), then pass
+that value explicitly with `--registration-nonce` to `--complete` or
+`--release`. The command does not look up or silently supply a current value
+for a bare invocation. A genuinely legacy entry without a nonce remains the
+only omission-compatible case.
+
 The maintainer, never the round, then posts a comment on the PR. The comment
 contains one exact marker and human-readable approval text:
 
