@@ -152,11 +152,13 @@ interface Run {
 
 /**
  * The root config's `retry: 2` would rerun both TUI sessions after a stall,
- * tripling its cost in the required gate. The ceiling covers all three arms
- * and must outlast the waits inside them: a shared host starved by other
- * jobs stretches every mocked turn several-fold (#18119).
+ * tripling its cost in the required gate. A starved shared host stretches
+ * every mocked turn several-fold — the teammate case measured ~395s under
+ * contention (#18119) — so the ceiling is 1.5x that. It bounds one case, not
+ * all three arms, whose waits sum past it, and it stays at half the 20-minute
+ * gate step so a stall cannot take the rest of the shard down with it.
  */
-const PARITY_CASE_OPTIONS = { retry: 0, timeout: 900_000 };
+const PARITY_CASE_OPTIONS = { retry: 0, timeout: 600_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
