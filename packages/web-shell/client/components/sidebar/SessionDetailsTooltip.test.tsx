@@ -312,6 +312,92 @@ describe('SessionDetailsTooltip', () => {
     }
   });
 
+  it.each([
+    [{ isWaitingForPermission: true }, false, 'Needs approval'],
+    [{ isWaitingForUserQuestion: true }, false, 'User input needed'],
+    [{ hasActivePrompt: true }, false, 'Running'],
+    [{ hasActivePrompt: true }, true, 'Finished'],
+  ])(
+    'composes the background suffix exactly once on every suffixed arm: %s',
+    async (flags, unread, label) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'suffix-count',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: true,
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread={unread}
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(
+          `${label} · Background tasks running`,
+        );
+        expect(
+          (details?.textContent ?? '').split('Background tasks running')
+            .length - 1,
+        ).toBe(1);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('composes the background suffix exactly once under an override label', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'override-count',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+              statusLabel="Custom"
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Custom · Background tasks running',
+      );
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('names background work alongside a running turn', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

@@ -7045,12 +7045,29 @@ describe('WebShellSidebar Live group', () => {
     active.sessions = [{ ...session, hasActivePrompt: false }];
     renderSidebar();
     await act(async () => Promise.resolve());
+    // Control phase: prove the running→idle promotion actually marked the
+    // row unread — with no background work the unread dot owns the slot.
+    active.sessions = [
+      { ...session, hasActivePrompt: false, hasRunningBackgroundTasks: false },
+    ];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
     ).not.toBeNull();
     expect(
       container.querySelector('[data-web-shell-session-completed-unread]'),
     ).toBeNull();
+    // The unread-over-running row guard only covers the render-before-effect
+    // transient: the tracker deletes the unread identity on the first effect
+    // that sees the session running again, so no steady state renders both.
+    // That leg is pinned at hover level by the tooltip unread matrix.
   });
   it.each([
     ['isWaitingForPermission', 'Needs approval'],

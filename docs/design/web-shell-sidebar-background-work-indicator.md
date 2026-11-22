@@ -245,9 +245,13 @@ row. No page errors.
    background over unread, starting spinner over all); the touch layout and
    the existing hover contracts are unchanged.
 6. Every pinned assertion dies under its corresponding mutation: the tooltip
-   matrix and the row-side dot witness cover the composed chains; row guards
-   for transient windows (unread beside a resumed turn) mirror the hover
-   chain pinned by the matrix.
+   matrix (including per-arm suffix occurrence counts and the
+   unread-over-running row) covers the composed chains, and the row-side
+   witness pins the running→idle promotion via a control phase and the
+   background-over-unread slot. The row's unread-over-running guard covers
+   only the render-before-effect transient — the tracker deletes the unread
+   identity on the first effect that sees the session running again — so that
+   leg is deliberately left to the tooltip matrix.
 
 ## Open questions / follow-ups
 

@@ -188,8 +188,11 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
    不再计入计数，并从请求中剔除。
 5. 圆点优先级与 hover 链一致（unread 优先于 running/active-work，background 优先
    于 unread，启动 Spinner 优先于全部）；触屏布局、既有悬停契约不变。
-6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵与行侧圆点见证覆盖组合
-   链；瞬态窗口的行守卫（unread 与恢复回合并存）镜像矩阵钉住的 hover 链。
+6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵（含逐支后缀出现计数与
+   unread 优先于 running 行）覆盖组合链；行侧见证以控制相钉住 running→idle
+   晋升与 background 优先于 unread 的槽位。行上 unread 优先于 running 的守卫
+   只覆盖 effect 前的渲染瞬态——tracker 在首次再看到会话运行的 effect 里即删除
+   unread 身份——故该环刻意留给 tooltip 矩阵。
 
 ## 待决问题 / 后续
 
