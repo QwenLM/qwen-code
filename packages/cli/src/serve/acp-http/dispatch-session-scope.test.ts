@@ -165,6 +165,7 @@ describe('real dispatch notification session scope', () => {
     };
     const data = { sessionId: 'origin', mode: 'default' };
     dispatcher.translateEvent({ sendSession }, 'peer', {
+      v: 1,
       type: 'approval_mode_changed',
       data,
     });
