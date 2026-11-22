@@ -12286,6 +12286,37 @@ export function registerSessionRoutes(
   );
 
   app.post(
+    '/session/:id/feedback',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/feedback',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const promptId = body['promptId'];
+        if (typeof promptId !== 'string' || !promptId) {
+          res.status(400).json({
+            error: '`promptId` is required and must be a non-empty string',
+          });
+          return;
+        }
+        const rating = body['rating'];
+        if (rating !== 'up' && rating !== 'down') {
+          res.status(400).json({ error: "`rating` must be 'up' or 'down'" });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const response = await runtime.bridge.rateSessionTurn(
+          sessionId,
+          { promptId, rating },
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      },
+    ),
+  );
+
+  app.post(
     '/session/:id/config-option',
     mutate(),
     withOwnerMutableSession(

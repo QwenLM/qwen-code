@@ -142,6 +142,11 @@ interface FakeBridge extends AcpSessionBridge {
     req: { modelId?: unknown; sessionId?: unknown };
     context?: BridgeClientRequestContext;
   }>;
+  readonly feedbackCalls: Array<{
+    sessionId: string;
+    req: { promptId: string; rating: 'up' | 'down' };
+    context?: BridgeClientRequestContext;
+  }>;
   readonly setApprovalModeCalls: Array<{
     sessionId: string;
     mode: string;
@@ -511,6 +516,7 @@ function makeBridge(
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const metadataCalls: FakeBridge['metadataCalls'] = [];
   const recapCalls: FakeBridge['recapCalls'] = [];
@@ -553,6 +559,7 @@ function makeBridge(
     listCalls,
     summaryCalls,
     setModelCalls,
+    feedbackCalls,
     setApprovalModeCalls,
     metadataCalls,
     recapCalls,
@@ -719,6 +726,14 @@ function makeBridge(
     ) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return { sessionId, modelId: req.modelId, _meta: { applied: true } };
+    },
+    async rateSessionTurn(
+      sessionId: string,
+      req: { promptId: string; rating: 'up' | 'down' },
+      context?: BridgeClientRequestContext,
+    ) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
     },
     async setSessionApprovalMode(
       sessionId: string,
@@ -3807,6 +3822,60 @@ describe('multi-workspace session dispatch', () => {
     // Owner-scoped: the mutation must land on the secondary bridge only, never
     // the primary one.
     expect(primaryBridge.setModelCalls).toEqual([]);
+  });
+
+  it('routes POST /session/:id/feedback to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ promptId: 'prompt-1', rating: 'up' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ recorded: true });
+    expect(secondaryBridge.feedbackCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        req: { promptId: 'prompt-1', rating: 'up' },
+        context: { clientId: 'client-1' },
+      },
+    ]);
+    expect(primaryBridge.feedbackCalls).toEqual([]);
+  });
+
+  it('rejects invalid feedback bodies before reaching the bridge', async () => {
+    const { app, secondaryBridge } = makeHarness();
+    const invalid = [
+      { rating: 'up' },
+      { promptId: '', rating: 'up' },
+      { promptId: 42, rating: 'up' },
+      { promptId: 'prompt-1', rating: 'fine' },
+      { promptId: 'prompt-1', rating: null },
+      { promptId: 'prompt-1' },
+    ];
+    for (const body of invalid) {
+      const res = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+        .set('Host', host())
+        .send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(secondaryBridge.feedbackCalls).toEqual([]);
+  });
+
+  it('rejects feedback on an untrusted non-primary session', async () => {
+    const { app, secondaryBridge } = makeHarness({ secondaryTrusted: false });
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+      .set('Host', host())
+      .send({ promptId: 'prompt-1', rating: 'down' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.feedbackCalls).toEqual([]);
   });
 
   it('routes POST /session/:id/approval-mode to the owning non-primary workspace bridge', async () => {

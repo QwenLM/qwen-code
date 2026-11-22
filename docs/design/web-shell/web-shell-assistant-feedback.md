@@ -28,10 +28,17 @@ the action row, so a host cannot put controls next to the built-in Copy button.
 
 - No server-side persistence. The mark is not written to the session record, and
   is not readable by another browser, device, or client.
-- No telemetry. Marking does not emit an `UserFeedbackEvent` or any other
-  analytics event, and is not gated by the usage-statistics setting.
-- No prompt-id anchoring, no daemon route, and no change to the daemon's
-  transcript projection or wire format.
+- No telemetry in the mark mechanism itself. Marking does not emit an
+  `UserFeedbackEvent` or any other analytics event, and is not gated by the
+  usage-statistics setting. The standalone app's later opt-in adds a telemetry
+  wire path as a separate layer, designed in
+  [Web Shell Assistant Feedback Telemetry](web-shell-assistant-feedback-telemetry.md);
+  the embedded-host contract below remains telemetry-free.
+- No prompt-id anchoring or daemon route **for the mark itself**: the mark
+  store stays browser-local. (The telemetry follow-up's
+  `POST /session/:id/feedback` is a separate, non-persisting notification
+  layer, not a mark store.) No change to the daemon's transcript projection
+  or wire format.
 - No host-supplied initial state: a host cannot seed or override a mark.
 - No per-turn visibility control: the host switches the whole feature on or off.
 
@@ -151,9 +158,12 @@ A host passes this as the `assistantFeedback` prop on the embedded `WebShell`,
 which forwards it into the customization context. Passing the object shows the
 marks; omitting it leaves the answer footer exactly as it is today, which is what
 keeps existing hosts unchanged. The payload types are exported from the package
-entry so a host can name them. This repository's own standalone app does not opt
-in, so the marks appear only where a host passes the option — deliberately, since
-the standalone app has no host to notify.
+entry so a host can name them. This repository's own standalone app originally
+did not opt in, since it had no host to notify. It now opts in through a
+capability-gated wiring inside the app that also reports each mark to telemetry
+— see
+[Web Shell Assistant Feedback Telemetry](web-shell-assistant-feedback-telemetry.md).
+A host-provided option still takes precedence over that wiring.
 
 The marks are offered only in an interactive transcript that has a session id, so
 the read-only and embedded transcript renderings never show them — as does the
@@ -180,7 +190,9 @@ marks on answers that still show Copy.
 - **No reuse of the TUI's `UserFeedbackEvent`.** That event is session-scoped,
   three-valued (`bad`/`fine`/`good`), has no "cleared" state, and its writer also
   emits telemetry. Reusing it would bind a UI toggle to an analytics sink and
-  still not express a per-turn mark.
+  still not express a per-turn mark. The standalone telemetry follow-up
+  deliberately reuses the event through a separate wire path, keeping the mark
+  UI itself independent of it.
 
 ## Constraints
 
@@ -265,6 +277,11 @@ strings introduced are `Satisfied` / `Not satisfied` in English and `满意` /
 
 ## Follow-up work
 
+- Telemetry for the standalone app's marks is implemented in
+  [Web Shell Assistant Feedback Telemetry](web-shell-assistant-feedback-telemetry.md):
+  a capability-gated opt-in plus a `POST /session/:id/feedback` wire path into
+  the session's `logUserFeedback`. The local-mark contract in this document is
+  unchanged.
 - Server-side persistence is still not implemented: the mark lives in this
   browser. Doing it later means writing a record through a new daemon route and
   reading it back through a projection — the key (`sessionId` + `promptId`) and
