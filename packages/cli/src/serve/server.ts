@@ -233,7 +233,6 @@ import {
   registerHostedPackagePreparation,
   HOSTED_PACKAGE_PREPARATION_PREFIX,
 } from './hosted-package-preparation.js';
-import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -2654,7 +2653,6 @@ export function createServeApp(
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
-  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
@@ -2664,17 +2662,6 @@ export function createServeApp(
             token: opts.managedRuntimeBrokerToken,
           }
         : undefined;
-    if (opts.hostedCsiSessionStoreUrl && broker) {
-      const privateSessions = registerHostedCsiSessionRoutes(
-        app,
-        hostedHarness,
-        opts.hostedCsiSessionStoreUrl,
-        broker,
-        (id) => ordinary.owns(id),
-      );
-      stopHostedCsiSessions = privateSessions.stopLocal;
-      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
-    }
     const ordinary = registerHostedHarnessSessionRoutes(
       app,
       hostedHarness,
@@ -4610,7 +4597,6 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
-        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

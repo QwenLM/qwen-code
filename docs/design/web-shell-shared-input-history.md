@@ -86,8 +86,9 @@ Capability advertisement:
   4. Window `focus` / `visibilitychange` (`visible`) so returning to a mobile browser tab syncs inputs submitted on desktop while backgrounded.
   5. Live cross-client SSE signal (`remotePromptSidechannel.ts`, published by `DaemonSessionProvider.tsx` when a live `user.text.delta` or `midTurnInjected` arrives from another `originatorClientId`) triggers a conditional refresh immediately when desktop and mobile have the same session open.
 - **Merge & race safety (`useInputHistory.ts`)**:
-  - `mergeRemoteHistory(localEntries, remoteEntries)`: keeps unique local-only entries before remote entries, then appends remote entries in canonical server order, capped to the latest `100` entries.
+  - `mergeRemoteInputHistory(localEntries, remoteEntries)`: keeps unique local-only entries before remote entries, then appends remote entries in canonical server order, capped to the latest `100` entries.
   - Track a per-hook mutation sequence number so an in-flight `GET` started before a local `push()` never overwrites the freshly pushed local entry.
+  - Track locally pushed entries not yet present in the remote snapshot, persist that bounded pending order beside the existing browser-local history per storage scope, and keep them at the newest tail until a remote snapshot confirms them. Remounts and workspace switches preserve that order; a stale response cannot demote a just-submitted input behind older remote history. Confirmation clears the pending markers without unnecessarily rewriting an unchanged history array.
   - Preserve `useInputHistory`'s zero-re-render invariant when the search panel is closed.
 
 ## Acceptance Criteria

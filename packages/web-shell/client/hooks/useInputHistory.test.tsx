@@ -214,6 +214,39 @@ it('merges remote history ahead at the newest tail while keeping local-only entr
   ]);
 });
 
+it('keeps a just-submitted local prompt at the newest tail until the daemon confirms it', () => {
+  pushInputHistoryEntry('workspace', 'older');
+  pushInputHistoryEntry('workspace', 'middle');
+  render('workspace');
+
+  act(() => history.push('just-submitted'));
+  const version = history.getMutationVersion();
+  expect(history.applyRemoteEntries(['older', 'middle'], version)).toBe(false);
+  expect(history.getReverseMatches('')).toEqual([
+    'just-submitted',
+    'middle',
+    'older',
+  ]);
+
+  expect(
+    history.applyRemoteEntries(['older', 'middle', 'from-desktop'], version),
+  ).toBe(true);
+  expect(history.getReverseMatches('')).toEqual([
+    'just-submitted',
+    'from-desktop',
+    'middle',
+    'older',
+  ]);
+
+  expect(
+    history.applyRemoteEntries(
+      ['older', 'middle', 'from-desktop', 'just-submitted'],
+      version,
+    ),
+  ).toBe(false);
+  expect(history.getLastEntry()).toBe('just-submitted');
+});
+
 it('applies remote entries without re-rendering and ignores stale responses after a local push', () => {
   pushInputHistoryEntry('workspace', 'local-1');
   render('workspace');
@@ -238,4 +271,70 @@ it('applies remote entries without re-rendering and ignores stale responses afte
   act(() => history.push('fresh-mobile'));
   expect(history.applyRemoteEntries(['desktop-1'], staleVersion)).toBe(false);
   expect(history.getLastEntry()).toBe('fresh-mobile');
+});
+
+it('retains the order of pending local prompts across a remount until remote confirmation', () => {
+  pushInputHistoryEntry('workspace', 'older');
+  pushInputHistoryEntry('workspace', 'middle');
+  render('workspace');
+  act(() => history.push('first-pending'));
+  act(() => history.push('second-pending'));
+  expect(JSON.parse(localStorage.getItem('workspace:pending-remote')!)).toEqual(
+    ['first-pending', 'second-pending'],
+  );
+  expect(JSON.parse(localStorage.getItem('workspace')!)).toEqual([
+    'older',
+    'middle',
+    'first-pending',
+    'second-pending',
+  ]);
+
+  render('other');
+  render('workspace');
+  expect(history.getReverseMatches('')).toEqual([
+    'second-pending',
+    'first-pending',
+    'middle',
+    'older',
+  ]);
+
+  const version = history.getMutationVersion();
+  expect(
+    history.applyRemoteEntries(['older', 'middle', 'from-desktop'], version),
+  ).toBe(true);
+  expect(history.getReverseMatches('')).toEqual([
+    'second-pending',
+    'first-pending',
+    'from-desktop',
+    'middle',
+    'older',
+  ]);
+  expect(JSON.parse(localStorage.getItem('workspace:pending-remote')!)).toEqual(
+    ['first-pending', 'second-pending'],
+  );
+
+  expect(
+    history.applyRemoteEntries(
+      ['older', 'middle', 'from-desktop', 'first-pending'],
+      version,
+    ),
+  ).toBe(false);
+  expect(history.getReverseMatches('')).toEqual([
+    'second-pending',
+    'first-pending',
+    'from-desktop',
+    'middle',
+    'older',
+  ]);
+
+  expect(
+    history.applyRemoteEntries(
+      ['older', 'middle', 'from-desktop', 'first-pending', 'second-pending'],
+      version,
+    ),
+  ).toBe(false);
+  expect(history.getLastEntry()).toBe('second-pending');
+  expect(JSON.parse(localStorage.getItem('workspace:pending-remote')!)).toEqual(
+    [],
+  );
 });

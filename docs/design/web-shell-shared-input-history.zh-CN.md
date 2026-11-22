@@ -86,8 +86,9 @@
   4. 窗口 `focus` / `visibilitychange`（`visible`）时刷新，覆盖手机切回浏览器标签页的场景。
   5. 实时跨端 SSE 信号（`remotePromptSidechannel.ts`，由 `DaemonSessionProvider.tsx` 在收到来自其他 `originatorClientId` 的实时 `user.text.delta` 或 `midTurnInjected` 时发布），在电脑和手机同时打开同一会话时立即触发条件刷新。
 - **合并与竞态防护（`useInputHistory.ts`）**：
-  - `mergeRemoteHistory(localEntries, remoteEntries)`：保留仅存在于本地的唯一条目在前，再按服务端顺序追加远端条目，截断至最近 `100` 条。
+  - `mergeRemoteInputHistory(localEntries, remoteEntries)`：保留仅存在于本地的唯一条目在前，再按服务端顺序追加远端条目，截断至最近 `100` 条。
   - 维护每次本地 `push()` 递增的变更序号，防止请求发起后、响应返回前发生的新本地提交被陈旧的 `GET` 响应覆盖。
+  - 按存储作用域，将尚未被远端确认的本地条目及其顺序与现有输入历史一齐保存在浏览器本地。远端确认前保持它们在最新尾，重载或切换工作区后恢复该顺序，确认后清理标记；陈旧快照因此不能把刚提交的输入误排在旧远端条目之前。若历史数组未变，则不额外写回。
   - 搜索面板关闭时不触发宿主组件额外重渲染，保持既有无重渲染不变量。
 
 ## 验收标准

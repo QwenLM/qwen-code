@@ -75,6 +75,10 @@ function readHistory(storageKey: string): string[] | null {
   }
 }
 
+function getPendingRemoteStorageKey(storageKey: string): string {
+  return `${storageKey}:pending-remote`;
+}
+
 function loadHistory(
   storageKey: string,
   fallbackStorageKey?: string,
@@ -136,6 +140,9 @@ export function useInputHistory(
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
   const mutationVersionRef = useRef<number>(0);
+  // Submissions may outrun the daemon write. Preserve their order until a
+  // remote snapshot confirms them instead of demoting them behind old entries.
+  const pendingRemoteEntriesRef = useRef<string[]>([]);
 
   useEffect(() => {
     if (
@@ -152,6 +159,9 @@ export function useInputHistory(
     draftRef.current = '';
     searchIndexRef.current = -1;
     mutationVersionRef.current++;
+    pendingRemoteEntriesRef.current = Array.from(
+      new Set(readHistory(getPendingRemoteStorageKey(storageKey)) ?? []),
+    ).slice(-MAX_HISTORY);
   }, [fallbackStorageKey, storageKey]);
 
   const readCurrentHistory = useCallback(() => {
@@ -167,6 +177,14 @@ export function useInputHistory(
   const push = useCallback(
     (text: string) => {
       mutationVersionRef.current++;
+      pendingRemoteEntriesRef.current = [
+        ...pendingRemoteEntriesRef.current.filter((entry) => entry !== text),
+        text,
+      ].slice(-MAX_HISTORY);
+      void saveHistory(
+        getPendingRemoteStorageKey(storageKeyRef.current),
+        pendingRemoteEntriesRef.current,
+      );
       const h = readCurrentHistory();
       if (h[h.length - 1] === text) {
         if (
@@ -199,7 +217,23 @@ export function useInputHistory(
         return false;
       }
       const current = readCurrentHistory();
-      const merged = mergeRemoteInputHistory(current, remoteEntries);
+      const remoteSet = new Set(remoteEntries);
+      const pending = pendingRemoteEntriesRef.current.filter(
+        (entry) => !remoteSet.has(entry),
+      );
+      pendingRemoteEntriesRef.current = pending;
+      void saveHistory(
+        getPendingRemoteStorageKey(storageKeyRef.current),
+        pending,
+      );
+      const pendingSet = new Set(pending);
+      const merged = [
+        ...mergeRemoteInputHistory(
+          current.filter((entry) => !pendingSet.has(entry)),
+          remoteEntries,
+        ),
+        ...pending,
+      ].slice(-MAX_HISTORY);
       if (
         merged.length === current.length &&
         merged.every((entry, idx) => entry === current[idx])
