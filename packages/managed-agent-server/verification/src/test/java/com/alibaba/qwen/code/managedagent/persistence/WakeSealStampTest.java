@@ -172,6 +172,27 @@ class WakeSealStampTest {
         assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
     }
 
+    // A staged wake the Broker wrote after the Harness produced its park
+    // certificate is server-discovered work, not a client contradiction:
+    // the seal takes the staged-wake path and clears the parked fields.
+    @Test
+    void aStagedWakeSealsAParkedCertificateThroughTheWakePendingPath() {
+        jdbc.update("INSERT INTO ma_runtime_stage (execution_call_id_hash, execution_call_id, delivery_seq,"
+                + " runtime_session_key, binding_id, runtime_generation, entry_kind, entry_json,"
+                + " is_wake_worthy, gmt_create) VALUES (?,?,1,?,'binding',1,'output','{}',1,0)",
+                "b".repeat(64), "run:process".getBytes(StandardCharsets.UTF_8),
+                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", session));
+
+        seal(new WakeStamp(1, false, 0, new ParkedTurn("prompt-1", 1234, 7L)));
+
+        var head = head();
+        assertThat(head.get("state")).isEqualTo("SEALED");
+        assertThat(head.get("is_wake_pending")).isEqualTo(1);
+        assertThat(head.get("wake_seal_parked_prompt_id")).isNull();
+        assertThat(head.get("wake_seal_parked_until")).isNull();
+        assertThat(head.get("wake_seal_parked_approval_revision")).isNull();
+    }
+
     @Test
     void aStampForAnotherRevisionRefusesTheSealUntilARecomputedRetry() {
         assertThatThrownBy(() -> seal(new WakeStamp(0, true, 0)))

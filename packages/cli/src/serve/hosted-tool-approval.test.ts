@@ -414,6 +414,22 @@ describe('Hosted approval waiters', () => {
     expect(waiters.park('decision')).toBe(true);
   });
 
+  it('keeps the park mutex until the last overlapping resolution ends', () => {
+    const waiters = new HostedApprovalWaiters();
+    void waiters.wait(
+      'decision',
+      Date.now() + 60_000,
+      new AbortController().signal,
+      () => false,
+    );
+    waiters.beginResolution('decision');
+    waiters.beginResolution('decision');
+    waiters.endResolution('decision');
+    expect(waiters.park('decision')).toBe(false);
+    waiters.endResolution('decision');
+    expect(waiters.park('decision')).toBe(true);
+  });
+
   it('does not wait for an Action that is already final', async () => {
     vi.useFakeTimers();
     const waiters = new HostedApprovalWaiters();

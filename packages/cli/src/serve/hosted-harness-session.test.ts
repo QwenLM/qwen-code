@@ -47463,6 +47463,107 @@ describe('idle suspension', () => {
     }
   });
 
+  it('parks a cold-recovered approval wait again on the next idle', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server, undefined, 30_000);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      expect(park).toHaveBeenCalledOnce();
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+
+      // Cold-load without resolving: the rebuilt wait keeps the original
+      // registration, so the next idle parks it a second time.
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(2), {
+        timeout: 5000,
+      });
+      expect(park).toHaveBeenCalledTimes(2);
+      expect(state.wakeStamps[1]).toEqual(state.wakeStamps[0]);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      expect(statsOf(server).cleanSuspensions).toBe(2);
+
+      // One Allow after the second park still executes the tool exactly once.
+      const reloaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', reloaded.body.clientId as string)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, reloaded.body.clientId as string)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, reloaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      park.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
   it('keeps an approval resident when Action parking is not advertised', async () => {
     // Wake dispatch stays on so only the Action parking grant gates the park.
     state.wakeDispatch = true;

@@ -177,6 +177,17 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 停靠 Session 的 head 是 `SEALED` + `released`，但它有一个 `RUNNING` 的 Turn。[恢复视图补篇](2026-11-18-managed-suspension-recovery-view.zh-CN.md)的"干净挂起 → `ready`"分支本来就要求没有未结算 Turn，因此不会把它报成就绪。另一侧不需要新增分支：现有的活跃 Turn 分支排在 `recovery_evidence_unavailable` 与运维分支之前，无论停靠证书是否仍然有效，都报告"Turn 进行中"。之后的任何 writer 获取都会清除证书，而 Turn 行在重新派发前一直保持 `hosted_action_parked`，所以视图根本不应读取证书。公开 Session、Web Shell Session 与 Turn 读取都经过这个视图，需要用测试固定。
 
+### 4.9 生命周期细化（第二轮评审）
+
+第二轮评审用实跑探针核验了六个生命周期细节，现均由回归测试固定：
+
+1. **resolution 互斥按重叠计数（§4.2）。** 冻结拒绝标记是按 Action 的计数，而非存在位：同一 Action 的两个重叠 resolution 在最后一个结束前始终拒绝停靠。
+2. **cleanup 排除复核 journal 序号（§4.3）。** 债务快照取自某个已提交序号；若读取 descriptor 期间序号前进，检查保守地报告有债务，而不是基于过期快照放行挂起。
+3. **staged wake 不是客户端矛盾（§4.4）。** 只有客户端自己声明的 `wake.pending()` 或 background 证书才拒绝停靠证书。Broker 在证书之后写入的 wake-worthy staged 行走既有 staged-wake 路径盖章，并清空停靠字段。
+4. **审批模式变更接纳全匹配的停靠证书（§4.6）。** 停靠 head 是 `SEALED`/`released`，忙碌准入本会在解除停靠之前拒绝变更。只有全匹配证书——seal revision、停靠 prompt、approval revision，且停靠 Turn 是 Session 唯一的活跃工作——获得窄豁免；任何不匹配保持拒绝。
+5. **冷恢复的等待可以再次停靠（§4.7）。** 恢复臂安装与原始等待相同的停靠注册、freeze 覆盖与 finally 注销生命周期，保留原 Action 身份与过期时间；下一次 idle 第二次停靠，之后单次 Allow 仍只执行工具一次。
+6. **digest-match 重放在同事务内解除停靠（§4.6）。** 两条失败投递修复路径（delivery-failed 与 decision-expired）在条件修复 UPDATE 后清除停靠标记，用户已作出的决定不再等到原唤醒期限。
+
 ## 5. 决定与理由
 
 1. **复用 G3 冷恢复，而不是另写一套 park/resume 协议。** G3 已覆盖决定、取消、过期、丢回复与崩溃的各种组合，并有打包故障门禁。第四阶段只新增"有意放下"这一个入口。

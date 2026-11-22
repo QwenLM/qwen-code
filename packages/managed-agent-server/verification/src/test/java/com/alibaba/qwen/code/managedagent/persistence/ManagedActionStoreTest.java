@@ -352,6 +352,10 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         project("decided", response("allow"), 2, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,9999,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 20);
 
@@ -365,6 +369,10 @@ class ManagedActionStoreTest {
         // The settled row stays out of the outbox: it is terminal, not
         // re-deliverable.
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     // The decision-expired terminal is the same durable lie the digest heal
@@ -381,6 +389,10 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_decision_expired", 10, 0);
         project("decided", response("allow"), 2, 1000);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,error_code,retry_after,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','prompt','[]','digest','RUNNING',?,9999,0,0)",
+                TENANT, SESSION, TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var replayed = admit("idem", "digest", response("allow"), 2000);
 
@@ -390,6 +402,10 @@ class ManagedActionStoreTest {
         assertThat(stringColumn("failure_code", operationId)).isNull();
         assertThat(stringColumn("receipt_id", operationId)).isNotNull().isNotEqualTo("rcpt-1");
         assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
+        var turn = jdbc.queryForMap("SELECT error_code, retry_after FROM ma_turn"
+                + " WHERE tenant_id=? AND session_id=? AND turn_id=?", TENANT, SESSION, "turn");
+        assertThat(turn.get("error_code")).isNull();
+        assertThat(turn.get("retry_after")).isNull();
     }
 
     // The re-admission gate keeps the Session check: on a Session that no

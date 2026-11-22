@@ -351,7 +351,7 @@ interface HostedApprovalWaiter {
 /** Wakes a waiting tool turn when its Action is answered. */
 export class HostedApprovalWaiters {
   private readonly waiting = new Map<string, HostedApprovalWaiter>();
-  private readonly resolving = new Set<string>();
+  private readonly resolving = new Map<string, number>();
 
   /**
    * Resolves once `isFinal` holds, the expiry passes, or the signal aborts.
@@ -414,7 +414,7 @@ export class HostedApprovalWaiters {
 
   park(requestId: string): boolean {
     const waiter = this.waiting.get(requestId);
-    if (!waiter || waiter.polling() || this.resolving.has(requestId))
+    if (!waiter || waiter.polling() || (this.resolving.get(requestId) ?? 0) > 0)
       return false;
     waiter.clear();
     this.waiting.delete(requestId);
@@ -422,11 +422,13 @@ export class HostedApprovalWaiters {
   }
 
   beginResolution(requestId: string): void {
-    this.resolving.add(requestId);
+    this.resolving.set(requestId, (this.resolving.get(requestId) ?? 0) + 1);
   }
 
   endResolution(requestId: string): void {
-    this.resolving.delete(requestId);
+    const remaining = (this.resolving.get(requestId) ?? 0) - 1;
+    if (remaining > 0) this.resolving.set(requestId, remaining);
+    else this.resolving.delete(requestId);
   }
 
   notify(requestId: string): void {

@@ -177,6 +177,17 @@ If decision delivery is delayed, the resumed Session may be suspended again afte
 
 A parked Session's head is `SEALED` + `released`, but it has a `RUNNING` Turn. The "clean suspension → `ready`" arm of the [recovery-view supplement](2026-11-18-managed-suspension-recovery-view.md) already requires no unsettled Turn, so it never reports such a Session as ready. The other side needs no new arm: the existing active-Turn arm already reports "Turn in progress" ahead of `recovery_evidence_unavailable` and the operator arms, whether or not the park certificate is still current. A later writer acquisition clears the certificate while the Turn row stays `hosted_action_parked` until it is redispatched, so the view must not read the certificate at all. Public Session reads, Web Shell Session reads, and Turn reads all go through this view and are pinned by tests.
 
+### 4.9 Lifecycle refinements (review round 2)
+
+The second review round verified six lifecycle details against executed probes; each is now pinned by a regression:
+
+1. **Resolution mutual exclusion counts overlaps (§4.2).** The freeze refusal marker is a per-Action count, not a presence bit: two overlapping resolutions of the same Action keep the park refused until the last one ends.
+2. **Cleanup exclusion re-checks the journal (§4.3).** The debt snapshot is taken at a committed sequence; if the sequence advanced while descriptors were read, the check conservatively reports debt instead of admitting a suspension on a stale snapshot.
+3. **Staged wake is not a client contradiction (§4.4).** Only the client's own `wake.pending()` or background claim refuses a park certificate. A wake-worthy staged row the Broker wrote after the certificate seals through the existing staged-wake path, which clears the parked fields.
+4. **Approval-mode change admits a matching parked certificate (§4.6).** A parked head is `SEALED`/`released`, so the busy admission would refuse the change before it can unpark. Only a fully matching certificate — seal revision, parked prompt, approval revision, and the parked Turn as the Session's only live work — earns a narrow exemption; any mismatch keeps the refusal.
+5. **A cold-recovered wait can park again (§4.7).** The recovery arm installs the same park registration, freeze override, and finally-unregister lifecycle as the original wait, keeping the original Action identity and expiry; the next idle parks it a second time, and one later Allow still executes the tool exactly once.
+6. **Digest-match replay unparks in the same transaction (§4.6).** Both failed-delivery replay heals (delivery-failed and decision-expired) clear the park mark after the conditional repair UPDATE, so a decision the user already made does not wait for the original wake deadline.
+
 ## 5. Decisions and rationale
 
 1. **Reuse G3 cold recovery instead of writing a new park/resume protocol.** G3 already covers the combinations of decision, cancellation, expiry, lost replies, and crashes, with packaged fault gates. Phase 4 adds only one entry point: a deliberate drop.

@@ -414,7 +414,10 @@ final class JournalWriterLifecycle {
         boolean effectivePending = wake.pending() || stagedWake;
         ManagedSessionStoreModels.ParkedTurn parked = wake.parkedTurn();
         if (parked != null) {
-            if (effectivePending || wake.backgroundHeld()) {
+            // Only the client's own wake claim contradicts a park certificate;
+            // server-discovered staged work seals through the staged-wake
+            // path below, which clears the parked fields safely.
+            if (wake.pending() || wake.backgroundHeld()) {
                 throw JournalStoreRows.invalid(
                         "A parked Turn cannot share a wake-pending or background seal.");
             }

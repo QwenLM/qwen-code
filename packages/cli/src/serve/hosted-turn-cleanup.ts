@@ -243,9 +243,11 @@ export async function hasHostedCleanupDebtExcluding(
   session: ManagedSession,
   promptId: string,
 ): Promise<boolean> {
+  const authority = session.authority;
+  const snapshotSequence = authority.committedSequence;
   const latest = new Map(
-    session.authority
-      .eventsInSequenceRange(1, session.authority.committedSequence)
+    authority
+      .eventsInSequenceRange(1, snapshotSequence)
       .filter((event) => event.kind === 'hosted.cleanup')
       .map((event) => [event.payload['cleanupId'], event]),
   );
@@ -257,7 +259,9 @@ export async function hasHostedCleanupDebtExcluding(
     );
     if (descriptor.promptId !== promptId) return true;
   }
-  return false;
+  // Debt committed while descriptors were read is absent from the snapshot;
+  // report debt conservatively rather than admit an unsafe suspension.
+  return authority.committedSequence !== snapshotSequence;
 }
 
 async function hasBackgroundHoldEvidence(

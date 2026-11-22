@@ -13,7 +13,7 @@ import type {
 export interface HostedActionParkRegistration {
   readonly promptId: string;
   readonly options: HostedActionOptions;
-  readonly settings: HostedApprovalSettings;
+  readonly settings?: HostedApprovalSettings;
   readonly livePoll: boolean;
   readonly globProfile: boolean;
   freeze: () => boolean;

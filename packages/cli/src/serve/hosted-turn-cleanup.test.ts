@@ -599,3 +599,28 @@ it('exempts only the parked prompt from cleanup eligibility', async () => {
   );
   expect(await hasHostedCleanupDebt(f.session)).toBe(true);
 });
+
+it('reports debt committed while cleanup descriptors are read', async () => {
+  const f = await fixture();
+  const read = f.session.resources.read.bind(f.session.resources);
+  let intercepted = false;
+  vi.spyOn(f.session.resources, 'read').mockImplementation(async (ref) => {
+    const bytes = await read(ref);
+    if (!intercepted && ref.kind === 'hosted-turn-cleanup') {
+      intercepted = true;
+      const broker = new HostedWorkspaceBroker(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        f.session.authority.sessionHeader.sessionKey,
+        hostedRuntimeSessionId('another-prompt'),
+      );
+      broker.runtime = {
+        bindingId: 'binding',
+        generation: '7',
+        workspaceGeneration: '3',
+      };
+      await oweHostedTurnCleanup(f.session, 'another-prompt', broker);
+    }
+    return bytes;
+  });
+  expect(await hasHostedCleanupDebtExcluding(f.session, f.promptId)).toBe(true);
+});

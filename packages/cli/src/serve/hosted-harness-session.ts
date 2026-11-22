@@ -66,6 +66,7 @@ import {
 } from './hosted-approval-continuation.js';
 import {
   hostedActionParkRegistration,
+  registerHostedActionPark,
   type HostedActionParkRegistration,
 } from './hosted-action-parking.js';
 import {
@@ -4064,12 +4065,28 @@ async function executeHostedTurn(
       const actionId = plan.actionId!;
       const original = authority.action(actionId)!;
       const options = await readHostedActionOptions(session.managed, original);
+      let parkRegistration: HostedActionParkRegistration | undefined;
       try {
         const liveApproval =
           options.toolName !== 'exit_plan_mode' &&
           !options.requiresHumanDecision
             ? await hostedApprovalForTurn(session, promptId)
             : undefined;
+        parkRegistration =
+          options.continuationRef !== undefined
+            ? {
+                promptId,
+                options,
+                settings: liveApproval?.settings,
+                livePoll:
+                  liveApproval !== undefined &&
+                  liveApproval.readSettings !== undefined,
+                globProfile: false,
+                freeze: () => session.waiters.park(actionId),
+              }
+            : undefined;
+        if (parkRegistration)
+          registerHostedActionPark(session.managed, parkRegistration);
         onResumeReady?.();
         if (
           plan.runtime &&
@@ -4101,6 +4118,9 @@ async function executeHostedTurn(
               requestId: actionId,
               expiresAt: options.expiresAt,
               signal: abort.signal,
+              registerFreeze: (freeze) => {
+                if (parkRegistration) parkRegistration.freeze = freeze;
+              },
             });
         } else
           await session.waiters.wait(
@@ -4124,6 +4144,9 @@ async function executeHostedTurn(
           );
       } catch (cause) {
         throw new HostedToolRecoveryRequiredError(cause);
+      } finally {
+        if (parkRegistration)
+          registerHostedActionPark(session.managed, undefined);
       }
       if (authority.action(actionId)?.state === 'requested')
         await endHostedAction(
@@ -5142,13 +5165,15 @@ export function registerHostedHarnessSessionRoutes(
       return undefined;
     let approvalRevision: number | undefined;
     if (registration.livePoll) {
+      const settings = registration.settings;
       const selection = await session.stores.approvalSelection();
       if (
+        !settings ||
         !selection ||
         !hostedApprovalAsks(
           {
             mode: selection.mode,
-            timeoutMs: registration.settings.timeoutMs,
+            timeoutMs: settings.timeoutMs,
             permissionRules: selection.permissionRules,
           },
           registration.options.toolName,
