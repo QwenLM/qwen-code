@@ -968,7 +968,7 @@ CREATE TABLE ma_runtime_slot (
     provisioner_kind VARCHAR(512) NOT NULL COMMENT 'Runtime provisioner implementation kind.',
     storage_id VARBINARY(256) COMMENT 'Logical storage identity.',
     last_generation BIGINT UNSIGNED NOT NULL COMMENT 'Last allocated Runtime generation, retained after binding collection.',
-    active_binding_id VARBINARY(2048) COMMENT 'Current binding identity, if the slot has an active binding.',
+    active_binding_id VARBINARY(512) COMMENT 'Current binding identity, if the slot has an active binding.',
     INDEX idx_ma_runtime_slot_isolation (isolation_key),
     CONSTRAINT uk_ma_runtime_slot_business_key UNIQUE (request_id),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
@@ -976,7 +976,7 @@ CREATE TABLE ma_runtime_slot (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Stable Runtime request slots retaining generation counters across binding collection.';
 
 CREATE TABLE ma_runtime_binding (
-    binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
+    binding_id VARBINARY(512) NOT NULL COMMENT 'Runtime binding identity.',
     request_id VARBINARY(3000) NOT NULL COMMENT 'Canonical Runtime request identity reference selecting a stable slot.',
     scope_id VARBINARY(2048) NOT NULL COMMENT 'Canonical scope identity reference used to partition records.',
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
@@ -1045,7 +1045,7 @@ CREATE TABLE ma_runtime_session (
     isolation_class VARCHAR(32) NOT NULL COMMENT 'Runtime isolation policy.',
     harness_session_id VARCHAR(64) NOT NULL COMMENT 'Originating Harness Session identity.',
     turn_kind VARCHAR(32) NOT NULL COMMENT 'Execution turn kind used for Runtime Session admission.',
-    binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
+    binding_id VARBINARY(512) NOT NULL COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the referenced Runtime binding.',
     session_state VARCHAR(32) NOT NULL COMMENT 'Runtime Session lifecycle state.',
     record_version BIGINT UNSIGNED NOT NULL COMMENT 'Optimistic concurrency version of the Runtime record.',
@@ -1064,7 +1064,7 @@ CREATE TABLE ma_runtime_session (
 CREATE TABLE ma_tool_execution (
     execution_call_id VARBINARY(512) NOT NULL COMMENT 'Raw stable identity of the tool execution.',
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same request.',
-    binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
+    binding_id VARBINARY(512) NOT NULL COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the referenced Runtime binding.',
     harness_session_id VARCHAR(64) NOT NULL COMMENT 'Originating Harness Session identity.',
     runtime_session_id VARCHAR(64) NOT NULL COMMENT 'Runtime execution Session identity.',
@@ -1103,7 +1103,7 @@ CREATE TABLE ma_tool_execution (
 CREATE TABLE ma_storage_owner (
     physical_id VARBINARY(512) NOT NULL COMMENT 'Canonical physical storage coordination reference for ownership and execution membership.',
     holder_id VARBINARY(512) COMMENT 'Canonical reference of the exclusive storage holder, when present.',
-    binding_id VARBINARY(2048) COMMENT 'Runtime binding identity.',
+    binding_id VARBINARY(512) COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED COMMENT 'Generation of the referenced Runtime binding.',
     runtime_session_id VARCHAR(64) COMMENT 'Runtime execution Session identity.',
     tenant_id VARCHAR(36) COMMENT 'Tenant identity used for isolation.',
