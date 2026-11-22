@@ -18,7 +18,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                         connection,
                         "SELECT 1 FROM ma_runtime_session WHERE binding_id = ? AND runtime_generation = ?"
                                 + " AND execution_storage_id IS NOT NULL LIMIT 1",
-                        identity(binding.getBindingId()), binding.getGeneration())
+                        binding.getBindingId(), binding.getGeneration())
                 || exists(
                         connection,
                         "SELECT 1 FROM ma_operation WHERE operation_kind = 'WORKSPACE_RETIREMENT' AND"
@@ -57,7 +57,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                         + " ON h.tenant_id = ? AND h.tenant_id = s.tenant_id AND h.session_id = s.harness_session_id"
                         + " WHERE s.binding_id = ? AND s.runtime_generation = ?" + stale + " LIMIT 1",
                 request.getScope().getTenantId(),
-                identity(binding.getBindingId()), binding.getGeneration());
+                binding.getBindingId(), binding.getGeneration());
     }
 
     private static boolean backgroundRunUnsettled(
@@ -77,7 +77,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                     + " BINARY(2048)) = CAST(? AS BINARY(2048)) AND CAST(r.domain AS BINARY(2048)) ="
                     + " CAST('child_run' AS BINARY(2048)) AND CAST(r.task_kind AS BINARY(2048)) ="
                     + " CAST('background_shell' AS BINARY(2048)) AND r.settled_at IS NULL LIMIT 1",
-                identity(binding.getBindingId()),
+                binding.getBindingId(),
                 binding.getGeneration(),
                 binding.getBindingId(),
                 tenantId,
@@ -96,7 +96,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
                             "SELECT DISTINCT harness_session_id FROM ma_runtime_session"
                                     + " WHERE binding_id = ? AND runtime_generation = ? AND tenant_id = ?")) {
                 statement.setQueryTimeout(10);
-                statement.setBytes(1, identity(binding.getBindingId()));
+                statement.setString(1, binding.getBindingId());
                 statement.setLong(2, binding.getGeneration());
                 statement.setString(3, tenantId);
                 try (var rows = statement.executeQuery()) {

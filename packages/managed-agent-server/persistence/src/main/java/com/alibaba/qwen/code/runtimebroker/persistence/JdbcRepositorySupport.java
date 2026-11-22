@@ -170,13 +170,17 @@ final class JdbcRepositorySupport {
     }
 
     static void setIdentity(java.sql.PreparedStatement statement, int index, String value) throws SQLException {
-        int type = statement.getParameterMetaData().getParameterType(index);
-        if (type == java.sql.Types.BINARY
-                || type == java.sql.Types.VARBINARY
-                || type == java.sql.Types.LONGVARBINARY) {
-            statement.setBytes(index, value == null ? null
-                    : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
-            return;
+        // Connector/J does not support ParameterMetaData by default; only H2
+        // needs the binary-column probe. MySQL binds text through the driver.
+        if ("H2".equals(statement.getConnection().getMetaData().getDatabaseProductName())) {
+            int type = statement.getParameterMetaData().getParameterType(index);
+            if (type == java.sql.Types.BINARY
+                    || type == java.sql.Types.VARBINARY
+                    || type == java.sql.Types.LONGVARBINARY) {
+                statement.setBytes(index, value == null ? null
+                        : com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(value));
+                return;
+            }
         }
         statement.setString(index, value);
     }

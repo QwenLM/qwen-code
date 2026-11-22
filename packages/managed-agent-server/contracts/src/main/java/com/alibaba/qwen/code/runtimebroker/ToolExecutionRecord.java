@@ -112,7 +112,7 @@ public final class ToolExecutionRecord {
                 "executionCallId");
         this.idempotencyKey = BrokerValues.requireId(idempotencyKey,
                 "idempotencyKey");
-        this.bindingId = BrokerValues.requireId(bindingId, "bindingId");
+        this.bindingId = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0) {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");

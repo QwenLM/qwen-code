@@ -50,6 +50,15 @@ public final class BrokerValues {
         return value;
     }
 
+    public static String requireBindingId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
     /**
      * An id the worker admits on its provider envelope, where it becomes a
      * file name: ASCII letters, digits, {@code .}, {@code _} and {@code -},

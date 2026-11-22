@@ -1116,7 +1116,7 @@ public final class JdbcRuntimeBindingRepository
                     }
                     requireRecoverablePlacement(connection, request);
                     long generation = slot.lastGeneration + 1;
-                    String bindingId = BrokerValues.requireId(idSupplier.get(), "bindingId");
+                    String bindingId = BrokerValues.requireBindingId(idSupplier.get(), "bindingId");
                     Instant now = JdbcRepositorySupport.databaseNow(connection);
                     RuntimeProvisionSeed seed =
                             request.requiresDurableIdentity()
@@ -1261,7 +1261,7 @@ public final class JdbcRuntimeBindingRepository
 
     @Override
     public RuntimeBindingRecord findById(String bindingId) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         return JdbcRepositorySupport.read(dataSource, connection -> {
             RuntimeBindingRecord record = selectById(connection, id, false);
             if (record != null && !id.equals(record.getBindingId())) {
@@ -1353,7 +1353,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeBindingRecord claimOperation(String bindingId,
             String owner, Duration leaseDuration) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         String ownerId = BrokerValues.requireId(owner, "owner");
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
@@ -1392,7 +1392,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeBindingRecord renewOperation(String bindingId,
             String owner, long operationGeneration, Duration leaseDuration) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         String ownerId = BrokerValues.requireId(owner, "owner");
         Duration duration = JdbcRepositorySupport.requireDuration(
                 leaseDuration);
@@ -1425,7 +1425,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeBindingRecord releaseOperation(String bindingId,
             String owner, long operationGeneration) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         String ownerId = BrokerValues.requireId(owner, "owner");
         return JdbcRepositorySupport.transaction(
                 dataSource,
@@ -1652,7 +1652,7 @@ public final class JdbcRuntimeBindingRepository
         if (connection == null || connection.getAutoCommit()) {
             throw new IllegalArgumentException("An active transaction is required");
         }
-        return selectById(connection, BrokerValues.requireId(bindingId, "bindingId"), true, 10);
+        return selectById(connection, BrokerValues.requireBindingId(bindingId, "bindingId"), true, 10);
     }
 
     public RuntimeBindingRecord releaseResidentForRetirement(Connection connection,
@@ -1667,7 +1667,7 @@ public final class JdbcRuntimeBindingRepository
             throw new IllegalArgumentException(
                     "A read-only repeatable-read transaction is required");
         }
-        return selectById(connection, BrokerValues.requireId(bindingId, "bindingId"), false, 10);
+        return selectById(connection, BrokerValues.requireBindingId(bindingId, "bindingId"), false, 10);
     }
 
     private RuntimeBindingRecord selectById(Connection connection,

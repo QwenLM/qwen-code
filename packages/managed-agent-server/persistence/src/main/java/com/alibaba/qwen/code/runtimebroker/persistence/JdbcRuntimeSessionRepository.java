@@ -358,7 +358,7 @@ public final class JdbcRuntimeSessionRepository
     @Override
     public long countActiveByBinding(String bindingId,
             long runtimeGeneration) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0) {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");

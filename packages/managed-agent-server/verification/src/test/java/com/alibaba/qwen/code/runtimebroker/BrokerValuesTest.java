@@ -22,6 +22,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BrokerValuesTest {
     @Test
+    void bindingIdsUseThe128CharacterNoTrailingSpaceBudget() {
+        String binding = "b".repeat(128);
+        assertEquals(binding, BrokerValues.requireBindingId(binding, "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId("b".repeat(129), "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId("binding ", "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId("bind\ud800ng", "bindingId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireBindingId(null, "bindingId"));
+    }
+
+    @Test
     void tenantIdsUseTheShared36CharacterBudget() {
         String tenant = "t".repeat(36);
         assertTrue(BrokerValues.isTenantId(tenant));

@@ -56,7 +56,8 @@ class BindingExecutionInventoryTest {
         writer.findOrCreate(prepared("foreign-case", "BINDING", GENERATION, "session"));
         var reader = new JdbcToolExecutionRepository(source);
         assertTrue(reader.findByBinding(BINDING, GENERATION, null, 100).isEmpty());
-        assertTrue(reader.findByBinding("BINDING ", GENERATION, null, 100).isEmpty());
+        assertThrows(IllegalArgumentException.class,
+                () -> reader.findByBinding("BINDING ", GENERATION, null, 100));
         assertEquals(1, reader.findByBinding("BINDING", GENERATION, null, 100).size());
     }
 

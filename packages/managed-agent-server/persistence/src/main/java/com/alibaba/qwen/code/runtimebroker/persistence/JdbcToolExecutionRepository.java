@@ -650,7 +650,7 @@ public final class JdbcToolExecutionRepository
     @Override
     public List<ToolExecutionRecord> findByBinding(String bindingId,
             long runtimeGeneration, String afterExecutionCallId, int limit) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0 || limit < 1 || limit > 100) {
             throw new IllegalArgumentException(
                     "positive runtimeGeneration and limit in [1, 100] are required");
@@ -695,7 +695,7 @@ public final class JdbcToolExecutionRepository
     @Override
     public boolean hasActiveByBinding(String bindingId,
             long runtimeGeneration) {
-        String id = BrokerValues.requireId(bindingId, "bindingId");
+        String id = BrokerValues.requireBindingId(bindingId, "bindingId");
         if (runtimeGeneration <= 0) {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");
