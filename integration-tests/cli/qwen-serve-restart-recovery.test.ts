@@ -486,7 +486,9 @@ describeDaemon('qwen serve — restart recovery', () => {
         if (record?.['code'] === 'daemon_runtime_starting') return false;
         expect(scan.status).toBe(200);
         scanItems = recoveryItems(scan.body);
-        return scanItems !== undefined;
+        return (
+          scanItems?.some((entry) => entry.sessionId === sessionId) ?? false
+        );
       },
       60_000,
     );
