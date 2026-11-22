@@ -2,6 +2,8 @@
 
 [English](2026-10-21-managed-harness-kubernetes.md) | [简体中文](2026-10-21-managed-harness-kubernetes.zh-CN.md)
 
+> **已归档。** 本文描述的 Kubernetes Harness 池发现与部署系统已由 [#17415](https://github.com/QwenLM/qwen-code/pull/17415)（Java 源码）与 [#17427](https://github.com/QwenLM/qwen-code/issues/17427)（发行模板、build/render/preflight 脚本及其测试）冷归档至 `packages/sdk-java/managed-kubernetes-archive/`。Java 仅支持 `discovery: static`。本文作为历史设计记录保留。
+
 状态：实现候选，2026-10-23，已衔接 main `32b4234b84` 及其首发单 V1 契约。最初源码审计：`97567d5dd733ad905aacf61f1f61a1e71c6fcc72`。历史 ACK 空闲服务池验收早于本基线；当前提交 CI、前台/故障和自动扩缩容门禁仍待完成。本文细化[共享多租户 Harness](2026-10-21-managed-shared-harness.zh-CN.md)。
 
 ## 范围与决策

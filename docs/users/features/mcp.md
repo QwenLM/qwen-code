@@ -43,8 +43,33 @@ Then enter:
 /mcp
 ```
 
-3. If Qwen Code was already running before you added the server, restart it in
-   the same project. Then ask the model to use tools from that server.
+3. Once `/mcp` shows the server is connected, ask the model to use its tools.
+   Interactive sessions that load servers from `settings.json` pick up
+   `mcpServers` changes without a restart (hot reload). If you edit the
+   project's `.mcp.json`, restart Qwen Code in the same project to load the
+   changes.
+
+### Server approval and session restrictions
+
+- In an [untrusted folder](../configuration/trusted-folders.md), the session
+  skips MCP connections, including servers configured at user scope.
+- If a server from the project's `.mcp.json` or `.qwen/settings.json` is
+  pending approval in the interactive session, use the approval prompt to
+  connect it. To approve it from a shell, run
+  `qwen mcp approve <name>` in that project and start a new interactive session,
+  or use `qwen mcp reject <name>` to deny it.
+- With `--bare` or `--safe-mode`, Qwen Code ignores servers from `settings.json`
+  and the project's `.mcp.json`. Pass servers at startup with `--mcp-config`.
+- The [Linux tool execution sandbox](./sandbox.md#linux-tool-execution-sandbox)
+  rejects startup if the session configuration includes an MCP server. To start
+  in this sandbox, remove the server entries from the settings and project
+  configuration used by the session and omit `--mcp-config`. If configured,
+  also unset `mcp.serverCommand` and remove `memory.mem0`, which registers
+  the bundled Mem0 server.
+
+If the session supports settings-based servers and an eligible server still
+does not appear in `/mcp` after a settings change, restart Qwen Code in the
+same project.
 
 ## Where configuration is stored (scopes)
 

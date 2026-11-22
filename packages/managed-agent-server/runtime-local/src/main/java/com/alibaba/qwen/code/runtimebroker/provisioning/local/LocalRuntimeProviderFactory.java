@@ -137,7 +137,12 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         try {
             Path candidate = Files.exists(directory) ? directory.toRealPath()
                     : directory.getParent().toRealPath().resolve(directory.getFileName());
-            if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
+            // A blank `workspace-cwd` means "no Workspace cwd configured", as it
+            // does in ManagedAgentPreflight; `Path.of("")` would otherwise resolve
+            // to this process's own directory and make the verdict caller-cwd
+            // dependent.
+            if (!StringUtils.isBlank(broker.getWorkspaceCwd())
+                    && candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
                 throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());
             }
             if (!broker.getWorkspaceCreationRoot().isBlank()
