@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeSupport;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.ServiceLoader;
 
@@ -18,8 +19,25 @@ public final class RuntimeProviderRegistry {
     private final Map<String, RuntimeProviderFactory> factories = new LinkedHashMap<>();
 
     public RuntimeProviderRegistry() {
-        // Broker callbacks can run on threads whose context loader cannot see the host's provider JARs.
-        this(ServiceLoader.load(RuntimeProviderFactory.class, RuntimeProviderRegistry.class.getClassLoader()));
+        this(discover());
+    }
+
+    // Broker callbacks can run on threads whose context loader cannot see the host's provider
+    // JARs, while hosts may supply extra providers only through a child context loader.
+    private static Iterable<RuntimeProviderFactory> discover() {
+        ClassLoader application = RuntimeProviderRegistry.class.getClassLoader();
+        ClassLoader context = Thread.currentThread().getContextClassLoader();
+        if (context == null || context == application) {
+            return ServiceLoader.load(RuntimeProviderFactory.class, application);
+        }
+        // The child loader also sees the parent's built-ins; keep one factory per class so the
+        // duplicate-kind guard only rejects genuinely distinct providers.
+        Map<Class<?>, RuntimeProviderFactory> byClass = new LinkedHashMap<>();
+        for (ClassLoader loader : List.of(application, context)) {
+            ServiceLoader.load(RuntimeProviderFactory.class, loader)
+                    .forEach(factory -> byClass.putIfAbsent(factory.getClass(), factory));
+        }
+        return byClass.values();
     }
 
     RuntimeProviderRegistry(Iterable<RuntimeProviderFactory> providers) {

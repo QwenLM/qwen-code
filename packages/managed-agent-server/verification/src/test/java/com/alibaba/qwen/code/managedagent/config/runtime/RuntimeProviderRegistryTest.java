@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalRuntime
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLClassLoader;
 import java.util.List;
 import java.util.Set;
 
@@ -26,6 +27,20 @@ class RuntimeProviderRegistryTest {
                     .isInstanceOf(ExternalRuntimeProviderFactory.class);
         } finally {
             thread.setContextClassLoader(previous);
+        }
+    }
+
+    @Test
+    void discoversThroughItsDefiningLoaderRatherThanTheSystemLoader() throws Exception {
+        try (var defining = new URLClassLoader(RuntimeProviderLoaders.testClasspath(),
+                ClassLoader.getPlatformClassLoader())) {
+            RuntimeProviderLoaders.withContextLoader(new ClassLoader(null) { }, () -> {
+                var registry = defining.loadClass(RuntimeProviderRegistry.class.getName())
+                        .getConstructor().newInstance();
+                var factory = registry.getClass().getMethod("require", String.class)
+                        .invoke(registry, "external-workspace");
+                assertThat(factory.getClass().getClassLoader()).isSameAs(defining);
+            });
         }
     }
 
