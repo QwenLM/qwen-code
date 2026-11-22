@@ -12,18 +12,19 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { DaemonSessionPrInfo } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
 import { SessionPrBadge, openableSessionPrs } from './SessionPrBadge';
+import badgeStyles from './SessionPrBadge.module.css';
 import styles from './SessionPrStateIcon.module.css';
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-function renderBadge(prs: DaemonSessionPrInfo[]): HTMLElement {
+function renderBadge(prs: DaemonSessionPrInfo[], compact = false): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <SessionPrBadge prs={prs} />
+        <SessionPrBadge prs={prs} compact={compact} />
       </I18nProvider>,
     );
   });
@@ -108,6 +109,18 @@ describe('SessionPrBadge', () => {
     expect(anchor?.getAttribute('aria-label')).toBe(
       'Pull Request #9500 (2 total)',
     );
+  });
+
+  it('keeps the state icon and link on a compact merged-PR badge', () => {
+    const anchor = renderBadge([pr(9517, 'merged')], true).querySelector('a');
+    expect(anchor?.className).toContain(badgeStyles.sessionPrBadgeCompact);
+    expect(
+      anchor?.querySelector('svg')?.classList.contains('lucide-git-merge'),
+    ).toBe(true);
+    expect(anchor?.getAttribute('href')).toBe(
+      'https://github.com/o/r/pull/9517',
+    );
+    expect(anchor?.getAttribute('aria-label')).toContain('Merged');
   });
 
   it('renders nothing when no binding is openable', () => {
