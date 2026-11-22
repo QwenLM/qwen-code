@@ -9,15 +9,40 @@ import {
   resolveBaseURL,
 } from './visuals/harness';
 
-type Rectangle = { x: number; y: number; width: number; height: number };
+import { rectanglesAreDisjoint, type Rectangle } from '../utils/rectangles';
 
-function rectanglesAreDisjoint(first: Rectangle, second: Rectangle): boolean {
-  return (
-    first.x + first.width <= second.x + 0.5 ||
-    second.x + second.width <= first.x + 0.5 ||
-    first.y + first.height <= second.y + 0.5 ||
-    second.y + second.height <= first.y + 0.5
-  );
+function expectWrappedMetadataLayout(
+  boxes: readonly Rectangle[],
+  row: Rectangle,
+  more: Rectangle,
+  label: string,
+): void {
+  expect(more.height, label).toBeCloseTo(26, 1);
+  for (const box of [...boxes, more]) {
+    expect(box.x, label).toBeGreaterThanOrEqual(row.x - 0.5);
+    expect(box.x + box.width, label).toBeLessThanOrEqual(
+      row.x + row.width + 0.5,
+    );
+    expect(box.y, label).toBeGreaterThanOrEqual(row.y - 0.5);
+    expect(box.y + box.height, label).toBeLessThanOrEqual(
+      row.y + row.height + 0.5,
+    );
+  }
+  for (let index = 0; index < boxes.length; index++) {
+    const box = boxes[index]!;
+    expect(
+      rectanglesAreDisjoint(box, more),
+      `${label}[${index}]: ${JSON.stringify(box)} vs More ${JSON.stringify(more)}`,
+    ).toBe(true);
+  }
+  for (let first = 0; first < boxes.length; first++) {
+    for (let second = first + 1; second < boxes.length; second++) {
+      expect(
+        rectanglesAreDisjoint(boxes[first]!, boxes[second]!),
+        `${label}: metadata overlaps at ${first}:${second}`,
+      ).toBe(true);
+    }
+  }
 }
 
 async function closeMenuWithEscape(menu: Locator) {
@@ -208,27 +233,6 @@ test.describe('Chromium CDP drawer gestures', () => {
 test('A touch embedded host sizes dense rows by its own width @smoke', async ({
   browser,
 }, testInfo) => {
-  const goalExample = { x: 0, y: 20, width: 10, height: 10 };
-  expect(
-    rectanglesAreDisjoint(goalExample, { x: 15, y: 20, width: 10, height: 10 }),
-  ).toBe(true);
-  expect(
-    rectanglesAreDisjoint(goalExample, { x: 0, y: 0, width: 10, height: 10 }),
-  ).toBe(true);
-  expect(
-    rectanglesAreDisjoint(goalExample, {
-      x: -15,
-      y: 20,
-      width: 10,
-      height: 10,
-    }),
-  ).toBe(true);
-  expect(
-    rectanglesAreDisjoint(goalExample, { x: 0, y: 35, width: 10, height: 10 }),
-  ).toBe(true);
-  expect(
-    rectanglesAreDisjoint(goalExample, { x: 5, y: 25, width: 10, height: 10 }),
-  ).toBe(false);
   const baseURL = resolveBaseURL(testInfo);
   const context = await browser.newContext({
     ...devices['iPhone 13'],
@@ -250,9 +254,14 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       hasActivePrompt: false,
       prs: [
         {
-          number: 1,
+          number: 9517,
           state: 'merged',
-          url: 'https://github.com/o/r/pull/1',
+          url: 'https://github.com/o/r/pull/9517',
+        },
+        {
+          number: 52484,
+          state: 'closed',
+          url: 'https://github.com/o/r/pull/52484',
         },
       ],
       goal: {
@@ -285,7 +294,7 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     await installScenario(page, scenario, baseURL);
     await page.goto('/e2e/navigation-rail-harness.html?narrow');
     await page.getByTestId('host-shell').evaluate((host) => {
-      host.style.width = '260px';
+      host.style.width = '200px';
     });
     await page.getByRole('button', { name: 'Toggle menu' }).tap();
     const sidebar = page.getByRole('complementary', {
@@ -299,10 +308,10 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       .locator('..');
     const previewPr = row.getByRole('link', { name: /Pull Request/ });
     await expect(previewPr).toBeVisible();
-    await expect(previewPr).toHaveText('#1');
+    await expect(previewPr).toHaveText('#52484 +1');
     await expect(previewPr).toHaveAttribute(
       'href',
-      'https://github.com/o/r/pull/1',
+      'https://github.com/o/r/pull/52484',
     );
     await expect(row.getByTestId('session-goal-marker')).toBeVisible();
     await expect(row.locator('[class*="sessionGitIcon"]')).toBeHidden();
@@ -378,26 +387,101 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       scheduledTitleBox.y + scheduledTitleBox.height / 2,
       1,
     );
-    const [goalBox, attentionBox, crowdedMoreBox, crowdedRowBox] =
-      await Promise.all([
-        goal.boundingBox(),
-        attention.boundingBox(),
-        crowdedMore.boundingBox(),
-        crowdedRow.boundingBox(),
-      ]);
-    if (!goalBox || !attentionBox || !crowdedMoreBox || !crowdedRowBox)
+    const crowdedPr = crowdedRow.getByRole('link', {
+      name: /Pull Request/,
+    });
+    await expect(crowdedPr).toHaveText('#52484 +1');
+    const [
+      goalBox,
+      attentionBox,
+      crowdedMoreBox,
+      crowdedRowBox,
+      crowdedPrBox,
+      crowdedLoadingBox,
+    ] = await Promise.all([
+      goal.boundingBox(),
+      attention.boundingBox(),
+      crowdedMore.boundingBox(),
+      crowdedRow.boundingBox(),
+      crowdedPr.boundingBox(),
+      crowdedRow.locator('[class*="sessionLoading"]').boundingBox(),
+    ]);
+    if (
+      !goalBox ||
+      !attentionBox ||
+      !crowdedMoreBox ||
+      !crowdedRowBox ||
+      !crowdedPrBox ||
+      !crowdedLoadingBox
+    )
       throw new Error('The embedded crowded row is not laid out.');
     await testInfo.attach('embedded-crowded-layout', {
-      body: JSON.stringify({ goalBox, attentionBox, crowdedMoreBox }),
+      body: JSON.stringify({
+        goalBox,
+        attentionBox,
+        crowdedMoreBox,
+        crowdedPrBox,
+        crowdedLoadingBox,
+      }),
+      contentType: 'application/json',
+    });
+    expectWrappedMetadataLayout(
+      [
+        scheduledBox,
+        scheduledTitleBox,
+        crowdedPrBox,
+        goalBox,
+        attentionBox,
+        crowdedLoadingBox,
+      ],
+      crowdedRowBox,
+      crowdedMoreBox,
+      'embedded-crowded-density',
+    );
+    // The capsule's right edge is clickable at its centre, not its corners.
+    const position = {
+      x: crowdedPrBox.width - 2,
+      y: crowdedPrBox.height / 2,
+    };
+    const countHit = await crowdedPr.evaluate((link, position) => {
+      const bounds = link.getBoundingClientRect();
+      const point = { x: bounds.x + position.x, y: bounds.y + position.y };
+      const target = document.elementFromPoint(point.x, point.y);
+      return {
+        point,
+        isLink: target ? link.contains(target) : false,
+        target: target
+          ? {
+              html: target.outerHTML.slice(0, 600),
+              rect: target.getBoundingClientRect().toJSON(),
+              pointerEvents: getComputedStyle(target).pointerEvents,
+            }
+          : null,
+        link: {
+          rect: bounds.toJSON(),
+          pointerEvents: getComputedStyle(link).pointerEvents,
+        },
+        bodyPointerEvents: getComputedStyle(document.body).pointerEvents,
+      };
+    }, position);
+    await testInfo.attach('embedded-pr-count-hit', {
+      body: JSON.stringify(countHit),
       contentType: 'application/json',
     });
     expect(
-      rectanglesAreDisjoint(goalBox, attentionBox),
-      'Goal and status must be disjoint in at least one dimension',
+      countHit.isLink,
+      'the stacked PR count must remain a real link hit',
     ).toBe(true);
-    expect(crowdedMoreBox.x + crowdedMoreBox.width).toBeLessThanOrEqual(
-      crowdedRowBox.x + crowdedRowBox.width + 0.5,
-    );
+    await crowdedPr.click({ trial: true, position });
+    await page.screenshot({
+      path: testInfo.outputPath('embedded-200-crowded.png'),
+      fullPage: true,
+      animations: 'disabled',
+    });
+    await testInfo.attach('embedded-200-crowded', {
+      path: testInfo.outputPath('embedded-200-crowded.png'),
+      contentType: 'image/png',
+    });
     await goal.click({ trial: true });
     await crowdedMore.tap();
     await expect(
@@ -425,14 +509,33 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       name: 'More actions',
       exact: true,
     });
-    const [rowBounds, goalBounds, continuationBounds, moreBounds] =
-      await Promise.all([
-        continuationRow.boundingBox(),
-        continuationGoal.boundingBox(),
-        continuation.boundingBox(),
-        continuationMore.boundingBox(),
-      ]);
-    if (!rowBounds || !goalBounds || !continuationBounds || !moreBounds)
+    const continuationPr = continuationRow.getByRole('link', {
+      name: /Pull Request/,
+    });
+    await expect(continuationPr).toHaveText('#52484 +1');
+    const [
+      rowBounds,
+      goalBounds,
+      continuationBounds,
+      moreBounds,
+      titleBounds,
+      prBounds,
+    ] = await Promise.all([
+      continuationRow.boundingBox(),
+      continuationGoal.boundingBox(),
+      continuation.boundingBox(),
+      continuationMore.boundingBox(),
+      continuationRow.locator('[data-web-shell-session-title]').boundingBox(),
+      continuationPr.boundingBox(),
+    ]);
+    if (
+      !rowBounds ||
+      !goalBounds ||
+      !continuationBounds ||
+      !moreBounds ||
+      !titleBounds ||
+      !prBounds
+    )
       throw new Error('The embedded continuation row is not laid out.');
     const actionBox = await continuationRow
       .locator('[class*="sessionActions"]')
@@ -444,17 +547,18 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
         goalBounds,
         continuationBounds,
         moreBounds,
+        titleBounds,
+        prBounds,
         actionBox,
       }),
       contentType: 'application/json',
     });
     expect(actionBox.height).toBeCloseTo(moreBounds.height, 1);
-    expect(
-      rectanglesAreDisjoint(goalBounds, continuationBounds),
-      'Goal and continuation must be disjoint in at least one dimension',
-    ).toBe(true);
-    expect(moreBounds.x + moreBounds.width).toBeLessThanOrEqual(
-      rowBounds.x + rowBounds.width + 0.5,
+    expectWrappedMetadataLayout(
+      [titleBounds, prBounds, goalBounds, continuationBounds],
+      rowBounds,
+      moreBounds,
+      'embedded-continuation-density',
     );
     await continuationGoal.click({ trial: true });
     await continuationMore.tap();
@@ -686,11 +790,7 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       contentType: 'application/json',
     });
     expect(
-      runningSpinnerBox.x + runningSpinnerBox.width <= runningGoalBox.x + 0.5 ||
-        runningGoalBox.x + runningGoalBox.width <= runningSpinnerBox.x + 0.5 ||
-        runningSpinnerBox.y + runningSpinnerBox.height <=
-          runningGoalBox.y + 0.5 ||
-        runningGoalBox.y + runningGoalBox.height <= runningSpinnerBox.y + 0.5,
+      rectanglesAreDisjoint(runningSpinnerBox, runningGoalBox),
       'running and goal must not overlap in either dimension',
     ).toBe(true);
     await runningGoal.click({ trial: true });
@@ -759,45 +859,12 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
         contentType: 'application/json',
       });
       const metadataBoxes = [titleBox, prBox, goalBox, ...statusBoxes] as const;
-      for (const box of metadataBoxes) {
-        expect(box.x).toBeGreaterThanOrEqual(rowBox.x - 0.5);
-        expect(box.x + box.width).toBeLessThanOrEqual(
-          rowBox.x + rowBox.width + 0.5,
-        );
-        expect(box.y).toBeGreaterThanOrEqual(rowBox.y - 0.5);
-        expect(box.y + box.height).toBeLessThanOrEqual(
-          rowBox.y + rowBox.height + 0.5,
-        );
-        const separated =
-          box.x + box.width <= moreBox.x + 0.5 ||
-          moreBox.x + moreBox.width <= box.x + 0.5 ||
-          box.y + box.height <= moreBox.y + 0.5 ||
-          moreBox.y + moreBox.height <= box.y + 0.5;
-        expect(separated, `${metadata.sessionId} overlaps More`).toBe(true);
-      }
-      for (
-        let firstIndex = 0;
-        firstIndex < metadataBoxes.length;
-        firstIndex++
-      ) {
-        const first = metadataBoxes[firstIndex]!;
-        for (
-          let secondIndex = firstIndex + 1;
-          secondIndex < metadataBoxes.length;
-          secondIndex++
-        ) {
-          const second = metadataBoxes[secondIndex]!;
-          const separated =
-            first.x + first.width <= second.x + 0.5 ||
-            second.x + second.width <= first.x + 0.5 ||
-            first.y + first.height <= second.y + 0.5 ||
-            second.y + second.height <= first.y + 0.5;
-          expect(
-            separated,
-            `${metadata.sessionId} overlaps metadata at ${firstIndex}:${secondIndex}`,
-          ).toBe(true);
-        }
-      }
+      expectWrappedMetadataLayout(
+        metadataBoxes,
+        rowBox,
+        moreBox,
+        metadata.sessionId,
+      );
       const actionBox = await candidateRow
         .locator('[class*="sessionActions"]')
         .boundingBox();

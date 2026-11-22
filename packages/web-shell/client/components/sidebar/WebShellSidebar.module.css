@@ -1632,6 +1632,8 @@ button.livePendingSession:hover {
       .sessionMetaSlotReserved .sessionContinuation,
       .sessionMetaSlotReserved .sessionLoading
     ) {
+    /* Keep More's 26px hit area above the next metadata line. */
+    row-gap: 6px;
     flex-wrap: wrap;
   }
 

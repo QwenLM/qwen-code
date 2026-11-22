@@ -133,7 +133,9 @@ describe('WebShellSidebar session row actions stylesheet', () => {
   it('wraps auxiliary metadata rather than overlapping narrow-row actions', () => {
     const wrappedNarrowRow = String.raw`\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow:not\(\.archivedRow\):has\(\s*\.sessionMetaSlotReserved \.sessionAttention,\s*\.sessionMetaSlotReserved \.sessionContinuation,\s*\.sessionMetaSlotReserved \.sessionLoading\s*\)`;
     expect(touchMedia).toMatch(
-      new RegExp(`${wrappedNarrowRow}\\s*\\{\\s*flex-wrap:\\s*wrap;`),
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\{[^}]*row-gap:\\s*6px;[^}]*flex-wrap:\\s*wrap;`,
+      ),
     );
     expect(touchMedia).toMatch(
       new RegExp(
