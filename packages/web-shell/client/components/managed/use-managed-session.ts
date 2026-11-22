@@ -4,12 +4,58 @@ import type {
   ManagedAgentSessionEvent,
   ManagedAgentSessionSummary,
   ManagedAgentRequestOptions,
+  ManagedAgentSessionTranscript,
 } from './managed-agent-provider';
 import {
   isAuthFailure,
   isNonRetryableClientError,
 } from './managed-request-error';
 import { mergeManagedEvents } from './managed-session-messages';
+
+function itemId(event: ManagedAgentSessionEvent): string | undefined {
+  if (!event.data || typeof event.data !== 'object') return undefined;
+  const id = (event.data as Record<string, unknown>)['itemId'];
+  return typeof id === 'string' ? id : undefined;
+}
+
+function itemContent(event: ManagedAgentSessionEvent): boolean {
+  return [
+    'accepted',
+    'assistant_delta',
+    'assistant_thought',
+    'tool_requested',
+    'tool_started',
+    'tool_completed',
+    'tool_result_updated',
+  ].includes(event.type);
+}
+
+function rememberItemCoverage(
+  coverage: Map<string, number>,
+  page: ManagedAgentSessionTranscript,
+): void {
+  for (const event of page.events) {
+    const id = event.assembledFromItem ? itemId(event) : undefined;
+    if (id !== undefined)
+      coverage.set(id, Math.max(coverage.get(id) ?? 0, page.lastEventId));
+  }
+}
+
+function withoutReplacedItemEvents(
+  events: ManagedAgentSessionEvent[],
+  page: ManagedAgentSessionTranscript,
+): ManagedAgentSessionEvent[] {
+  const replaced = new Set(
+    page.events.filter((event) => event.assembledFromItem).map(itemId),
+  );
+  replaced.delete(undefined);
+  return events.filter(
+    (event) =>
+      event.id > page.lastEventId ||
+      !itemContent(event) ||
+      !replaced.has(itemId(event)),
+  );
+}
 
 type SignalLeg = 'session' | 'transcript' | 'stream';
 
@@ -142,6 +188,8 @@ export function useManagedSession(
     loading: false,
   });
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const itemPagesRef = useRef(false);
+  const itemCoverageRef = useRef(new Map<string, number>());
   const lifetime = useRef<AbortController | undefined>(undefined);
   const summaryRef = useRef<ManagedAgentSessionSummary | undefined>(undefined);
   const selectedSession = useRef(sessionId);
@@ -226,6 +274,34 @@ export function useManagedSession(
           planMode: previous.planMode,
         };
       }
+      if (
+        previous?.sessionId === incoming.sessionId &&
+        (previous.worktree?.revision ?? 0) > (incoming.worktree?.revision ?? 0)
+      ) {
+        next = {
+          ...next,
+          worktree: previous.worktree,
+          workspace: next.workspace
+            ? { ...next.workspace, state: previous.workspace?.state }
+            : previous.workspace,
+          ...(previous.worktree?.state === 'ready'
+            ? {}
+            : {
+                planModeSupported: false,
+                capabilities: {
+                  ...next.capabilities,
+                  canSend: false,
+                  canRename: false,
+                  workspaceTurns: false,
+                  childAgents: false,
+                  modelChange: false,
+                  contextCompression: false,
+                  approvalModeChange: false,
+                  inputAttachments: false,
+                },
+              }),
+        };
+      }
       summaryRef.current = next;
       return next;
     },
@@ -274,6 +350,8 @@ export function useManagedSession(
     lifetime.current = abort;
     summaryRef.current = undefined;
     cursorRef.current = undefined;
+    itemPagesRef.current = false;
+    itemCoverageRef.current.clear();
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
@@ -440,6 +518,34 @@ export function useManagedSession(
       const summary = retainSummary(sessionRead.value);
       const transcript = transcriptRead.value;
       if (abort.signal.aborted) return transcript.lastEventId;
+      itemPagesRef.current = transcript.history === 'items';
+      itemCoverageRef.current.clear();
+      if (itemPagesRef.current)
+        rememberItemCoverage(itemCoverageRef.current, transcript);
+      if (preserveLoadedPages && transcript.history === 'items') {
+        cursorRef.current = transcript.olderCursor;
+        pagedRef.current = false;
+        exhaustedRef.current = false;
+        pagedHeadRef.current = undefined;
+        setState((current) => ({
+          ...current,
+          summary,
+          events: mergeManagedEvents(
+            current.events.filter(
+              (event) =>
+                event.id > transcript.lastEventId &&
+                event.assembledFromItem !== true,
+            ),
+            transcript.events,
+            true,
+          ),
+          olderCursor: transcript.olderCursor,
+          loading: false,
+        }));
+        retire('session');
+        retire('transcript');
+        return transcript.lastEventId;
+      }
       if (preserveLoadedPages) {
         // The stream never replays events at or below the snapshot head,
         // so the snapshot is the sole authority for that range (assumed
@@ -642,10 +748,22 @@ export function useManagedSession(
             expiredVerdictMessage = undefined;
             retire('stream');
             retire('transcript');
-            setState((current) => ({
-              ...current,
-              events: mergeManagedEvents(current.events, [event]),
-            }));
+            const projectedThrough =
+              itemCoverageRef.current.get(itemId(event) ?? '') ?? -1;
+            if (
+              !itemPagesRef.current ||
+              !itemContent(event) ||
+              event.id > projectedThrough
+            ) {
+              setState((current) => ({
+                ...current,
+                events: mergeManagedEvents(
+                  current.events,
+                  [event],
+                  itemPagesRef.current,
+                ),
+              }));
+            }
             if (
               event.type === 'context_changed' ||
               (provider.recovery &&
@@ -808,6 +926,8 @@ export function useManagedSession(
           return;
         }
         cursorRef.current = page.olderCursor;
+        if (page.history === 'items')
+          rememberItemCoverage(itemCoverageRef.current, page);
         pagedRef.current = true;
         exhaustedRef.current = page.olderCursor === undefined;
         if (page.events.length > 0)
@@ -819,7 +939,13 @@ export function useManagedSession(
         // may have corrected (e.g. retracted) the text since.
         setState((current) => ({
           ...current,
-          events: mergeManagedEvents(current.events, page.events),
+          events: mergeManagedEvents(
+            page.history === 'items'
+              ? withoutReplacedItemEvents(current.events, page)
+              : current.events,
+            page.events,
+            page.history === 'items',
+          ),
           olderCursor: page.olderCursor,
           ...(current.signals?.transcript
             ? {

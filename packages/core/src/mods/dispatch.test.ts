@@ -5,7 +5,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { jsonDepth } from './dispatch.js';
+import { jsonDepth, validateInput, validateResult } from './dispatch.js';
 import { ModRuntime } from './runtime.js';
 import type { ModLog } from './types.js';
 
@@ -648,6 +648,123 @@ describe('Mod middleware through real isolated realms', () => {
     },
     20_000,
   );
+});
+
+describe('Mod API event shapes', () => {
+  const usage = { startedAt: 1, context: { window: 0 }, rateLimits: [] };
+  it.each([
+    ['clock.now', 0, true],
+    ['clock.now', -1, false],
+    ['clock.sleep', undefined, true],
+    ['clock.sleep', 0, false],
+    ['session.id', 'abc', true],
+    ['session.model', 1, false],
+    ['session.turns', 3, true],
+    ['session.turns', 1.5, false],
+    ['session.surfaces', ['terminal', 'vscode'], true],
+    ['session.surfaces', ['web'], false],
+    ['session.surface', null, true],
+    ['session.surface', 'web', false],
+    ['session.usage', usage, true],
+    [
+      'session.usage',
+      {
+        startedAt: 1,
+        context: { tokens: 5, window: 10, percent: 50, breakdown: {} },
+        rateLimits: [{ kind: 'five_hour', percentUsed: 12.5, resetsAt: 'x' }],
+        cost: { usd: 0.5 },
+      },
+      true,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 100 } },
+      true,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 33.5 } },
+      false,
+    ],
+    [
+      'session.usage',
+      { ...usage, context: { window: 10, percent: 101 } },
+      false,
+    ],
+    ['session.usage', { ...usage, extra: 1 }, false],
+    ['session.usage', { ...usage, context: {} }, false],
+    ['session.usage', { ...usage, rateLimits: [{ kind: 'x' }] }, false],
+    ['session.usage', { ...usage, cost: { usd: -1 } }, false],
+    ['turn.abort', undefined, true],
+    ['turn.abort', true, false],
+  ] as const)('checks a %s answer of %j', (event, value, valid) => {
+    const check = () => validateResult(event, { value });
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow('Unsupported ' + event + ' result fields.');
+  });
+
+  it.each([
+    ['clock.sleep', { ms: 0 }, true],
+    ['clock.sleep', { ms: -1 }, false],
+    ['clock.sleep', { ms: Infinity }, false],
+    ['clock.sleep', { ms: 1, signal: {} }, false],
+    ['session.usage', {}, true],
+    ['session.usage', { breakdown: 'full', columns: 80 }, true],
+    ['session.usage', { columns: 0 }, false],
+    ['session.usage', { mode: 'full' }, false],
+    ['session.id', {}, true],
+    ['session.id', { force: true }, false],
+    ['turn.abort', { turnId: 'turn-1' }, true],
+    ['turn.abort', {}, false],
+    ['turn.abort', { turnId: 1 }, false],
+    ['turn.abort', { turnId: 'turn-1', reason: 'x' }, false],
+  ] as const)('checks %s arguments %j', (event, value, valid) => {
+    const check = () => validateInput(event, value, {});
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow();
+  });
+
+  const turnUsage = {
+    input_tokens: 1,
+    output_tokens: 2,
+    cache_read_input_tokens: 3,
+    cache_creation_input_tokens: 0,
+    model: 'qwen-max',
+  };
+  it.each([
+    ['turn.start', { turnId: 'turn-1' }, true],
+    ['turn.start', { turnId: 'turn-1', text: 'x' }, false],
+    ['turn.start', {}, false],
+    ['turn.complete', { text: '' }, true],
+    ['turn.complete', { text: 'TL;DR', usage: turnUsage }, true],
+    ['turn.complete', { text: 'x', extra: 1 }, false],
+    ['turn.complete', { usage: turnUsage }, false],
+    ['turn.complete', { text: 'x', usage: { ...turnUsage, model: 1 } }, false],
+    [
+      'turn.complete',
+      { text: 'x', usage: { ...turnUsage, output_tokens: 1.5 } },
+      false,
+    ],
+    [
+      'turn.complete',
+      { text: 'x', usage: { ...turnUsage, cache_read_input_tokens: -1 } },
+      false,
+    ],
+  ] as const)('checks a %s result of %j', (event, value, valid) => {
+    const check = () => validateResult(event, value);
+    if (valid) expect(check).not.toThrow();
+    else expect(check).toThrow('Unsupported ' + event + ' result fields.');
+  });
+
+  it('pins the turn events against a rewritten input', () => {
+    const start = { text: 'Fix it', turnId: 'turn-1' };
+    expect(() =>
+      validateInput('turn.start', { ...start }, start),
+    ).not.toThrow();
+    expect(() =>
+      validateInput('turn.start', { ...start, text: 'other' }, start),
+    ).toThrow('Mod hook changed pinned event fields.');
+  });
 });
 
 describe('Mod value depth', () => {

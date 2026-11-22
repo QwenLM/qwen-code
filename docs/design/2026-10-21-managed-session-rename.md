@@ -15,9 +15,7 @@ renaming, including a small dialog for standalone Sessions.
 Extract the existing standalone Session rename form into a shared
 `SessionRenameDialog`. Both daemon standalone recents and Managed use this
 dialog: Enter saves, Escape or Cancel dismisses, blank names cannot be saved,
-and the input accepts at most 256 UTF-16 code units. Managed exposes Rename
-beside the current title and opens the same editor when the title is
-double-clicked. A busy request cannot be submitted twice.
+and the input accepts at most 256 UTF-16 code units. Managed home exposes Rename in the sidebar project Session row menus, including rows other than the selected conversation, and removes the separate header button. The standalone view retains its title button, and double-clicking the selected title opens the same editor. A busy request cannot be submitted twice.
 
 Add the optional provider method `renameSession(sessionId, displayName,
 options)`. The Java provider maps `displayName` to the backend's `title` field
@@ -41,8 +39,7 @@ permission from `canSend`: an active Turn does not itself prevent renaming.
 
 ## State and failure handling
 
-Update the selected summary and navigation title only after a confirmed
-success. Refresh the list after success, and invalidate title reads that began
+Bind the rename target to the Session row that opened the menu, independently of the selected conversation. Update that row and, when selected, its conversation title only after a confirmed success. Refresh the list after success, and invalidate title reads that began
 before the confirmation so that a late snapshot cannot restore the old name.
 Retain the confirmation even while a manual reload temporarily has no summary.
 Project `session.updated` as a summary-refresh event so changes made by another
@@ -50,12 +47,11 @@ client also become visible.
 
 Bind each edit and request to its provider and Session. Switching Sessions or
 providers dismisses that editor; an old reply cannot rename the new selection,
-close a new editor, or display an error against it. Keep one idempotency key
+close a new editor, or display an error against it. Opening a different target after an unsuccessful edit starts a separate intent. Keep one idempotency key
 for retries of the same submitted name. Editing the name creates a new intent.
 Errors remain visible in the editor and do not claim that a rename succeeded.
 Closing an editor after submission dismisses the UI; it does not cancel an
-admitted rename. Its late result is applied only while the original Session
-remains selected.
+admitted rename. Its late result is applied only while the original provider and navigation selection remain unchanged; the rename target may be a different Session.
 
 The existing Java mutation confirms Harness persistence and SQL settlement
 before returning HTTP 200. HTTP 503 or a lost connection can leave the outcome
@@ -81,8 +77,11 @@ the globally installed CLI and an isolated previous lightweight distribution.
 Post-change checks use a matching new CLI and Java runtime against isolated
 local storage, including the real browser UI.
 
+The sidebar placement adjustment uses `.qwen/e2e-tests/managed-sidebar-rename/plan.md`, with the user-requested running main artifact as its baseline and a separate worktree for the new frontend build.
+
 - Rename a new empty Session and a Session with an active Turn; the confirmed
   name appears in the header, navigation, and subsequent API reads.
+- The sidebar action menu renames its own Session without navigating away from the selected conversation; missing permission or a noninteractive view hides the entry. Older background polls cannot restore the previous row title.
 - Enter saves; Escape and Cancel before submission preserve the stored name; blank names do not
   submit. The shared daemon dialog retains these interactions.
 - Reload and restart preserve the new name.

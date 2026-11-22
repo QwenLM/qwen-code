@@ -400,6 +400,7 @@ export interface CLIControlInitializeRequest {
    * Applied at session start via config.setReasoningEffort().
    */
   effort?: string;
+  workflowMode?: boolean;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -435,6 +436,15 @@ export interface CLIControlSetEffortRequest {
   effort: string;
 }
 
+export interface CLIControlGetWorkflowModeRequest {
+  subtype: 'get_workflow_mode';
+}
+
+export interface CLIControlSetWorkflowModeRequest {
+  subtype: 'set_workflow_mode';
+  enabled: boolean;
+}
+
 export interface CLIControlGetAvailableModelsRequest {
   subtype: 'get_available_models';
 }
@@ -467,6 +477,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlSetEffortRequest
+  | CLIControlGetWorkflowModeRequest
+  | CLIControlSetWorkflowModeRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
   | CLIControlGetContextUsageRequest

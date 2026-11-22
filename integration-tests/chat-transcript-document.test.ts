@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +12,7 @@ import {
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
   type ExportTranscriptBlockV1,
   type ExportTranscriptDocumentV1,
 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
@@ -19,13 +21,14 @@ import {
   toHtml,
 } from '../packages/cli/src/ui/utils/export/formatters/html.js';
 import { escapeJsonForHtmlScriptData } from '../packages/cli/src/ui/utils/export/html-script-data.js';
+import { documentExportBudgetMs } from './document-export-budget.js';
 
 const RENDERER_VERSION = EXPORT_TRANSCRIPT_RENDERER_VERSION;
 const RENDERER_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.js`;
 const RENDERER_CSS_URL = `https://unpkg.com/@qwen-code/qwen-code@${RENDERER_VERSION.split('+')[0]}/export-transcript-document.css`;
 const EXPORTED_AT = '2026-08-16T01:00:00.000Z';
 const CANARY = 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT';
-const MAX_DOCUMENT_DURATION_MS = 60_000;
+const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);
 const MAX_HEAP_DELTA_BYTES = 512 * 1024 * 1024;
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixtureRoot = resolve(
@@ -437,188 +440,194 @@ describe('ExportTranscriptDocument browser gate', () => {
     visit(schema);
   });
 
-  it('opens, searches, copies, and prints the maximum document with its pinned npm runtime', async () => {
-    const exportDocument = createMaximumDocument();
-    const serialized = JSON.stringify(exportDocument);
-    const html = renderExportTranscriptDocumentToHtml(exportDocument);
-    expect(exportDocument.blocks).toHaveLength(
-      EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
-    );
-    expect(exportDocument.metadata).toMatchObject({
-      complete: true,
-      truncated: false,
-    });
-    const envelopeBytes = new TextEncoder().encode(
-      escapeJsonForHtmlScriptData(serialized),
-    ).byteLength;
-    expect(envelopeBytes).toBeLessThanOrEqual(
-      EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
-    );
-    expect(serialized).not.toContain(CANARY);
+  it(
+    'opens, searches, copies, and prints the maximum document with its pinned npm runtime',
+    async () => {
+      const exportDocument = createMaximumDocument();
+      const serialized = JSON.stringify(exportDocument);
+      const html = renderExportTranscriptDocumentToHtml(exportDocument);
+      expect(exportDocument.blocks).toHaveLength(
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks,
+      );
+      expect(exportDocument.metadata).toMatchObject({
+        complete: true,
+        truncated: false,
+      });
+      const envelopeBytes = new TextEncoder().encode(
+        escapeJsonForHtmlScriptData(serialized),
+      ).byteLength;
+      expect(envelopeBytes).toBeLessThanOrEqual(
+        EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
+      );
+      expect(serialized).not.toContain(CANARY);
 
-    browser = await chromium.launch({
-      headless: true,
-      args: ['--enable-precise-memory-info'],
-    });
-    const page = await browser.newPage();
-    const probe = await installNetworkAndCspProbe(page);
-    const startedAt = nodePerformance.now();
-    const heapBefore = await page.evaluate(
-      () =>
-        (
-          globalThis.performance as Performance & {
-            memory?: { usedJSHeapSize: number };
-          }
-        ).memory?.usedJSHeapSize ?? 0,
-    );
+      browser = await chromium.launch({
+        headless: true,
+        args: ['--enable-precise-memory-info'],
+      });
+      const page = await browser.newPage();
+      const probe = await installNetworkAndCspProbe(page);
+      const startedAt = nodePerformance.now();
+      const heapBefore = await page.evaluate(
+        () =>
+          (
+            globalThis.performance as Performance & {
+              memory?: { usedJSHeapSize: number };
+            }
+          ).memory?.usedJSHeapSize ?? 0,
+      );
 
-    await page.setContent(html, { waitUntil: 'load' });
-    await expect
-      .poll(() => page.locator('body').getAttribute('data-render-complete'))
-      .toBe('true');
-    expect(await page.locator('[data-document-metadata]').isVisible()).toBe(
-      true,
-    );
-    const expandAll = page.locator('[data-document-expand-all]');
-    const collapseAll = page.locator('[data-document-collapse-all]');
-    const themeToggle = page.locator('[data-document-theme-toggle]');
-    expect(await expandAll.isDisabled()).toBe(true);
-    expect(await collapseAll.isEnabled()).toBe(true);
-    expect(await themeToggle.isVisible()).toBe(true);
-    await collapseAll.click();
-    expect(await expandAll.isEnabled()).toBe(true);
-    expect(await collapseAll.isDisabled()).toBe(true);
-    await expandAll.click();
-    expect(await expandAll.isDisabled()).toBe(true);
-    await themeToggle.click();
-    // `document-main.tsx` toggles `dark` and `light` on <html> mutually
-    // exclusively, so the attribute is exactly one of them.
-    await expect
-      .poll(() => page.locator('html').getAttribute('class'))
-      .toBe('light');
-    // Since #11091 a document does not render diagrams: mermaid is stubbed out
-    // of this bundle, and the fence degrades to its own source in a plain <pre>
-    // so it stays readable, selectable and findable. Math is deliberately kept,
-    // which is why `.katex` below still has to be there.
-    expect(await page.locator('div[class*="mermaidInline"]').count()).toBe(0);
-    expect(
-      await page.evaluate(() => globalThis.document.body.innerText),
-    ).toContain('graph TD; A[Export] --> B[Document]');
-    expect(await page.locator('.katex').count()).toBeGreaterThan(0);
-    // Keep a smoke-check for the stylesheet link, while the KaTeX font-family
-    // is the cascade oracle: that rule comes only from the split stylesheet.
-    const styled = await page.evaluate(() => {
-      const link = document.getElementById(
-        'transcript-stylesheet',
-      ) as HTMLLinkElement | null;
-      const katex = document.querySelector('.katex');
-      return {
-        sheetLoaded: link !== null && link.sheet !== null,
-        katexFontFamily: katex ? getComputedStyle(katex).fontFamily : '',
-      };
-    });
-    expect(styled.sheetLoaded).toBe(true);
-    expect(styled.katexFontFamily).toContain('KaTeX');
-    expect(
-      await page.locator('[data-agent-status]').count(),
-    ).toBeGreaterThanOrEqual(2);
-    const renderedItemCount = await page
-      .locator('[data-message-row-key]')
-      .count();
-    expect(renderedItemCount).toBeGreaterThan(0);
-    const interaction = await page.evaluate(() => {
-      const bodyText = globalThis.document.body.innerText;
-      const range = globalThis.document.createRange();
-      range.selectNodeContents(globalThis.document.body);
-      const selection = window.getSelection();
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      const copiedLength = selection?.toString().length ?? 0;
-      selection?.removeAllRanges();
-      const clippedByMaxHeight = Array.from(
-        globalThis.document.querySelectorAll<HTMLElement>('*'),
-      )
-        .filter((element) => {
-          const style = getComputedStyle(element);
-          return (
-            style.display !== 'none' &&
-            style.maxHeight !== 'none' &&
-            element.scrollHeight > element.clientHeight + 1
-          );
-        })
-        .map((element) => ({
-          tag: element.tagName.toLowerCase(),
-          className: element.className,
-          maxHeight: getComputedStyle(element).maxHeight,
-        }));
-      return {
-        firstFound: bodyText.includes('FIRST_SEARCH_NEEDLE'),
-        lastFound: bodyText.includes('LAST_SEARCH_NEEDLE'),
-        thinkingFound: bodyText.includes('DOCUMENT_THINKING_DETAIL'),
-        toolFound: bodyText.includes('DOCUMENT_TOOL_DETAIL'),
-        richFound: bodyText.includes('DOCUMENT_RICH_CONTENT'),
-        chartFallbackFound: bodyText.includes('DOCUMENT_CHART_FALLBACK'),
-        subagentResultFound: bodyText.includes('DOCUMENT_SUBAGENT_RESULT'),
-        subagentStreamFound: bodyText.includes('DOCUMENT_SUBAGENT_STREAM'),
-        nestedToolFound: bodyText.includes('DOCUMENT_NESTED_TOOL_DETAIL'),
-        parallelAgentFound: bodyText.includes('DOCUMENT_PARALLEL_AGENT_RESULT'),
-        userShellFound: bodyText.includes('DOCUMENT_USER_SHELL_DETAIL'),
-        diffFound: bodyText.includes('DOCUMENT_DIFF_DETAIL'),
-        copiedLength,
-        clippedByMaxHeight,
-      };
-    });
-    const pdf = await page.pdf({ printBackground: false });
-    const heapAfter = await page.evaluate(
-      () =>
-        (
-          globalThis.performance as Performance & {
-            memory?: { usedJSHeapSize: number };
-          }
-        ).memory?.usedJSHeapSize ?? 0,
-    );
-    const durationMs = nodePerformance.now() - startedAt;
+      await page.setContent(html, { waitUntil: 'load' });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('true');
+      expect(await page.locator('[data-document-metadata]').isVisible()).toBe(
+        true,
+      );
+      const expandAll = page.locator('[data-document-expand-all]');
+      const collapseAll = page.locator('[data-document-collapse-all]');
+      const themeToggle = page.locator('[data-document-theme-toggle]');
+      expect(await expandAll.isDisabled()).toBe(true);
+      expect(await collapseAll.isEnabled()).toBe(true);
+      expect(await themeToggle.isVisible()).toBe(true);
+      await collapseAll.click();
+      expect(await expandAll.isEnabled()).toBe(true);
+      expect(await collapseAll.isDisabled()).toBe(true);
+      await expandAll.click();
+      expect(await expandAll.isDisabled()).toBe(true);
+      await themeToggle.click();
+      // `document-main.tsx` toggles `dark` and `light` on <html> mutually
+      // exclusively, so the attribute is exactly one of them.
+      await expect
+        .poll(() => page.locator('html').getAttribute('class'))
+        .toBe('light');
+      // Since #11091 a document does not render diagrams: mermaid is stubbed out
+      // of this bundle, and the fence degrades to its own source in a plain <pre>
+      // so it stays readable, selectable and findable. Math is deliberately kept,
+      // which is why `.katex` below still has to be there.
+      expect(await page.locator('div[class*="mermaidInline"]').count()).toBe(0);
+      expect(
+        await page.evaluate(() => globalThis.document.body.innerText),
+      ).toContain('graph TD; A[Export] --> B[Document]');
+      expect(await page.locator('.katex').count()).toBeGreaterThan(0);
+      // Keep a smoke-check for the stylesheet link, while the KaTeX font-family
+      // is the cascade oracle: that rule comes only from the split stylesheet.
+      const styled = await page.evaluate(() => {
+        const link = document.getElementById(
+          'transcript-stylesheet',
+        ) as HTMLLinkElement | null;
+        const katex = document.querySelector('.katex');
+        return {
+          sheetLoaded: link !== null && link.sheet !== null,
+          katexFontFamily: katex ? getComputedStyle(katex).fontFamily : '',
+        };
+      });
+      expect(styled.sheetLoaded).toBe(true);
+      expect(styled.katexFontFamily).toContain('KaTeX');
+      expect(
+        await page.locator('[data-agent-status]').count(),
+      ).toBeGreaterThanOrEqual(2);
+      const renderedItemCount = await page
+        .locator('[data-message-row-key]')
+        .count();
+      expect(renderedItemCount).toBeGreaterThan(0);
+      const interaction = await page.evaluate(() => {
+        const bodyText = globalThis.document.body.innerText;
+        const range = globalThis.document.createRange();
+        range.selectNodeContents(globalThis.document.body);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        const copiedLength = selection?.toString().length ?? 0;
+        selection?.removeAllRanges();
+        const clippedByMaxHeight = Array.from(
+          globalThis.document.querySelectorAll<HTMLElement>('*'),
+        )
+          .filter((element) => {
+            const style = getComputedStyle(element);
+            return (
+              style.display !== 'none' &&
+              style.maxHeight !== 'none' &&
+              element.scrollHeight > element.clientHeight + 1
+            );
+          })
+          .map((element) => ({
+            tag: element.tagName.toLowerCase(),
+            className: element.className,
+            maxHeight: getComputedStyle(element).maxHeight,
+          }));
+        return {
+          firstFound: bodyText.includes('FIRST_SEARCH_NEEDLE'),
+          lastFound: bodyText.includes('LAST_SEARCH_NEEDLE'),
+          thinkingFound: bodyText.includes('DOCUMENT_THINKING_DETAIL'),
+          toolFound: bodyText.includes('DOCUMENT_TOOL_DETAIL'),
+          richFound: bodyText.includes('DOCUMENT_RICH_CONTENT'),
+          chartFallbackFound: bodyText.includes('DOCUMENT_CHART_FALLBACK'),
+          subagentResultFound: bodyText.includes('DOCUMENT_SUBAGENT_RESULT'),
+          subagentStreamFound: bodyText.includes('DOCUMENT_SUBAGENT_STREAM'),
+          nestedToolFound: bodyText.includes('DOCUMENT_NESTED_TOOL_DETAIL'),
+          parallelAgentFound: bodyText.includes(
+            'DOCUMENT_PARALLEL_AGENT_RESULT',
+          ),
+          userShellFound: bodyText.includes('DOCUMENT_USER_SHELL_DETAIL'),
+          diffFound: bodyText.includes('DOCUMENT_DIFF_DETAIL'),
+          copiedLength,
+          clippedByMaxHeight,
+        };
+      });
+      const pdf = await page.pdf({ printBackground: false });
+      const heapAfter = await page.evaluate(
+        () =>
+          (
+            globalThis.performance as Performance & {
+              memory?: { usedJSHeapSize: number };
+            }
+          ).memory?.usedJSHeapSize ?? 0,
+      );
+      const durationMs = nodePerformance.now() - startedAt;
 
-    expect(interaction).toMatchObject({
-      firstFound: true,
-      lastFound: true,
-      thinkingFound: true,
-      toolFound: true,
-      richFound: true,
-      chartFallbackFound: true,
-      subagentResultFound: true,
-      subagentStreamFound: true,
-      nestedToolFound: true,
-      parallelAgentFound: true,
-      userShellFound: true,
-      diffFound: true,
-      clippedByMaxHeight: [],
-    });
-    expect(interaction.copiedLength).toBeGreaterThan(7_000_000);
-    expect(pdf.byteLength).toBeGreaterThan(1_000);
-    expect(probe.unexpectedRequests).toHaveLength(
-      expectedNetwork.unexpectedRequests,
-    );
-    expect(probe.allowedScriptRequests).toEqual(
-      expect.arrayContaining([RENDERER_URL]),
-    );
-    expect(probe.allowedStyleRequests).toEqual(
-      expect.arrayContaining([RENDERER_CSS_URL]),
-    );
-    expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
-      expectedNetwork.cspViolations,
-    );
-    expect(await page.locator('body').innerText()).not.toMatch(
-      /(?:1969-12-31|1970-01-01)/,
-    );
-    await expectConnectSrcCspEnforced(page);
-    expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);
-    const heapDeltaBytes = Math.max(0, heapAfter - heapBefore);
-    expect(heapDeltaBytes).toBeLessThan(MAX_HEAP_DELTA_BYTES);
-    await page.close();
-    await browser.close();
-    browser = undefined;
-  }, 90_000);
+      expect(interaction).toMatchObject({
+        firstFound: true,
+        lastFound: true,
+        thinkingFound: true,
+        toolFound: true,
+        richFound: true,
+        chartFallbackFound: true,
+        subagentResultFound: true,
+        subagentStreamFound: true,
+        nestedToolFound: true,
+        parallelAgentFound: true,
+        userShellFound: true,
+        diffFound: true,
+        clippedByMaxHeight: [],
+      });
+      expect(interaction.copiedLength).toBeGreaterThan(7_000_000);
+      expect(pdf.byteLength).toBeGreaterThan(1_000);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.allowedScriptRequests).toEqual(
+        expect.arrayContaining([RENDERER_URL]),
+      );
+      expect(probe.allowedStyleRequests).toEqual(
+        expect.arrayContaining([RENDERER_CSS_URL]),
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
+      expect(await page.locator('body').innerText()).not.toMatch(
+        /(?:1969-12-31|1970-01-01)/,
+      );
+      await expectConnectSrcCspEnforced(page);
+      expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);
+      const heapDeltaBytes = Math.max(0, heapAfter - heapBefore);
+      expect(heapDeltaBytes).toBeLessThan(MAX_HEAP_DELTA_BYTES);
+      await page.close();
+      await browser.close();
+      browser = undefined;
+    },
+    MAX_DOCUMENT_DURATION_MS + 30_000,
+  );
 
   it('renders a stable error page for incompatible document envelopes', async () => {
     const document = createExportTranscriptDocumentV1(
@@ -669,6 +678,273 @@ describe('ExportTranscriptDocument browser gate', () => {
       await page.close();
     }
   });
+
+  it('renders valid Cron metadata in a V2 document', async () => {
+    const prompt = '/loop 60 seconds: continue with verified metadata';
+    const document = createExportTranscriptDocumentV2(
+      [
+        {
+          ...record('valid-cron-metadata', null, 'user', prompt),
+          subtype: 'cron',
+          systemPayload: { displayText: prompt },
+        },
+      ],
+      {
+        startTime: '2026-08-16T00:00:00.000Z',
+        metadata: {
+          sessionId: 'valid-cron-metadata',
+          startTime: '2026-08-16T00:00:00.000Z',
+          exportTime: EXPORTED_AT,
+          cwd: '/workspace/project',
+          promptCount: 1,
+          uniqueFiles: [],
+        },
+      },
+      { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+    );
+    const html = renderExportTranscriptDocumentToHtml(document);
+    expect(html).toContain('"schemaVersion":2');
+
+    browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    const probe = await installNetworkAndCspProbe(page);
+    await page.setContent(html, { waitUntil: 'load' });
+    await expect
+      .poll(() => page.locator('body').getAttribute('data-render-complete'))
+      .toBe('true');
+    const card = page.locator('[data-web-shell-automatic-trigger-message]');
+    expect(await card.count()).toBe(1);
+    expect(
+      await card
+        .locator('[data-web-shell-automatic-trigger-summary]')
+        .textContent(),
+    ).toBe(prompt);
+    const instructions = card.locator(
+      '[data-web-shell-automatic-trigger-instructions]',
+    );
+    expect(await instructions.isVisible()).toBe(true);
+    expect(await instructions.innerText()).toBe(prompt);
+    expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+    expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
+    expect(probe.unexpectedRequests).toHaveLength(
+      expectedNetwork.unexpectedRequests,
+    );
+    expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+      expectedNetwork.cspViolations,
+    );
+    await page.close();
+    await browser.close();
+    browser = undefined;
+  });
+
+  it('opens V1 and rejects V2 with the pinned pre-V2 public renderer', async () => {
+    const legacyIdentity = '0.28.3+88485ce86a090982';
+    const legacyAssets = [
+      {
+        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.js',
+        integrity:
+          'sha384-RmZTu+dlEMG0jEt1MPe6uwIFPUR0wy3BVWW/vf8HIJwf0DvYK5GVg9c8F+mo3xei',
+        bytes: 2_149_861,
+      },
+      {
+        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.css',
+        integrity:
+          'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
+        bytes: 2_426_053,
+      },
+    ];
+    // Fetch immutable public bytes and verify them before serving only these
+    // two requests through Chromium's route handler.
+    const publishedAssets = await Promise.all(
+      legacyAssets.map(async ({ url, integrity, bytes }) => {
+        const response = await fetch(url);
+        expect(response.ok, `${url}: HTTP ${response.status}`).toBe(true);
+        const asset = Buffer.from(await response.arrayBuffer());
+        expect(asset.byteLength).toBe(bytes);
+        expect(
+          `sha384-${createHash('sha384').update(asset).digest('base64')}`,
+        ).toBe(integrity);
+        return asset;
+      }),
+    );
+
+    const prompt = '/loop 60 seconds: preserve this V1 instruction';
+    const cronRecord = {
+      ...record('legacy-cron', null, 'user', prompt),
+      subtype: 'cron',
+      systemPayload: { displayText: prompt },
+    };
+    const sessionData = {
+      startTime: '2026-08-16T00:00:00.000Z',
+      metadata: {
+        sessionId: 'legacy-cron',
+        startTime: '2026-08-16T00:00:00.000Z',
+        exportTime: EXPORTED_AT,
+        cwd: '/workspace/project',
+        promptCount: 1,
+        uniqueFiles: [],
+      },
+    };
+    const options = {
+      rendererVersion: RENDERER_VERSION,
+      exportedAt: EXPORTED_AT,
+    };
+    const documents = [
+      createExportTranscriptDocumentV1([cronRecord], sessionData, options),
+      createExportTranscriptDocumentV2([cronRecord], sessionData, options),
+    ];
+    expect(documents[0].blocks[0]).not.toHaveProperty('meta');
+    expect(documents[1].blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { source: 'cron' },
+    });
+
+    const currentRendererIntegrity = `sha384-${createHash('sha384').update(rendererAsset).digest('base64')}`;
+    const currentCssIntegrity = `sha384-${createHash('sha384').update(rendererCssAsset).digest('base64')}`;
+    browser = await chromium.launch({ headless: true });
+    for (const document of documents) {
+      const page = await browser.newPage();
+      await page.route('**/*', async (route) => {
+        const index = legacyAssets.findIndex(
+          ({ url }) => route.request().url() === url,
+        );
+        if (index === -1) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        await route.fulfill({
+          body: publishedAssets[index],
+          contentType: index === 0 ? 'text/javascript' : 'text/css',
+          headers: { 'access-control-allow-origin': '*' },
+        });
+      });
+      let html = renderExportTranscriptDocumentToHtml(document);
+      html = replaceDocumentEnvelope(html, {
+        ...document,
+        rendererVersion: legacyIdentity,
+      })
+        .replaceAll(RENDERER_URL, legacyAssets[0]!.url)
+        .replaceAll(RENDERER_CSS_URL, legacyAssets[1]!.url)
+        .replaceAll(currentRendererIntegrity, legacyAssets[0]!.integrity)
+        .replaceAll(currentCssIntegrity, legacyAssets[1]!.integrity);
+      await page.setContent(html, { waitUntil: 'load' });
+      if (document.schemaVersion === 1) {
+        await expect
+          .poll(() => page.locator('body').getAttribute('data-render-complete'))
+          .toBe('true');
+        expect(await page.locator('body').innerText()).toContain(prompt);
+        expect(
+          await page
+            .locator('[data-web-shell-automatic-trigger-message]')
+            .count(),
+        ).toBe(0);
+      } else {
+        await expect
+          .poll(() => page.locator('body').getAttribute('data-render-complete'))
+          .toBe('error');
+        expect(await page.getByRole('alert').textContent()).toContain(
+          'Unable to open this chat export',
+        );
+        expect(await page.locator('body').innerText()).not.toContain(prompt);
+      }
+      await page.close();
+    }
+    await browser.close();
+    browser = undefined;
+  });
+
+  it.each([
+    {
+      caseName: 'V1 with injected cron metadata',
+      schemaVersion: 1,
+      meta: { source: 'cron' },
+    },
+    {
+      caseName: 'V2 with a non-canonical source',
+      schemaVersion: 2,
+      meta: { source: 'loop' },
+    },
+    {
+      caseName: 'V2 with extra user metadata',
+      schemaVersion: 2,
+      meta: { source: 'cron', additionalKey: 'not-allowed' },
+    },
+    {
+      caseName: 'V2 with metadata on an assistant block',
+      schemaVersion: 2,
+      meta: { source: 'cron' },
+      metaIndex: 1,
+    },
+    {
+      caseName: 'an unsupported schema version',
+      schemaVersion: 3,
+      meta: { source: 'cron' },
+    },
+  ])(
+    'rejects $caseName from a static document reader',
+    async ({ schemaVersion, meta, metaIndex = 0 }) => {
+      const document = createExportTranscriptDocumentV1(
+        [
+          record('metadata-error', null, 'user', 'Untrusted metadata marker'),
+          record(
+            'assistant-marker',
+            'metadata-error',
+            'assistant',
+            'Assistant metadata marker',
+          ),
+        ],
+        {
+          startTime: '2026-08-16T00:00:00.000Z',
+          metadata: {
+            sessionId: 'metadata-error',
+            startTime: '2026-08-16T00:00:00.000Z',
+            exportTime: EXPORTED_AT,
+            cwd: '/workspace/project',
+            promptCount: 1,
+            uniqueFiles: [],
+          },
+        },
+        { rendererVersion: RENDERER_VERSION, exportedAt: EXPORTED_AT },
+      );
+      expect(document.blocks.map(({ kind }) => kind)).toEqual([
+        'user',
+        'assistant',
+      ]);
+      const invalidDocument = {
+        ...document,
+        schemaVersion,
+        blocks: document.blocks.map((block, index) =>
+          index === metaIndex ? { ...block, meta } : block,
+        ),
+      };
+      const html = replaceDocumentEnvelope(
+        renderExportTranscriptDocumentToHtml(document),
+        invalidDocument,
+      );
+
+      browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      const probe = await installNetworkAndCspProbe(page);
+      await page.setContent(html, { waitUntil: 'load' });
+      await expect
+        .poll(() => page.locator('body').getAttribute('data-render-complete'))
+        .toBe('error');
+      expect(await page.getByRole('alert').textContent()).toContain(
+        'Unable to open this chat export',
+      );
+      expect(probe.allowedScriptRequests).toEqual([RENDERER_URL]);
+      expect(probe.allowedStyleRequests).toEqual([RENDERER_CSS_URL]);
+      expect(probe.unexpectedRequests).toHaveLength(
+        expectedNetwork.unexpectedRequests,
+      );
+      expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
+        expectedNetwork.cspViolations,
+      );
+      await page.close();
+      await browser.close();
+      browser = undefined;
+    },
+  );
 
   it('fails closed when the CDN renderer is unavailable or fails integrity', async () => {
     const document = createExportTranscriptDocumentV1(

@@ -4,6 +4,10 @@ import type { ComposerSubmitMetadata } from '../../hooks/useComposerCore';
 import type { WebShellComposerTag } from '../../customization';
 import type { ManagedAgentProvider } from './managed-agent-provider';
 import type { PromptFile } from '../../adapters/promptTypes';
+import {
+  useManagedFileUpload,
+  type ManagedUploadReference,
+} from './use-managed-file-upload';
 
 interface Snapshot {
   version: 1;
@@ -58,6 +62,11 @@ export function useManagedFileReferences(
   const currentSource = useRef(source);
   currentSource.current = source;
   const [ready, setReady] = useState<string>();
+  const [uploadScope, setUploadScope] = useState<{
+    source: string;
+    scopeRevision: string;
+    maxUploadBytes: number;
+  }>();
   const pendingReads = useRef(new Map<string, number>());
   const [busySource, setBusySource] = useState<string>();
   const [failure, setFailure] = useState<{ source: string; message: string }>();
@@ -87,8 +96,9 @@ export function useManagedFileReferences(
       try {
         const result = await api!.query(
           {
-            workspaceId: workspaceId!,
-            cwdRelative: cwdRelative!,
+            ...(sessionId === 'new'
+              ? { workspaceId: workspaceId!, cwdRelative: cwdRelative! }
+              : { sessionId }),
             directory,
             query,
           },
@@ -97,6 +107,11 @@ export function useManagedFileReferences(
         if (!active.current || currentSource.current !== source)
           throw new Error('Workspace changed; select the file again.');
         revision = result.scopeRevision;
+        setUploadScope({
+          source,
+          scopeRevision: result.scopeRevision,
+          maxUploadBytes: result.maxUploadBytes ?? 0,
+        });
         return result;
       } catch (error) {
         if (signal?.aborted) throw error;
@@ -147,8 +162,9 @@ export function useManagedFileReferences(
           if (!revision) await query('.', '');
           const snapshot = await api.read(
             {
-              workspaceId,
-              cwdRelative,
+              ...(sessionId === 'new'
+                ? { workspaceId, cwdRelative }
+                : { sessionId }),
               path,
               expectedScopeRevision: revision!,
             },
@@ -186,7 +202,15 @@ export function useManagedFileReferences(
         }
       },
     };
-  }, [api, workspaceId, cwdRelative, source, clientId, workspace?.state]);
+  }, [
+    api,
+    workspaceId,
+    cwdRelative,
+    source,
+    clientId,
+    workspace?.state,
+    sessionId,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -212,6 +236,22 @@ export function useManagedFileReferences(
     };
   }, [actions, source]);
 
+  const uploadTarget = useManagedFileUpload(
+    provider,
+    clientId,
+    ready === source &&
+      uploadScope?.source === source &&
+      workspaceId &&
+      cwdRelative
+      ? {
+          ...uploadScope,
+          ...(sessionId === 'new'
+            ? { workspaceId, cwdRelative }
+            : { sessionId }),
+        }
+      : undefined,
+  );
+
   function assertCurrent() {
     if (!active.current || currentSource.current !== source)
       throw new Error('Workspace changed; select the file again.');
@@ -227,13 +267,32 @@ export function useManagedFileReferences(
         'Wait for the selected file to finish loading before sending.',
       );
     const selected: Snapshot[] = [];
+    const uploaded: ManagedUploadReference[] = [];
     for (const annotation of metadata?.inputAnnotations ?? []) {
       if (
         annotation.type !== 'reference' ||
         annotation.reference.kind !== 'file'
       )
         continue;
-      const item = object(object(annotation.reference.metadata)['managedFile']);
+      const details = object(annotation.reference.metadata);
+      const upload = object(details['managedUpload']);
+      if (upload['version'] === 1) {
+        if (
+          upload['source'] !== source ||
+          typeof upload['scopeRevision'] !== 'string' ||
+          typeof upload['path'] !== 'string' ||
+          upload['path'] !== details['filePath'] ||
+          !upload['path'] ||
+          upload['path']
+            .split('/')
+            .some((part) => !part || part === '.' || part === '..')
+        )
+          throw new Error('Workspace changed; select the file again.');
+        if (!uploaded.some((item) => item.path === upload['path']))
+          uploaded.push(upload as unknown as ManagedUploadReference);
+        continue;
+      }
+      const item = object(details['managedFile']);
       if (
         item['version'] !== 1 ||
         item['source'] !== source ||
@@ -249,17 +308,24 @@ export function useManagedFileReferences(
       if (!selected.some((snapshot) => snapshot.path === item['path']))
         selected.push(item as unknown as Snapshot);
     }
-    if (!selected.length) return { text, files: [...files] };
+    if (!selected.length && !uploaded.length)
+      return { text, files: [...files] };
     if (!api || !workspaceId || !cwdRelative)
       throw new Error('Workspace file access is unavailable.');
     const scope = await api.query(
-      { workspaceId, cwdRelative, directory: '.', query: '' },
+      {
+        ...(sessionId === 'new' ? { workspaceId, cwdRelative } : { sessionId }),
+        directory: '.',
+        query: '',
+      },
       { clientId },
     );
     if (
       !active.current ||
       currentSource.current !== source ||
-      selected.some((item) => item.scopeRevision !== scope.scopeRevision)
+      [...selected, ...uploaded].some(
+        (item) => item.scopeRevision !== scope.scopeRevision,
+      )
     )
       throw new Error('Workspace changed; select the file again.');
     const attached = [...files];
@@ -287,13 +353,26 @@ export function useManagedFileReferences(
       );
     }
     assertCurrent();
+    const context = [
+      ...(selected.length
+        ? [
+            `Workspace files (relative path → attachment):\n${mapping.join('\n')}`,
+          ]
+        : []),
+      ...(uploaded.length
+        ? [
+            `Uploaded Workspace files (paths relative to the working directory):\n${uploaded.map((item) => JSON.stringify(item.path)).join('\n')}`,
+          ]
+        : []),
+    ];
     return {
-      text: `${text}\n\nWorkspace files (relative path → attachment):\n${mapping.join('\n')}`,
+      text: `${text}\n\n${context.join('\n\n')}`,
       files: attached,
     };
   }
   return {
     actions: ready === source ? actions : undefined,
+    uploadTarget,
     busy: busySource === source && (pendingReads.current.get(source) ?? 0) > 0,
     prepareInput,
     assertCurrent,

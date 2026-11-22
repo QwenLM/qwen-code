@@ -2,9 +2,8 @@
 
 [English](2026-10-16-managed-agent-gate.md) | [简体中文](2026-10-16-managed-agent-gate.zh-CN.md)
 
-Status: proposed and implemented in `.github/workflows/managed-agent-gate.yml`;
-required-check enablement is pending a maintainer decision. Tracking issues:
-#14392, #14381.
+Status: implemented in `.github/workflows/managed-agent-gate.yml`; required-check
+enablement is tracked in #17039. Historical tracking issues: #14392, #14381.
 
 ## Problem
 
@@ -12,8 +11,9 @@ Since #14205 the SDK Java suite (`sdk-java.yml`) runs only nightly, on demand,
 and before a Java release. On 2026-10-16 #13918 and #14370 were each green and
 together broke compilation of the `managed-agent-server` test sources on main;
 nothing reported it until the nightly run. Managed Agent is now a protected
-product line: a change to it, or to the harness it drives, must pass the full
-suite before it merges.
+product line: a change to it, or to the harness it drives, must report the
+stable gate before it merges. The first approval starts the full suite for
+deeper verification.
 
 Running the full suite on every push is not affordable. One full run is 11
 checks, about 330 machine minutes and 125 minutes of wall time (run
@@ -22,13 +22,15 @@ machine hours per day.
 
 ## Goals
 
-- Every PR that touches Managed Agent paths passes the full suite on its
-  final head before it can merge.
+- Every PR that touches Managed Agent paths reports the stable gate on its
+  final head before it can merge; its fast-tier result satisfies that check,
+  and its first approval starts the full suite for deeper verification.
 - Feedback on a push stays fast (about 25 minutes).
 - A PR that does not touch those paths pays nothing beyond a few seconds of
   path matching.
 - A regression that still reaches main files an issue through the existing
-  `main-ci-failure-issue.yml` route.
+  `main-ci-failure-issue.yml` route, except when main has already advanced
+  past the failing head and a newer run owns the result.
 
 ## Non-goals
 
@@ -75,8 +77,9 @@ workspace install as `mysql-integration`. Together that adds about 16 minutes:
 `.github/scripts/managed-agent-gate-scope.mjs` matches the changed paths:
 `packages/managed-agent-server/`, `packages/sdk-java/`,
 `packages/cli/src/serve/`, `packages/core/src/managed-runtime/`, the Hosted
-integration helpers and config, the scripts `sdk-java.yml` runs, and the gate
-files themselves. Pull request and review events diff the test merge commit
+integration helpers and config, the scripts `sdk-java.yml` runs, the gate
+workflow, and `.github/scripts/managed-agent-gate-tier.sh`. Pull request and
+review events diff the test merge commit
 against its first parent, so the set is the PR's own change. A push diffs
 `before..after` and a merge group diffs its base. Renames count both paths,
 and the diff runs with git's path quoting off so a non-ASCII file name still
@@ -84,39 +87,48 @@ matches. Changes outside the scope still reach the nightly run.
 
 ### Required check
 
-The `gate` job reports the tier result for every run the workflow starts. Its
-name is computed:
+The `gate` job reports under the stable required-check name `Managed Agent gate`
+for every run whose result can gate a merge. Its conclusion and the
+`SDK Java (<tier>)` job distinguish the selected tier:
 
-| Event                 | Scope                           | Name                                 |
-| --------------------- | ------------------------------- | ------------------------------------ |
-| any                   | untouched                       | `Managed Agent gate` (pass)          |
-| `pull_request`        | touched                         | `Managed Agent fast tier`            |
-| `pull_request_review` | touched, full run               | `Managed Agent gate`                 |
-| `pull_request_review` | touched, no full run            | `Managed Agent review (no full run)` |
-| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no gate check         |
-| `push`, `merge_group` | touched                         | `Managed Agent gate`                 |
-| any                   | tier selection failed           | `Managed Agent gate` (fail)          |
+| Event                 | Scope                           | Result                                                     |
+| --------------------- | ------------------------------- | ---------------------------------------------------------- |
+| any                   | untouched                       | pass without Java                                          |
+| `pull_request`        | touched, no earlier full report | fast-tier result                                           |
+| `pull_request`        | touched, earlier full report    | no Java; non-required `Managed Agent review (no full run)` |
+| `pull_request_review` | touched, full run               | full-tier result                                           |
+| `pull_request_review` | touched, no full run            | non-required `Managed Agent review (no full run)`          |
+| `pull_request_review` | not an approval, or a closed PR | all jobs skip; no required-context check                   |
+| `push`, `merge_group` | touched                         | fast-tier result                                           |
+| any                   | tier selection failed           | `Managed Agent gate` fail                                  |
 
 A review that is not an approval, or one submitted after its pull request
 closed, starts no job: GitHub still creates the run, but it can never select a
 tier above `none` — or the check it would report no longer gates anything —
 so both `scope` and `gate` skip and it finishes in seconds without taking a
-runner. The run still lists one skipped check per job, and `gate`'s name is
-reported as its unevaluated expression, so no check named `Managed Agent gate`
-or `Managed Agent review (no full run)` appears. It used to report
-`Managed Agent review (no full run)` — a green check no rule reads.
+runner. Its computed name remains unevaluated, so no skipped check is published
+under the required context.
 
-Branch protection reads the most recently updated check of a name. A touched
-PR therefore shows `Managed Agent gate` as expected until the full run on its
-head reports it, and only a full run, or a failure, can report that name for
-it. Check runs need no write token, so the gate works for fork PRs.
+The ruleset can therefore require one context for every PR. A touched PR's
+fast-tier result satisfies that check before its first approval; approval still
+starts the full suite, which reports its result under the same name. A touched
+review that selects no new full run keeps the non-required
+`Managed Agent review (no full run)` context, so it cannot overwrite the prior
+fast or full result. A pull-request rerun or reopen on a head with an earlier
+full report also selects no suite and keeps that full result on the required
+context. Check runs
+need no write token after GitHub allows the workflow run. A first-time
+contributor's run can remain `action_required` until a maintainer approves it,
+so no gate check exists before that approval.
 
-A superseded fast tier is neutral, not red: when a newer push cancels a pull
-request's in-flight run, the gate reports `Managed Agent fast tier` as a
-warning-level pass. Every other cancellation stays failing — a cancelled full
-run, so the next approval retries the suite instead of deduping against a
-green check, and a push or merge-group cancellation, because nothing there
-cancels in progress, so it is a timeout or an operator stop.
+A superseded fast tier reports red, not green: when a newer push cancels a pull
+request's in-flight run, the gate still publishes `Managed Agent gate` as a
+failure on a head branch protection no longer reads. That keeps a cancellation
+without a newer push from satisfying the required check. Every other
+cancellation stays failing too — a cancelled full run, so the next approval
+retries the suite instead of deduping against a green check, and a push or
+merge-group cancellation, because nothing there cancels in progress, so it is
+a timeout or an operator stop.
 
 ### First approval of the current head
 
@@ -132,12 +144,20 @@ involved.
 The `scope` job runs the full tier for such an approval unless an earlier
 `pull_request_review` run already reported a passing or running
 `Managed Agent gate` for the same head. A run's own reruns
-do not count, and a pass from the PR push run (an untouched classification)
-does not count. The covering run must also belong to the same pull request and
+do not count, and a fast-tier or untouched pass from the PR push run does not
+count. The covering run must also belong to the same pull request and
 show the `SDK Java (full)` callee in its jobs: a review run of another PR on
 the same head, or a run that reported the name without running the suite, ran
-no Java lane and does not count. After a failed full run, the next approval or
+no Java lane and does not count. GitHub leaves `pull_requests` empty for fork
+review runs, so the approval dedup confirms that the current PR still points at
+this head SHA and then matches the candidate run's head branch to the PR's
+head ref. After a failed full run, the next approval or
 **Re-run failed jobs** retries it.
+
+The reopened or manually rerun `pull_request` case is deliberately SHA-scoped
+rather than PR-scoped: branch protection reads the required context by commit,
+so any full-suite report already published for that head must remain the
+result that a new fast run cannot overwrite.
 
 ### Concurrency
 
@@ -173,11 +193,35 @@ pre-checkout hygiene steps; fork runs stay hosted.
 ### Failure reporting
 
 `main-ci-failure-issue.yml` also watches `Managed Agent gate`, so a red
-post-merge fast tier is recorded on one open issue per workflow, reopening a
+post-merge fast tier is recorded there: a run that names failing tests reuses
+or files a per-signature issue deduped by the test markers in its body, and a
+run without one comments on the workflow's shared aggregate issue, reopening a
 matching closed issue when found. New aggregates receive `scope/ci-cd` and
 `status/needs-triage` for human triage, with no automatic autofix assignment.
 `qwen-triage-finalize.yml` now lists `Managed Agent gate` in place of `SDK Java`,
 which has had no `pull_request` trigger since #14205.
+
+A post-merge push failure whose head is no longer main's tip is recorded only
+on the analyze run's step summary, not on the workflow issue, when a newer push
+run of the same workflow exists at the new tip and has already settled: a
+`success` there means the tree is green, and a `failure` reports itself through
+its own completion event. A successor that ended `timed_out`, `skipped`, or
+`startup_failure` is never analyzed, so the original failure is reported
+instead. A `cancelled` successor owns the result only when the shared
+classifier's verdict for it is one that reports: `timeout`, or the fail-open
+`unknown`. A `concurrency` or `nothing-executed` successor stays silent on its
+own, so the original failure is still reported; an `unreadable` successor does
+not take ownership either, because a failed read certifies nothing about what
+that run concluded, and this run keeps its own fail-open report (#16272,
+#16280).
+
+A successor that has not completed settles nothing, and this job cannot wait
+for it — the pool the reporter runs on queued it for 20-100
+minutes, so the tip's run is usually still young when the report is prepared.
+The failure is reported anyway, marked provisional at the top of the body. That
+is affordable because the per-signature route hands new issues to a human
+rather than to autofix: a stale provisional report costs a close, while a
+dropped one costs the regression (#15470).
 
 ## Cost
 
@@ -205,9 +249,58 @@ jobs, and move Java 17 to nightly only.
   `HostedMonitorRunFaultGatesIT` fails intermittently. Required today, the
   gate would block a large share of Java PRs on noise. Keep it advisory until
   #14361 is resolved; **Re-run failed jobs** is the escape hatch meanwhile.
-- **Approval timing.** The full suite starts at the first approval, so merge
-  waits up to about two hours after it. Reviewers can approve earlier; a push
-  after approval dismisses it and restarts the cycle.
+
+  Re-measured on 2026-11-12. Two different denominators are in play and must not
+  be compared directly: 41% is the failure rate of the single
+  `HostedShellLifecycleRecoveryIT` class, while the figures below count runs in
+  which at least one of the two Hosted lanes failed.
+
+  Over the 97 `sdk-java.yml` runs created between 2026-10-27T14:57Z and
+  2026-11-11T21:48:10Z, 70 had completed without cancellation and all 70 executed
+  both Hosted lanes. Of those, 54 failed at least one lane (77%), and only 6 were
+  green across every job in the run. In the newest 22 of them, 20 failed at least
+  one lane (91%).
+
+  **The failure is almost entirely one lane, not both.** Process-fault failed 54
+  times and failover 8, and every one of those 8 failover failures was in a run
+  where process-fault had also failed — failover never failed on its own. That
+  "never" is a claim about this window, not about the lane: widened to
+  2026-10-16 through 2026-11-11T13:44Z under the same counting rule, 163 runs
+  executed both lanes and 3 of them failed failover while process-fault passed
+  (runs 39091025824 and 39097018288 on 2026-10-18, 39201677644 on 2026-10-19), so
+  earlier windows do contain failover-only failures. The wider split is 110
+  process-fault failures against 11 failover, so the asymmetry survives the
+  window change and only the absolute "never" does not. Within the pinned
+  window the split is 46 runs with process-fault alone failing, 8 with both
+  failing, and 16 with both passing, which is the same 70. An earlier revision of
+  this note reported "26 process-fault, 26 failover" and concluded the lanes fail
+  independently; that count did not reproduce and the conclusion was backwards.
+  Whoever picks up #14361 should start from the process-fault lane.
+
+  This series is nightly plus manual dispatch, not the gate's own runs: those 97
+  runs are 16 `schedule` and 81 `workflow_dispatch`, and `sdk-java.yml` has no
+  `pull_request` trigger at all. The nightly arm is worse — 15 of 16 nightlies
+  failed a Hosted lane and none was fully green, while all 6 fully green runs came
+  from the 54 completed dispatch runs. Read it as the harness's background failure
+  rate, which is what makes the gate unrequireable, not as the gate's pass rate.
+
+  The gate's own full tier is too young to give a rate, and it is a separate run
+  list. `managed-agent-gate.yml` runs the lanes through reusable-workflow calls
+  whose job names carry a `SDK Java (full) /` prefix. Of the 133
+  `pull_request_review` runs of that workflow that finished success or failure
+  on 2026-11-11, 38 executed both Hosted lanes, and every one of the 38 failed
+  process-fault while passing failover — the same shape as above, and not one
+  full-tier run that day had both lanes pass.
+
+  The refusal itself has changed shape: the Runtime Broker now
+  answers `409 managed_runtime_identity_conflict` where the original report had
+  the Store answering `400 invalid_request`, freezing the turn the same way.
+
+- **Approval timing.** The full suite starts at the first approval but does not
+  delay merge: its gate job publishes only after its dependencies finish, so the
+  fast-tier result remains the required context while it runs. A reviewer who
+  needs full-suite proof must wait manually. A push after approval dismisses it
+  and restarts the cycle.
 - **Classification drift.** The push run and the approval run classify their
   own merge commits; if the base moves between them, the scope can differ.
   Both diff against their own first parent, which keeps the PR's change set
@@ -222,22 +315,61 @@ jobs, and move Java 17 to nightly only.
 3. A maintainer adds `Managed Agent gate` to main's required checks (and to
    the merge queue if it is enabled again).
 
+Step 2 has a measurement trap worth recording, because two reassuring series
+do not measure the Hosted lanes at all:
+
+- This workflow's own `pull_request_review` runs mostly select tier `none`.
+  All 13 of its recent successes ran `SDK Java (none)` — no Java at all,
+  because those heads did not touch the scoped paths. A green streak here says
+  nothing about the full tier.
+- This workflow's main failures can be an unrelated step. All 7 of its recent
+  main failures were `Run Managed Agent Server Checkstyle` — one unused import,
+  fixed by `da270e434` — after which main went green on this workflow while the
+  Hosted lanes kept failing at the rate above.
+
+Only runs that actually executed `Hosted process fault gates` and `Hosted
+failover E2E` measure step 2. Filter on both jobs being present _and_ not
+`skipped`, then exclude cancelled runs before reading a pass rate. The two ways a
+run fails to be a measurement differ: a scoped-out PR selects tier `none` and
+emits no Hosted job at all, while a `fast`-tier run emits both Hosted names and
+skips them, so filtering on presence alone counts fast runs as measurements.
+
+Name the run list and pin the window whenever quoting a rate, because the two
+lists differ and an unpinned count drifts as runs arrive. `sdk-java.yml` is
+nightly plus dispatch and has no `pull_request` trigger; the gate's own runs are
+under `managed-agent-gate.yml`, where the reusable-workflow job names carry a
+`SDK Java (full) /` prefix (for example run `43019171265`). The figures in Risks
+are pinned to `sdk-java.yml` runs created between 2026-10-27T14:57Z and
+2026-11-11T21:48:10Z; a later reader will get a different denominator from the same
+query. Main's required checks live in ruleset `main`, not in legacy branch
+protection, and adding the name there must not disturb its two-approval and
+dismiss-on-push rules.
+
+Only step 3's single name is needed. Fast, full, untouched, push and merge-group
+runs all report `Managed Agent gate`, so the ruleset can require it without
+blocking on a tier-specific context. A fast-tier pass can satisfy the required
+check; the first approval still starts the full suite for deeper verification.
+`Managed Agent review (no full run)` remains deliberately non-required so a
+review that runs no suite cannot overwrite a real gate result. Do not add that
+context or the retired `Managed Agent fast tier` context to the ruleset.
+
 ## Validation
 
 - `scripts/tests/managed-agent-gate-workflow.test.js` evaluates the path
-  matcher, the check-name and concurrency expressions, the fast matrix, and
-  runs the tier-selection and report scripts against a stub `gh`.
+  matcher, the stable check name and concurrency expressions, the fast matrix,
+  and runs the tier-selection and report scripts against a stub `gh`.
 - The existing SDK Java, Hosted, failure-issue, finalize and runner-routing
   meta-tests pin the changed contracts, including that an approval of a fork
   PR stays on hosted runners.
-- After merge: a touched PR shows `Managed Agent fast tier` on push and
-  `Managed Agent gate` after its first approval; an untouched PR shows a
-  passing `Managed Agent gate` within a minute.
+- After merge: a touched PR shows its fast-tier result as `Managed Agent gate`
+  on push and its full-tier result under the same name after its first
+  approval; an untouched PR shows a passing `Managed Agent gate` within a
+  minute.
 
 ## Acceptance criteria
 
-- A touched PR cannot report a passing `Managed Agent gate` without a full run
-  on its current head.
+- A touched PR reports its fast-tier result as `Managed Agent gate` on push and
+  its full-tier result under the same name after its first approval.
 - An untouched PR reports a passing `Managed Agent gate` without running Java.
 - A second approval of the same head does not start a second full run after a
   pass.

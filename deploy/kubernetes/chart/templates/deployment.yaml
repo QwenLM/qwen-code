@@ -1,0 +1,346 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "managed-agent.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: application
+  template:
+    metadata:
+      labels:
+        {{- include "managed-agent.labels" . | nindent 8 }}
+        app.kubernetes.io/component: application
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- if .Values.runtime.enabled }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values:
+                      - {{ required "Set runtime.nodeName to the trusted Node name." .Values.runtime.nodeName | quote }}
+      {{- end }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        fsGroup: 1000
+        {{- if .Values.runtime.enabled }}
+        fsGroupChangePolicy: OnRootMismatch
+        {{- end }}
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: {{ required "Set server.image to the built Java image." .Values.server.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: api
+              containerPort: 8080
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: {{ printf "jdbc:mysql://%s-mysql:3306/qwen_managed_agent" .Release.Name | quote }}
+            - name: SPRING_DATASOURCE_USERNAME
+              value: qwen
+            {{- $secret := include "managed-agent.secret" . }}
+            {{- range $env, $key := dict "SPRING_DATASOURCE_PASSWORD" "mysql-password" "QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY" "auth-signing-key" "QWEN_MANAGED_AGENT_SESSION_STORE_BINDING_KEY" "session-store-binding-key" "QWEN_MANAGED_AGENT_HARNESS_TOKEN" "harness-token" "QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" "capability-digest" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $key }}
+            {{- end }}
+            - name: QWEN_MANAGED_AGENT_SERVER_ADDRESS
+              value: '0.0.0.0'
+            - name: QWEN_MANAGED_AGENT_AUTH_MODE
+              value: signed
+            - name: QWEN_MANAGED_AGENT_INTERNAL_SERVER_ADDRESS
+              value: '127.0.0.1'
+            - name: QWEN_MANAGED_AGENT_INTERNAL_SERVER_PORT
+              value: '8081'
+            - name: QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL
+              value: 'http://127.0.0.1:8081'
+            - name: QWEN_MANAGED_AGENT_WORKSPACE_ID
+              value: {{ "/workspace" | sha256sum | trunc 16 | quote }}
+            - name: QWEN_MANAGED_AGENT_WORKSPACE_CWD
+              value: /workspace
+            - name: QWEN_MANAGED_AGENT_HARNESS_ENABLED
+              value: 'true'
+            - name: QWEN_MANAGED_AGENT_HARNESS_BASE_URL
+              value: 'http://127.0.0.1:4170'
+            - name: QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED
+              value: {{ .Values.runtime.enabled | quote }}
+            - name: QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED
+              value: {{ .Values.runtime.enabled | quote }}
+            - name: QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED
+              value: {{ .Values.runtime.enabled | quote }}
+            {{- if .Values.runtime.enabled }}
+            {{- range $env, $key := dict "QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN" "runtime-broker-token" "QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY" "runtime-credential-key" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $key }}
+            {{- end }}
+            - name: QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID
+              value: kubernetes-v1
+            - name: QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER
+              value: local-process
+            - name: QWEN_MANAGED_AGENT_RUNTIME_ISOLATION
+              value: session
+            - name: QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY
+              value: /runtime-data/state
+            - name: QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS
+              value: 'true'
+            - name: QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED
+              value: 'true'
+            - name: QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY
+              value: 'false'
+            - name: QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT
+              value: /workspaces
+            - name: QWEN_MANAGED_AGENT_NODE_EXECUTABLE
+              value: /usr/local/bin/node
+            - name: QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY
+              value: /usr/local/share/npm-global/lib/node_modules/@qwen-code/qwen-code/cli.js
+            - name: QWEN_MANAGED_AGENT_APPROVAL_MODE
+              value: default
+            - name: QWEN_MANAGED_AGENT_WORKSPACE_CHILD_AGENTS_ENABLED
+              value: 'false'
+            - name: QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ENABLED
+              value: 'false'
+            - name: QWEN_HOME
+              value: /runtime-data/home
+            - name: QWEN_RUNTIME_DIR
+              value: /runtime-data/home/runtime
+            {{- end }}
+            - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
+              value: 'true'
+            - name: MANAGEMENT_ENDPOINT_HEALTH_GROUP_READINESS_INCLUDE
+              value: readinessState,db
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: api
+            periodSeconds: 5
+            failureThreshold: 120
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: api
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: api
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.server.resources | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: server-tmp
+              mountPath: /tmp
+            {{- if .Values.runtime.enabled }}
+            - name: workspaces
+              mountPath: /workspaces
+            - name: runtime-data
+              mountPath: /runtime-data
+            - name: machine-id
+              mountPath: /etc/machine-id
+              readOnly: true
+            {{- end }}
+        - name: harness
+          image: {{ required "Set harness.image to the matching built Qwen CLI image." .Values.harness.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [qwen]
+          args: [serve, --profile, hosted-harness, --hostname, '127.0.0.1', --port, '4170', --no-web]
+          workingDir: /workspace
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: QWEN_HOME
+              value: /home/node/.qwen
+            - name: QWEN_RUNTIME_DIR
+              value: /home/node/.qwen/runtime
+            {{- if .Values.runtime.enabled }}
+            - name: QWEN_MANAGED_RUNTIME_BROKER_URL
+              value: 'http://127.0.0.1:4182'
+            - name: QWEN_MANAGED_RUNTIME_BROKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: runtime-broker-token
+            {{- end }}
+            {{- range $env, $key := dict "QWEN_SERVER_TOKEN" "harness-token" "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST" "capability-digest" "OPENAI_API_KEY" "model-api-key" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: {{ $key }}
+            {{- end }}
+          startupProbe:
+            exec:
+              command: &harness-health
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:4170/health',{headers:{authorization:'Bearer '+process.env.QWEN_SERVER_TOKEN},signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: *harness-health
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: *harness-health
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.harness.resources | nindent 12 }}
+          volumeMounts:
+            - name: harness-home
+              mountPath: /home/node/.qwen
+            - name: config
+              mountPath: /home/node/.qwen/settings.json
+              subPath: settings.json
+              readOnly: true
+            - name: workspace
+              mountPath: /workspace
+            - name: harness-tmp
+              mountPath: /tmp
+        {{- if .Values.web.enabled }}
+        - name: web
+          image: {{ default .Values.harness.image .Values.web.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [qwen]
+          args:
+            - serve
+            - --managed-web-config
+            - /etc/qwen-web/config.json
+            - --hostname
+            - '0.0.0.0'
+            - --port
+            - '4171'
+            {{- range .Values.web.allowOrigins }}
+            - --allow-origin
+            - {{ . | quote }}
+            {{- end }}
+          workingDir: /home/node/.qwen
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - name: web
+              containerPort: 4171
+          env:
+            - name: QWEN_HOME
+              value: /home/node/.qwen
+            - name: QWEN_RUNTIME_DIR
+              value: /home/node/.qwen/runtime
+            - name: QWEN_SERVER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secret }}
+                  key: web-token
+          startupProbe:
+            exec:
+              command: &web-health
+                - node
+                - -e
+                - "fetch('http://127.0.0.1:4171/health',{headers:{authorization:'Bearer '+process.env.QWEN_SERVER_TOKEN},signal:AbortSignal.timeout(2000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: *web-health
+            timeoutSeconds: 3
+          readinessProbe:
+            exec:
+              command: *web-health
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          volumeMounts:
+            - name: web-home
+              mountPath: /home/node/.qwen
+            - name: web-tmp
+              mountPath: /tmp
+            - name: config
+              mountPath: /etc/qwen-web/config.json
+              subPath: managed-web.json
+              readOnly: true
+            - name: web-signing-key
+              mountPath: /run/qwen-web
+              readOnly: true
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-config
+        - name: harness-home
+          emptyDir: {}
+        - name: workspace
+          emptyDir: {}
+        - name: server-tmp
+          emptyDir: {}
+        - name: harness-tmp
+          emptyDir: {}
+        {{- if .Values.runtime.enabled }}
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-workspaces
+        - name: runtime-data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-runtime
+        - name: machine-id
+          hostPath:
+            path: /etc/machine-id
+            type: File
+        {{- end }}
+        {{- if .Values.web.enabled }}
+        - name: web-home
+          emptyDir: {}
+        - name: web-tmp
+          emptyDir: {}
+        - name: web-signing-key
+          secret:
+            secretName: {{ $secret }}
+            defaultMode: 0440
+            items:
+              - key: auth-signing-key
+                path: auth-signing-key
+        {{- end }}

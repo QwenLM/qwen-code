@@ -30,29 +30,40 @@
  * runtime Config to the ExtensionManager.
  */
 
+import { ExtensionManager } from '@qwen-code/qwen-code-core/extension/extensionManager.js';
+import { ExtensionStore } from '@qwen-code/qwen-code-core/extension/extension-store.js';
 import {
-  ExtensionManager,
-  ExtensionStore,
   SkillManager,
-  Storage,
-  isSafeModeEnv,
-  getExtensionDisplayName,
+  watcherIgnored,
+  WATCHER_MAX_DEPTH,
+} from '@qwen-code/qwen-code-core/skills/skill-manager.js';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { isSafeModeEnv } from '@qwen-code/qwen-code-core/utils/safe-mode.js';
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
+import {
   authoredSkillName,
   qualifySkillName,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/skills/types.js';
 import type { Config, Extension, SkillLevel } from '@qwen-code/qwen-code-core';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import * as fs from 'node:fs/promises';
+import { watch, type FSWatcher } from 'chokidar';
 import { loadSettings } from '../config/settings.js';
 import { resolveLanguage, resolveLanguageSetting } from '../i18n/index.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from '../runtime/workspace-skills-mapping.js';
 import { resolveSkillSettings } from '../config/skill-settings.js';
+import {
+  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS,
+  WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS,
+} from './workspace-skills-refresh-policy.js';
 
 export interface WorkspaceSkillsStatusProvider {
   (workspaceCwd: string): Promise<ServeWorkspaceSkillsStatus>;
   invalidate?(workspaceCwd: string): void;
+  dispose?(): Promise<void>;
 }
 
 export interface WorkspaceSkillsSnapshot {
@@ -70,6 +81,8 @@ export interface WorkspaceSkillsStatusProviderOptions {
   workspaceTrusted?: boolean;
   /** Read inert on-disk Skill manifests without loading workspace settings. */
   includeUntrustedSkills?: boolean;
+  /** Enable independent automatic discovery for the configuration catalog. */
+  autoDiscover?: boolean;
 }
 
 const VALID_SKILL_LEVELS: ReadonlySet<string> = new Set<SkillLevel>([
@@ -101,6 +114,19 @@ interface WorkspaceSkillManagers {
   skillManager: SkillManager;
   extensionManager?: ExtensionManager;
   extensionSkillStates: Map<Extension, Map<string, boolean>>;
+  watchDirectories: string[];
+}
+
+interface SkillsDiscoveryState {
+  safeMode: boolean;
+  startedAt: number;
+  sequence: number;
+  publishedSequence: number;
+  activeScans: number;
+  dirty: boolean;
+  directories: Set<string>;
+  debounce?: NodeJS.Timeout;
+  pending?: { timeout: NodeJS.Timeout };
 }
 
 export function createWorkspaceSkillsStatusProvider(
@@ -108,22 +134,255 @@ export function createWorkspaceSkillsStatusProvider(
 ): WorkspaceSkillsStatusProvider & {
   snapshot(workspaceCwd: string): Promise<WorkspaceSkillsSnapshot>;
 } {
-  // Reuse one SkillManager per workspace so repeat queries hit its in-memory
-  // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
-  // globs for) every level on each call. This is a best-effort pre-child
-  // fallback, so slight staleness between explicit invalidation points is
-  // acceptable: the live child re-lists authoritatively once a session exists.
+  // Warm reads reuse a committed manager while discovery builds its replacement
+  // separately. Runtime fallback callers keep explicit invalidation semantics.
   const managers = new Map<string, WorkspaceSkillManagers>();
-  const provider = ((workspaceCwd: string) =>
-    buildWorkspaceSkillsStatus(
+  // An enumeration that overlaps an invalidation captured pre-invalidation
+  // settings, so it must not install its managers; the next read rebuilds.
+  const epochs = new Map<string, number>();
+  const inFlight = new Map<string, Promise<ServeWorkspaceSkillsStatus>>();
+  const discovery = new Map<string, SkillsDiscoveryState>();
+  const watchers = new Map<
+    string,
+    { watcher: FSWatcher; workspaces: Set<string> }
+  >();
+  const closing = new Set<Promise<void>>();
+  const watcherRetryAfter = new Map<string, number>();
+  let disposed = false;
+
+  function closeWatcher(directory: string): void {
+    const subscription = watchers.get(directory);
+    if (!subscription) return;
+    watchers.delete(directory);
+    const pending = closeFileWatcher(subscription.watcher)
+      .catch((error: unknown) => {
+        writeStderrLine(
+          `qwen serve: Skills watcher close failed: ${String(error)}`,
+        );
+      })
+      .finally(() => closing.delete(pending));
+    closing.add(pending);
+  }
+
+  function releaseDirectories(
+    workspaceCwd: string,
+    state: SkillsDiscoveryState,
+  ) {
+    for (const directory of state.directories) {
+      const subscription = watchers.get(directory);
+      subscription?.workspaces.delete(workspaceCwd);
+      if (subscription?.workspaces.size === 0) closeWatcher(directory);
+    }
+    state.directories.clear();
+  }
+
+  function scheduleChange(workspaceCwd: string, state: SkillsDiscoveryState) {
+    if (disposed || discovery.get(workspaceCwd) !== state) return;
+    state.dirty = true;
+    if (state.debounce) clearTimeout(state.debounce);
+    state.debounce = setTimeout(() => {
+      state.debounce = undefined;
+      refresh(workspaceCwd, state);
+    }, 150);
+    state.debounce.unref();
+  }
+
+  function subscribe(workspaceCwd: string, state: SkillsDiscoveryState) {
+    const cached = managers.get(workspaceCwd);
+    if (!cached || disposed || discovery.get(workspaceCwd) !== state) return;
+    const directories = new Set(cached.watchDirectories);
+    for (const directory of state.directories) {
+      if (directories.has(directory)) continue;
+      const subscription = watchers.get(directory);
+      subscription?.workspaces.delete(workspaceCwd);
+      if (subscription?.workspaces.size === 0) closeWatcher(directory);
+    }
+    state.directories = directories;
+    for (const directory of directories) {
+      const existing = watchers.get(directory);
+      if (existing) {
+        existing.workspaces.add(workspaceCwd);
+        continue;
+      }
+      if (Date.now() < (watcherRetryAfter.get(directory) ?? 0)) continue;
+      try {
+        const workspaces = new Set([workspaceCwd]);
+        const watcher = watch(directory, {
+          ignoreInitial: true,
+          ignored: watcherIgnored,
+          depth: WATCHER_MAX_DEPTH,
+        });
+        watchers.set(directory, { watcher, workspaces });
+        watcherRetryAfter.delete(directory);
+        watcher.on('all', () => {
+          for (const cwd of workspaces) {
+            const current = discovery.get(cwd);
+            if (current) scheduleChange(cwd, current);
+          }
+        });
+        watcher.on('error', (error: unknown) => {
+          if (watchers.get(directory)?.watcher !== watcher) return;
+          watcherRetryAfter.set(directory, Date.now() + 30_000);
+          writeStderrLine(
+            `qwen serve: Skills watcher failed: ${String(error)}`,
+          );
+          if (watchers.get(directory)?.watcher === watcher)
+            closeWatcher(directory);
+        });
+      } catch (error) {
+        watcherRetryAfter.set(directory, Date.now() + 30_000);
+        writeStderrLine(`qwen serve: Skills watcher failed: ${String(error)}`);
+      }
+    }
+  }
+
+  function refresh(workspaceCwd: string, state: SkillsDiscoveryState): void {
+    if (
+      disposed ||
+      discovery.get(workspaceCwd) !== state ||
+      state.pending ||
+      state.activeScans >= 2
+    )
+      return;
+    state.activeScans++;
+    state.dirty = false;
+    state.startedAt = Date.now();
+    const sequence = ++state.sequence;
+    const freshManagers = new Map<string, WorkspaceSkillManagers>();
+    const release = () => {
+      clearTimeout(pending.timeout);
+      if (state.pending === pending) state.pending = undefined;
+      if (!state.pending && state.dirty && state.activeScans < 2)
+        scheduleChange(workspaceCwd, state);
+    };
+    const pending = {
+      timeout: setTimeout(release, WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS),
+    };
+    pending.timeout.unref();
+    state.pending = pending;
+    void buildWorkspaceSkillsStatus(
+      workspaceCwd,
+      freshManagers,
+      options.workspaceTrusted ?? true,
+      options.includeUntrustedSkills ?? false,
+    )
+      .then((status) => {
+        const candidate = freshManagers.get(workspaceCwd);
+        if (
+          !status.initialized ||
+          status.errors?.length ||
+          !candidate ||
+          candidate.skillManager.hasDiscoveryReadErrors()
+        )
+          return;
+        // A timeout releases the slot, not publication rights. A valid slow
+        // scan can still publish, but cannot overwrite a newer successful one.
+        if (
+          disposed ||
+          discovery.get(workspaceCwd) !== state ||
+          state.safeMode !== isSafeModeEnv() ||
+          sequence <= state.publishedSequence
+        )
+          return;
+        state.publishedSequence = sequence;
+        managers.set(workspaceCwd, candidate);
+        subscribe(workspaceCwd, state);
+      })
+      .catch((error: unknown) => {
+        writeStderrLine(
+          `qwen serve: Skills revalidation failed: ${String(error)}`,
+        );
+      })
+      .finally(() => {
+        state.activeScans--;
+        release();
+      });
+  }
+
+  const provider = ((workspaceCwd: string) => {
+    if (disposed) {
+      return Promise.resolve({
+        v: STATUS_SCHEMA_VERSION,
+        workspaceCwd,
+        initialized: false,
+        skills: [],
+      } satisfies ServeWorkspaceSkillsStatus);
+    }
+    let state = discovery.get(workspaceCwd);
+    if (state && state.safeMode !== isSafeModeEnv()) {
+      provider.invalidate?.(workspaceCwd);
+      state = undefined;
+    }
+    if (options.autoDiscover && !state) {
+      state = {
+        safeMode: isSafeModeEnv(),
+        startedAt: Date.now(),
+        sequence: 0,
+        publishedSequence: 0,
+        activeScans: 0,
+        dirty: false,
+        directories: new Set(),
+      };
+      discovery.set(workspaceCwd, state);
+    }
+    const pending = inFlight.get(workspaceCwd);
+    if (pending) return pending;
+    const epoch = epochs.get(workspaceCwd) ?? 0;
+    const current = () =>
+      !disposed && (epochs.get(workspaceCwd) ?? 0) === epoch;
+    if (state && managers.has(workspaceCwd)) {
+      const elapsed = Date.now() - state.startedAt;
+      if (elapsed < 0 || elapsed >= WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS) {
+        refresh(workspaceCwd, state);
+      }
+    }
+    const promise = buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
       options.workspaceTrusted ?? true,
       options.includeUntrustedSkills ?? false,
-    )) as WorkspaceSkillsStatusProvider & {
+      current,
+    )
+      .then((status) => {
+        if (state && current()) subscribe(workspaceCwd, state);
+        return status;
+      })
+      .finally(() => {
+        if (inFlight.get(workspaceCwd) === promise) {
+          inFlight.delete(workspaceCwd);
+        }
+      });
+    inFlight.set(workspaceCwd, promise);
+    return promise;
+  }) as WorkspaceSkillsStatusProvider & {
     snapshot(workspaceCwd: string): Promise<WorkspaceSkillsSnapshot>;
   };
-  provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
+  provider.invalidate = (workspaceCwd) => {
+    epochs.set(workspaceCwd, (epochs.get(workspaceCwd) ?? 0) + 1);
+    managers.delete(workspaceCwd);
+    // An enumeration that started before this invalidation must not answer a
+    // read issued after it; the caller needs its own observation.
+    inFlight.delete(workspaceCwd);
+    const state = discovery.get(workspaceCwd);
+    discovery.delete(workspaceCwd);
+    if (state) {
+      clearTimeout(state.debounce);
+      clearTimeout(state.pending?.timeout);
+      releaseDirectories(workspaceCwd, state);
+    }
+  };
+  provider.dispose = async () => {
+    disposed = true;
+    for (const cwd of new Set([
+      ...managers.keys(),
+      ...inFlight.keys(),
+      ...discovery.keys(),
+    ])) {
+      provider.invalidate?.(cwd);
+    }
+    await Promise.all(closing);
+    watcherRetryAfter.clear();
+  };
   provider.snapshot = async (workspaceCwd) => {
     if (options.workspaceTrusted === false)
       throw new Error('Skills snapshots require a trusted Workspace.');
@@ -179,6 +438,7 @@ async function buildWorkspaceSkillsStatus(
   managers: Map<string, WorkspaceSkillManagers>,
   workspaceTrusted: boolean,
   includeUntrustedSkills: boolean,
+  canInstall?: () => boolean,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     const settings = loadSettings(workspaceCwd, {
@@ -269,12 +529,14 @@ async function buildWorkspaceSkillsStatus(
         getDisabledSkillLevels: () => disabledLevels,
       };
       const skillManager = new SkillManager(shim as Config);
+      const watchDirectories: string[] = [];
       if (!safeMode) {
         for (const level of ['project', 'user'] as const) {
           if (disabledLevels.has(level)) continue;
           for (const directory of skillManager.getSkillsBaseDirs(level)) {
             try {
               await fs.readdir(directory);
+              if (workspaceTrusted) watchDirectories.push(directory);
             } catch (error) {
               if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
                 throw error;
@@ -283,8 +545,13 @@ async function buildWorkspaceSkillsStatus(
           }
         }
       }
-      cached = { skillManager, extensionManager, extensionSkillStates };
-      managers.set(workspaceCwd, cached);
+      cached = {
+        skillManager,
+        extensionManager,
+        extensionSkillStates,
+        watchDirectories,
+      };
+      if (!canInstall || canInstall()) managers.set(workspaceCwd, cached);
     }
     const { disablements, enabledNames } = resolveSkillSettings(settings);
     const { skillManager, extensionManager, extensionSkillStates } = cached;

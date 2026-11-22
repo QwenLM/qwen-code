@@ -7,6 +7,9 @@ import type {
   SessionAgentEventFrame,
   SessionAgentRunFrame,
 } from '@qwen-code/sdk/daemon';
+import type { DaemonAvailability } from '../../daemon/availability.js';
+import { offlineDaemon } from '../../daemon/availability.test-fixtures.js';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
 import type { AgentStreamState } from './agent-events';
 import type { SessionAgentsApi } from './session-agents-api';
 import {
@@ -196,12 +199,22 @@ describe('useSessionAgentRuns', () => {
     return null;
   }
 
-  function mount(props: Parameters<typeof useSessionAgentRuns>[0]) {
+  function mount(
+    props: Parameters<typeof useSessionAgentRuns>[0],
+    availability?: DaemonAvailability,
+  ) {
     const root = createRoot(document.createElement('div'));
     mounted.push({ root });
-    act(() => root.render(<Probe {...props} />));
-    return (next: Parameters<typeof useSessionAgentRuns>[0]) =>
-      act(() => root.render(<Probe {...next} />));
+    const render = (next: Parameters<typeof useSessionAgentRuns>[0]) =>
+      act(() =>
+        root.render(
+          <DaemonAvailabilityContext.Provider value={availability}>
+            <Probe {...next} />
+          </DaemonAvailabilityContext.Provider>,
+        ),
+      );
+    render(props);
+    return render;
   }
 
   it('shows the snapshot, follows the stream, and hides a run once its reply is recorded', async () => {
@@ -360,6 +373,53 @@ describe('useSessionAgentRuns', () => {
       });
       expect(stream.api.listRuns).toHaveBeenCalledTimes(2);
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('pauses fallback polling, keeps run frames, and refreshes after recovery', async () => {
+    vi.useFakeTimers();
+    const { server, availability } = offlineDaemon();
+    try {
+      const stream = fakeApi([frame('r1')]);
+      mount(
+        { api: stream.api, sessionId: 's1', settledRunIds: new Set() },
+        availability,
+      );
+      stream.setState('closed');
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(latest.runs.map((run) => run.runId)).toEqual(['r1']);
+      server.healthy = true;
+      await act(async () => {
+        await availability.check(true);
+        await availability.check(true);
+      });
+      expect(stream.api.listRuns).toHaveBeenCalledTimes(1);
+      server.healthy = false;
+      await act(async () => {
+        await availability.check(true);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(stream.api.listRuns).toHaveBeenCalledTimes(1);
+      expect(latest.runs.map((run) => run.runId)).toEqual(['r1']);
+      server.healthy = true;
+      vi.mocked(stream.api.listRuns).mockResolvedValue({
+        frames: [frame('r2')],
+      });
+      await act(async () => {
+        await availability.check(true);
+      });
+      expect(stream.api.listRuns).toHaveBeenCalledTimes(2);
+      expect(latest.runs.map((run) => run.runId)).toEqual(['r1', 'r2']);
+      expect(stream.api.subscribe).toHaveBeenCalledTimes(1);
+      await act(async () => availability.check(true));
+      expect(stream.api.listRuns).toHaveBeenCalledTimes(2);
+    } finally {
+      act(() => availability.dispose());
       vi.useRealTimers();
     }
   });

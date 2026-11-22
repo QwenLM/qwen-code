@@ -729,6 +729,22 @@ describe('presubmit handler (Aone backing)', () => {
     ).toBe(true);
   });
 
+  it.each(['anchor', 'startLine'])(
+    'names an unexpected %s key in the Aone downgrade reason',
+    async (key) => {
+      mocks.readFileSync.mockReturnValue(
+        JSON.stringify([{ path: 'a.ts', line: 48, [key]: 42 }]),
+      );
+      await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
+      const report = reportWritten();
+      expect(report.findingsFileInvalid).toBe(true);
+      expect(report.downgradeApprove).toBe(true);
+      expect(report.downgradeReasons.join(' ')).toContain(
+        `unexpected key "${key}"`,
+      );
+    },
+  );
+
   it('rejects a non-integer MR id (caller error)', async () => {
     await expect(run({ pr_number: 'abc' })).rejects.toThrow(/positive integer/);
   });

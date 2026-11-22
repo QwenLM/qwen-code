@@ -29,7 +29,7 @@ jobs:
       matrix:
         include:
           - language: 'javascript'
-            timeout: 90
+            timeout: 180
           - language: 'java'
             timeout: 15
             sourceroot: 'packages/sdk-java'
@@ -39,12 +39,17 @@ jobs:
             timeout: 15
             sourceroot: 'packages/managed-agent-server'
     # One job per source tree, each with its own measured cap: a shared job let
-    # the JavaScript leg's overrun kill the Java analysis with it. The
-    # JavaScript leg took 44m12s on the 2026-10-02 dispatch (run 37019120152)
-    # after the old shared 30-minute cap had cancelled the nightly on
-    # thirteen consecutive runs (2026-09-20 through 2026-10-02); the
-    # buildless Java leg took 4m40s. The caps stay finite so a runner that
-    # drops its heartbeat mid-analysis can't hold a slot for the default 6h.
+    # the JavaScript leg's overrun kill the Java analysis with it. The caps stay
+    # finite so a runner that drops its heartbeat mid-analysis can't hold a slot
+    # for the default 6h.
+    #
+    # Re-measure the JavaScript cap as the tree grows — it is a moving target.
+    # 44m12s on the 2026-10-02 dispatch (run 37019120152) set 90m, but the eight
+    # nightlies before #17796 ran 57-86m and the 2026-11-19 one reached the cap
+    # with every query already interpreted, dying inside "Exporting results to
+    # SARIF" (#17796). 180m covers that trend. Extraction is ~10m of the total
+    # and pulls in no build output, so narrowing scope is not the lever here.
+    # The buildless Java legs took 4m40s.
     timeout-minutes: '${{ matrix.timeout }}'
     steps:
       - name: 'Checkout'

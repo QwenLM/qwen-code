@@ -110,6 +110,7 @@ describe('daemon discovery records', () => {
   it('validates the restart fields while keeping them optional', () => {
     const restartable = record({
       startupWorkspaces: ['/tmp/project'],
+      conversationsDir: path.join(dir, 'Conversations'),
       web: false,
       requireAuth: true,
     });
@@ -135,6 +136,24 @@ describe('daemon discovery records', () => {
       'daemon-4173.json',
     ]);
   });
+
+  it.each(['', '.', 'relative/root', '~/Conversations', '/root\0suffix', 42])(
+    'rejects an invalid Conversations root in a discovery record: %j',
+    (conversationsDir) => {
+      fs.writeFileSync(
+        path.join(dir, 'daemon-4170.json'),
+        JSON.stringify({ ...record(), conversationsDir }),
+      );
+      const { entries, invalid } = readDaemonDiscoveries(dir);
+      expect(entries).toEqual([]);
+      expect(invalid).toEqual([
+        {
+          path: path.join(dir, 'daemon-4170.json'),
+          reason: 'invalid record',
+        },
+      ]);
+    },
+  );
 
   it('removes a record only for the expected process', () => {
     const written = writeDaemonDiscovery(record(), dir);

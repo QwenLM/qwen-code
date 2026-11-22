@@ -68,7 +68,10 @@ async function readManifest(
       throw new Error('Mod manifest path must be relative to the extension.');
     }
     const value: unknown = JSON.parse(
-      (await readModFile(root, path.resolve(root, relative))).source,
+      (await readModFile(root, path.resolve(root, relative))).source.replace(
+        /^\uFEFF/,
+        '',
+      ),
     );
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw new Error('Mod manifest must be a JSON object.');
@@ -116,10 +119,10 @@ export async function loadModSource(
     modules.length !== 1 ||
     typeof modules[0] !== 'string' ||
     path.isAbsolute(modules[0]) ||
-    !/\.(?:[cm]?js|[cm]?ts)$/.test(modules[0])
+    !/\.(?:[cm]?js|[cm]?ts|[jt]sx)$/.test(modules[0])
   ) {
     throw new Error(
-      'Mods require one relative JavaScript or TypeScript module.',
+      'Mods require one relative JavaScript, TypeScript or JSX module.',
     );
   }
   const manifest = { ...claude, ...qwen };

@@ -21,6 +21,7 @@ import {
   FolderOpenIcon,
   GitForkIcon,
   PencilIcon,
+  PlusIcon,
   PlugIcon,
   RadioTowerIcon,
   RefreshCwIcon,
@@ -58,6 +59,7 @@ export interface WorkspaceMenuActions {
   openTerminal?: () => void;
   newSession?: () => void;
   newWorktreeSession?: () => void;
+  createGroup?: () => void;
   moveUp?: () => void;
   moveDown?: () => void;
   openManagement?: (target: WorkspaceManagementTarget) => void;
@@ -170,6 +172,14 @@ export function WorkspaceMenu({
       <DropdownMenuItem key="worktree" onSelect={actions.newWorktreeSession}>
         <GitForkIcon />
         {t('sidebar.newWorktreeTask')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.createGroup) {
+    primary.push(
+      <DropdownMenuItem key="create-group" onSelect={actions.createGroup}>
+        <PlusIcon />
+        {t('sidebar.groupCreate')}
       </DropdownMenuItem>,
     );
   }

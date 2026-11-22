@@ -223,12 +223,27 @@ service children are created.
 
 A dedicated protected release workflow builds from an existing CLI release tag,
 checks its package version, and verifies the Java SDK and server using Java 21.
-The server JAR is published as the independent Maven coordinate
-`com.alibaba:qwen-managed-agent-server:<cli-version>` using the SDK's signed
-Central publication conventions, including sources and Javadoc. Auxiliary
-operator executable JARs are not attached to that publication. The exact same
-primary JAR and checksum are attached to the CLI GitHub Release and copied to
-the existing versioned OSS prefix, outside the standalone archive allowlist.
+After full verification, the executable server JAR and checksum are attached to the
+CLI GitHub Release and copied to the existing versioned OSS prefix, outside the
+standalone archive allowlist. The workflow selects the `-exec.jar` build output
+when present and falls back to the main JAR for older tags; the public versioned
+JAR name stays unchanged. The workflow verifies both public channels against
+the staged bytes. Runtime distribution does not check for the server coordinate
+on Maven Central, publish it there, or wait for that publication. Central
+publishing authorization and artifact synchronization no longer gate delivery
+to the channels the installer actually uses. It needs OSS credentials and GitHub
+release access, without loading Central publishing credentials or a GPG private key.
+
+Java compilation and normal Maven dependency resolution, the complete SDK/server
+verification, test-fork isolation and the existing `central-release` build profile
+remain unchanged. GPG signing is
+skipped during verification; the profile does not publish anything before the
+Maven deploy phase. Independent signed publication of
+`com.alibaba:qwen-managed-agent-server:<cli-version>` remains available through
+that Maven profile when needed for Maven consumers, including sources and
+Javadoc and excluding auxiliary operator JARs. It is a separate release
+operation, with no dependency edge in the runtime distribution workflow.
+
 Reproducible timestamps and checksum comparisons prevent a retry from replacing
 an existing version with different bytes. Dry runs build and verify without
 publishing. Production credentials and publication remain protected by the
@@ -320,7 +335,7 @@ they do not describe the current main branch. The results above belong to the
 pre-split trial. Current split-head verification and limitations are recorded
 in the PR test report.
 
-The first-use download path passed fourteen built-bundle scenarios with the real Java 21 server and Hosted Harness: initial installation, offline restart, OSS-to-GitHub fallback, interrupted-download retry, and refusal of invalid downloads or selected payloads. Transport was intercepted at the exact production URLs to serve the locally built JAR; public production assets have not been published or validated. The release profile builds the primary executable JAR, sources, and Javadoc locally; signed Central publication and protected GitHub/OSS upload require a production release run.
+The first-use download path passed fourteen built-bundle scenarios with the real Java 21 server and Hosted Harness: initial installation, offline restart, OSS-to-GitHub fallback, interrupted-download retry, and refusal of invalid downloads or selected payloads. Transport was intercepted at the exact production URLs to serve the locally built JAR; public production assets have not been published or validated. The release profile builds the primary executable JAR, sources, and Javadoc locally. The runtime-distribution change still requires a protected GitHub/OSS release run and clean first-install acceptance; signed Central publication is independent.
 
 ## Open questions
 

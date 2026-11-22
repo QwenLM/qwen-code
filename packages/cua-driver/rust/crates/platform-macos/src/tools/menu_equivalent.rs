@@ -84,6 +84,7 @@ pub(super) struct MenuMatch {
     /// Titles from the menu bar item down to the item.
     pub path: Vec<String>,
     pub enabled: bool,
+    combo: Combo,
 }
 
 /// Find the item in `pid`'s menu bar whose key equivalent is `combo`. An
@@ -157,6 +158,7 @@ unsafe fn search(
                     *found = Some(MenuMatch {
                         path: item_path,
                         enabled,
+                        combo: combo.clone(),
                     });
                 }
             }
@@ -294,7 +296,12 @@ pub(super) fn run(
                 false,
             );
         };
-        let target = super::invoke_menu::resolve_exact_prefix(bar, &item.path);
+        let target = super::invoke_menu::resolve_exact_prefix_matching(bar, &item.path, |leaf| {
+            let character = copy_string_attr(leaf, "AXMenuItemCmdChar").unwrap_or_default();
+            let modifiers = copy_number_attr(leaf, "AXMenuItemCmdModifiers").unwrap_or(0.0) as i64;
+            item.combo.matches(&character, modifiers)
+                && copy_bool_attr(leaf, "AXEnabled") != Some(false)
+        });
         CFRelease(bar as CFTypeRef);
         let target = match target {
             Ok(target) => target,

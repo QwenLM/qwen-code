@@ -8,13 +8,20 @@ import { randomUUID } from 'node:crypto';
 import type { Application, RequestHandler } from 'express';
 import { markAccessLogError } from './server/access-log.js';
 import type { HostedHarnessCapabilities } from './types.js';
+import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
+} from './hosted-workspace-profiles.js';
 
 export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
   'QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST';
 export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
 const LIFECYCLE_V2_PROFILES = [
+  'hosted-workspace-files/1',
   'hosted-workspace-shell/1',
+  'hosted-workspace-shell/3',
+  'hosted-workspace-shell/4',
   'hosted-workspace-mcp/1',
 ] as const;
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
@@ -36,7 +43,8 @@ export function createHostedHarnessContract(
   capabilityDigest: string,
   bootId: string = randomUUID(),
   lifecycleV2Profiles: readonly string[] = (
-    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'
+    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
   )
     .split(',')
     .filter(Boolean),
@@ -83,9 +91,15 @@ export function createHostedHarnessContract(
       'hosted_approval_resume_v1',
       'hosted_model_round_recovery_v1',
       'model-selection/1',
+      'session-model-config/1',
+      'side-query/1',
+      'session-memory/1',
       'context-compression/1',
+      'user-message-queue/1',
       'public-child-agents/1',
       'approval-selection/1',
+      'auto-approval/1',
+      'permission-rules/1',
       'live-approval-selection/1',
       'agent-definition-approval-selection/1',
       'plan-mode/1',
@@ -94,12 +108,18 @@ export function createHostedHarnessContract(
       'session-skills/2',
       'workspace-shell-mcp/1',
       'session-mcp-management/1',
+      'client-files/1',
+      'session-extension-packages/1',
+      'managed-package-preparation/1',
+      'managed-runtime-skill-import/1',
       'recovery-cleanup/1',
       'targeted-cancel/1',
       // GET /session/:id/events writes keepalive comments while no event
       // is committed, so a client may bound a stream by its silence.
       'event-keepalive/1',
       'web-fetch/1',
+      HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      HOSTED_WORKSPACE_EXTERNAL_SHELL_PROFILE,
     ]),
   });
 }
@@ -149,5 +169,8 @@ export function installHostedHarnessContractMiddleware(
   contract: HostedHarnessContract | undefined,
 ): void {
   if (!contract) return;
-  app.use('/session', hostedHarnessContractMiddleware(contract));
+  app.use(
+    ['/session', '/side-queries'],
+    hostedHarnessContractMiddleware(contract),
+  );
 }

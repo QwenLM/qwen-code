@@ -5,13 +5,14 @@
  */
 
 import type { ToolErrorType } from './tool-error.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 
 /**
  * Resolved endpoint and credentials for the search side request, as produced
  * by the gate in `web-search.ts` and consumed by a backend implementation.
  * `kind` selects that implementation.
  */
-export interface WebSearchBackendConfig {
+export interface DashScopeWebSearchBackendConfig {
   kind: 'dashscope';
   modelId: string;
   /** Environment variable name holding the API key. */
@@ -32,6 +33,10 @@ export interface WebSearchBackendConfig {
    */
   customHeaders?: Record<string, string>;
 }
+
+export type WebSearchBackendConfig =
+  | DashScopeWebSearchBackendConfig
+  | { kind: 'qwen-subscription'; timeoutMs: number };
 
 /** One page the search produced. */
 export interface WebSearchSource {
@@ -64,7 +69,12 @@ export interface WebSearchOutcome {
 
 export type WebSearchBackendResult =
   | { ok: true; outcome: WebSearchOutcome }
-  | { ok: false; message: string; errorType: ToolErrorType };
+  | {
+      ok: false;
+      message: string;
+      errorType: ToolErrorType;
+      quota?: SubscriptionQuotaDisplay;
+    };
 
 export interface WebSearchBackendRequest {
   query: string;

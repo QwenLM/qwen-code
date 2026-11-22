@@ -9,8 +9,10 @@ import type { Application, Request, RequestHandler } from 'express';
 import { listenerIdentityOf } from '../local-control/listener-identity.js';
 import { singleTokenCredentials } from '../local-control/credentials.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { readFile, realpath } from 'node:fs/promises';
+import { access, readFile, realpath } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import semver from 'semver';
 
 const CHECK_CACHE_MS = 15 * 60_000;
 const ERROR_CACHE_MS = 60_000;
@@ -52,6 +54,30 @@ interface PreparedUpdate {
   launcher: string;
   activate(): Promise<unknown>;
   cleanup(): void | Promise<void>;
+}
+
+async function standaloneUpdateLauncher(
+  standaloneDir: string,
+): Promise<string | undefined> {
+  // Prefer the PATH wrapper: it lives outside the install and is refreshed
+  // when an archive ships no launcher, so it survives either swap. Only a
+  // wrapper that names this install may restart it.
+  const wrapper = join(dirname(standaloneDir), '..', 'bin', 'qwen');
+  try {
+    await access(wrapper, constants.X_OK);
+    if ((await readFile(wrapper, 'utf8')).includes(standaloneDir)) {
+      return wrapper;
+    }
+  } catch {
+    // No wrapper; fall back to the archive's own launcher.
+  }
+  const launcher = join(standaloneDir, 'bin', 'qwen');
+  try {
+    await access(launcher, constants.X_OK);
+    return launcher;
+  } catch {
+    return undefined;
+  }
 }
 
 interface UpdateRouteDeps {
@@ -106,6 +132,67 @@ function createUpdateController(deps: UpdateRouteDeps) {
     };
     return status;
   };
+  // Resolves how a given release can be staged. Shared by the periodic check
+  // and the pre-activation re-resolve so both agree on what one-click covers.
+  const resolveInstallTarget = async (
+    latestVersion: string,
+  ): Promise<{
+    prepare?: () => Promise<PreparedUpdate>;
+    instructions?: string[];
+  }> => {
+    const { getInstallationInfo, formatUpdateInstructions, PackageManager } =
+      await import('../../utils/installationInfo.js');
+    const installation = getInstallationInfo(startupDirectory, false);
+    let prepare: (() => Promise<PreparedUpdate>) | undefined;
+    if (installation.isStandalone && installation.standaloneDir) {
+      const standaloneDir = installation.standaloneDir;
+      const launcher = await standaloneUpdateLauncher(standaloneDir);
+      if (launcher) {
+        prepare = async () => {
+          const { prepareStandaloneUpdate } = await import(
+            '../../ui/standalone-update.js'
+          );
+          return {
+            ...(await prepareStandaloneUpdate(standaloneDir, latestVersion)),
+            launcher,
+          };
+        };
+      }
+    } else if (
+      installation.isGlobal &&
+      (installation.packageManager === PackageManager.NPM ||
+        installation.packageManager === PackageManager.PNPM ||
+        installation.packageManager === PackageManager.YARN ||
+        installation.packageManager === PackageManager.BUN)
+    ) {
+      // Staging installs into a user-scoped isolated prefix and the
+      // shared cli-entry.js launcher resolves the pointer, so neither
+      // the installing package manager nor a root-owned global prefix
+      // bars one-click; the launcher identity check below is the gate.
+      const launcher = await managedNpmLauncher(bootstrap, launcherStamp);
+      if (launcher) {
+        prepare = async () => {
+          const {
+            stageManagedNpmUpdate,
+            activateManagedNpmUpdate,
+            cleanupManagedNpmUpdate,
+          } = await import('../../utils/managed-npm-update.js');
+          const staged = await stageManagedNpmUpdate(latestVersion, launcher);
+          return {
+            launcher,
+            activate: () =>
+              activateManagedNpmUpdate(staged, latestVersion, launcher),
+            cleanup: () => cleanupManagedNpmUpdate(staged),
+          };
+        };
+      }
+    }
+    return prepare
+      ? { prepare }
+      : {
+          instructions: formatUpdateInstructions(installation, latestVersion),
+        };
+  };
   const check = async (refresh = false): Promise<DaemonUpdateStatus> => {
     if (closed) return unavailable();
     const current = status;
@@ -154,63 +241,15 @@ function createUpdateController(deps: UpdateRouteDeps) {
           };
           return status;
         }
-        const {
-          getInstallationInfo,
-          formatUpdateInstructions,
-          PackageManager,
-        } = await import('../../utils/installationInfo.js');
-        const installation = getInstallationInfo(startupDirectory, false);
         const latestVersion = result.info.update.latest;
-        if (installation.isStandalone && installation.standaloneDir) {
-          const standaloneDir = installation.standaloneDir;
-          prepare = async () => {
-            const { prepareStandaloneUpdate } = await import(
-              '../../ui/standalone-update.js'
-            );
-            return {
-              ...(await prepareStandaloneUpdate(standaloneDir, latestVersion)),
-              launcher: join(standaloneDir, 'bin', 'qwen'),
-            };
-          };
-        } else if (
-          installation.isGlobal &&
-          installation.packageManager === PackageManager.NPM &&
-          installation.updateCommand
-        ) {
-          const launcher = await managedNpmLauncher(bootstrap, launcherStamp);
-          if (launcher) {
-            prepare = async () => {
-              const {
-                stageManagedNpmUpdate,
-                activateManagedNpmUpdate,
-                cleanupManagedNpmUpdate,
-              } = await import('../../utils/managed-npm-update.js');
-              const staged = await stageManagedNpmUpdate(
-                latestVersion,
-                launcher,
-              );
-              return {
-                launcher,
-                activate: () =>
-                  activateManagedNpmUpdate(staged, latestVersion, launcher),
-                cleanup: () => cleanupManagedNpmUpdate(staged),
-              };
-            };
-          }
-        }
+        const target = await resolveInstallTarget(latestVersion);
+        prepare = target.prepare;
         status = {
           state: 'available',
           currentVersion,
           latestVersion,
           canInstall: prepare !== undefined,
-          ...(!prepare
-            ? {
-                instructions: formatUpdateInstructions(
-                  installation,
-                  latestVersion,
-                ),
-              }
-            : {}),
+          ...(target.instructions ? { instructions: target.instructions } : {}),
         };
       } catch (error) {
         return fail(error);
@@ -222,6 +261,58 @@ function createUpdateController(deps: UpdateRouteDeps) {
       checking = undefined;
     });
     return checking;
+  };
+  // `ready` pins the check so polling never re-downloads, which leaves a
+  // long-lived daemon restarting into whatever was latest when it first
+  // prepared. Re-resolve once at activation so a click lands on the current
+  // latest, matching the CLI's install-at-startup. Runs after the 202 response
+  // because staging can take minutes. Any failure keeps the prepared payload:
+  // the user asked to update, and a registry hiccup must not strand them on
+  // the running version.
+  const restageIfNewer = async (
+    candidate: PreparedUpdate,
+    preparedVersion: string | undefined,
+  ): Promise<PreparedUpdate> => {
+    if (!preparedVersion) return candidate;
+    try {
+      const { checkForUpdatesDetailed, describeUpdateCheckFailure } =
+        await import('../../ui/utils/updateCheck.js');
+      const result = await checkForUpdatesDetailed();
+      // A registry failure resolves as `error`; it does not throw. Without
+      // this branch an unreachable registry and a routine "nothing newer"
+      // would be indistinguishable afterwards, even though both apply the
+      // older prepared release.
+      if (result.status === 'error') {
+        writeStderrLine(
+          'qwen serve: update re-resolve failed, applying the prepared release: ' +
+            describeUpdateCheckFailure(result.error),
+        );
+        return candidate;
+      }
+      if (result.status !== 'update') return candidate;
+      const latestVersion = result.info.update.latest;
+      if (!semver.gt(latestVersion, preparedVersion)) return candidate;
+      const target = await resolveInstallTarget(latestVersion);
+      if (!target.prepare) return candidate;
+      const staged = await target.prepare();
+      prepared = staged;
+      if (status) status = { ...status, latestVersion };
+      // Commit to the newer payload before discarding the old one. A failed
+      // discard leaks disk, but must not orphan the payload just staged and
+      // fall back to one that may already be half removed.
+      await Promise.resolve()
+        .then(() => candidate.cleanup())
+        .catch(() => undefined);
+      return staged;
+    } catch (error) {
+      // What throws here is detection or staging, not the registry lookup,
+      // which reports its own failures above.
+      writeStderrLine(
+        'qwen serve: update restage failed, applying the prepared release: ' +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      return candidate;
+    }
   };
 
   return {
@@ -280,16 +371,18 @@ function createUpdateController(deps: UpdateRouteDeps) {
         },
         run: async () => {
           restartStarted = true;
+          let target = candidate;
           try {
-            await candidate.activate();
-            await candidate.cleanup();
+            target = await restageIfNewer(candidate, current.latestVersion);
+            await target.activate();
+            await target.cleanup();
             prepared = undefined;
-            await restart(candidate.launcher);
+            await restart(target.launcher);
           } catch (error) {
             restartStarted = false;
             prepared = undefined;
             await Promise.resolve()
-              .then(() => candidate.cleanup())
+              .then(() => target.cleanup())
               .catch(() => undefined);
             fail(error);
             writeStderrLine(

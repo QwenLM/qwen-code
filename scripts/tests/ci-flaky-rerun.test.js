@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -263,6 +271,52 @@ describe('ci flaky rerun patrol', () => {
     }
   });
 
+  // Windows cannot express this fixture: chmodSync sets no executable bit and
+  // execFile cannot run an extensionless #!/bin/sh script (no PATHEXT match),
+  // and the PATH join below is the POSIX spelling. Gate the case rather than
+  // the file, so the rest of the driver suite still runs on the Windows lane —
+  // which downgrades a test:scripts failure to a warning and would otherwise
+  // deposit a permanent silent failure in its log.
+  it.skipIf(process.platform === 'win32')(
+    'spawns the pinned gh, never a bare name from PATH',
+    async () => {
+      // Every other GhClient test stubs api.gh, so none of them exercise the
+      // spawn. On the shared pool a bare `gh` resolves through a PATH whose
+      // directories the job uid can write, and this client runs with the bot PAT
+      // in its environment — a co-tenant's gh would receive it.
+      const dir = mkdtempSync(join(tmpdir(), 'patrol-gh-'));
+      const planted = join(dir, 'planted');
+      const trusted = join(dir, 'trusted');
+      mkdirSync(planted);
+      mkdirSync(trusted);
+      const leaked = join(dir, 'LEAKED');
+      writeFileSync(
+        join(planted, 'gh'),
+        `#!/bin/sh\nprintf '%s' "\${GH_TOKEN:-}" > '${leaked}'\necho planted\n`,
+      );
+      writeFileSync(join(trusted, 'gh'), '#!/bin/sh\necho trusted\n');
+      for (const d of [planted, trusted]) chmodSync(join(d, 'gh'), 0o755);
+      const prevPath = process.env.PATH;
+      const prevGh = process.env.PATROL_GH;
+      const prevToken = process.env.GH_TOKEN;
+      try {
+        process.env.PATH = `${planted}:${prevPath}`;
+        process.env.GH_TOKEN = 'SENTINEL-PAT-VALUE';
+        process.env.PATROL_GH = join(trusted, 'gh');
+        const api = new GhClient('QwenLM/qwen-code');
+        await expect(api.gh(['api', 'user'])).resolves.toBe('trusted\n');
+        expect(existsSync(leaked)).toBe(false);
+      } finally {
+        if (prevGh === undefined) delete process.env.PATROL_GH;
+        else process.env.PATROL_GH = prevGh;
+        if (prevToken === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = prevToken;
+        process.env.PATH = prevPath;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('ignores empty lines in paginated comment output', async () => {
     const api = new GhClient('QwenLM/qwen-code');
     api.gh = async () => '{"body":"first"}\n\n{"body":"second"}\n';
@@ -337,6 +391,61 @@ describe('ci flaky rerun patrol', () => {
     };
     await api.currentPr(42);
     expect(args[args.indexOf('--json') + 1].split(',')).toContain('number');
+  });
+
+  it('passes --allow-escape-sequences so gh serves the colourised job log', async () => {
+    // A current gh refuses the logs endpoint without the flag (exit 1, empty
+    // stdout); without this the patrol's distillation is log-blind. Witness:
+    // the bare call throws the refusal, the flagged call serves the log.
+    const api = new GhClient('QwenLM/qwen-code');
+    const calls = [];
+    api.gh = async (args) => {
+      calls.push(args);
+      if (!args.includes('--allow-escape-sequences')) {
+        throw Object.assign(new Error('gh refused'), {
+          stderr:
+            'the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway',
+        });
+      }
+      return '##[error]boom\n\x1b[31mcolored\x1b[0m\n';
+    };
+    const log = await api.jobLog(7);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual([
+      'api',
+      '--allow-escape-sequences',
+      'repos/QwenLM/qwen-code/actions/jobs/7/logs',
+    ]);
+    expect(log).toContain('##[error]boom');
+    expect(log).toContain('colored');
+    expect(log).not.toContain('\x1b');
+  });
+
+  it('falls back to the bare call for a gh without the flag', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    const calls = [];
+    api.gh = async (args) => {
+      calls.push(args);
+      if (args.includes('--allow-escape-sequences')) {
+        throw Object.assign(new Error('gh failed'), {
+          stderr: 'unknown flag: --allow-escape-sequences',
+        });
+      }
+      return 'boom';
+    };
+    await expect(api.jobLog(7)).resolves.toBe('boom');
+    expect(calls.at(-1)).toEqual([
+      'api',
+      'repos/QwenLM/qwen-code/actions/jobs/7/logs',
+    ]);
+  });
+
+  it('propagates a log error that is not the unknown-flag refusal', async () => {
+    const api = new GhClient('QwenLM/qwen-code');
+    api.gh = async () => {
+      throw Object.assign(new Error('HTTP 404'), { stderr: 'Not Found' });
+    };
+    await expect(api.jobLog(7)).rejects.toThrow('HTTP 404');
   });
 
   it('handles an exact run attempt once and allows a new attempt', () => {
@@ -545,13 +654,35 @@ describe('ci flaky rerun patrol', () => {
     expect(kinds).toContain('comment');
   });
 
-  it('reruns before recording the hidden action marker', async () => {
+  it('reruns before posting the visible rerun notice', async () => {
     const c = client();
     await actOnDecision(c, target(), decision());
-    expect(c.calls).toEqual([
-      ['rerunFailedJobs', 123],
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=rerun.* -->$/)],
+    expect(c.calls.map((call) => call[0])).toEqual([
+      'rerunFailedJobs',
+      'comment',
     ]);
+    const body = c.calls[1][2];
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('re-run on the same commit');
+    expect(body).toContain('No Update Branch');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('runner 超时');
+    expect(body.split('</details>').length - 1).toBe(1);
+    expect(body).toMatch(/<!-- .*action=rerun.* -->$/);
+  });
+
+  it('keeps markers parseable inside the visible notices', async () => {
+    // The visible text must not break dedup or the per-head action count:
+    // both read the marker back out of the posted comment body.
+    const c = client();
+    await actOnDecision(c, target(), decision());
+    const posted = {
+      body: c.calls.find((call) => call[0] === 'comment')[2],
+      createdAt: '2026-07-12T07:25:00.000Z',
+      author: { login: 'patrol-bot' },
+    };
+    expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    expect(currentActionCount(pr(), [posted], 'patrol-bot')).toBe(1);
   });
 
   it('posts deterministic failures in English with folded Chinese', async () => {
@@ -566,22 +697,36 @@ describe('ci flaky rerun patrol', () => {
       }),
     );
     expect(c.calls).toHaveLength(1);
-    expect(c.calls[0][2]).toContain('TypeScript cannot resolve');
-    expect(c.calls[0][2]).toContain('<details>');
-    expect(c.calls[0][2]).toContain('TypeScript 无法解析');
-    expect(c.calls[0][2]).toContain('action=comment');
+    const body = c.calls[0][2];
+    expect(body).toContain('TypeScript cannot resolve');
+    expect(body).toContain('<details>');
+    expect(body).toContain('TypeScript 无法解析');
+    expect(body).toContain('action=comment');
+    // Pin the bilingual placement, not just the presence of both strings:
+    // English before the fold, Chinese inside it.
+    const enIndex = body.indexOf('TypeScript cannot resolve');
+    const foldIndex = body.indexOf('<summary>中文说明</summary>');
+    const zhIndex = body.indexOf('TypeScript 无法解析');
+    expect(enIndex).toBeLessThan(foldIndex);
+    expect(foldIndex).toBeLessThan(zhIndex);
+    expect(body.split('</details>').length - 1).toBe(1);
   });
 
-  it('records no_action without a visible comment', async () => {
+  it('records no_action with a visible manual-review notice', async () => {
     const c = client();
     await actOnDecision(
       c,
       target(),
       decision({ action: 'no_action', confidence: 'low' }),
     );
-    expect(c.calls).toEqual([
-      ['comment', 42, expect.stringMatching(/^<!-- .*action=no_action.* -->$/)],
-    ]);
+    expect(c.calls).toHaveLength(1);
+    const body = c.calls[0][2];
+    expect(body).toContain('could not be confidently classified');
+    expect(body).toContain('runner timeout');
+    expect(body).toContain('<summary>中文说明</summary>');
+    expect(body).toContain('未采取自动动作');
+    expect(body.split('</details>').length - 1).toBe(1);
+    expect(body).toMatch(/<!-- .*action=no_action.* -->$/);
   });
 
   it('rejects malformed, unsafe, or mismatched decisions', async () => {
@@ -604,19 +749,110 @@ describe('ci flaky rerun patrol', () => {
   });
 
   it('neutralizes mentions and markup copied into visible reasons', async () => {
-    const c = client();
-    await actOnDecision(
-      c,
-      target(),
-      decision({
-        action: 'comment',
-        reason_en: '@qwen-maintainers <script>alert(1)</script>',
-        reason_zh: '@全体成员 </details>',
-      }),
-    );
-    expect(c.calls[0][2]).toContain('@\u200bqwen-maintainers');
-    expect(c.calls[0][2]).toContain('&lt;script&gt;');
-    expect(c.calls[0][2]).toContain('@\u200b全体成员 &lt;/details&gt;');
+    // All three actions now surface the reason in a visible comment, so the
+    // escaping must hold for every action, not just `comment`.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: '@qwen-maintainers <script>alert(1)</script>',
+          reason_zh: '@全体成员 </details>',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).toContain('@\u200bqwen-maintainers');
+      expect(body).toContain('&lt;script&gt;');
+      expect(body).toContain('@\u200b全体成员 &lt;/details&gt;');
+    }
+  });
+
+  it('strips bidi overrides that could visually rewrite a notice', async () => {
+    // The reason is classifier output derived from untrusted logs; a bidi
+    // override could make "no Update Branch needed" read as its opposite.
+    // Every member of the Unicode Bidi_Control set is also fed individually
+    // so narrowing the strip class cannot survive this pin.
+    const bidiControls = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const confidence = action === 'no_action' ? 'low' : 'high';
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence,
+          reason_en: 'safe \u202Ereversed\u202C text',
+          reason_zh: '安全 \u2066隔离\u2069 \u061C文本',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(
+        /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/,
+      );
+      expect(body).toContain('safe reversed text');
+      expect(body).toContain('安全 隔离 文本');
+      for (const ch of bidiControls) {
+        const cc = client();
+        await actOnDecision(
+          cc,
+          target(),
+          decision({
+            action,
+            confidence,
+            reason_en: `a${ch}b`,
+            reason_zh: `a${ch}b`,
+          }),
+        );
+        const single = cc.calls.find((call) => call[0] === 'comment')[2];
+        expect(single).not.toContain(ch);
+        expect(single).toContain('ab');
+      }
+    }
+  });
+
+  it('collapses newlines so a reason cannot open a block-level fence', async () => {
+    // A line-start fence in a reason swallows the folded Chinese block and
+    // renders the tracking marker as visible code; keep reasons single-line.
+    for (const action of ['rerun', 'comment', 'no_action']) {
+      const c = client();
+      await actOnDecision(
+        c,
+        target(),
+        decision({
+          action,
+          confidence: action === 'no_action' ? 'low' : 'high',
+          reason_en: 'npm error:\n```\nnpm error code ETIMEDOUT',
+          reason_zh: 'npm 错误：\n```\nnpm error code ETIMEDOUT',
+        }),
+      );
+      const body = c.calls.find((call) => call[0] === 'comment')[2];
+      expect(body).not.toMatch(/^```/m);
+      expect(body).toContain('npm error: ``` npm error code ETIMEDOUT');
+      expect(body.split('</details>').length - 1).toBe(1);
+      const posted = {
+        body,
+        createdAt: '2026-07-12T07:25:00.000Z',
+        author: { login: 'patrol-bot' },
+      };
+      expect(alreadyHandled([posted], target(), 'patrol-bot')).toBe(true);
+    }
   });
 
   it('stops after three actions on the same head', async () => {
@@ -723,6 +959,72 @@ describe('ci flaky rerun patrol', () => {
     expect(c.calls.filter((call) => call[0] === 'comment')).toHaveLength(1);
   });
 
+  it('fails the round when a non-empty decision list matches no candidate', async () => {
+    // The hollow-green shape the workflow's verdict step cannot catch: validate
+    // sees a non-empty array and sets has_decisions=true, so the verdict step is
+    // skipped, act prints "no candidate" per entry and exits 0. The consumer has
+    // to close the loop. `{"pr":123,"action":"rerun"}` is exactly the shape a
+    // model emits when it ignores the five-field key.
+    const c = client();
+    await expect(
+      actOnDecisions(c, [target()], [{ pr: 123, action: 'rerun' }]),
+    ).rejects.toThrow(/addressed no actionable candidate/);
+    expect(c.calls).toEqual([]);
+
+    // A mistyped headSha is the same failure, not a per-decision skip.
+    const c2 = client();
+    await expect(
+      actOnDecisions(c2, [target()], [decision({ headSha: 'f'.repeat(40) })]),
+    ).rejects.toThrow(/addressed no actionable candidate/);
+    expect(c2.calls).toEqual([]);
+
+    // Keys can all match while the schema rejects every entry. actOnDecision
+    // returns silently on that check, so counting key resolution would report
+    // success on a round that acted on nothing.
+    for (const invalid of [
+      decision({ action: 'rerun', confidence: 'low' }),
+      decision({ reason_en: 'x'.repeat(240) }),
+      decision({ runId: String(target().runId) }),
+    ]) {
+      const cx = client();
+      await expect(actOnDecisions(cx, [target()], [invalid])).rejects.toThrow(
+        /addressed no actionable candidate/,
+      );
+      expect(cx.calls).toEqual([]);
+    }
+
+    // no_action IS an act: it posts the "could not be confidently classified"
+    // marker, so it must not be counted as nothing done.
+    const cNoAction = client();
+    await expect(
+      actOnDecisions(
+        cNoAction,
+        [target()],
+        [decision({ action: 'no_action', confidence: 'low' })],
+      ),
+    ).resolves.toBeUndefined();
+    expect(cNoAction.calls.some((call) => call[0] === 'comment')).toBe(true);
+
+    // An empty list is still a legitimate no-op: the workflow's verdict step
+    // owns that case, and the consumer must not throw on it.
+    const c3 = client();
+    await expect(actOnDecisions(c3, [target()], [])).resolves.toBeUndefined();
+    expect(c3.calls).toEqual([]);
+  });
+
+  it('keeps a matched decision that failed per-target from failing the round', async () => {
+    // A candidate superseded between scan and act must not fail the round. It
+    // still counts as matched, because the decision addressed a real target.
+    const c = client({
+      async rerunFailedJobs() {
+        throw new Error('temporary API failure');
+      },
+    });
+    await expect(
+      actOnDecisions(c, [target()], [decision()]),
+    ).resolves.toBeUndefined();
+  });
+
   it('persists a zero-count reset marker after success', async () => {
     const c = client({
       async comments() {
@@ -811,6 +1113,370 @@ describe('ci flaky rerun patrol', () => {
       expect(evidence).not.toContain(secret);
     }
     expect(evidence).toContain('TypeError: ensureTool is not a function');
+  });
+
+  it('strips terminal controls after redaction, not before', () => {
+    // A bare \r supplies the word boundary \bnpm_ needs: stripping controls
+    // before redactLog would concatenate `x` onto the token and leak it. The
+    // strip must also cover backspace and friends, not just CR.
+    const evidence = skillLog(
+      '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\b\bSPOOFED\x0b\u202E\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+    expect(evidence).toContain('installedSPOOFED');
+    expect(evidence).not.toContain('\r');
+    expect(evidence).not.toContain('\b');
+    expect(evidence).not.toContain('\x0b');
+    expect(evidence).not.toContain('\u202E');
+  });
+
+  it('redacts a credential split by a control byte once the strip rejoins it', () => {
+    // A control INSIDE the token defeats \bnpm_… on the first pass (only the
+    // short prefix precedes it); deleting the control welds the fragments into
+    // a contiguous token, so a second redaction pass must still scrub it.
+    const evidence = skillLog(
+      '##[error]npm_\rABCDEFGHIJKLMNOPQRSTUV0123 done\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+  });
+
+  it('redacts a welded credential whose leading boundary the strip also removed', () => {
+    // The strip deletes the CR in front of the token as well as the one inside
+    // it, so the second pass sees `xnpm_…`: the first pass had a boundary but
+    // no token, and \b has nothing to match once the fragments are welded.
+    const evidence = skillLog(
+      '##[error]Downloading x\rnpm_\rABCDEFGHIJKLMNOPQRSTUV0123 installed\n',
+    );
+    expect(evidence).toContain('[redacted]');
+    expect(evidence).not.toContain('npm_ABCDEFGHIJKLMNOPQRSTUV0123');
+  });
+
+  it('keeps the failure line that follows a CR-terminated header', () => {
+    // The header rules are bounded by \r as well as \n, which is what keeps
+    // them off the next line. Re-running them after the strip deleted every
+    // \r would swallow everything up to the next newline — including the
+    // ##[error] line the excerpt exists to show, leaving only noise.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const evidence = skillLog(
+      `${noise}\nCookie: sid=abc\r##[error]AssertionError: real failure\n${noise}`,
+    );
+    expect(evidence).toContain('##[error]AssertionError: real failure');
+    expect(evidence).toContain('Cookie: [redacted]');
+    expect(evidence).not.toContain('sid=abc');
+  });
+
+  it('keeps the failure line after a CR-terminated value of a whitespace-bounded rule', () => {
+    // Bearer's \S+ and the env rule's [^"',\s}]+ also stop at \r, so the strip
+    // welds their value onto the next logical line just like the header rules.
+    // The post-strip value is a tempered token that stops before the ##[error]
+    // marker, so the weld cannot carry the value over the marker and the
+    // excerpt keeps the failure it was fetched for.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    for (const prefix of [
+      'SSH_AUTH_SOCK=/tmp/agent',
+      'NPM_TOKEN=abc',
+      'API_KEY=abc',
+      'GITHUB_TOKEN=abc',
+      'Bearer abc123',
+    ]) {
+      for (const control of ['\r', '\x0b', '\x0c']) {
+        const evidence = skillLog(
+          `${noise}\n${prefix}${control}##[error]AssertionError: real failure\n${noise}`,
+        );
+        expect(evidence).toContain('##[error]AssertionError: real failure');
+        expect(evidence).toContain('[redacted]');
+      }
+    }
+  });
+
+  it('keeps the failure payload of a control-free quoted JSON object', () => {
+    // Regression: the repair pass re-matched the already-redacted value and ran
+    // its whitespace-bounded token to the end of the line, eating the rest of
+    // the JSON object — the failure identifier the excerpt exists to show. A
+    // quoted value must stop at its closing quote; an already-[redacted] value
+    // followed by a structural delimiter must not be re-redacted greedily.
+    for (const [line, payload, secret] of [
+      [
+        '{"authToken":"s3cr3t","err":"TestFailed:suiteA"}',
+        '"err":"TestFailed:suiteA"',
+        's3cr3t',
+      ],
+      [
+        '{"apiKey":"s3cr3t","msg":"AssertionError: expected 1 to be 2"}',
+        '"msg":"AssertionError: expected 1 to be 2"',
+        's3cr3t',
+      ],
+      [
+        '{"db_password":"x","msg":"AssertionError: boom"}',
+        '"msg":"AssertionError: boom"',
+        '"x"',
+      ],
+      // A control splits the KEY, so pass 1 misses it and the repair's
+      // quoted-value branch is load-bearing: it must bound the value at its
+      // closing quote, not run into the err payload. Deleting that branch
+      // reds this case.
+      ['{"auth\rToken":"s3cr3t","err":"boom"}', '"err":"boom"', 's3cr3t'],
+    ]) {
+      const evidence = skillLog(`${line}\n`);
+      expect(evidence, line).toContain(payload);
+      expect(evidence, line).not.toContain(secret);
+    }
+  });
+
+  it('keeps the failure payload when a quoted value is unclosed across lines or carries an escape', () => {
+    // Regression: the quoted-value branch must bound its value on the SAME line
+    // and handle escapes. skillLog joins each contiguous run of selected lines
+    // with \n, so a value class that matches \n lets an unclosed quote swallow
+    // every following selected line; a value class that excludes \ lets an
+    // escaped value ("C:\temp") never reach its closing quote, and the greedy
+    // unquoted rule then eats the rest of the line. Both delete the failure
+    // evidence the excerpt is fetched for.
+    const multilineSplitKey =
+      'noise0\nnoise1\nNPM_TO\x0bKEN="ab\nFAIL src/a.test.ts > suite > case\nAssertionError: expected 1 to be 2\n    at Object.<anonymous> ("/build/a.ts":12:3)\nnoise8\nnoise9';
+    const multilineControlFree =
+      'noise0\nAPI_KEY="\nFAIL src/a.test.ts\nAssertionError: expected 1 to be 2\n    at x.ts:1:1\n"end"\nnoise9';
+    const escaped = '{"auth\rToken":"C:\\temp","err":"boom"}';
+    for (const [line, needles] of [
+      [
+        multilineSplitKey,
+        ['FAIL src/a.test.ts', 'AssertionError: expected 1 to be 2'],
+      ],
+      [
+        multilineControlFree,
+        ['FAIL src/a.test.ts', 'AssertionError: expected 1 to be 2'],
+      ],
+      [escaped, ['"err":"boom"']],
+    ]) {
+      const evidence = skillLog(line);
+      for (const needle of needles) expect(evidence, line).toContain(needle);
+    }
+    expect(skillLog(multilineSplitKey)).not.toContain('"ab');
+    expect(skillLog(escaped)).not.toContain('C:\\temp');
+  });
+
+  it('keeps the failure line a welded URL userinfo would otherwise reach', () => {
+    // The scheme rule's userinfo is a tempered token per @-segment: it runs to
+    // the next whitespace or @ but never across the ##[error] marker. Two
+    // shapes: one where the first pass already redacted the userinfo, and one
+    // where the only @ sits past the CR so the first pass never reached it — in
+    // both, the temper keeps the rule off the ##[error] marker.
+    for (const line of [
+      'https://u@h\r##[error]AssertionError:real@failure',
+      'https://host\r##[error]AssertionError:real@failure',
+    ]) {
+      const evidence = skillLog(line);
+      expect(evidence, line).toContain('##[error]AssertionError:real@failure');
+    }
+    expect(
+      skillLog('https://u@h\r##[error]AssertionError:real@failure'),
+    ).toContain('https://[redacted]@');
+  });
+
+  it('keeps the marker when a control splits the credential keyword itself', () => {
+    // A split keyword is exactly the case the first pass cannot see. Selection
+    // runs before the strip so the line is still chosen. For the env / Bearer
+    // fixtures the repair pass redacts the welded value (a tempered token that
+    // stops before the ##[error] marker); for the private-key fixture the
+    // tempered body stops at the marker, so the marker survives rather than the
+    // span being redacted. Either way the weld cannot carry a value over the
+    // marker.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const tail = Array.from({ length: 40 }, (_, i) => `tail line ${i}`).join(
+      '\n',
+    );
+    for (const [line, marker] of [
+      [
+        'SSH_AU\rTH_SOCK=abc\r##[error]AssertionError: real failure',
+        '##[error]AssertionError: real failure',
+      ],
+      ['Bea\rrer abc123\r##[error]Build failed', '##[error]Build failed'],
+      [
+        '-----BEGIN RSA\rKEY-----\r##[error]AssertionError: boom\r-----END RSA\rKEY-----',
+        '##[error]AssertionError: boom',
+      ],
+    ]) {
+      const evidence = skillLog(`${noise}\n${line}\n${tail}`);
+      expect(evidence, line).toContain(marker);
+    }
+    expect(
+      skillLog('SSH_AU\rTH_SOCK=abc\r##[error]AssertionError: real failure'),
+    ).toContain('SSH_AUTH_SOCK=[redacted]');
+    expect(skillLog('Bea\rrer abc123\r##[error]Build failed')).toContain(
+      'Bearer [redacted]',
+    );
+  });
+
+  it('selects a FAIL line whose leading whitespace is a control', () => {
+    // \sFAIL\s needs the whitespace a leading \r supplies. Stripping before
+    // selection deleted it, so the line was never chosen and the excerpt fell
+    // back to noise.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const evidence = skillLog(`${noise}\n\rFAIL src/a.test.ts\n${noise}`);
+    expect(evidence).toContain('FAIL src/a.test.ts');
+  });
+
+  it('does not infer redaction completeness from the [redacted] placeholder', () => {
+    // Pass 1's value class stops INSIDE a credential at , } quote or a stripped
+    // control, so KEY=[redacted]<remainder> comes from both a completed and a
+    // truncated redaction. The repair must not re-redact a [redacted]-prefixed
+    // value: greedily re-matching it deletes the failure payload, and skipping
+    // only on a delimiter ships a truncated secret tail. Such values are left as
+    // pass 1 (base) left them. (A fork's [redacted]secret under a split key is
+    // likewise left as base leaves it — a recorded base-equivalent limitation.)
+    for (const [line, payload] of [
+      [
+        '{"apiKey":"Ab\'c123","msg":"AssertionError: boom"}',
+        '"msg":"AssertionError: boom"',
+      ],
+      [
+        '##[error]{"authToken":"s3\r3cr3t","err":"TestFailed:suiteA"}',
+        '"err":"TestFailed:suiteA"',
+      ],
+      // A backslash directly before the marker must not carry the quoted value
+      // across it (the escape unit is tempered too).
+      [
+        '{"auth\rToken":"C:\\##[error]AssertionError: boom","err":"k"}',
+        '##[error]AssertionError: boom',
+      ],
+    ]) {
+      const evidence = skillLog(line);
+      expect(evidence, line).toContain(payload);
+    }
+    // The truncated unquoted value is left as base leaves it: the tail is not
+    // re-redacted, but nothing after it is deleted either.
+    expect(skillLog('##[error]API_PASSWORD=p,ssw0rd done')).toBe(
+      '##[error]API_PASSWORD=[redacted],ssw0rd done',
+    );
+  });
+
+  it('repairs every credential family a control byte split', () => {
+    // The post-strip rule list is a hand-copy of redactLog's; pin each rule
+    // individually so deleting one cannot leave both suites green.
+    const cases = [
+      [
+        '-----BEGIN RSA\rKEY-----\nbody\n-----END RSA\rKEY-----',
+        '[redacted private key]',
+      ],
+      ['eyJ\rhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abcdefghij', '[redacted jwt]'],
+      ['Bea\rrer abcdefghij', 'Bearer [redacted]'],
+      ['ghp_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
+      ['sk-\rabcdefghijklmnopqrstuvwx', 'sk-[redacted]'],
+      ['AKIA\rABCDEFGHIJKLMNOP', '[redacted]'],
+      ['npm_\rABCDEFGHIJKLMNOPQRSTUV0123', '[redacted]'],
+      ['https://u\rser:pass@host', 'https://[redacted]@host'],
+      ['NPM_TO\rKEN=abcdefghij', 'NPM_TOKEN=[redacted]'],
+      // Round-6 entrances: a value carrying a terminator character, a welded
+      // scheme prefix, a multi-@ userinfo, and a deleted Bearer separator.
+      ['https:/\r/[redacted]realsecretvalue@host', 'https://[redacted]@'],
+      ['42\rhttps://us\rer:pw@host', '42https://[redacted]@'],
+      ['NPM_TO\rKEN=abc#realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['https://u\rser:p@ss@host', 'https://[redacted]@host'],
+      ['Bea\rrer\rrealsecretvalue123', 'Bearer[redacted]'],
+      // Adversarial audit: a value carrying a structural terminator (} or a
+      // quote) or a URL password carrying # must not ship its tail either.
+      ['NPM_TO\rKEN=abc}realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['NPM_TO\rKEN=abc"realsecret99', 'NPM_TOKEN=[redacted]'],
+      ['https://us\rer:p#ss@host', 'https://[redacted]@host'],
+    ];
+    for (const [input, expected] of cases) {
+      const evidence = skillLog(`##[error]${input} done`);
+      expect(evidence, input).toContain(expected);
+    }
+    // The secret tail must be gone, not just the placeholder present.
+    for (const [input, secret] of [
+      ['https:/\r/[redacted]realsecretvalue@host', 'realsecretvalue'],
+      ['42\rhttps://us\rer:pw@host', 'user:pw'],
+      ['NPM_TO\rKEN=abc#realsecret99', 'realsecret99'],
+      ['https://u\rser:p@ss@host', 'p@ss'],
+      ['Bea\rrer\rrealsecretvalue123', 'realsecretvalue123'],
+      ['NPM_TO\rKEN=abc}realsecret99', 'realsecret99'],
+      ['NPM_TO\rKEN=abc"realsecret99', 'realsecret99'],
+      ['https://us\rer:p#ss@host', 'p#ss'],
+    ]) {
+      expect(skillLog(`##[error]${input} done`), input).not.toContain(secret);
+    }
+  });
+
+  it('keeps a marker inside a BEGIN…END span instead of redacting the span', () => {
+    // For a SPLIT-label block (the case the repair pass handles) the tempered
+    // private-key body stops before ##[error], so the marker survives instead
+    // of the span being redacted. (An intact-label block is redacted whole by
+    // the first pass, as in base — that path has no marker temper.) A real PEM
+    // (no marker) and a body with a non-marker # are still fully redacted.
+    const withMarker = skillLog(
+      '-----BEGIN RSA\rKEY-----\nMIIEow\n##[error]x\n-----END RSA\rKEY-----',
+    );
+    expect(withMarker).toContain('##[error]x');
+    expect(
+      skillLog('-----BEGIN RSA\rKEY-----\nMIIEow\n-----END RSA\rKEY-----'),
+    ).toContain('[redacted private key]');
+    expect(
+      skillLog('-----BEGIN RSA\rKEY-----\nMIIE#ow\n-----END RSA\rKEY-----'),
+    ).toContain('[redacted private key]');
+  });
+
+  it('does not pair a key BEGIN and END across non-adjacent selected windows', () => {
+    // The selected windows are joined per contiguous run, so a control-split
+    // BEGIN in the primary window cannot pair with a control-split END in the
+    // always-selected tail and delete the failure line between them.
+    const log = [
+      'a line 1',
+      'a line 2',
+      '-----BEGIN RSA\rKEY-----',
+      'TypeError: boom',
+      ...Array.from({ length: 30 }, (_, i) => `b line ${i}`),
+      '-----END RSA\rKEY-----',
+      'tail one',
+      'tail two',
+    ].join('\n');
+    const evidence = skillLog(log);
+    expect(evidence).toContain('TypeError: boom');
+    expect(evidence).not.toContain('[redacted private key]');
+  });
+
+  it('strips every control and Bidi_Control code point, keeping tab and newline', () => {
+    // Pin the extent of the class, not the points a fixture happens to sample:
+    // every member is fed, and the assertion asks Unicode itself, so narrowing
+    // the class to a sample cannot stay green. \n and \t must survive.
+    const controls = [
+      ...Array.from({ length: 0x20 }, (_, i) => i).filter(
+        (i) => i !== 0x09 && i !== 0x0a,
+      ),
+      ...Array.from({ length: 0x21 }, (_, i) => 0x7f + i),
+    ].map((i) => String.fromCharCode(i));
+    const bidi = [
+      '\u061C',
+      '\u200E',
+      '\u200F',
+      '\u202A',
+      '\u202B',
+      '\u202C',
+      '\u202D',
+      '\u202E',
+      '\u2066',
+      '\u2067',
+      '\u2068',
+      '\u2069',
+    ];
+    const evidence = skillLog(
+      `##[error]AssertionError: real failure${[...controls, ...bidi].join('')}\ttail\nsecond line`,
+    );
+    expect(evidence).toContain('real failure');
+    expect(evidence).toContain('\ttail');
+    expect(evidence).toContain('second line');
+    expect(evidence).not.toMatch(/\p{Bidi_Control}/u);
+    // eslint-disable-next-line no-control-regex -- the class under test is the control set
+    expect(evidence).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/u);
   });
 
   it('keeps fallback errors', () => {

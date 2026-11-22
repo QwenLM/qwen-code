@@ -7,7 +7,7 @@
 
 use core_graphics::{
     event::{CGEvent, CGEventFlags},
-    event_source::{CGEventSource, CGEventSourceStateID},
+    event_source::CGEventSource,
 };
 use foreign_types::ForeignType;
 
@@ -28,6 +28,11 @@ pub fn is_screen_sharing_pid(pid: i32) -> bool {
     crate::apps::bundle_id_for_pid(pid)
         .as_deref()
         .is_some_and(is_screen_sharing_bundle_id)
+}
+
+pub(crate) fn uses_application_keyboard_target(foreground: bool, modifiers: &[&str]) -> bool {
+    // Command equivalents are dispatched through the application's menu chain.
+    foreground || modifier_flags(modifiers).contains(CGEventFlags::CGEventFlagCommand)
 }
 
 /// Press and release a single key, delivered to `pid` without stealing focus.
@@ -80,7 +85,7 @@ fn text_event(source: &CGEventSource, ch: char, down: bool) -> anyhow::Result<CG
 
 /// Type a string character-by-character to `pid`, with line breaks as Return.
 pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
     for ch in text_characters(text) {
@@ -98,7 +103,7 @@ pub fn type_text(pid: i32, text: &str) -> anyhow::Result<()> {
 /// Type a string character-by-character with an extra `inter_char_delay_ms`
 /// pause after each character (on top of the internal 8 ms down/up gap).
 pub fn type_text_with_delay(pid: i32, text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
 
     for ch in text_characters(text) {
@@ -160,7 +165,7 @@ pub fn press_key_global(key: &str, modifiers: &[&str]) -> anyhow::Result<()> {
     use core_graphics::event::CGEventTapLocation;
 
     let key_code = key_name_to_code(key)?;
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let mut active_flags = CGEventFlags::CGEventFlagNull;
     let mut pressed_modifiers: Vec<(u16, CGEventFlags)> = Vec::new();
@@ -238,7 +243,7 @@ pub(super) fn with_global_modifier_keys<T>(
 ) -> anyhow::Result<T> {
     use core_graphics::event::CGEventTapLocation;
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let mut active_flags = held_flags();
     let mut pressed = Vec::new();
@@ -385,7 +390,7 @@ fn release_pid_modifiers(
 pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<()> {
     use core_graphics::event::CGEventTapLocation;
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     for ch in text_characters(text) {
         let down = text_event(&source, ch, true)?;
@@ -616,7 +621,7 @@ pub(super) fn post_keyboard_event(pid: i32, event: &CGEvent) {
 }
 
 fn post_key(pid: i32, key_code: u16, key_down: bool, flags: CGEventFlags) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let event = CGEvent::new_keyboard_event(source, key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
@@ -631,7 +636,7 @@ fn post_key_no_auth(
     key_down: bool,
     flags: CGEventFlags,
 ) -> anyhow::Result<()> {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let event = CGEvent::new_keyboard_event(source, key_code, key_down)
         .map_err(|_| anyhow::anyhow!("CGEvent::new_keyboard_event failed"))?;
@@ -748,7 +753,18 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core_graphics::event::CGEventType;
+
+    #[test]
+    fn command_chords_keep_application_target() {
+        for command in ["cmd", "COMMAND", "meta", "super"] {
+            assert!(uses_application_keyboard_target(false, &[command]));
+        }
+        assert!(uses_application_keyboard_target(true, &[]));
+        for modifiers in [&[][..], &["shift"][..], &["ctrl", "option"][..]] {
+            assert!(!uses_application_keyboard_target(false, modifiers));
+        }
+    }
+    use core_graphics::{event::CGEventType, event_source::CGEventSourceStateID};
 
     #[test]
     fn named_key_flags_match_native_structure_without_inheriting_modifiers() {
@@ -794,7 +810,7 @@ mod tests {
     #[test]
     fn synthesized_return_uses_physical_keycode_in_both_transitions() {
         use core_graphics::event::EventField;
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+        let source = crate::input::new_event_source().unwrap();
         for down in [true, false] {
             for (ch, expected_code) in [('a', 0), ('甲', 0), ('\t', 0), ('\n', 36)] {
                 let event = text_event(&source, ch, down).unwrap();
@@ -817,7 +833,7 @@ mod tests {
                 unicode_string: *mut u16,
             );
         }
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).unwrap();
+        let source = crate::input::new_event_source().unwrap();
         for ch in "aA_~!@#$%^&*()+-={}[]|:;\"'<>,.?/中🙂".chars() {
             for down in [true, false] {
                 let event = text_event(&source, ch, down).unwrap();
@@ -1017,7 +1033,7 @@ impl cua_driver_core::desktop_keyboard::DesktopKeyboard for DesktopKeyboard {
             .map_err(|error| error.to_string())
     }
     fn transition(&self, code: u32, down: bool, held: &[u32]) -> Result<(), String> {
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        let source = crate::input::new_event_source()
             .map_err(|_| "Could not create a keyboard event source".to_owned())?;
         let event = CGEvent::new_keyboard_event(source, code as u16, down)
             .map_err(|_| "Could not create a keyboard event".to_owned())?;

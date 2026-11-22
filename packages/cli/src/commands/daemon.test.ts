@@ -4,17 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawn } from 'node:child_process';
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import type { Argv } from 'yargs';
+import yargs, { type Argv } from 'yargs';
 
 const sanitizeTerminalText = vi.hoisted(() =>
   vi.fn((value: string) => value.replace(/\p{Cc}/gu, '')),
 );
 
 vi.mock('../ui/utils/textUtils.js', () => ({ sanitizeTerminalText }));
+
+vi.mock('node:child_process', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:child_process')>()),
+  spawn: vi.fn(() => {
+    throw new Error('unexpected daemon spawn');
+  }),
+}));
 
 // A record only names a process inside the namespace it was written in, so
 // the decision table is pinned against a fixed local namespace here.
@@ -61,6 +69,7 @@ import {
 } from './daemon.js';
 import {
   readDaemonToken,
+  writeDaemonDiscovery,
   writeDaemonToken,
   type DaemonDiscoveryEntry,
   type DaemonDiscoveryRecord,
@@ -105,6 +114,44 @@ describe('qwen daemon command', () => {
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
       ['start', 'status', 'logs', 'stop', 'restart', 'token'],
     );
+  });
+
+  it('rejects repeated Conversations roots before spawning a daemon', async () => {
+    const tempDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-start-root-'),
+    );
+    const exitCode = process.exitCode;
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    vi.stubEnv('QWEN_HOME', tempDir);
+    vi.stubEnv('QWEN_RUNTIME_DIR', tempDir);
+    vi.mocked(spawn).mockClear();
+    try {
+      await yargs([])
+        .exitProcess(false)
+        .fail(false)
+        .command(daemonCommand)
+        .parseAsync([
+          'daemon',
+          'start',
+          '--workspace',
+          tempDir,
+          '--conversations-dir',
+          path.join(tempDir, 'root-a'),
+          '--conversations-dir',
+          path.join(tempDir, 'root-b'),
+        ]);
+
+      expect(process.exitCode).toBe(1);
+      expect(stderr.mock.calls.map(([text]) => String(text)).join('')).toBe(
+        'qwen daemon: pass --conversations-dir once.\n',
+      );
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      process.exitCode = exitCode;
+      stderr.mockRestore();
+      vi.unstubAllEnvs();
+      await fsp.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   describe('restart', () => {
@@ -176,6 +223,38 @@ describe('qwen daemon command', () => {
       );
       expect(result.error).toContain('did not record its startup workspaces');
       expect(result.stopArgs).toBeUndefined();
+    });
+
+    it('preserves the recorded Conversations root over a changed restart environment', () => {
+      const conversationsDir = path.resolve('persistent', 'conversations root');
+      const result = plan(
+        recorded({ conversationsDir }),
+        {},
+        {
+          QWEN_CONVERSATIONS_DIR: path.resolve('different-root'),
+        },
+      );
+      expect(result.error).toBeUndefined();
+      const optionIndex = result.startArgs!.indexOf('--conversations-dir');
+      expect(optionIndex).toBeGreaterThan(-1);
+      expect(result.startArgs![optionIndex + 1]).toBe(conversationsDir);
+      expect(result.env?.['QWEN_CONVERSATIONS_DIR']).toBe(
+        path.resolve('different-root'),
+      );
+    });
+
+    it('keeps environment-based selection for older records without a Conversations root', () => {
+      const conversationsDir = path.resolve('legacy-launch-root');
+      const result = plan(
+        recorded(),
+        {},
+        {
+          QWEN_CONVERSATIONS_DIR: conversationsDir,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.startArgs).not.toContain('--conversations-dir');
+      expect(result.env?.['QWEN_CONVERSATIONS_DIR']).toBe(conversationsDir);
     });
 
     it('names the defaults it assumes for an older single-workspace record', () => {
@@ -624,6 +703,22 @@ describe('qwen daemon command', () => {
     ]);
   });
 
+  it('forwards the Conversations root as one argument when starting a daemon', () => {
+    const conversationsDir = path.resolve('persistent', 'conversations root');
+    const { args } = buildDaemonStartArgs({
+      entry: '/opt/qwen/index.js',
+      port: 4170,
+      hostname: '127.0.0.1',
+      workspaces: ['/repo'],
+      conversationsDir,
+      web: true,
+      requireAuth: false,
+    });
+    const optionIndex = args.indexOf('--conversations-dir');
+    expect(optionIndex).toBeGreaterThan(-1);
+    expect(args[optionIndex + 1]).toBe(conversationsDir);
+  });
+
   it('formats a start summary with the bound port', () => {
     const summary = formatDaemonStartSummary(entry(4170).record);
     expect(summary).toContain('started pid');
@@ -741,6 +836,157 @@ describe('qwen daemon command', () => {
     ).toBe(true);
   });
 
+  it('emits memory only with detail JSON through the status command', async () => {
+    const dir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-memory-status-'),
+    );
+    vi.stubEnv('QWEN_RUNTIME_DIR', dir);
+    const stdout = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request) =>
+        new Response(
+          JSON.stringify({
+            v: 1,
+            status: 'ok',
+            runtime: { process: { rss: 4096 } },
+            limits: { memory: null },
+          }),
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    try {
+      writeDaemonDiscovery({ ...entry(4170).record, pidNamespace: 'pid:[2]' });
+      const run = (detail: boolean) =>
+        yargs([])
+          .exitProcess(false)
+          .fail(false)
+          .command(daemonCommand)
+          .parseAsync([
+            'daemon',
+            'status',
+            '--json',
+            ...(detail ? ['--detail'] : []),
+          ]);
+      await run(true);
+      const detailed = JSON.parse(
+        stdout.mock.calls.map(([text]) => String(text)).join(''),
+      );
+      expect(detailed.detail).toMatchObject({
+        runtime: { process: { rss: 4096 } },
+        limits: { memory: null },
+      });
+      stdout.mockClear();
+      fetchMock.mockClear();
+      await run(false);
+      expect(
+        JSON.parse(stdout.mock.calls.map(([text]) => String(text)).join('')),
+      ).not.toHaveProperty('detail');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/health');
+    } finally {
+      stdout.mockRestore();
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+      await fsp.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves memory figures, nulls and missing fields in JSON detail', () => {
+    const process = {
+      rss: 1024,
+      heapTotal: 128,
+      heapUsed: 64,
+      external: 0,
+      arrayBuffers: 0,
+    };
+    const memory = {
+      registeredWorkspaces: 3,
+      activeAcpChildren: 2,
+      committedAcpChildren: 2,
+      childRssCoverage: 'active_children',
+      children: {
+        rssBytes: 1048576,
+        sampled: 1,
+        oldestReadingAgeMs: 42,
+        heap: null,
+      },
+      modeled: {
+        recommendedShareAtRegisteredMb: 512,
+        recommendedShareAtActiveMb: 768,
+      },
+    };
+    const limits = {
+      enforced: false,
+      configuredBudgetMb: 4096,
+      effectiveBudgetMb: 2048,
+      journalGrowth: null,
+      childHeap: null,
+    };
+    const summary = summarizeDaemonStatus({
+      v: 1,
+      status: 'ok',
+      runtime: { process, memory, secret: 'omit' },
+      limits: { memory: limits, secret: 'omit' },
+    });
+    expect(summary).toMatchObject({
+      runtime: { process, memory },
+      limits: { memory: limits },
+    });
+    expect(JSON.stringify(summary)).not.toContain('secret');
+    expect(formatDaemonDetail(entry(4170).record, summary!)).toEqual(
+      formatDaemonDetail(entry(4170).record, { status: 'ok', issues: [] }),
+    );
+    expect(summarizeDaemonStatus({ v: 1, status: 'ok' })).toEqual({
+      status: 'ok',
+      issues: [],
+    });
+    expect(
+      summarizeDaemonStatus({
+        v: 1,
+        status: 'ok',
+        limits: { memory: null },
+        runtime: {
+          memory: {
+            childRssCoverage: 'primary_only',
+            children: {
+              rssBytes: 0,
+              sampled: 0,
+              oldestReadingAgeMs: null,
+              heap: null,
+            },
+          },
+        },
+      }),
+    ).toMatchObject({
+      limits: { memory: null },
+      runtime: {
+        memory: {
+          childRssCoverage: 'primary_only',
+          children: {
+            rssBytes: 0,
+            sampled: 0,
+            oldestReadingAgeMs: null,
+            heap: null,
+          },
+        },
+      },
+    });
+  });
+
+  it.each([undefined, [], {}, 'unavailable', 0])(
+    'omits unavailable memory blocks: %j',
+    (value) => {
+      expect(
+        summarizeDaemonStatus({
+          v: 1,
+          status: 'ok',
+          runtime: { process: value, memory: value },
+          limits: { memory: value },
+        }),
+      ).toEqual({ status: 'ok', issues: [] });
+    },
+  );
+
   it('reads daemon status detail over HTTP', async () => {
     vi.stubGlobal(
       'fetch',
@@ -751,7 +997,11 @@ describe('qwen daemon command', () => {
               v: 1,
               status: 'ok',
               daemon: { qwenCodeVersion: '0.25.3', uptimeMs: 1_000 },
-              runtime: { sessions: { active: 0 } },
+              runtime: {
+                sessions: { active: 0 },
+                process: { rss: 1024, heapUsed: 64 },
+              },
+              limits: { memory: null },
               issues: [],
             }),
             { status: 200 },
@@ -761,7 +1011,15 @@ describe('qwen daemon command', () => {
     try {
       await expect(
         fetchDaemonDetail(entry(4170).record, true),
-      ).resolves.toMatchObject({ status: 'ok', version: '0.25.3' });
+      ).resolves.toMatchObject({
+        status: 'ok',
+        version: '0.25.3',
+        runtime: { process: { rss: 1024, heapUsed: 64 } },
+        limits: { memory: null },
+      });
+      expect(String(vi.mocked(fetch).mock.calls[0]?.[0])).toContain(
+        '/daemon/status?detail=summary',
+      );
     } finally {
       vi.unstubAllGlobals();
     }
@@ -905,6 +1163,7 @@ describe('qwen daemon command', () => {
         QWEN_SERVER_TOKEN: 'old',
         QWEN_CODE_SESSION_ID: 'sid',
         QWEN_CODE_SERVE: '1',
+        QWEN_CODE_MANAGED_RUNTIME: '1',
         QWEN_DAEMON_TOKEN: 'daemon',
         QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'capability',
       },
@@ -914,6 +1173,7 @@ describe('qwen daemon command', () => {
     expect(env['QWEN_SERVER_TOKEN']).toBe('new-token');
     expect(env['QWEN_CODE_SESSION_ID']).toBeUndefined();
     expect(env['QWEN_CODE_SERVE']).toBeUndefined();
+    expect(env['QWEN_CODE_MANAGED_RUNTIME']).toBeUndefined();
     expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
   });

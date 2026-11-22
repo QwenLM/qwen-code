@@ -3,8 +3,10 @@
  * Analyze failed CI logs and render failure details.
  *
  * main-ci-failure-issue.yml consumes only `analyze` and `comment`: extracted
- * tests populate the failure summary, while the workflow aggregates issues
- * by workflow identity rather than by test or commit signatures.
+ * tests populate the failure summary, and the workflow routes on them — a run
+ * that names failing tests files or reuses a per-signature issue (matched by
+ * the `title` and `searchMarkers` emitted here), while a run without any test
+ * identity shares the workflow's aggregate issue.
  *
  * The legacy `plan`/title/body-renderer pipeline has no shipped caller and is
  * retained for revertability. It places a `qwen-main-ci-failure-test:<key>`
@@ -409,7 +411,10 @@ export function renderFailureComment({ analysis, occurrence, jobs = [] }) {
     `[Run ${occurrence.runId}](${occurrence.runUrl}) · commit ${code(occurrence.sha.slice(0, 12))}`,
     '',
     ...jobs
-      .filter((job) => job.conclusion === 'failure')
+      // A job that hit its execution cap concludes `cancelled`, not `failure`;
+      // keep it so a timed-out leg is named in the report (#16272). The step
+      // filter below already accepts cancelled, so the two levels agree.
+      .filter((job) => ['failure', 'cancelled'].includes(job.conclusion))
       .map((job) => {
         const steps = (job.steps ?? [])
           .filter((step) => ['failure', 'cancelled'].includes(step.conclusion))

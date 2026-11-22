@@ -42,8 +42,10 @@ interface CreateServeFeaturesDeps {
   opts: ServeOptions;
   boundWorkspace: string;
   persistSettingAvailable: boolean;
+  userSkillActivationAvailable?: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
+  sessionBtwStreamAvailable: () => boolean;
   currentSessionSchedulingAvailable: boolean;
   workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
@@ -56,11 +58,13 @@ interface CreateServeFeaturesDeps {
   dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
   scratchWorkspaceRegistrationAvailable: () => boolean;
+  gitWorkspaceCloneAvailable?: boolean;
   realtimeVoiceEnabled: () => boolean;
   realtimeVoiceWebEnabled?: () => boolean;
   standaloneSessionsAvailable?: () => boolean;
   acpHttpEnabled?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceDirectoriesAvailable?: boolean;
   nativeDirectoryPickerAvailable?: boolean;
   workspaceRuntimeAvailable: () => boolean;
   workspaceRuntimeStopAvailable?: () => boolean;
@@ -87,6 +91,7 @@ export function createServeFeatures(
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable,
+    sessionBtwStreamAvailable,
     currentSessionSchedulingAvailable,
     workspaceGenerationAvailable,
     reloadAvailable,
@@ -99,11 +104,13 @@ export function createServeFeatures(
     dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
     scratchWorkspaceRegistrationAvailable,
+    gitWorkspaceCloneAvailable,
     realtimeVoiceEnabled,
     realtimeVoiceWebEnabled,
     standaloneSessionsAvailable,
     acpHttpEnabled,
     workspaceRuntimeRemovalAvailable,
+    workspaceDirectoriesAvailable,
     nativeDirectoryPickerAvailable,
     workspaceRuntimeAvailable,
     workspaceRuntimeStopAvailable,
@@ -147,9 +154,11 @@ export function createServeFeatures(
           ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
           : {}),
         persistSettingAvailable,
+        userSkillActivationAvailable: deps.userSkillActivationAvailable,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         sessionGenerationAvailable: sessionGenerationAvailable(),
+        sessionBtwStreamAvailable: sessionBtwStreamAvailable(),
         currentSessionSchedulingAvailable,
         workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
@@ -163,7 +172,9 @@ export function createServeFeatures(
         persistentWorkspaceRegistrationAvailable,
         scratchWorkspaceRegistrationAvailable:
           scratchWorkspaceRegistrationAvailable(),
+        gitWorkspaceCloneAvailable: gitWorkspaceCloneAvailable === true,
         workspaceRuntimeRemovalAvailable,
+        workspaceDirectoriesAvailable,
         nativeDirectoryPickerAvailable,
         workspaceRuntimeAvailable: workspaceRuntimeAvailable(),
         workspaceRuntimeStopAvailable:

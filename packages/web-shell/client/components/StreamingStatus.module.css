@@ -21,8 +21,25 @@
   font-size: 13px;
 }
 
+.streamingMeta {
+  color: var(--foreground);
+}
+
+.label + .streamingMeta::before {
+  content: '(';
+}
+
+.label + .streamingMeta::after {
+  content: ')';
+}
+
 @media (max-width: 700px) {
   .label {
     display: none;
+  }
+
+  .label + .streamingMeta::before,
+  .label + .streamingMeta::after {
+    content: none;
   }
 }

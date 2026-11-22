@@ -5,6 +5,8 @@
  */
 
 import type { ToolOutputSize } from './tool-output-size.js';
+import type { ApprovalMode } from '../config/approval-mode.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
@@ -90,9 +92,15 @@ export interface ToolInvocation<
   canAutoApproveOnAllow?(): boolean;
 
   /**
-   * Constructs the confirmation dialog details for this invocation.
-   * Only called when the final permission decision is `'ask'` and the user
-   * needs to be prompted interactively.
+   * Whether an allow decision must still be reviewed by AUTO mode.
+   * This is independent of host interaction-payload forwarding.
+   */
+  requiresAutoReviewOnAllow?(): boolean;
+
+  /**
+   * Constructs confirmation details and optional automatic-approval hooks.
+   * A host may call this after a real automatic decision even when no human
+   * interaction is required.
    *
    * @param abortSignal Signal to cancel the operation.
    * @returns The confirmation details for the UI to display.
@@ -147,6 +155,10 @@ export abstract class BaseToolInvocation<
 
   canAutoApproveOnAllow(): boolean {
     return true;
+  }
+
+  requiresAutoReviewOnAllow(): boolean {
+    return false;
   }
 
   /**
@@ -612,6 +624,9 @@ export interface ToolResult {
    */
   persistedOutputFiles?: string[];
 
+  /** Producer-owned reason and recovery handle, preserved as one unit. */
+  recoveryText?: string;
+
   /**
    * Internal runtime marker: the producer already sized `llmContent` against
    * its own declared character budget, whether or not anything was cut. Records
@@ -624,6 +639,13 @@ export interface ToolResult {
    * is bounding it alone. The aggregate batch budget applies on every path.
    */
   outputBudgetApplied?: boolean;
+
+  /**
+   * Set by a producer that knows its own work was cut short but reports that
+   * outcome as an ordinary result instead of throwing. The scheduler uses it to
+   * tell the model the call was interrupted rather than completed.
+   */
+  interruptedBeforeCompletion?: boolean;
 
   /**
    * Markdown string for user display.
@@ -654,6 +676,9 @@ export interface ToolResult {
    * underlying file, URL, or managed resource lifecycle.
    */
   artifacts?: ToolArtifact[];
+
+  /** The tool returned a failure result. Its body is in llmContent. */
+  isError?: boolean;
 
   /**
    * If this property is present, the tool call is considered a failure.
@@ -922,6 +947,7 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | SubscriptionQuotaDisplay
   | ShellResultDisplay
   | string
   | AdvisorReviewDisplay
@@ -1190,6 +1216,8 @@ export interface ToolExecuteConfirmationDetails {
   hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Plain-text approval details for clients that render tool call content. */
+  approvalText?: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
   /**
@@ -1243,7 +1271,9 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_unavailable'
     | 'total_denial'
     | 'external_write'
-    | 'external_directory';
+    | 'external_directory'
+    // A human-only safety floor, currently the `git commit --amend` guard.
+    | 'safety_check';
   message: string;
 }
 
@@ -1257,6 +1287,11 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
+  /**
+   * Called instead of onConfirm for an automatic permission grant. This lets
+   * tools distinguish it from an explicit human approval at execution time.
+   */
+  onAutoConfirm?: (approvalMode: ApprovalMode) => Promise<void>;
 };
 
 export interface ToolPlanConfirmationDetails {

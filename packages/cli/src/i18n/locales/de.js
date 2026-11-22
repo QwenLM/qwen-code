@@ -8,6 +8,53 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  user: 'Benutzer',
+  assistant: 'Assistent',
+  thinking: 'Überlegung',
+  task: 'Aufgabe',
+  compaction: 'Komprimierung',
+  info: 'Information',
+  warning: 'Warnung',
+  retry: 'Wiederholung',
+  'stop-hook': 'Stopp-Hook',
+  'away-recap': 'Abwesenheitszusammenfassung',
+  'user-shell': 'Benutzerbefehl',
+  advisor: 'Berater',
+  'arena-agent': 'Arena-Agent',
+  'arena-session': 'Arena-Sitzung',
+  goal: 'Ziel',
+  'Protected input': 'Geschützte Eingabe',
+  'Focused input. Cursor: {{position}}':
+    'Eingabe fokussiert. Cursor: {{position}}',
+  'Unfocused input.': 'Eingabe nicht fokussiert.',
+  'Focused Prompt: {{value}}': 'Fokussierte Eingabeaufforderung: {{value}}',
+  'Prompt: {{value}}': 'Eingabeaufforderung: {{value}}',
+  'Focused Input: {{value}}': 'Fokussierte Eingabe: {{value}}',
+  'Input: {{value}}': 'Eingabe: {{value}}',
+  'Placeholder: {{value}}': 'Platzhalter: {{value}}',
+  'Cursor: {{position}}': 'Cursor: {{position}}',
+  'Selected {{value}}': 'Ausgewählt {{value}}',
+  'Disabled {{value}}': 'Deaktiviert {{value}}',
+  'Focused Toggle on: {{value}}': 'Fokussiert, Schalter an: {{value}}',
+  'Focused Toggle off: {{value}}': 'Fokussiert, Schalter aus: {{value}}',
+  'Toggle on: {{value}}': 'Schalter an: {{value}}',
+  'Toggle off: {{value}}': 'Schalter aus: {{value}}',
+  'Conversation cleared.': 'Unterhaltung geleert.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Überarbeitung {{value}}',
+  Dialog: 'Dialog',
+  'Dialog closed. Focus: prompt.':
+    'Dialog geschlossen. Fokus: Eingabeaufforderung.',
+  'Dialog closed.': 'Dialog geschlossen.',
+  'Waiting for confirmation': 'Warte auf Bestätigung',
+  'Working. Escape to cancel.': 'Wird ausgeführt. Escape zum Abbrechen.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'Verlaufseinträge {{start}}-{{end}} von {{total}}.',
+  'Worktree: {{value}}': 'Arbeitsbaum: {{value}}',
+  'Workflow mode: on': 'Workflow-Modus: ein',
+  'Workflow mode: on (unavailable)': 'Workflow-Modus: ein (nicht verfügbar)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Umschalt+Auf/Ab oder BildAuf/BildAb zum Lesen; Strg+Pos1/Ende für ersten/neuesten Eintrag.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Aktiviert die integrierte Generated UI in unterstützten lokalen Sitzungen. Starten Sie die zugehörige Sitzung neu, um Änderungen anzuwenden.',
@@ -83,6 +130,7 @@ export default {
   Auth: 'Authentifizierung',
   Model: 'Modell',
   'Fast Model': 'Schnelles Modell',
+  'Agent Loop': 'Agent-Loop',
   Sandbox: 'Sandbox',
   'Session ID': 'Sitzungs-ID',
   'Base URL': 'Base URL',
@@ -985,6 +1033,27 @@ export default {
     'Verwendung: /forget <zu entfernender Erinnerungstext>',
   'No managed auto-memory entries matched: {{query}}':
     'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'GitHub-Pull-Request an diese Sitzung binden',
+  'Usage: /pr <number | url>': 'Verwendung: /pr <Nummer | url>',
+  'No PRs bound to this session.': 'An diese Sitzung sind keine PRs gebunden.',
+  'Bound PRs: {{list}}': 'Gebundene PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Ungültiger PR-Verweis. Verwendung: /pr <Nummer | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'PR #{{number}} konnte über gh nicht aufgelöst werden. Geben Sie stattdessen die vollständige PR-URL an.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} wurde an diese Sitzung gebunden: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} ist bereits an diese Sitzung gebunden: {{url}}',
+  'Failed to bind PR #{{number}}.':
+    'PR #{{number}} konnte nicht gebunden werden.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'PR #{{number}} konnte nicht gebunden werden: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Die PR-Bindungen dieser Sitzung konnten nicht gelesen werden.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) ist nicht verfügbar oder hat das Zeitlimit überschritten. Geben Sie die vollständige PR-URL an, um ohne gh zu binden.',
   'Consolidate managed auto-memory topic files.':
     'Verwaltete Auto-Speicher-Themendateien konsolidieren.',
   'Could not retrieve tool registry.':
@@ -1079,6 +1148,8 @@ export default {
     'Chatverlauf konnte nicht komprimiert werden, da die Komprimierungszusammenfassung abgeschnitten wurde.',
   'Could not compress chat history due to an API error.':
     'Chatverlauf konnte aufgrund eines API-Fehlers nicht komprimiert werden.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Chatverlauf konnte nicht komprimiert werden, da er für das Kontextfenster zu groß ist.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================
@@ -1147,6 +1218,8 @@ export default {
   'disabled (bare mode)': 'deaktiviert (Bare-Modus)',
   'disabled (safe mode)': 'deaktiviert (Sicherheitsmodus)',
   'disabled (disableAllHooks)': 'deaktiviert (disableAllHooks)',
+  'disabled (not approved)': 'deaktiviert (nicht freigegeben)',
+  'disabled (rejected)': 'deaktiviert (abgelehnt)',
   'disabled (folder not trusted)':
     'deaktiviert (Ordner nicht vertrauenswürdig)',
   'disabled (turned off for this session)':
@@ -1495,6 +1568,7 @@ export default {
   Reqs: 'Anfragen',
   'Input Tokens': 'Eingabe-Token',
   'Output Tokens': 'Ausgabe-Token',
+  'Output (incl. Reasoning)': 'Ausgabe (inkl. Reasoning)',
   'Savings Highlight:': 'Einsparungen:',
   'of input tokens were served from the cache, reducing costs.':
     'der Eingabe-Token wurden aus dem Cache bedient, was die Kosten reduziert.',
@@ -1872,6 +1946,8 @@ export default {
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Anweisungsdateien',
+  'Auto memory': 'Auto-Speicher',
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
@@ -2048,6 +2124,8 @@ export default {
     'Berater-Überprüfung fehlgeschlagen: {{error}}',
   'No conversation context available for /advisor':
     'Kein Gesprächskontext für /advisor verfügbar',
+  'No conversation context available for /btw':
+    'Kein Gesprächskontext für /btw verfügbar',
   'Focus too long (max {{max}} chars)': 'Fokus zu lang (max. {{max}} Zeichen)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Ein anderer Vorgang läuft gerade. Warten Sie, bis er abgeschlossen ist, bevor Sie /advisor ausführen',
@@ -2219,6 +2297,8 @@ export default {
   out: 'aus',
   'In/Out': 'Ein/Aus',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Updates auf eine bestimmte Version erfordern eine Standalone-Installation. Installieren Sie Version {{version}} manuell mit Ihrer Installationsmethode.',
   'Check for Qwen Code updates and install if available':
     'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
   'Qwen Code update available! {{current}} → {{latest}}':

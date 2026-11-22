@@ -5,6 +5,8 @@
  */
 
 import { SettingScope, type LoadedSettings } from './settings.js';
+import type { Config } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 
 export function hasOwnModelProviders(settingsObj: unknown): boolean {
   if (!settingsObj || typeof settingsObj !== 'object') {
@@ -12,7 +14,8 @@ export function hasOwnModelProviders(settingsObj: unknown): boolean {
   }
   const obj = settingsObj as Record<string, unknown>;
   // Treat an explicitly configured empty object (modelProviders: {}) as "owned"
-  // by this scope, which is important when mergeStrategy is REPLACE.
+  // by this scope: ownership is keyed on presence of the setting, not on
+  // whether it has any entries.
   return Object.prototype.hasOwnProperty.call(obj, 'modelProviders');
 }
 
@@ -44,7 +47,47 @@ export function getModelProvidersOwnerScope(
 export function getPersistScopeForModelSelection(
   settings: LoadedSettings,
 ): SettingScope {
+  // Subscription activation owns workspace auth/model settings without a
+  // modelProviders entry; writing to User would be shadowed on restart.
+  if (
+    settings.isTrusted &&
+    settings.workspace.settings.security?.auth?.selectedType ===
+      AuthType.QWEN_SUBSCRIPTION
+  ) {
+    return SettingScope.Workspace;
+  }
   return getModelProvidersOwnerScope(settings) ?? SettingScope.User;
+}
+
+export function getSubscriptionStartupFallbackModel(
+  settings: LoadedSettings,
+  authType: AuthType | undefined,
+  config: Pick<Config, 'getModel'>,
+): string | undefined {
+  if (
+    authType !== AuthType.QWEN_SUBSCRIPTION ||
+    !settings.isTrusted ||
+    !settings.workspaceSettingsActive
+  ) {
+    return undefined;
+  }
+  const { user, workspace, system } = settings;
+  const enforcedType = settings.merged.security?.auth?.enforcedType;
+  const projectModel = workspace.settings.model;
+  if (
+    projectModel?.name &&
+    projectModel.name === config.getModel() &&
+    user.settings.security?.auth?.selectedType === authType &&
+    (!enforcedType || enforcedType === authType) &&
+    workspace.settings.security?.auth?.selectedType === undefined &&
+    !projectModel.baseUrl &&
+    workspace.settings.modelProviders === undefined &&
+    system.settings.security?.auth?.selectedType === undefined &&
+    system.settings.model?.name === undefined
+  ) {
+    return user.settings.model?.name;
+  }
+  return undefined;
 }
 
 /**

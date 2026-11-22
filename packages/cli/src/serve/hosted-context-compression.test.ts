@@ -9,6 +9,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Content } from '@google/genai';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
@@ -22,9 +24,18 @@ import {
 } from '@qwen-code/qwen-code-core/services/chatCompressionService.js';
 import { loadCliConfig } from '../config/config.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
+import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import { startModelInvocationObservation } from '@qwen-code/qwen-code-core/telemetry/model-observation.js';
 
 vi.mock('../config/settings.js', () => ({
-  loadSettings: () => ({ merged: {} }),
+  loadSettings: () => ({
+    merged: {},
+    getSystemHooks: () => undefined,
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
+  }),
 }));
 vi.mock('../config/config.js', () => ({ loadCliConfig: vi.fn() }));
 
@@ -44,6 +55,7 @@ const config = {
   getFastModel: () => undefined,
   getModelsConfig: () => ({ getCurrentAuthType: () => 'openai' }),
   refreshAuth: vi.fn(),
+  switchModel: vi.fn(),
   getLlmClient: () => ({ getChat: () => chat }),
   getHookSystem: () => undefined,
 };
@@ -52,6 +64,7 @@ let session: ManagedSession;
 let compression: HostedContextCompression;
 let busy = false;
 let pendingHooks = false;
+let onCompactionCommitted: ReturnType<typeof vi.fn>;
 
 const candidate: ChatCompressionCandidate = {
   newHistory: [
@@ -71,6 +84,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   busy = false;
   pendingHooks = false;
+  onCompactionCommitted = vi.fn();
   vi.mocked(loadCliConfig).mockResolvedValue(config as never);
   root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-compression-'));
   const sessionKey = {
@@ -132,6 +146,7 @@ beforeEach(async () => {
     instructions: async () => 'instructions',
     busy: () => busy,
     hasPendingHooks: () => pendingHooks,
+    onCompactionCommitted,
   });
 });
 
@@ -177,16 +192,276 @@ async function reopen() {
     instructions: async () => 'instructions',
     busy: () => busy,
     hasPendingHooks: () => pendingHooks,
+    onCompactionCommitted,
   });
 }
 
 describe('Hosted context compression', () => {
+  it.each(['noop', 'compressed', 'business-failed'] as const)(
+    'commits bounded model statistics for manual %s without a user turn',
+    async (mode) => {
+      await enableManagedSessionDiagnostics(session);
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockImplementation(
+        async (_chat, options) => {
+          if (mode === 'noop')
+            return {
+              newHistory: null,
+              info: {
+                originalTokenCount: 0,
+                newTokenCount: 0,
+                compressionStatus: CompressionStatus.NOOP,
+              },
+            };
+          const observation = startModelInvocationObservation({
+            sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+            executionId: randomUUID(),
+            model: 'summary',
+            startedAt: Date.now(),
+            retryAttempt: 1,
+          });
+          observation!.update({
+            promptTokenCount: 30,
+            candidatesTokenCount: 10,
+            totalTokenCount: 40,
+            cachedContentTokenCount: 0,
+            thoughtsTokenCount: 0,
+          });
+          observation!.finish('success');
+          if (mode === 'business-failed') throw new Error('Invalid summary');
+          await options.onPreparedCompaction?.(structuredClone(candidate));
+          return { newHistory: candidate.newHistory, info: candidate.info };
+        },
+      );
+      const request = intent();
+      const before = session.authority.committedSequence;
+      await compression.admit(request);
+      await compression.wait();
+      const maintenance = session.authority.extensionRecord(
+        'history_maintenance',
+        request.operationId,
+      )!.record as {
+        schemaVersion: number;
+        modelStatsRef: import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef;
+      };
+      expect(maintenance.schemaVersion).toBe(2);
+      expect(maintenance.modelStatsRef.kind).toBe(
+        'managed-session-model-stats',
+      );
+      const saved = JSON.parse(
+        (await session.resources.read(maintenance.modelStatsRef)).toString(),
+      );
+      expect(saved.statistics.sources.compression.requests.success).toBe(
+        mode === 'noop' ? 0 : 1,
+      );
+      expect(saved.statistics.totals.requests.total).toBe(
+        mode === 'noop' ? 0 : 1,
+      );
+      expect(saved.statistics.sources.main.requests.total).toBe(0);
+      expect(saved.context).toBeNull();
+      expect(
+        session.authority
+          .eventsInSequenceRange(
+            before + 1,
+            session.authority.committedSequence,
+          )
+          .some(
+            (event) =>
+              event.kind === 'model.attempt' || event.kind === 'turn.settled',
+          ),
+      ).toBe(false);
+      expect(compression.status(request.operationId)).toMatchObject(
+        mode === 'business-failed'
+          ? { status: 'failed', failureCode: 'context_compression_failed' }
+          : { status: 'completed', outcome: mode },
+      );
+    },
+  );
+
+  it('compresses with the Session connection without a host model registration', async () => {
+    const modelConfiguration = {
+      authType: AuthType.USE_OPENAI,
+      model: 'session-model',
+      apiKey: 'session-key',
+      baseUrl: 'https://session.example/v1',
+    };
+    compression = new HostedContextCompression({
+      session,
+      cwd: root,
+      instructions: async () => '',
+      busy: () => false,
+      hasPendingHooks: () => false,
+      modelConfig: async () => modelConfiguration,
+    });
+    engine();
+    const request = {
+      ...intent(),
+      modelSelection: { modelId: modelConfiguration.model, revision: 1 },
+    };
+    await compression.admit(request);
+    await compression.wait();
+    expect(compression.status(request.operationId)).toMatchObject({
+      status: 'completed',
+    });
+    expect(
+      vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.modelConfiguration,
+    ).toEqual(modelConfiguration);
+    expect(config.switchModel).not.toHaveBeenCalled();
+  });
+
+  it.each(
+    [false, true].flatMap((snapshot) =>
+      [
+        {
+          stopReason: 'harness_interruption',
+          work: true,
+          expectedRoles: ['user', 'model', 'user'],
+        },
+        { stopReason: 'harness_interruption', work: false, expectedRoles: [] },
+        { stopReason: 'cancelled', work: true, expectedRoles: [] },
+      ].map((row) => ({ ...row, snapshot })),
+    ),
+  )(
+    'keeps compact source groups whole: $stopReason, work=$work, snapshot=$snapshot',
+    async ({ stopReason, work, expectedRoles, snapshot }) => {
+      const promptId = randomUUID();
+      const instruction = 'review COMPACT_REPRO then fix findings';
+      const callId = `${promptId}:agent`;
+      const sessionId = session.authority.sessionHeader.sessionKey.sessionId;
+      const messages: Content[] = [
+        { role: 'user', parts: [{ text: instruction }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: callId, name: 'agent', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'agent',
+                response: { output: 'Child started' },
+              },
+            },
+          ],
+        },
+      ];
+      if (!work) messages.splice(1);
+      for (const [index, message] of messages.entries())
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'test',
+          type: (['user', 'assistant', 'tool_result'] as const)[index]!,
+          daemonPromptId: promptId,
+          message,
+        });
+      await session.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        cwd: root,
+        version: 'test',
+        type: 'system',
+        subtype: 'turn_result',
+        daemonPromptId: promptId,
+        systemPayload: {
+          promptId,
+          state: 'cancelled',
+          stopReason,
+          endedAt: Date.now(),
+        },
+      });
+      if (snapshot) {
+        const projected = await session.sink.projectModelHistory();
+        const group = projected.apiHistory.filter((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.text === instruction ||
+              part.functionCall?.id === callId ||
+              part.functionResponse?.id === callId,
+          ),
+        );
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'test',
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: candidate.info,
+            compressedHistory: [...candidate.newHistory, ...group],
+            summaryPrefixLength: 2,
+            promptIds: [
+              null,
+              null,
+              ...group.map((entry) => getApiHistoryPromptId(entry) ?? null),
+            ],
+          },
+        });
+      }
+      engine();
+      const project = vi.spyOn(session.sink, 'project');
+      const projectModel = vi.spyOn(session.sink, 'projectModelRecords');
+      const cut = session.authority.committedSequence;
+      const request = {
+        ...intent(),
+        expectedCompactionRevision: compression.revision,
+      };
+      await compression.admit(request);
+      expect(project).not.toHaveBeenCalled();
+      expect(projectModel).toHaveBeenCalledExactlyOnceWith(cut);
+      await compression.wait();
+      expect(compression.status(request.operationId)?.status).toBe('completed');
+      const history = chat.setHistory.mock.calls[0]![0];
+      expect(
+        history.some((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.text ===
+              (snapshot ? 'remember: blue' : 'original blue history'),
+          ),
+        ),
+      ).toBe(true);
+      const interruptedGroup = history.filter((entry) =>
+        entry.parts?.some(
+          (part) =>
+            part.text === instruction ||
+            part.functionCall?.id === callId ||
+            part.functionResponse?.id === callId,
+        ),
+      );
+      expect(interruptedGroup.map((entry) => entry.role)).toEqual(
+        expectedRoles,
+      );
+    },
+  );
+
   it('durably compresses without a user Turn and replays the exact operation', async () => {
     const summarize = engine();
     const request = intent();
     const before = session.authority.committedSequence;
     await compression.admit(request);
     await compression.wait();
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).toMatchObject({
+      sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+      sessionIdGenerated: true,
+      chatRecording: false,
+      acp: true,
+    });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[1]).not.toHaveProperty(
+      'channel',
+    );
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]).toMatchObject({
+      lspDisabled: true,
+    });
     const result = compression.status(request.operationId)!;
     expect(result).toMatchObject({
       status: 'completed',
@@ -219,6 +494,60 @@ describe('Hosted context compression', () => {
     expect(await compression.admit(request)).toEqual(result);
     await compression.wait();
     expect(summarize).toHaveBeenCalledOnce();
+  });
+
+  it('persists the synthetic prefix boundary separately from retained original messages', async () => {
+    const prepared: ChatCompressionCandidate = {
+      ...candidate,
+      newHistory: [
+        { role: 'user', parts: [{ text: 'earlier summary' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+        { role: 'user', parts: [{ text: 'Recent operation follows.' }] },
+        { role: 'model', parts: [{ text: 'latest original response' }] },
+      ],
+      info: { ...candidate.info, summaryPrefixLength: 3 },
+    };
+    engine(prepared);
+    const request = intent();
+
+    await compression.admit(request);
+    await compression.wait();
+
+    expect(compression.status(request.operationId)?.outcome).toBe('compressed');
+    const event = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .findLast((event) => event.kind === 'context.compacted')!;
+    const checkpoint = JSON.parse(
+      (
+        await readManagedMessageBody(
+          (ref) => session.resources.read(ref),
+          event.payload['summaryRef'] as unknown as ManagedSessionDurableRef,
+        )
+      ).toString(),
+    );
+    expect(checkpoint.systemPayload).toMatchObject({
+      summaryPrefixLength: 3,
+      compressedHistory: prepared.newHistory,
+    });
+    await reopen();
+    expect((await session.sink.projectModelHistory()).apiHistory).toEqual(
+      prepared.newHistory,
+    );
+  });
+
+  it('notifies the loop resolver seam when a route-driven compaction commits', async () => {
+    engine();
+    const request = intent();
+    expect(onCompactionCommitted).not.toHaveBeenCalled();
+    await compression.admit(request);
+    await compression.wait();
+    expect(compression.status(request.operationId)).toMatchObject({
+      status: 'completed',
+      outcome: 'compressed',
+    });
+    // A committed compaction is fresh context: the loop resolver must reset
+    // so the next fire re-delivers the full guidance, not a dangling reminder.
+    expect(onCompactionCommitted).toHaveBeenCalledOnce();
   });
 
   it('refuses busy and stale requests before invoking the model', async () => {

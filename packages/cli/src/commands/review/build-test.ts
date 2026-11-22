@@ -39,12 +39,20 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { devNull } from 'node:os';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   boxedRunLeftContainer,
   containerCommand,
+  containerCommandEnv,
   containerName,
   containerPathFor,
   handOffRefused,
@@ -71,6 +79,8 @@ import {
   type ReviewToolchainAdapter,
 } from './lib/toolchain.js';
 import { type TestScope } from './lib/workspace-scope.js';
+import { declaredBuildHeapMb } from './lib/workspaces.js';
+import { heapBannerIn, raiseHeap, raiseNpmHeap } from './lib/heap.js';
 
 /**
  * The root toolchains build-test can select. One today; the registry exists so
@@ -104,6 +114,26 @@ export interface CommandResult {
    * The raw text exists here and nowhere else; record the set while it does.
    */
   failingFiles?: string[];
+  /**
+   * True when the command failed and its UNTRIMMED output carries V8's
+   * heap-exhaustion banner. Measured here for the reason `failingFiles` is:
+   * `output` keeps a bounded head and tail, and a banner with more than the
+   * tail after it — siblings of a parallel build still printing — is cut.
+   * Absent otherwise.
+   */
+  heapExhausted?: boolean;
+  /**
+   * The signal that killed the command, when it left no exit status. Absent
+   * otherwise.
+   */
+  signal?: string;
+  /**
+   * The error code that kept the command from running or finishing (ENOENT,
+   * EACCES, ENOBUFS), other than its deadline's — that is `timedOut`. With
+   * `signal`, what tells an outside kill from the rest of the null-status
+   * deaths (see `killedFromOutside`).
+   */
+  spawnError?: string;
   /**
    * The deadline the command was actually given (ms) — the whole-call budget
    * shortens it below the per-command default, and the timeout note must
@@ -148,6 +178,14 @@ export interface BuildTestReport {
    * parsing prose.
    */
   notBuilt?: string[];
+  /**
+   * What a skipped root `build` runs, when the root build did not run and
+   * that left work undone: the local script it hands off to (see
+   * `rootBuildFanOutScript`), or the root build's whole text when it chains
+   * more than one command. Structural so a `--resume` merge, which rewrites
+   * the note, can say it again.
+   */
+  skippedRootBuild?: string;
   /** Packages the compiler asked for that the dependency graph had not predicted. */
   widenedWith: string[];
   install: CommandResult | null;
@@ -180,6 +218,19 @@ export interface BuildTestReport {
    * neither may claim a scoping decision it never made.
    */
   testScope?: TestScope;
+  /**
+   * The dirs whose suite ran only the tests related to the diff (`vitest
+   * related`), not the whole suite — read off the test commands, sorted.
+   * Absent when every suite ran whole: a script that is not a plain `vitest
+   * run`, or a diff the import graph cannot see through (`relatedTests`).
+   */
+  relatedTests?: string[];
+  /**
+   * Why every suite ran whole where a related run could have stood in — the
+   * diff changes what no import graph sees through (`wholeSuiteReason`).
+   * Absent when a suite ran related, or when none could have.
+   */
+  wholeSuiteReason?: string;
   /**
    * True when every build and test command exited 0. An install that exits non-zero
    * but leaves a usable tree (a failed `prepare` hook) does NOT set this false — the
@@ -318,16 +369,171 @@ export function trimOutput(s: string): string {
  * when they run explicit build/bundle steps after npm ci." In a TUI A/B on PR
  * #6866 the install-time full build was the single largest thing left in Agent 7.
  * Harmless on any repo that does not read it.
+ *
+ * `heapMb` is the heap a build or install command gets — see
+ * `declaredBuildHeapMb` — at least: a channel that already sets more keeps
+ * it, as the root build would never have run below the declared one. A Web
+ * Shell review cannot set it from outside: `qwen serve` drops an inherited
+ * `NODE_OPTIONS`.
+ *
+ * Two channels reach a lifecycle script, and each is raised on its own,
+ * keeping everything else it says. `NODE_OPTIONS`, unless npm has
+ * `node-options` of its own (`npmNodeOptions`, as npm computes them in this
+ * environment) — then npm REPLACES the script's `NODE_OPTIONS` with those, so
+ * they are raised too and handed back through `npm_config_node_options`,
+ * which outranks every `.npmrc`.
  */
 export function buildRunEnv(
   base: NodeJS.ProcessEnv = process.env,
+  heapMb?: number,
+  npmNodeOptions?: string,
 ): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...base,
     CI: '1',
     npm_config_yes: 'true',
     QWEN_SKIP_PREPARE: '1',
   };
+  if (heapMb === undefined) return env;
+  // Replaced, not appended: with two heap flags the child gets whichever V8
+  // reads last.
+  const nodeOptions = raiseHeap(base['NODE_OPTIONS'] ?? '', heapMb);
+  if (nodeOptions !== undefined) env['NODE_OPTIONS'] = nodeOptions;
+  const npmOptions =
+    npmNodeOptions === undefined
+      ? undefined
+      : raiseNpmHeap(npmNodeOptions, heapMb);
+  if (npmOptions !== undefined) {
+    // One spelling: npm reads the variable case-insensitively, and two of
+    // them leave the winner to the environment's order.
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === 'npm_config_node_options') delete env[key];
+    }
+    env['npm_config_node_options'] = npmOptions;
+  }
+  return env;
+}
+
+const npmNodeOptionsCache = new Map<string, string | undefined>();
+
+/** What npm needs to start: the host variables a container's query keeps. */
+const NPM_STARTUP_ENV = new Set(['path', 'pathext', 'systemroot', 'comspec']);
+
+/**
+ * Stands in for `NODE_OPTIONS` while npm is asked: an option that does
+ * nothing, so a preload there neither runs in the query nor prints into its
+ * answer.
+ */
+const NODE_OPTIONS_STAND_IN = '--title=qwen-review-node-options';
+
+/** `env` with `name` set to `value`, in one spelling (Windows has `Path`). */
+function withEnvVar(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  value: string,
+): NodeJS.ProcessEnv {
+  const out = Object.fromEntries(
+    Object.entries(env).filter(([k]) => k.toUpperCase() !== name),
+  );
+  out[name] = value;
+  return out;
+}
+
+/**
+ * The `PWD` a command's POSIX shell reports: the directory it starts in, as
+ * `getcwd` spells it. (A shell keeps an inherited `PWD` that already names
+ * that directory: another spelling of the same place.) `cmd.exe` sets none,
+ * so on Windows the inherited one stands: undefined.
+ */
+function shellPwd(cwd: string): string | undefined {
+  if (process.platform === 'win32') return undefined;
+  try {
+    return realpathSync(cwd);
+  } catch {
+    return cwd;
+  }
+}
+
+/**
+ * The `node-options` npm hands a lifecycle script in place of its
+ * `NODE_OPTIONS`, or undefined when npm has none. Any layer can set it — the
+ * tree's `.npmrc`, the user's or the global one, `npm_config_node_options` —
+ * so it is asked of npm itself, in the tree the command runs in.
+ *
+ * npm expands a `${VAR}` in it from its own environment, so it is asked in
+ * the command's: `env`, with `PWD` set to `pwd`, the directory the command's
+ * shell reports — this process's `PWD` names another. `NODE_OPTIONS` alone is
+ * not passed as is: a preload there would run in this npm and print into its
+ * answer, so a stand-in goes in its place and the answer gets the real value
+ * back. `isolated` asks for a container: the tree's own `.npmrc` only, as its
+ * HOME is empty and `containerEnv` passes no npm configuration — and `env` is
+ * then the container's, so a `${VAR}` naming a host variable expands as it
+ * does there.
+ *
+ * A query that fails, or answers more than one line, reads as none. Once per
+ * tree and environment.
+ */
+export function npmNodeOptions(
+  cwd: string,
+  {
+    env = buildRunEnv(process.env),
+    pwd = shellPwd(cwd),
+    isolated = false,
+  }: { env?: NodeJS.ProcessEnv; pwd?: string; isolated?: boolean } = {},
+): string | undefined {
+  const nodeOptions = Object.entries(env).find(
+    ([k]) => k.toUpperCase() === 'NODE_OPTIONS',
+  )?.[1];
+  let query = pwd === undefined ? env : withEnvVar(env, 'PWD', pwd);
+  if (nodeOptions !== undefined) {
+    query = withEnvVar(query, 'NODE_OPTIONS', NODE_OPTIONS_STAND_IN);
+  }
+  const key = JSON.stringify([cwd, isolated, nodeOptions, query]);
+  if (npmNodeOptionsCache.has(key)) return npmNodeOptionsCache.get(key);
+  const r = spawnSync(
+    'npm',
+    [
+      'config',
+      'get',
+      'node-options',
+      // Two different paths: npm refuses to load one file as both. The
+      // global one names a child of the null device, which cannot exist.
+      ...(isolated
+        ? ['--userconfig', devNull, '--globalconfig', join(devNull, 'npmrc')]
+        : []),
+    ],
+    {
+      cwd,
+      env: query,
+      encoding: 'utf8',
+      timeout: 30_000,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      shell: process.platform === 'win32',
+    },
+  );
+  const value = r.status === 0 ? (r.stdout ?? '').trim() : '';
+  const options =
+    value === '' ||
+    value === 'null' ||
+    value === 'undefined' ||
+    /[\r\n]/.test(value)
+      ? undefined
+      : value.split(NODE_OPTIONS_STAND_IN).join(nodeOptions ?? '');
+  npmNodeOptionsCache.set(key, options);
+  return options;
+}
+
+/**
+ * The environment a command runs with outside a container: `buildRunEnv`,
+ * with npm's own `node-options` read in that same environment.
+ */
+function directRunEnv(
+  cwd: string,
+  heapMb: number | undefined,
+): NodeJS.ProcessEnv {
+  const env = buildRunEnv(process.env, heapMb);
+  if (heapMb === undefined) return env;
+  return buildRunEnv(process.env, heapMb, npmNodeOptions(cwd, { env }));
 }
 
 /**
@@ -360,8 +566,10 @@ export function buildRunEnv(
  * between the job's start and the traps and kill only the shell. What is left
  * is the step between the fork and `c=$!`; a signal there finds `c` empty and
  * reaps nothing. Reading `$!` in the trap instead would close that too, but
- * zsh, which macOS can install as `/bin/sh`, expands `$!` to 0 before any job,
- * and the walk from pid 0 is every process on the machine.
+ * zsh expands `$!` to 0 before any job, and the walk from pid 0 is every
+ * process on the machine. macOS's `/bin/sh` runs zsh when
+ * `/private/var/select/sh` points at it (see sh(1)); it points at bash by
+ * default.
  */
 export const REAPING_SHELL = `cmd=$1
 shift
@@ -410,6 +618,7 @@ function containerised(
   command: string,
   cwd: string,
   kind: CommandKind,
+  heapMb: number | undefined,
 ): {
   file: string;
   args: string[];
@@ -426,11 +635,36 @@ function containerised(
   const workdir = containerPathFor(cwd);
   if (workdir === null) return null;
   const name = containerName();
+  // npm is asked in the container's environment: its own entries, and of the
+  // host's only what npm needs to start.
+  const containerQueryEnv = (): NodeJS.ProcessEnv => ({
+    ...Object.fromEntries(
+      Object.entries(process.env).filter(([k]) =>
+        NPM_STARTUP_ENV.has(k.toLowerCase()),
+      ),
+    ),
+    ...Object.fromEntries(
+      containerCommandEnv({ tmpDir, kind, heapMb }).map((entry) => {
+        const eq = entry.indexOf('=');
+        return [entry.slice(0, eq), entry.slice(eq + 1)];
+      }),
+    ),
+  });
   return {
     ...containerCommand(command, {
       cwd: workdir,
       tmpDir,
       kind,
+      ...(heapMb === undefined
+        ? {}
+        : {
+            heapMb,
+            npmNodeOptions: npmNodeOptions(cwd, {
+              env: containerQueryEnv(),
+              pwd: workdir,
+              isolated: true,
+            }),
+          }),
       name,
       runtime: verdict.runtime,
       rootless: runtimeIsRootless(verdict.runtime),
@@ -458,7 +692,11 @@ export function run(
   // install scripts the PR committed, its build, its suite — so it is the
   // thing #9556 is about. `containerised` returns null when the run is not
   // sandboxed, and the direct spawn below is unchanged for that case.
-  const boxed = containerised(command, cwd, kind);
+  // A build or an install gets the heap the root build declares; an install
+  // because `npm ci` runs `prepare`, which is the whole-project build on many
+  // repos.
+  const heapMb = kind === 'test' ? undefined : declaredBuildHeapMb(cwd);
+  const boxed = containerised(command, cwd, kind, heapMb);
   const r = boxed
     ? spawnSync(boxed.file, boxed.args, {
         cwd,
@@ -477,7 +715,8 @@ export function run(
         killSignal: 'SIGKILL',
         stdio: ['ignore', 'pipe', 'pipe'],
         // NOT `buildRunEnv()`: the container gets an allowlist instead (see
-        // `containerEnv`), and this env is the RUNTIME CLIENT's — the caller's
+        // `containerEnv`; a build's declared heap rides in the argv, see
+        // `containerCommand`), and this env is the RUNTIME CLIENT's — the caller's
         // PATH and nothing from the review, minus the daemon-selecting
         // variables a repository could have shipped in its own `.env`.
         env: runtimeClientEnv(),
@@ -498,7 +737,7 @@ export function run(
           maxBuffer: 64 * 1024 * 1024,
           // A build that asks a question is a build that hangs until the deadline.
           stdio: ['ignore', 'pipe', 'pipe'],
-          env: buildRunEnv(),
+          env: directRunEnv(cwd, heapMb),
         },
       );
   if (boxed && boxedRunLeftContainer(r.status)) {
@@ -519,6 +758,11 @@ export function run(
   // reads absent as "this seam supplied no measurement" and falls back to
   // re-parsing `output`, exactly as it did before this field existed.
   const failingFiles = failingFilesOf(raw, cwd);
+  const heapExhausted = r.status !== 0 && heapBannerIn(raw);
+  const signal = r.status === null ? r.signal : null;
+  const spawnError = timedOut
+    ? undefined
+    : (r.error as NodeJS.ErrnoException | undefined)?.code;
   return {
     command,
     exitCode: r.status,
@@ -527,6 +771,9 @@ export function run(
     output: trimOutput(raw),
     deadlineMs,
     ...(failingFiles.length > 0 ? { failingFiles } : {}),
+    ...(heapExhausted ? { heapExhausted } : {}),
+    ...(signal ? { signal } : {}),
+    ...(spawnError ? { spawnError } : {}),
   };
 }
 
@@ -577,7 +824,12 @@ interface BuildTestArgs {
    * hard to force out of real npm — chiefly the one that cost a live review: an
    * install that exits non-zero and leaves a working `node_modules` behind.
    */
-  exec?: (command: string, cwd: string, timeoutMs: number) => CommandResult;
+  exec?: (
+    command: string,
+    cwd: string,
+    timeoutMs: number,
+    kind?: CommandKind,
+  ) => CommandResult;
 }
 
 /** The plan's fetched commit, when it has one — a local plan does not. */
@@ -593,6 +845,22 @@ function planShaFrom(planPath: string): string | undefined {
     // changedFilesFrom throws the descriptive error for an unreadable plan;
     // this reader must not race it to a worse one.
     return undefined;
+  }
+}
+
+/** The old paths of the plan's renames (`DiffFile.renameFrom`). */
+function renamedFromIn(planPath: string): string[] {
+  try {
+    const parsed = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      files?: Array<{ renameFrom?: unknown }>;
+    };
+    const files = Array.isArray(parsed?.files) ? parsed.files : [];
+    return files
+      .map((f) => f?.renameFrom)
+      .filter((p): p is string => typeof p === 'string' && p.length > 0);
+  } catch {
+    // As `planShaFrom`: changedFilesFrom owns the error for a bad plan.
+    return [];
   }
 }
 
@@ -737,6 +1005,12 @@ function previousReport(out: string | undefined): BuildTestReport {
   const okOk = typeof (parsed as { ok?: unknown }).ok === 'boolean';
   const notBuiltShape = (parsed as { notBuilt?: unknown }).notBuilt;
   const notBuiltOk = notBuiltShape === undefined || strings(notBuiltShape);
+  // Quoted into the continuation's note, and read for truthiness there, so
+  // '' is refused with the rest: it would mean "absent" and "present" at once.
+  const skippedRootShape = (parsed as { skippedRootBuild?: unknown })
+    .skippedRootBuild;
+  const skippedRootOk =
+    skippedRootShape === undefined || strings([skippedRootShape]);
   const scope = shape.testScope;
   const scopeOk =
     scope === undefined ||
@@ -758,6 +1032,7 @@ function previousReport(out: string | undefined): BuildTestReport {
     !endedBeforeOk ||
     !okOk ||
     !notBuiltOk ||
+    !skippedRootOk ||
     !scopeOk ||
     !runOk
   ) {
@@ -781,9 +1056,9 @@ function previousReport(out: string | undefined): BuildTestReport {
     throw new Error(
       `build-test: --resume refuses the report at ${out}: test command ` +
         `${JSON.stringify(alien.command)} is not one build-test itself runs ` +
-        `(npm test [--workspace="<dir>"]), so the report is not a build-test ` +
-        `run this command can continue. Run build-test without --resume ` +
-        `first.`,
+        `(npm test [--workspace="<dir>"], or its vitest related run), so the ` +
+        `report is not a build-test run this command can continue. Run ` +
+        `build-test without --resume first.`,
     );
   }
   return parsed as BuildTestReport;
@@ -953,6 +1228,7 @@ function runBuildTestUnguarded(args: BuildTestArgs): BuildTestReport {
   const runArgs = {
     root,
     changedFiles,
+    renamedFrom: renamedFromIn(args.plan),
     timeout: args.timeout,
     install: args.install,
     buildOnly: args.buildOnly,

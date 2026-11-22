@@ -21,6 +21,7 @@ import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
 import { InteractiveSession } from './interactive-session.js';
+import { createUntil } from './wait.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const renderer = pickE2eRenderer();
@@ -36,16 +37,7 @@ const image = Buffer.from(
 const sleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-async function until(
-  check: () => boolean | Promise<boolean>,
-  description: string,
-) {
-  const deadline = Date.now() + 15_000;
-  while (!(await check())) {
-    if (Date.now() > deadline) throw new Error(description);
-    await sleep(100);
-  }
-}
+const until = createUntil(15_000);
 
 it(`preserves composer ownership through ${runtime}+${renderer} product requests`, async () => {
   const scratch = mkdtempSync(join(tmpdir(), 'qwen-input-ownership-'));

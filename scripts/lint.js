@@ -8,9 +8,16 @@
 
 import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getLintScope } from './lint-scope.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
@@ -99,8 +106,35 @@ export function getCachedArchiveInstaller({
       if ! cp "${cacheArchive}" "${localArchive}" 2>/dev/null \
         || ! verify_sha256 "${localArchive}" "${expectedSha256}"; then
         rm -f "${localArchive}"
-        curl -fsSL --retry 2 --retry-connrefused --connect-timeout 10 --max-time 90 \
-          -o "${localArchive}" "${downloadUrl}"
+        download_attempt=1
+        download_max_attempts=3
+        # curl --retry discards partial output before retrying, so keep our own
+        # loop and resume at the bytes already received. The rm -f above leaves
+        # no file, so attempt 1 starts at offset 0; the 33/36 branch drops the
+        # partial so a mirror answering a ranged request with 200 resets to
+        # offset 0 instead of re-sending the same offset until the budget is
+        # spent. The budget is per archive (3 x --max-time 90 + 15s backoff), so
+        # a step provisioning both archives inside one 5-minute step can still
+        # cut the second one off, as curl --retry 2 could before this loop.
+        while :; do
+          set -- -fsSL --connect-timeout 10 --max-time 90 --continue-at -
+          if curl "$@" -o "${localArchive}" "${downloadUrl}"; then
+            break
+          else
+            curl_status=$?
+          fi
+          if [ "$curl_status" -eq 33 ] || [ "$curl_status" -eq 36 ]; then
+            rm -f "${localArchive}"
+          fi
+          if [ "$download_attempt" -ge "$download_max_attempts" ]; then
+            echo "Linter download failed after ${'${download_max_attempts}'} attempts (curl exit $curl_status): ${downloadUrl}" >&2
+            exit "$curl_status"
+          fi
+          delay=$((download_attempt * 5))
+          echo "Linter download failed (curl exit $curl_status); retrying in ${'${delay}'}s..." >&2
+          sleep "$delay"
+          download_attempt=$((download_attempt + 1))
+        done
         verify_sha256 "${localArchive}" "${expectedSha256}"
         ${archiveCheck}
         cache_tmp=''
@@ -375,6 +409,34 @@ export function runPrettier() {
   }
 }
 
+// Prettier's experimental CLI only discovers a config or ignore file in the
+// directory it starts from, so the lane has to chdir. One spawn per touched
+// directory pays a cold start each (0.24 s measured, against a 37 s whole-repo
+// run), which inverts on a wide diff: this repository holds 655 directories
+// with prettier-eligible files. Group by the nearest ancestor that actually
+// carries one instead, so a diff without nested configuration costs a single
+// spawn.
+const PRETTIER_CONFIG_FILE =
+  /^(?:\.prettierrc(?:\.[^/]+)?|prettier\.config\.(?:js|cjs|mjs|ts)|\.prettierignore|\.gitignore)$/;
+
+function prettierGroupFor(cwd, file, cache) {
+  for (let directory = dirname(file); ; directory = dirname(directory)) {
+    if (!cache.has(directory)) {
+      let carriesConfig = false;
+      try {
+        carriesConfig = readdirSync(join(cwd, directory)).some((name) =>
+          PRETTIER_CONFIG_FILE.test(name),
+        );
+      } catch {
+        // An unreadable directory carries nothing this lane could load.
+      }
+      cache.set(directory, carriesConfig);
+    }
+    if (cache.get(directory)) return directory;
+    if (directory === '.' || directory === '') return '.';
+  }
+}
+
 function runChangedFiles(command, options, files) {
   if (files.length === 0) {
     console.log(`Skipping ${command}: no relevant changed files.`);
@@ -382,22 +444,30 @@ function runChangedFiles(command, options, files) {
   }
   console.log(`\nRunning ${command} on ${files.length} selected files...`);
   // Explicit targets do not make the experimental Prettier CLI discover
-  // nested config/ignore files. Start in each target directory to load them.
+  // nested config/ignore files. Start in the nearest directory that carries
+  // one (see prettierGroupFor) and name each target relative to that
+  // directory, so the file Prettier resolves is the file that was selected —
+  // a bare basename would miss every file that sits below its group directory.
+  const root = process.cwd();
+  const configCache = new Map();
   const groups =
     command === 'prettier'
-      ? Object.groupBy(files, (file) => dirname(file))
+      ? Object.groupBy(files, (file) =>
+          prettierGroupFor(root, file, configCache),
+        )
       : { '.': files };
   // Accumulate failures instead of exiting on the first non-zero status:
-  // Prettier runs per directory with basename targets, so its own output never
-  // names the directory, and aborting would leave the remaining directories
-  // unchecked and unreported in the same run.
+  // Prettier runs per directory with directory-relative targets, so its own
+  // output never names the directory, and aborting would leave the remaining
+  // directories unchecked and unreported in the same run.
   let failed = false;
   for (const [directory, selected] of Object.entries(groups)) {
     const targets =
       command === 'prettier'
-        ? selected.map((file) => basename(file))
+        ? selected.map((file) => posix.relative(directory, file))
         : selected;
     if (command === 'prettier') console.log(`\nChecking ${directory}`);
+    // 50 keeps argv far below the OS limit while leaving room for long paths.
     for (let index = 0; index < targets.length; index += 50) {
       const result = spawnSync(
         command,
@@ -409,7 +479,7 @@ function runChangedFiles(command, options, files) {
           ...targets.slice(index, index + 50).map((file) => `./${file}`),
         ],
         {
-          cwd: join(process.cwd(), directory),
+          cwd: join(root, directory),
           env: { ...process.env, PATH: getLinterPath() },
           stdio: 'inherit',
           encoding: 'utf8',
@@ -421,6 +491,29 @@ function runChangedFiles(command, options, files) {
     }
   }
   if (failed) process.exit(1);
+}
+
+// A history fallback is the one full scan nobody expects: the lane stays
+// green while every file is checked, so without a signal the optimization can
+// silently stop working — after #15381 a failing history fetch made 3 of 8
+// sampled PR runs fall back to full lint with nothing in the UI showing it.
+// Falling back because a lint config or dependency changed is routine and
+// stays quiet. The summary is deduplicated because every lane invokes this
+// script separately.
+function announceHistoryFallback(scope) {
+  const reason = scope.full ? (scope.reason ?? '') : '';
+  if (!reason.startsWith('Incremental selection unavailable:')) return;
+  if (process.env.GITHUB_ACTIONS !== 'true') return;
+  console.log(`::warning::${reason}; running the full lint`);
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (!summary) return;
+  const line = `- Incremental lint unavailable: ${reason}\n`;
+  try {
+    if (readFileSync(summary, 'utf8').includes(reason)) return;
+  } catch {
+    // Missing summary file is the normal first-write case.
+  }
+  appendFileSync(summary, line);
 }
 
 async function main() {
@@ -443,6 +536,7 @@ async function main() {
   console.log(
     scope.full ? `Full lint: ${scope.reason}` : 'Incremental PR lint.',
   );
+  announceHistoryFallback(scope);
   if (args.length === 0 || args.includes('--setup')) setupLinters(scope);
   const lanes = {
     eslint: () =>
@@ -486,7 +580,18 @@ async function main() {
   if (args.length === 0) console.log('\nAll linting checks passed!');
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+// Run the CLI only when this file IS the entry point. The CI provisioning
+// steps import the installer helpers (`getLinters`, `getLinterTempDir`); an
+// unconditional main() made every such import execute a full lint pass
+// instead of installing anything, silently, under continue-on-error
+// (PR #16001 review, round 4). The argv[1] guard keeps `node -e` imports
+// (no argv[1]) inert too.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

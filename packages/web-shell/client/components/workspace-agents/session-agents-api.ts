@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { findDaemonAvailability } from '../../daemon/availability.js';
+import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
 import type {
   SessionAgentEventFrame,
   SessionAgentRunFrame,
@@ -55,14 +58,14 @@ export function createSessionAgentsHttpApi(
   baseUrl: string,
   token: string | undefined,
   workspaceCwd: string,
+  client?: DaemonClient,
 ): SessionAgentsApi {
-  const root = `${baseUrl.replace(/\/+$/, '')}/workspaces/${encodeURIComponent(
-    workspaceCwd,
-  )}/agent`;
+  const root = `/workspaces/${encodeURIComponent(workspaceCwd)}/agent`;
+  const rest = createDaemonRestRequest(baseUrl, token, client);
   const session = (sessionId: string) =>
     `/sessions/${encodeURIComponent(sessionId)}`;
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
-    const response = await fetch(`${root}${path}`, {
+    const response = await rest(`${root}${path}`, {
       ...init,
       headers: {
         ...(init?.body ? { 'content-type': 'application/json' } : {}),
@@ -107,10 +110,24 @@ export function createSessionAgentsHttpApi(
       ),
     subscribe: (sessionId, onEvent, onState) =>
       subscribeAgentStream<SessionAgentEventFrame>(
-        `${root}/session-events?sessionId=${encodeURIComponent(sessionId)}`,
+        `${baseUrl.replace(/\/+$/, '')}${root}/session-events?sessionId=${encodeURIComponent(sessionId)}`,
         token,
         onEvent,
         onState,
+        async (signal) => {
+          await findDaemonAvailability(
+            baseUrl,
+            token,
+            client,
+          )?.waitUntilAvailable(signal);
+          return rest(
+            `${root}/session-events?sessionId=${encodeURIComponent(sessionId)}`,
+            { headers: { Accept: 'text/event-stream' }, signal },
+          );
+        },
+        () => {
+          void findDaemonAvailability(baseUrl, token, client)?.check();
+        },
       ),
   };
 }

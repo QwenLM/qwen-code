@@ -7,9 +7,12 @@
 export const WEB_SHELL_PAGES = [
   'plugins',
   'channels',
+  'channel-events',
   'live',
   'scheduled-tasks',
+  'pr-watches',
   'goals',
+  'artifacts',
   'settings',
 ] as const;
 export type WebShellPage = (typeof WEB_SHELL_PAGES)[number];

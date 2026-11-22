@@ -104,6 +104,7 @@ describe('CodeModeOnly exposure', () => {
     'exit_plan_mode',
     'structured_output',
     'create_sub_session',
+    'autofix_pr',
     'enter_worktree',
     'exit_worktree',
     'send_message',
@@ -850,7 +851,9 @@ describe('isolated code mode host', () => {
     const result = await run(
       `setTimeout(() => text('late'), 60_000);
       text('done');`,
-      { timeoutMs: 25 },
+      // Wall-clock budget: generous enough that CI contention cannot
+      // interrupt this trivial program during setup.
+      { timeoutMs: 5_000 },
     );
 
     expect(result.output).toBe('done');

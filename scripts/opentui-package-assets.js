@@ -15,7 +15,7 @@ export const NPM_BUN_OPTIONAL_DEPENDENCIES = Object.fromEntries(
     '@oven/bun-darwin-x64',
     '@oven/bun-linux-aarch64',
     '@oven/bun-linux-x64',
-  ].map((name) => [name, '1.3.14']),
+  ].map((name) => [name, '1.4.4']),
 );
 
 export const NPM_OPENTUI_NATIVE_ASSETS = {

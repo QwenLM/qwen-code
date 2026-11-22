@@ -465,6 +465,58 @@ describe('shouldForceAutoModeReviewForAllow', () => {
   const heredoc = (body: string) =>
     ["bash <<'SCRIPT'", body, 'SCRIPT'].join('\n');
 
+  it.each([
+    'curl -sS --proxy http://127.0.0.1:7890 -o catalog.json https://raw.githubusercontent.com/Pal-AI-Lab/cortico-extensions/main/catalog.json',
+    'curl -o catalog.json "HTTPS://example.com/catalog.json?mirror=relative/catalog.json"',
+    'python -c \'download("https://example.com/catalog.json")\'',
+  ])('reviews URL arguments without filesystem UNC probes: %s', (command) => {
+    const realpathSpy = vi
+      .spyOn(fs.realpathSync, 'native')
+      .mockImplementation(() => {
+        throw Object.assign(new Error('missing test path'), { code: 'ENOENT' });
+      });
+    try {
+      expect(forcesReview(command)).toBe(true);
+      expect(
+        realpathSpy.mock.calls.some(([filePath]) =>
+          /^[/\\]{2}/.test(String(filePath)),
+        ),
+      ).toBe(false);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
+  it.each([
+    'node -e \'fetch("https://example.com/data");require("node:fs").writeFileSync(".qwen/settings.json","{}");\'',
+    'node -e \'require("node:fs").writeFileSync(new URL("https://example.com/?dest=.qwen/settings.json").searchParams.get("dest"), "{}")\'',
+    'node -e \'require("node:fs").writeFileSync(new URL("https://example.com/?dest=//fileserver/share/alias").searchParams.get("dest"), "{}")\'',
+    'node -e \'require("node:fs").writeFileSync(new URL("https://fileserver/share/alias").href.slice(6), "{}")\'',
+  ])('still reviews protected writes around URL literals: %s', (command) => {
+    expect(forcesReview(command)).toBe(true);
+  });
+
+  it.each([
+    'cp //fileserver/share/alias output.txt',
+    'curl file://fileserver/share/alias -o output.txt',
+    'node -e \'require("node:fs").writeFileSync(new URL("xhttps://fileserver/share/alias").href.slice(7), "{}")\'',
+  ])('still resolves genuine network paths: %s', (command) => {
+    const realpathSpy = vi
+      .spyOn(fs.realpathSync, 'native')
+      .mockImplementation((filePath) => {
+        if (String(filePath) === '//fileserver/share/alias') {
+          return '/repo/.qwen/settings.json';
+        }
+        throw Object.assign(new Error('missing test path'), { code: 'ENOENT' });
+      });
+    try {
+      expect(forcesReview(command)).toBe(true);
+      expect(realpathSpy).toHaveBeenCalledWith('//fileserver/share/alias');
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
   it('returns true for Edit/Write targeting protected self-modification paths', () => {
     expect(
       forcesReviewOf(ToolNames.EDIT, '/Users/test/.qwen/settings.json'),
@@ -491,6 +543,11 @@ describe('shouldForceAutoModeReviewForAllow', () => {
         ToolNames.MONITOR,
       ),
     ).toBe(true);
+  });
+
+  it('reviews an amend even when an allow rule already matched', () => {
+    expect(forcesReview('git commit --amend --no-edit')).toBe(true);
+    expect(forcesReview('git status')).toBe(false);
   });
 
   it('returns true for nested wrappers writing protected paths after `cd`', () => {
@@ -1563,6 +1620,28 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
       if (result.kind === 'fallback') {
         expect(result.requiresHumanDecision).toBe(true);
       }
+    }
+  });
+
+  it('marks the amend approval as one a PermissionRequest hook cannot waive', async () => {
+    // The marker has to travel on the decision, or a hook `allow` rewrites a
+    // human-authored commit with nobody in the loop.
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command: 'git commit --amend --no-edit',
+    });
+    expect(decision.via).toBe('fallback');
+    if (decision.via === 'fallback') {
+      expect(decision.reason).toBe('safety_check');
+      expect(decision.requiresHumanDecision).toBe(true);
+      // The message is what makes the scheduler hide "always allow".
+      expect(decision.message).toContain('requires manual approval');
+    }
+    const { result } = apply(decision, counters(0, 0, 0, 0));
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.requiresHumanDecision).toBe(true);
+      expect(result.message).toContain('requires manual approval');
     }
   });
 

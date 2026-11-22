@@ -12,3 +12,10 @@ Type=oneshot
 # case instead of cutting the sweep off mid-prune.
 TimeoutStartSec=1h
 ExecStart=/usr/local/sbin/qwen-docker-cleanup
+# Enforce the /etc/tmpfiles.d/tmp.conf (1d) retention here rather than
+# relying on the distro's systemd-tmpfiles-clean.timer: on hardened images
+# that timer can be masked, and it reports "static" on stock Ubuntu —
+# unverifiable via is-enabled — while the fleet's measured 120-260k
+# temp files/day regrows past the tmpfs inode ceiling without an
+# enforcement agent (the 2026-10-31 incident class).
+ExecStartPost=/usr/bin/systemd-tmpfiles --clean --prefix=/tmp

@@ -33,6 +33,7 @@ const SETTING_KEYS = {
   'setting:advisor-model': 'advisorModel',
   'setting:advisor-session-call-limit': 'advisorMaxUses',
   'setting:vision-model': 'visionModel',
+  'setting:vision-bridge-timeout': 'visionBridgeTimeoutMs',
   'setting:model-fallbacks': 'modelFallbacks',
   'setting:respect-git-ignore': 'context.fileFiltering.respectGitIgnore',
   'setting:respect-qwen-ignore': 'context.fileFiltering.respectQwenIgnore',
@@ -49,9 +50,11 @@ const SETTING_KEYS = {
   'setting:todo-write': 'tools.todoWrite.enabled',
   'setting:interactive-shell': 'tools.shell.enableInteractiveShell',
   'setting:workflows': 'tools.workflowsEnabled',
+  'setting:lsp': 'tools.lspEnabled',
   'setting:workflow-size': 'tools.workflowSizeGuideline',
   'setting:workflow-name-only': 'tools.workflowNameOnly',
   'setting:permission-strategy': 'policy.permissionStrategy',
+  'setting:max-sessions': 'serve.maxSessions',
   'setting:model-proposed-goals': 'goals.modelProposed',
   'setting:arena-artifacts': 'agents.arena.preserveArtifacts',
   'setting:session-workflow': 'experimental.sessionWorkflow',
@@ -63,6 +66,11 @@ const SETTING_KEYS = {
   'setting:omni-media-delivery': 'omni.enabled',
   'setting:artifacts': 'experimental.artifact',
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+  'setting:mods': 'experimental.mods',
+  'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
+  'setting:event-bus-agent-loop': 'experimental.eventBusAgentLoop',
+  'setting:model-availability-tracking':
+    'experimental.modelAvailabilityTracking',
   'setting:voice-model': 'voiceModel',
   'setting:image-model': 'imageModel',
 } as const;
@@ -73,6 +81,8 @@ const BUILTIN_IDS = [
   'builtin:live-setup',
   'builtin:local-control',
   'builtin:connections',
+  'builtin:archived-sessions',
+  'builtin:workspace-directories',
   'builtin:model-management',
 ] as const;
 

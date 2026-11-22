@@ -3,7 +3,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { ImapFlow } from 'imapflow';
 import type { ParsedMail, simpleParser } from 'mailparser';
 import type { Transporter } from 'nodemailer';
-import { resolvePrivatePolicy } from '@qwen-code/channel-base';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
+import type {
+  ManagedChannelPolicy,
+  ManagedInboundEvent,
+  ManagedClaimedDelivery,
+  ManagedChannelControlPlane,
+} from '@qwen-code/channel-base';
 import { addressList, emailSettings } from './config.js';
 import type { EmailSettings } from './config.js';
 import {
@@ -30,36 +39,12 @@ export type { ManagedReceipt } from './managed-state.js';
 // never a second input, never a second send. See
 // docs/design/2026-10-07-managed-channel-runtime.md.
 
-/** The route policy pinned with the first binding of each route. */
-export interface ManagedChannelPolicy {
-  adapter: 'email';
-  senderPolicy: 'allowlist' | 'open' | 'disabled';
-  allowedSenders: string[];
-  dispatchMode: 'followup' | 'steer';
-}
-
-export interface ManagedInboundEvent {
-  accountGeneration: number;
-  platformEventId: string;
-  semanticRevision: 1;
-  scope: {
-    kind: 'chat_thread';
-    senderId: null;
-    chatId: string;
-    threadId: string;
-  };
-  senderId: string;
-  chatId: string;
-  threadId: string;
-  subject: string | null;
-  text: string;
-  attachments: Array<{
-    fileName: string;
-    mimeType: string;
-    bytesBase64: string;
-  }>;
-  replyContext: EmailReplyContext;
-}
+export type {
+  ManagedChannelPolicy,
+  ManagedInboundEvent,
+  ManagedClaimedDelivery,
+  ManagedChannelControlPlane,
+};
 
 /** What a reply needs, committed with the input and echoed by the outbox. */
 export interface EmailReplyContext {
@@ -68,28 +53,6 @@ export interface EmailReplyContext {
   parent: string;
   references: string[];
   subject: string;
-}
-
-export interface ManagedClaimedDelivery {
-  deliveryId: string;
-  replyContext: unknown;
-  segments: Array<{ ordinal: number; segmentId: string; text: string }>;
-}
-
-/** The trusted control-plane surface the adapter talks to. */
-export interface ManagedChannelControlPlane {
-  register(request: {
-    platform: 'email';
-    accountId: string;
-    accountGeneration: number;
-    policy: ManagedChannelPolicy;
-  }): Promise<void>;
-  disconnect(): Promise<void>;
-  submitInbound(
-    event: ManagedInboundEvent,
-  ): Promise<{ inputId: string; sessionId: string; replayed: boolean }>;
-  claimDeliveries(limit: number): Promise<ManagedClaimedDelivery[]>;
-  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<void>;
 }
 
 export interface ManagedEmailAdapterDeps {
@@ -181,6 +144,7 @@ export class ManagedEmailAdapter {
   private parse?: typeof simpleParser;
   private releaseLock?: () => Promise<void>;
   private running = false;
+  private ownershipLost = false;
   private abort = new AbortController();
   private loop?: Promise<void>;
   /**
@@ -221,6 +185,7 @@ export class ManagedEmailAdapter {
       options.name,
       options.cwd,
       this.settings,
+      options.controlPlane.destinationKey ?? '',
     );
     this.controlPlane = options.controlPlane;
     this.deps = options.deps;
@@ -244,7 +209,10 @@ export class ManagedEmailAdapter {
     try {
       this.releaseLock = await this.deps.lock(this.store.directory, () => {
         // A reaped stale lock means a second owner won the mailbox: stop
-        // rather than keep polling as its silent twin.
+        // rather than keep polling as its silent twin, and stop persisting —
+        // an in-flight tick or the shutdown drain must not rewrite the state
+        // file the new owner now holds (parity with DingTalk R7-2, #17173).
+        this.ownershipLost = true;
         this.log(
           'Managed email state ownership was lost to another process; adapter stopped.',
         );
@@ -256,7 +224,17 @@ export class ManagedEmailAdapter {
       );
     }
     try {
-      this.state = this.store.load();
+      const loaded = this.store.load();
+      // The upgrade to per-registration ledgers strands the legacy
+      // managed-state.json: make the drop explicit, never silent. Detect it
+      // even when a keyed ledger already exists — a rollback to the
+      // pre-upgrade build can stage fresh legacy claims after the upgrade. The
+      // legacy ledger is not adopted — that would replay one registration's
+      // pending into another. It is archived only once the start succeeds
+      // (below), so a failed first start leaves the file for a rollback to
+      // recover.
+      const legacy = this.store.strandedLegacyLedger();
+      this.state = loaded;
       // The stall flag is in-memory, so a restart zeroes it: derive the
       // stall from a persisted held claim, or the search re-opens behind
       // it and the mail the stall promised to keep is admitted to its
@@ -285,10 +263,102 @@ export class ManagedEmailAdapter {
       await this.openMailbox();
       if (!this.running)
         throw new Error('Managed email adapter stopped during connection.');
+      // openMailbox clamped a fresh or epoch-changed ledger to the durable
+      // high-water before registering. A loaded ledger whose epoch already
+      // matches can still lag the shared (tenant_id, channel_id) row — it missed
+      // epoch changes another registration counted — so heal it here too. The
+      // row is monotonic and >= every sibling generation, so when the high-water
+      // sits above this ledger's generation its staged claims are already dead
+      // (their generation can never be registered): drop them visibly — never
+      // re-offer them at a raised generation, which would change their dedupe
+      // key — and raise the counter, mirroring the epoch branch. An unreadable
+      // generation source is named, not dropped silently. No cursor adoption.
+      // openMailbox already named any unreadable generation source this start,
+      // so the heal reads only the number (no second log line per start).
+      const { generation: highWater } = this.store.highestSiblingGeneration();
+      if (this.state && highWater > this.state.generation) {
+        if (this.state.pending.length) {
+          this.log(
+            `Managed email account generation healed from ${this.state.generation} to ${highWater} to meet the shared control-plane row; ${this.state.pending.length} staged claim(s) of the old generation admit nothing further.`,
+          );
+          this.state.pending = [];
+          this.state.instanceRefusals = 0;
+          this.instanceStalled = false;
+        }
+        this.state.generation = highWater;
+        this.persist();
+      }
+      // Report the stranded legacy now that the cursor is pinned, so the
+      // offline-window clause consults the ACTUAL window: a fresh ledger pins to
+      // the mailbox tip, and a quiescent upgrade whose tip equals the legacy
+      // cursor skipped nothing — reporting a loss there would be a false alarm
+      // on the common clean-shutdown path. The pending claims sit at/below the
+      // legacy cursor (stranded once the cursor reaches it; always stranded on a
+      // fresh upgrade). The offline window begins at legacy cursor + 1, so it is
+      // skipped only when the pinned cursor is STRICTLY past it — at equality the
+      // next poll admits that mail. These are reporting gates keyed on the
+      // cursors, not on load-ness, so the retry after a failed first start (whose
+      // ledger is already pinned to the tip) still reports; the cursor itself is
+      // never seeded from the legacy.
+      if (legacy) {
+        const pendingLabel = legacy.readable ? legacy.pending : 'unknown';
+        const outboundLabel = legacy.readable ? legacy.outbound : 'unknown';
+        const cursor = legacy.lastUid;
+        const pinned = this.state!.lastUid;
+        const pendingStranded =
+          loaded === undefined || (cursor !== undefined && pinned >= cursor);
+        const offlineSkipped = cursor !== undefined && pinned > cursor;
+        let consequence = '';
+        if (!legacy.readable) {
+          consequence =
+            ' Its contents could not be read; restore or repair it before restarting — the account generation it carried is the only local copy, and any staged-but-unadmitted claims it held are stranded.';
+        } else {
+          if (legacy.pending > 0 && pendingStranded)
+            consequence +=
+              loaded === undefined
+                ? ' Its staged-but-unadmitted claims are stranded; the fresh ledger starts at the current mailbox tip and does not re-fetch them.'
+                : ` Its staged-but-unadmitted claims are stranded; this ledger's cursor (UID ${pinned}) is already past them, so they are not re-fetched.`;
+          if (legacy.outbound > 0)
+            consequence +=
+              ' Its outbound segments with an unknown delivery status were dropped.';
+          if (offlineSkipped)
+            consequence += ` Mail between the legacy cursor (UID ${cursor}) and the pinned cursor (UID ${pinned}) was never listed and will not be admitted.`;
+        }
+        this.log(
+          `Managed email upgraded to per-registration ledgers; the legacy ledger ${legacy.path} (${pendingLabel} pending, ${outboundLabel} outbound) is stranded and not replayed.${consequence}`,
+        );
+      }
       await this.ensureRegistered(this.state!);
       // Segments sent before a crash took their receipt: the provider may
       // hold them, so each is reported unknown — never sent again.
       await this.reportOrphanedOutbound();
+      // A lock compromise can land during the awaits above. Re-check so
+      // connect() rejects rather than resolving a healthy-looking start for a
+      // stopped, deaf adapter the CLI would then park on.
+      if (!this.running || this.ownershipLost)
+        throw new Error('Managed email adapter stopped during connection.');
+      // The start succeeded, so archive the reported legacy: a static legacy is
+      // not re-announced on every later start, and a second registration of the
+      // mailbox is not told the first registration's claims were its own. A
+      // failed start above leaves it untouched for a rollback to recover; the
+      // notice then simply repeats on the retry. An UNREADABLE legacy is kept in
+      // place, not archived: the notice told the operator to repair it at that
+      // path, and archiving would invalidate the instruction it printed.
+      if (legacy && legacy.readable) {
+        const archived = this.store.archiveStrandedLegacy();
+        // The notice above names the legacy path, which this rename moves; name
+        // the archived path too so an operator following the notice can still
+        // find the preserved claims instead of hitting ENOENT.
+        if (archived) {
+          this.log(
+            `Managed email archived the legacy ledger to ${archived}; the claims it held are preserved there for inspection.`,
+          );
+        } else {
+          this.log(
+            `Managed email could not archive the legacy ledger ${legacy.path}; it remains in place and will be reported again on the next start.`,
+          );
+        }
+      }
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
@@ -333,11 +403,27 @@ export class ManagedEmailAdapter {
       return;
     }
     const uidValidity = String(mailbox.uidValidity);
+    // The control plane fences account_generation on a (tenant_id, channel_id)
+    // row shared by every registration of the mailbox, so a ledger that missed
+    // one or more epoch changes while down must jump to the durable high-water,
+    // not merely +1, or its register is refused channel_generation_stale before
+    // any later seed can heal it. Clamp both the fresh and the epoch generation
+    // to it here, before this branch registers.
+    const { generation: highWater, skipped } =
+      this.store.highestSiblingGeneration();
+    // Name every unreadable generation source here too: tick()/poll() re-enter
+    // openMailbox without going through connect()'s own start path, so the
+    // diagnostic must not live only in connect().
+    for (const path of skipped) {
+      this.log(
+        `Managed email could not read the generation source ${path}; its generation is not carried this start.`,
+      );
+    }
     if (!this.state) {
       this.state = {
         version: 1,
         uidValidity,
-        generation: 1,
+        generation: Math.max(1, highWater),
         lastUid: mailbox.uidNext - 1,
         pending: [],
         outbound: [],
@@ -359,7 +445,7 @@ export class ManagedEmailAdapter {
       this.state = {
         ...this.state,
         uidValidity,
-        generation: this.state.generation + 1,
+        generation: Math.max(this.state.generation + 1, highWater),
         lastUid: mailbox.uidNext - 1,
         instanceRefusals: 0,
         pending: [],
@@ -399,6 +485,9 @@ export class ManagedEmailAdapter {
   }
 
   private persist(): void {
+    // Once the lock is compromised the state file belongs to another process;
+    // never rewrite it, even from an in-flight tick's post-await persist.
+    if (this.ownershipLost) return;
     if (!this.state) throw new Error('Managed email state is unavailable.');
     this.store.save(this.state);
   }
@@ -1117,7 +1206,7 @@ export class ManagedEmailAdapter {
           ordinal: segment.ordinal,
           messageId,
         },
-      ].slice(-64);
+      ].slice(-MANAGED_OUTBOUND_LIMIT);
       this.persist();
       let outcome: ManagedReceipt;
       try {

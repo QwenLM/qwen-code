@@ -4,8 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MANAGED_TOOL_MEASUREMENTS_KIND,
+  parseManagedToolMeasurementEvidence,
+} from './managed-tool-measurements.js';
+import {
+  EXECUTION_DIAGNOSTICS_KIND,
+  parseManagedExecutionEvidence,
+} from './managed-execution-diagnostics.js';
+import {
+  parseManagedPermissionRules,
+  nonEmptyManagedPermissionRules,
+  type ManagedPermissionRules,
+} from './managed-permission-rules.js';
+
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { isIPv4 } from 'node:net';
+import { isDeepStrictEqual } from 'node:util';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -43,6 +58,10 @@ import {
   parseHostedRecoveryResource,
 } from './hosted-recovery-records.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
+import {
+  MANAGED_MODEL_STATISTICS_RESOURCE_KINDS,
+  parseManagedStatisticsEnvelope,
+} from './managed-model-statistics.js';
 import type {
   HostedHarnessPlacement,
   HostedHarnessReleaseRequest,
@@ -63,10 +82,13 @@ import {
 import {
   ManagedSessionCommitRejectedError,
   scanManagedSessionJournal,
+  type ManagedSessionActivationLease,
+  type ManagedSessionCommitProof,
   type ManagedSessionJournalHandle,
   type ManagedSessionJournalScan,
   type ManagedSessionJournalStore,
   type ManagedSessionResourceStore,
+  type ManagedSessionWakeStamp,
 } from './managed-session-storage.js';
 
 export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
@@ -81,6 +103,7 @@ export const HTTP_MANAGED_SESSION_STORE_CONTRACT = {
 } as const;
 
 const MAX_ATTACHMENT_INPUT_BYTES = 8 * 1024 * 1024;
+const MAX_NATIVE_SNAPSHOT_PAGE_BYTES = 16 * 1024 * 1024;
 
 export function managedSessionInlineResourceBytes(kind: string): number {
   if (kind === 'managed-checkpoint')
@@ -142,7 +165,35 @@ export interface CsiApplicationRetirementStatus {
   readonly finalizeReceiptSha256: string | null;
 }
 
+export interface ManagedQueuedUserMessage {
+  readonly id: string;
+  readonly revision: number;
+  readonly input: readonly unknown[];
+}
+
+export interface ManagedMemoryQuery {
+  readonly operation:
+    | 'binding'
+    | 'recall'
+    | 'search'
+    | 'remember'
+    | 'get'
+    | 'forget';
+  readonly inputId?: string;
+  readonly callId?: string;
+  readonly query?: string;
+  readonly content?: string;
+  readonly memoryId?: string;
+  readonly expectedContent?: string;
+}
+
 export interface HttpManagedSessionStores {
+  supportsModelDiagnostics(): boolean;
+  supportsExecutionDiagnostics(): boolean;
+  /** Whether the control plane delivers a suspended Session's wake inputs. */
+  supportsWakeDispatch(): boolean;
+  /** Whether this control plane lets a background Session suspend behind the pull. */
+  supportsRuntimeObservation(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -157,6 +208,14 @@ export interface HttpManagedSessionStores {
   };
   assertWritable(): Promise<void>;
   stopLocal(): Promise<void>;
+  /**
+   * Ends the writer lease's renewal timer without fencing the client. A
+   * suspension that cannot confirm its seal needs the lease to lapse so a
+   * successor generation fences the old writer, while the same client must
+   * still be able to reconcile that seal — `stopLocal()` refuses those
+   * requests too. An on-demand renewal for a commit still runs.
+   */
+  stopWriterRenewal(): void;
   quiesceOwnership(placement: HostedHarnessPlacement): Promise<void>;
   releaseOwnership(
     request: HostedHarnessReleaseRequest,
@@ -164,12 +223,33 @@ export interface HttpManagedSessionStores {
   close(): Promise<void>;
   setLifecycleAuthority(authority?: ManagedSessionLifecycleAuthority): void;
   authorizeLifecycle(kind?: 'close' | 'delete'): Promise<void>;
-  authorizeOrdinary(kind?: 'legacy-close'): Promise<void>;
+  authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void>;
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
+  modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
+  memory(query: ManagedMemoryQuery): Promise<unknown>;
+  automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
+  automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage>;
+  automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
+  claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]>;
 }
 
 export interface ManagedSessionApprovalSelection {
-  readonly mode: 'default' | 'auto-edit' | 'yolo';
+  readonly mode: 'default' | 'auto-edit' | 'yolo' | 'auto';
+  readonly permissionRules?: ManagedPermissionRules;
   readonly revision: number;
 }
 
@@ -207,6 +287,114 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
 
 /**
+ * The fixed-interval /loop definition the internal `automations:create`
+ * route admits (the H6 snake_case wire shape). The Session id is forced to
+ * the bound Session by the route, so the tool omits it.
+ */
+export interface ManagedAutomationDefinitionInput {
+  readonly cron: string;
+  readonly prompt: string;
+  readonly goal?: string;
+  readonly timezone?: string;
+  readonly session_mode: 'persistent';
+  readonly overlap?: string;
+  readonly catch_up?: string;
+  readonly catch_up_limit?: number;
+  readonly enabled?: boolean;
+  readonly gate?: unknown;
+}
+
+/** One H6 definition as the internal routes answer it (PublicAutomation). */
+export interface ManagedPublicAutomation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly cron: string;
+  readonly timezone: string;
+  readonly goal: string | null;
+  readonly state: string;
+  readonly enabled: boolean;
+}
+
+/** A create/retire answer: the definition plus the Idempotency-Key replay mark. */
+export interface ManagedAutomationResult {
+  readonly automation: ManagedPublicAutomation;
+  readonly replayed: boolean;
+}
+
+/** One page of the bound Session's definitions (PublicList). */
+export interface ManagedAutomationPage {
+  readonly data: readonly ManagedPublicAutomation[];
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+}
+
+async function readAutomationJson(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof DOMException)
+      throw new ManagedSessionStoreTransportError(
+        'Managed automation response failed.',
+      );
+    if (error instanceof SyntaxError)
+      throw corrupt('Managed automation response is invalid JSON.');
+    throw error;
+  }
+}
+
+function asPublicAutomation(value: unknown): ManagedPublicAutomation {
+  const record = asRecord(value, 'automation definition');
+  if (
+    typeof record['id'] !== 'string' ||
+    typeof record['session_id'] !== 'string' ||
+    typeof record['cron'] !== 'string' ||
+    typeof record['timezone'] !== 'string' ||
+    typeof record['state'] !== 'string' ||
+    typeof record['enabled'] !== 'boolean'
+  )
+    throw corrupt('invalid automation definition.');
+  return {
+    id: record['id'],
+    sessionId: record['session_id'],
+    cron: record['cron'],
+    timezone: record['timezone'],
+    goal: typeof record['goal'] === 'string' ? record['goal'] : null,
+    state: record['state'],
+    enabled: record['enabled'],
+  };
+}
+
+function parseAutomationResult(
+  value: unknown,
+  route: string,
+): ManagedAutomationResult {
+  const record = asRecord(value, `automation result from ${route}`);
+  if (typeof record['replayed'] !== 'boolean')
+    throw corrupt(`invalid automation result from ${route}.`);
+  return {
+    automation: asPublicAutomation(record['body']),
+    replayed: record['replayed'],
+  };
+}
+
+function parseAutomationPage(
+  value: unknown,
+  route: string,
+): ManagedAutomationPage {
+  const record = asRecord(value, `automation list from ${route}`);
+  if (!Array.isArray(record['data']) || typeof record['has_more'] !== 'boolean')
+    throw corrupt(`invalid automation list from ${route}.`);
+  const next = record['next_cursor'];
+  if (next !== null && next !== undefined && typeof next !== 'string')
+    throw corrupt(`invalid automation list cursor from ${route}.`);
+  return {
+    data: record['data'].map((entry) => asPublicAutomation(entry)),
+    hasMore: record['has_more'],
+    nextCursor: typeof next === 'string' ? next : null,
+  };
+}
+
+/**
  * Failures that leave the commit's outcome unknown: the request may have
  * reached the store. A retry is safe only against a proved head, which the
  * writer re-establishes after its lease lapses.
@@ -222,6 +410,20 @@ function isUncertainStoreFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * True when the Store refused this seal, with a 4xx other than 429, so it
+ * did not land. Any other failure, including one raised after a 2xx answer,
+ * may have left the head sealed.
+ */
+function sealRefused(error: unknown): boolean {
+  return (
+    error instanceof ManagedSessionStoreHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 429
+  );
+}
+
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -233,6 +435,10 @@ export function createHttpManagedSessionStores(
   const client = new ManagedSessionStoreHttpClient(options, resources);
   resources.bind(client);
   return {
+    supportsModelDiagnostics: () => client.supportsModelDiagnostics(),
+    supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
+    supportsWakeDispatch: () => client.supportsWakeDispatch(),
+    supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -255,6 +461,7 @@ export function createHttpManagedSessionStores(
     },
     assertWritable: () => client.assertWritable(),
     stopLocal: () => client.stopLocal(),
+    stopWriterRenewal: () => client.stopWriterRenewal(),
     quiesceOwnership: (placement) => client.quiesceOwnership(placement),
     releaseOwnership: (request) => client.releaseOwnership(request),
     close: () => client.seal(),
@@ -263,6 +470,16 @@ export function createHttpManagedSessionStores(
     authorizeLifecycle: (kind) => client.authorizeLifecycle(kind),
     authorizeOrdinary: (kind) => client.authorizeOrdinary(kind),
     approvalSelection: () => client.approvalSelection(),
+    modelConfig: (expectedDigest, kind) =>
+      client.modelConfig(expectedDigest, kind),
+    memory: (query) => client.memory(query),
+    automationsCreate: (definition, idempotencyKey) =>
+      client.automationsCreate(definition, idempotencyKey),
+    automationsList: (cursor, limit) => client.automationsList(cursor, limit),
+    automationsRetire: (automationId, idempotencyKey) =>
+      client.automationsRetire(automationId, idempotencyKey),
+    claimUserMessages: (promptId, initialOnly) =>
+      client.claimUserMessages(promptId, initialOnly),
   };
 }
 
@@ -278,7 +495,6 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   );
   const head = parseRestoreHead(snapshot['head']);
   if (
-    ![1, 2].includes(head.storageVersion) ||
     !['ACTIVE', 'SEALED'].includes(head.state) ||
     head.recoveryStatus !== 'READY' ||
     head.compactedThroughRevision !== 0
@@ -412,11 +628,26 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       // inspectable by dropping the dangling page ref from the walk
       // without registering it — adding it would fire the enumeration
       // check below for exactly the snapshots this keeps readable
-      // (#13930 R1-43).
-      if (ref.kind === MANAGED_TOOL_RESULT_KINDS.page) continue;
+      // (#13930 R1-43). The same backward-compatibility applies to the
+      // extension closure's legacy kinds: a snapshot committed before that
+      // closure edge shipped recorded the bundle but never its contributions
+      // child (nor the manifest's parts), so an absent one degrades instead of
+      // condemning the whole snapshot (R3-1 / R7-1).
+      if (
+        ref.kind === MANAGED_TOOL_RESULT_KINDS.page ||
+        LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)
+      )
+        continue;
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
+      // A pre-fix config_install edge may name a child that a later
+      // transaction committed. Ignore the stale edge; the child's own
+      // reference still registers it.
+      if (LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)) {
+        requireSameRef(stored.ref, ref);
+        continue;
+      }
       throw corrupt('snapshot dependency was not committed at its use.');
     }
     requireSameRef(stored.ref, ref);
@@ -443,7 +674,11 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
   };
   const journal: ManagedSessionJournalHandle = {
     sessionKey,
-    read: async () => scanManagedSessionJournal(journalBytes, sessionKey),
+    read: async () =>
+      applyActivationLease(
+        scanManagedSessionJournal(journalBytes, sessionKey),
+        head.activationLease,
+      ),
     appendTransaction: rejectWrite,
     blockRecovery: rejectWrite,
     seal: rejectWrite,
@@ -522,6 +757,14 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     }
   }
 
+  renewActivation(
+    request: Parameters<
+      NonNullable<ManagedSessionJournalHandle['renewActivation']>
+    >[0],
+  ): Promise<ManagedSessionActivationLease | undefined> {
+    return this.client.renewActivation(request);
+  }
+
   async settleAppend(): Promise<'landed' | 'absent'> {
     try {
       return await this.client.settleAppend();
@@ -550,8 +793,11 @@ class HttpManagedSessionJournalHandle implements ManagedSessionJournalHandle {
     return this.client.blockRecovery(request);
   }
 
-  seal(): Promise<void> {
-    return this.client.seal();
+  seal(
+    _commit?: ManagedSessionCommitProof,
+    wake?: ManagedSessionWakeStamp,
+  ): Promise<void> {
+    return this.client.seal(wake);
   }
 
   get writerSealed(): boolean {
@@ -569,10 +815,24 @@ const EXTENSION_RECORD_KINDS = new Set(
   ),
 );
 
+// Resources a pre-closure-edge snapshot may name without having staged them:
+// extension contribution children, plus the children a pre-fix config_install
+// record named. The inspection, native-page and commit walks degrade an absent
+// or later-committed one instead of condemning the snapshot. One constant so
+// the walks cannot drift (R7-1).
+const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
+  'managed-extension-contributions',
+  'managed-extension-contributions-part',
+  'managed-extension-config-bundle',
+  'managed-extension-root',
+  'managed-extension-stage-ack',
+  'managed-extension-enable-ack',
+]);
+
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytes: Buffer }
+    { ref: ManagedSessionDurableRef; bytes: Buffer; external?: boolean }
   >();
   private client: ManagedSessionStoreHttpClient | undefined;
 
@@ -583,22 +843,28 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   async publish(
     kind: string,
     source: Buffer,
+    resourceId?: string,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
-    if (source.byteLength > maxBytes) {
-      throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
-      );
-    }
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
-      resourceId: randomUUID(),
+      resourceId: resourceId ?? randomUUID(),
       kind: safeKind,
       schemaVersion: 1,
       byteLength: bytes.byteLength,
       digest: sha256(bytes),
     };
+    if (source.byteLength > maxBytes) {
+      if (this.client === undefined) {
+        throw new ManagedSessionRecordError(
+          `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
+        );
+      }
+      await this.client.externalizeResource(ref, bytes);
+      this.staged.set(ref.resourceId, { ref, bytes, external: true });
+      return ref;
+    }
     this.staged.set(ref.resourceId, { ref, bytes });
     return ref;
   }
@@ -619,6 +885,21 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       );
     }
     return this.client.readResource(validated);
+  }
+
+  // Existence probe for the commit-side closure walk: a staged resource is
+  // present; a persisted one is present unless the store answers 404. Any other
+  // failure stays fatal (R6-1).
+  private async has(ref: ManagedSessionDurableRef): Promise<boolean> {
+    if (this.staged.has(ref.resourceId)) return true;
+    try {
+      await this.read(ref);
+      return true;
+    } catch (error) {
+      if (error instanceof ManagedSessionStoreHttpError && error.status === 404)
+        return false;
+      throw error;
+    }
   }
 
   async commitResources(
@@ -646,16 +927,39 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       if (staged !== undefined) {
         requireSameRef(staged.ref, ref);
         const nested = collectNestedResourceRefs(ref, staged.bytes);
-        pending.push(
-          ...(ref.kind === CHECKPOINT_HISTORY_KIND
+        const children =
+          ref.kind === CHECKPOINT_HISTORY_KIND
             ? nested.filter((child) => this.staged.has(child.resourceId))
-            : nested),
-        );
+            : nested;
+        for (const child of children) {
+          // A re-staged legacy bundle may name a contributions child (or part)
+          // that was never uploaded; degrade it like the persisted arm (R7-1).
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(child.kind) &&
+            !(await this.has(child))
+          )
+            continue;
+          pending.push(child);
+        }
       } else if (
         ref.kind !== CHECKPOINT_HISTORY_KIND &&
         isReferenceContainer(ref.kind)
       ) {
-        pending.push(...collectNestedResourceRefs(ref, await this.read(ref)));
+        for (const nested of collectNestedResourceRefs(
+          ref,
+          await this.read(ref),
+        )) {
+          // A legacy bundle may name a contributions child (or part) that was
+          // never staged — the commit-side counterpart of the read-side
+          // tolerance (R6-1 / R7-1). Drop only an absent one from the closure;
+          // a present or conflicting one stays fatal.
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(nested.kind) &&
+            !(await this.has(nested))
+          )
+            continue;
+          pending.push(nested);
+        }
       }
     }
     return [...closure.values()].map((ref) => {
@@ -667,7 +971,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         schemaVersion: ref.schemaVersion,
         byteLength: ref.byteLength,
         digest: ref.digest,
-        ...(staged === undefined
+        ...(staged === undefined || staged.external
           ? {}
           : { bytesBase64: staged.bytes.toString('base64') }),
       };
@@ -684,7 +988,10 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
 }
 
 interface WriterGrant {
-  readonly supportedStorageVersion: number;
+  readonly activationLeaseRenewal: boolean;
+  readonly wakeDispatch: boolean;
+  readonly runtimeObservation: boolean;
+  readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
   readonly journalRevision: number;
@@ -694,8 +1001,8 @@ interface WriterGrant {
 }
 
 interface RestoreHead {
+  readonly activationLease?: ManagedSessionActivationLease;
   readonly state: string;
-  readonly storageVersion: number;
   readonly writerGeneration: number;
   readonly journalRevision: number;
   readonly committedSequence: number;
@@ -705,6 +1012,17 @@ interface RestoreHead {
   readonly compactedThroughRevision: number;
   readonly recoveryStatus: string;
   readonly recoveryDetailCode: string | null;
+}
+
+interface NativeSnapshotManifest {
+  readonly snapshotId: string;
+  readonly coveredJournalRevision: number;
+  readonly committedSequence: number;
+  readonly lastCommitDigest: string | null;
+  readonly activationEpoch: number;
+  readonly latestCheckpointResourceId: string | null;
+  readonly resourceCount: number;
+  readonly lastPageDigest: string;
 }
 
 interface CommitResource {
@@ -733,6 +1051,19 @@ interface TransactionDescriptor {
 }
 
 class ManagedSessionStoreHttpClient {
+  supportsExecutionDiagnostics(): boolean {
+    return true;
+  }
+  supportsModelDiagnostics(): boolean {
+    return true;
+  }
+  supportsWakeDispatch(): boolean {
+    return this.grant?.wakeDispatch === true;
+  }
+
+  supportsRuntimeObservation(): boolean {
+    return this.grant?.runtimeObservation === true;
+  }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
   private readonly writerId: string;
@@ -764,6 +1095,14 @@ class ManagedSessionStoreHttpClient {
     preparedCommitSha256: string;
   };
   private sealed = false;
+  /** Settles once every seal started so far has answered. */
+  private sealsAnswered?: Promise<void>;
+  /**
+   * The last failure of a seal that may have landed; acquireWriter refuses
+   * while it is set. A writer-conflict refusal clears it, and once a seal
+   * succeeds `sealed` refuses first.
+   */
+  private uncertainSeal?: Error;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
   /**
@@ -789,7 +1128,9 @@ class ManagedSessionStoreHttpClient {
     this.lifecycleAuthority = authority;
   }
 
-  async authorizeOrdinary(kind?: 'legacy-close'): Promise<void> {
+  async authorizeOrdinary(
+    kind?: 'legacy-close' | `configuration:${string}`,
+  ): Promise<void> {
     await this.assertWritable();
     await this.json('/execution:authorize', 'POST', {
       ...(kind ? { kind } : {}),
@@ -797,6 +1138,260 @@ class ManagedSessionStoreHttpClient {
       writerId: this.writerId,
       writerGeneration: this.grant!.writerGeneration,
     });
+  }
+
+  async claimUserMessages(
+    promptId: string,
+    initialOnly?: boolean,
+  ): Promise<ManagedQueuedUserMessage[]> {
+    await this.assertWritable();
+    let value: unknown;
+    try {
+      value = await this.json('/user-messages:claim', 'POST', {
+        workspaceId: this.sessionKey.workspaceId,
+        writerId: this.writerId,
+        writerGeneration: this.grant!.writerGeneration,
+        promptId,
+        initialOnly: initialOnly ?? false,
+      });
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        error.status === 404 &&
+        error.remoteCode === 'not_found'
+      )
+        return [];
+      throw error;
+    }
+    if (!Array.isArray(value) || value.length > 32)
+      throw corrupt('invalid user message queue.');
+    return value.map((entry) => {
+      const message = asRecord(entry, 'queued user message');
+      if (
+        typeof message['id'] !== 'string' ||
+        !message['id'].startsWith('umsg_') ||
+        !Number.isSafeInteger(message['revision']) ||
+        Number(message['revision']) < 1 ||
+        !Array.isArray(message['input'])
+      )
+        throw corrupt('invalid queued user message.');
+      return {
+        id: message['id'],
+        revision: Number(message['revision']),
+        input: message['input'],
+      };
+    });
+  }
+
+  async memory(query: ManagedMemoryQuery): Promise<unknown> {
+    await this.assertWritable();
+    return this.withRetry(false, 'POST', '/memory:query', async (timeoutMs) => {
+      const response = await this.request(
+        '/memory:query',
+        'POST',
+        {
+          ...query,
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: this.grant!.writerGeneration,
+        },
+        Math.min(timeoutMs, 6_000),
+      );
+      const reader = response.body?.getReader();
+      if (!reader) throw corrupt('Memory response has no body.');
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      try {
+        while (true) {
+          const item = await reader.read();
+          if (item.done) break;
+          length += item.value.byteLength;
+          if (length > 64 * 1024) {
+            await reader.cancel();
+            throw corrupt('Memory response exceeds its byte limit.');
+          }
+          chunks.push(item.value);
+        }
+        return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof DOMException)
+          throw new ManagedSessionStoreTransportError(
+            'Managed memory response failed.',
+          );
+        if (error instanceof SyntaxError)
+          throw corrupt('Memory response is invalid JSON.');
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+    });
+  }
+
+  /**
+   * Fixed-interval /loop: create an H6 definition bound to this Session.
+   * The Idempotency-Key derives from the tool execution's identity, so a
+   * re-drive meets the claim or the replay rather than minting a second
+   * definition. A transport fault is not retried here — the tool execution
+   * stays pending and its re-drive reuses the key (design decision 9).
+   */
+  async automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:create',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:create',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            definition,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:create',
+        );
+      },
+    );
+  }
+
+  /** One page of the bound Session's definitions (ungated, Session-scoped). */
+  async automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:list',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:list',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          },
+          timeoutMs,
+        );
+        return parseAutomationPage(
+          await readAutomationJson(response),
+          'POST /automations:list',
+        );
+      },
+    );
+  }
+
+  /** Retire a definition of the bound Session; a retired id answers the replay. */
+  async automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:retire',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:retire',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            automationId,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:retire',
+        );
+      },
+    );
+  }
+
+  async modelConfig(
+    expectedDigest: string,
+    kind?: 'legacy-close',
+  ): Promise<unknown> {
+    if (!/^sha256:[0-9a-f]{64}$/u.test(expectedDigest)) {
+      throw corrupt('model configuration digest is invalid.');
+    }
+    await this.assertWritable();
+    return this.withRetry(
+      true,
+      'POST',
+      '/model-config:query',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/model-config:query',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            expectedDigest,
+            ...(kind ? { kind } : {}),
+          },
+          timeoutMs,
+        );
+        const reader = response.body?.getReader();
+        if (!reader) throw corrupt('Model configuration response has no body.');
+        const chunks: Uint8Array[] = [];
+        let length = 0;
+        try {
+          while (true) {
+            let item: ReadableStreamReadResult<Uint8Array>;
+            try {
+              item = await reader.read();
+            } catch (error) {
+              if (error instanceof TypeError || error instanceof DOMException) {
+                throw new ManagedSessionStoreTransportError(
+                  'Managed Session Store model configuration response failed.',
+                );
+              }
+              throw error;
+            }
+            if (item.done) break;
+            length += item.value.byteLength;
+            if (length > 16 * 1024) {
+              await reader.cancel();
+              throw corrupt(
+                'Model configuration response exceeds its byte limit.',
+              );
+            }
+            chunks.push(item.value);
+          }
+          try {
+            return JSON.parse(
+              Buffer.concat(chunks).toString('utf8'),
+            ) as unknown;
+          } catch {
+            throw corrupt('Model configuration response is invalid JSON.');
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      },
+    );
   }
 
   async approvalSelection(): Promise<
@@ -811,17 +1406,37 @@ class ManagedSessionStoreHttpClient {
     if (value === null) return undefined;
     const selection = asRecord(value, 'approval selection');
     if (
-      Object.keys(selection).length !== 2 ||
-      !['default', 'auto-edit', 'yolo'].includes(String(selection['mode'])) ||
+      Object.keys(selection).length !==
+        (selection['permissionRules'] === undefined ? 2 : 3) ||
+      !['default', 'auto-edit', 'yolo', 'auto'].includes(
+        String(selection['mode']),
+      ) ||
       typeof selection['mode'] !== 'string' ||
       typeof selection['revision'] !== 'number' ||
       !Number.isSafeInteger(selection['revision']) ||
       selection['revision'] < 0
     )
       throw corrupt('approval selection is invalid.');
+    let permissionRules: ManagedPermissionRules | undefined;
+    try {
+      permissionRules =
+        selection['permissionRules'] === undefined
+          ? undefined
+          : nonEmptyManagedPermissionRules(
+              parseManagedPermissionRules(selection['permissionRules']),
+            );
+    } catch {
+      throw corrupt('approval selection rules are invalid.');
+    }
+    if (
+      selection['revision'] === 0 &&
+      (selection['mode'] === 'auto' || permissionRules)
+    )
+      throw corrupt('approval selection revision is invalid.');
     return {
       mode: selection['mode'] as ManagedSessionApprovalSelection['mode'],
       revision: selection['revision'],
+      ...(permissionRules ? { permissionRules } : {}),
     };
   }
 
@@ -906,6 +1521,11 @@ class ManagedSessionStoreHttpClient {
         'the HTTP Managed Session writer is already opened or sealed.',
       );
     }
+    // A seal that failed without the Store refusing it may have landed, and
+    // the Store gives a sealed head a new writer generation on acquire. Stay
+    // unsettled until a later seal succeeds or meets a writer conflict.
+    if (this.uncertainSeal !== undefined)
+      throw new ManagedSessionAppendUnsettledError(this.uncertainSeal);
     const grant = parseWriterGrant(
       await this.json('/writers:acquire', 'POST', {
         workspaceId: this.sessionKey.workspaceId,
@@ -924,28 +1544,98 @@ class ManagedSessionStoreHttpClient {
 
   async readJournal(maxBytes?: number): Promise<ManagedSessionJournalScan> {
     await this.ensureWriter();
-    const head = parseRestoreHead(
+    const response = asRecord(
       await this.json(
-        `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+        `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&includeNativeSnapshot=true`,
         'GET',
       ),
+      'restore head',
     );
+    const head = parseRestoreHead(response);
+    const usesSnapshot = response['nativeSnapshot'] != null;
     this.requireHeadMatchesGrant(head);
     // Sanitized grant/head pair (review #14522): a restored head that
     // matches the acquired writer generation proves the previous boot's
     // writer stayed fenced; the lease-active verdict is implied by the
     // acquire itself succeeding.
     debugLogger.debug(
-      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state} storageVersion=${head.storageVersion}`,
+      `Managed Session Store restore head matches grant: session=${this.sessionKey.sessionId} writerId=${this.writerId} acquiredWriterGeneration=${this.requireGrant().writerGeneration} headGeneration=${head.writerGeneration} journalRevision=${head.journalRevision} committedSequence=${head.committedSequence} state=${head.state}`,
     );
     const chunks: Buffer[] = [];
     let afterRevision = 0;
     let activationEpoch = 0;
+    let committedSequence = 0;
+    let lastCommitDigest: string | null = null;
+    let latestCheckpointResourceId: string | null = null;
+    const append = (value: unknown): TransactionDescriptor => {
+      const transaction = parseStoredTransaction(value);
+      if (
+        transaction.journalRevision !== afterRevision + 1 ||
+        (usesSnapshot && transaction.journalRevision > head.journalRevision)
+      ) {
+        throw corrupt('transaction revisions are not contiguous.');
+      }
+      const bytes = decodeBase64(
+        transaction.recordBytesBase64,
+        'recordBytesBase64',
+      );
+      if (
+        bytes.byteLength !== transaction.byteLength ||
+        sha256(bytes) !== transaction.recordDigest
+      ) {
+        throw corrupt('transaction bytes do not match their metadata.');
+      }
+      const descriptor = describeTransaction(
+        decodeRecords(bytes),
+        bytes,
+        activationEpoch,
+        this.sessionKey,
+      );
+      requireStoredTransactionMatches(transaction, descriptor);
+      if (
+        usesSnapshot &&
+        (transaction.previousCommitDigest !== lastCommitDigest ||
+          (afterRevision === 0
+            ? transaction.operation !== 'session.create' ||
+              transaction.eventCount !== 0
+            : transaction.operation === 'session.create' ||
+              transaction.firstSequence !== committedSequence + 1))
+      ) {
+        throw corrupt('snapshot transaction chain is discontinuous.');
+      }
+      activationEpoch = descriptor.activationEpoch;
+      committedSequence = transaction.lastSequence;
+      lastCommitDigest = transaction.commitDigest;
+      latestCheckpointResourceId =
+        descriptor.latestCheckpointResourceId ?? latestCheckpointResourceId;
+      chunks.push(bytes);
+      afterRevision = transaction.journalRevision;
+      return descriptor;
+    };
+    if (usesSnapshot) {
+      const snapshot = await this.readNativeSnapshot(
+        response['nativeSnapshot'],
+        head,
+        append,
+      );
+      if (
+        afterRevision !== snapshot.coveredJournalRevision ||
+        committedSequence !== snapshot.committedSequence ||
+        lastCommitDigest !== snapshot.lastCommitDigest ||
+        activationEpoch !== snapshot.activationEpoch ||
+        latestCheckpointResourceId !== snapshot.latestCheckpointResourceId
+      ) {
+        throw corrupt('snapshot prefix does not match its manifest.');
+      }
+    }
     while (afterRevision < head.journalRevision) {
       await this.ensureWriter();
+      const limit = usesSnapshot
+        ? Math.min(100, head.journalRevision - afterRevision)
+        : 100;
       const page = asRecord(
         await this.json(
-          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${afterRevision}&limit=100`,
+          `/transactions?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${afterRevision}&limit=${limit}`,
           'GET',
         ),
         'transaction page',
@@ -955,30 +1645,7 @@ class ManagedSessionStoreHttpClient {
         throw corrupt('transaction page did not advance the journal.');
       }
       for (const value of transactions) {
-        const transaction = parseStoredTransaction(value);
-        if (transaction.journalRevision !== afterRevision + 1) {
-          throw corrupt('transaction revisions are not contiguous.');
-        }
-        const bytes = decodeBase64(
-          transaction.recordBytesBase64,
-          'recordBytesBase64',
-        );
-        if (
-          bytes.byteLength !== transaction.byteLength ||
-          sha256(bytes) !== transaction.recordDigest
-        ) {
-          throw corrupt('transaction bytes do not match their metadata.');
-        }
-        const descriptor = describeTransaction(
-          decodeRecords(bytes),
-          bytes,
-          activationEpoch,
-          this.sessionKey,
-        );
-        requireStoredTransactionMatches(transaction, descriptor);
-        activationEpoch = descriptor.activationEpoch;
-        chunks.push(bytes);
-        afterRevision = transaction.journalRevision;
+        append(value);
       }
       const nextRevision = safeCounter(page['nextRevision'], 'nextRevision');
       const hasMore = boolean(page['hasMore'], 'hasMore');
@@ -990,14 +1657,36 @@ class ManagedSessionStoreHttpClient {
       }
     }
     const bytes = Buffer.concat(chunks);
-    const scan = scanManagedSessionJournal(bytes, this.sessionKey, maxBytes);
+    const scan = scanManagedSessionJournal(
+      bytes,
+      this.sessionKey,
+      usesSnapshot ? undefined : maxBytes,
+    );
     if (
-      maxBytes === undefined &&
+      (usesSnapshot || maxBytes === undefined) &&
       (scan.committed !== head.committedSequence ||
         scan.lastMarkerDigest !== head.lastCommitDigest ||
-        (scan.activation?.epoch ?? 0) !== head.activationEpoch)
+        (scan.activation?.epoch ?? 0) !== head.activationEpoch ||
+        (usesSnapshot &&
+          latestCheckpointResourceId !== head.latestCheckpointResourceId))
     ) {
       throw corrupt('journal bytes do not match the durable head.');
+    }
+    if (usesSnapshot) {
+      await this.ensureWriter();
+      const current = parseRestoreHead(
+        await this.json(
+          `/restore?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`,
+          'GET',
+        ),
+      );
+      this.requireHeadMatchesGrant(current);
+      this.requireHeadMatchesGrant(head);
+      if (
+        current.journalRevision < head.journalRevision ||
+        current.committedSequence < head.committedSequence
+      )
+        throw corrupt('restore head regressed while reading the snapshot.');
     }
     this.grant = {
       ...this.requireGrant(),
@@ -1008,7 +1697,277 @@ class ManagedSessionStoreHttpClient {
       lastCommitDigest: head.lastCommitDigest,
       activationEpoch: head.activationEpoch,
     };
-    return scan;
+    const result =
+      usesSnapshot && maxBytes !== undefined
+        ? scanManagedSessionJournal(bytes, this.sessionKey, maxBytes)
+        : scan;
+    return maxBytes === undefined
+      ? applyActivationLease(result, head.activationLease)
+      : result;
+  }
+
+  async renewActivation(
+    activation: Parameters<
+      NonNullable<ManagedSessionJournalHandle['renewActivation']>
+    >[0],
+  ): Promise<ManagedSessionActivationLease | undefined> {
+    if (!this.requireGrant().activationLeaseRenewal) return undefined;
+    let reacquiring = false;
+    try {
+      if (this.requireGrant().leaseUntil <= Date.now()) {
+        reacquiring = true;
+        await this.reacquireWriter();
+        reacquiring = false;
+      }
+      await this.ensureWriter();
+      const grant = this.requireGrant();
+      const renewed = parseWriterGrant(
+        await this.json('/writers:renew', 'POST', {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          leaseMillis: this.leaseDurationMs,
+          activation,
+        }),
+      );
+      if (
+        renewed.writerGeneration !== grant.writerGeneration ||
+        renewed.journalRevision !== grant.journalRevision ||
+        renewed.committedSequence !== grant.committedSequence ||
+        renewed.lastCommitDigest !== grant.lastCommitDigest ||
+        renewed.activationEpoch !== grant.activationEpoch ||
+        !renewed.activationLease
+      )
+        throw corrupt('activation renewal changed the journal head.');
+      this.grant = renewed;
+      this.scheduleRenewal();
+      return renewed.activationLease;
+    } catch (error) {
+      if (
+        error instanceof ManagedSessionStoreHttpError &&
+        ((error.status === 409 &&
+          [
+            'workspace_lifecycle_admission_closed',
+            'workspace_lifecycle_claim_fenced',
+          ].includes(error.remoteCode)) ||
+          (this.lifecycleAuthority &&
+            (error.status === 403 ||
+              (error.status === 409 &&
+                (error.remoteCode.startsWith('workspace_lifecycle_') ||
+                  error.remoteCode === 'workspace_unavailable')))))
+      )
+        throw new ManagedSessionCommitRejectedError(error);
+      if (
+        isUncertainStoreFailure(error) ||
+        (!reacquiring &&
+          this.requireGrant().leaseUntil <= Date.now() &&
+          error instanceof ManagedSessionStoreHttpError &&
+          error.status === 409 &&
+          error.remoteCode === 'managed_session_writer_conflict')
+      )
+        throw new ManagedSessionAppendUnsettledError(asError(error));
+      this.stopWriterRenewal();
+      throw error;
+    }
+  }
+
+  private async readNativeSnapshot(
+    value: unknown,
+    head: RestoreHead,
+    append: (transaction: unknown) => TransactionDescriptor,
+  ): Promise<NativeSnapshotManifest> {
+    const descriptor = asRecord(value, 'native snapshot descriptor');
+    const raw = asRecord(descriptor['snapshot'], 'native snapshot manifest');
+    const manifestRef = assertManagedSessionDurableRef(
+      descriptor['manifest'] as ManagedSessionJsonValue,
+      'native manifest',
+    );
+    const snapshot: NativeSnapshotManifest = {
+      snapshotId: string(raw['snapshotId'], 'snapshotId'),
+      coveredJournalRevision: safeCounter(
+        raw['coveredJournalRevision'],
+        'coveredJournalRevision',
+      ),
+      committedSequence: safeCounter(
+        raw['committedSequence'],
+        'committedSequence',
+      ),
+      lastCommitDigest: nullableDigest(
+        raw['lastCommitDigest'],
+        'lastCommitDigest',
+      ),
+      activationEpoch: safeCounter(raw['activationEpoch'], 'activationEpoch'),
+      latestCheckpointResourceId: nullableString(
+        raw['latestCheckpointResourceId'],
+        'latestCheckpointResourceId',
+      ),
+      resourceCount: safeCounter(raw['resourceCount'], 'resourceCount'),
+      lastPageDigest: digest(raw['lastPageDigest'], 'lastPageDigest'),
+    };
+    if (
+      raw['format'] !== 'qwen-managed-native-session-snapshot/1' ||
+      raw['payloadFormat'] !== 'committed-prefix-v1' ||
+      raw['tenantId'] !== this.sessionKey.tenantId ||
+      raw['workspaceId'] !== this.sessionKey.workspaceId ||
+      raw['sessionId'] !== this.sessionKey.sessionId ||
+      snapshot.snapshotId.length === 0 ||
+      Buffer.byteLength(snapshot.snapshotId, 'utf8') > 512 ||
+      snapshot.coveredJournalRevision < 1 ||
+      snapshot.coveredJournalRevision > head.journalRevision ||
+      snapshot.committedSequence > head.committedSequence ||
+      snapshot.activationEpoch > head.activationEpoch ||
+      raw['pageCount'] !== snapshot.coveredJournalRevision ||
+      manifestRef.kind !== 'managed-native-journal-snapshot' ||
+      manifestRef.schemaVersion !== 1 ||
+      manifestRef.byteLength > MAX_NATIVE_SNAPSHOT_PAGE_BYTES
+    ) {
+      throw corrupt('native snapshot scope, format or coverage is invalid.');
+    }
+    const resources = new Map<string, ManagedSessionDurableRef>();
+    let after = 0;
+    let previousDigest: string | null = null;
+    while (after < snapshot.coveredJournalRevision) {
+      await this.ensureWriter();
+      const result = asRecord(
+        await this.json(
+          `/journal-snapshots/${encodeURIComponent(snapshot.snapshotId)}/pages?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}&afterRevision=${after}&limit=100`,
+          'GET',
+        ),
+        'native snapshot pages',
+      );
+      const pages = asArray(result['pages'], 'native snapshot pages');
+      if (pages.length === 0 || pages.length > 100)
+        throw corrupt('native snapshot pages did not advance.');
+      let responseBytes = 0;
+      for (const item of pages) {
+        const stored = asRecord(item, 'native snapshot page');
+        const ref = assertManagedSessionDurableRef(
+          stored['resource'] as ManagedSessionJsonValue,
+          'native page resource',
+        );
+        if (
+          ref.kind !== 'managed-native-journal-snapshot-page' ||
+          ref.schemaVersion !== 1 ||
+          ref.byteLength > MAX_NATIVE_SNAPSHOT_PAGE_BYTES ||
+          string(stored['bytesBase64'], 'native page bytes').length >
+            Math.ceil(ref.byteLength / 3) * 4
+        ) {
+          throw corrupt('native snapshot page resource is invalid.');
+        }
+        const bytes = decodeBase64(
+          string(stored['bytesBase64'], 'native page bytes'),
+          'native page bytes',
+        );
+        responseBytes += bytes.byteLength;
+        if (
+          bytes.byteLength !== ref.byteLength ||
+          sha256(bytes) !== ref.digest ||
+          responseBytes > MAX_NATIVE_SNAPSHOT_PAGE_BYTES
+        )
+          throw corrupt('native snapshot page digest or size is invalid.');
+        const page = asRecord(
+          parseManagedSessionRecordJson(
+            bytes.toString('utf8'),
+            MAX_NATIVE_SNAPSHOT_PAGE_BYTES,
+          ),
+          'native snapshot page body',
+        );
+        if (
+          stored['journalRevision'] !== after + 1 ||
+          page['journalRevision'] !== after + 1 ||
+          page['previousPageDigest'] !== previousDigest ||
+          after >= snapshot.coveredJournalRevision
+        ) {
+          throw corrupt('native snapshot page chain is discontinuous.');
+        }
+        const census = asArray(page['resources'], 'native resource census');
+        if (
+          census.length >
+          HTTP_MANAGED_SESSION_STORE_CONTRACT.maxResourcesPerTransaction
+        )
+          throw corrupt('native resource census is too large.');
+        const seen = new Set<string>();
+        const added: ManagedSessionDurableRef[] = [];
+        for (const item of census) {
+          const { bytesBase64, ...metadata } = asRecord(
+            item,
+            'native resource',
+          );
+          const resource = assertManagedSessionDurableRef(
+            metadata as ManagedSessionJsonValue,
+            'native resource',
+          );
+          if (
+            bytesBase64 != null ||
+            seen.has(resource.resourceId) ||
+            [
+              'managed-native-journal-snapshot',
+              'managed-native-journal-snapshot-page',
+            ].includes(resource.kind) ||
+            (resources.has(resource.resourceId) &&
+              !isDeepStrictEqual(resources.get(resource.resourceId), resource))
+          ) {
+            throw corrupt('native resource census conflicts.');
+          }
+          seen.add(resource.resourceId);
+          if (!resources.has(resource.resourceId)) added.push(resource);
+          resources.set(resource.resourceId, resource);
+        }
+        const transaction = asRecord(
+          page['transaction'],
+          'native snapshot transaction',
+        );
+        if (transaction['journalRevision'] !== after + 1)
+          throw corrupt('native snapshot transaction revision conflicts.');
+        const declared = append(transaction).refs;
+        const nested: typeof declared = [];
+        for (const resource of added) {
+          const body = await this.readResource(resource);
+          nested.push(...collectNestedResourceRefs(resource, body));
+        }
+        // Direct references are the transaction's own census: a missing one is
+        // corrupt, exactly like the inspection walk's direct-reference guard.
+        for (const resource of declared) {
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        // Transitive refs collected from resource bodies: a bundle committed
+        // before the contributions closure edge shipped names a contributions
+        // child (and manifest parts) the snapshot never staged. Degrade only
+        // those absent legacy kinds, mirroring the inspection walk's tolerance
+        // (R3-1 / R4-6 / R7-1); a directly declared ref stays on the strict
+        // path above.
+        for (const resource of nested) {
+          if (
+            LEGACY_EXTENSION_CLOSURE_KINDS.has(resource.kind) &&
+            !resources.has(resource.resourceId)
+          )
+            continue;
+          if (!isDeepStrictEqual(resources.get(resource.resourceId), resource))
+            throw corrupt(
+              'native resource dependency is missing or conflicting.',
+            );
+        }
+        previousDigest = ref.digest;
+        after++;
+      }
+      if (
+        safeCounter(result['nextRevision'], 'nextRevision') !== after ||
+        boolean(result['hasMore'], 'hasMore') !==
+          after < snapshot.coveredJournalRevision
+      ) {
+        throw corrupt('native snapshot cursor is inconsistent.');
+      }
+    }
+    if (
+      previousDigest !== snapshot.lastPageDigest ||
+      resources.size !== snapshot.resourceCount
+    ) {
+      throw corrupt('native snapshot digest or resource count conflicts.');
+    }
+    return snapshot;
   }
 
   async appendTransaction(records: readonly unknown[]): Promise<void> {
@@ -1365,10 +2324,6 @@ class ManagedSessionStoreHttpClient {
           event.payload?.['sourceBootId'] !== undefined
         );
       });
-    if (needsVersionTwo && grant.supportedStorageVersion < 2)
-      throw new ManagedSessionRecordError(
-        'Managed Session Store does not support Hosted recovery storage version 2.',
-      );
     const publicationIds = new Set(
       descriptor.refs.flatMap((ref) => {
         const id = this.publicationAdmissions.get(ref.resourceId);
@@ -1646,7 +2601,6 @@ class ManagedSessionStoreHttpClient {
           method,
           headers: {
             Accept: 'application/json',
-            'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
             ...(readOnly ? {} : { 'Content-Type': 'application/json' }),
             [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
               this.sessionKey.tenantId,
@@ -1684,6 +2638,49 @@ class ManagedSessionStoreHttpClient {
       },
       contentionDeadline,
     );
+  }
+
+  async externalizeResource(
+    ref: ManagedSessionDurableRef,
+    bytes: Buffer,
+  ): Promise<void> {
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const query =
+      `workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}` +
+      `&writerId=${encodeURIComponent(this.writerId)}` +
+      `&writerGeneration=${grant.writerGeneration}`;
+    const allocatePath = '/resources:allocate';
+    await this.withRetry(true, 'POST', allocatePath, async (timeoutMs) => {
+      await this.request(
+        allocatePath,
+        'POST',
+        {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          resourceId: ref.resourceId,
+          kind: ref.kind,
+          schemaVersion: ref.schemaVersion,
+          byteLength: ref.byteLength,
+          digest: ref.digest,
+        },
+        timeoutMs,
+      );
+    });
+    const uploadPath = `/resources/${encodeURIComponent(ref.resourceId)}:upload?${query}`;
+    await this.withRetry(true, 'POST', uploadPath, async (timeoutMs) => {
+      await this.request(
+        uploadPath,
+        'POST',
+        { bytesBase64: bytes.toString('base64') },
+        timeoutMs,
+      );
+    });
+    const finalizePath = `/resources/${encodeURIComponent(ref.resourceId)}:finalize?${query}`;
+    await this.withRetry(true, 'POST', finalizePath, async (timeoutMs) => {
+      await this.request(finalizePath, 'POST', undefined, timeoutMs);
+    });
   }
 
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
@@ -1818,14 +2815,37 @@ class ManagedSessionStoreHttpClient {
     }
   }
 
-  async seal(): Promise<void> {
+  async seal(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
-    await this.acquirePromise?.catch(() => undefined);
-    return this.sealGrant();
+    // The seal joins sealsAnswered before it waits on acquirePromise, so a
+    // reacquire that starts meanwhile still waits for it.
+    const sealing = (async () => {
+      await this.acquirePromise?.catch(() => undefined);
+      await this.sealGrant(wake);
+    })();
+    const answered = sealing.then(
+      () => undefined,
+      (error: unknown) => {
+        if (!sealRefused(error)) this.uncertainSeal = asError(error);
+        // Most refusals come before the Store replays a seal that landed, so
+        // they say nothing about an earlier one. A writer conflict comes
+        // after that replay: the head has left this writer generation, so no
+        // seal of it can still decide the Session.
+        else if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.remoteCode === 'managed_session_writer_conflict'
+        )
+          this.uncertainSeal = undefined;
+      },
+    );
+    this.sealsAnswered = Promise.all([this.sealsAnswered, answered]).then(
+      () => undefined,
+    );
+    return sealing;
   }
 
-  private async sealGrant(): Promise<void> {
+  private async sealGrant(wake?: ManagedSessionWakeStamp): Promise<void> {
     if (this.sealed) return;
     const grant = this.grant;
     this.stopWriterRenewal();
@@ -1839,6 +2859,10 @@ class ManagedSessionStoreHttpClient {
         workspaceId: this.sessionKey.workspaceId,
         writerId: this.writerId,
         writerGeneration: grant.writerGeneration,
+        // The Store refuses a stamp whose revision is not the head's.
+        ...(wake === undefined
+          ? {}
+          : { wake: { revision: grant.journalRevision, ...wake } }),
       }),
       'seal receipt',
     );
@@ -2008,6 +3032,45 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A seal on its way to the Store decides this writer's end first. The
+    // Store gives a sealed head a new writer generation on acquire, so an
+    // acquire that lands after the seal would reopen the Session behind it,
+    // and one that lands first would make the seal meet a newer writer. A
+    // seal that starts during this wait replaces sealsAnswered, so wait
+    // again until none has. Then acquireWriter refuses a sealed client, and
+    // one whose seal may have landed.
+    let answered = this.sealsAnswered;
+    while (answered !== undefined) {
+      await answered;
+      answered =
+        answered === this.sealsAnswered ? undefined : this.sealsAnswered;
+    }
+    // A renewal in flight may have answered after the caller saw the lease
+    // lapse; it moved the lease forward and re-armed the timer, so keep that
+    // grant. Dropping it for an acquire, which a Store holding the Session's
+    // lifecycle can delay, leaves authorizeLifecycle, and any caller that
+    // reads the grant without first waiting in ensureWriter, refusing
+    // locally until the acquire answers. Only a lease that moved past the
+    // lapsed one counts: a refused renewal leaves the lapsed lease in place,
+    // and a commit, a head adoption or a journal read copies it into a new
+    // grant; in either case a wall-clock step back could make the lapsed
+    // lease look live.
+    if (
+      expired !== undefined &&
+      this.grant !== undefined &&
+      this.grant.leaseUntil > expired.leaseUntil &&
+      this.grant.leaseUntil > Date.now()
+    )
+      return;
+    // No renewal may fire while there is no grant: renewWriter() would
+    // throw out of the timer callback. The wait may have re-armed the
+    // timer (for example, a renewal that answered schedules the next one,
+    // and a renewal the timer started or joined that met a transient error
+    // schedules a retry); reaching this line after that takes a wall-clock
+    // step back, or a renewed lease that ran out between that re-arm and
+    // the check above. A successful acquire arms its own timer; a failed
+    // one restores the lapsed grant without one.
+    this.stopRenewal();
     this.grant = undefined;
     const acquire = (async () => {
       await this.acquireWriter();
@@ -2074,7 +3137,8 @@ class ManagedSessionStoreHttpClient {
       this.grant = {
         ...this.requireGrant(),
         leaseUntil: renewed.leaseUntil,
-        supportedStorageVersion: renewed.supportedStorageVersion,
+        wakeDispatch: renewed.wakeDispatch,
+        runtimeObservation: renewed.runtimeObservation,
       };
       this.scheduleRenewal();
     })();
@@ -2171,7 +3235,6 @@ class ManagedSessionStoreHttpClient {
     const grant = this.requireGrant();
     if (
       head.state !== 'ACTIVE' ||
-      ![1, 2].includes(head.storageVersion) ||
       head.writerGeneration !== grant.writerGeneration ||
       head.recoveryStatus !== 'READY' ||
       head.compactedThroughRevision !== 0
@@ -2369,6 +3432,7 @@ class ManagedSessionStoreHttpClient {
     body?: Readonly<Record<string, unknown>>,
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Response> {
     if (this.ownershipRelease && path !== '/writers:release-ownership')
       throw corrupt('ownership release has fenced this writer.');
@@ -2384,7 +3448,6 @@ class ManagedSessionStoreHttpClient {
         redirect: 'error',
         headers: {
           Accept: accept,
-          'X-Qwen-Managed-Max-Readable-Storage-Version': '2',
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.tenantHeader]:
             this.sessionKey.tenantId,
           [HTTP_MANAGED_SESSION_STORE_CONTRACT.writerTokenHeader]:
@@ -2399,6 +3462,7 @@ class ManagedSessionStoreHttpClient {
               }
             : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(extraHeaders ?? {}),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(timeoutMs),
@@ -2716,13 +3780,12 @@ export function requireStoredTransactionMatches(
 function parseWriterGrant(value: unknown): WriterGrant {
   const record = asRecord(value, 'writer grant');
   return {
-    supportedStorageVersion:
-      record['supportedStorageVersion'] === undefined
-        ? 1
-        : safeCounter(
-            record['supportedStorageVersion'],
-            'supportedStorageVersion',
-          ),
+    activationLeaseRenewal: record['activationLeaseRenewal'] === true,
+    wakeDispatch: record['wakeDispatch'] === true,
+    runtimeObservation: record['runtimeObservation'] === true,
+    ...(record['activationLease'] == null
+      ? {}
+      : { activationLease: parseActivationLease(record['activationLease']) }),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',
@@ -2744,8 +3807,10 @@ function parseWriterGrant(value: unknown): WriterGrant {
 function parseRestoreHead(value: unknown): RestoreHead {
   const record = asRecord(value, 'restore head');
   return {
+    ...(record['activationLease'] == null
+      ? {}
+      : { activationLease: parseActivationLease(record['activationLease']) }),
     state: string(record['state'], 'state'),
-    storageVersion: safeCounter(record['storageVersion'], 'storageVersion'),
     writerGeneration: safeCounter(
       record['writerGeneration'],
       'writerGeneration',
@@ -2774,6 +3839,37 @@ function parseRestoreHead(value: unknown): RestoreHead {
       'recoveryDetailCode',
     ),
   };
+}
+
+function parseActivationLease(value: unknown): ManagedSessionActivationLease {
+  const lease = asRecord(value, 'activation lease');
+  return {
+    activationId: assertManagedSessionStableId(
+      string(lease['activationId'], 'activationId'),
+      'activationId',
+    ),
+    epoch: safeCounter(lease['epoch'], 'activation epoch'),
+    renewalSeq: safeCounter(lease['renewalSeq'], 'activation renewalSeq'),
+    expiresAt: safeCounter(lease['expiresAt'], 'activation expiresAt'),
+  };
+}
+
+function applyActivationLease(
+  scan: ManagedSessionJournalScan,
+  lease?: ManagedSessionActivationLease,
+): ManagedSessionJournalScan {
+  if (!lease) return scan;
+  const activation = scan.activation;
+  if (
+    !activation ||
+    activation.phase !== 'active' ||
+    activation.activationId !== lease.activationId ||
+    activation.epoch !== lease.epoch ||
+    lease.renewalSeq < activation.renewalSeq ||
+    lease.expiresAt < activation.expiresAt
+  )
+    throw corrupt('activation lease conflicts with the journal.');
+  return { ...scan, activation: { ...activation, ...lease } };
 }
 
 /**
@@ -2832,7 +3928,11 @@ export function collectNestedResourceRefs(
     // re-admits its predecessor through preparation.intentRef, which SQL's
     // activation proof reads from this transaction.
     return record['schemaVersion'] === 2 &&
-      record['profile'] === 'csi-files-retirement/1'
+      [
+        'csi-files-retirement/1',
+        'csi-files-retirement/2',
+        'csi-files-retirement/3',
+      ].includes(String(record['profile']))
       ? collectRefs([record['preparation']])
       : [];
   }
@@ -2841,13 +3941,43 @@ export function collectNestedResourceRefs(
       parseHostedRecoveryResource(bytes, undefined, ref.kind),
     );
   }
+  if (ref.kind === MANAGED_TOOL_MEASUREMENTS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported tool measurements version.');
+    parseManagedToolMeasurementEvidence(bytes);
+    return [];
+  }
+  if (ref.kind === EXECUTION_DIAGNOSTICS_KIND) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('Unsupported execution diagnostics version.');
+    parseManagedExecutionEvidence(bytes);
+    return [];
+  }
+  if (MANAGED_MODEL_STATISTICS_RESOURCE_KINDS.has(ref.kind)) {
+    if (ref.schemaVersion !== 1)
+      throw corrupt('diagnostics resource schema is unsupported.');
+    parseManagedStatisticsEnvelope(
+      ref.kind,
+      parseManagedSessionRecordJson(bytes.toString('utf8'), 64 * 1024),
+    );
+    return [];
+  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-config_install' ||
+    ref.kind === 'managed-extension-config-bundle' ||
+    ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
     ref.kind === 'managed-action-options' ||
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
   ) {
+    // A config_install record names its own bundle, root snapshot and the
+    // stage/enable acknowledgements (managed-session-resource-references.ts),
+    // and its predecessor through previousRecordRef. The commit closes over
+    // the record's own edges but not the predecessor chain — re-closing it
+    // would grow linearly with the session's config history (R1-2), and a
+    // pre-fix predecessor's children were never persisted (R1-1).
     const record = parseManagedSessionRecordJson(
       bytes.toString('utf8'),
       MANAGED_SESSION_LIMITS.maxEventBytes,
@@ -2856,6 +3986,16 @@ export function collectNestedResourceRefs(
       return collectRefs([(record as { messagesRef?: unknown }).messagesRef]);
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
+    if (ref.kind === 'managed-config_install') {
+      // Exclude previousRecordRef: it belongs to the predecessor's own
+      // transaction. Re-closing the chain would grow linearly (R1-2); pre-fix
+      // records can also name children that were never uploaded (R1-1).
+      const { previousRecordRef: _, ...ownEdges } = asRecord(
+        record,
+        'config install record',
+      );
+      return collectRefs([ownEdges]);
+    }
     return collectRefs([record]);
   }
   // A result manifest names its page envelopes: they are Session resources
@@ -2895,6 +4035,9 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-config_install',
+      'managed-extension-config-bundle',
+      'managed-extension-contributions',
       'managed-definition',
       'managed-checkpoint',
       CHECKPOINT_HISTORY_KIND,
@@ -2904,6 +4047,10 @@ function isReferenceContainer(kind: string): boolean {
       'managed-hook-message-chunks',
       MANAGED_MESSAGE_CHUNKS_KIND,
       'managed-tool-outcome-chunks',
+      // Phase 3b: a draining Harness commits a manifest it never staged in
+      // memory, so the closure must walk its pages server-side exactly like
+      // the resident staged arm does, or the pages stay unreferenced.
+      MANAGED_TOOL_RESULT_KINDS.manifest,
     ].includes(kind)
   );
 }

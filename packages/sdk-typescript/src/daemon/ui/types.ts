@@ -42,6 +42,7 @@ export type DaemonUiEventType =
   | 'session.metadata.changed'
   | 'session.artifact.changed'
   | 'session.source.changed'
+  | 'session.sub_session_task.changed'
   | 'session.approval_mode.changed'
   | 'session.available_commands'
   | 'session.state_resync_required'
@@ -109,7 +110,30 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
   parentToolCallId?: string;
+  /**
+   * The agent associated with this frame. This normally names the producer;
+   * for an inter-agent message it names the recipient, matching OpenAI's
+   * `agent_message` semantics. The identity uses a path such as
+   * `/root/security`.
+   *
+   * Source: daemon stamps `_meta.agent` (see `SubAgentTracker` in the CLI).
+   */
+  agent?: DaemonAgentIdentity;
   meta?: DaemonTextDeltaMeta;
+}
+
+/**
+ * Path-style agent identity associated with one frame.
+ *
+ * `agentName` is derived from the spawning agent's path plus the subagent type.
+ * It is a readable role path, not a unique execution id: concurrent subagents
+ * of the same type share it, and renaming the agent definition changes it. Use
+ * `parentToolCallId` when a consumer must distinguish subagent executions.
+ */
+export interface DaemonAgentIdentity {
+  agentName: string;
+  depth: number;
+  kind: 'root' | 'subagent' | 'teammate';
 }
 
 export interface DaemonInputReference {
@@ -132,9 +156,22 @@ export interface DaemonInputReferenceAnnotation {
 
 export type DaemonInputAnnotation = DaemonInputReferenceAnnotation;
 
+/**
+ * The session that sent this message from another session (`/send`, or a
+ * sub-session launch). Normalization separates it from the wire's
+ * `inputAnnotations` because it covers no text range.
+ */
+export interface DaemonInputSourceAnnotation {
+  type: 'source';
+  sessionId: string;
+  workspaceCwd: string;
+  title?: string;
+}
+
 export interface DaemonTextDeltaMeta extends Record<string, unknown> {
   qwenDiscreteMessage?: boolean;
   inputAnnotations?: DaemonInputAnnotation[];
+  sourceAnnotation?: DaemonInputSourceAnnotation;
 }
 
 export interface DaemonUiUserImageEvent extends DaemonUiEventBase {
@@ -215,6 +252,8 @@ export interface DaemonTranscriptTimingMeta {
   durationMs: number;
   /** `kind === 'request'`: dispatch to first user-visible content. */
   ttftMs?: number;
+  /** `kind === 'request'`: request start to first user-visible content. */
+  firstVisibleOffsetMs?: number;
   /** `kind === 'request'`: 'error' means the request failed. */
   status?: 'ok' | 'error';
   responseId?: string;
@@ -283,6 +322,12 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
   title?: string;
   status?: string;
   toolName?: string;
+  /**
+   * Set when the event only carries a late-arriving tool name (a metadata
+   * lifecycle frame). Reducers may name an existing block by `toolCallId`
+   * but must not create a block from it.
+   */
+  nameOnly?: boolean;
   /** Server-measured call timing; absent in older recordings. */
   startedAt?: number;
   durationMs?: number;
@@ -319,6 +364,11 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
    * Source: daemon stamps `tool_call._meta.subagentType`.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this tool call, when it was not the session's
+   * root agent. Same shape and source as `DaemonUiTextEvent.agent`.
+   */
+  agent?: DaemonAgentIdentity;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -487,6 +537,7 @@ export interface DaemonLoopStop {
 
 export interface DaemonUiErrorEvent extends DaemonUiEventBase {
   type: 'error';
+  data?: unknown;
   text: string;
   recoverable?: boolean;
   code?: string;
@@ -523,6 +574,13 @@ export interface DaemonUiSessionArtifactChangedEvent extends DaemonUiEventBase {
   type: 'session.artifact.changed';
   sessionId: string;
   change: DaemonSessionArtifactChange;
+}
+
+/** A launch reported back to `sessionId` started or settled. */
+export interface DaemonUiSessionSubSessionTaskChangedEvent
+  extends DaemonUiEventBase {
+  type: 'session.sub_session_task.changed';
+  sessionId: string;
 }
 
 export interface DaemonUiSessionApprovalModeChangedEvent
@@ -618,7 +676,9 @@ export interface DaemonUiSessionRewoundEvent extends DaemonUiEventBase {
   type: 'session.rewound';
   sessionId?: string;
   promptId: string;
+  daemonPromptId?: string;
   targetTurnIndex: number;
+  replay?: DaemonUiEvent[];
 }
 
 export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
@@ -823,6 +883,7 @@ export type DaemonUiEvent =
   // Session-meta events
   | DaemonUiSessionMetadataChangedEvent
   | DaemonUiSessionArtifactChangedEvent
+  | DaemonUiSessionSubSessionTaskChangedEvent
   | DaemonUiSessionSourceChangedEvent
   | DaemonUiSessionApprovalModeChangedEvent
   | DaemonUiSessionAvailableCommandsEvent
@@ -1102,6 +1163,12 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
+  /**
+   * The agent associated with this block. This normally names the producer;
+   * for an inter-agent message it names the recipient. Lets a renderer name
+   * an agent by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /** Raw ACP update metadata used by renderers for display-only routing. */
   meta?: DaemonTextDeltaMeta;
   /**
@@ -1149,6 +1216,12 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
    * block came from a sub-agent delegation.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this block, when it was not the session's root
+   * agent. Carried through from the event so renderers can attribute a block
+   * by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /**
    * `id` of the parent transcript block, populated by the reducer when
    * `parentToolCallId` matches a block already in state. Renderers can
@@ -1301,6 +1374,12 @@ export interface DaemonTranscriptState
   activeThoughtBlockByParent: Record<string, string>;
   blockIndexById: Readonly<Record<string, number>>;
   toolBlockByCallId: Record<string, string>;
+  /**
+   * Late tool name keyed by call id, for lifecycle frames that arrive before
+   * the block they name (mid-run attach). The create path consumes its entry;
+   * the oldest entry is evicted past `MAX_PENDING_TOOL_NAMES`. #16301
+   */
+  pendingToolNameByCallId: Record<string, string>;
   trimmedToolNotificationByCallId: Record<string, true>;
   permissionBlockByRequestId: Record<string, string>;
   nextOrdinal: number;
@@ -1332,7 +1411,8 @@ export interface DaemonTranscriptBlockChangeSummary {
   /**
    * The latest revision that was not a pure append to one streaming tail
    * block. For summaries from the same source, equal values therefore prove
-   * that every intervening revision was such an append.
+   * that every intervening revision was such an append. Passive Mod log lines
+   * can follow the streaming block without ending it.
    */
   tailAppendBarrierRevision: number;
   /** The streaming tail block changed at this revision, when eligible. */
@@ -1352,12 +1432,14 @@ export interface DaemonTranscriptTruncationDetail {
   oldestRetainedRecordId?: string;
   /**
    * Set for `kind: 'blocks'`: whether the eviction removed blocks from the
-   * OLDEST end. True for retention trimming (oldest-first), which can evict
-   * the record an exclusive pagination anchor points at; false for a rewind
-   * (which drops the newest blocks and leaves the oldest anchor intact).
+   * OLDEST end of the record-bearing history. True when retention trims the
+   * history prefix, false for Mod-log-only eviction or a tail-only rewind.
+   * Replay replacement can also change the oldest retained anchor.
    * Consumers should only re-anchor pagination when this is true.
    */
   evictedOldest?: boolean;
+  /** True when an authoritative rewind installs a replacement replay. */
+  replacedReplay?: boolean;
   /**
    * Set for `kind: 'blocks'`: the post-trim window occupancy. Lets consumers
    * decide whether a previously rejected history page would now be admitted,
