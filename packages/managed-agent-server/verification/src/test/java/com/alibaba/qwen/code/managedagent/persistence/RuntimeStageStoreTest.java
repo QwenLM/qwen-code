@@ -160,6 +160,67 @@ class RuntimeStageStoreTest {
     }
 
     @Test
+    void stagesMonitorNotificationResources() {
+        String callId = "call-mon";
+        seedPreparedBackgroundProcess(callId);
+        PullerClaim claim = stageStore.claimBindingPuller(bindingId, 1L, "broker-1", Duration.ofSeconds(30));
+
+        byte[] input = "{\"text\":\"tick\"}".getBytes(StandardCharsets.UTF_8);
+        byte[] admission = "{}".getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> notification = new LinkedHashMap<>();
+        notification.put("inputId", "mon:notify:1");
+        notification.put("turnId", "mon:notify:1");
+        notification.put("contentRef", ref("input-1", "managed-input", input));
+        notification.put("admissionRef", ref("admission-1", "managed-admission", admission));
+        Map<String, Object> observation = new LinkedHashMap<>();
+        observation.put("kind", "observation");
+        observation.put("executionCallId", callId);
+        observation.put("deliverySeq", 1L);
+        observation.put("sequence", 1L);
+        observation.put("lines", List.of("tick"));
+        observation.put("notification", notification);
+        observation.put("resources", List.of(
+                resource("input-1", "managed-input", input),
+                resource("admission-1", "managed-admission", admission)));
+
+        StageOutcome outcome = stageStore.stageBatch(new StageBatchRequest(
+                claim, TENANT, WORKSPACE, session, callId, List.of(observation)));
+        assertThat(outcome.committed()).isTrue();
+        assertThat(outcome.stagedThrough()).isEqualTo(1L);
+        assertThat(jdbc.queryForObject(
+                "SELECT state FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(TENANT, session), "input-1"))
+                .isEqualTo("REFERENCED");
+    }
+
+    @Test
+    void keepsNullEntryFieldsWhenStaging() {
+        String callId = "call-null";
+        seedPreparedBackgroundProcess(callId);
+        PullerClaim claim = stageStore.claimBindingPuller(bindingId, 1L, "broker-1", Duration.ofSeconds(30));
+        Map<String, Object> terminal = terminalEntry(callId, 1L, "man-null", "exited", "success", false);
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("exitCode", 0);
+        evidence.put("exitSignal", null);
+        terminal.put("evidence", evidence);
+
+        StageOutcome outcome = stageStore.stageBatch(new StageBatchRequest(
+                claim, TENANT, WORKSPACE, session, callId, List.of(terminal)));
+        assertThat(outcome.committed()).isTrue();
+
+        acquireWriter();
+        List<Map<String, Object>> listed = stageStore.listStagedDeliveries(
+                TENANT, session, "writer", writerGeneration);
+        assertThat(listed).hasSize(1);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> listedEvidence = (Map<String, Object>) listed.get(0).get("evidence");
+        assertThat(listedEvidence)
+                .containsEntry("exitCode", 0)
+                .containsKey("exitSignal")
+                .containsEntry("exitSignal", null);
+    }
+
+    @Test
     void enforcesWatermarkWakeHardCapAndReservedTerminalSlot() {
         String callId = "call-cap";
         seedPreparedBackgroundProcess(callId);

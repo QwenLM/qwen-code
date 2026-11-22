@@ -10,7 +10,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, type Server } from 'node:http';
 import express from 'express';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
+import { MANAGED_DELIVERY_REQUEST_LIMIT_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
 import {
   openManagedSession,
   type ManagedSession,
@@ -19,6 +20,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  MANAGED_TOOL_RESULT_KINDS,
   MANAGED_TOOL_RESULT_PROTOCOL,
   parseToolResultManifestBytes,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
@@ -33,18 +35,22 @@ import {
   MANAGED_SHELL_PUBLISHER_ROUTE,
   ManagedShellPublisherRegistry,
 } from './managed-shell-publisher.js';
-import type { WorkerBackgroundCaptureSink } from './managed-background-delivery.js';
-import { WorkerMonitorPolicy } from './managed-background-delivery.js';
+import {
+  BackgroundDeliveryRun,
+  WorkerBackgroundCaptureSink,
+  WorkerMonitorPolicy,
+} from './managed-background-delivery.js';
 
 let root: string | undefined;
 let session: ManagedSession | undefined;
 let publisher: HostedShellPublisher | undefined;
 let server: Server | undefined;
 let worker: Server | undefined;
+const publishers: Server[] = [];
 
 afterEach(async () => {
   await publisher?.close();
-  for (const s of [server, worker]) {
+  for (const s of [server, worker, ...publishers.splice(0)]) {
     if (s?.listening) {
       s.closeAllConnections();
       await new Promise<void>((resolve) => s.close(() => resolve()));
@@ -384,7 +390,6 @@ it('worker monitor policy delivers an observation entry the applier commits once
   const sink = prepared.sink as WorkerBackgroundCaptureSink;
   sink.attachMonitorPolicy(
     new WorkerMonitorPolicy(
-      sink,
       sink.run,
       {
         monitorId,
@@ -847,4 +852,288 @@ it('re-attaches before draining staged deliveries without gaps or duplicate comm
   const stderr = manifest.contents.find((c) => c.streamId === 'stderr')!;
   expect(stdout.byteLength).toBe(Buffer.byteLength('direct-1\n'));
   expect(stderr.byteLength).toBe(Buffer.byteLength('staged-2\n'));
+});
+
+function workerIdentity(executionCallId: string) {
+  return {
+    tenantId: 'tenant-a',
+    sessionId: randomUUID(),
+    turnId: 'turn-a',
+    executionCallId,
+    callId: 'worker-call-a',
+    invocationDigest: `sha256:${'a'.repeat(64)}`,
+    bindingGeneration: '1',
+    captureId: randomUUID(),
+    revision: 1,
+  };
+}
+
+/** A Harness delivery endpoint that answers each push with `status`. */
+async function deliveryEndpoint(
+  status: (seqs: number[]) => number | Promise<number>,
+) {
+  const applied: number[][] = [];
+  const sizes: number[] = [];
+  const endpoint = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks);
+      sizes.push(raw.byteLength);
+      const seqs = (
+        JSON.parse(raw.toString('utf8')) as {
+          entries: Array<{ deliverySeq: number }>;
+        }
+      ).entries.map((entry) => entry.deliverySeq);
+      void Promise.resolve(status(seqs)).then((code) => {
+        if (code === 200) applied.push(seqs);
+        res.writeHead(code, {
+          'content-type': 'application/json',
+          'cache-control': 'no-store',
+        });
+        res.end(JSON.stringify({ appliedThrough: seqs.at(-1) }));
+      });
+    });
+  });
+  await new Promise<void>((resolve) =>
+    endpoint.listen(0, '127.0.0.1', resolve),
+  );
+  publishers.push(endpoint);
+  const port = (endpoint.address() as { port: number }).port;
+  return {
+    descriptor: { url: `http://127.0.0.1:${port}/`, token: 'harness-token' },
+    applied,
+    sizes,
+  };
+}
+
+function exited(sink: WorkerBackgroundCaptureSink): void {
+  sink.setProcessResult({
+    exitCode: 0,
+    signal: null,
+    rawOutput: Buffer.alloc(0),
+    output: '',
+    error: null,
+    aborted: false,
+    pid: 7,
+    executionMethod: 'child_process',
+  });
+}
+
+function monitorPolicy(
+  run: BackgroundDeliveryRun,
+  maxEvents: number,
+  terminate: () => Promise<boolean>,
+): WorkerMonitorPolicy {
+  return new WorkerMonitorPolicy(
+    run,
+    {
+      monitorId: run.executionCallId,
+      executionCallId: run.executionCallId,
+      description: 'watch',
+      maxEvents,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+      startSequence: 0,
+    },
+    terminate,
+  );
+}
+
+it('sizes a push batch by its serialized request, wrapper and separators included', async () => {
+  const harness = await deliveryEndpoint(() => 200);
+  const run = new BackgroundDeliveryRun('execution-batch', '1', 'monitor_run');
+  for (let sequence = 1; sequence <= 2_500; sequence++) {
+    await run.enqueueObservation(sequence, ['x'.repeat(150)], null, []);
+  }
+  run.attach(harness.descriptor, 1);
+  await vi.waitFor(() => expect(run.pendingCount).toBe(0), {
+    timeout: 10_000,
+  });
+  expect(Math.max(...harness.sizes)).toBeLessThanOrEqual(
+    MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+  );
+  expect(harness.applied.flat()).toEqual(
+    Array.from({ length: 2_500 }, (_, index) => index + 1),
+  );
+});
+
+it('hands an in-flight push to a newer attach and keeps what the Broker staged meanwhile', async () => {
+  let failOld: ((code: number) => void) | undefined;
+  const old = await deliveryEndpoint(
+    () => new Promise<number>((resolve) => (failOld = resolve)),
+  );
+  const fresh = await deliveryEndpoint(() => 200);
+  const run = new BackgroundDeliveryRun(
+    'execution-handover',
+    '1',
+    'monitor_run',
+  );
+  run.attach(old.descriptor, 1);
+  await run.enqueueObservation(1, ['first'], null, []);
+  await vi.waitFor(() => expect(failOld).toBeDefined());
+  // A staging acknowledgement while a Harness holds the publisher must not
+  // trim an entry that Harness never applied.
+  const pulled = await run.pullForStage({ afterSeq: 1, ackThrough: 1 });
+  expect(pulled.status).toBe('attached');
+  expect(run.pendingCount).toBe(1);
+  expect(run.attach(fresh.descriptor, 2)).toBe(true);
+  failOld!(500);
+  await vi.waitFor(() => expect(run.pendingCount).toBe(0));
+  expect(run.deliveryMode).toBe('attached');
+  expect(fresh.applied.flat()).toEqual([1]);
+});
+
+it('retries a failed push while held and never trims what that Harness still owes', async () => {
+  let refuse = true;
+  const harness = await deliveryEndpoint(() => (refuse ? 500 : 200));
+  const run = new BackgroundDeliveryRun('execution-retry', '1', 'monitor_run');
+  run.attach(harness.descriptor, 1);
+  await run.enqueueObservation(1, ['early'], null, []);
+  await vi.waitFor(() => expect(run.deliveryMode).toBe('held'));
+  const staged = await run.pullForStage({ afterSeq: 0 });
+  expect(staged.entries.map((entry) => entry.deliverySeq)).toEqual([1]);
+  await run.pullForStage({ afterSeq: 1, ackThrough: 1 });
+  expect(run.pendingCount).toBe(1);
+  refuse = false;
+  await vi.waitFor(() => expect(run.pendingCount).toBe(0), {
+    timeout: 5_000,
+  });
+  expect(run.deliveryMode).toBe('attached');
+  expect(harness.applied.flat()).toEqual([1]);
+  run.close();
+});
+
+it('keeps a background stream healthy across more idle partial flushes than the page bound', async () => {
+  const run = new BackgroundDeliveryRun('execution-ticks', '1', 'child_run');
+  const sink = new WorkerBackgroundCaptureSink(
+    workerIdentity('execution-ticks'),
+    run,
+  );
+  sink.setStarted(7);
+  for (let tick = 0; tick < 70; tick++) {
+    await sink.write('stdout', Buffer.from(`tick ${tick}\n`));
+    await sink.capture.flushPartial('stdout');
+  }
+  await sink.finish('stdout', true);
+  await sink.finish('stderr', true);
+  exited(sink);
+  const envelope = await sink.finalize('success', []);
+  await sink.close();
+  expect(envelope.capture?.captureStatus).toBe('complete');
+  const manifest = parseToolResultManifestBytes(
+    await sink.resources.read(envelope.capture!.manifest!),
+  );
+  const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+  expect(
+    (
+      stdout.body as { readonly pages: ReadonlyArray<{ segmentCount: number }> }
+    ).pages.map((page) => page.segmentCount),
+  ).toEqual([70]);
+});
+
+it('keeps capture output out of monitor observation entries', async () => {
+  const run = new BackgroundDeliveryRun(
+    'execution-mon-out',
+    '1',
+    'monitor_run',
+  );
+  const sink = new WorkerBackgroundCaptureSink(
+    workerIdentity('execution-mon-out'),
+    run,
+  );
+  const policy = monitorPolicy(run, 100, async () => true);
+  sink.attachMonitorPolicy(policy);
+  sink.setStarted(9);
+  await sink.write(
+    'stdout',
+    Buffer.concat([Buffer.from('event\n'), Buffer.alloc(128 * 1024, 0x61)]),
+  );
+  await policy.flushTail();
+  await sink.close();
+  const { entries } = await run.pullForStage({ afterSeq: 0, maxEntries: 256 });
+  const kinds = (kind: string) =>
+    entries
+      .filter((entry) => entry.kind === kind)
+      .flatMap((entry) => entry.resources.map((resource) => resource.ref.kind));
+  expect(kinds('output')).toContain(MANAGED_TOOL_RESULT_KINDS.content);
+  expect(kinds('observation').sort()).toEqual([
+    'managed-admission',
+    'managed-input',
+  ]);
+});
+
+it('settles a Monitor whose tail reaches maxEvents without waiting on its own completion', async () => {
+  const run = new BackgroundDeliveryRun(
+    'execution-mon-tail',
+    '1',
+    'monitor_run',
+  );
+  const sink = new WorkerBackgroundCaptureSink(
+    workerIdentity('execution-mon-tail'),
+    run,
+  );
+  // terminate resolves with the unit's completion, which is this finalize.
+  const unit: { completion?: Promise<unknown> } = {};
+  sink.attachMonitorPolicy(
+    monitorPolicy(run, 1, async () => {
+      await unit.completion;
+      return true;
+    }),
+  );
+  sink.setStarted(9);
+  await sink.write('stdout', Buffer.from('only\n'));
+  await sink.finish('stdout', true);
+  await sink.finish('stderr', true);
+  exited(sink);
+  unit.completion = sink.finalize('success', []);
+  const outcome = await Promise.race([
+    unit.completion.then(() => 'settled'),
+    new Promise((resolve) => setTimeout(() => resolve('hung'), 2_000)),
+  ]);
+  await sink.close();
+  expect(outcome).toBe('settled');
+  const { entries } = await run.pullForStage({ afterSeq: 0, maxEntries: 256 });
+  expect(entries.filter((entry) => entry.kind === 'observation')).toHaveLength(
+    1,
+  );
+  expect(entries.at(-1)).toMatchObject({
+    kind: 'terminal',
+    monitorStopReason: 'exited',
+  });
+});
+
+it('drops the tail window after a max_events stop instead of exceeding the quota', async () => {
+  const run = new BackgroundDeliveryRun(
+    'execution-mon-quota',
+    '1',
+    'monitor_run',
+  );
+  const sink = new WorkerBackgroundCaptureSink(
+    workerIdentity('execution-mon-quota'),
+    run,
+  );
+  let terminated = false;
+  sink.attachMonitorPolicy(
+    monitorPolicy(run, 1, async () => {
+      terminated = true;
+      return true;
+    }),
+  );
+  sink.setStarted(9);
+  await sink.write('stdout', Buffer.from('first\nsecond'));
+  await vi.waitFor(() => expect(terminated).toBe(true), { timeout: 3_000 });
+  await sink.finish('stdout', true);
+  await sink.finish('stderr', true);
+  exited(sink);
+  await sink.finalize('success', []);
+  await sink.close();
+  const { entries } = await run.pullForStage({ afterSeq: 0, maxEntries: 256 });
+  expect(entries.filter((entry) => entry.kind === 'observation')).toHaveLength(
+    1,
+  );
+  expect(entries.at(-1)).toMatchObject({
+    kind: 'terminal',
+    monitorStopReason: 'max_events',
+  });
 });

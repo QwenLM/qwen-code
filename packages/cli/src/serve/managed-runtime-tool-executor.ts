@@ -1757,7 +1757,6 @@ export class ManagedToolExecutor {
             : capture.executionCallId;
       sink.attachMonitorPolicy(
         new WorkerMonitorPolicy(
-          sink,
           sink.run,
           {
             monitorId: capture.executionCallId,

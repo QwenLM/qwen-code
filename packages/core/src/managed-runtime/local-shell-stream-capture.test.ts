@@ -72,7 +72,9 @@ const IDENTITY = {
   revision: 1,
 } as const;
 
-async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
+async function rig(
+  options: { segmentsPerPage?: number; revisionPerSegment?: boolean } = {},
+): Promise<Rig> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-shell-stream-'));
   temporaryDirectories.add(root);
   const real = LocalManagedSessionResourceStore.create({
@@ -248,7 +250,10 @@ async function rig(options: { segmentsPerPage?: number } = {}): Promise<Rig> {
     resources,
     IDENTITY,
     async () => {},
-    { segmentsPerPage: options.segmentsPerPage ?? 512 },
+    {
+      segmentsPerPage: options.segmentsPerPage ?? 512,
+      revisionPerSegment: options.revisionPerSegment,
+    },
   );
   return rigState;
 }
@@ -712,6 +717,73 @@ describe('LocalShellStreamCapture', () => {
       signalName: null,
     });
     expect(final.capture?.captureStatus).toBe('complete');
+  });
+
+  it('grows the open page with each partial flush instead of spending a page per flush', async () => {
+    const r = await rig({ segmentsPerPage: 3, revisionPerSegment: true });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    const written: Buffer[] = [];
+    for (let tick = 0; tick < 5; tick++) {
+      const chunk = Buffer.from(`tick ${tick}\n`);
+      written.push(chunk);
+      await r.captured.write('stdout', chunk);
+      await r.captured.flushPartial('stdout');
+    }
+    await r.captured.finish('stdout', true);
+    await r.captured.finish('stderr', true);
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture?.captureStatus).toBe('complete');
+    // The open revision, one per flushed segment, and the settle; every step
+    // a valid successor.
+    expect(r.manifests).toHaveLength(1 + 5 + 1);
+    for (let index = 1; index < r.manifests.length; index++) {
+      expect(
+        isToolResultManifestSuccessor(
+          r.manifests[index - 1],
+          r.manifests[index],
+        ),
+      ).toBe(true);
+      expect(
+        isToolResultManifestChainLink(
+          r.manifests[index - 1],
+          r.manifests[index],
+        ),
+      ).toBe(true);
+    }
+    const stdout = (
+      r.manifests.at(-1)!['contents'] as Array<{
+        byteLength: number;
+        digest: string;
+        body: { pages: Array<{ segmentCount: number; byteLength: number }> };
+      }>
+    )[0]!;
+    expect(stdout.body.pages.map((page) => page.segmentCount)).toEqual([3, 2]);
+    const bytes = Buffer.concat(written);
+    expect(stdout.byteLength).toBe(bytes.byteLength);
+    expect(stdout.digest).toBe(
+      createHash('sha256').update(bytes).digest('hex'),
+    );
+  });
+
+  it('latches a failed partial flush instead of wedging the stream', async () => {
+    const r = await rig({ segmentsPerPage: 1 });
+    await r.captured.open();
+    r.captured.setStarted(1);
+    await r.captured.write('stdout', Buffer.from('lost\n'));
+    r.refuseSegmentCalls = 3;
+    await expect(r.captured.flushPartial('stdout')).resolves.toBeUndefined();
+    expect(r.captured.brokenReason).toEqual({ reason: 'storage_failed' });
+    await r.captured.write('stdout', Buffer.from('later\n'));
+    const final = await r.captured.finalize('success', [], undefined, {
+      exitCode: 0,
+      signalName: null,
+    });
+    expect(final.capture?.captureReason).toBe('storage_failed');
+    expect(r.manifests.at(-1)!['captureReason']).toBe('storage_failed');
   });
 
   it('settles exit evidence set through the process result', async () => {
