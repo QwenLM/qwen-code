@@ -57,6 +57,7 @@ import {
   parseWebPreviewUrl,
   type WebPreviewState,
 } from './components/preview/web-preview';
+import { visualViewportBottomInset } from './utils/visualViewportInset';
 import {
   forwardRef,
   memo,
@@ -371,7 +372,14 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
-import { artifactDisplayName } from './components/artifacts/artifactUtils';
+import {
+  artifactDisplayName,
+  resolvePendingArtifactJumpOpen,
+  runArtifactLibrarySessionJump,
+  type PendingArtifactJumpOpenRequest,
+} from './components/artifacts/artifactUtils';
+import { WorkspaceArtifactLibraryPage } from './components/artifacts/WorkspaceArtifactLibraryPage';
+import { WORKSPACE_ARTIFACT_LIBRARY_FEATURE } from './hooks/useWorkspaceArtifactLibrary';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -2067,6 +2075,7 @@ type MainView =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'artifacts'
   | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -4048,7 +4057,7 @@ export function App({
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -4074,15 +4083,12 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
-      // [data-web-shell-dialog] joins this allowlist because DialogShell
-      // portals outside the drawer subtree but stacks above it — without the
-      // exemption, a dialog opened over the drawer loses all touch scrolling
-      // on a phone. The exemption covers DialogShell only, not other
-      // portaled overlays.
+      // Dialogs and dropdown menus portal outside the drawer subtree but stack
+      // above it. They must keep native touch scrolling over the drawer.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -4151,6 +4157,41 @@ export function App({
 
   const allowedApprovalModes = useShallowMemo(allowedApprovalModesProp);
   const hostOwnsArtifactPreview = Boolean(onRightPanelOpen);
+  const connection = useConnection();
+  const standalone = useContext(StandaloneContext);
+  const sessionActions = useActions();
+  // Standalone opt-in for the per-turn marks: the entry has no session
+  // client, so the app wires the telemetry notification itself, gated by
+  // the daemon capability. A host-provided option always wins.
+  const effectiveAssistantFeedback = useMemo<
+    WebShellAssistantFeedbackOptions | undefined
+  >(() => {
+    if (assistantFeedback !== undefined) return assistantFeedback;
+    if (!standalone) return undefined;
+    if (!connection.capabilities?.features.includes('session_turn_feedback'))
+      return undefined;
+    return {
+      onRate: (info) => {
+        if (info.rating === null) return;
+        // Split panes inherit this option but own a different session; a
+        // mark must never be recorded under a session that did not admit
+        // its turn. Pane marks stay local-only until dispatch can reach
+        // the pane's own session client.
+        if (
+          info.sessionId !== undefined &&
+          info.sessionId !== connection.sessionId
+        )
+          return;
+        void sessionActions.rateAssistantTurn(info.promptId, info.rating);
+      },
+    };
+  }, [
+    assistantFeedback,
+    standalone,
+    connection.capabilities,
+    connection.sessionId,
+    sessionActions,
+  ]);
   const customization = useMemo(
     () => ({
       onRefreshModels,
@@ -4177,7 +4218,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      assistantFeedback: effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4222,7 +4263,7 @@ export function App({
       renderComposerTagTooltip,
       onComposerTagClick,
       renderAssistantTurnFooter,
-      assistantFeedback,
+      effectiveAssistantFeedback,
       getAssistantSourcesIcon,
       sourceReferences,
       renderComposerToolbarStart,
@@ -4254,9 +4295,7 @@ export function App({
   const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot({
     structuralOnly: true,
   });
-  const connection = useConnection();
   const modelRefresh = useModelRefresh(onRefreshModels);
-  const standalone = useContext(StandaloneContext);
   const logicalSessionKey = getLogicalSessionKey(
     connection.sessionId,
     connection.workspaceCwd,
@@ -4634,7 +4673,6 @@ export function App({
         : ordinaryWorkspaces,
     [lockedWorkspaceCwd, ordinaryWorkspaces],
   );
-  const sessionActions = useActions();
   const {
     intent: capacityRecovery,
     offer: offerCapacityRecovery,
@@ -4787,6 +4825,10 @@ export function App({
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
     workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
+  const workspaceArtifactLibraryAvailable =
+    workspace.capabilities?.features?.includes(
+      WORKSPACE_ARTIFACT_LIBRARY_FEATURE,
+    ) === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -8485,6 +8527,49 @@ export function App({
     sessionWorktree?.path,
     workspace.client,
   ]);
+  const [pendingJumpArtifactOpen, setPendingJumpArtifactOpenState] = useState<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const pendingJumpArtifactOpenRef = useRef<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const setPendingJumpArtifactOpen = useCallback(
+    (request: PendingArtifactJumpOpenRequest | undefined) => {
+      pendingJumpArtifactOpenRef.current = request;
+      setPendingJumpArtifactOpenState(request);
+    },
+    [],
+  );
+  useEffect(() => {
+    const decision = resolvePendingArtifactJumpOpen(pendingJumpArtifactOpen, {
+      currentSessionId: connection.sessionId,
+      switchingSessionId: sidebarSwitchingSessionId,
+      panelStateKey,
+      restoredSessionKey: artifactPanelRestoredSessionKeyRef.current,
+      panelRestoring: artifactPanelRestoring,
+      loadingTranscript: Boolean(connection.loadingTranscript),
+      artifactsLoading,
+      connected: connection.status === 'connected',
+    });
+    if (decision === 'cancel') {
+      setPendingJumpArtifactOpen(undefined);
+    } else if (decision === 'open' && pendingJumpArtifactOpen) {
+      const targetArtifactId = pendingJumpArtifactOpen.artifactId;
+      setPendingJumpArtifactOpen(undefined);
+      openArtifactPanel(targetArtifactId);
+    }
+  }, [
+    artifactPanelRestoring,
+    artifactsLoading,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    openArtifactPanel,
+    panelStateKey,
+    pendingJumpArtifactOpen,
+    setPendingJumpArtifactOpen,
+    sidebarSwitchingSessionId,
+  ]);
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -11226,6 +11311,7 @@ export function App({
         (mainView === 'scheduledTasks' ||
           mainView === 'prWatches' ||
           mainView === 'goals' ||
+          mainView === 'artifacts' ||
           mainView === 'split'))
     ) {
       setMainView('chat');
@@ -11332,6 +11418,27 @@ export function App({
       showChat();
     }
   }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
+  const openArtifacts = useCallback(() => {
+    if (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable) return;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    if (!navigationRef.current) showChat();
+    setMainView('artifacts');
+    navigationRef.current?.openPage('artifacts');
+  }, [projectFeaturesAvailable, showChat, workspaceArtifactLibraryAvailable]);
+  useEffect(() => {
+    if (
+      mainView === 'artifacts' &&
+      (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable)
+    ) {
+      showChat();
+    }
+  }, [
+    mainView,
+    projectFeaturesAvailable,
+    showChat,
+    workspaceArtifactLibraryAvailable,
+  ]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -11350,6 +11457,7 @@ export function App({
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
+        if (item === 'artifacts') return workspaceArtifactLibraryAvailable;
         return true;
       }),
     );
@@ -11376,6 +11484,43 @@ export function App({
   // when an embedded container disagrees with the viewport.
   const compactShell =
     sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760;
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    const viewport = window.visualViewport;
+    if (!root) return;
+    if (!compactShell || !viewport) {
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
+      return;
+    }
+
+    const updateInset = () => {
+      const inset = visualViewportBottomInset(
+        root.getBoundingClientRect(),
+        viewport,
+      );
+      root.style.setProperty(
+        '--web-shell-visual-viewport-inset-bottom',
+        `${inset}px`,
+      );
+      // The compact welcome layout only anchors its group to the bottom of the
+      // reserved box while the keyboard actually occludes the viewport, so the
+      // unoccluded welcome state keeps its vertical centring.
+      root.toggleAttribute('data-visual-viewport-occluded', inset > 0);
+    };
+    updateInset();
+    viewport.addEventListener('resize', updateInset);
+    // Safari changes offsetTop while scrolling or revealing browser chrome.
+    viewport.addEventListener('scroll', updateInset);
+    window.addEventListener('resize', updateInset);
+    return () => {
+      viewport.removeEventListener('resize', updateInset);
+      viewport.removeEventListener('scroll', updateInset);
+      window.removeEventListener('resize', updateInset);
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
+    };
+  }, [compactShell]);
   const channelSidebarEnabled =
     sidebarOptions.enabled &&
     projectFeaturesAvailable &&
@@ -11527,7 +11672,9 @@ export function App({
           ? 'pr-watches'
           : mainView === 'goals'
             ? 'goals'
-            : undefined;
+            : mainView === 'artifacts'
+              ? 'artifacts'
+              : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -11553,6 +11700,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
           (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
@@ -11580,7 +11728,9 @@ export function App({
           ? 'prWatches'
           : nextPage === 'goals'
             ? 'goals'
-            : 'chat',
+            : nextPage === 'artifacts'
+              ? 'artifacts'
+              : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -11592,6 +11742,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    workspaceArtifactLibraryAvailable,
     channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
@@ -12462,7 +12613,8 @@ export function App({
       mainView === 'scheduledTasks' ||
       mainView === 'prWatches' ||
       mainView === 'workflows' ||
-      mainView === 'goals'
+      mainView === 'goals' ||
+      mainView === 'artifacts'
     ) {
       setMainView('chat');
     }
@@ -18442,6 +18594,12 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      if (
+        pendingJumpArtifactOpenRef.current &&
+        pendingJumpArtifactOpenRef.current.sessionId !== sessionId
+      ) {
+        setPendingJumpArtifactOpen(undefined);
+      }
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
@@ -18517,7 +18675,45 @@ export function App({
       closePanel,
       isKnownLiveWorkspaceCwd,
       sessionActions,
+      setPendingJumpArtifactOpen,
       setPendingSessionContext,
+    ],
+  );
+
+  const openSessionFromArtifactLibrary = useCallback(
+    (
+      sessionId: string,
+      archiveState: 'active' | 'archived',
+      artifactId?: string,
+    ) => {
+      const targetCwd =
+        resolveWorkspaceMaintenanceTargetCwd() ??
+        workspace.capabilities?.workspaceCwd;
+      void runArtifactLibrarySessionJump({
+        sessionId,
+        archiveState,
+        artifactId,
+        targetCwd,
+        primaryCwd: workspace.capabilities?.workspaceCwd,
+        showChat,
+        unarchivePrimarySession: (id) => workspaceActions.unarchiveSession(id),
+        unarchiveWorkspaceSessions: (cwd, ids) =>
+          workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+        getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
+        setPendingJumpArtifactOpen,
+        loadSidebarSession: (id, cwd) => loadSidebarSession(id, cwd),
+        reportError,
+      });
+    },
+    [
+      loadSidebarSession,
+      reportError,
+      resolveWorkspaceMaintenanceTargetCwd,
+      setPendingJumpArtifactOpen,
+      showChat,
+      workspace.capabilities?.workspaceCwd,
+      workspace.client,
+      workspaceActions,
     ],
   );
 
@@ -24868,6 +25064,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(workspaceArtifactLibraryAvailable
+                    ? {
+                        onOpenArtifacts: () => {
+                          closeMobileDrawer();
+                          openArtifacts();
+                        },
+                      }
+                    : {})}
                   {...(prWatchesAvailable
                     ? {
                         onOpenPrWatches: () => {
@@ -26172,6 +26376,68 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                workspaceArtifactLibraryAvailable &&
+                mainView === 'artifacts' && (
+                  <div
+                    className={styles.fullPage}
+                    data-testid="artifacts-library-page"
+                  >
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('workspaceArtifactLibrary.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <WorkspaceArtifactLibraryPage
+                        workspaceCwd={
+                          resolveWorkspaceMaintenanceTargetCwd() ??
+                          workspace.capabilities?.workspaceCwd
+                        }
+                        onOpenSession={(sessionId, archiveState) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                          )
+                        }
+                        onJumpToSessionArtifact={(
+                          sessionId,
+                          artifactId,
+                          archiveState,
+                        ) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                            artifactId,
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
               {workspaceContextActive && mainView === 'cockpit' && (
                 <div className={styles.fullPage} data-testid="cockpit-page">
                   <SessionWorkflowCockpit

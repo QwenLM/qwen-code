@@ -171,6 +171,16 @@ low/medium/high. An adaptive profile selects adaptive thinking even when a
 legacy manual budget is configured. Existing complete capability declarations
 continue to work.
 
+An undeclared `gemini-4*` model on a `gemini` or `vertex-ai` route inherits the
+Gemini profile with `low`, `medium`, and `high`, defaulting to `high`. `/effort`
+and the provider reasoning controls offer only those tiers and allow thinking
+off. A persisted stronger legacy tier clamps to high on the wire rather than
+being offered as a new selection. These routes also have built-in fallbacks of
+1,000,000 input tokens and 65,536 output tokens; an explicit
+`generationConfig.contextWindowSize` still takes precedence, and published
+model-catalog values retain their normal precedence. The same model id on an
+OpenAI-compatible route does not inherit these Gemini protocol defaults.
+
 Reasoning changes apply before the next user prompt. Its requests, retries and
 child agents share the captured reasoning configuration. Invalid updates retain
 the previous configuration and log the model/field error. Invalid declarations

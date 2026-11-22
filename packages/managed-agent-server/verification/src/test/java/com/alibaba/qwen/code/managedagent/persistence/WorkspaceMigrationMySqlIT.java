@@ -311,8 +311,8 @@ class WorkspaceMigrationMySqlIT {
         String operationKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.DELETE, scopeKey, targetKey, "delete");
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_key, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, ?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
-                operationKey, scopeKey, scopeKey, targetKey, "tenant-a", "headless");
+                "INSERT INTO ma_operation (operation_key, scope_key, target_key, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
+                operationKey, scopeKey, targetKey, "tenant-a", "headless");
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
