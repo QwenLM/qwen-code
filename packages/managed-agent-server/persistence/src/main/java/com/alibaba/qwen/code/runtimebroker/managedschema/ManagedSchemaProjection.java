@@ -103,7 +103,8 @@ public enum ManagedSchemaProjection {
                     + "runtime_instance_id, runtime_endpoint, "
                     + "runtime_lease_id, runtime_epoch, runtime_credential_ciphertext, "
                     + "runtime_credential_key_id, attestation_generation, is_drain_requested, "
-                    + "operation_owner, operation_lease_until, operation_generation, record_version, "
+                    + "operation_owner, operation_lease_until, operation_generation, "
+                    + "observation_owner, observation_lease_until, observation_generation, record_version, "
                     + "last_health_at, last_reconciled_at, last_active_at, drain_receipt_json"),
     RUNTIME_SESSION(
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
