@@ -34,38 +34,37 @@ the visual before/after gate remains the rest of 2f.
 ### Session-scoped locks (R5-1)
 
 Both latches belong to the session that armed them. `ChatSurface` tracks the
-owner session with a `lockOwner` state initialized to `controller.sessionId`,
-an `ownerTokenRef` captured by each submit, and a per-session `parkedLatchesRef`
-map (`sessionId -> { token, inFlight, admissionLocked }`). On a render where the
-controller's session differs, it uses the React "adjust-state-during-render"
-pattern to park the outgoing session's latches and restore the incoming
-session's latches:
+owner session with a `lockOwner` state and a `refOwnerRef` ref initialized to
+`controller.sessionId`, an `ownerTokenRef` captured by each submit, and a
+per-session `parkedLatchesRef` map (`sessionId -> { token, inFlight, admissionLocked }`).
+On a render where the controller's session differs, it uses the React
+"adjust-state-during-render" pattern to park the outgoing session's latches and
+restore the incoming session's latches:
 
-- A **real session change** (one non-empty id to a different id, back to the
+- **Every session change** (one non-empty id to a different id, back to the
   empty new-chat id, an idle `'' -> id` sidebar click out of a locked new chat
-  with no submit in flight, or a sidebar switch into an unrelated existing
-  session while a new chat's first submit is still in flight) parks the outgoing
-  durable session's `{ token, inFlight, admissionLocked }` when either latch is
-  armed (or deletes its parked entry when idle; an unallocated `''` new chat has
-  no durable session to return to and is abandoned) and restores the incoming
-  session's parked entry (defaulting to a fresh token and cleared latches). This
-  ensures neither the render gate (`submitDisabled`) nor the dispatch gate (the
-  refs read in `onSubmit`) blocks a session that does not own the lock, while a
+  with no submit in flight, or a sidebar switch into an existing session while a
+  new chat's first submit is still in flight; on the daemon path
+  `actions.submitPrompt` requires an already-created session via
+  `requireSessionForAction` and session creation completes before `submitPrompt`
+  is dispatched) parks the outgoing durable session's
+  `{ token, inFlight, admissionLocked }` when either latch is armed (or deletes
+  its parked entry when idle; an unallocated `''` new chat has no durable
+  session to return to and is abandoned) and restores the incoming session's
+  parked entry (defaulting to a fresh token and cleared latches). This ensures
+  neither the render gate (`submitDisabled`) nor the dispatch gate (the refs
+  read in `onSubmit`) blocks a session that does not own the lock, while a
   round-trip switch back (`A -> B -> A`) restores `A`'s in-flight guard, owner
   token, and unknown-admission lock.
-- The **one change that is not a switch** is the `'' -> id` allocation a new
-  chat's first submit spans **while that submit is still in flight and the
-  controller identifies `controller.sessionId` as the id that submit allocated**
-  (`lockOwner === '' && controller.sessionId !== '' && submitInFlight && controller.allocatedSessionId === controller.sessionId`):
-  for a controller whose `submit` allocates a session before rendering the new
-  id, the controller exposes that id on `allocatedSessionId`. That is the same
-  logical chat, so the in-flight latch and the owner token stay armed across it
-  (so the settlement still commits the draft and no duplicate send can slip
-  through mid-submit). On the daemon path, `actions.submitPrompt` requires an
-  already-created session (`requireSessionForAction`) and session creation
-  (`ensureSessionForPrompt` / `createSession`) completes before `submitPrompt`
-  is dispatched, so `useDaemonChatController` leaves `allocatedSessionId` unset
-  and treats every `'' -> id` transition as a session switch.
+- **Idempotent ref transition across discarded renders.** Because React discards
+  uncommitted state updates on an aborted render (for example when a sibling
+  suspends) without rolling back ref writes, the live refs' owner is tracked in
+  `refOwnerRef` separate from the `lockOwner` state: the ref park/restore runs
+  only when `refOwnerRef.current !== controller.sessionId`, while a retry of an
+  uncommitted render where `refOwnerRef.current` already matches
+  `controller.sessionId` only re-applies the `setLockOwner` / `setSubmitInFlight`
+  / `setAdmissionLocked` state updates from the live refs instead of overwriting
+  or deleting the entry it just parked.
 - **Accepted settlement commits the submitting session's own draft across a
   switch.** `commitAccepted` in `useComposerCore` is already identity-scoped (on
   `sourceChanged` it clears only the submitting draft key and pushes history
@@ -78,8 +77,7 @@ session's latches:
 The switch updates the ref and the state halves together; updating only one
 would leave either a visible-but-dispatchable or an invisible-but-blocked
 composer. This mirrors the session-owned admission state already present in
-`App` and `ChatPane` (`admissionOwnerRef`), with the mid-submit allocation
-exception gated on the contract's `allocatedSessionId` signal.
+`App` and `ChatPane` (`admissionOwnerRef`).
 
 ### History pagination binding
 
@@ -97,22 +95,13 @@ full retry parity.
 
 ## Design decisions and rationale
 
-- **Render-phase reset, not an effect.** An effect would run after the first
-  render under the new session, leaving a stale armed lock visible for a frame
-  and able to gate a submit before the effect clears it. The render-phase update
-  converges (the owner matches on the re-render) and clears the latches before
-  the new session can dispatch.
-- **The allocation exception requires both an in-flight submit and a matching
-  `allocatedSessionId`.** `sessionId` alone cannot distinguish a mid-submit
-  session allocation (`'' -> allocated s1`) from a user clicking an existing
-  session in the sidebar (`'' -> existing s2`) during the session-creation round
-  trip. The contract therefore exposes an optional `allocatedSessionId` for
-  controllers that allocate a session inside `submit` before rendering the new
-  id, and `ChatSurface` preserves the latch and owner token only when the new
-  `controller.sessionId` matches `controller.allocatedSessionId`. The daemon
-  adapter (`useDaemonChatController`) allocates sessions before `submitPrompt`
-  and leaves `allocatedSessionId` unset, so any `'' -> id` transition on the
-  daemon controller takes the switch branch.
+- **Render-phase reset with `refOwnerRef` idempotency, not an effect.** An
+  effect would run after the first render under the new session, leaving a stale
+  armed lock visible for a frame and able to gate a submit before the effect
+  clears it. Tracking the live refs' owner in `refOwnerRef` separate from the
+  `lockOwner` state ensures that if React discards an uncommitted render after
+  mutating the refs, the retry does not re-run the ref park/restore with
+  already-restored refs and delete the entry it just parked.
 - **Per-session parking + owner token guards late settlement.** Each submit
   captures the current `ownerTokenRef`; parking `{ token, inFlight, admissionLocked }`
   under the outgoing durable session id and restoring the incoming session's
@@ -129,8 +118,7 @@ full retry parity.
 ## Constraints respected
 
 - `chat-core` imports no `daemon/**` value; the session-scoping uses only the
-  contract's `sessionId` and `allocatedSessionId`. The history binding lives in
-  the daemon adapter.
+  contract's `sessionId`. The history binding lives in the daemon adapter.
 - No daemon/Java route, OpenAPI, session-id namespace, or storage-key change.
 - Additive: no production column is switched yet; the change is verified by the
   component/binding suites, not a browser gate (that belongs to the switch).
@@ -139,18 +127,18 @@ full retry parity.
 
 - `ChatSurface` suite adds six session-scoping cases: the admission lock clears
   on a session switch (including an idle `'' -> id` sidebar switch out of a
-  locked new chat and returning to a brand-new `''` chat), the in-flight latch
-  and owner token survive a mid-submit `'' -> id` allocation identified by
-  `allocatedSessionId`, a mid-submit switch from an unallocated new chat into an
-  unrelated existing session clears the in-flight latch and ignores the
-  abandoned `unknown` settlement, a session switch between allocated sessions
-  clears the in-flight latch (without letting the inactive settlement clear the
-  new session's own in-flight latch), an accepted settlement after a switch
-  still commits the submitting session's draft while a rejected settlement stays
-  silent on the new session, and a round-trip switch (`A -> B -> A`) restores
-  both the admission lock (including when `unknown` settles while parked) and an
-  in-flight submit latch. Verified red under each named mutation and restored
-  byte-identical.
+  locked new chat and returning to a brand-new `''` chat), a mid-submit switch
+  from an unallocated new chat into an existing session clears the in-flight
+  latch and ignores the abandoned `unknown` settlement, a session switch between
+  allocated sessions clears the in-flight latch (without letting the inactive
+  settlement clear the new session's own in-flight latch), an accepted
+  settlement after a switch still commits the submitting session's draft while a
+  rejected settlement stays silent on the new session, a round-trip switch
+  (`A -> B -> A`) restores both the admission lock (including when `unknown`
+  settles while parked) and an in-flight submit latch, and a switch render that
+  is discarded before commit (via `<Suspense>`) preserves the parked in-flight
+  latch on the retry and on returning to the original session. Verified red
+  under each named mutation and restored byte-identical.
 - The binding suite adds a `loadOlder` case (including `{ force: true }`
   forwarding and per-render history handle refresh), verified red under its
   named mutations and restored byte-identical.

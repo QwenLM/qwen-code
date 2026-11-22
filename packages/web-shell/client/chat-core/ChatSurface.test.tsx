@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, Suspense } from 'react';
 import type {
   Message,
   PermissionRequest,
@@ -852,56 +852,6 @@ describe('ChatSurface', () => {
     ).toBeNull();
   });
 
-  it('preserves the in-flight latch and owner across a mid-submit session id allocation', async () => {
-    let resolveSubmit: ((value: { admission: string }) => void) | undefined;
-    const first = fakeController({
-      sessionId: '',
-      submit: vi.fn(
-        () =>
-          new Promise<{ admission: string }>((resolve) => {
-            resolveSubmit = resolve;
-          }),
-      ),
-    });
-    const container = mountReact(<ChatSurface controller={first} />);
-    const commitAccepted = vi.fn();
-    await act(async () => {
-      (captured.editor?.onSubmit as SubmitHandler)(
-        'hello',
-        undefined,
-        undefined,
-        commitAccepted,
-        undefined,
-      );
-    });
-    expect(captured.editor?.submitDisabled).toBe(true);
-    // Mid-submit, the daemon allocates 's1' and the controller rebuilds under
-    // it with allocatedSessionId matching 's1': that is the same logical chat,
-    // so the in-flight guard must stay armed (preventing a duplicate send) and
-    // the owner token must survive so the settlement still commits the draft.
-    const allocated = fakeController({
-      sessionId: 's1',
-      allocatedSessionId: 's1',
-    });
-    rerenderReact(container, <ChatSurface controller={allocated} />);
-    expect(captured.editor?.submitDisabled).toBe(true);
-    await act(async () => {
-      (captured.editor?.onSubmit as SubmitHandler)(
-        'duplicate',
-        undefined,
-        undefined,
-        vi.fn(),
-        undefined,
-      );
-    });
-    expect(allocated.submit).not.toHaveBeenCalled();
-    await act(async () => {
-      resolveSubmit?.({ admission: 'accepted' });
-    });
-    expect(commitAccepted).toHaveBeenCalledTimes(1);
-    expect(captured.editor?.submitDisabled).toBe(false);
-  });
-
   it('clears the in-flight latch when switching from an unallocated new chat to an existing session mid-submit', async () => {
     let resolveFirst: ((value: { admission: string }) => void) | undefined;
     const first = fakeController({
@@ -929,9 +879,8 @@ describe('ChatSurface', () => {
     });
     expect(captured.editor?.submitDisabled).toBe(true);
     // The user clicks an existing session ('s2') in the sidebar while the new
-    // chat's first submit is still in flight: s2 was not allocated by that
-    // submit (allocatedSessionId is undefined), so the latch must clear and the
-    // owner token must rotate. Treating every in-flight '' -> id change as the
+    // chat's first submit is still in flight: the latch must clear and the
+    // owner token must rotate. Treating an in-flight '' -> id change as an
     // allocation turns this red (verify-pr F1 / cell C4).
     const existing = fakeController({ sessionId: 's2' });
     rerenderReact(
@@ -1226,5 +1175,91 @@ describe('ChatSurface', () => {
     expect(
       container.querySelector('[data-testid="admission-locked-banner"]'),
     ).toBeNull();
+  });
+
+  it('preserves a parked in-flight latch when the switch render is discarded before commit (R1-4)', async () => {
+    let resolveS1: ((value: { admission: string }) => void) | undefined;
+    const s1 = fakeController({
+      sessionId: 's1',
+      submit: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveS1 = resolve;
+          }),
+      ),
+    });
+    const s2 = fakeController({ sessionId: 's2' });
+    let pendingSuspense: Promise<void> | null = null;
+    function SuspendingSibling() {
+      if (pendingSuspense) {
+        throw pendingSuspense;
+      }
+      return null;
+    }
+    const container = mountReact(
+      <Suspense fallback={null}>
+        <ChatSurface controller={s1} />
+        <SuspendingSibling />
+      </Suspense>,
+    );
+    const s1Commit = vi.fn();
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'in s1',
+        undefined,
+        undefined,
+        s1Commit,
+        undefined,
+      );
+    });
+    expect(captured.editor?.submitDisabled).toBe(true);
+    // Switch to s2 on a render whose sibling suspends so React discards the
+    // uncommitted state update after ChatSurface has run its render body, then
+    // resolve the suspension so React retries the s1 -> s2 render. Without
+    // gating the ref park/restore on refOwnerRef, the retry re-enters with
+    // lockOwner === 's1' and submitInFlightRef.current === false and deletes
+    // s1's parked entry.
+    let resolveSuspense!: () => void;
+    pendingSuspense = new Promise<void>((resolve) => {
+      resolveSuspense = resolve;
+    });
+    rerenderReact(
+      container,
+      <Suspense fallback={null}>
+        <ChatSurface controller={s2} />
+        <SuspendingSibling />
+      </Suspense>,
+    );
+    pendingSuspense = null;
+    await act(async () => {
+      resolveSuspense();
+    });
+    expect(captured.editor?.sessionId).toBe('s2');
+    expect(captured.editor?.submitDisabled).toBe(false);
+    // Switch back to s1 while s1's submit is still in flight: s1's parked
+    // in-flight latch must still be intact, blocking a duplicate send.
+    rerenderReact(
+      container,
+      <Suspense fallback={null}>
+        <ChatSurface controller={s1} />
+        <SuspendingSibling />
+      </Suspense>,
+    );
+    expect(captured.editor?.submitDisabled).toBe(true);
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'duplicate in s1',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    expect(s1.submit).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveS1?.({ admission: 'accepted' });
+    });
+    expect(s1Commit).toHaveBeenCalledTimes(1);
+    expect(captured.editor?.submitDisabled).toBe(false);
   });
 });

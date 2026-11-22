@@ -120,44 +120,45 @@ export function ChatSurface({
   // the incoming session's parked latches (defaulting to fresh) so a stale lock
   // never blocks another session while a round-trip switch back (A -> B -> A)
   // preserves A's in-flight guard, owner token, and unknown-admission lock.
-  // The one transition that is NOT a switch is the '' -> id allocation a new
-  // chat's first submit spans while that submit is still in flight AND the
-  // controller identifies the new sessionId as the one that submit allocated
-  // (controller.allocatedSessionId) — that is the same logical chat, so the
-  // active latch and owner token stay armed across it. A switch out of an
-  // unallocated '' new chat into an unrelated existing session has no durable
-  // '' session to return to and abandons the unallocated latches.
+  // An unallocated '' new chat has no durable session to return to and abandons
+  // its latches on a switch. Track the live refs' owner in a ref (refOwnerRef)
+  // separate from the React state (lockOwner): if React discards an uncommitted
+  // render after the ref park/restore has run, the retry re-enters with
+  // lockOwner rolled back while refOwnerRef already matches controller.sessionId,
+  // so gating the ref mutation on refOwnerRef makes the transition idempotent
+  // instead of overwriting or deleting the entry it just parked.
   const ownerTokenRef = useRef({});
   const parkedLatchesRef = useRef<
     Map<string, { token: object; inFlight: boolean; admissionLocked: boolean }>
   >(new Map());
+  const refOwnerRef = useRef(controller.sessionId);
   const [lockOwner, setLockOwner] = useState(controller.sessionId);
-  if (lockOwner !== controller.sessionId) {
-    const allocatedMidSubmit =
-      lockOwner === '' &&
-      controller.sessionId !== '' &&
-      submitInFlight &&
-      controller.allocatedSessionId === controller.sessionId;
-    setLockOwner(controller.sessionId);
-    if (!allocatedMidSubmit) {
-      if (lockOwner !== '') {
+  if (
+    refOwnerRef.current !== controller.sessionId ||
+    lockOwner !== controller.sessionId
+  ) {
+    if (refOwnerRef.current !== controller.sessionId) {
+      const prevOwner = refOwnerRef.current;
+      if (prevOwner !== '') {
         if (submitInFlightRef.current || admissionLockedRef.current) {
-          parkedLatchesRef.current.set(lockOwner, {
+          parkedLatchesRef.current.set(prevOwner, {
             token: ownerTokenRef.current,
             inFlight: submitInFlightRef.current,
             admissionLocked: admissionLockedRef.current,
           });
         } else {
-          parkedLatchesRef.current.delete(lockOwner);
+          parkedLatchesRef.current.delete(prevOwner);
         }
       }
       const restored = parkedLatchesRef.current.get(controller.sessionId);
       ownerTokenRef.current = restored?.token ?? {};
       submitInFlightRef.current = restored?.inFlight ?? false;
-      setSubmitInFlight(restored?.inFlight ?? false);
       admissionLockedRef.current = restored?.admissionLocked ?? false;
-      setAdmissionLocked(restored?.admissionLocked ?? false);
+      refOwnerRef.current = controller.sessionId;
     }
+    setLockOwner(controller.sessionId);
+    setSubmitInFlight(submitInFlightRef.current);
+    setAdmissionLocked(admissionLockedRef.current);
   }
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =

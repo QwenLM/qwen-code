@@ -135,11 +135,6 @@ export interface SessionChatController {
   readonly kind: 'daemon' | 'managed';
   readonly sessionId: string;
   readonly storageKey: string;
-  // When an unallocated new chat (sessionId === '') allocates its session id
-  // mid-submit, exposes that id while the submit is in flight so the surface
-  // can distinguish the same-chat allocation from a user switch into an
-  // unrelated existing session during the session-creation round trip.
-  readonly allocatedSessionId?: string;
 
   // In-flight and recently settled intents, observable across refresh.
   // Retention is bounded: at most the latest terminal entry per kind and
