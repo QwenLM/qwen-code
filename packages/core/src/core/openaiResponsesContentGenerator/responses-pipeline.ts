@@ -16,6 +16,7 @@ import type {
   ResponsesApiInputItem,
   ResponsesApiRequest,
   ResponsesApiReasoning,
+  ResponsesApiServiceTier,
   ResponsesSSEEvent,
   ResponsesSSEEventType,
 } from './types.js';
@@ -503,6 +504,11 @@ export class ResponsesPipeline {
       requestMaxTokens;
     if (maxOut != null) {
       apiRequest.max_output_tokens = maxOut;
+    }
+
+    if (this.config.service_tier !== undefined) {
+      apiRequest.service_tier = this.config
+        .service_tier as ResponsesApiServiceTier;
     }
 
     const extraBody = filterIsolatedModelOverrides(this.config.extra_body);
