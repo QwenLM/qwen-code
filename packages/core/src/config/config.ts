@@ -2515,6 +2515,8 @@ export interface SubSessionSpawnRequest {
   workspaceGeneration?: string;
   /** The named workspace was selected under YOLO without one-time approval. */
   requiresYolo?: true;
+  /** The authorization was automatic under AUTO and requires that mode still. */
+  requiresAutoMode?: true;
   /** An existing session in `workspace` to send the prompt to. */
   sessionId?: string;
 }
@@ -2523,6 +2525,8 @@ export interface SubSessionWorkspaceBinding {
   workspaceId: string;
   workspaceCwd: string;
   workspaceGeneration: string;
+  /** Derived from launcher identity; used for approval, not launch authorization. */
+  sameWorkspace: boolean;
 }
 
 export type SubSessionWorkspaceResolver = (

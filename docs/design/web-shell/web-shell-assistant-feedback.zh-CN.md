@@ -23,8 +23,13 @@
 ## 非目标
 
 - 不做服务端持久化。标记不写入会话记录，别的浏览器、设备或客户端读不到。
-- 不发遥测。标记不会发出 `UserFeedbackEvent` 或任何分析事件，也不受使用统计开关约束。
-- 不引入 `promptId` 锚点、不新增 daemon 路由、不改 daemon 的 transcript 投影与线格式。
+- 标记机制本身不发遥测。标记不会发出 `UserFeedbackEvent` 或任何分析事件，也不受使用
+  统计开关约束。独立版应用后续的开启以独立一层追加了遥测通路，见
+  [Web Shell 助手反馈遥测](web-shell-assistant-feedback-telemetry.zh-CN.md)；
+  下文的嵌入式宿主契约仍不发遥测。
+- **标记本身**不引入 `promptId` 锚点、不新增 daemon 路由：标记存储仍只在浏览器本地。
+  （遥测后续的 `POST /session/:id/feedback` 是独立的、不落盘的通知层，不是标记存储。）
+  不改 daemon 的 transcript 投影与线格式。
 - 不接受宿主传入初始状态：宿主无法预置或覆盖标记。
 - 不做逐轮可见性控制：宿主只能整体开或关。
 
@@ -121,8 +126,11 @@ customization.assistantFeedback?: {
 
 宿主把它作为 `assistantFeedback` prop 传给嵌入的 `WebShell`，由后者转发进 customization
 上下文。传入这个对象即显示标记；不传则回答底部与今天完全一致，这正是老宿主零变化的原因。
-载荷类型已从包的入口导出，宿主可以给它们命名。本仓库自己的独立应用**不**开启它，所以标记
-只在宿主传入配置项时出现——这是刻意的，因为独立应用没有宿主可通知。
+载荷类型已从包的入口导出，宿主可以给它们命名。本仓库自己的独立应用最初**不**开启它，
+因为它没有宿主可通知。现在它经由应用内部一处 capability 门控的接线开启，并把每次标记
+上报遥测——见
+[Web Shell 助手反馈遥测](web-shell-assistant-feedback-telemetry.zh-CN.md)。
+宿主传入的配置项仍优先于该接线。
 
 只有在**有会话 id 的可交互 transcript** 中才会提供标记，因此只读与嵌入的 transcript 渲染
 永远不显示它们——冻结的历史视口也一样，它会丢掉会话 id，于是在"复制"仍在的回答上不显示
@@ -140,7 +148,8 @@ customization.assistantFeedback?: {
   与"遥测开关口径"的问题。刻意做成局部的标记，先拿到可见行为，同时把升级路径留着。
 - **不复用 TUI 的 `UserFeedbackEvent`。** 那个事件是会话级、三值（`bad`/`fine`/`good`）、
   没有"已取消"状态，且它的写入函数同时向遥测出口发送。复用它会把一个界面开关绑到分析出口上，
-  而且仍然表达不了"每轮一个标记"。
+  而且仍然表达不了"每轮一个标记"。独立版的遥测后续改动刻意经由一条独立通路复用该事件，
+  标记 UI 本身仍与之无关。
 
 ## 约束
 
@@ -209,6 +218,10 @@ prompt 自己的块在两种情况下都带落盘值。正因如此，键才回�
 
 ## 后续事项
 
+- 独立版标记的遥测已在
+  [Web Shell 助手反馈遥测](web-shell-assistant-feedback-telemetry.zh-CN.md)
+  中实现：capability 门控的开启，加一条 `POST /session/:id/feedback`
+  通路接入会话的 `logUserFeedback`。本文档的本地标记契约不变。
 - 服务端持久化仍未实现：标记只存在这个浏览器里。将来要做，需要新增一条 daemon 路由写入、
   再通过投影读回——键（`sessionId` + `promptId`）与本文档里的载荷已经带齐了这样的记录所需
   的内容。

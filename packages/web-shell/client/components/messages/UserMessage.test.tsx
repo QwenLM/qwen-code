@@ -1,15 +1,26 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactNode } from 'react';
+import {
+  act,
+  startTransition,
+  StrictMode,
+  Suspense,
+  type ReactNode,
+} from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   createDaemonTranscriptState,
   reduceDaemonTranscriptEvents,
 } from '@qwen-code/sdk/daemon';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
+import * as composerTag from '../../utils/composerTag';
+import * as automaticTrigger from '../../utils/automatic-trigger';
 import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
-import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import {
+  TranscriptDocumentExpandedProvider,
+  TranscriptRenderModeProvider,
+} from '../../transcriptRenderMode';
 import { MessageItem } from '../MessageItem';
 import { UserMessage } from './UserMessage';
 
@@ -25,6 +36,7 @@ afterEach(() => {
     container.remove();
   }
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function render(node: ReactNode): HTMLElement {
@@ -81,6 +93,33 @@ function findByTitle(container: HTMLElement, title: string): Element | null {
     ) ?? null
   );
 }
+
+function SuspendingContent({
+  promise,
+  onSuspend,
+}: {
+  promise?: Promise<void>;
+  onSuspend?: () => void;
+}) {
+  if (promise) {
+    onSuspend?.();
+    throw promise;
+  }
+  return null;
+}
+
+const scheduledTaskRunContent = [
+  'Scheduled task: Review PRs',
+  'Task ID: task-1',
+  'Schedule: 0 * * * *',
+  'Triggered at: 2026-08-26T07:27:00.000Z',
+  'Trigger: scheduled',
+  'Session: new chat for this run',
+  '',
+  'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.',
+  '',
+  'review the next PR',
+].join('\n');
 
 describe('UserMessage', () => {
   it('names the session a message came from', () => {
@@ -575,21 +614,935 @@ describe('UserMessage', () => {
     expect(container.textContent).toContain('full exported prompt');
   });
 
+  it.each(['cron', 'loop'] as const)(
+    'renders %s input as a compact automatic trigger with expandable rich content',
+    (source) => {
+      vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(
+        500,
+      );
+      const content =
+        '/loop Check the release\n' +
+        'Open https://example.test/releases and keep every original constraint.\n' +
+        'Final instruction marker.';
+      const container = render(
+        <I18nProvider language="en">
+          <UserMessage content={content} source={source} />
+        </I18nProvider>,
+      );
+      const card = container.querySelector(
+        '[data-web-shell-automatic-trigger-message]',
+      );
+      expect(card?.getAttribute('data-source')).toBe(source);
+      expect(card?.textContent).toContain('Automatic trigger');
+      expect(
+        card?.querySelector('[data-web-shell-automatic-trigger-summary]')
+          ?.textContent,
+      ).toBe(content.replace(/\s+/g, ' '));
+      expect(card?.querySelector('time')).toBeNull();
+      expect(
+        card?.querySelector('[data-web-shell-automatic-trigger-instructions]'),
+      ).toBeNull();
+      expect(card?.querySelectorAll('button')).toHaveLength(1);
+
+      const toggle = card?.querySelector<HTMLButtonElement>('button');
+      expect(toggle?.textContent).toBe('Show more');
+      expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+      act(() => toggle?.click());
+
+      const instructions = card?.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      );
+      expect(instructions?.textContent).toContain(content);
+      expect(
+        instructions?.querySelector('a[href="https://example.test/releases"]'),
+      ).not.toBeNull();
+      expect(
+        instructions?.querySelector('[data-web-shell-user-slash-command]')
+          ?.textContent,
+      ).toBe('/loop');
+      expect(toggle?.textContent).toBe('Collapse');
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(card?.querySelectorAll('button')).toHaveLength(1);
+    },
+  );
+
+  it.each([undefined, 'goal_runtime', 'custom'])(
+    'does not render an automatic trigger for source %s',
+    (source) => {
+      const container = render(
+        <UserMessage content="ordinary full prompt" source={source} />,
+      );
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+      expect(container.textContent).toContain('ordinary full prompt');
+    },
+  );
+
+  it.each([false, true])(
+    'lets a host override the complete automatic-input body (document=%s)',
+    (documentMode) => {
+      const content = 'RAW-SECRET\nwith details';
+      const renderUserMessageContent = vi.fn(() => (
+        <span>custom full automatic content</span>
+      ));
+      const container = render(
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ renderUserMessageContent }}>
+              <UserMessage content={content} source="cron" />
+            </WebShellCustomizationProvider>
+          </I18nProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(container.textContent).toContain('custom full automatic content');
+      expect(container.textContent).not.toContain('RAW-SECRET');
+      expect(container.querySelector('[title="RAW-SECRET"]')).toBeNull();
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+      expect(renderUserMessageContent).toHaveBeenCalledTimes(1);
+      expect(renderUserMessageContent).toHaveBeenCalledWith(
+        expect.objectContaining({ content }),
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'respects parser redaction for automatic input (document=%s)',
+    (documentMode) => {
+      const content = 'RAW-SECRET\nwith details';
+      const container = render(
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <WebShellCustomizationProvider
+            value={{
+              parseUserMessageContent: () => [
+                { type: 'text' as const, text: '[redacted]' },
+              ],
+            }}
+          >
+            <UserMessage content={content} source="cron" />
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(container.textContent).toBe('[redacted]');
+      expect(container.textContent).not.toContain('RAW-SECRET');
+      expect(container.querySelector('[title="RAW-SECRET"]')).toBeNull();
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+    },
+  );
+
+  it.each([false, true])(
+    'respects custom composer-tag rendering (document=%s)',
+    (documentMode) => {
+      const content = '@secret-token';
+      const container = render(
+        <TranscriptRenderModeProvider
+          value={documentMode ? 'document' : 'interactive'}
+        >
+          <WebShellCustomizationProvider
+            value={{
+              renderComposerTag: () => <span>[redacted]</span>,
+            }}
+          >
+            <UserMessage
+              content={content}
+              source="cron"
+              inputAnnotations={[
+                referenceAnnotation(content, '@secret-token', {
+                  id: 'secret',
+                  kind: 'file',
+                  label: '@secret-token',
+                  value: 'secret-token',
+                }),
+              ]}
+            />
+          </WebShellCustomizationProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(container.textContent).toBe('[redacted]');
+      expect(container.textContent).not.toContain('secret-token');
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-summary]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-message]'),
+      ).toBeNull();
+    },
+  );
+
+  it('keeps attachments and the complete editor text for automatic input', () => {
+    const content = '/loop full original instruction';
+    const container = render(
+      <UserMessage
+        content={content}
+        source="loop"
+        editing
+        images={[
+          {
+            data: 'data:image/png;base64,iVBORw0KGgo=',
+            mimeType: 'image/png',
+          },
+        ]}
+        files={[{ name: 'notes.txt', mimeType: 'text/plain', text: 'notes' }]}
+      />,
+    );
+    expect(
+      container.querySelector('[data-web-shell-user-images]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-user-files]'),
+    ).not.toBeNull();
+    expect(container.querySelector('textarea')?.value).toBe(content);
+  });
+
+  it('preserves annotation chips and attachment previews beyond disclosure', () => {
+    const content = '@README.md Review this\nsecond line';
+    const onAttachmentPreview = vi.fn();
+    const container = render(
+      <UserMessage
+        content={content}
+        source="cron"
+        inputAnnotations={[
+          referenceAnnotation(content, '@README.md', {
+            id: 'readme',
+            kind: 'file',
+            label: '@README.md',
+            value: 'README.md',
+          }),
+        ]}
+        onAttachmentPreview={onAttachmentPreview}
+      />,
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    act(() => toggle?.click());
+    const chip = findByTitle(container, '@README.md');
+    expect(chip).not.toBeNull();
+    act(() => (chip as HTMLElement).click());
+    expect(onAttachmentPreview).toHaveBeenCalledWith({
+      name: 'README.md',
+      workspacePath: 'README.md',
+    });
+  });
+
+  it.each([true, false])(
+    'uses document expansion=%s for automatic input without controls',
+    (documentExpanded) => {
+      const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+      const container = render(
+        <TranscriptRenderModeProvider value="document">
+          <TranscriptDocumentExpandedProvider value={documentExpanded}>
+            <UserMessage
+              content={'full exported loop input\nwith a second line'}
+              source="loop"
+            />
+          </TranscriptDocumentExpandedProvider>
+        </TranscriptRenderModeProvider>,
+      );
+      expect(
+        container.querySelector('[data-web-shell-automatic-trigger-summary]')
+          ?.textContent,
+      ).toBe('full exported loop input with a second line');
+      expect(
+        container.querySelector(
+          '[data-web-shell-automatic-trigger-instructions]',
+        ) !== null,
+      ).toBe(documentExpanded);
+      expect(parse).toHaveBeenCalledTimes(documentExpanded ? 1 : 0);
+      expect(container.querySelector('button')).toBeNull();
+      if (documentExpanded) {
+        expect(container.textContent).toContain('full exported loop input');
+      }
+    },
+  );
+
+  it('resets expanded details when automatic source arrives', () => {
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(500);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const content = 'ordinary prompt\nwith details';
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (source?: string) => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source={source} />
+      </I18nProvider>
+    );
+    act(() => root.render(<StrictMode>{view()}</StrictMode>));
+    const genericToggle = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Show more');
+    act(() => genericToggle?.click());
+    expect(container.textContent).toContain('Collapse');
+    expect(parse).toHaveBeenCalledTimes(2);
+    parse.mockClear();
+
+    act(() => root.render(<StrictMode>{view('cron')}</StrictMode>));
+    const automaticToggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(automaticToggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    act(() => automaticToggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps expanded details when loop normalizes to cron', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const content = 'First instruction\nSecond instruction';
+    const view = (source: 'cron' | 'loop') => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source={source} />
+      </I18nProvider>
+    );
+    act(() => root.render(<StrictMode>{view('loop')}</StrictMode>));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+    expect(parse).toHaveBeenCalled();
+    parse.mockClear();
+
+    act(() => root.render(<StrictMode>{view('cron')}</StrictMode>));
+    expect(
+      container
+        .querySelector('[data-web-shell-automatic-trigger-message]')
+        ?.getAttribute('data-source'),
+    ).toBe('cron');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+
+    act(() => root.render(<StrictMode>{view('loop')}</StrictMode>));
+    expect(
+      container
+        .querySelector('[data-web-shell-automatic-trigger-message]')
+        ?.getAttribute('data-source'),
+    ).toBe('loop');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('honors a tooltip-only host renderer for cron input', () => {
+    const content = '@README.md';
+    const renderComposerTagTooltip = vi.fn(() => null);
+    const container = render(
+      <WebShellCustomizationProvider value={{ renderComposerTagTooltip }}>
+        <UserMessage
+          content={content}
+          source="cron"
+          inputAnnotations={[
+            referenceAnnotation(content, '@README.md', {
+              id: 'file:README.md',
+              kind: 'file',
+              value: 'README.md',
+              serialized: '@README.md',
+            }),
+          ]}
+        />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(findByTitle(container, '@README.md')).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).toBeNull();
+    expect(renderComposerTagTooltip).toHaveBeenCalledWith({
+      tag: expect.objectContaining({ id: 'file:README.md' }),
+      placement: 'user-message',
+      readonly: true,
+    });
+  });
+
+  it('does not rescan an unchanged automatic instruction during edits', () => {
+    const matcher = vi.spyOn(automaticTrigger, 'isDetailFreeAutomaticEcho');
+    const content = 'Original automatic prompt\nwith details';
+    const container = render(
+      <UserMessage editing content={content} source="cron" />,
+    );
+    const editor = container.querySelector('textarea');
+    expect(editor).not.toBeNull();
+    act(() => setTextareaValue(editor as HTMLTextAreaElement, 'edited once'));
+    const calls = matcher.mock.calls.length;
+    act(() => setTextareaValue(editor as HTMLTextAreaElement, 'edited twice'));
+    expect(matcher).toHaveBeenCalledTimes(calls);
+  });
+
+  it('collapses changed automatic content without re-parsing it', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (content: string) => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source="cron" />
+      </I18nProvider>
+    );
+    act(() =>
+      root.render(
+        <StrictMode>{view('First automatic instruction')}</StrictMode>,
+      ),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(parse).toHaveBeenCalledTimes(2);
+    parse.mockClear();
+
+    act(() =>
+      root.render(
+        <StrictMode>{view('Second automatic instruction')}</StrictMode>,
+      ),
+    );
+    const nextToggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(nextToggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-summary]')
+        ?.textContent,
+    ).toBe('Second automatic instruction');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    act(() => nextToggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('Second automatic instruction');
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it('collapses an image update before parsing it again', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (images: Array<{ data: string; mimeType: string }>) => (
+      <UserMessage
+        content="Instructions with image attachments"
+        source="cron"
+        images={images}
+      />
+    );
+    act(() =>
+      root.render(
+        view([{ data: 'data:image/png;base64,YQ==', mimeType: 'image/png' }]),
+      ),
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
+
+    act(() =>
+      root.render(
+        view([
+          { data: 'data:image/png;base64,YQ==', mimeType: 'image/png' },
+          { data: 'data:image/png;base64,Yg==', mimeType: 'image/png' },
+        ]),
+      ),
+    );
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('Instructions with image attachments');
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps committed expanded details after an abandoned update', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    let attempted = 0;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = (content: string, promise?: Promise<void>) => (
+      <StrictMode>
+        <I18nProvider language="en">
+          <Suspense fallback={<p>pending-boundary</p>}>
+            <UserMessage content={content} source="cron" />
+            <SuspendingContent
+              promise={promise}
+              onSuspend={() => {
+                attempted += 1;
+              }}
+            />
+          </Suspense>
+        </I18nProvider>
+      </StrictMode>
+    );
+    act(() => root.render(view('alpha')));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('alpha');
+    expect(parse).toHaveBeenCalledTimes(2);
+    parse.mockClear();
+
+    try {
+      await act(async () => {
+        startTransition(() => root.render(view('beta', blocked)));
+        await Promise.resolve();
+      });
+      await vi.waitFor(() => {
+        expect(attempted).toBeGreaterThan(0);
+      });
+      act(() => root.render(view('alpha')));
+      const instructions = container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      );
+      expect(instructions?.textContent).toBe('alpha');
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(parse).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => release());
+    }
+  });
+
+  it.each(['images', 'files'] as const)(
+    'keeps automatic details expanded when one %s attachment is replaced',
+    (kind) => {
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const view = (attachments: {
+        images?: Array<{ data: string; mimeType: string }>;
+        files?: Array<{ name: string; mimeType: string; text: string }>;
+      }) => (
+        <UserMessage
+          content="Instructions with attachments"
+          source="cron"
+          {...attachments}
+        />
+      );
+      const initial =
+        kind === 'images'
+          ? {
+              images: [
+                { data: 'data:image/png;base64,YQ==', mimeType: 'image/png' },
+              ],
+            }
+          : {
+              files: [{ name: 'one.txt', mimeType: 'text/plain', text: 'one' }],
+            };
+      const replacement =
+        kind === 'images'
+          ? {
+              images: [
+                { data: 'data:image/png;base64,Yg==', mimeType: 'image/png' },
+              ],
+            }
+          : {
+              files: [{ name: 'two.txt', mimeType: 'text/plain', text: 'two' }],
+            };
+      act(() => root.render(view(initial)));
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-automatic-trigger-message] button',
+      );
+      act(() => toggle?.click());
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      act(() => root.render(view(replacement)));
+      expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+      expect(
+        container.querySelector(
+          '[data-web-shell-automatic-trigger-instructions]',
+        )?.textContent,
+      ).toBe('Instructions with attachments');
+      if (kind === 'images') {
+        expect(container.querySelector('img')?.getAttribute('src')).toBe(
+          'data:image/png;base64,Yg==',
+        );
+      } else {
+        expect(container.textContent).toContain('two.txt');
+      }
+    },
+  );
+
+  it('collapses a files attachment update before parsing it again', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const view = (
+      files: { name: string; mimeType: string; text: string }[],
+    ) => (
+      <UserMessage
+        content="Instructions with attachments"
+        source="cron"
+        files={files}
+      />
+    );
+    const attachments = [
+      { name: 'one.txt', mimeType: 'text/plain', text: 'one' },
+    ];
+    act(() => root.render(view(attachments)));
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle?.click());
+    expect(parse).toHaveBeenCalledTimes(1);
+    parse.mockClear();
+
+    act(() =>
+      root.render(
+        view([
+          ...attachments,
+          { name: 'two.txt', mimeType: 'text/plain', text: 'two' },
+        ]),
+      ),
+    );
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe('Instructions with attachments');
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not measure automatic cards or subscribe ResizeObserver', () => {
+    const height = vi
+      .spyOn(HTMLElement.prototype, 'scrollHeight', 'get')
+      .mockReturnValue(500);
+    const observer = vi.fn(() => ({ observe: vi.fn(), disconnect: vi.fn() }));
+    vi.stubGlobal('ResizeObserver', observer);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const view = (source?: string) => (
+      <I18nProvider language="en">
+        <UserMessage content="Long message\nwith details" source={source} />
+      </I18nProvider>
+    );
+    act(() => root.render(view('cron')));
+    expect(height).not.toHaveBeenCalled();
+    expect(observer).not.toHaveBeenCalled();
+
+    act(() => root.render(view(undefined)));
+    expect(height).toHaveBeenCalled();
+    expect(observer).toHaveBeenCalled();
+    const toggle = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].find((button) => button.textContent === 'Show more');
+    expect(toggle).toBeDefined();
+  });
+
+  it('disconnects the ordinary observer when becoming an automatic card', () => {
+    const disconnect = vi.fn();
+    const observer = vi.fn(() => ({ observe: vi.fn(), disconnect }));
+    vi.stubGlobal('ResizeObserver', observer);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const view = (source?: string) => (
+      <UserMessage content="Long message\nwith details" source={source} />
+    );
+    act(() => root.render(view()));
+    expect(observer).toHaveBeenCalledTimes(1);
+    expect(disconnect).not.toHaveBeenCalled();
+
+    act(() => root.render(view('cron')));
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(observer).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores the baseline ResizeObserver after each test', () => {
+    expect(vi.isMockFunction(globalThis.ResizeObserver)).toBe(false);
+    expect(new globalThis.ResizeObserver(() => {}).unobserve).toBeTypeOf(
+      'function',
+    );
+  });
+
+  it('resets automatic instructions after editing and lets them reopen', () => {
+    const content = '/loop inspect the edited copy\n\nrestore this detail';
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const view = (editing: boolean) => (
+      <I18nProvider language="en">
+        <UserMessage content={content} source="cron" editing={editing} />
+      </I18nProvider>
+    );
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-automatic-trigger-message] button',
+      );
+    const instructions = () =>
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      );
+    act(() => root.render(view(false)));
+    expect(toggle()?.textContent).toBe('Show more');
+    act(() => toggle()?.click());
+    expect(instructions()?.textContent).toBe(content);
+    act(() => root.render(view(true)));
+    expect(container.querySelector('textarea')?.value).toBe(content);
+    act(() => root.render(view(false)));
+    expect(instructions()).toBeNull();
+    expect(toggle()?.textContent).toBe('Show more');
+    act(() => toggle()?.click());
+    expect(instructions()?.textContent).toBe(content);
+  });
+
+  it('keeps readonly automatic instructions behind a disclosure', () => {
+    const content = 'readonly automatic prompt\nsecond line';
+    const container = render(
+      <TranscriptRenderModeProvider value="readonly">
+        <I18nProvider language="en">
+          <UserMessage content={content} source="cron" />
+        </I18nProvider>
+      </TranscriptRenderModeProvider>,
+    );
+    const card = container.querySelector(
+      '[data-web-shell-automatic-trigger-message]',
+    );
+    const toggle = card?.querySelector<HTMLButtonElement>('button');
+    expect(toggle?.textContent).toBe('Show more');
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(
+      card?.querySelector('[data-web-shell-automatic-trigger-instructions]'),
+    ).toBeNull();
+    act(() => toggle?.click());
+    expect(
+      card?.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+  });
+
+  it('defers default parsing until automatic instructions are opened', () => {
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const content = '/loop inspect the queue\nsecond line';
+    const container = render(<UserMessage content={content} source="cron" />);
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(parse).not.toHaveBeenCalled();
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+    expect(parse).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips document parsing for a detail-free runtime echo', () => {
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content="Autonomous loop tick" source="loop" />
+      </TranscriptRenderModeProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-instructions]',
+      ),
+    ).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'Autonomous loop tick',
+    'Loop tick — tasks from project loop.md',
+    'Loop tick — tasks from home loop.md',
+    'Loop tick — loop.md temporarily unavailable',
+  ])('keeps instructions following the runtime echo %s', (echo) => {
+    const content = `${echo}\nreal trailing instruction`;
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content={content} source="loop" />
+      </TranscriptRenderModeProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+  });
+
+  it.each([
+    'Autonomous loop tick',
+    'Loop tick — tasks from project loop.md',
+    'Loop tick — tasks from home loop.md',
+    'Loop tick — loop.md temporarily unavailable',
+  ])('does not offer a redundant disclosure for runtime echo %s', (content) => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage content={content} source="loop" />
+      </I18nProvider>,
+    );
+    const card = container.querySelector(
+      '[data-web-shell-automatic-trigger-message]',
+    );
+    expect(card?.textContent).toContain(content);
+    expect(card?.querySelector('button')).toBeNull();
+    expect(
+      card?.querySelector('[data-web-shell-automatic-trigger-instructions]'),
+    ).toBeNull();
+  });
+
+  it.each([
+    'Loop tick — real instruction\nsecond line',
+    `Loop tick — tasks from ${'x'.repeat(600)} FINAL-MARKER`,
+  ])(
+    'retains details for a real instruction with a Loop tick prefix',
+    (content) => {
+      const container = render(
+        <I18nProvider language="en">
+          <UserMessage content={content} source="cron" />
+        </I18nProvider>,
+      );
+      const toggle = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-automatic-trigger-message] button',
+      );
+      expect(toggle?.textContent).toBe('Show more');
+      act(() => toggle?.click());
+      expect(
+        container.querySelector(
+          '[data-web-shell-automatic-trigger-instructions]',
+        )?.textContent,
+      ).toBe(content);
+    },
+  );
+
+  it('keeps a Loop tick-prefixed prompt in exported documents', () => {
+    const content = 'Loop tick — tasks from an unrecognized future source';
+    const container = render(
+      <TranscriptRenderModeProvider value="document">
+        <UserMessage content={content} source="cron" />
+      </TranscriptRenderModeProvider>,
+    );
+    const instructions = container.querySelector(
+      '[data-web-shell-automatic-trigger-instructions]',
+    );
+    expect(instructions?.textContent).toBe(content);
+    expect(
+      container.querySelector(
+        '[data-web-shell-automatic-trigger-message] button',
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps details available for short non-echo automatic input', () => {
+    const content = '/loop check PR';
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage content={content} source="loop" />
+      </I18nProvider>,
+    );
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-automatic-trigger-message] button',
+    );
+    expect(toggle?.textContent).toBe('Show more');
+    act(() => toggle?.click());
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-instructions]')
+        ?.textContent,
+    ).toBe(content);
+  });
+
+  it('does not create an empty automatic bubble', () => {
+    const container = render(<UserMessage content={' \n'} source="cron" />);
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-web-shell-user-bubble]')).toBeNull();
+  });
+
+  it('prioritizes the structured per-run card over an automatic source without host overrides', () => {
+    const container = render(
+      <I18nProvider language="en">
+        <UserMessage content={scheduledTaskRunContent} source="cron" />
+      </I18nProvider>,
+    );
+    expect(
+      container.querySelector('[data-web-shell-scheduled-task-run-message]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).toBeNull();
+  });
+
   it('renders scheduled-task context as a compact localized card', () => {
     const renderUserMessageContent = vi.fn(() => <span>custom message</span>);
-    const content =
-      'Scheduled task: Review PRs\n' +
-      'Task ID: task-1\n' +
-      'Schedule: 0 * * * *\n' +
-      'Triggered at: 2026-08-26T07:27:00.000Z\n' +
-      'Trigger: scheduled\n' +
-      'Session: new chat for this run\n\n' +
-      'This is a scheduled task run. Execute the instructions below now. Do not create or modify a schedule unless the instructions explicitly ask you to.\n\n' +
-      'review the next PR';
+    const content = scheduledTaskRunContent;
     const container = render(
       <I18nProvider language="zh-CN">
         <WebShellCustomizationProvider value={{ renderUserMessageContent }}>
-          <UserMessage content={content} />
+          <UserMessage content={content} source="cron" />
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -597,6 +1550,9 @@ describe('UserMessage', () => {
     expect(
       container.querySelector('[data-web-shell-scheduled-task-run-message]'),
     ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).toBeNull();
     expect(container.textContent).toContain('定时任务运行');
     expect(container.textContent).toContain('Review PRs');
     expect(container.textContent).toContain('任务 ID: task-1');

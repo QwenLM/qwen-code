@@ -289,8 +289,8 @@ class LocalStorageAliasTest {
             ToolPublicationRetentionStore.retire(jdbc, tenant, session, UUID.randomUUID().toString());
         });
         var before = jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session));
+                + " FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session);
         assertUncovered(() -> guard.fence("tenant", "storage", 1, UUID.randomUUID().toString()));
         var config = new ManagedAgentProperties();
         config.getToolPublication().setGcEnabled(true);
@@ -303,8 +303,8 @@ class LocalStorageAliasTest {
         assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'SESSION_RESOURCE_GC'", String.class)).isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx", Integer.class)).isZero();
         assertThat(jdbc.queryForMap("SELECT writer_generation, journal_revision, committed_sequence, activation_epoch, last_commit_digest"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ?",
-                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session))).isEqualTo(before);
+                + " FROM ma_session_head WHERE tenant_id = ? AND harness_session_id = ?",
+                tenant, session)).isEqualTo(before);
         guard.fence("tenant", "storage", 1, UUID.randomUUID().toString());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session", Integer.class)).isEqualTo(1);
     }
@@ -364,7 +364,7 @@ class LocalStorageAliasTest {
     private void session(String tenant, String storage, String session) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified)"
                 + " VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, 1, 1)", tenant, session, storage,
-                RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session), ManagedSessionStore.sessionScopeKey(tenant, session));
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant), com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(session), ManagedSessionStore.sessionScopeKey(tenant, session));
     }
 
     private static void assertUncovered(Runnable action) {
