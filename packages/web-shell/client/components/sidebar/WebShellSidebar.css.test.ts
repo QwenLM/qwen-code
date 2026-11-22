@@ -116,12 +116,18 @@ describe('WebShellSidebar session row actions stylesheet', () => {
 
   it('holds the overlay width at rest on rows that show a PR badge', () => {
     // The badge sits right before the slot; growing the slot on hover slid it
-    // left and put Pin under the pointer. Touch keeps the buttons in the
-    // flow, so the reservation is hover-only.
+    // left and put Pin under the pointer. Narrow touch rows anchor only the
+    // action slot so intrinsic badge widths cannot move it outside the row.
     expect(hoverMedia).toMatch(
       /\.sessionMetaSlotReserved\s*\{[^}]*min-width:\s*var\(--session-actions-width/,
     );
-    expect(nonHoverCss).not.toMatch(/\.sessionMetaSlotReserved/);
+    expect(nonHoverCss).not.toMatch(/^[ \t]*\.sessionMetaSlotReserved\s*\{/m);
+    expect(touchMedia).toMatch(
+      /\.sessionMetaSlotReserved:has\(\.sessionActions\)\s*\{[^}]*display:\s*contents;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow\s+\.sessionMetaSlotReserved\s+\.sessionActions\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*2px 0 2px auto;[^}]*width:\s*var\(--session-actions-width, 26px\)/,
+    );
   });
 
   it('hides the busy marker when a background-only row reveals its actions', () => {
