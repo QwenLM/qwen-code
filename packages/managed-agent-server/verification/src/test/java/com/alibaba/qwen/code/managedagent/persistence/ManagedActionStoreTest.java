@@ -251,11 +251,9 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         // The resurrection arm's evidence that a new delivery must wait.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
+        jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?)",
                 RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage"),
                 TENANT, "storage", "op-fence");
 
         var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);
@@ -730,10 +728,10 @@ class ManagedActionStoreTest {
         try {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+            jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                             + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                            + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                    ManagedSchemaKeys.key(scope, id), scope, TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
+                            + " VALUES (?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                    ManagedSchemaKeys.key(scope, id), TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
             return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         } catch (java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException(error);

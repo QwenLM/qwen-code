@@ -252,13 +252,29 @@ jobs:
       # screenshot spec, append it here too. The video-flow specs
       # (flows.spec.ts) and the animation-harness test (harness.spec.ts) stay
       # out — the base arm discards recordings, so rendering them is waste.
+      # New visual specs do not exist in the merge-base. Inject only those
+      # missing cases, which must keep explicit before/after assertions for the
+      # two UI contracts, and never overwrite a scenario the base already owns.
+      - name: 'Stage new before-render visual scenarios'
+        if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
+        working-directory: 'base'
+        run: |-
+          for scenario in \
+            'packages/web-shell/client/e2e/visuals/mobile-session-list.spec.ts' \
+            'packages/web-shell/client/e2e/utils/sessionListDensityFixture.ts'; do
+            if [ -f "../${scenario}" ] && [ ! -f "${scenario}" ]; then
+              cp "../${scenario}" "${scenario}"
+            fi
+          done
+
       - name: 'Capture before (base) screenshots'
         if: "${{ steps.base_checkout.outcome == 'success' && steps.base_install.outcome == 'success' }}"
         working-directory: 'base'
         continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-before'
-        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- --workers=2 screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts ask-user-details.spec.ts'
+          WEB_SHELL_VISUALS_ARM: 'before'
+        run: 'npm run test:e2e:visuals --workspace=packages/web-shell -- --workers=2 screenshots.spec.ts workflow-page.spec.ts git-branch-picker.spec.ts session-workflow.spec.ts collaboration.spec.ts ask-user-details.spec.ts mobile-session-list.spec.ts'
 
       - name: 'Compose before/after and keep only changed views'
         env:

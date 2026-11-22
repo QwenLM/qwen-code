@@ -149,8 +149,8 @@ public class ExternalStorageRegistrationTest {
     public void externalRegistrationCannotEnterLocalExecutionAndCannotAdoptLegacyAliases() {
         for (String kind : List.of("LOCAL", "UNREGISTERED")) {
             String alias = RuntimeAdmissionFences.storageAliasKey("tenant", kind);
-            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?, ?, ?)",
-                    alias, RuntimeAdmissionFences.storageFenceKey("tenant"), RuntimeAdmissionFences.storageFenceKey(kind), "tenant", kind, kind);
+            jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?)",
+                    alias, "tenant", kind, kind);
             assertThat(LocalStorageOwners.alias(jdbc, "tenant", kind, false).get("storage_kind")).isEqualTo(kind);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, "tenant", kind);
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, "tenant", kind);

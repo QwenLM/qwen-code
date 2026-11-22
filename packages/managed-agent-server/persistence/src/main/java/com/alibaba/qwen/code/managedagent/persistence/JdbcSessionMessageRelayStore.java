@@ -55,7 +55,7 @@ public class JdbcSessionMessageRelayStore
                     + " r.record_resource_id"
                     + " FROM ma_session_record r"
                     + " LEFT JOIN ma_delivery l"
-                    + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key"
+                    + " ON l.delivery_kind = 'SESSION_MESSAGE'"
                     + " AND l.tenant_id = r.tenant_id AND l.source_session_id = r.session_id"
                     + " AND l.delivery_id = r.record_id"
                     + " WHERE r.domain = ?"
@@ -80,7 +80,7 @@ public class JdbcSessionMessageRelayStore
                     + " r.record_resource_id"
                     + " FROM ma_delivery l"
                     + " JOIN ma_session_record r"
-                    + " ON r.session_scope_key = l.source_scope_key AND r.tenant_id = l.tenant_id"
+                    + " ON r.tenant_id = l.tenant_id"
                     + " AND r.session_id = l.source_session_id"
                     + " AND r.domain = 'session_message'"
                     + " AND r.record_id = l.delivery_id"
@@ -130,12 +130,12 @@ public class JdbcSessionMessageRelayStore
         List<CurrentRecord> rows = jdbc.query(
                 "SELECT delivery_state, record_resource_id FROM"
                         + " ma_session_record"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = ? AND record_id = ?",
                 (result, row) -> new CurrentRecord(
                         result.getString("delivery_state"),
                         result.getString("record_resource_id")),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
+                tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -144,10 +144,10 @@ public class JdbcSessionMessageRelayStore
             String domain, String messageId) {
         List<String> rows = jdbc.query(
                 "SELECT delivery_state FROM ma_session_record"
-                        + " WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = ? AND record_id = ?",
                 (result, row) -> result.getString("delivery_state"),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, domain, messageId);
+                tenantId, sessionId, domain, messageId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
@@ -181,15 +181,15 @@ public class JdbcSessionMessageRelayStore
         return !jdbc.query("SELECT 1 FROM"
                         + " ma_session_record r"
                         + " JOIN ma_session_record c"
-                        + " ON c.session_scope_key = r.session_scope_key AND c.tenant_id = r.tenant_id"
+                        + " ON c.tenant_id = r.tenant_id"
                         + " AND c.session_id = r.session_id"
                         + " AND c.domain = r.domain"
                         + " AND c.record_id = ?"
                         + " LEFT JOIN ma_delivery l"
-                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key AND l.tenant_id = r.tenant_id"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = ? AND l.tenant_id = r.tenant_id"
                         + " AND l.source_session_id = r.session_id"
                         + " AND l.delivery_id = r.record_id"
-                        + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                        + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'session_command'"
                         + " AND r.first_sequence < c.first_sequence"
                         + " AND r.delivery_state IN ('planned', 'accepting')"
@@ -210,15 +210,15 @@ public class JdbcSessionMessageRelayStore
         return jdbc.query("SELECT r.record_resource_id FROM"
                         + " ma_session_record r"
                         + " JOIN ma_session_record c"
-                        + " ON c.session_scope_key = r.session_scope_key AND c.tenant_id = r.tenant_id"
+                        + " ON c.tenant_id = r.tenant_id"
                         + " AND c.session_id = r.session_id"
                         + " AND c.domain = r.domain"
                         + " AND c.record_id = ?"
                         + " LEFT JOIN ma_delivery l"
-                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = r.session_scope_key AND l.tenant_id = r.tenant_id"
+                        + " ON l.delivery_kind = 'SESSION_MESSAGE' AND l.source_scope_key = ? AND l.tenant_id = r.tenant_id"
                         + " AND l.source_session_id = r.session_id"
                         + " AND l.delivery_id = r.record_id"
-                        + " WHERE r.session_scope_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                        + " WHERE r.tenant_id = ? AND r.session_id = ?"
                         + " AND r.domain = 'session_message'"
                         + " AND r.first_sequence < c.first_sequence"
                         + " AND r.delivery_state IN ('planned', 'accepting', 'unknown')"

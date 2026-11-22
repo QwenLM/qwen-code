@@ -74,28 +74,29 @@ class ManagedMcpSettingsProjection {
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
         if (previous == null) {
-            jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_kind, record_key, tenant_id, workspace_id,"
                             + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId,
+                            + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", key, tenantId, workspaceId,
                     sessionId, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID, revision, resource.resourceId(),
                     occurredAt, settledAt, sequence);
         } else {
             JsonNode predecessor = settings.get("previousRecordRef");
             String previousResource = jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record"
-                    + " WHERE session_scope_key=? AND record_key=?", String.class, scope, key);
+                    + " WHERE tenant_id=? AND session_id=? AND record_key=?", String.class, tenantId, sessionId, key);
             JdbcManagedExtensionRecordStore.require(previousResource.equals(predecessor.path("resourceId").asText()), "MCP settings predecessor conflicts");
             JdbcManagedExtensionRecordStore.requireReference(resources.apply(previousResource), predecessor);
             jdbc.update("UPDATE ma_session_record SET revision=?, record_resource_id=?, settled_at=?"
-                    + " WHERE session_scope_key=? AND record_key=? AND revision=?",
-                    revision, resource.resourceId(), settledAt, scope, key, revision - 1);
+                    + " WHERE tenant_id=? AND session_id=? AND record_key=? AND revision=?",
+                    revision, resource.resourceId(), settledAt, tenantId, sessionId, key, revision - 1);
         }
         if (ManagedConfigInstall.isPackageConfig(settings)) {
             // Package config accumulates across revisions: the retained seed
             // stops the closure walk from re-projecting resources an earlier
             // revision already pinned.
             Set<String> retained = new HashSet<>(jdbc.queryForList(
-                    "SELECT resource_id FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
-                    String.class, scope, key));
+                    "SELECT resource_id FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SESSION_RECORD'"
+                            + " AND owner_key=?",
+                    String.class, tenantId, sessionId, key));
             if (retained.add(resource.resourceId())) {
                 JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
                         sessionId, resource.resourceId());
@@ -108,8 +109,8 @@ class ManagedMcpSettingsProjection {
             // Legacy MCP settings need no closure: replace the superseded
             // projection row so the key keeps exactly one row instead of
             // accumulating one per revision for the Session's whole life (R2-5).
-            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key=? AND owner_kind='SESSION_RECORD' AND owner_key=?",
-                    scope, key);
+            jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id=? AND session_id=? AND owner_kind='SESSION_RECORD'"
+                    + " AND owner_key=?", tenantId, sessionId, key);
             JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, revision, tenantId, workspaceId,
                     sessionId, resource.resourceId());
         }
@@ -135,7 +136,7 @@ class ManagedMcpSettingsProjection {
             if (candidates.isEmpty()) {
                 continue;
             }
-            Set<String> existing = existingResources(scope, candidates.keySet());
+            Set<String> existing = existingResources(tenantId, sessionId, candidates.keySet());
             for (Map.Entry<String, JsonNode> candidate : candidates.entrySet()) {
                 String resourceId = candidate.getKey();
                 if (!existing.contains(resourceId)) {
@@ -186,14 +187,15 @@ class ManagedMcpSettingsProjection {
         return refs;
     }
 
-    private Set<String> existingResources(String scope, Set<String> resourceIds) {
+    private Set<String> existingResources(String tenantId, String sessionId, Set<String> resourceIds) {
         String placeholders = String.join(",",
                 java.util.Collections.nCopies(resourceIds.size(), "?"));
         List<Object> args = new ArrayList<>();
-        args.add(scope);
+        args.add(tenantId);
+        args.add(sessionId);
         args.addAll(resourceIds);
         return new HashSet<>(jdbc.queryForList(
-                "SELECT resource_id FROM ma_resource WHERE session_scope_key = ?"
+                "SELECT resource_id FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                         + " AND resource_id IN (" + placeholders + ")",
                 String.class, args.toArray()));
     }
