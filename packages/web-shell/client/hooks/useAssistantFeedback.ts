@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import {
   forgetAssistantFeedbackSessionPruned,
+  readAssistantFeedbackEditRevision,
   readAssistantFeedbackStore,
   readPrunedAssistantFeedbackSession,
   setAssistantFeedbackRating,
@@ -40,6 +41,7 @@ export function useAssistantFeedback(
       turnId: string;
       rating: AssistantFeedbackRating | null;
       base: AssistantFeedbackRating | undefined;
+      revision: number;
     }>
   >([]);
   const storeRef = useRef(store);
@@ -52,6 +54,13 @@ export function useAssistantFeedback(
         setAssistantFeedbackRating(current, sessionId, turnId, rating),
       );
       let next = readAssistantFeedbackStore();
+      // Replay this pane's uncommitted edits on the latest storage. Restore
+      // the ratings only when a successful write actually pruned the session.
+      const pruned = readPrunedAssistantFeedbackSession(sessionId);
+      if (pruned && !next[sessionId]) {
+        next = { ...next, [sessionId]: { ...pruned } };
+      }
+      const merged = next;
       pendingChanges.current = pendingChanges.current.filter(
         (change) => change.sessionId !== sessionId || change.turnId !== turnId,
       );
@@ -59,19 +68,16 @@ export function useAssistantFeedback(
         sessionId,
         turnId,
         rating,
-        base: next[sessionId]?.[turnId],
+        base: merged[sessionId]?.[turnId],
+        revision: readAssistantFeedbackEditRevision(sessionId, turnId),
       });
-      // Replay this pane's uncommitted edits on the latest storage. Restore
-      // the ratings only when a successful write actually pruned the session.
-      const persisted = next;
-      const pruned = readPrunedAssistantFeedbackSession(sessionId);
-      if (pruned && !next[sessionId]) {
-        next = { ...next, [sessionId]: { ...pruned } };
-      }
+      pendingChanges.current = pendingChanges.current.filter(
+        (change) =>
+          merged[change.sessionId]?.[change.turnId] === change.base &&
+          readAssistantFeedbackEditRevision(change.sessionId, change.turnId) ===
+            change.revision,
+      );
       for (const change of pendingChanges.current) {
-        if (persisted[change.sessionId]?.[change.turnId] !== change.base) {
-          continue;
-        }
         next = setAssistantFeedbackRating(
           next,
           change.sessionId,
@@ -81,9 +87,9 @@ export function useAssistantFeedback(
       }
       if (writeAssistantFeedbackStore(next)) {
         pendingChanges.current = [];
-        if (!next[sessionId]) forgetAssistantFeedbackSessionPruned(sessionId);
         setStore(next);
       }
+      if (!next[sessionId]) forgetAssistantFeedbackSessionPruned(sessionId);
     },
     [sessionId],
   );

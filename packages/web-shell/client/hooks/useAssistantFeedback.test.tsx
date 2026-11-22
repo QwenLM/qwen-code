@@ -11,6 +11,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellAssistantFeedbackRating } from '../customization';
 import { AssistantMessage } from '../components/messages/AssistantMessage';
 import { I18nProvider } from '../i18n';
+import * as assistantFeedback from '../utils/assistantFeedback';
 import {
   ASSISTANT_FEEDBACK_STORAGE_KEY,
   MAX_ASSISTANT_FEEDBACK_SESSIONS,
@@ -99,6 +100,21 @@ function mountPair(firstSession: string, secondSession: string): void {
         </section>
         <section data-pane="second">
           <Transcript sessionId={secondSession} turnId="turn-b" />
+        </section>
+      </I18nProvider>,
+    );
+  });
+}
+
+function renderPairTurns(firstTurn: string, secondTurn: string): void {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <section data-pane="first">
+          <Transcript sessionId="shared-session" turnId={firstTurn} />
+        </section>
+        <section data-pane="second">
+          <Transcript sessionId="shared-session" turnId={secondTurn} />
         </section>
       </I18nProvider>,
     );
@@ -288,10 +304,10 @@ describe('useAssistantFeedback through the answer footer', () => {
   it('does not overwrite a newer rating with a queued retry', () => {
     mountPair('shared-session', 'shared-session');
     try {
-      vi.spyOn(Storage.prototype, 'setItem').mockImplementationOnce(() => {
-        throw new Error('quota exceeded');
-      });
-      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      vi.spyOn(
+        assistantFeedback,
+        'writeAssistantFeedbackStore',
+      ).mockReturnValueOnce(false);
       rateInPane('first', 'Satisfied');
       expect(isLitInPane('first', 'Satisfied')).toBe(true);
       act(() => {
@@ -333,15 +349,97 @@ describe('useAssistantFeedback through the answer footer', () => {
     }
   });
 
+  it('does not restore a pruned rating when clearing it fails to write', () => {
+    const stored: AssistantFeedbackStore = {
+      'shared-session': { 'turn-a': 'up' },
+    };
+    for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS - 1; index++) {
+      stored[`session-${index}`] = { 'turn-1': 'up' };
+    }
+    writeAssistantFeedbackStore(stored);
+    mountPair('shared-session', 'shared-session');
+    try {
+      writeAssistantFeedbackStore({
+        ...stored,
+        'session-10': { 'turn-1': 'up' },
+      });
+      const write = vi
+        .spyOn(assistantFeedback, 'writeAssistantFeedbackStore')
+        .mockReturnValueOnce(false);
+      rateInPane('first', 'Satisfied');
+      expect(write).toHaveBeenCalledOnce();
+
+      rateInPane('second', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()['shared-session']).toEqual({
+        'turn-b': 'down',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('replays a queued edit over its pruned base', () => {
+    writeAssistantFeedbackStore({
+      'shared-session': { 'turn-a': 'up' },
+    });
+    mountPair('shared-session', 'shared-session');
+    try {
+      const write = vi
+        .spyOn(assistantFeedback, 'writeAssistantFeedbackStore')
+        .mockReturnValueOnce(false);
+      rateInPane('first', 'Not satisfied');
+      expect(write).toHaveBeenCalledOnce();
+      const evicting: AssistantFeedbackStore = {
+        ...readAssistantFeedbackStore(),
+      };
+      for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS; index++) {
+        evicting[`session-${index}`] = { 'turn-1': 'up' };
+      }
+      writeAssistantFeedbackStore(evicting);
+      renderPairTurns('turn-c', 'turn-b');
+
+      rateInPane('first', 'Satisfied');
+
+      expect(readAssistantFeedbackStore()['shared-session']).toEqual({
+        'turn-a': 'down',
+        'turn-c': 'up',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('retires a queued edit superseded by a rating round trip', () => {
+    mountPair('shared-session', 'shared-session');
+    try {
+      const write = vi
+        .spyOn(assistantFeedback, 'writeAssistantFeedbackStore')
+        .mockReturnValueOnce(false);
+      rateInPane('first', 'Satisfied');
+      expect(write).toHaveBeenCalledOnce();
+      renderPairTurns('turn-a', 'turn-a');
+      rateInPane('second', 'Satisfied');
+      rateInPane('second', 'Satisfied');
+      expect(readAssistantFeedbackStore()).toEqual({});
+      renderPairTurns('turn-c', 'turn-b');
+
+      rateInPane('first', 'Satisfied');
+
+      expect(readAssistantFeedbackStore()).toEqual({
+        'shared-session': { 'turn-c': 'up' },
+      });
+    } finally {
+      unmount();
+    }
+  });
+
   it("retries local edits after storage becomes writable without losing another pane's changes", () => {
     mountPair('session-a', 'session-a');
     try {
       const write = vi
-        .spyOn(Storage.prototype, 'setItem')
-        .mockImplementationOnce(() => {
-          throw new Error('quota exceeded');
-        });
-      vi.spyOn(console, 'warn').mockImplementation(() => {});
+        .spyOn(assistantFeedback, 'writeAssistantFeedbackStore')
+        .mockReturnValueOnce(false);
       rateInPane('first', 'Satisfied');
       expect(write).toHaveBeenCalledOnce();
       rateInPane('second', 'Not satisfied');

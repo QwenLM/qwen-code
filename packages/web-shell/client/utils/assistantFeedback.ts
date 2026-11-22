@@ -69,6 +69,19 @@ export const ASSISTANT_FEEDBACK_STORAGE_KEY =
 /** Sessions kept in storage; the rest age out oldest-first. */
 export const MAX_ASSISTANT_FEEDBACK_SESSIONS = 10;
 
+const editRevisions = new Map<string, number>();
+
+function editRevisionKey(sessionId: string, turnId: string): string {
+  return JSON.stringify([sessionId, turnId]);
+}
+
+export function readAssistantFeedbackEditRevision(
+  sessionId: string,
+  turnId: string,
+): number {
+  return editRevisions.get(editRevisionKey(sessionId, turnId)) ?? 0;
+}
+
 const prunedSessions = new Map<
   string,
   Record<string, AssistantFeedbackRating>
@@ -165,6 +178,31 @@ function keepMostRecentSessions(
   return kept;
 }
 
+function recordEditRevisions(
+  previous: AssistantFeedbackStore,
+  requested: AssistantFeedbackStore,
+  kept: AssistantFeedbackStore,
+): void {
+  for (const sessionId of new Set([
+    ...Object.keys(previous),
+    ...Object.keys(kept),
+  ])) {
+    // Capacity eviction retains the revision for the snapshot restored later.
+    if (previous[sessionId] && requested[sessionId] && !kept[sessionId])
+      continue;
+    const before = previous[sessionId] ?? {};
+    const after = kept[sessionId] ?? {};
+    for (const turnId of new Set([
+      ...Object.keys(before),
+      ...Object.keys(after),
+    ])) {
+      if (before[turnId] === after[turnId]) continue;
+      const key = editRevisionKey(sessionId, turnId);
+      editRevisions.set(key, (editRevisions.get(key) ?? 0) + 1);
+    }
+  }
+}
+
 function emptyAssistantFeedbackStore(): AssistantFeedbackStore {
   prunedSessions.clear();
   return {};
@@ -228,6 +266,7 @@ export function writeAssistantFeedbackStore(
       ASSISTANT_FEEDBACK_STORAGE_KEY,
       JSON.stringify({ v: STORAGE_VERSION, ...kept }),
     );
+    recordEditRevisions(previous, store, kept);
     for (const sessionId of Object.keys(previous)) {
       if (!store[sessionId]) prunedSessions.delete(sessionId);
     }
