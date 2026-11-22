@@ -376,9 +376,19 @@ order this section exists to prevent.
   to that diagnostic process, so it cannot abort restoration of the saved step
   status. Other cleanup and warning I/O failures do not replace that status.
   Permission-denial cleanup cases are gated by an actual removal probe rather
-  than uid alone, so root CI lanes without DAC bypass still run them.
+  than uid alone, so root CI lanes without DAC bypass still run them. Probe
+  setup errors and unexpected unlink errors raise failures instead of silently
+  removing coverage. The trap is pinned to one downloaded-helper removal, with
+  no workspace-helper target, and the real workspace helper's bytes are checked
+  unchanged. Its cwd and GITHUB_WORKSPACE both point at that private fixture,
+  so a `$PWD`-based deletion targets only the fixture copy, not the source
+  checkout. A directory operand makes its cleanup fail independently of DAC
+  privileges; an unread pipe's drained byte count is checked separately from
+  the ordinary pipe's single annotated warning.
   The reference build directly sources its checked-out helper and never
-  requires a fallback fetch. A
+  requires a fallback fetch. Tests pin its unique helper assignment and exact
+  source statement, reject common downloaders, and execute an empty workspace
+  to assert that source fails before Maven and no fetcher is invoked. A
   host-source mount or mount-inspection failure skips the optional copy and
   uses a clean repository; required job-local guards still stop Maven. It then
   also pins the sourced helper, the
