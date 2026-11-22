@@ -494,9 +494,9 @@ function isDeepInfraEndpoint(baseUrl?: string): boolean {
 
 function resolveServiceTier(params: {
   modelProvider?: ModelProviderConfig;
-  cli?: CliConfig;
+  cli?: ModelConfigCliInput;
   env: Record<string, string | undefined>;
-  settings?: SettingsConfig;
+  settings?: ModelConfigSettingsInput;
   authType?: AuthType;
   modelId?: string;
   baseUrl?: string;
