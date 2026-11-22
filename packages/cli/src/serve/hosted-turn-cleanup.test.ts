@@ -20,6 +20,7 @@ import {
   hostedRuntimeSessionId,
 } from './hosted-workspace-broker.js';
 import {
+  backgroundSuspensionCertificate,
   hasBlockingHostedCleanupDebt,
   hasHostedCleanupDebt,
   oweHostedTurnCleanup,
@@ -541,4 +542,48 @@ it('rejects a moving evidence view without releasing or admitting through it', a
   });
   expect(await hasBlockingHostedCleanupDebt(f.session, result.held)).toBe(true);
   expect(release).toHaveBeenCalledTimes(1);
+});
+
+// Phase 3b §4.8: only a verified background hold on a binding whose worker
+// owns the observation pull may be exempted from suspension eligibility and
+// certified at the seal. Everything else keeps the Session resident.
+it.each<BackgroundKind>(['shell', 'monitor'])(
+  'certifies a proved %s hold on an observation-capable binding',
+  async (kind) => {
+    const f = await fixture();
+    await f.background(kind);
+    await f.terminal();
+    expect(
+      await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
+    ).toBe(true);
+  },
+);
+
+it('does not certify a hold whose worker never took over the capture', async () => {
+  const f = await fixture();
+  await f.background('shell');
+  await f.terminal();
+  expect(
+    await backgroundSuspensionCertificate(f.session, new Set(['binding@6'])),
+  ).toBe(false);
+  expect(await backgroundSuspensionCertificate(f.session, undefined)).toBe(
+    false,
+  );
+});
+
+it('does not certify a run that is not running attached', async () => {
+  const f = await fixture();
+  await f.background('shell', { attached: false });
+  await f.terminal();
+  expect(
+    await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
+  ).toBe(false);
+});
+
+it('does not certify a Session with no unsettled background run', async () => {
+  const f = await fixture();
+  await f.terminal();
+  expect(
+    await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
+  ).toBe(false);
 });

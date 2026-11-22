@@ -9,6 +9,7 @@ import {
   readOperatorSandboxSettings,
   InvalidExecutionSandboxConfigError,
 } from '../config/execution-sandbox-settings.js';
+import { QWEN_CODE_MANAGED_RUNTIME_ENV } from '../config/acp-channel-fallback.js';
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { lookup } from 'node:dns/promises';
@@ -30,10 +31,7 @@ import express, {
 } from 'express';
 import { resolveChannelLocale } from '../utils/channel-locale.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
-import {
-  validateHostedHarnessProfile,
-  HOSTED_CSI_SESSION_STORE_URL_ENV,
-} from './hosted-harness-profile.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from './hosted-harness-contract.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
@@ -3482,6 +3480,11 @@ function installServeBrokenPipeGuard(): void {
   process.stderr.on('error', ignoreEpipe);
 }
 
+// Refcount of co-resident hosted-harness daemons in this process; the shared
+// process.env marker is restored to the ambient value only at last release.
+let managedMarkerDepth = 0;
+let managedMarkerAmbient: string | undefined;
+
 async function runQwenServeImpl(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps,
@@ -3542,18 +3545,59 @@ async function runQwenServeImpl(
     (optsIn.profile === 'hosted-harness'
       ? process.env[HOSTED_HARNESS_CAPABILITY_DIGEST_ENV]
       : undefined);
-  const hostedCsiSessionStoreUrl =
-    optsIn.hostedCsiSessionStoreUrl ??
-    process.env[HOSTED_CSI_SESSION_STORE_URL_ENV];
   validateHostedHarnessProfile({
     ...optsIn,
     token,
     requireAuth:
       optsIn.profile === 'hosted-harness' ? true : optsIn.requireAuth,
     hostedHarnessCapabilityDigest,
-    hostedCsiSessionStoreUrl,
   });
+  // The Hosted Harness is the Managed Agent's session host. Stamp the
+  // attribution marker before the base env freeze so the in-process Hosted
+  // turns (loadCliConfig's ACP fallback reads process.env) and every spawned
+  // child inherit it. The stamp is refcounted: co-resident embedded daemons
+  // share process.env, so the ambient value is restored only when the last
+  // hosted harness closes. Other profiles never touch the shared slot; they
+  // drop an inherited marker from their own base env copy only, so an
+  // independent daemon's children do not inherit a co-resident harness's (or
+  // the launcher's) marker while the harness keeps its attribution (same
+  // rule as `qwen daemon start`'s START_ENV_DROP, applied per daemon).
+  // Registered with the lifecycle immediately so a startup failure before
+  // the loader scrub still restores an embedded caller's env. scrubApplied
+  // is a single-slot setter, so the later combined registration replaces
+  // this one for the startup-failure catch; the shutdown handler calls this
+  // restore explicitly next to the loader restore, so a successful close
+  // releases the refcount exactly once.
+  const previousManagedRuntimeMarker =
+    process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
+  if (optsIn.profile === 'hosted-harness') {
+    if (managedMarkerDepth === 0) {
+      managedMarkerAmbient = previousManagedRuntimeMarker;
+    }
+    managedMarkerDepth += 1;
+    process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = '1';
+  }
+  // One-shot per boot: the shutdown block and the startup-failure catch are
+  // independent callers (a runtimeReady rejection closes the handle and then
+  // rejects into the catch), so a second call must not decrement again.
+  let managedMarkerReleased = false;
+  const restoreManagedRuntimeMarker = (): void => {
+    if (optsIn.profile !== 'hosted-harness') return;
+    if (managedMarkerReleased) return;
+    managedMarkerReleased = true;
+    managedMarkerDepth -= 1;
+    if (managedMarkerDepth > 0) return;
+    if (managedMarkerAmbient === undefined) {
+      delete process.env[QWEN_CODE_MANAGED_RUNTIME_ENV];
+    } else {
+      process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = managedMarkerAmbient;
+    }
+  };
+  loggerLifecycle.scrubApplied(restoreManagedRuntimeMarker);
   const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  if (optsIn.profile !== 'hosted-harness') {
+    delete baseEnv[QWEN_CODE_MANAGED_RUNTIME_ENV];
+  }
   const liveConversationWorkspace =
     deps.liveConversationWorkspace ??
     new ConversationWorkspace({
@@ -3611,7 +3655,10 @@ async function runQwenServeImpl(
   const restoreScrubbedLoaderEnv = (): void => {
     loaderEnvScrub.release();
   };
-  loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
+  loggerLifecycle.scrubApplied(() => {
+    restoreScrubbedLoaderEnv();
+    restoreManagedRuntimeMarker();
+  });
 
   // An empty --hostname (an unset variable in an alias or compose file) makes
   // Node bind every interface; treat it as operator error rather than an
@@ -3697,7 +3744,6 @@ async function runQwenServeImpl(
     ),
     token,
     hostedHarnessCapabilityDigest,
-    hostedCsiSessionStoreUrl,
     promptDeadlineMs,
     writerIdleTimeoutMs,
     workspace: rawWorkspace,
@@ -11049,9 +11095,6 @@ async function runQwenServeImpl(
               ?.locals?.['conversationRuntimeActivity'] as
               | { sealAndWait?: () => Promise<void> }
               | undefined;
-            const initiallyMountedCsiStop = initiallyMountedApp?.locals?.[
-              'stopHostedCsiSessions'
-            ] as (() => Promise<void>) | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
@@ -11066,7 +11109,6 @@ async function runQwenServeImpl(
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
             const initialConversationActivityWait =
               initiallyMountedConversationActivity?.sealAndWait?.();
-            const initialCsiWait = initiallyMountedCsiStop?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -11188,6 +11230,7 @@ async function runQwenServeImpl(
                     await daemonLog.close();
                   }
                   restoreScrubbedLoaderEnv();
+                  restoreManagedRuntimeMarker();
                   if (finalErr) rej(finalErr);
                   else res();
                 });
@@ -11251,11 +11294,6 @@ async function runQwenServeImpl(
                 ) {
                   await conversationActivity?.sealAndWait?.();
                 }
-                const csiStop = appForCleanup?.locals?.[
-                  'stopHostedCsiSessions'
-                ] as (() => Promise<void>) | undefined;
-                await initialCsiWait;
-                if (csiStop !== initiallyMountedCsiStop) await csiStop?.();
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
                   'waitForTrustPolicyIdle'

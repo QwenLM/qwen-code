@@ -247,6 +247,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableExistingNonPrivateDirectoryFailsPreflightAndCreate() throws Exception {
         Path state = Files.createDirectory(directory.resolve("existing-0755"));
         Files.setPosixFilePermissions(state, PosixFilePermissions.fromString("rwxr-xr-x"));
@@ -401,6 +402,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableDirectoryOwnedByAnotherAccountFailsPreflight() throws Exception {
         // F11: the Broker runs as the service account, so a directory owned by
         // a different account must not pass preflight even though it is 0700
@@ -430,6 +432,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableDirectoryOwnedByTheServiceAccountPassesPreflight() throws Exception {
         // R4-1: ownership is judged against the configured service account, so
         // a canonical 0700 directory owned by that account passes. Needs no
@@ -491,6 +494,7 @@ class LocalRuntimeProviderFactoryStateDirectoryTest {
     }
 
     @Test
+    @EnabledOnOs(OS.LINUX)
     void durableDirectoryWithUnknownServiceAccountWarnsPreflight() throws Exception {
         // When the configured service account cannot be resolved, ownership
         // cannot be judged; the row warns rather than passes or fails.
