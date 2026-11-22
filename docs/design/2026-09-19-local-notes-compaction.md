@@ -268,7 +268,10 @@ keys and nested JSON-encoded strings, receive the same media redaction without
 round-tripping numeric literals or unrelated evidence. The same rules apply
 to complete JSON documents embedded in ordinary tool output, including
 objects, arrays and JSON-encoded containers. Quoted MIME parameter values are
-part of the data URL header.
+part of the data URL header. An unfinished document with a recognizable JSON
+property header is omitted from that fragment onward. Duplicate properties
+use the parsed last value instead of returning raw text with hidden earlier
+values.
 Standalone media strings and strings containing non-base64 media data URLs
 (such as raw SVG) are omitted as a whole: quotes, spaces, and nested markup
 make the raw payload boundary ambiguous. Other JSON fields remain available.

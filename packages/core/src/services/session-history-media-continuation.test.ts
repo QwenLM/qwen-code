@@ -84,6 +84,7 @@ describe('session history media continuations', () => {
     part: Part,
     canary: string,
     evidence: string[],
+    requireMarker = true,
   ) {
     const ref = await append(
       part.functionResponse ? 'tool_result' : 'user',
@@ -98,6 +99,7 @@ describe('session history media continuations', () => {
       const result = await service.query(request, signal);
       if (result.includes(canary)) violations.push(`${request.action}: leaked`);
       if (
+        requireMarker &&
         request.action !== 'search' &&
         !result.includes('[Recorded media omitted]')
       )
@@ -126,6 +128,107 @@ describe('session history media continuations', () => {
     expect(result).toContain('RECOVERY_KEY_12345');
     expect(result).not.toContain('[Recorded media omitted]');
   });
+
+  const truncatedPayload = 'R13TRUNCATEDCANARY' + 'A'.repeat(12000);
+  const encodedContainer = JSON.stringify(
+    `{"inline_data":{"mime_type":"image/png","data":"${truncatedPayload}"},` +
+      '"evidence":"CLOSED_SIBLING_EVIDENCE"}',
+  );
+  const truncatedDocuments: Array<{
+    name: string;
+    complete: string;
+    cutAfterPayload?: number;
+  }> = [
+    {
+      name: 'inlineData object',
+      complete:
+        `{"inlineData":{"mimeType":"image/png","data":"${truncatedPayload}"},` +
+        '"evidence":"CLOSED_SIBLING_EVIDENCE"}',
+    },
+    {
+      name: 'typed media array',
+      complete:
+        `[{"type":"image","data":"${truncatedPayload}"},` +
+        '{"evidence":"CLOSED_SIBLING_EVIDENCE"}]',
+    },
+    {
+      name: 'encoded container scalar',
+      complete: encodedContainer,
+    },
+    {
+      name: 'encoded container with dangling escaped delimiter',
+      complete: encodedContainer,
+      cutAfterPayload: 1,
+    },
+    {
+      name: 'doubly encoded container with dangling escaped delimiter',
+      complete: JSON.stringify(encodedContainer),
+      cutAfterPayload: 1,
+    },
+    {
+      name: 'encoded container with partial Unicode delimiter',
+      complete: encodedContainer.replaceAll('\\"', '\\u0022'),
+      cutAfterPayload: 3,
+    },
+  ];
+
+  for (const document of truncatedDocuments) {
+    it.each(['text', 'call', 'response', 'nested-json'] as const)(
+      `R13 omits truncated ${document.name} in %s while its closed control stays usable`,
+      async (kind) => {
+        const evidence = ['BEFORE_TRUNCATED_EVIDENCE'];
+        if (kind !== 'text') evidence.push('OUTSIDE_JSON_EVIDENCE');
+        expect(
+          await projectionViolations(
+            textProjection(
+              kind,
+              `BEFORE_TRUNCATED_EVIDENCE ${document.complete}`,
+            ),
+            'R13TRUNCATEDCANARY',
+            [...evidence, 'CLOSED_SIBLING_EVIDENCE'],
+          ),
+        ).toEqual([]);
+        const cut =
+          document.complete.indexOf('R13TRUNCATEDCANARY') +
+          truncatedPayload.length +
+          (document.cutAfterPayload ?? -100);
+        expect(
+          await projectionViolations(
+            textProjection(
+              kind,
+              `BEFORE_TRUNCATED_EVIDENCE ${document.complete.slice(0, cut)}`,
+            ),
+            'R13TRUNCATEDCANARY',
+            evidence,
+          ),
+        ).toEqual([]);
+      },
+    );
+  }
+
+  for (const key of ['image', 'output', 'screenshot']) {
+    it.each(['text', 'call', 'response', 'nested-json'] as const)(
+      `R13 policy retains long untyped ${key} recovery text in %s`,
+      async (kind) => {
+        const payload = 'RECOVERYKEY0123456789'.repeat(64);
+        const text = JSON.stringify({ [key]: payload });
+        const ref = await append(
+          kind === 'response' ? 'tool_result' : 'user',
+          textProjection(kind, text),
+        );
+        const read = await service.query({ action: 'read', ref }, signal);
+        expect(read).toContain(payload);
+        expect(read).not.toContain('[Recorded media omitted]');
+        const search = JSON.parse(
+          await service.query(
+            { action: 'search', query: payload.slice(0, 64) },
+            signal,
+          ),
+        );
+        expect(search.entries).toHaveLength(1);
+      },
+    );
+  }
 
   it.each(['image/svg+xml', 'audio/wav', 'video/mp4', 'application/pdf'])(
     'R11-2 omits parameterized or folded %s data URLs in every text projection',
@@ -277,6 +380,41 @@ describe('session history media continuations', () => {
     },
   ];
 
+  for (const media of mediaJsonFields) {
+    it.each(['text', 'call', 'response', 'nested-json'] as const)(
+      `R13 omits duplicate-key shadowed ${media.name} in %s`,
+      async (kind) => {
+        const body =
+          `{"out":{${media.field.replaceAll('R9_MEDIA_CANARY', 'R13_DUPLICATE_CANARY')}},` +
+          '"out":"benign","request_id":9007199254740993,"amount":1.2300e+4,' +
+          '"evidence":"DUPLICATE_SIBLING_EVIDENCE"}';
+        const variants = [
+          body,
+          `Result: ${body.replace('"out":"benign"', String.raw`"o\u0075t":"benign"`)}`,
+          `[${body}]`,
+          `Result: ${JSON.stringify(body)}`,
+        ];
+        const violations: string[][] = [];
+        for (const text of variants) {
+          violations.push(
+            await projectionViolations(
+              textProjection(kind, text),
+              'R13_DUPLICATE_CANARY',
+              [
+                'DUPLICATE_SIBLING_EVIDENCE',
+                'benign',
+                '9007199254740993',
+                '1.2300e+4',
+              ],
+              false,
+            ),
+          );
+        }
+        expect(violations).toEqual(variants.map(() => []));
+      },
+    );
+  }
+
   const jsonWrappers = [
     (json: string) => `Result: ${json}`,
     (json: string) => `<result>${json}</result>`,
@@ -383,6 +521,9 @@ describe('session history media continuations', () => {
         `Result: ${JSON.stringify('ordinary "quoted" recovery evidence')}`,
         `Result: ${JSON.stringify('Status 200 ' + JSON.stringify({ evidence: 'RECOVERY_KEY' }))}`,
         'Result: {request failed: MALFORMED_LOG_RECOVERY_KEY',
+        'BEFORE_PROSE [note this is not a JSON document',
+        'BEFORE_PROSE arr[0',
+        'BEFORE_PROSE "unterminated ordinary quote',
       ]) {
         const part = textProjection(kind, text);
         const ref = await append(

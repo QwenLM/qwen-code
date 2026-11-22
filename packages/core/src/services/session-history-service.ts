@@ -46,6 +46,14 @@ interface HistoryCursor {
 
 const RECORDED_MEDIA_OMITTED = '[Recorded media omitted]';
 
+function countJsonProperties(text: string): number {
+  let count = 0;
+  for (const [, colon] of text.matchAll(/"[^"\\]*(?:\\.[^"\\]*)*"(\s*:)?/gu)) {
+    if (colon) count++;
+  }
+  return count;
+}
+
 function redactRecordedJson(text: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(
@@ -66,7 +74,13 @@ function redactRecordedJson(text: string): string | undefined {
         return value === decoded ? literal : JSON.stringify(value);
       },
     );
-    return redacted === JSON.stringify(parsed) ? text : redacted;
+    const serialized = JSON.stringify(parsed);
+    // Parsing can hide an earlier duplicate property before redaction sees it.
+    return redacted === serialized &&
+      (text === serialized ||
+        countJsonProperties(text) === countJsonProperties(serialized))
+      ? text
+      : redacted;
   } catch (error) {
     // A redaction resource failure must not expose valid JSON as plain text.
     if (!(error instanceof SyntaxError)) return RECORDED_MEDIA_OMITTED;
@@ -84,7 +98,7 @@ function redactEmbeddedRecordedJson(text: string): string {
   for (let start = starts.exec(text); start; start = starts.exec(text)) {
     const isString = start[0] === '"';
     let inString = isString;
-    let hasEscape = false;
+    let lastEscape = -1;
     let depth = isString ? 0 : 1;
     let end: number | undefined;
     for (let i = start.index + 1; i < text.length; i++) {
@@ -92,7 +106,7 @@ function redactEmbeddedRecordedJson(text: string): string {
       const char = text[i];
       if (inString) {
         if (char === '\\') {
-          hasEscape = true;
+          lastEscape = i;
           i++;
         } else if (char === '"') {
           if (isString) {
@@ -110,9 +124,30 @@ function redactEmbeddedRecordedJson(text: string): string {
         break;
       }
     }
-    if (end === undefined || (isString && !hasEscape)) continue;
-
     const fragment = text.slice(start.index, end);
+    if (end === undefined) {
+      if (isString && lastEscape >= 0) {
+        const cutEscape =
+          text.length - lastEscape <= 5 &&
+          /^\\(?:u[0-9a-f]{0,3})?$/iu.test(text.slice(lastEscape));
+        const completed =
+          text.slice(start.index, cutEscape ? lastEscape : text.length) + '"';
+        const redacted = redactRecordedJson(completed);
+        if (redacted !== undefined && redacted !== completed)
+          return chunks.join('') + text.slice(copied, start.index) + redacted;
+      } else if (
+        /^(?:\[\s*)*\{\s*"[^"\\]*(?:\\.[^"\\]*)*"\s*:/u.test(fragment)
+      ) {
+        return (
+          chunks.join('') +
+          text.slice(copied, start.index) +
+          RECORDED_MEDIA_OMITTED
+        );
+      }
+      continue;
+    }
+    if (isString && lastEscape < 0) continue;
+
     // This quote can instead be the first JSON key or array item in prose.
     if (isString && /[{[]\s*"$/u.test(fragment)) continue;
     const redacted = redactRecordedJson(fragment);
