@@ -278,14 +278,15 @@ This means the `baseUrl` you configure should be compatible with the correspondi
 
 ### OpenAI-compatible providers (`openai`)
 
-This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter and Requesty.
+This auth type supports not only OpenAI's official API but also any OpenAI-compatible endpoint, including aggregated model providers like OpenRouter, Requesty, and DeepInfra.
 
 ```json
 {
   "env": {
     "OPENAI_API_KEY": "sk-your-actual-openai-key-here",
     "OPENROUTER_API_KEY": "sk-or-your-actual-openrouter-key-here",
-    "REQUESTY_API_KEY": "sk-your-actual-requesty-key-here"
+    "REQUESTY_API_KEY": "sk-your-actual-requesty-key-here",
+    "DEEPINFRA_API_KEY": "your-actual-deepinfra-key-here"
   },
   "modelProviders": {
     "openai": [
@@ -357,6 +358,17 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
           "samplingParams": {
             "temperature": 0.7
           }
+        }
+      },
+      {
+        "id": "deepseek-ai/DeepSeek-V3",
+        "name": "DeepSeek V3 (via DeepInfra Flex)",
+        "envKey": "DEEPINFRA_API_KEY",
+        "baseUrl": "https://api.deepinfra.com/v1/openai",
+        "generationConfig": {
+          "service_tier": "flex",
+          "timeout": 120000,
+          "maxRetries": 3
         }
       }
     ]
