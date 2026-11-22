@@ -568,6 +568,8 @@ describe('model catalog', () => {
     ]) {
       expect(tokenLimit(id)).toBe(131_072);
     }
+    expect(tokenLimit('zai-org/GLM-4.5-Air-FP8')).toBe(131_072);
+    expect(tokenLimit('zai-org/GLM-4.5-Air-FP8', 'output')).toBe(98_304);
   });
 
   it.each([

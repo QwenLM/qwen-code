@@ -817,6 +817,16 @@ describe('quantized builds', () => {
       expect(tokenLimit(quantized, 'output')).toBe(tokenLimit(base, 'output'));
     }
   });
+
+  it('strips every GPTQ spelling but only at the end of the id', () => {
+    expect(normalize('Qwen/Qwen2.5-72B-Instruct-GPTQ-Int8')).toBe(
+      'qwen2.5-72b-instruct',
+    );
+    expect(normalize('Qwen/Qwen2.5-72B-Instruct-GPTQ')).toBe(
+      'qwen2.5-72b-instruct',
+    );
+    expect(normalize('my-awq-model')).toBe('my-awq-model');
+  });
 });
 
 describe('models.dev catalog', () => {
