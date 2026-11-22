@@ -10,7 +10,10 @@ import type {
   SimpleGitOptions,
 } from 'simple-git';
 import { NO_EXEC_CONFIG_SETTINGS } from './gitUtils.js';
-import { REMOTE_GIT_TRANSPORT_KEYS } from './git-branches.js';
+import {
+  GIT_METADATA_RESTORE_KEYS,
+  REMOTE_GIT_TRANSPORT_KEYS,
+} from './git-branches.js';
 
 export type SimpleGitModule = {
   CheckRepoActions: typeof CheckRepoActions;
@@ -22,26 +25,32 @@ export type SimpleGitModule = {
 // environment guard throws when a task env names a guarded key the client
 // did not opt into, so every client from this loader names them — the
 // worktree service alone applies `.env(gitEnv())` at ~25 call sites.
+// Derived from gitEnv()'s own restore set (plus GIT_ALLOW_PROTOCOL, which
+// gitEnv() restores on a separate filtered path) so the two cannot drift.
 export const GIT_ENV_RESTORED_KEYS = [
-  'GIT_AUTHOR_NAME',
-  'GIT_AUTHOR_EMAIL',
-  'GIT_AUTHOR_DATE',
-  'GIT_COMMITTER_NAME',
-  'GIT_COMMITTER_EMAIL',
-  'GIT_COMMITTER_DATE',
-  'GIT_SSL_CAINFO',
-  'GIT_SSL_CAPATH',
+  ...GIT_METADATA_RESTORE_KEYS,
   'GIT_ALLOW_PROTOCOL',
 ] as const;
 
 /**
  * Every guarded name this loader opts its clients into: the set `gitEnv()`
- * restores for `.env()` clients, plus the ambient transport credentials a
- * client that inherits `process.env` would otherwise lose to the v4 guard.
+ * restores for `.env()` clients, plus the ambient operator configuration a
+ * client that inherits `process.env` would otherwise lose to the v4 guard —
+ * transport credentials, TLS client certificates, the SSH variant, the
+ * no-prompt switch and a dedicated global config. Naming a key only lets a
+ * value already in the child environment survive; it never injects one, so
+ * the `.env(gitEnv())` clients keep their scrub. Exec-capable keys
+ * (GIT_EXEC_PATH, GIT_PROXY_COMMAND, editors, …) stay unnamed on purpose:
+ * the guard deleting them is the hardening this loader exists for.
  */
 export const LOADER_ALLOWED_ENVIRONMENT_KEYS = [
   ...GIT_ENV_RESTORED_KEYS,
   ...REMOTE_GIT_TRANSPORT_KEYS,
+  'GIT_SSL_CERT',
+  'GIT_SSL_KEY',
+  'GIT_SSH_VARIANT',
+  'GIT_TERMINAL_PROMPT',
+  'GIT_CONFIG_GLOBAL',
 ] as const;
 
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;

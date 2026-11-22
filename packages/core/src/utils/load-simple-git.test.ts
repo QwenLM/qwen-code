@@ -12,6 +12,7 @@ import {
   GIT_ENV_RESTORED_KEYS,
   LOADER_ALLOWED_ENVIRONMENT_KEYS,
 } from './load-simple-git.js';
+import { GIT_METADATA_RESTORE_KEYS } from './git-branches.js';
 
 describe('loadSimpleGit', () => {
   afterEach(() => {
@@ -147,22 +148,31 @@ describe('loadSimpleGit', () => {
   // The witness is a POSIX shell script: Windows has no `#!/bin/sh` and the
   // batch equivalent would test cmd.exe quoting rather than the env guard.
   it.skipIf(process.platform === 'win32')(
-    'keeps the ambient transport variables for clients that never set .env()',
+    'keeps the ambient operator configuration for clients that never set .env()',
     async () => {
       // Unmocked: v4's guard deletes every guarded key the client did not name,
       // not only the ones a task env sets. The extension git client returns
-      // before `.env()` on the default policy, so an operator's SSH identity has
-      // to survive in the child or an SSH-sourced install fails `publickey`.
+      // before `.env()` on the default policy, so an operator's SSH identity,
+      // TLS client certificate, no-prompt switch and dedicated global config
+      // have to survive in the child or the install fails (publickey denial,
+      // TLS handshake failure, the #13447 /dev/tty hang, lost credentials).
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-env-shim-'));
       const shim = path.join(dir, 'shim');
       const dump = path.join(dir, 'env.txt');
-      fs.writeFileSync(
-        shim,
-        `#!/bin/sh\nprintf '%s' "$GIT_SSH_COMMAND" > '${dump}'\nexit 1\n`,
-      );
+      const ambient = {
+        GIT_SSH_COMMAND: 'ssh -i /tmp/operator-key',
+        GIT_SSL_CERT: '/tmp/operator-client.pem',
+        GIT_SSL_KEY: '/tmp/operator-client.key',
+        GIT_SSH_VARIANT: 'ssh',
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_CONFIG_GLOBAL: '/tmp/operator-gitconfig',
+      };
+      fs.writeFileSync(shim, `#!/bin/sh\nenv > '${dump}'\nexit 1\n`);
       fs.chmodSync(shim, 0o755);
       try {
-        vi.stubEnv('GIT_SSH_COMMAND', 'ssh -i /tmp/operator-key');
+        for (const [key, value] of Object.entries(ambient)) {
+          vi.stubEnv(key, value);
+        }
         const { loadSimpleGit } = await import('./load-simple-git.js');
         const { simpleGit: guarded } = await loadSimpleGit();
 
@@ -170,7 +180,10 @@ describe('loadSimpleGit', () => {
         // The shim exits non-zero on purpose; what matters is the environment
         // its child received, not how simple-git reports the failure.
         await git.raw(['version']).catch(() => undefined);
-        expect(fs.readFileSync(dump, 'utf8')).toBe('ssh -i /tmp/operator-key');
+        const childEnv = fs.readFileSync(dump, 'utf8');
+        for (const [key, value] of Object.entries(ambient)) {
+          expect(childEnv).toContain(`${key}=${value}`);
+        }
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
       }
@@ -178,14 +191,13 @@ describe('loadSimpleGit', () => {
   );
 
   it('allowlists every guarded key gitEnv() restores', async () => {
-    vi.stubEnv('GIT_AUTHOR_NAME', 'CI User');
-    vi.stubEnv('GIT_AUTHOR_EMAIL', 'ci@example.com');
-    vi.stubEnv('GIT_AUTHOR_DATE', '2026-01-01T00:00:00Z');
-    vi.stubEnv('GIT_COMMITTER_NAME', 'CI User');
-    vi.stubEnv('GIT_COMMITTER_EMAIL', 'ci@example.com');
-    vi.stubEnv('GIT_COMMITTER_DATE', '2026-01-01T00:00:00Z');
-    vi.stubEnv('GIT_SSL_CAINFO', '/tmp/ci-test-ca.pem');
-    vi.stubEnv('GIT_SSL_CAPATH', '/tmp/ci-test-ca');
+    // Stub from the exported restore set, not from the loader's constant:
+    // adding a key to gitEnv()'s set without mirroring it into the loader
+    // must turn this red, which a stub list copied from the constant cannot
+    // do (the new key would never appear in gitEnv()'s output here).
+    for (const key of GIT_METADATA_RESTORE_KEYS) {
+      vi.stubEnv(key, `stub-${key}`);
+    }
     vi.stubEnv('GIT_ALLOW_PROTOCOL', 'https:ssh');
     const { gitEnv } = await import('./git-branches.js');
 

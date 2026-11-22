@@ -95,17 +95,22 @@ export const REMOTE_GIT_TRANSPORT_KEYS = [
 const NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS = new Set(
   REMOTE_GIT_TRANSPORT_KEYS.map((key) => key.toLowerCase()),
 );
+// The operator-set variables gitEnv() restores after the scrub. Exported so
+// the simple-git loader's allowlist derives from the same list instead of
+// hand-copying it: a key added here must reach the v4 environment guard too,
+// or every `.env(gitEnv())` spawn throws for operators who export it.
+export const GIT_METADATA_RESTORE_KEYS = [
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_DATE',
+  'GIT_SSL_CAINFO',
+  'GIT_SSL_CAPATH',
+] as const;
 const GIT_METADATA_KEYS = new Set(
-  [
-    'GIT_AUTHOR_NAME',
-    'GIT_AUTHOR_EMAIL',
-    'GIT_AUTHOR_DATE',
-    'GIT_COMMITTER_NAME',
-    'GIT_COMMITTER_EMAIL',
-    'GIT_COMMITTER_DATE',
-    'GIT_SSL_CAINFO',
-    'GIT_SSL_CAPATH',
-  ].map((key) => key.toLowerCase()),
+  GIT_METADATA_RESTORE_KEYS.map((key) => key.toLowerCase()),
 );
 
 // Transport names git ships helpers for: `ext` is deny-by-default but
