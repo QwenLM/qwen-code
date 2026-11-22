@@ -50,6 +50,48 @@ class BrokerValuesTest {
     }
 
     @Test
+    void childRunIdsUseThe256CharacterNoTrailingSpaceBudget() {
+        String run = "r".repeat(256);
+        assertEquals(run, BrokerValues.requireChildRunId(run, "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId("r".repeat(257), "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId("run ", "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId("r\ud800un", "childRunId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireChildRunId(null, "childRunId"));
+    }
+
+    @Test
+    void toolCallIdsUseThe128CharacterNoTrailingSpaceBudget() {
+        String call = "c".repeat(128);
+        assertEquals(call, BrokerValues.requireToolCallId(call, "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId("c".repeat(129), "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId("call ", "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId("c\ud800all", "toolCallId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireToolCallId(null, "toolCallId"));
+    }
+
+    @Test
+    void runtimeIdentitiesUseThe128CharacterNoTrailingSpaceBudget() {
+        String instance = "i".repeat(128);
+        assertEquals(instance, BrokerValues.requireRuntimeIdentity(instance, "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity("i".repeat(129), "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity("instance ", "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity("inst\ud800ance", "runtimeInstanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireRuntimeIdentity(null, "runtimeInstanceId"));
+    }
+
+    @Test
     void idempotencyKeysUseThe128CharacterNoTrailingSpaceBudgetAndAllowUnicode() {
         String key = "k".repeat(128);
         assertEquals(key, BrokerValues.requireIdempotencyKey(key, "idempotencyKey"));

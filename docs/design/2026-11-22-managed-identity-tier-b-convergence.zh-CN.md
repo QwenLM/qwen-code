@@ -47,6 +47,7 @@ Tier A 已把简单的服务端铸造身份转为有界 `VARCHAR`。剩余 Tier 
 | 我们的代码铸造 | `item_id`、`content_part_id`、`transaction_id`、`command_id`、`activation_id`、`writer_id`、`ma_session_head.operation_id`、`source_scope_id`、`parent_child_run_id`、ma_channel_segment `delivery_id`/`segment_id`、PR `binding_id`、`idempotency_key`（多数命名空间） | `VARCHAR(128)` |
 | 复合 resource 铸造 | `resource_id`（ma_resource **及** ma_resource_ref） | `VARCHAR(256)` |
 | childRunId union | `record_id`、`child_run_id`、`execution_call_id`、`delivery_id`（CHILD_RESULT） | `VARCHAR(256)` |
+| 投递分段 | ma_delivery `segment_id`（= `delivery_id` + ":" + ordinal 0..63，≤256+1+2） | `VARCHAR(320)` |
 | 短确定值 | `isolation_key` | `VARCHAR(64)` |
 | 复合契约安全 | `provision_request_id` / `loss_evidence_id` | `VARCHAR(160)` / `VARCHAR(192)` |
 | GitHub 规格 | PR `owner` / `repo` | `VARCHAR(64)` / `VARCHAR(128)` |
@@ -58,8 +59,13 @@ Tier A 已把简单的服务端铸造身份转为有界 `VARCHAR`。剩余 Tier 
 
 `childRunId = hostedPromptKey(≤64) + ":" + callId`。`tool_call_id` 准入收紧到 128 后，
 `childRunId ≤ 64 + 1 + 128 = 193`，故 `VARCHAR(256)` 覆盖且有余量。reconcile 现有 gate
-不一致：child-result relay gate `childRunId ≤ 128`（`requireOperationId`），而
-child-operation 路径允许 320；统一到收敛的 256 界。
+不一致：child-result relay 原先 gate `childRunId ≤ 128`（`requireOperationId`），而
+child-operation 路径允许 320。收敛后的身份 gate 为 `requireChildRunId ≤ 256`，TS
+child-operation 路径由 320 收敛到 256。relay ledger 还会把 `childRunId` 镜像写入
+`ma_operation.operation_id`（`VARCHAR(128)`，`INSERT IGNORE`），因此其行写入保留更紧的
+`requireOperationId ≤ 128` 界，避免 MySQL 静默截断较长 id；真实 provider call id 使
+`childRunId ≤ 127`，故实践中不会触发。要把该 ledger 列加宽（或派生有界 ledger id）以
+端到端接纳完整 256，是单独的后续工作。
 
 ## 生产者证据与准入收紧
 

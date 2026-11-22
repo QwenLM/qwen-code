@@ -27,7 +27,9 @@ public final class RuntimeProvisionRequest {
             throw new IllegalArgumentException("scope is required");
         }
         if ("session".equals(scope.getIsolationClass())) {
-            this.isolationKey = BrokerValues.requireId(isolationKey,
+            // isolation_key is the Harness Session id (UUID36) in a
+            // VARCHAR(64) column; the short-id bound keeps it fail-closed.
+            this.isolationKey = BrokerValues.requireShortId(isolationKey,
                     "isolationKey");
         } else {
             if (isolationKey != null) {

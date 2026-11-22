@@ -232,7 +232,7 @@ final class ManagedModelDiagnosticProjection {
 
     static void invalidateModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
         jdbc.update("UPDATE ma_session_record SET settled_at = NULL WHERE tenant_id = ? AND session_id = ?"
-                + " AND domain = ? AND record_id = X'6C6174657374'"
+                + " AND domain = ? AND record_id = 'latest'"
                 + " AND EXISTS (SELECT 1 FROM ma_resource u WHERE u.tenant_id = ma_session_record.tenant_id"
                 + " AND u.session_id = ma_session_record.session_id"
                 + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id")
@@ -244,13 +244,13 @@ final class ManagedModelDiagnosticProjection {
         Integer legacy = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record r JOIN ma_resource u"
                 + " ON u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND "
                 + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "u.resource_id") + " = r.record_resource_id"
-                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? AND r.record_id = X'6C6174657374' AND u.kind = ?",
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.domain = ? AND r.record_id = 'latest' AND u.kind = ?",
                 Integer.class, tenantId, sessionId, MODEL_CONTEXT_DOMAIN, MODEL_USAGE_KIND);
         if (legacy != null && legacy > 0) {
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'SESSION_RECORD'"
                     + " AND owner_ref = ?", tenantId, sessionId, ManagedSchemaKeys.identity(
                     JdbcManagedExtensionRecordStore.sessionRecordOwnerRef(sessionId, MODEL_CONTEXT_DOMAIN, "latest")));
-            jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = X'6C6174657374'",
+            jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND domain = ? AND record_id = 'latest'",
                     tenantId, sessionId, MODEL_CONTEXT_DOMAIN);
         }
     }

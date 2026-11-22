@@ -75,6 +75,56 @@ public final class BrokerValues {
     }
 
     /**
+     * A child-run identity stored in a VARCHAR(256) column (record_id,
+     * child_run_id, execution_call_id, CHILD_RESULT delivery_id). The union
+     * mint is {@code hostedPromptKey(<=64) + ":" + callId(<=128)}, so 256
+     * covers it with headroom. PAD SPACE collations fold trailing spaces, so
+     * two distinct ids would compare equal; the boundary refuses them rather
+     * than relying on the column to preserve exactness.
+     */
+    public static String requireChildRunId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 256 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-256 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A raw model tool-call identity stored in a VARCHAR(128) column
+     * (tool_call_id). Known providers mint far shorter ids; 128 is the
+     * converged contract bound. PAD SPACE collations fold trailing spaces, so
+     * two distinct ids would compare equal; the boundary refuses them rather
+     * than relying on the column to preserve exactness.
+     */
+    public static String requireToolCallId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A Runtime instance or lease identity stored in a VARCHAR(128) column
+     * (runtime_instance_id, runtime_lease_id). Dynamic placements mint the
+     * binding id (<=128) or a UUID(36); static operator slugs are shorter.
+     * PAD SPACE collations fold trailing spaces, so two distinct ids would
+     * compare equal; the boundary refuses them rather than relying on the
+     * column to preserve exactness.
+     */
+    public static String requireRuntimeIdentity(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
      * An idempotency key stored in a VARCHAR(128) column. Unicode is allowed
      * (queue keys are not forced to ASCII); PAD SPACE collations fold trailing
      * spaces, so two distinct keys would compare equal and the boundary refuses

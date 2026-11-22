@@ -353,7 +353,7 @@ class ChildWorkspaceServiceTest {
         for (String started : List.of(JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING,
                 JdbcChildWorkspaceStore.APPLIED)) {
             updateChild("UPDATE ma_workspace SET child_state = ?, finish_request = 'merge'"
-                    + " WHERE tenant_id = ? AND child_run_id = X'72756e2d34'", started, parent.tenantId());
+                    + " WHERE tenant_id = ? AND child_run_id = 'run-4'", started, parent.tenantId());
             assertApi(() -> service.finish(parent.tenantId(), parent.sessionId(), "run-4",
                     JdbcChildWorkspaceStore.DISCARD), "child_workspace_finishing");
         }

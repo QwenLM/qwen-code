@@ -422,22 +422,22 @@ class SessionMessageRelayStoreTest {
         // further revision): past the bound, then classified.
         store.claim(TENANT, child, "msg_e", "owner-a", 31_000, 1_000);
         jdbc.update("UPDATE ma_delivery SET attempt_count"
-                + " = ? WHERE source_session_id = ? AND delivery_id = X'6d73675f65'",
+                + " = ? WHERE source_session_id = ? AND delivery_id = 'msg_e'",
                 JdbcSessionMessageRelayStore.MAX_ATTEMPTS - 1, child);
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         jdbc.update("UPDATE ma_delivery SET attempt_count"
-                + " = ? WHERE source_session_id = ? AND delivery_id = X'6d73675f65'",
+                + " = ? WHERE source_session_id = ? AND delivery_id = 'msg_e'",
                 JdbcSessionMessageRelayStore.MAX_ATTEMPTS, child);
         assertThat(records.childOwesHandover(TENANT, child)).isFalse();
         assertThat(records.edgeMessages(TENANT, parent, "run-1", child)
                 .undelivered()).isEqualTo(1);
         jdbc.update("UPDATE ma_delivery SET attempt_count"
                 + " = 0, transport_state = 'orphaned' WHERE source_session_id = ?"
-                + " AND delivery_id = X'6d73675f65'", child);
+                + " AND delivery_id = 'msg_e'", child);
         assertThat(records.childOwesHandover(TENANT, child)).isFalse();
         jdbc.update("UPDATE ma_delivery SET transport_state ="
                 + " 'relaying' WHERE source_session_id = ?"
-                + " AND delivery_id = X'6d73675f65'", child);
+                + " AND delivery_id = 'msg_e'", child);
         assertThat(records.childOwesHandover(TENANT, child)).isTrue();
         // A closed child's outbox is orphaned and never moves again: it
         // holds neither the settlement nor the close.

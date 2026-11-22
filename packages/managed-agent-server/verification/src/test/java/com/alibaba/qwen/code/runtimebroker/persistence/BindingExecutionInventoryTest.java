@@ -94,9 +94,7 @@ class BindingExecutionInventoryTest {
                         "UPDATE ma_tool_execution SET result_json = ? "
                                 + "WHERE execution_call_id = ?")) {
             statement.setString(1, "{corrupt");
-            statement.setBytes(2,
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys
-                            .identity("plain"));
+            statement.setString(2, "plain");
             assertEquals(1, statement.executeUpdate());
         }
         var harnessReader = new JdbcToolExecutionRepository(source);

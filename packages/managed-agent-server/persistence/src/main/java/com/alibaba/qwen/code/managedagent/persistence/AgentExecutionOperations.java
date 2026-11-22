@@ -147,7 +147,7 @@ final class AgentExecutionOperations {
     ContextCompressionState contextCompressionState(String tenantId, String sessionId) {
         ensureCompactionProjection(tenantId, sessionId);
         List<Long> revisions = jdbc.queryForList("SELECT revision FROM ma_session_record WHERE"
-                + " tenant_id = ? AND session_id = ? AND domain = 'hosted_context_compaction' AND record_id = X'6C6174657374' AND record_kind = 'DOMAIN'", Long.class,
+                + " tenant_id = ? AND session_id = ? AND domain = 'hosted_context_compaction' AND record_id = 'latest' AND record_kind = 'DOMAIN'", Long.class,
                 tenantId, sessionId);
         List<String> operations = jdbc.queryForList("SELECT operation_id FROM ma_operation WHERE"
                 + " scope_kind = 'SESSION' AND scope_id = ? AND operation_kind = 'CONTEXT_COMPRESSION' AND target_id = ?"
@@ -205,7 +205,7 @@ final class AgentExecutionOperations {
 
     void ensureCompactionProjection(String tenantId, String sessionId) {
         if (!jdbc.queryForList("SELECT 1 FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
-                + " AND domain = 'hosted_context_compaction' AND record_id = X'6C6174657374'",
+                + " AND domain = 'hosted_context_compaction' AND record_id = 'latest'",
                 tenantId, sessionId).isEmpty()) {
             return;
         }

@@ -163,7 +163,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
         return exists(
                 connection,
                 "SELECT 1 FROM ma_output_capture WHERE execution_call_id = ? LIMIT 1",
-                identity(executionCallId));
+                executionCallId);
     }
 
     private static byte[] identity(String value) {

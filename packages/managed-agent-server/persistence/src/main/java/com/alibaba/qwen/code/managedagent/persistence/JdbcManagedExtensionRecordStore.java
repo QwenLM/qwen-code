@@ -575,7 +575,7 @@ public class JdbcManagedExtensionRecordStore
                 resource.resourceId(), occurredAt, occurredAt, sequence);
         if (inserted == 0 && jdbc.update("UPDATE ma_session_record SET revision = ?, record_resource_id = ?, settled_at = ?"
                 + " WHERE tenant_id = ? AND session_id = ? AND domain = 'hosted_context_compaction'"
-                + " AND record_id = X'6C6174657374' AND revision < ?", sequence,
+                + " AND record_id = 'latest' AND revision < ?", sequence,
                 resource.resourceId(), occurredAt, tenantId, sessionId, sequence) == 0) {
             return;
         }

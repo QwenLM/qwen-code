@@ -380,7 +380,7 @@ final class AgentSessionAdmissions {
                     || !snapshot.path("approvalRevision").isIntegralNumber() || snapshot.path("approvalRevision").asLong(-1) < 0
                     || !snapshot.path("approvalRevision").canConvertToLong() || snapshot.path("approvalRevision").asLong() > 9_007_199_254_740_991L
                     || !snapshot.path("modelId").isTextual() || snapshot.path("modelId").asText().isBlank()
-                    || snapshot.path("modelId").asText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 512
+                    || snapshot.path("modelId").asText().length() > 128
                     || !snapshot.path("modelRevision").isIntegralNumber() || snapshot.path("modelRevision").asLong(-1) < 0
                     || !snapshot.path("modelRevision").canConvertToLong() || snapshot.path("modelRevision").asLong() > 9_007_199_254_740_991L
                     || !snapshot.has("skillsRef") || snapshot.path("modelRoute").size() != (snapshot.path("modelRoute").has("origin") ? 4 : 3)
@@ -401,7 +401,7 @@ final class AgentSessionAdmissions {
             if (snapshot.path("modelRoute").has("origin")) {
                 var origin = snapshot.path("modelRoute").get("origin");
                 if (origin.size() != 4 || !origin.path("modelId").isTextual() || origin.path("modelId").asText().isBlank()
-                        || origin.path("modelId").asText().getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 512
+                        || origin.path("modelId").asText().length() > 128
                         || !origin.path("authType").isTextual()
                         || !origin.path("authType").asText().matches("[a-z][a-z0-9_-]{0,63}")
                         || !origin.path("endpointDigest").isTextual()

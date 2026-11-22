@@ -53,6 +53,7 @@ redesign. Converging each budget from its real producer eliminates those blocker
 | Our-code minted | `item_id`, `content_part_id`, `transaction_id`, `command_id`, `activation_id`, `writer_id`, `ma_session_head.operation_id`, `source_scope_id`, `parent_child_run_id`, ma_channel_segment `delivery_id`/`segment_id`, PR `binding_id`, `idempotency_key` (most namespaces) | `VARCHAR(128)` |
 | Composite resource mints | `resource_id` (ma_resource **and** ma_resource_ref) | `VARCHAR(256)` |
 | childRunId union | `record_id`, `child_run_id`, `execution_call_id`, `delivery_id` (CHILD_RESULT) | `VARCHAR(256)` |
+| Delivery segment | ma_delivery `segment_id` (= `delivery_id` + ":" + ordinal 0..63, ≤256+1+2) | `VARCHAR(320)` |
 | Short bounded | `isolation_key` | `VARCHAR(64)` |
 | Composite contract-safe | `provision_request_id` / `loss_evidence_id` | `VARCHAR(160)` / `VARCHAR(192)` |
 | GitHub spec-based | PR `owner` / `repo` | `VARCHAR(64)` / `VARCHAR(128)` |
@@ -64,9 +65,15 @@ redesign. Converging each budget from its real producer eliminates those blocker
 
 `childRunId = hostedPromptKey(≤64) + ":" + callId`. With `tool_call_id` admission
 bounded to 128, `childRunId ≤ 64 + 1 + 128 = 193`, so `VARCHAR(256)` covers it with
-headroom. Reconcile the existing gate inconsistency: the child-result relay gates
-`childRunId ≤ 128` (`requireOperationId`) while the child-operation route allows 320;
-unify both to the converged 256 bound.
+headroom. Reconcile the existing gate inconsistency: the child-result relay gated
+`childRunId ≤ 128` (`requireOperationId`) while the child-operation route allowed 320.
+The converged identity gate is `requireChildRunId ≤ 256` and the TS child-operation
+route converges 320→256. The relay ledger additionally mirrors `childRunId` into
+`ma_operation.operation_id` (`VARCHAR(128)`) under `INSERT IGNORE`, so its row write
+keeps the tighter `requireOperationId ≤ 128` bound rather than letting MySQL silently
+truncate a longer id; real provider call ids keep `childRunId ≤ 127`, so this never
+binds in practice. Widening that ledger column (or deriving a bounded ledger id) to
+admit the full 256 end-to-end is a separate follow-up.
 
 ## Producer evidence and admission tightening
 

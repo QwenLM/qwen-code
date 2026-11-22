@@ -91,7 +91,7 @@ public class JdbcManagedToolResultStore
                                 tenant, "SESSION", session, executionCallId, source.id()),
                         ManagedSchemaKeys.identity(session), source.id(),
                         tenant, workspace, session,
-                        ManagedSchemaKeys.identity(executionCallId), ManagedSchemaKeys.identity(executionCallId),
+                        ManagedSchemaKeys.identity(executionCallId), executionCallId,
                         JSON.valueToTree(source).toString(), source.sourceDigest(),
                         createdAt, createdAt});
             }

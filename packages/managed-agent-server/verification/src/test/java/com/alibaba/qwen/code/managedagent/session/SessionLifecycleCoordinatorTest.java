@@ -886,7 +886,7 @@ class SessionLifecycleCoordinatorTest {
                         .requireSession("tenant", world.session).workspace(), 1L);
             }
             world.jdbc.update("UPDATE ma_workspace SET child_state = ?,"
-                    + " finish_request = ? WHERE child_run_id = X'72756e2d31'",
+                    + " finish_request = ? WHERE child_run_id = 'run-1'",
                     start.startsWith("faltering") ? "ready" : start,
                     "merging".equals(start) ? "merge" : null);
             var faltered = new AtomicBoolean(start.startsWith("faltering"));

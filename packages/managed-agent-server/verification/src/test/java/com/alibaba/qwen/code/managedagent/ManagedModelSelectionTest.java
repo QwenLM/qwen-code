@@ -443,11 +443,11 @@ class ManagedModelSelectionTest {
         if (diagnostics) {
             jdbc.update("UPDATE ma_session_record SET revision=2,record_resource_id='new-usage',settled_at=2"
                     + " WHERE tenant_id = ? AND session_id = ? AND domain='hosted_context_usage'"
-                    + " AND record_id=X'6C6174657374'", tenant, session);
+                    + " AND record_id='latest'", tenant, session);
         } else {
             jdbc.update("INSERT INTO ma_session_record (tenant_id,workspace_id,"
                     + "session_id,domain,record_id,revision,record_resource_id,gmt_create,settled_at)"
-                    + " VALUES (?,'ws',?,'hosted_context_usage',X'6C6174657374',2,'new-usage',2,2)", tenant, session);
+                    + " VALUES (?,'ws',?,'hosted_context_usage','latest',2,'new-usage',2,2)", tenant, session);
         }
         assertThat(change("actor", "again-a", "model-a", 2).replayed()).isTrue();
         assertThat(jdbc.queryForObject("SELECT record_resource_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?",

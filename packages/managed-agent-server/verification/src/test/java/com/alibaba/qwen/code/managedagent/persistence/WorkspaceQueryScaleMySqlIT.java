@@ -166,7 +166,7 @@ class WorkspaceQueryScaleMySqlIT {
             operations.add(new Object[] {ManagedIdentityRefs.operationRef("CLOSE", "tenant", "SESSION", session, session, "close-" + child), "SESSION", session, "close-" + child,
                     session, "CLOSE", session, "COMPLETED", "CONFIRMED"});
             workspaces.add(new Object[] {child, child,
-                    session, rawRun.getBytes(java.nio.charset.StandardCharsets.UTF_8)});
+                    session, rawRun});
             String resourceId = "history-resource-" + index;
             resources.add(new Object[] {session,
                     resourceId.getBytes(java.nio.charset.StandardCharsets.UTF_8), com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))});

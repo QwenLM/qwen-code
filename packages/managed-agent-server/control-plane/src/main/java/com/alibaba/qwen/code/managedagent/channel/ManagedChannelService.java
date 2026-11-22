@@ -139,6 +139,7 @@ public class ManagedChannelService {
                     "The channel actor must be non-blank text without"
                             + " trailing spaces.");
         }
+        requireNoTrailingSpace(request.accountId(), "The channel account");
         String policyJson;
         try {
             policyJson = mapper.writeValueAsString(request.policy());
@@ -199,6 +200,9 @@ public class ManagedChannelService {
         String senderId = event.scope().senderId();
         String chatId = event.scope().chatId();
         String threadId = event.scope().threadId();
+        requireNoTrailingSpace(senderId, "The channel sender");
+        requireNoTrailingSpace(chatId, "The channel chat");
+        requireNoTrailingSpace(threadId, "The channel thread");
         String routeId = routeId(channelId, instance.accountId(), kind,
                 senderId, chatId, threadId);
         String routeKey = ChannelRouteRepository.routeKey(tenantId, channelId,
@@ -1052,6 +1056,21 @@ public class ManagedChannelService {
         if (value.contains(SEPARATOR)) {
             throw new ManagedAgentException(400, "invalid_request",
                     name + " must not contain NUL.");
+        }
+    }
+
+    /**
+     * A platform or repository identity stored in a VARCHAR column under a
+     * PAD SPACE collation: a trailing-space variant would fold onto another
+     * identity. Null/empty pass (nullable route fields); required fields are
+     * separately bounded non-blank by the adapter contract.
+     */
+    static void requireNoTrailingSpace(String value, String name) {
+        if (value != null && !value.isEmpty()
+                && Character.isWhitespace(
+                        value.codePointBefore(value.length()))) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    name + " must be text without trailing spaces.");
         }
     }
 

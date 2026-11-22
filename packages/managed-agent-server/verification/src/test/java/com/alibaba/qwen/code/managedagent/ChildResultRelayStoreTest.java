@@ -216,7 +216,7 @@ class ChildResultRelayStoreTest {
         // ledger its owed step: it surfaces, until classify retires it.
         jdbc.update("UPDATE ma_session_record SET"
                         + " delivery_state = 'consumed'"
-                        + " WHERE tenant_id = ? AND record_id = X'72756e2d736574746c6564'",
+                        + " WHERE tenant_id = ? AND record_id = 'run-settled'",
                 TENANT);
         RelayRow delivering = relayStore.claim(TENANT, session, "run-settled",
                 "key-settled", "owner", 30_000, 400);
@@ -760,7 +760,7 @@ class ChildResultRelayStoreTest {
         jdbc.update("UPDATE ma_session_record SET"
                         + " runtime_state = 'unbound'"
                         + " WHERE tenant_id = ?"
-                        + " AND record_id = X'72756e2d657865632d696e74656e74'",
+                        + " AND record_id = 'run-exec-intent'",
                 TENANT);
         insertRecordBody("resource-run-exec-intent", session, "intent");
         assertThat(relayStore.executionState(TENANT, session,
@@ -770,7 +770,7 @@ class ChildResultRelayStoreTest {
         jdbc.update("UPDATE ma_session_record SET"
                         + " runtime_state = 'provisioning'"
                         + " WHERE tenant_id = ?"
-                        + " AND record_id = X'72756e2d657865632d6469737061746368'",
+                        + " AND record_id = 'run-exec-dispatch'",
                 TENANT);
         insertRecordBody("resource-run-exec-dispatch", session,
                 "dispatch_started");
