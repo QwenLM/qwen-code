@@ -34,6 +34,7 @@ function setup() {
       originalInput: 'qwen-test',
     },
     stderr,
+    logLevel: 'debug',
   });
   transports.push(transport);
   return { child, transport, stderr };
@@ -48,14 +49,28 @@ describe('ProcessTransport clean child exit', () => {
   it.each(['before-close', 'after-close'])(
     'does not turn a clean exit into failure for an EPIPE %s',
     async (order) => {
-      const { child, transport } = setup();
+      const { child, transport, stderr } = setup();
       const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
-      if (order === 'before-close') child.stdin.emit('error', error);
+      if (order === 'before-close') {
+        child.stdin.emit('error', error);
+        expect(transport.exitError?.cause).toBe(error);
+      }
       child.exitCode = 0;
       child.emit('close', 0, null);
       if (order === 'after-close') child.stdin.emit('error', error);
       await expect(transport.waitForExit()).resolves.toBeUndefined();
       expect(transport.exitError).toBeNull();
+      if (order === 'before-close') {
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Discarding stdin error after successful child exit: CLI stdin error: write EPIPE',
+          ),
+        );
+      } else {
+        expect(stderr.mock.calls.flat().join('\n')).not.toContain(
+          'CLI stdin error',
+        );
+      }
     },
   );
 

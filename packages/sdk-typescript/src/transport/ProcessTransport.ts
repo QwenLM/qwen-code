@@ -290,6 +290,7 @@ export class ProcessTransport implements Transport {
           { cause: error },
         );
         this._exitError = this.recoverableStdinError;
+        logger.error(this.recoverableStdinError.message);
       }
       this.requestChildProcessExit();
     });
@@ -322,9 +323,13 @@ export class ProcessTransport implements Transport {
         } else if (
           code === 0 &&
           signal === null &&
+          this.recoverableStdinError !== null &&
           this._exitError === this.recoverableStdinError
         ) {
           // A successful child may close its pipe before buffered input drains.
+          logger.debug(
+            `Discarding stdin error after successful child exit: ${this.recoverableStdinError.message}`,
+          );
           this._exitError = null;
         }
       }

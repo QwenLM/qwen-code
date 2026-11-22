@@ -25,6 +25,7 @@ function setup(stdin: Writable = new PassThrough()) {
     kill: vi.fn(() => true),
   });
   spawn.mockReturnValue(child as unknown as ChildProcess);
+  const stderr = vi.fn();
   const transport = new ProcessTransport({
     spawnInfo: {
       command: 'qwen-test',
@@ -32,9 +33,10 @@ function setup(stdin: Writable = new PassThrough()) {
       type: 'native',
       originalInput: 'qwen-test',
     },
+    stderr,
   });
   transports.push(transport);
-  return { child, transport, stdin };
+  return { child, transport, stdin, stderr };
 }
 
 afterEach(async () => {
@@ -44,11 +46,14 @@ afterEach(async () => {
 
 describe('ProcessTransport stdin errors', () => {
   it('owns stdin error events instead of throwing an uncaught exception', () => {
-    const { stdin, transport } = setup();
+    const { stdin, transport, stderr } = setup();
     const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
     expect(() => stdin.emit('error', error)).not.toThrow();
     expect(transport.isReady).toBe(false);
     expect(transport.exitError?.message).toContain('EPIPE');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('CLI stdin error: write EPIPE'),
+    );
   });
 
   it('retains an asynchronous write error through process termination', async () => {
