@@ -32,6 +32,15 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_TLS_INSECURE');
   });
 
+  // The post-cd approval carry waits while the session's close gate is held;
+  // a repository .env must not be able to stretch that window for its
+  // workspace's sessions.
+  it('excludes the MCP approval carry timeout from project .env files', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      'QWEN_SERVE_MCP_APPROVAL_CARRY_TIMEOUT_MS',
+    );
+  });
+
   // isTlsVerificationDisabled() also honors NODE_TLS_REJECT_UNAUTHORIZED=0, and
   // the initial .env load only consults this list, so it must be blocked here
   // too — otherwise a project .env could bypass TLS via the Node-native var.
