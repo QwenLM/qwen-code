@@ -6970,6 +6970,61 @@ describe('WebShellSidebar Live group', () => {
     expect(settled).toContain('Idle');
     expect(settled).not.toContain('Preparing voice chat');
   });
+  it('names hidden background work while the voice row is starting', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+              hasRunningBackgroundTasks: true,
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    const details = document.querySelector('[role="dialog"]')?.textContent;
+    expect(details).toContain('Preparing voice chat');
+    expect(details).toContain('Background tasks running');
+  });
   it.each([
     ['isWaitingForPermission', 'Needs approval'],
     ['isWaitingForUserQuestion', 'User input needed'],

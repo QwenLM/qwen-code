@@ -359,7 +359,11 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{statusLabel ?? status}</span>
+            {/* An override replaces the line but must keep naming hidden
+                background work: the row hides that dot in these states. */}
+            <span>
+              {statusLabel ? `${statusLabel}${backgroundSuffix}` : status}
+            </span>
           </div>
           {details}
           <div className={styles.sessionDetailsIdRow}>

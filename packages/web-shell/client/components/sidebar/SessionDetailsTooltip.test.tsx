@@ -192,6 +192,48 @@ describe('SessionDetailsTooltip', () => {
     },
   );
 
+  it.each([
+    [true, 'Custom · Background tasks running'],
+    [false, 'Custom'],
+  ])(
+    'override label keeps the hidden-background suffix (background=%s)',
+    async (background, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'override',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: background,
+                }}
+                label="Session"
+                time=""
+                statusLabel="Custom"
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (!background)
+          expect(details?.textContent).not.toContain(
+            'Background tasks running',
+          );
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
   it('names background work alongside a running turn', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');
