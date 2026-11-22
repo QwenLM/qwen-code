@@ -471,7 +471,7 @@ describe('HostedMonitorLoop', () => {
     expect(observation.lines.at(-1)).toBe('... 6 more lines omitted');
     expect(
       Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
-    ).toBeLessThanOrEqual(64 * 1024);
+    ).toBeLessThanOrEqual(32 * 1024);
 
     const events = rig.authority.readEvents().slice(-3);
     expect(events.map((event) => event.kind)).toEqual([
@@ -513,7 +513,7 @@ describe('HostedMonitorLoop', () => {
     expect(observation.lines.length).toBeLessThanOrEqual(1_000);
     expect(
       Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
-    ).toBeLessThanOrEqual(64 * 1024);
+    ).toBeLessThanOrEqual(32 * 1024);
     const retained = observation.lines.slice(0, -1);
     expect(retained).toEqual(lines.slice(0, retained.length));
     expect(observation.lines.at(-1)).toBe(

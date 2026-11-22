@@ -11,7 +11,10 @@ import path from 'node:path';
 import { createServer, type Server } from 'node:http';
 import express from 'express';
 import { afterEach, expect, it, vi } from 'vitest';
-import { MANAGED_DELIVERY_REQUEST_LIMIT_BYTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
+import {
+  MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+  type ManagedDeliveryResource,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-delivery-entry.js';
 import {
   openManagedSession,
   type ManagedSession,
@@ -381,29 +384,61 @@ it('refuses a stale writer after a detach because the watermark survives', async
   expect((await r.install(5)).status).toBe(200);
 });
 
-it('worker monitor policy delivers an observation entry the applier commits once', async () => {
-  const r = await rig();
-  const monitorId = 'execution-mon';
-  await r.monitors.admit({
-    monitorId,
-    ownerScopeId: r.key.sessionId,
-    executionCallId: monitorId,
-    args: { command: 'tail -f log', description: 'watch log' },
-    maxEvents: 100,
-    idleTimeoutMs: 60_000,
-    debounceMs: 1_000,
-  });
-  await r.monitors.dispatchStarted(monitorId, {
-    runtimeBindingId: 'binding-a',
-    generation: '1',
-  });
-  await r.monitors.attach(
-    monitorId,
-    { runtimeBindingId: 'binding-a', generation: '1' },
-    { pid: 9 },
-  );
-  publisher!.register(
-    {
+it.each([
+  { label: 'a small window', lines: ['line1', 'line2'] },
+  {
+    label: 'an oversized window',
+    lines: Array.from(
+      { length: 1_005 },
+      (_, index) => `${index.toString().padStart(4, '0')}:${'x'.repeat(600)}`,
+    ),
+  },
+])(
+  'worker monitor policy delivers $label and the applier commits once',
+  async ({ lines }) => {
+    const r = await rig();
+    const monitorId = 'execution-mon';
+    await r.monitors.admit({
+      monitorId,
+      ownerScopeId: r.key.sessionId,
+      executionCallId: monitorId,
+      args: { command: 'tail -f log', description: 'watch log' },
+      maxEvents: 100,
+      idleTimeoutMs: 60_000,
+      debounceMs: 1_000,
+    });
+    await r.monitors.dispatchStarted(monitorId, {
+      runtimeBindingId: 'binding-a',
+      generation: '1',
+    });
+    await r.monitors.attach(
+      monitorId,
+      { runtimeBindingId: 'binding-a', generation: '1' },
+      { pid: 9 },
+    );
+    publisher!.register(
+      {
+        reference: {
+          sessionId: r.key.sessionId,
+          promptId: 'prompt-a',
+          callId: 'worker-call-mon',
+          argsDigest: `sha256:${'b'.repeat(64)}`,
+        },
+        capture: {
+          tenantId: r.key.tenantId,
+          sessionId: r.key.sessionId,
+          turnId: 'turn-a',
+          executionCallId: monitorId,
+          bindingGeneration: '1',
+          capturePolicy: 'complete_required',
+          background: true,
+          monitoring: true,
+        },
+      } as Parameters<HostedShellPublisher['register']>[0],
+      'model-call-mon',
+      'prompt-a',
+    );
+    const prepared = await r.registry.prepare({
       reference: {
         sessionId: r.key.sessionId,
         promptId: 'prompt-a',
@@ -420,66 +455,63 @@ it('worker monitor policy delivers an observation entry the applier commits once
         background: true,
         monitoring: true,
       },
-    } as Parameters<HostedShellPublisher['register']>[0],
-    'model-call-mon',
-    'prompt-a',
-  );
-  const prepared = await r.registry.prepare({
-    reference: {
-      sessionId: r.key.sessionId,
-      promptId: 'prompt-a',
-      callId: 'worker-call-mon',
-      argsDigest: `sha256:${'b'.repeat(64)}`,
-    },
-    capture: {
-      tenantId: r.key.tenantId,
-      sessionId: r.key.sessionId,
-      turnId: 'turn-a',
-      executionCallId: monitorId,
-      bindingGeneration: '1',
-      capturePolicy: 'complete_required',
-      background: true,
-      monitoring: true,
-    },
-  } as Parameters<ManagedShellPublisherRegistry['prepare']>[0]);
-  const sink = prepared.sink as WorkerBackgroundCaptureSink;
-  sink.attachMonitorPolicy(
-    new WorkerMonitorPolicy(
-      sink.run,
-      {
-        monitorId,
-        executionCallId: monitorId,
-        description: 'watch log',
-        maxEvents: 100,
-        idleTimeoutMs: 60_000,
-        debounceMs: 1_000,
-        startSequence: 0,
-      },
-      async () => true,
-    ),
-  );
-  sink.setStarted(9);
-  await sink.write('stdout', Buffer.from('line1\nline2\n'));
-  await sink.finish('stdout', true);
-  await sink.finish('stderr', true);
-  sink.setProcessResult({
-    exitCode: 0,
-    signal: null,
-    rawOutput: Buffer.from('line1\nline2\n'),
-    output: 'line1\nline2\n',
-    error: null,
-    aborted: false,
-    pid: 9,
-    executionMethod: 'child_process',
-  });
-  const envelope = await sink.finalize('success', []);
-  await r.registry.accept(prepared.identity, envelope);
-  const record = r.monitors.record(monitorId)!;
-  expect(record.observationSequence).toBe(1);
-  expect(record.notifiedThrough).toBe(1);
-  expect(record.run.state).toBe('settled');
-  expect(record.stopReason).toBe('exited');
-});
+    } as Parameters<ManagedShellPublisherRegistry['prepare']>[0]);
+    const sink = prepared.sink as WorkerBackgroundCaptureSink;
+    sink.attachMonitorPolicy(
+      new WorkerMonitorPolicy(
+        sink.run,
+        {
+          monitorId,
+          executionCallId: monitorId,
+          description: 'watch log',
+          maxEvents: 100,
+          idleTimeoutMs: 60_000,
+          debounceMs: 1_000,
+          startSequence: 0,
+        },
+        async () => true,
+      ),
+    );
+    sink.setStarted(9);
+    const output = `${lines.join('\n')}\n`;
+    await sink.write('stdout', Buffer.from(output));
+    await sink.finish('stdout', true);
+    await sink.finish('stderr', true);
+    sink.setProcessResult({
+      exitCode: 0,
+      signal: null,
+      rawOutput: Buffer.from(output),
+      output,
+      error: null,
+      aborted: false,
+      pid: 9,
+      executionMethod: 'child_process',
+    });
+    const envelope = await sink.finalize('success', []);
+    await r.registry.accept(prepared.identity, envelope);
+    const record = r.monitors.record(monitorId)!;
+    expect(record.observationSequence).toBe(1);
+    expect(record.notifiedThrough).toBe(1);
+    expect(record.run.state).toBe('settled');
+    expect(record.stopReason).toBe('exited');
+    const observation = JSON.parse(
+      (await r.resources.read(record.lastObservationRef!)).toString('utf8'),
+    ) as { lines: string[] };
+    expect(observation.lines.length).toBeLessThanOrEqual(1_000);
+    expect(
+      Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
+    ).toBeLessThanOrEqual(32 * 1024);
+    if (lines.length <= 1_000) {
+      expect(observation.lines).toEqual(lines);
+    } else {
+      const retained = observation.lines.slice(0, -1);
+      expect(retained).toEqual(lines.slice(0, retained.length));
+      expect(observation.lines.at(-1)).toBe(
+        `... ${lines.length - retained.length} more lines omitted`,
+      );
+    }
+  },
+);
 
 it('applies a live observation through the production kind gate, keeping the worker resource ids', async () => {
   const r = await rig({ kindGated: true });
@@ -1105,63 +1137,71 @@ function monitorPolicy(
   );
 }
 
-it('bounds a worker monitor window before its serialized delivery request', async () => {
-  const run = new BackgroundDeliveryRun(
-    'execution-large-monitor-window',
-    '1',
-    'monitor_run',
-  );
-  const policy = monitorPolicy(run, 100, async () => true);
-  const lines = Array.from(
-    { length: 1_005 },
-    (_, index) => `${index.toString().padStart(4, '0')}:${'x'.repeat(600)}`,
-  );
-  policy.onChunk(Buffer.from(`${lines.join('\n')}\n`, 'utf8'));
-  await policy.flushTail();
-  const { entries } = await run.pullForStage({ afterSeq: 0 });
-  const observation = entries.find((entry) => entry.kind === 'observation');
-  if (observation?.kind !== 'observation') {
-    throw new Error('The worker did not enqueue its observation.');
-  }
+it.each([
+  { label: 'plain text', payload: 'x' },
+  { label: 'XML-heavy text', payload: '"' },
+])(
+  'bounds a worker monitor window with $label before its serialized delivery request',
+  async ({ payload }) => {
+    const run = new BackgroundDeliveryRun(
+      'execution-large-monitor-window',
+      '1',
+      'monitor_run',
+    );
+    const policy = monitorPolicy(run, 100, async () => true);
+    const lines = Array.from(
+      { length: 1_005 },
+      (_, index) =>
+        `${index.toString().padStart(4, '0')}:${payload.repeat(600)}`,
+    );
+    policy.onChunk(Buffer.from(`${lines.join('\n')}\n`, 'utf8'));
+    await policy.flushTail();
+    const { entries } = await run.pullForStage({ afterSeq: 0 });
+    const observation = entries.find((entry) => entry.kind === 'observation');
+    if (observation?.kind !== 'observation') {
+      throw new Error('The worker did not enqueue its observation.');
+    }
 
-  const requestBytes = Buffer.byteLength(
-    JSON.stringify({
-      operation: 'deliver',
-      executionCallId: run.executionCallId,
-      entries: [observation],
-    }),
-  );
-  expect(requestBytes).toBeLessThanOrEqual(
-    MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
-  );
-  expect(observation.lines.length).toBeLessThanOrEqual(1_000);
-  expect(
-    Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
-  ).toBeLessThanOrEqual(64 * 1024);
-  const retained = observation.lines.slice(0, -1);
-  expect(retained).toEqual(lines.slice(0, retained.length));
-  expect(observation.lines.at(-1)).toBe(
-    `... ${lines.length - retained.length} more lines omitted`,
-  );
+    const requestBytes = Buffer.byteLength(
+      JSON.stringify({
+        operation: 'deliver',
+        executionCallId: run.executionCallId,
+        entries: [observation],
+      }),
+    );
+    expect(requestBytes).toBeLessThanOrEqual(
+      MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+    );
+    expect(observation.lines.length).toBeLessThanOrEqual(1_000);
+    expect(
+      Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
+    ).toBeLessThanOrEqual(32 * 1024);
+    const retained = observation.lines.slice(0, -1);
+    expect(retained).toEqual(lines.slice(0, retained.length));
+    expect(observation.lines.at(-1)).toBe(
+      `... ${lines.length - retained.length} more lines omitted`,
+    );
 
-  const input = observation.resources.find(
-    (resource) => resource.ref.kind === 'managed-input',
-  );
-  expect(input).toBeDefined();
-  const notification = JSON.parse(
-    Buffer.from(input!.bytesBase64, 'base64').toString('utf8'),
-  ) as { text: string };
-  expect(notification.text).toBe(
-    monitorNotificationText({
-      monitorId: run.executionCallId,
-      toolUseId: run.executionCallId,
-      description: 'watch',
-      eventCount: 1,
-      lines: observation.lines,
-    }),
-  );
-  run.close();
-});
+    const input = observation.resources.find(
+      (resource: ManagedDeliveryResource) =>
+        resource.ref.kind === 'managed-input',
+    );
+    expect(input).toBeDefined();
+    const notification = JSON.parse(
+      Buffer.from(input!.bytesBase64, 'base64').toString('utf8'),
+    ) as { text: string };
+    expect(notification.text).toBe(
+      monitorNotificationText({
+        monitorId: run.executionCallId,
+        toolUseId: run.executionCallId,
+        description: 'watch',
+        eventCount: 1,
+        lines: observation.lines,
+      }),
+    );
+    run.close();
+  },
+);
 
 it('sizes a push batch by its serialized request, wrapper and separators included', async () => {
   const harness = await deliveryEndpoint(() => 200);

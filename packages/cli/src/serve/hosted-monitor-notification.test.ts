@@ -73,8 +73,8 @@ describe('monitor task-notification envelope', () => {
     expect(boundMonitorObservationLines(lines)).toEqual(lines);
   });
 
-  it('accepts exactly 64 KiB of line text without adding a marker', () => {
-    const lines = ['x'.repeat(64 * 1024)];
+  it('accepts exactly 32 KiB of line text without adding a marker', () => {
+    const lines = ['x'.repeat(32 * 1024)];
     expect(boundMonitorObservationLines(lines)).toEqual(lines);
   });
 
@@ -92,7 +92,7 @@ describe('monitor task-notification envelope', () => {
     const marker = bounded.at(-1)!;
     const retained = bounded.slice(0, -1);
     expect(Buffer.byteLength(bounded.join('\n'), 'utf8')).toBeLessThanOrEqual(
-      64 * 1024,
+      32 * 1024,
     );
     expect(retained).toEqual(lines.slice(0, retained.length));
     expect(marker).toBe(

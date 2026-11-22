@@ -28,7 +28,10 @@ function truncateEventLine(line: string): string {
 }
 
 const OBSERVATION_WINDOW_MAX_LINES = 1000;
-const OBSERVATION_WINDOW_MAX_BYTES = 64 * 1024;
+// Worker observations also carry JSON-escaped lines and an XML-escaped,
+// base64-encoded notification. Sixfold XML expansion must not push the
+// combined entry over the 512 KiB delivery request limit.
+const OBSERVATION_WINDOW_MAX_BYTES = 32 * 1024;
 
 export function boundMonitorObservationLines(
   lines: readonly string[],
