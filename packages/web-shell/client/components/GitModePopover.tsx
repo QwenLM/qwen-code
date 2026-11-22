@@ -153,7 +153,12 @@ export function GitModePopover({
                     )}
                   </span>
                   {!compact && (
-                    <span className={styles.chipText}>{chipLabel}</span>
+                    <span
+                      className={styles.chipText}
+                      data-web-shell-git-branch-label
+                    >
+                      {chipLabel}
+                    </span>
                   )}
                   <svg
                     className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}

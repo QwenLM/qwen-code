@@ -177,7 +177,9 @@ export function GitBranchChipContent({
           />
         )}
       </span>
-      <span className={styles.gitBranchText}>{branch}</span>
+      <span className={styles.gitBranchText} data-web-shell-git-branch-label>
+        {branch}
+      </span>
       {!compact && (
         <span className={styles.gitBranchIndicators} aria-hidden="true">
           {s.operation && (

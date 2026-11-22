@@ -3274,25 +3274,31 @@
   flex-shrink: 1;
 }
 
+@supports (container-type: inline-size) {
+  @container (max-width: 320px) {
+    .mobileContextRow [data-slot='select-value'],
+    .mobileContextRow [data-web-shell-git-branch-label],
+    .mobileContextRow .gitBranchText,
+    .mobileContextRow .gitBranchIndicators,
+    .mobileContextRow .workspaceChipText {
+      display: none;
+    }
+  }
+}
+
 .mobileEditingActions {
   flex-wrap: wrap;
   margin-top: -8px;
 }
 
-/* The caret/slash keys flow inline with the editing row on normal widths.
-   Below 360px they take their own line so the workspace chip and the
-   hide-keyboard/expand controls keep sharing one row (the 240px acceptance). */
+/* Keep the controls together so hide-keyboard/expand stay an adjacent tail.
+   Group-internal wrapping preserves 44px targets and keeps them right aligned. */
 .mobileEditingKeys {
-  display: contents;
-}
-
-@media (max-width: 360px) {
-  .mobileEditingKeys {
-    display: flex;
-    flex-basis: 100%;
-    justify-content: flex-end;
-    gap: 4px;
-  }
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
 }
 
 .mobileEditingActions:has(.mobileContextRow) {
@@ -3305,9 +3311,8 @@
   height: 18px;
 }
 
-/* The caret keys nest one level deeper in .mobileEditingKeys, which has no
-   box of its own (display: contents); the selector must not rely on a direct
-   child of .mobileEditingActions. */
+/* Direction, hide-keyboard and expand buttons share this group's 18px icon
+   geometry, including when the keyboard button appears and disappears. */
 .mobileEditingKeys > button > svg {
   width: 18px;
   height: 18px;

@@ -1209,13 +1209,15 @@ test('mobile workspace controls share the editing row without overlapping @smoke
 });
 
 for (const width of [390, 240]) {
-  test(`mobile workspace and editing actions fit one row at ${width}px @smoke`, async ({
+  test(`mobile workspace keeps editing controls accessible at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
-    const scenario = createGitWorkspaceScenario();
-    scenario.gitStatus = undefined;
-    scenario.capabilities.workspaces![0]!.cwd = `/tmp/${'long-workspace-name-'.repeat(6)}`;
+    const workspaceCwd = `/tmp/${'long-workspace-name-'.repeat(6)}`;
+    const scenario = createGitWorkspaceScenario({
+      gitStatus: { v: 2, workspaceCwd, branch: 'main' },
+    });
+    scenario.capabilities.workspaces![0]!.cwd = workspaceCwd;
     scenario.capabilities.workspaces!.push({
       id: 'secondary',
       cwd: '/tmp/another-project',
@@ -1239,16 +1241,42 @@ for (const width of [390, 240]) {
     const workspaceBox = (await workspace.boundingBox())!;
     const keyboardBox = (await keyboard.boundingBox())!;
     await expect(workspace.locator(':scope > svg')).toHaveCSS('width', '16px');
-    expect(Math.abs(workspaceBox.y - keyboardBox.y)).toBeLessThanOrEqual(1);
-    expect(workspaceBox.x + workspaceBox.width).toBeLessThanOrEqual(
-      keyboardBox.x,
+    expect(keyboardBox.y).toBeGreaterThanOrEqual(
+      workspaceBox.y + workspaceBox.height,
     );
+    const expandBox = (await composer
+      .getByRole('button', { name: 'Expand editor', exact: true })
+      .boundingBox())!;
+    expect(Math.abs(keyboardBox.y - expandBox.y)).toBeLessThanOrEqual(1);
+    expect(expandBox.x).toBeGreaterThanOrEqual(
+      keyboardBox.x + keyboardBox.width,
+    );
+    expect(keyboardBox.width).toBeGreaterThanOrEqual(44);
+    expect(keyboardBox.height).toBeGreaterThanOrEqual(44);
+    expect(expandBox.width).toBeGreaterThanOrEqual(44);
+    expect(expandBox.height).toBeGreaterThanOrEqual(44);
+    expect(expandBox.x + expandBox.width).toBeLessThanOrEqual(width);
     const value = workspace.locator('[data-slot="select-value"]');
-    expect(
-      await value.evaluate(
-        (element) => element.scrollWidth > element.clientWidth,
-      ),
-    ).toBe(true);
+    const branchLabel = composer.locator('[data-web-shell-git-branch-label]');
+    await expect(branchLabel).toHaveCount(1);
+    if (width === 240) {
+      await expect(value).toBeHidden();
+      await expect(branchLabel).toBeHidden();
+      await workspace.tap();
+      await expect(page.getByRole('menuitemradio').first()).toBeVisible();
+      expect(
+        await page.getByRole('menuitemradio').count(),
+      ).toBeGreaterThanOrEqual(2);
+      await page.keyboard.press('Escape');
+      await textarea.focus();
+      await expect(keyboard).toBeVisible();
+    } else {
+      expect(
+        await value.evaluate(
+          (element) => element.scrollWidth > element.clientWidth,
+        ),
+      ).toBe(true);
+    }
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBe(width);

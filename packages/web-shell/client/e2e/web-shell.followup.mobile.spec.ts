@@ -363,41 +363,91 @@ test('@smoke mobile editing-row direction keys move the caret', async ({
     page.getByRole('button', { name: 'Hide keyboard', exact: true }),
   ).toHaveCount(0);
   await page.screenshot({
-    path: testInfo.outputPath('followup-keys-row-v6.png'),
+    path: testInfo.outputPath('followup-keys-row-v9.png'),
   });
 });
 
-test('@smoke mobile editing keys share the row at 390px and own a line at 240px', async ({
+test('@smoke mobile editing controls keep the keyboard and expand tail right aligned', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   await gotoHarness(page, scenario, daemon, 'default');
-  const caretUp = page.locator('[data-web-shell-mobile-caret-up]');
-  const expand = page.getByRole('button', {
-    name: 'Expand editor',
-    exact: true,
-  });
-  await expect(caretUp).toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect
-    .poll(async () => {
-      const up = (await caretUp.boundingBox())!;
-      const exp = (await expand.boundingBox())!;
-      return Math.abs(up.y - exp.y) <= 1;
-    })
-    .toBe(true);
-  await page.setViewportSize({ width: 240, height: 844 });
-  await expect
-    .poll(async () => {
-      const up = (await caretUp.boundingBox())!;
-      const exp = (await expand.boundingBox())!;
-      return up.y > exp.y + 1;
-    })
-    .toBe(true);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
-    240,
-  );
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  const keys = page.locator('[data-web-shell-mobile-editing-keys]');
+  await textarea.evaluate((el) => el.blur());
+
+  const checkTail = async (keyboardVisible: boolean) => {
+    for (const width of [390, 240]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect
+        .poll(async () =>
+          keys.evaluate((group, hasKeyboard) => {
+            const buttons = Array.from(
+              group.querySelectorAll<HTMLButtonElement>('button'),
+            );
+            const labels = buttons.map((button) =>
+              button.getAttribute('aria-label'),
+            );
+            const expectedLabels = [
+              'Move cursor up',
+              'Move cursor down',
+              'Move cursor right',
+              'Insert slash',
+              ...(hasKeyboard ? ['Hide keyboard'] : []),
+              'Expand editor',
+            ];
+            if (labels.join('\n') !== expectedLabels.join('\n')) return false;
+            const rects = buttons.map((button) =>
+              button.getBoundingClientRect(),
+            );
+            const expand = rects.at(-1)!;
+            const slash = rects[3]!;
+            const expandRight = expand.x + expand.width;
+            if (
+              !rects.every(
+                (rect) =>
+                  expandRight >= rect.x + rect.width - 1 &&
+                  expand.width >= 44 &&
+                  expand.height >= 44,
+              )
+            ) {
+              return false;
+            }
+            if (hasKeyboard) {
+              const keyboard = rects.at(-2)!;
+              if (
+                Math.abs(keyboard.y - expand.y) > 1 ||
+                expand.x < keyboard.x + keyboard.width
+              ) {
+                return false;
+              }
+            }
+            return expand.x >= slash.x + slash.width;
+          }, keyboardVisible),
+        )
+        .toBe(true);
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+      ).toBe(width);
+      await page.screenshot({
+        path: testInfo.outputPath(
+          `editing-tail-${keyboardVisible ? 'focused' : 'idle'}-${width}px-v9.png`,
+        ),
+      });
+    }
+  };
+
+  await checkTail(false);
+  await textarea.focus();
+  await checkTail(true);
+  await page.getByRole('button', { name: 'Hide keyboard', exact: true }).tap();
+  await expect(textarea).not.toBeFocused();
+  await checkTail(false);
+  await expect(keys.getByRole('button')).toHaveCount(5);
+  await expect(
+    page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+  ).toHaveCount(0);
 });
 
 test('@smoke mobile right key accepts the visible suggestion', async ({
@@ -887,7 +937,7 @@ test('@smoke mobile chip bar accepts in Simplified Chinese with caret keys only'
     page.getByRole('button', { name: '收起键盘', exact: true }),
   ).toHaveCount(0);
   await page.screenshot({
-    path: testInfo.outputPath('followup-keys-row-zh-v6.png'),
+    path: testInfo.outputPath('followup-keys-row-zh-v9.png'),
   });
   await page.locator(FOLLOWUP_ACCEPT).tap();
   await expect(textarea).toHaveValue(ZH_SUGGESTION);
