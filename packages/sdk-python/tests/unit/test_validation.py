@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import cache, lru_cache, wraps
 from pathlib import Path
 from typing import Any, cast, get_args
 
@@ -208,6 +209,123 @@ def test_validation_rejects_stderr_with_wrong_arity() -> None:
         ValidationError, match="stderr must accept exactly 1 positional argument"
     ):
         validate_query_options(QueryOptions(stderr=cast(Any, stderr)))
+
+
+@pytest.mark.parametrize("callback_option", ["can_use_tool", "stderr"])
+@pytest.mark.parametrize("as_object", [False, True])
+def test_callbacks_accept_optional_keyword_only_and_variadic_arguments(
+    callback_option: str, as_object: bool
+) -> None:
+    async def permission(
+        name: str,
+        payload: dict[str, Any],
+        context: Any,
+        *args: Any,
+        verbose: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return {"behavior": "allow", "updatedInput": payload}
+
+    def stderr(text: str, *args: Any, prefix: str = "", **kwargs: Any) -> None:
+        pass
+
+    options: dict[str, Any] = {
+        callback_option: permission if callback_option == "can_use_tool" else stderr
+    }
+    validate_query_options(
+        QueryOptions(**options) if as_object else QueryOptions.from_mapping(options)
+    )
+
+
+@pytest.mark.parametrize("cache_kind", ["cache", "lru_cache"])
+@pytest.mark.parametrize("as_object", [False, True])
+def test_cached_stderr_with_wrong_arity_is_rejected(
+    cache_kind: str, as_object: bool
+) -> None:
+    def stderr(text: str, level: str) -> None:
+        pass
+
+    callback = cache(stderr) if cache_kind == "cache" else lru_cache(maxsize=8)(stderr)
+    with pytest.raises(
+        ValidationError if as_object else TypeError,
+        match="stderr must accept exactly 1 positional argument",
+    ):
+        if as_object:
+            validate_query_options(QueryOptions(stderr=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"stderr": callback})
+
+
+@pytest.mark.parametrize("callback_kind", ["function", "instance", "cached_function"])
+@pytest.mark.parametrize("as_object", [False, True])
+def test_async_stderr_is_rejected(callback_kind: str, as_object: bool) -> None:
+    async def stderr(text: str) -> None:
+        pass
+
+    class AsyncStderr:
+        async def __call__(self, text: str) -> None:
+            pass
+
+    callback = {
+        "function": stderr,
+        "instance": AsyncStderr(),
+        "cached_function": cache(stderr),
+    }[callback_kind]
+    with pytest.raises(
+        ValidationError if as_object else TypeError,
+        match="stderr must be a sync callable",
+    ):
+        if as_object:
+            validate_query_options(QueryOptions(stderr=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"stderr": callback})
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("as_object", [False, True])
+def test_sync_stderr_wrapper_uses_its_own_call_contract(
+    cached: bool, as_object: bool
+) -> None:
+    async def async_inner(text: str) -> None:
+        pass
+
+    seen: list[str] = []
+
+    @wraps(async_inner)
+    def stderr(text: str) -> None:
+        seen.append(text)
+
+    callback = cache(stderr) if cached else stderr
+    if as_object:
+        validate_query_options(QueryOptions(stderr=callback))
+    else:
+        QueryOptions.from_mapping({"stderr": callback})
+    callback("diagnostic")
+    assert seen == ["diagnostic"]
+
+
+@pytest.mark.parametrize(
+    "callback_kind", ["print", "bound_method", "cache", "lru_cache"]
+)
+@pytest.mark.parametrize("as_object", [False, True])
+def test_supported_stderr_callbacks_remain_valid(
+    callback_kind: str, as_object: bool
+) -> None:
+    seen: list[str] = []
+
+    def stderr(text: str) -> None:
+        seen.append(text)
+
+    callback = {
+        "print": print,
+        "bound_method": seen.append,
+        "cache": cache(stderr),
+        "lru_cache": lru_cache(maxsize=8)(stderr),
+    }[callback_kind]
+    if as_object:
+        validate_query_options(QueryOptions(stderr=callback))
+    else:
+        QueryOptions.from_mapping({"stderr": callback})
 
 
 def test_rejects_invalid_max_session_turns() -> None:

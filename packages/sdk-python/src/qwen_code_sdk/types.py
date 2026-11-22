@@ -319,16 +319,26 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
     if not callable(value):
         raise error_type("stderr must be callable")
 
-    try:
-        sig = signature(value, follow_wrapped=False)
-    except (TypeError, ValueError):
-        return
+    inspected: set[int] = set()
+    while callable(value) and id(value) not in inspected:
+        inspected.add(id(value))
+        if iscoroutinefunction(value) or iscoroutinefunction(type(value).__call__):
+            raise error_type("stderr must be a sync callable")
 
-    if not _supports_argument_count(sig, 1):
-        raise error_type(
-            "stderr must accept exactly 1 positional argument "
-            "and no required keyword-only arguments"
-        )
+        try:
+            sig = signature(value, follow_wrapped=False)
+        except (TypeError, ValueError):
+            value = getattr(value, "__wrapped__", None)
+            if value is None:
+                return
+            continue
+
+        if not _supports_argument_count(sig, 1):
+            raise error_type(
+                "stderr must accept exactly 1 positional argument "
+                "and no required keyword-only arguments"
+            )
+        return
 
 
 def _supports_argument_count(sig: Signature, count: int) -> bool:

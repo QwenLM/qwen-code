@@ -168,7 +168,7 @@ with query_sync(
 | `continue_session`         | `bool`                                                     | Continue the latest CLI session.                                                                                                                                  |
 | `session_id`               | UUID string                                                | Start or correlate a session with a known id.                                                                                                                     |
 | `timeout`                  | mapping                                                    | Timeouts in seconds.                                                                                                                                              |
-| `stderr`                   | callable                                                   | Receives CLI stderr lines.                                                                                                                                        |
+| `stderr`                   | synchronous callable                                       | Receives CLI stderr lines.                                                                                                                                        |
 
 Use only one of `resume`, `continue_session`, or `session_id` in a request. The
 SDK raises `ValidationError` if these session options are combined.
@@ -214,10 +214,12 @@ When the CLI emits a `can_use_tool` control request, the SDK routes it through
 - Callback context: `cancel_event`, `suggestions`, and `blocked_path`
 - Callback contract: `can_use_tool` must be an async callable: an `async def`
   function or an instance with an async `__call__` method accepting
-  `(tool_name, tool_input, context)`. `stderr` must accept one positional string
-  argument. Neither callback may require additional keyword-only arguments.
-  Decorated callbacks are checked against the wrapper that the SDK calls,
-  rather than the function referenced by `__wrapped__`.
+  `(tool_name, tool_input, context)`. `stderr` must be a synchronous callable
+  accepting one positional string argument. Neither callback may require
+  additional keyword-only arguments. An inspectable decorated callback is
+  checked against the wrapper that the SDK calls. When a `stderr` wrapper has
+  no inspectable signature, validation checks the first inspectable wrapped
+  callback instead.
 
 Example:
 
