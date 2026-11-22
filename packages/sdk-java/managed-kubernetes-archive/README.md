@@ -1,13 +1,15 @@
-# Managed Kubernetes Java Archive
+# Managed Kubernetes Archive
 
 Cold source archive of the Kubernetes Runtime, Resident Workspace / Workspace CSI,
 and Kubernetes Harness Pool discovery Java sources extracted from
-`packages/managed-agent-server`.
+`packages/managed-agent-server`, plus the matching Kubernetes deployment
+templates and their build/render/preflight scripts (#17427).
 
 This directory is intentionally **not** wired into Maven or CI builds: the
 corresponding CSI/Resident database columns, configuration bindings, and Broker
-hooks have been removed from `packages/managed-agent-server`. TypeScript worker
-counterparts under `packages/cli` remain untouched.
+hooks have been removed from `packages/managed-agent-server`. The private
+Hosted CSI session client under `packages/cli` (`hosted-csi-*`) was retired in
+#17427; the `managed-csi-*` worker protocol family remains live.
 
 ## Archived Layout
 
@@ -30,7 +32,17 @@ counterparts under `packages/cli` remain untouched.
   and `WorkspaceCsi*Main` maintenance entrypoints.
 - `verification/` — dedicated unit tests, MySQL integration tests, fixtures, and
   test resources for Kubernetes Runtime, Resident Workspace, CSI, and Kubernetes
-  Harness discovery.
+  Harness discovery, including the former
+  `verification/src/test/resources/resident-acceptance/` Node acceptance harness.
+- `distribution/kubernetes/` — former
+  `packages/managed-agent-server/distribution/kubernetes/` deployment package
+  (Harness pool manifests, EndpointSlice discovery RBAC, launcher/probe, Envoy
+  and qualification templates). Historical: Java only supports `discovery: static`.
+- `scripts/` — former root `scripts/build-managed-harness-images.mjs`,
+  `scripts/render-managed-harness-kubernetes.mjs`, and
+  `scripts/harness-kubernetes-preflight.py` with their `scripts/tests/` suites.
+  Path constants inside still name the pre-archive locations; restore the layout
+  before running them.
 - `deploy/k2-resident/` — former `deploy/k2-resident/` deployment example
   (`application.example.yaml` plus bilingual README) for the `kubernetes-workspace`
   provisioner and the `csi-protection` / `resident-retirement` maintenance commands.
@@ -90,8 +102,7 @@ hooks:
   in the Removed Schema Elements section above, including the `is_csi_guard`
   arm of `ck_ma_session_boolean_values`.
 
-`csi-native-file-declarations.json` ALSO remains live at
-`packages/managed-agent-server/contracts/src/main/resources/`, because the
-active TypeScript test `packages/cli/src/serve/hosted-csi-tool-turn.test.ts`
-reads it from there. The archive copy under `contracts/` is the snapshot taken
-at archive time; the live copy is the source of truth for the TS worker.
+`csi-native-file-declarations.json` no longer has a live copy: #17427 removed
+`packages/managed-agent-server/contracts/src/main/resources/csi-native-file-declarations.json`
+together with its last consumer, the retired `hosted-csi-tool-turn.test.ts`.
+The archive copy under `contracts/` is the surviving snapshot.

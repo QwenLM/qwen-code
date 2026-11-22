@@ -580,10 +580,6 @@ public final class ToolPublicationStore {
         return false;
     }
 
-    ToolExecutionRecord lockOriginalAcknowledgementResult(JsonNode key, String publicationId, JsonNode finished) {
-        throw new IllegalStateException("Original acknowledgement is no longer supported");
-    }
-
     // The admission lanes' entry: placement or the Session root, then root
     // and head, as collection does (design 2026-11-04-managed-publication-placement).
     void lockAdmissionLane(JsonNode key, String publicationId, JsonNode original,
@@ -592,10 +588,6 @@ public final class ToolPublicationStore {
         lockOriginalSettledResult(key, publicationId, original);
         sessions.lockPublicationWriter(text(key, "tenantId"), text(key, "workspaceId"),
                 text(key, "sessionId"), writerId, writerGeneration, writerToken, placement, false);
-    }
-
-    void requireStagedCall(JsonNode key, String publicationId) {
-        // No CSI ambient check needed; all publications are ordinary.
     }
 
     private static JsonNode grant(String id, Row row) {
