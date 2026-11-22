@@ -1029,7 +1029,7 @@ export class Query implements AsyncIterable<SDKMessage> {
       if (this.closed) {
         throw error;
       }
-      if (this.inputStream.hasError === undefined) {
+      if (!this.inputStream.settled) {
         this.inputStream.error(
           this.transport.exitError ??
             (error instanceof Error ? error : new Error(String(error))),

@@ -11,6 +11,10 @@ export class Stream<T> implements AsyncIterable<T> {
     this.returned = returned;
   }
 
+  get settled(): boolean {
+    return this.isDone || this.hasError !== undefined;
+  }
+
   [Symbol.asyncIterator](): AsyncIterator<T> {
     if (this.started) {
       throw new Error('Stream can only be iterated once');

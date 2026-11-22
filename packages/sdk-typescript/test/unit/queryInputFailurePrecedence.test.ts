@@ -50,6 +50,7 @@ describe('input failure precedence after asynchronous transport teardown', () =>
     'transport-error',
     'exit-only',
     'earlier-error',
+    'transport-done',
     'closed',
   ] as const)('%s preserves the first terminal state', async (kind) => {
     const transport = new Transport();
@@ -76,12 +77,15 @@ describe('input failure precedence after asynchronous transport teardown', () =>
       await tick();
     } else if (kind === 'exit-only') {
       transport.exitError = exitError;
+    } else if (kind === 'transport-done') {
+      transport.messages.done();
+      await tick();
     } else if (kind === 'closed') await q.close();
     transport.failure = writeError;
     release();
     try {
       expect(await streaming).toBe(writeError);
-      if (kind === 'closed')
+      if (kind === 'closed' || kind === 'transport-done')
         await expect(q.next()).resolves.toMatchObject({ done: true });
       else
         await expect(q.next()).rejects.toBe(
