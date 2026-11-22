@@ -221,6 +221,9 @@ export type ContentGeneratorConfig = {
   // text-only tool results as strings while leaving the default spec-compliant
   // content-part shape unchanged.
   toolResultContentFormat?: 'parts' | 'string';
+  // Service tier for providers supporting tiered routing (e.g. 'flex' on DeepInfra
+  // or 'auto' | 'default' | 'flex' | 'priority' on OpenAI).
+  service_tier?: 'auto' | 'default' | 'flex' | 'priority' | string;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
