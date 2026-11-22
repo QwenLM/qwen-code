@@ -91,11 +91,21 @@ const QUOTED_GET_VALUE_PATTERN =
  * Drop quoted spans so a creation subcommand or write flag inside a quoted
  * argument is not mistaken for the real command: `grep 'gh pr comment' …` is a
  * read, and `--jq '.[] | .id'` must not fragment the pipeline split below.
- * Best-effort (escaped quotes are not modeled), consistent with the module's
- * best-effort attribution that fails open toward delivery.
+ * Best-effort, consistent with attribution that fails open toward delivery.
  */
 function stripQuotedSpans(command: string): string {
-  return command.replace(/'[^']*'/g, "''").replace(/"[^"]*"/g, '""');
+  return command.replace(
+    /\\[\s\S]|\$'(?:\\[\s\S]|[^'\\])*'|'[^']*'|"(?:\\[\s\S]|[^"\\])*"/g,
+    (span) => (span.startsWith('\\') ? span : span[0] === '"' ? '""' : "''"),
+  );
+}
+
+type ShellQuote = "'" | '"' | "$'";
+
+function shellQuoteAt(text: string, index: number): ShellQuote | null {
+  if (text.startsWith("$'", index)) return "$'";
+  const char = text[index];
+  return char === "'" || char === '"' ? char : null;
 }
 
 /**
@@ -105,15 +115,20 @@ function stripQuotedSpans(command: string): string {
  * fragment) is not a comment. Best-effort, like the quote handling.
  */
 function stripShellComment(segment: string): string {
-  let quote: string | null = null;
+  let quote: ShellQuote | null = null;
   for (let i = 0; i < segment.length; i++) {
     const ch = segment[i]!;
-    if (quote !== null) {
-      if (ch === quote) quote = null;
+    if (ch === '\\' && quote !== "'") {
+      i++;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
+    if (quote !== null) {
+      if (ch === quote.at(-1)) quote = null;
+      continue;
+    }
+    quote = shellQuoteAt(segment, i);
+    if (quote !== null) {
+      i += quote.length - 1;
       continue;
     }
     if (ch === '#' && (i === 0 || /\s/.test(segment[i - 1]!))) {
@@ -143,6 +158,8 @@ function isUnescapedWordBoundary(command: string, i: number): boolean {
   return backslashes % 2 === 0;
 }
 
+const HEREDOC_WORD_BOUNDARY = /[ \t\n;|&<>()]/;
+
 /**
  * Remove heredoc bodies before segmentation. A heredoc body is data written to
  * a file/stdin, not shell structure: a quote character in the body (e.g. the
@@ -152,30 +169,46 @@ function isUnescapedWordBoundary(command: string, i: number): boolean {
  * `<<'DELIM'` / `<<"DELIM"` body up to its delimiter line, keeping the command
  * line that carries the redirection and the line boundary after it, so the next
  * command is segmented normally. A herestring (`<<<`) is not a heredoc. The
- * body is stripped only when its delimiter line is actually present; otherwise
- * (an arithmetic `<<` or a malformed heredoc) the text is left for normal
- * processing rather than swallowing the commands that follow. Best-effort,
- * like the quote handling.
+ * body is stripped only when its delimiter line is actually present. An open
+ * heredoc or quote means the caller has not found a complete command boundary.
  */
-function stripHeredocBodies(command: string): string {
-  // Shell removes a backslash-newline line continuation before parsing, joining
-  // the lines. Normalize it to a space (as segmentation does) so a `#` that
-  // follows a continuation is judged against the joined line: in `: \<newline>
-  // # Use <<'EOF' …` the `#` begins a real comment, not an escaped word.
-  command = command.replace(/\\\r?\n/g, ' ');
+function stripHeredocBodies(command: string): string | undefined {
   let result = '';
-  let quote: string | null = null;
+  let quote: ShellQuote | null = null;
+  let arithmeticDepth = 0;
+  const pending: Array<{
+    delimiter: string;
+    stripTabs: boolean;
+    quoted: boolean;
+  }> = [];
   let i = 0;
   while (i < command.length) {
     const ch = command[i]!;
+    if (ch === '\\' && quote !== "'") {
+      if (i + 1 === command.length) return undefined;
+      if (command[i + 1] === '\n') {
+        i += 2;
+        continue;
+      }
+      result += command.slice(i, i + 2);
+      i += 2;
+      continue;
+    }
     if (quote !== null) {
       result += ch;
-      if (ch === quote) quote = null;
+      if (ch === quote.at(-1)) quote = null;
       i++;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
+    quote = shellQuoteAt(command, i);
+    if (quote !== null) {
+      result += quote;
+      i += quote.length;
+      continue;
+    }
+    if (arithmeticDepth > 0 || command.startsWith('((', i)) {
+      if (ch === '(') arithmeticDepth++;
+      if (ch === ')') arithmeticDepth--;
       result += ch;
       i++;
       continue;
@@ -188,11 +221,40 @@ function stripHeredocBodies(command: string): string {
     // check. Segmentation drops the comment itself later. The boundary must be
     // unescaped, so the `#` in `tee review\ #1.md` (part of the filename) does
     // not hide the real heredoc that follows it.
-    if (ch === '#' && isUnescapedWordBoundary(command, i)) {
-      while (i < command.length && command[i] !== '\n' && command[i] !== '\r') {
+    if (ch === '#' && isUnescapedWordBoundary(result, result.length)) {
+      while (i < command.length && command[i] !== '\n') {
         result += command[i];
         i++;
       }
+      continue;
+    }
+    if (pending.length > 0 && ch === '\n') {
+      result += ch;
+      i++;
+      for (const { delimiter, stripTabs, quoted } of pending) {
+        let closed = false;
+        let continued = '';
+        while (i < command.length) {
+          const end = command.indexOf('\n', i);
+          const line = command.slice(i, end === -1 ? undefined : end);
+          i = end === -1 ? command.length : end + 1;
+          const logicalLine = continued + line;
+          if (!quoted && end !== -1 && /(?:^|[^\\])(?:\\\\)*\\$/.test(line)) {
+            continued = logicalLine.slice(0, -1);
+            continue;
+          }
+          continued = '';
+          if (
+            (stripTabs ? logicalLine.replace(/^\t+/, '') : logicalLine) ===
+            delimiter
+          ) {
+            closed = true;
+            break;
+          }
+        }
+        if (!closed) return undefined;
+      }
+      pending.length = 0;
       continue;
     }
     // A herestring (<<<) is not a heredoc; consume all three so the trailing
@@ -211,78 +273,67 @@ function stripHeredocBodies(command: string): string {
       }
       while (command[j] === ' ' || command[j] === '\t') j++;
       let delim = '';
+      let quoted = false;
       const dq = command[j];
       if (dq === "'" || dq === '"') {
+        quoted = true;
         j++;
         while (j < command.length && command[j] !== dq) {
+          if (dq === '"' && command[j] === '\\') {
+            const escaped = command[j + 1];
+            if (escaped === '\n') {
+              j += 2;
+              continue;
+            }
+            if (
+              escaped === '"' ||
+              escaped === '\\' ||
+              escaped === '$' ||
+              escaped === '`'
+            ) {
+              delim += escaped;
+              j += 2;
+              continue;
+            }
+          }
           delim += command[j];
           j++;
         }
-        if (j < command.length) j++;
+        if (j === command.length) return undefined;
+        j++;
+        if (j < command.length && !HEREDOC_WORD_BOUNDARY.test(command[j]!)) {
+          return undefined;
+        }
       } else {
-        while (j < command.length && !/[\s;|&<>]/.test(command[j]!)) {
-          delim += command[j];
-          j++;
+        while (j < command.length && !HEREDOC_WORD_BOUNDARY.test(command[j]!)) {
+          const char = command[j]!;
+          if (char === "'" || char === '"') return undefined;
+          if (char !== '\\') {
+            delim += char;
+            j++;
+            continue;
+          }
+
+          const escaped = command[j + 1];
+          if (escaped === undefined) return undefined;
+          j += 2;
+          if (escaped === '\n') continue;
+          quoted = true;
+          delim += escaped;
         }
-        // A backslash before/within the delimiter quotes it (<<\EOF is <<'EOF'):
-        // the delimiter word itself has the backslashes removed.
-        delim = delim.replace(/\\/g, '');
       }
-      if (delim === '') {
-        result += command.slice(i, j);
-        i = j;
-        continue;
-      }
-      // The body starts on the next line; find the end of the current line.
-      let lineEnd = j;
-      while (
-        lineEnd < command.length &&
-        command[lineEnd] !== '\n' &&
-        command[lineEnd] !== '\r'
-      ) {
-        lineEnd++;
-      }
-      if (lineEnd >= command.length) {
-        result += command.slice(i, j);
-        i = j;
-        continue;
-      }
-      let bodyStart = lineEnd + 1;
-      if (command[lineEnd] === '\r' && command[lineEnd + 1] === '\n') {
-        bodyStart = lineEnd + 2;
-      }
-      // Only strip when the delimiter line actually exists. Otherwise (an
-      // arithmetic `<<` or a malformed heredoc) fall back to normal processing
-      // instead of swallowing the commands that follow.
-      let scan = bodyStart;
-      let afterDelim = -1;
-      while (scan < command.length) {
-        let le = command.indexOf('\n', scan);
-        if (le === -1) le = command.length;
-        let line = command.slice(scan, le);
-        if (line.endsWith('\r')) line = line.slice(0, -1);
-        const candidate = stripTabs ? line.replace(/^\t+/, '') : line;
-        if (candidate === delim) {
-          afterDelim = le + 1;
-          break;
-        }
-        scan = le + 1;
-      }
-      if (afterDelim === -1) {
-        result += command.slice(i, i + 2);
-        i += 2;
-        continue;
-      }
-      // Keep the command line carrying the redirection (through its newline)
-      // and skip the body plus the delimiter line.
-      result += command.slice(i, bodyStart);
-      i = afterDelim;
+      if (delim === '' && dq !== "'" && dq !== '"') return undefined;
+      pending.push({ delimiter: delim, stripTabs, quoted });
+      result += command.slice(i, j);
+      i = j;
       continue;
     }
     result += ch;
     i++;
   }
-  return result;
+  return quote === null && arithmeticDepth === 0 && pending.length === 0
+    ? result
+    : undefined;
 }
 
 /**
@@ -293,23 +344,28 @@ function stripHeredocBodies(command: string): string {
  * tear a read-only search such as `rg 'gh api|gh pr comment' …` into unbalanced
  * fragments and mistake the quoted `gh pr comment` for a real creation, so a
  * separator only ends a stage when no quote is open. A newline is a boundary
- * too. Best-effort: escaped quotes are not modeled.
+ * too. Heredoc bodies have already been stripped by the caller.
  */
 function commandSegments(command: string): string[] {
-  command = stripHeredocBodies(command);
   const segments: string[] = [];
   let current = '';
-  let quote: string | null = null;
+  let quote: ShellQuote | null = null;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
-    if (quote !== null) {
-      current += ch;
-      if (ch === quote) quote = null;
+    if (ch === '\\' && quote !== "'" && i + 1 < command.length) {
+      current += command.slice(i, i + 2);
+      i++;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
+    if (quote !== null) {
       current += ch;
+      if (ch === quote.at(-1)) quote = null;
+      continue;
+    }
+    quote = shellQuoteAt(command, i);
+    if (quote !== null) {
+      current += quote;
+      i += quote.length - 1;
       continue;
     }
     // An unquoted word-initial `#` begins a shell comment: ignore the rest of
@@ -326,17 +382,6 @@ function commandSegments(command: string): string[] {
       ) {
         i++;
       }
-      continue;
-    }
-    // A backslash-newline is a line continuation, not a command boundary: the
-    // write flag on the continued line belongs to the same stage as the path.
-    if (
-      ch === '\\' &&
-      (command[i + 1] === '\n' ||
-        (command[i + 1] === '\r' && command[i + 2] === '\n'))
-    ) {
-      current += ' ';
-      i += command[i + 1] === '\r' ? 2 : 1;
       continue;
     }
     if (ch === ';' || ch === '|' || ch === '\n' || ch === '\r') {
@@ -361,6 +406,7 @@ function commandSegments(command: string): string[] {
     }
     current += ch;
   }
+  if (quote !== null) return [];
   segments.push(current);
   return segments;
 }
@@ -429,17 +475,23 @@ function creationSegment(command: string): string | undefined {
 function splitIndependentCommands(command: string): string[] {
   const parts: string[] = [];
   let current = '';
-  let quote: string | null = null;
+  let quote: ShellQuote | null = null;
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
-    if (quote !== null) {
-      current += ch;
-      if (ch === quote) quote = null;
+    if (ch === '\\' && quote !== "'" && i + 1 < command.length) {
+      current += command.slice(i, i + 2);
+      i++;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
+    if (quote !== null) {
       current += ch;
+      if (ch === quote.at(-1)) quote = null;
+      continue;
+    }
+    quote = shellQuoteAt(command, i);
+    if (quote !== null) {
+      current += quote;
+      i += quote.length - 1;
       continue;
     }
     if (
@@ -707,8 +759,7 @@ function passesStdinThrough(rawStage: string): boolean {
  * (fail-open: the author may self-echo once, but a mere reader is never
  * credited with comments it only read).
  */
-function creationOutputIsAmbiguous(command: string): boolean {
-  const stripped = stripHeredocBodies(command);
+function creationOutputIsAmbiguous(stripped: string): boolean {
   const segments = commandSegments(stripped).map((segment) =>
     stripQuotedSpans(stripShellComment(segment)),
   );
@@ -828,19 +879,53 @@ export function extractPostedCommentIds(entry: unknown): string[] {
     const response = fr['response'];
     if (response === null || typeof response !== 'object') continue;
     const output = (response as Record<string, unknown>)['output'];
-    if (typeof output !== 'string') continue;
+    const commandPrefix = 'Command: ';
+    if (typeof output !== 'string' || !output.startsWith(commandPrefix)) {
+      continue;
+    }
 
-    // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput: <result>".
-    const command =
-      output.match(/^Command: ([\s\S]*?)\nDirectory:/)?.[1] ??
-      output.match(/^Command: ([\s\S]*?)\nOutput:/)?.[1] ??
-      '';
-    const segment = command ? creationSegment(command) : undefined;
+    // The shell tool echoes "Command: <cmd>\nDirectory: ...\nOutput (stdout
+    // and stderr combined): <result>\nExecution Error: ...". Recorded
+    // transcripts keep the earlier "Output:" / "Error:" labels.
+    const headerPattern =
+      /\nDirectory: [^\n]*(?:\n(?!Directory: |Output(?: \(stdout and stderr combined\))?: )[^\n]*)*\n(Output(?: \(stdout and stderr combined\))?): /g;
+    const header = headerPattern.exec(output);
+    const outputPattern = /\n(Output(?: \(stdout and stderr combined\))?): /g;
+    const boundary = header ?? outputPattern.exec(output);
+    if (!boundary) continue;
+
+    const command = stripHeredocBodies(
+      output.slice(commandPrefix.length, boundary.index),
+    );
+    if (command === undefined) continue;
+    const segment = creationSegment(command);
     if (!segment) continue;
-    const result =
-      output.match(/\nOutput: ([\s\S]*?)\nError:/)?.[1] ??
-      output.match(/\nOutput: ([\s\S]*)$/)?.[1] ??
-      '';
+    const resultStart = boundary.index + boundary[0].length;
+    const errorPrefix =
+      boundary[1] === 'Output' ? '\nError:' : '\nExecution Error:';
+    const firstError = output.indexOf(errorPrefix, resultStart);
+    const footerPattern =
+      /\nExit Code: (-?\d+|\(none\))(?:\nSignal: (?:-?\d+|\(none\))\nProcess Group PGID: (?:-?\d+|\(none\)))?(?=\n\n|\n?$)/g;
+    footerPattern.lastIndex = firstError === -1 ? output.length : firstError;
+    const footer = firstError === -1 ? null : footerPattern.exec(output);
+    const metadataStart = footer?.index ?? output.length;
+    const nextHeader = header ? headerPattern.exec(output) : null;
+    if (nextHeader && nextHeader.index < metadataStart) continue;
+
+    const successError = `${errorPrefix} (none)`;
+    const successErrorStart = metadataStart - successError.length;
+    const resultEnd =
+      footer?.[1] === '0' &&
+      successErrorStart >= resultStart &&
+      output.startsWith(successError, successErrorStart)
+        ? successErrorStart
+        : firstError === -1
+          ? metadataStart
+          : firstError;
+    outputPattern.lastIndex = header ? resultEnd : resultStart;
+    const nextOutput = outputPattern.exec(output);
+    if (nextOutput && nextOutput.index < metadataStart) continue;
+    const result = output.slice(resultStart, resultEnd);
 
     // The output must be attributable to the creation. When another gh/curl
     // command runs AFTER the creation, it may have produced the output —

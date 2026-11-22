@@ -108,6 +108,33 @@ describe('Generated UI view state through the daemon', () => {
           { prompt: [{ type: 'text', text }] },
           target.clientId,
         );
+      const waitForCompletedTurn = async (response: Response) => {
+        const { promptId } = (await json(response, 202)) as {
+          promptId: string;
+        };
+        expect(promptId).toEqual(expect.any(String));
+        expect(promptId.length).toBeGreaterThan(0);
+        // Admission is asynchronous; closing the session can cancel the turn.
+        await expect
+          .poll(
+            async () =>
+              json(
+                await call(
+                  'GET',
+                  `/session/${session.sessionId}/turns/${encodeURIComponent(promptId)}`,
+                  undefined,
+                  session.clientId,
+                ),
+                200,
+              ),
+            { timeout: 60_000 },
+          )
+          .toMatchObject({
+            promptId,
+            state: 'completed',
+            resultText: 'done',
+          });
+      };
       const put = (
         target: { sessionId: string; clientId: string },
         baseRevision: number,
@@ -123,8 +150,7 @@ describe('Generated UI view state through the daemon', () => {
         await json(await put(session, 0, { items: ['Agenda'] }), 200),
       ).toEqual({ outcome: 'saved', cardId: CARD, revision: 1 });
       release();
-      const first = await firstPrompt;
-      expect(first.status, await first.text()).toBeLessThan(300);
+      await waitForCompletedTurn(await firstPrompt);
 
       // An artifact registered after a save still lists after reload.
       await json(
@@ -189,29 +215,7 @@ describe('Generated UI view state through the daemon', () => {
         200,
       );
       expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
-      const second = await promptOf(session, 'second prompt');
-      const secondBody = await second.text();
-      expect(second.status, secondBody).toBeLessThan(300);
-      // Admission only returns 202; reloading now cancels the turn before its
-      // user record is written.
-      const { promptId: secondPromptId } = JSON.parse(secondBody) as {
-        promptId: string;
-      };
-      await expect
-        .poll(
-          async () => {
-            const response = await call(
-              'GET',
-              `/session/${session.sessionId}/turns/${secondPromptId}`,
-              undefined,
-              session.clientId,
-            );
-            if (!response.ok) return { status: response.status };
-            return (await response.json()) as Record<string, unknown>;
-          },
-          { timeout: 60_000 },
-        )
-        .toMatchObject({ state: 'completed' });
+      await waitForCompletedTurn(await promptOf(session, 'second prompt'));
       await reload();
       expect(
         await json(

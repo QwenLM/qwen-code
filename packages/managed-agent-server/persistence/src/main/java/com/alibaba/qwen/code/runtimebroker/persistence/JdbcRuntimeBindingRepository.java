@@ -47,13 +47,11 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFe
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.admissionClosed;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.fence;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.hasHarnessDrain;
-import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.localStorageOwnerKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requirePhysicalStorageAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireStorageAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageAliasKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageFence;
-import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageFenceKey;
 
 /** JDBC Runtime binding repository coordinated through a shared database. */
 public final class JdbcRuntimeBindingRepository
@@ -175,7 +173,7 @@ public final class JdbcRuntimeBindingRepository
             String physical = external ? null : localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
                     claim.getRequest().getStorageId(), true);
             if (physical != null) {
-                try (var lock = connection.prepareStatement("SELECT physical_key FROM ma_storage_owner WHERE storage_key = ?"
+                try (var lock = connection.prepareStatement("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ?"
                         + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE alias_key = ?)"
                         + " FOR UPDATE")) {
                     lock.setString(1, physical);
@@ -570,12 +568,10 @@ public final class JdbcRuntimeBindingRepository
             lockPlacementDomain(connection, tenantId);
             ExecutionAdmissionPlacement.lockDrainRoot(connection, tenantId, harnessSessionId);
             try (PreparedStatement statement = connection.prepareStatement(
-                                    "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'DRAINING' OR claim_lease_until IS NOT NULL THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'DRAINING', claim_lease_until = NULL")) {
-                statement.setString(1, harnessDrainKey(tenantId));
-                statement.setString(2, harnessDrainKey(harnessSessionId));
-                JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
-                JdbcRepositorySupport.setIdentity(statement, 4, harnessSessionId);
-                JdbcRepositorySupport.setIdentity(statement, 5, harnessSessionId);
+                                    "INSERT INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'DRAINING' OR claim_lease_until IS NOT NULL THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'DRAINING', claim_lease_until = NULL")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+                JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
+                JdbcRepositorySupport.setIdentity(statement, 3, harnessSessionId);
                 statement.executeUpdate();
             }
             return null;
@@ -590,9 +586,9 @@ public final class JdbcRuntimeBindingRepository
                     try (PreparedStatement statement =
                             connection.prepareStatement(
                                     "SELECT phase FROM ma_session_head"
-                                            + " WHERE tenant_key = ? AND harness_key = ?")) {
-                        statement.setString(1, harnessDrainKey(tenantId));
-                        statement.setString(2, harnessDrainKey(harnessSessionId));
+                                            + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+                        JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+                        JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
                         try (ResultSet row = statement.executeQuery()) {
                             return row.next() && "DRAINING".equals(row.getString(1));
                         }
@@ -707,18 +703,16 @@ public final class JdbcRuntimeBindingRepository
                     lockPlacementDomain(connection, tenantId);
                     try (PreparedStatement statement =
                             connection.prepareStatement(
-                                    "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                                    "INSERT INTO ma_storage (alias_key,"
                                         + " tenant_id, storage_id, fence_operation_id, gmt_create, gmt_modified) VALUES (?,"
-                                        + " ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
+                                        + " ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE"
                                         + " gmt_modified = CASE WHEN fence_operation_id IS NULL THEN VALUES(gmt_modified) ELSE gmt_modified END,"
                                         + " fence_operation_id = COALESCE(fence_operation_id,"
                                         + " VALUES(fence_operation_id))")) {
                         statement.setString(1, storageAliasKey(tenantId, storageId));
-                        statement.setString(2, storageFenceKey(tenantId));
-                        statement.setString(3, storageFenceKey(storageId));
-                        JdbcRepositorySupport.setIdentity(statement, 4, tenantId);
-                        JdbcRepositorySupport.setIdentity(statement, 5, storageId);
-                        JdbcRepositorySupport.setIdentity(statement, 6, operationId);
+                        JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
+                        JdbcRepositorySupport.setIdentity(statement, 3, storageId);
+                        JdbcRepositorySupport.setIdentity(statement, 4, operationId);
                         statement.executeUpdate();
                     }
                     if (!operationId.equals(storageFence(connection, tenantId, storageId))) {
@@ -914,12 +908,11 @@ public final class JdbcRuntimeBindingRepository
         lockPlacementDomain(connection, tenantId);
         try (PreparedStatement fence = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ? FOR UPDATE")) {
-            fence.setString(1, harnessDrainKey(tenantId));
-            fence.setString(2, harnessDrainKey(harnessSessionId));
+                                + " tenant_id = ? AND harness_session_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(fence, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(fence, 2, harnessSessionId);
             try (ResultSet row = fence.executeQuery()) {
-                if (!row.next() || !tenantId.equals(row.getString(1)) || !harnessSessionId.equals(row.getString(2))
-                        || !"DRAINING".equals(row.getString(3))) {
+                if (!row.next() || !"DRAINING".equals(row.getString(3))) {
                     throw admissionClosed();
                 }
             }
@@ -1199,7 +1192,8 @@ public final class JdbcRuntimeBindingRepository
                             connection.prepareStatement(
                                     "SELECT "
                                             + BINDING_COLUMNS
-                                            + " FROM ma_runtime_binding WHERE provisioner_kind = ?"
+                                            + " FROM ma_runtime_binding WHERE is_recovery_candidate = 1"
+                                            + " AND provisioner_kind = ?"
                                             + " AND binding_id > ? AND resource_handle_version = 2"
                                             + " AND binding_state IN ('PROVISIONING', 'READY',"
                                             + " 'DRAINING', 'RECOVERY_BLOCKED', 'LOST') AND NOT"
@@ -1680,24 +1674,22 @@ public final class JdbcRuntimeBindingRepository
      */
     public static void lockPlacementDomain(Connection connection, String tenantId, int timeoutSeconds)
             throws SQLException {
-        String key = JdbcRepositorySupport.valueKey(tenantId);
         try (PreparedStatement insert = connection.prepareStatement(
-                        "INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES"
-                            + " (?, ?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_key ="
-                            + " tenant_key")) {
+                        "INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES"
+                            + " (?, 'runtime_placement') ON DUPLICATE KEY UPDATE tenant_id ="
+                            + " tenant_id")) {
             insert.setQueryTimeout(timeoutSeconds);
-            insert.setString(1, key);
-            JdbcRepositorySupport.setIdentity(insert, 2, tenantId);
+            insert.setString(1, tenantId);
             insert.executeUpdate();
         }
         try (PreparedStatement lock = connection.prepareStatement(
-                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ? AND"
+                        "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_id = ? AND"
                                 + " guard_domain = 'runtime_placement' FOR UPDATE")) {
             lock.setQueryTimeout(timeoutSeconds);
-            lock.setString(1, key);
+            lock.setString(1, tenantId);
             try (ResultSet result = lock.executeQuery()) {
                 if (!result.next() || !tenantId.equals(result.getString("tenant_id"))) {
-                    throw new IllegalStateException("Runtime placement tenant hash collision");
+                    throw new IllegalStateException("Runtime placement tenant conflict");
                 }
             }
         }

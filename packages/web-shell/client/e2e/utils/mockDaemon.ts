@@ -457,26 +457,39 @@ export function createWebShellDaemonScenario(
     ...(overrides.mcp ?? {}),
   };
 
-  const sessions = overrides.sessions ?? [
-    {
-      sessionId,
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName,
-      clientCount: 1,
-      hasActivePrompt: false,
-    },
-    {
-      sessionId: 'previous-session',
-      workspaceCwd,
-      createdAt: now,
-      updatedAt: now,
-      displayName: 'Previous Session',
-      clientCount: 0,
-      hasActivePrompt: false,
-    },
-  ];
+  // Clone the caller-supplied collections that routes mutate in place:
+  // sessions here, standaloneSessions, midTurnMessages and gitRemotes below,
+  // and goalsByWorkspace. gitRemotes counts because materializeRemotes hands
+  // the array itself to the add/remove routes, which splice and push it.
+  // Notification-path cases mutate these after install, and without the clone
+  // that mutation would reach the caller's fixture and leak into every later
+  // case sharing it. installMockDaemon still holds the scenario itself by
+  // reference, so those mutations stay visible to routes. allocatedSessions is
+  // factory-owned, and whole-field reassignments (capabilities, channels,
+  // providers, pairing*, workspaceOrder, goalSnapshot) replace the reference
+  // rather than writing into the caller's value, so neither needs a clone.
+  const sessions = structuredClone(
+    overrides.sessions ?? [
+      {
+        sessionId,
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName,
+        clientCount: 1,
+        hasActivePrompt: false,
+      },
+      {
+        sessionId: 'previous-session',
+        workspaceCwd,
+        createdAt: now,
+        updatedAt: now,
+        displayName: 'Previous Session',
+        clientCount: 0,
+        hasActivePrompt: false,
+      },
+    ],
+  );
 
   return {
     workspaceCwd,
@@ -503,7 +516,7 @@ export function createWebShellDaemonScenario(
     sessions,
     workspaceOrder: overrides.workspaceOrder ?? [],
     workspaceOrderSaveError: overrides.workspaceOrderSaveError,
-    standaloneSessions: overrides.standaloneSessions ?? [],
+    standaloneSessions: structuredClone(overrides.standaloneSessions ?? []),
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
     sessionCatalogVersion: overrides.sessionCatalogVersion ?? {
@@ -525,7 +538,9 @@ export function createWebShellDaemonScenario(
     gitHubPrs: overrides.gitHubPrs,
     gitBranches: overrides.gitBranches,
     gitCheckoutDirty: overrides.gitCheckoutDirty,
-    gitRemotes: overrides.gitRemotes,
+    gitRemotes: overrides.gitRemotes
+      ? structuredClone(overrides.gitRemotes)
+      : undefined,
     gitDiff: overrides.gitDiff,
     gitLog: overrides.gitLog,
     btwAnswer: overrides.btwAnswer,
@@ -538,7 +553,7 @@ export function createWebShellDaemonScenario(
       ? structuredClone(overrides.goalsByWorkspace)
       : undefined,
     allocatedSessions: [],
-    midTurnMessages: overrides.midTurnMessages ?? [],
+    midTurnMessages: structuredClone(overrides.midTurnMessages ?? []),
     branch: overrides.branch,
   };
 }
@@ -649,13 +664,16 @@ export async function installMockDaemon(
 
 export function userTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; promptId?: string } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      // Mirrors the production replay stamp: the user record's
+      // daemonPromptId lands in the chunk's `_meta.promptId`.
+      ...(options.promptId ? { _meta: { promptId: options.promptId } } : {}),
     },
     options.id,
   );
@@ -2350,7 +2368,10 @@ async function handleDaemonRoute(
       return;
     }
     const summary = scenario.sessions[index];
-    const displayName = readStringField(body, 'displayName');
+    const initialDisplayName = readStringField(body, 'initialDisplayName');
+    const displayName =
+      readStringField(body, 'displayName') ??
+      (summary.displayName?.trim() ? undefined : initialDisplayName);
     const prInput = getRecordValue(body, 'pr');
     let prs = summary.prs ?? [];
     if (prInput !== undefined) {
@@ -2431,7 +2452,11 @@ async function handleDaemonRoute(
     };
     await json(route, {
       sessionId,
-      ...(displayName !== undefined ? { displayName } : {}),
+      ...(displayName !== undefined
+        ? { displayName }
+        : initialDisplayName !== undefined
+          ? { displayName: summary.displayName }
+          : {}),
       prs,
     });
     return;

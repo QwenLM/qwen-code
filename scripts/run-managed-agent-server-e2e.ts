@@ -879,7 +879,7 @@ function readCommandRewriteDomainRecords(
 ): Array<Record<string, unknown>> {
   const rows = runMysql(
     mysqlPort,
-    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.session_scope_key=sr.session_scope_key AND r.resource_id=sr.record_resource_id WHERE sr.session_scope_key=(SELECT session_scope_key FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
+    `SELECT HEX(r.inline_bytes) FROM qwen_managed_agent.ma_session_record sr JOIN qwen_managed_agent.ma_resource r ON r.tenant_id=sr.tenant_id AND r.session_id=sr.session_id AND r.resource_id=sr.record_resource_id WHERE (sr.tenant_id, sr.session_id)=(SELECT tenant_id, session_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}) AND sr.record_kind='DOMAIN' AND sr.domain='${domain}' ORDER BY sr.gmt_create, sr.record_key`,
   );
   return rows
     ? rows
@@ -2707,6 +2707,48 @@ function assertScheduledFireWitness(
   return { occurrenceKey };
 }
 
+// The classifier side-query answer for a respond_in_schema tool's properties,
+// or undefined when the schema is not the block schema. Other structured side
+// queries (title, tool-use summary, next speaker) also emit respond_in_schema;
+// answering them with a block allow is schema-invalid and would silently
+// mis-answer a real feature, so a non-block schema must yield undefined — never
+// a fallback allow. Kept a top-level pure declaration so the meta-test can
+// execute it against both block and non-block schemas (an additive fallback
+// that re-creates the mis-answer reddens the non-block direction).
+function classifierBlockAnswer(
+  blockProperties: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (blockProperties === undefined || !('shouldBlock' in blockProperties)) {
+    return undefined;
+  }
+  // Answer with the stage's own schema exactly: stage 1 permits only
+  // shouldBlock (additionalProperties is false), stage 2 adds thinking/reason.
+  const answer: Record<string, unknown> = { shouldBlock: false };
+  if ('thinking' in blockProperties) answer['thinking'] = '';
+  if ('reason' in blockProperties) answer['reason'] = '';
+  return answer;
+}
+
+// The minted schedule id printed by the create tool result, matched by
+// structured call id (not a substring of the delete fixture's own argument),
+// or undefined when no matching result exists. Returning undefined — never an
+// invented id — keeps the fixture failing loud with `?? 'missing-schedule-id'`
+// instead of retiring a schedule the store never minted. Kept a top-level pure
+// declaration so the meta-test can execute it against hostile histories.
+function mintedScheduleId(
+  messages: unknown[],
+  createCallId: string,
+): string | undefined {
+  const createResultText = messages
+    .filter((message) => {
+      const entry = message as { role?: string; tool_call_id?: string };
+      return entry.role === 'tool' && entry.tool_call_id === createCallId;
+    })
+    .map((message) => JSON.stringify(message))
+    .join('');
+  return /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+}
+
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
 const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
@@ -3035,22 +3077,16 @@ try {
             };
           }
         | undefined;
-      // Match the block schema, not the tool name: other structured side
-      // queries (title, tool-use summary, next speaker) also emit
-      // respond_in_schema, and a {shouldBlock:false} answer is schema-invalid
-      // for them — it would silently mis-answer a real feature.
+      // Match the block schema, not the tool name (classifierBlockAnswer):
+      // other structured side queries (title, tool-use summary, next speaker)
+      // also emit respond_in_schema and must not be mis-answered with a
+      // schema-invalid allow.
       const blockProperties = schemaTool?.function?.parameters?.properties;
-      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
-        // Answer with the stage's own schema exactly: stage 1 permits only
-        // shouldBlock (additionalProperties is false), stage 2 adds
-        // thinking/reason. Extra keys fail validation and report the
-        // classifier unavailable, denying cron_create unreviewed.
-        const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in blockProperties) answer['thinking'] = '';
-        if ('reason' in blockProperties) answer['reason'] = '';
+      const blockAnswer = classifierBlockAnswer(blockProperties);
+      if (blockAnswer !== undefined) {
         return {
           toolCalls: [
-            fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
+            fakeToolCall('respond_in_schema', blockAnswer, 'loop-classifier'),
           ],
         };
       }
@@ -3089,19 +3125,7 @@ try {
         // The automation store mints the schedule id; reuse the one the
         // create result printed so the retire targets the live schedule
         // instead of a fabricated id the store answers 404 for.
-        const createResultText = messages
-          .filter((message) => {
-            const entry = message as {
-              role?: string;
-              tool_call_id?: string;
-            };
-            return (
-              entry.role === 'tool' && entry.tool_call_id === 'loop-cron-create'
-            );
-          })
-          .map((message) => JSON.stringify(message))
-          .join('');
-        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        const createdId = mintedScheduleId(messages, 'loop-cron-create');
         return {
           toolCalls: [
             fakeToolCall(
@@ -3153,13 +3177,15 @@ try {
           }
         | undefined;
       const blockProperties = schemaTool?.function?.parameters?.properties;
-      if (blockProperties !== undefined && 'shouldBlock' in blockProperties) {
-        const answer: Record<string, unknown> = { shouldBlock: false };
-        if ('thinking' in blockProperties) answer['thinking'] = '';
-        if ('reason' in blockProperties) answer['reason'] = '';
+      const blockAnswer = classifierBlockAnswer(blockProperties);
+      if (blockAnswer !== undefined) {
         return {
           toolCalls: [
-            fakeToolCall('respond_in_schema', answer, 'loop-fire-classifier'),
+            fakeToolCall(
+              'respond_in_schema',
+              blockAnswer,
+              'loop-fire-classifier',
+            ),
           ],
         };
       }
@@ -3191,19 +3217,7 @@ try {
         if (hasToolResult('loop-fire-delete')) {
           return { content: 'LOOP_FIRE_DONE' };
         }
-        const createResultText = messages
-          .filter((message) => {
-            const entry = message as {
-              role?: string;
-              tool_call_id?: string;
-            };
-            return (
-              entry.role === 'tool' && entry.tool_call_id === 'loop-fire-create'
-            );
-          })
-          .map((message) => JSON.stringify(message))
-          .join('');
-        const createdId = /asch_[0-9a-f]{32}/.exec(createResultText)?.[0];
+        const createdId = mintedScheduleId(messages, 'loop-fire-create');
         return {
           toolCalls: [
             fakeToolCall(
@@ -4328,7 +4342,7 @@ try {
       );
       const privateHead = runMysql(
         mysqlPort,
-        `SELECT storage_version, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
+        `SELECT has_activity_diagnostics, latest_checkpoint_resource_id FROM qwen_managed_agent.ma_session_head WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)}`,
       ).split('\t');
       const checkpoint = JSON.parse(
         runMysql(
@@ -4337,7 +4351,7 @@ try {
         ),
       );
       if (
-        privateHead[0] !== '4' ||
+        privateHead[0] !== '1' ||
         checkpoint.continuation?.phase !== 'await_action' ||
         checkpoint.approval?.requestId !== originalApprovalId
       ) {
@@ -4364,7 +4378,7 @@ try {
         options: originalApprovalOptions,
         plan: originalApprovalPlan,
         originalRuntime: runtime,
-        storageVersion: Number(privateHead[0]),
+        activityDiagnostics: privateHead[0] === '1',
         checkpointPhase: checkpoint.continuation.phase,
         executionCount,
         physicalFileExists: existsSync(inflightSideEffect),
@@ -6969,7 +6983,7 @@ try {
             // activation renewal the live writer journals.
             head: runMysql(
               mysqlPort,
-              `SELECT state, storage_version, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
+              `SELECT state, has_activity_diagnostics, writer_generation, HEX(writer_id), HEX(latest_checkpoint_resource_id), compacted_through_revision, recovery_status, recovery_detail_code FROM qwen_managed_agent.ma_session_head WHERE ${sessionFilter}`,
               probeMs,
             ),
             // Every journal transaction except those renewals, by writer

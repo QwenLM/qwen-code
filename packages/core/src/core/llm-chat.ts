@@ -105,6 +105,7 @@ import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
   appendAutoMemoryContext,
   appendAutoMemorySnapshot,
+  findLatestAutoMemorySnapshot,
   getAutoMemorySnapshot,
   withoutAutoMemorySnapshots,
 } from '../memory/request-context.js';
@@ -114,6 +115,10 @@ import {
   effectiveHistoryEnd,
 } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
+import {
+  getToolOutputRecovery,
+  setToolOutputRecovery,
+} from '../tools/tool-output-recovery.js';
 import type { StructuredError } from './turn.js';
 import {
   logContentRetry,
@@ -740,6 +745,29 @@ export interface LlmChatSendOptions {
   preparedRequest?: LlmPreparedRequest;
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /**
+   * This send is an explicit user Retry. The model-availability ledger treats
+   * it as a turn boundary so a retry re-probes fallbacks the failed attempt
+   * consumed, instead of inheriting their skipped state.
+   */
+  isExplicitRetry?: boolean;
+  /**
+   * This send belongs to the session's interactive turn flow (a user question,
+   * an explicit Retry, or a continuation driven by `LlmClient`/`Turn`). Only
+   * such sends participate in the model-availability ledger. Background
+   * operations (subagents, forked queries, speculation, side queries,
+   * suggestions) share the session `Config` but leave this unset, so they
+   * neither rotate the live turn's key nor read or write its marks.
+   */
+  isSessionTurn?: boolean;
+  /**
+   * Stable turn key for the model-availability ledger, for surfaces whose
+   * per-send `prompt_id` is a continuation rewrite of the turn's identity
+   * (ACP mid-turn automatic-continuation suffixes). Defaults to the send's
+   * `prompt_id`. Only the ledger key is normalized; `prompt_id` keeps its
+   * load-bearing prompt identity.
+   */
+  ledgerTurnKey?: string;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
   /**
@@ -1933,14 +1961,20 @@ function copyContentContainer(content: Content): Content {
 
 function copyPartContainer(part: Part): Part {
   const nested = getFunctionResponseParts(part);
-  if (!nested) return { ...part };
-  return {
-    ...part,
-    functionResponse: {
-      ...part.functionResponse,
-      parts: nested.map((inner) => ({ ...inner })),
-    },
-  };
+  const copy = nested
+    ? {
+        ...part,
+        functionResponse: {
+          ...part.functionResponse,
+          parts: nested.map((inner) => ({ ...inner })),
+        },
+      }
+    : { ...part };
+  const recovery = getToolOutputRecovery(part);
+  if (recovery) {
+    setToolOutputRecovery(copy, recovery);
+  }
+  return copy;
 }
 
 function stripThoughtPartsFromContent(content: Content): Content | null {
@@ -2491,6 +2525,19 @@ export class LlmChat {
     return this.historyReplacementRevision;
   }
 
+  /**
+   * The per-response output-token limit the send layer last used — clamp,
+   * escalation, or user override. `Turn` reads it when a `MAX_TOKENS` cut
+   * truncates a tool call so the scheduler's rejection can name the budget
+   * (#16417). One send stale is fine: the value is refreshed at every clamp
+   * and every escalation before the retry goes out.
+   */
+  private lastRequestMaxOutputTokens: number | undefined;
+
+  getLastRequestMaxOutputTokens(): number | undefined {
+    return this.lastRequestMaxOutputTokens;
+  }
+
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
@@ -2789,6 +2836,14 @@ export class LlmChat {
     return this.config.getModelRouteIdentity?.() ?? '';
   }
 
+  private memorySnapshotsBecameVisible(visible: boolean): boolean {
+    return (
+      this.memorySnapshotsVisible !== true &&
+      visible &&
+      findLatestAutoMemorySnapshot(this.history) !== undefined
+    );
+  }
+
   /**
    * Make the single-slot token counters describe the route identified by
    * `targetRouteKey` (default: the active route). Counts recorded for a
@@ -2824,15 +2879,7 @@ export class LlmChat {
     const memorySnapshotsVisible = Boolean(
       this.config.getAutoMemoryContext?.(),
     );
-    if (
-      this.memorySnapshotsVisible !== true &&
-      memorySnapshotsVisible &&
-      this.history.some((entry) =>
-        entry.parts?.some(
-          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
-        ),
-      )
-    ) {
+    if (this.memorySnapshotsBecameVisible(memorySnapshotsVisible)) {
       // A suppressed request cannot account for catalogs that are visible
       // again. Invalidate every route before adoption. The opposite flip
       // (visible -> suppressed) deliberately keeps the authoritative count:
@@ -2944,6 +2991,23 @@ export class LlmChat {
   getLastPromptTokenCount(targetRouteKey?: string): number {
     this.adoptTokenCountsForRoute(targetRouteKey);
     return this.lastPromptTokenCount;
+  }
+
+  /** Reads the active route's prompt count without mutating chat or telemetry state. */
+  peekLastPromptTokenCount(): number {
+    if (
+      (this.lastPromptTokenCount === 0 &&
+        this.tokenCountsByRouteKey.size === 0) ||
+      this.memorySnapshotsBecameVisible(
+        Boolean(this.config.getAutoMemoryContext?.()),
+      )
+    ) {
+      return 0;
+    }
+    const routeKey = this.currentRouteKey();
+    return routeKey === this.tokenCountsRouteKey
+      ? this.lastPromptTokenCount
+      : (this.tokenCountsByRouteKey.get(routeKey)?.promptTokenCount ?? 0);
   }
 
   /** Previous model-response tokens used by the next prompt estimate. */
@@ -3539,6 +3603,9 @@ export class LlmChat {
         onPreparedRequest,
         retractDeliveredOutputOnRetry: true,
         disableModelFallbacks: true,
+        // A prepared resume continues the live session turn, so it belongs to
+        // the ledger's turn boundary like the interactive path.
+        isSessionTurn: true,
       },
     );
   }
@@ -3554,6 +3621,27 @@ export class LlmChat {
     // must not continue: it could repeat a call that already took effect.
     const managedSessionBlock = this.config.getManagedSessionBlock?.();
     if (managedSessionBlock) throw managedSessionBlock;
+    // Model health ledger (experimental, opt-in). The turn boundary runs once
+    // per request here — not inside the fallback branch — so an explicit Retry
+    // whose first request the primary serves still re-probes the fallbacks the
+    // failed attempt consumed. Only session-turn sends (`isSessionTurn`, set by
+    // `LlmClient`/`Turn`) participate: background operations (subagents, forked
+    // queries, speculation, side queries, suggestions) share this Config but
+    // leave the flag unset, so they neither rotate the live turn's key nor read
+    // or write its marks, and keep the gate-off fallback behaviour.
+    // Optional-chain the gate: partial Config mocks omit the new accessor, and
+    // an absent gate must read as "off".
+    const availability =
+      options?.isSessionTurn &&
+      this.config.isModelAvailabilityTrackingEnabled?.()
+        ? this.config.getModelAvailabilityService()
+        : undefined;
+    if (availability) {
+      availability.beginTurn(options?.ledgerTurnKey ?? prompt_id);
+      if (options?.isExplicitRetry) {
+        availability.resetTurn();
+      }
+    }
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -4322,6 +4410,7 @@ export class LlmChat {
           contextWindowForClamp,
           promptTokensForClamp,
         );
+        this.lastRequestMaxOutputTokens = clampedMaxOutputTokens;
         params = {
           ...params,
           config: {
@@ -5581,6 +5670,7 @@ export class LlmChat {
           let recoveryParams: SendMessageParameters = params;
 
           if (shouldEscalateMaxOutputTokens) {
+            self.lastRequestMaxOutputTokens = escalatedLimit;
             debugLogger.info(
               `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
                 `Escalating to ${escalatedLimit} tokens.`,
@@ -5724,15 +5814,21 @@ export class LlmChat {
             // defensive fallback that never fires in practice.
             const recoveryCeiling =
               recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
+              recoveryCeiling,
+              contextWindowForClamp,
+              recoveryPromptEstimate,
+            );
+            // Refresh the per-response limit the Turn reads (#16417): a
+            // recovery iteration can end at MAX_TOKENS, and the rejection
+            // must name the limit *this* iteration used, not the one from
+            // before the recovery loop started.
+            self.lastRequestMaxOutputTokens = iterationClampedMaxOutputTokens;
             const iterationParams: SendMessageParameters = {
               ...recoveryParams,
               config: {
                 ...recoveryParams.config,
-                maxOutputTokens: clampOutputTokensToWindow(
-                  recoveryCeiling,
-                  contextWindowForClamp,
-                  recoveryPromptEstimate,
-                ),
+                maxOutputTokens: iterationClampedMaxOutputTokens,
               },
             };
 
@@ -5842,6 +5938,9 @@ export class LlmChat {
               let currentResolvedModel = cgConfig?.model ?? model;
               let fallbackStreamYieldedAnyChunk = false;
 
+              // The health ledger (`availability`) is bound at the request entry
+              // above; here only fallback selection consults it. The primary is
+              // still attempted each request (it may have recovered).
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
                 if (
@@ -5893,6 +5992,29 @@ export class LlmChat {
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
                       `resolved model "${resolvedFallbackModel}" matches ` +
                       `the current model.`,
+                  );
+                  continue;
+                }
+
+                // Key the ledger by the resolved provider route, not the bare
+                // model id: two fallbacks can resolve to the same model id on
+                // different routes (e.g. openai:shared vs anthropic:shared),
+                // and exhausting one route must not skip the other. Aliases of
+                // one route still share health (P2 resolved-route).
+                const fallbackRouteKey =
+                  self.config.getModelRouteIdentity?.(
+                    resolvedFallbackModel,
+                    fallbackConfig,
+                  ) ?? resolvedFallbackModel;
+
+                // Skip a fallback the health ledger already exhausted this turn.
+                if (
+                  availability &&
+                  !availability.snapshot(fallbackRouteKey).available
+                ) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `marked unavailable for this turn.`,
                   );
                   continue;
                 }
@@ -5973,6 +6095,7 @@ export class LlmChat {
                   // Fallback succeeded
                   lastError = null;
                   fallbackSucceeded = true;
+                  availability?.markHealthy(fallbackRouteKey);
                   debugLogger.info(
                     `[FALLBACK] Successfully completed request with ` +
                       `fallback model "${resolvedFallbackModel}".`,
@@ -5989,17 +6112,6 @@ export class LlmChat {
                   }
                   lastError = fallbackError;
 
-                  if (currentFallbackYieldedAnyChunk) {
-                    self.popPendingPartialAssistantTurn();
-                    debugLogger.warn(
-                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
-                        `failed after emitting output. Popped the partial ` +
-                        `assistant turn and stopped the fallback chain to ` +
-                        `avoid duplicating user-visible output.`,
-                    );
-                    break;
-                  }
-
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
                   const fallbackClassification = classifyRetryError(
@@ -6013,6 +6125,27 @@ export class LlmChat {
                   const canTryNextFallback = isFallbackEligible(
                     fallbackClassification,
                   );
+                  // Record the unhealthy fallback even when it emitted output
+                  // before failing: the chain stops below to avoid duplicating
+                  // output, but the model must still be skipped for the rest of
+                  // the turn. Gated on fallback-eligibility so a post-output
+                  // auth/client error is not recorded as turn-unavailable.
+                  if (availability && canTryNextFallback) {
+                    availability.markRetryOncePerTurn(fallbackRouteKey);
+                    availability.consumeStickyAttempt(fallbackRouteKey);
+                  }
+
+                  if (currentFallbackYieldedAnyChunk) {
+                    self.popPendingPartialAssistantTurn();
+                    debugLogger.warn(
+                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
+                        `failed after emitting output. Popped the partial ` +
+                        `assistant turn and stopped the fallback chain to ` +
+                        `avoid duplicating user-visible output.`,
+                    );
+                    break;
+                  }
+
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +

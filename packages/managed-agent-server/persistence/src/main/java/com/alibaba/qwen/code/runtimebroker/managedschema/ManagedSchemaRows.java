@@ -15,11 +15,13 @@ import java.util.Set;
 /** Reads raw SQL rows while decoding only declared UTF-8 identity columns. */
 public final class ManagedSchemaRows {
     private static final Set<String> BOOLEANS = Set.of(
+            "has_activity_diagnostics",
             "is_accepted_complete",
             "is_activation_record",
             "is_archived",
             "owner_only",
             "is_cancel_requested",
+            "is_catalog_listed",
             "is_default",
             "is_deleted",
             "is_drain_requested",
@@ -53,7 +55,6 @@ public final class ManagedSchemaRows {
                     "original_workspace",
                     "source_session_id",
                     "target_session_id",
-                    "public_session_id",
                     "harness_session_id",
                     "operation_id",
                     "retirement_operation_id",
@@ -93,7 +94,6 @@ public final class ManagedSchemaRows {
                     "parent_workspace_id",
                     "segment_id",
                     "creation_key",
-                    "provider_id",
                     "lease_id",
                     "binding_id",
                     "active_binding_id",

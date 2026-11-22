@@ -130,6 +130,54 @@ describe('LocalControlService', () => {
     }
   });
 
+  it('prunes closed sockets before the disable force-close sweep', async () => {
+    const port = await unusedPort();
+    const accepted: NetSocket[] = [];
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: (server) => {
+        server.on('connection', (socket) => accepted.push(socket));
+      },
+      detachWebSocket: vi.fn(),
+      getPort: () => port,
+    });
+    const connectClient = () =>
+      new Promise<NetSocket>((resolve, reject) => {
+        const client = netConnect(port, '127.0.0.1', () => resolve(client));
+        client.once('error', reject);
+      });
+
+    await service.enable();
+    const firstClient = await connectClient();
+    let secondClient: NetSocket | undefined;
+    try {
+      await vi.waitFor(() => expect(accepted).toHaveLength(1));
+      const closedSocket = accepted[0]!;
+      const closed = new Promise<void>((resolve) => {
+        closedSocket.once('close', resolve);
+      });
+      firstClient.destroy();
+      await closed;
+      const destroyClosed = vi.spyOn(closedSocket, 'destroy');
+
+      // A second live socket keeps disable()'s close sweep observable.
+      secondClient = await connectClient();
+      await vi.waitFor(() => expect(accepted).toHaveLength(2));
+      await service.disable();
+
+      expect(destroyClosed).not.toHaveBeenCalled();
+    } finally {
+      firstClient.destroy();
+      secondClient?.destroy();
+      await service.disable();
+    }
+  });
+
   it('serializes lifecycle changes and fully revokes state on disable', async () => {
     const port = await unusedPort();
     const credentials = new CredentialStore();
@@ -925,4 +973,63 @@ describe('LocalControlService', () => {
 
     expect(service.grantedExplicitCandidate).toBeUndefined();
   });
+
+  it('disable resolves over a paired upgraded peer that never answers close', async () => {
+    // closeAllConnections() does not reach sockets detached by an upgrade;
+    // without the tracked destroy in close(), disable() hangs forever on a
+    // non-reading paired ACP peer. The upgrade is accepted raw so the pin
+    // does not depend on the ACP transport.
+    const port = await unusedPort();
+    const service = new LocalControlService({
+      app: express(),
+      credentials: new CredentialStore(),
+      originAllowlist: new MutableOriginAllowlist({
+        allowAny: false,
+        origins: new Set(),
+      }),
+      attachWebSocket: (server) => {
+        server.on('upgrade', (_req, socket) => {
+          socket.write(
+            'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n',
+          );
+        });
+      },
+      detachWebSocket: () => {},
+      getPort: () => port,
+    });
+    await service.enable();
+    const client = await new Promise<NetSocket>((resolve, reject) => {
+      const sock = netConnect(port, '127.0.0.1', () => {
+        sock.write(
+          'GET /acp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      sock.once('data', () => resolve(sock));
+      sock.on('error', reject);
+    });
+    try {
+      let timer: NodeJS.Timeout | undefined;
+      const bounded = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'disable() did not resolve over a non-answering upgraded peer',
+              ),
+            ),
+          5_000,
+        );
+      });
+      await Promise.race([service.disable(), bounded]);
+      clearTimeout(timer);
+    } finally {
+      client.destroy();
+      // Bounded: on a mutant that hangs disable(), an unbounded await here
+      // would mask the explicit race rejection with a test timeout.
+      await Promise.race([
+        service.disable(),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+      ]).catch(() => undefined);
+    }
+  }, 10_000);
 });

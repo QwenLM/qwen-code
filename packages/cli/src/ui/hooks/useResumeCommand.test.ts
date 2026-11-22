@@ -531,7 +531,9 @@ describe('useResumeCommand', () => {
       }),
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
-    expect(seedPromptCount).toHaveBeenCalledWith(3);
+    // Mint seed 3 (highest claimed id + 1); the visible Prompts statistic seeds
+    // from the user-turn count (1), not the mint seed (S1).
+    expect(seedPromptCount).toHaveBeenCalledWith(3, 1);
     expect(startNewSession.mock.invocationCallOrder[0]).toBeLessThan(
       seedPromptCount.mock.invocationCallOrder[0]!,
     );

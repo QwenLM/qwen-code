@@ -381,6 +381,196 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void reclaimsAParkedOwnerBeforeHandingBackItsMount() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            CompletableFuture<Void> closing = new CompletableFuture<>();
+            fixture.transport.reclaimMcpResult = closing;
+            CompletionStage<Boolean> reclaim = fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true);
+            assertEquals(1, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            closing.complete(null);
+            assertTrue(join(reclaim));
+            assertEquals(1, fixture.transport.releaseMountCalls.get());
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+        }
+    }
+
+    @Test
+    void reclamationLeavesAReopenedSessionItsMountAndClaim() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            AtomicInteger checks = new AtomicInteger();
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(), saved.getRuntimeGeneration(),
+                    "holder", () -> checks.incrementAndGet() == 1)));
+            assertEquals(1, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder", MOUNT_CLAIM, null)));
+        }
+    }
+
+    @Test
+    void reclamationYieldsToASuccessorThatAcquiresWhileConnectionsClose() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            CompletableFuture<Void> closing = new CompletableFuture<>();
+            fixture.transport.reclaimMcpResult = closing;
+            CompletionStage<Boolean> reclaim = fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true);
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, "successor"));
+            closing.complete(null);
+            assertEquals("runtime_session_conflict", failure(reclaim).getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder", "successor", null)));
+        }
+    }
+
+    @Test
+    void reclamationKeepsTheMountWhileTheWorkerRefusesForPendingWork() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            fixture.transport.reclaimMcpResult = CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(409, "managed_mcp_drain_unknown", "pending", false));
+            assertEquals("managed_mcp_drain_unknown", failure(fixture.service.reclaimParkedMcp(
+                    saved.getBindingId(), saved.getRuntimeGeneration(), "holder", () -> true)).getCode());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertTrue(join(fixture.service.releaseMount("holder", "holder", MOUNT_CLAIM, null)));
+        }
+    }
+
+    // Phase 3b §4.10: live background work owns the mount. Reclamation must
+    // refuse BEFORE the transport closes any connection, so a suspended
+    // Session's running Shell keeps its stdio servers and its storage.
+    @Test
+    void reclamationRefusesWhileABackgroundExecutionIsLiveWithoutClosingConnections() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            String digest = "sha256:" + "b".repeat(64);
+            fixture.executionRepository.findOrCreate(new ToolExecutionRecord(
+                    "bg-process", "idem-bg-process", saved.getBindingId(), saved.getRuntimeGeneration(),
+                    "holder", "holder", "prompt", "call", digest,
+                    Map.of("sessionId", "holder", "promptId", "prompt", "callId", "call",
+                            "argsDigest", digest, "processOf", "bg", "kind", "shell"),
+                    ToolExecutionRecord.State.PREPARED, null, null,
+                    0L, false, null, null, 0L, 0L, null));
+
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true)));
+            assertEquals(0, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(0, fixture.transport.releaseMountCalls.get());
+            assertEquals(RuntimeSessionRecord.State.READY,
+                    fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder").getState());
+            // The ordinary handback refuses for the same live work, so the
+            // mount stays with the run that still needs it.
+            assertEquals("runtime_session_busy", failure(fixture.service.releaseMount(
+                    "holder", "holder", MOUNT_CLAIM, null)).getCode());
+        }
+    }
+
+    // Without the observation capability nothing else settles a background
+    // row whose run already ended, so reclamation's own observe-only sweep
+    // must settle it before the live-work refusal is decided.
+    @Test
+    void reclamationSettlesAnExitedBackgroundProcessBeforeReclaiming() throws Exception {
+        String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"pwd\",\"is_background\":true}}";
+        String digest = "sha256:" + HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(payload.getBytes(StandardCharsets.UTF_8)));
+        Map<String, Object> detachedCapture = new LinkedHashMap<>();
+        detachedCapture.put("captureStatus", "detached");
+        detachedCapture.put("captureReason", null);
+        detachedCapture.put("manifest", null);
+        detachedCapture.put("previewTruncated", false);
+        detachedCapture.put("deliveryStatus", "pending");
+        Map<String, Object> detachedResult = new LinkedHashMap<>();
+        detachedResult.put("executionStatus", "success");
+        detachedResult.put("responseParts", java.util.List.of(Map.of("text", "started")));
+        detachedResult.put("capture", detachedCapture);
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE, captureVerifier())) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            Map<String, Object> reference = Map.of("sessionId", "holder", "promptId", "prompt",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            fixture.transport.executeV3Result = CompletableFuture.completedFuture(
+                    Map.of("state", "prepared"));
+            fixture.transport.statusResult = CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", detachedResult));
+            ToolExecutionRecord prepared = join(fixture.service.prepareExecution(
+                    "holder", "holder", "key", reference, digest, "pub-1"));
+            join(fixture.service.startExecution("holder", "holder",
+                    prepared.getExecutionCallId(), payload, "pub-1", "token"));
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId(),
+                    ToolExecutionRecord.State.SETTLED);
+            awaitExecution(fixture.executionRepository, prepared.getExecutionCallId() + ":process",
+                    ToolExecutionRecord.State.PREPARED);
+            Map<String, Object> exitedAnswer = new LinkedHashMap<>();
+            exitedAnswer.put("operationId", "call");
+            exitedAnswer.put("state", "exited");
+            Map<String, Object> evidence = new LinkedHashMap<>();
+            evidence.put("exitCode", 0);
+            evidence.put("exitSignal", null);
+            exitedAnswer.put("evidence", evidence);
+            fixture.transport.controlResult = CompletableFuture.completedFuture(exitedAnswer);
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+
+            assertTrue(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration(), "holder", () -> true)));
+            assertEquals(ToolExecutionRecord.State.SETTLED, fixture.executionRepository
+                    .findByExecutionCallId(prepared.getExecutionCallId() + ":process").getState());
+            assertEquals(1, fixture.transport.reclaimMcpCalls.get());
+            assertEquals(1, fixture.transport.releaseMountCalls.get());
+        }
+    }
+
+    @Test
+    void reclamationSkipsAnOwnerOfAnotherGeneration() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            assertFalse(join(fixture.service.reclaimParkedMcp(saved.getBindingId(),
+                    saved.getRuntimeGeneration() + 1, "holder", () -> true)));
+            assertEquals(0, fixture.transport.reclaimMcpCalls.get());
+        }
+    }
+
+    @Test
+    void advertisesParkingOnlyOnceEnabledAndOnlyForManagedStorage() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
+            RuntimeSessionRecord saved = fixture.sessionRepository.findById(WORKSPACE_SCOPE, "holder");
+            assertFalse(fixture.service.mcpParkable(saved));
+            fixture.service.enableMcpParking();
+            assertFalse(fixture.service.mcpParkable(saved));
+        }
+    }
+
+    @Test
+    void advertisesParkingForManagedLocalStorageButNeverExternalStorage() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            fixture.service.enableMcpParking();
+            RuntimeScope scope = new RuntimeScope("tenant-m", "workspace-m", "1", "/workspace",
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+            RuntimeBindingRecord local = fixture.bindingRepository.findOrCreate(
+                    new RuntimeProvisionRequest(scope, "harness-1", "test-supervisor", "storage-a"));
+            RuntimeBindingRecord external = fixture.bindingRepository.findOrCreate(new RuntimeProvisionRequest(scope,
+                    "harness-2", com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE,
+                    scope.getWorkspaceId()));
+            for (RuntimeBindingRecord binding : List.of(local, external)) {
+                RuntimeSessionRecord record = new RuntimeSessionRecord(
+                        new RuntimeSession("harness", "runtime", "bootstrap", scope), binding.getBindingId(),
+                        binding.getGeneration(), RuntimeSessionRecord.State.READY, 0, START);
+                assertEquals(binding == local, fixture.service.mcpParkable(record));
+            }
+        }
+    }
+
+    @Test
     void mountReleaseRefusesAClaimALaterAcquireSuperseded() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             join(fixture.service.acquire("holder", "holder", "bootstrap", null, MOUNT_CLAIM));
@@ -8011,6 +8201,8 @@ class RuntimeBrokerServiceTest {
                 CompletableFuture.completedFuture(true);
         final AtomicInteger releaseMountCalls = new AtomicInteger();
         final AtomicInteger reclaimMountCalls = new AtomicInteger();
+        final AtomicInteger reclaimMcpCalls = new AtomicInteger();
+        volatile CompletableFuture<Void> reclaimMcpResult = CompletableFuture.completedFuture(null);
         volatile CompletableFuture<Boolean> releaseMountResult =
                 CompletableFuture.completedFuture(true);
         volatile CompletableFuture<List<Map<String, Object>>> mcpDefinitionsResult =
@@ -8166,6 +8358,12 @@ class RuntimeBrokerServiceTest {
                 RuntimeSession session) {
             reclaimMountCalls.incrementAndGet();
             return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Void> reclaimMcp(RuntimeLease lease, RuntimeSession session) {
+            reclaimMcpCalls.incrementAndGet();
+            return reclaimMcpResult;
         }
 
         @Override

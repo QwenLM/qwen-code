@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
@@ -88,6 +87,13 @@ public class WorkspaceProfileLifecycleVerifier {
         if (WorkspaceToolProfiles.MCP.equals(profile)) {
             return;
         }
+        // D3: ordinary files has no Shell capture/publication/monitor; its
+        // close invariants are the settled executions and owed file history
+        // already verified above, so it settles like MCP. External-files keeps
+        // v1 and never reaches this v2 resource phase.
+        if (WorkspaceToolProfiles.FILES.equals(profile)) {
+            return;
+        }
         if (!WorkspaceToolProfiles.isPublicShell(profile)) {
             unsettled();
         }
@@ -132,8 +138,8 @@ public class WorkspaceProfileLifecycleVerifier {
                 .collect(Collectors.toMap(ToolExecutionRecord::getExecutionCallId, Function.identity()));
         var backgroundCalls = backgroundCalls(operation);
         var sourcesByCall = jdbc.queryForList("SELECT request_json FROM ma_operation"
-                + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND session_scope_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
-                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()), operation.tenantId(), operation.sessionId()).stream().map(this::source)
+                + " WHERE operation_kind = 'TOOL_RESULT_PROJECTION' AND tenant_id = ? AND session_id = ? FOR UPDATE", String.class,
+                operation.tenantId(), operation.sessionId()).stream().map(this::source)
                 .collect(Collectors.groupingBy(JdbcManagedToolResultStore.Source::executionCallId));
         var inlineInputs = nativeInlineInputs(operation);
         for (ToolExecutionRecord execution : executions.values()) {
@@ -281,9 +287,8 @@ public class WorkspaceProfileLifecycleVerifier {
     private java.util.Set<String> nativeInlineInputs(OperationRecord operation) {
         var inputs = new java.util.HashSet<String>();
         var refs = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256"
-                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
+                + " FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                 + " AND kind = ? AND state = 'REFERENCED' FOR UPDATE",
-                ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
                 operation.tenantId(), operation.sessionId(), "managed-tool-input");
         for (var row : refs) {
             var ref = JSON.createObjectNode().put("resourceId", row.get("resource_id").toString())
@@ -451,8 +456,8 @@ public class WorkspaceProfileLifecycleVerifier {
 
     private byte[] readContent(OperationRecord operation, String id, JsonNode expected) {
         var rows = jdbc.queryForList("SELECT resource_id, kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                + " FROM ma_resource WHERE session_scope_key = ? AND tenant_id = ? AND session_id = ?"
-                + " AND resource_id = ? FOR UPDATE", ManagedSessionStore.sessionScopeKey(operation.tenantId(), operation.sessionId()),
+                + " FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
+                + " AND resource_id = ? FOR UPDATE",
                 operation.tenantId(), operation.sessionId(), id);
         if (rows.size() != 1) {
             unsettled();
