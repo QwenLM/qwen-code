@@ -802,17 +802,19 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     ]);
     const projectsDir = path.join(process.env['QWEN_HOME']!, 'projects');
     const directorySpy = vi.spyOn(fs, 'readdirSync');
+    const openSpy = vi.spyOn(fs.promises, 'open');
     try {
       for (let i = 0; i < 2; i++) {
         const records = await loadUsageHistory();
         expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1200);
       }
-      expect(directorySpy.mock.calls.map(([entry]) => String(entry))).toEqual(
-        [],
-      );
+      expect(
+        openSpy.mock.calls.filter(([openedPath]) => openedPath === filePath),
+      ).toHaveLength(1);
       expect(directorySpy).not.toHaveBeenCalledWith(projectsDir);
     } finally {
       directorySpy.mockRestore();
+      openSpy.mockRestore();
     }
     expect(usageLines()).toHaveLength(1);
   });

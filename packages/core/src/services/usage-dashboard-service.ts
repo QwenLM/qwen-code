@@ -20,6 +20,7 @@ import {
   type TokenUsageDayModelTotals,
 } from './tokenUsageService.js';
 import { outputTokenCount } from '../telemetry/gen-ai-usage.js';
+import path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
 
@@ -555,7 +556,7 @@ export async function loadUsageDashboardSources(
     Date.now() - LEDGER_WINDOW_DAYS * MS_PER_DAY,
   );
   const runtimeRoots = ledgerRuntimeBaseDirs
-    ? [...new Set(ledgerRuntimeBaseDirs)]
+    ? [...new Set(ledgerRuntimeBaseDirs.map((dir) => path.resolve(dir)))]
     : [undefined];
   const [records, ledgerTables] = await Promise.all([
     loadUsageHistoryWithLive(),

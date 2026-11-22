@@ -302,7 +302,7 @@ describe('usage-stats route (real loader against seeded history)', () => {
       });
     });
 
-    it('merges the known runtime roots rather than selecting only one', async () => {
+    it('merges known runtime roots once across equivalent spellings', async () => {
       const rootA = path.join(roots, 'a');
       const rootB = path.join(roots, 'b');
       process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
@@ -310,7 +310,7 @@ describe('usage-stats route (real loader against seeded history)', () => {
       seedLedger(rootB, ledgerRow('request-b', 800, 200));
 
       const app = mount({
-        getLedgerRuntimeBaseDirs: () => [rootA, rootB, rootA],
+        getLedgerRuntimeBaseDirs: () => [rootA, rootB, `${rootA}/`],
       });
       const res = await request(app).get('/usage/dashboard?range=today');
 

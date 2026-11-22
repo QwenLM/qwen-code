@@ -70,7 +70,7 @@ config.getSessionId()` versus `config.getSessionId()`), and reported 2 same-run
    own transcripts, and **zero persisted records**. There is no second identity —
    those persisted records came from runs that made no request of their own and
    wrote only replayed history. It was a symptom of defect 2, and it disappears
-   with it: such a run now fails `hasActivity` and writes nothing. The 188-of-189
+   with it: such a run now fails `hasRunActivity` and writes nothing. The 188-of-189
    unmatched transcripts are simply runs that never persisted.
 
 5. **Last-wins dedup — corrected, and the regression it now needs to avoid.**
@@ -129,8 +129,8 @@ explicitly left the local-`today` window semantics out of scope.
 
 **One day/model table, one code path.** `buildUsageDashboard` builds a
 `localDate -> model -> counters` table from the session records (the legacy end-day
-attribution), then for every day the ledger covers **replaces** that day's entry
-with the ledger's. Every token-bearing output — summary token fields, requests,
+attribution), then **replaces** only model/session entries actually covered by
+the ledger and adds the ledger's counters. Every token-bearing output — summary token fields, requests,
 per-model share, daily tokens, heatmap cells — derives from that table. Sessions,
 ended-run duration, tool calls, changed lines and skills still come from
 `aggregateUsage`, because the ledger deliberately carries none of them. Both
@@ -195,7 +195,7 @@ by `/clear`, successful session switches and the process-exit cleanup.
   cannot leave the live counter inflated by an abandoned replay. The flush only
   occurs on success, never on those rollback paths.
 - A resume with neither an API response nor a skill invocation fails the callers'
-  `hasActivity` check and writes no record, instead of an all-history one. A
+  `hasRunActivity` check and writes no record, instead of an all-history one. A
   skills-only branch also persists the skills it actually ran, even with no model
   requests.
 
@@ -402,10 +402,10 @@ requests were yesterday cannot be reassigned to today merely because today has
 no ledger row yet. Only the window sum, not coverage discovery, is range-bound.
 It replaces the current report's `models`, `totalRequests` and
 `totalLatencyMs` with the shared token table. A completed-day side uses the
-ledger when every model-bearing record in it touches a ledger-covered day,
-including an ordinary weekend with no requests and no ledger keys. A genuinely
-uncovered model-bearing record keeps **both** sides on the session-record basis,
-rather than comparing incompatible measurements. Consecutive idle days never
+ledger when every active model in its records has ledger coverage, including an
+ordinary weekend with no requests and no ledger keys. A genuinely uncovered
+active model keeps **both** sides on the session-record basis, rather than
+comparing incompatible measurements. Consecutive idle days never
 force fabrication of zero-token ledger rows. Concurrent opens of the same start
 day share one pending read. Completed-month aggregates are reused only while
 their file signatures remain unchanged; a late append forces a fresh read.
@@ -444,20 +444,20 @@ than a fabricated attribution.
 - **The ledger is the intended daily source.** #4479 chose per-response JSONL with
   local date and auth type precisely to answer daily / monthly consumption; the
   dashboard predates that alignment and read session summaries instead.
-- **Replace by run span, never sum.** The same requests exist in both sources.
-  A session record is dropped when its entire `[startTime, timestamp]` day span
-  touches **any** ledger-covered day, not merely when its end day is covered.
-  This prevents a run that spent on D and exited on D+1 from leaving a second
-  full-run copy on D+1.
+- **Replace covered model/session entries, never sum a covered request twice.**
+  The same requests exist in both sources. A model from a record is omitted if
+  that record's `[startTime, timestamp]` span and session/model identity match
+  ledger coverage. Other models and independent session records remain additive.
 - **Runs with no ledger overlap keep session-record attribution.** This preserves
   heatmap history from before the ledger existed and users who have usage
-  statistics disabled. The conservative trade is explicit: if a run spans both a
-  covered and an uncovered day, its whole record is discarded, so the record's
-  unattributable part on the uncovered day is lost too. For example, a 1,100-token
-  record spanning a covered day with 500 ledger tokens and an uncovered day
-  reports 500 total, not 1,100; the aggregate record cannot safely split the
-  remaining 600 by response date. Undercounting that ambiguous portion is
-  preferred to double counting.
+  statistics disabled. The conservative trade is explicit: if a covered model
+  spans both a covered and an uncovered day, its entire record entry is omitted,
+  so the model's unattributable part on the uncovered day is lost. For example,
+  a 1,100-token record spanning a covered day with 500 ledger tokens and an
+  uncovered day reports 500 total, not 1,100; the aggregate record cannot safely
+  split the remaining 600 by response date. Unmatched models and sessions are
+  still retained. Undercounting that ambiguous portion is preferred to double
+  counting.
 - **Calendar-day windows.** Day buckets cannot be split by hour, so `today`, `week`
   and `month` select whole local days (`today` is unchanged; `week` and `month`
   include the full boundary day instead of the hours after a rolling `now - N*24h`).
@@ -512,7 +512,9 @@ than a fabricated attribution.
 - **Legacy totals are normalized per persisted record.** A pre-upgrade writer
   could include reasoning in `totalTokens` even when `outputTokens` already did.
   The ledger reader uses `authType` while accumulating each row, then carries
-  `inputTokens` plus reasoning-once output into the day/model totals. This
+  `inputTokens` plus reasoning-once output into the day/model and query totals.
+  The API and exported summaries preserve the provider-reported `outputTokens`,
+  while `totalTokens` contains billing output with reasoning counted once. This
   changes only the read-side view; it neither rewrites nor migrates old rows.
 - **Legacy managed usage keeps its closed api shape.** Failure-latency tracking
   remains available to the usage statistics, but the non-diagnostics managed
@@ -534,15 +536,20 @@ than a fabricated attribution.
 
 ## Risks
 
-- **Partial coverage.** A day where only some processes wrote ledger records is
-  replaced wholesale, so the non-writing processes' tokens are lost for that day.
-  Same class of gap for history older than the ledger feature.
+- **Partial record-span coverage.** A model/session covered on only some of
+  its run's local days still cannot distribute that full model's spending
+  precisely across those days without inventing timestamps. The covered
+  requests are not added twice; uncovered portions have no exact per-day
+  attribution. Unmatched models and sessions now keep their conservative
+  record-day attribution instead of being overwritten by an unrelated ledger.
 - **Ledger read cost.** Measured 862 ms to stream and parse 771,906 records
   (~304 MB, 5 month files); the combined source load measured 29.4 s, still
   dominated by the transcript replay, and the route caches it for 60 s.
 - **Directory scope.** The route reads the ledger roots of registered workspaces,
-  plus the global `~/.qwen` root used by default CLI sessions. Shared roots are
-  loaded once; distinct known roots are merged. It does not fall back from a known
+  plus the global `~/.qwen` root used by default CLI sessions. `path.resolve()`
+  normalizes spellings before de-duplication, including trailing separators;
+  it does not collapse distinct symlink aliases. Shared roots are loaded once;
+  distinct known roots are merged. It does not fall back from a known
   workspace root to an unrelated ambient process runtime. Global session history
   is loaded independently and is never narrowed to those workspaces. For a
   historical runtime that is no longer discoverable, records retain their
@@ -677,8 +684,8 @@ than a fabricated attribution.
 
 ## Open questions
 
-- Should a day with partial ledger coverage fall back per model instead of being
-  replaced wholesale?
+- How should the uncovered part of a model/session with only partial day
+  coverage be represented without inventing response timestamps?
 - Should existing inflated records be repaired or marked, so the TUI
   cross-session view and the fallback path stop showing them? The 72% figure above
   sizes that work.

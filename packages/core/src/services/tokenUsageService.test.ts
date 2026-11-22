@@ -21,6 +21,7 @@ import {
   apiResponseEventToTokenUsageRecord,
   exportTokenUsageSummary,
   formatTokenUsageSummaryAsCsv,
+  formatTokenUsageSummaryAsJson,
   getTokenUsageFilePath,
   getTokenUsageSessionIds,
   loadTokenUsageDailyByModel,
@@ -685,6 +686,23 @@ describe('tokenUsageService', () => {
       thoughtsTokens: 50,
       requests: 1,
     });
+    const summary = await queryTokenUsage({
+      period: 'day',
+      value: '2026-05-25',
+    });
+    expect(summary.totals).toMatchObject({
+      totalTokens: 1200,
+      inputTokens: 1000,
+      outputTokens: 200,
+      thoughtsTokens: 50,
+      requests: 1,
+    });
+    expect(
+      JSON.parse(formatTokenUsageSummaryAsJson(summary)).totals.totalTokens,
+    ).toBe(1200);
+    expect(formatTokenUsageSummaryAsCsv(summary).split('\n')[1]).toBe(
+      'day,2026-05-25,total,total,,,,1,1000,200,0,50,1200,50',
+    );
   });
 
   it('aggregates the ledger per local day and model', async () => {

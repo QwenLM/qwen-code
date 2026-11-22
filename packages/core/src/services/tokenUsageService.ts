@@ -109,13 +109,20 @@ function addRecordToTotals(
   totals: TokenUsageTotals,
   record: TokenUsageRecord,
 ): void {
+  const billingOutputTokens = normalizedOutputTokens(record);
   totals.requests += 1;
   totals.inputTokens += record.inputTokens;
   totals.outputTokens += record.outputTokens;
   totals.cachedTokens += record.cachedTokens;
   totals.thoughtsTokens += record.thoughtsTokens;
-  totals.totalTokens += record.totalTokens;
+  totals.totalTokens += record.inputTokens + billingOutputTokens;
   totals.apiDurationMs += record.apiDurationMs;
+}
+
+function normalizedOutputTokens(record: TokenUsageRecord): number {
+  return outputIncludesThoughts(record.authType)
+    ? record.outputTokens
+    : record.outputTokens + record.thoughtsTokens;
 }
 
 function getLocalDateParts(date: Date): { date: string; month: string } {
@@ -434,9 +441,7 @@ async function accumulateMonthByDay(
         }
         // Older writers could already include thoughts in totalTokens.
         // Normalize at the record boundary, where authType is still available.
-        const normalizedOutput = outputIncludesThoughts(record.authType)
-          ? record.outputTokens
-          : record.outputTokens + record.thoughtsTokens;
+        const normalizedOutput = normalizedOutputTokens(record);
         totals.requests += 1;
         totals.inputTokens += record.inputTokens;
         totals.outputTokens += normalizedOutput;
