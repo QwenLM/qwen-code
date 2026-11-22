@@ -17,7 +17,7 @@
 
 门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,481 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。次大 pin 为 `JdbcRuntimeBindingRepository` 的 2,319 行。
 
-新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过当时的 2,483 行上限。通过 `ToolPublicationContract` 共享 scope，并由 `ToolPublicationObjectKeys` 拼接 publication/slot 路径后，该类回到 2,481 行且持久化 key 布局不变；全局上限与该类 pin 同步从 2,483 下调至 2,481。下文 4,216 行及其他类体量均描述原始设计基线，而非当前上限。
+新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过 #15512 当时建立的 2,483 行上限。main 上 #18085 将该 scope helper 移入 `ToolPublicationContract`，使该类减到 2,482 行，并把全局上限与该类 pin 从 2,483 下调至 2,482。在本 PR 中，把三处内联表达式替换为 `ToolPublicationObjectKeys` 调用并不减少行数；删除因此不再使用的 `ossScope` import 才使该类从 2,482 降为 2,481，两个上限随之再降一步，持久化 key 布局不变。下文 4,216 行及其他类体量均描述原始设计基线，而非当前上限。
 
 ## 问题
 

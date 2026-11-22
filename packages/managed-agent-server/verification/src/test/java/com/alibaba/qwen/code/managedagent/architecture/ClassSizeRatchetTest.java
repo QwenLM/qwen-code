@@ -44,9 +44,10 @@ class ClassSizeRatchetTest {
     private static final int LARGE_CLASS_THRESHOLD = 800;
     // 2026-11-11: lowered from 2662 after the JdbcRuntimeBindingRepository
     // admission/fence extraction. #15512 lowers it again to 2483 after the
-    // publication seal-manifest extraction; sharing the scope through
-    // ToolPublicationContract and extracting ToolPublicationObjectKeys lowers
-    // the current maximum to 2481.
+    // publication seal-manifest extraction. #18085 moved ossScope to
+    // ToolPublicationContract and lowered the maximum to 2482. This change
+    // replaces three calls with ToolPublicationObjectKeys and removes the
+    // resulting unused import, lowering the current maximum to 2481.
     private static final int GLOBAL_MAX_LINES = 2481;
     private static final String PIN_RESOURCE = "/class-size-ratchet.properties";
     private static final List<String> SOURCE_ROOTS =

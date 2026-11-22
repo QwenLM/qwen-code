@@ -17,7 +17,7 @@ Combining upstream's extraction of provisioning failure handling with the move o
 
 The gate covers the `persistence/src/main/java` and `runtime-broker/src/main/java` roots. The current global ceiling is **2,481 lines**, matching `ToolPublicationDataStore` as the current largest class and its per-class pin. The next-largest pin is `JdbcRuntimeBindingRepository` at 2,319 lines.
 
-Adding the private `ossScope` helper grew `ToolPublicationDataStore` from 2,481 to 2,485 lines, above the then-current 2,483 ceiling. Sharing the scope through `ToolPublicationContract` and completing the publication/slot path in `ToolPublicationObjectKeys` returns the store to 2,481 without changing the persisted key layout, and lowers both the global maximum and that class's pin from 2,483 to 2,481. The 4,216-line value and other class sizes below describe the original design baseline, not today's ceilings.
+Adding the private `ossScope` helper grew `ToolPublicationDataStore` from 2,481 to 2,485 lines, above the then-current 2,483 ceiling established by #15512. On main, #18085 moved that scope helper to `ToolPublicationContract`, reduced the store to 2,482 lines, and lowered both the global maximum and that class's pin from 2,483 to 2,482. Here, replacing the three inline expressions with `ToolPublicationObjectKeys` calls does not change their line counts; deleting the resulting unused `ossScope` import is the one-line reduction from 2,482 to 2,481, and both ceilings follow that step. The persisted key layout is unchanged. The 4,216-line value and other class sizes below describe the original design baseline, not today's ceilings.
 
 ## Problem
 
