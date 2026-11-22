@@ -1146,6 +1146,77 @@ describe('customHeaders in ProviderConfig', () => {
     expect(installed[0]?.generationConfig?.service_tier).toBe('flex');
     expect(installed[1]?.generationConfig?.service_tier).toBe('priority');
   });
+
+  it('applies advancedConfig.service_tier on install for custom providers (R1-9)', () => {
+    const config = makeConfig({ models: undefined });
+    const installed = modelsOf(
+      buildInstallPlanSrc(config, {
+        baseUrl: 'https://custom.example/v1',
+        apiKey: 'k',
+        modelIds: ['custom-m1'],
+        advancedConfig: { service_tier: 'scale' },
+      }),
+    );
+    expect(installed[0]?.generationConfig?.service_tier).toBe('scale');
+  });
+
+  it('preserves existing model service_tier across reconnect instead of provider template default (R1-21)', () => {
+    const config = makeConfig({
+      service_tier: 'flex',
+    });
+    const inputs = testInputs(['model-a'], {
+      apiKey: 'k',
+    });
+    const initial = modelsOf(buildInstallPlanSrc(config, inputs));
+    const existing = [
+      {
+        ...initial[0]!,
+        generationConfig: { service_tier: 'priority' },
+      },
+    ];
+    const plan = buildInstallPlanSrc(config, inputs, existing);
+    const updated = plan.modelProviders?.[0]?.models[0];
+    expect(updated?.generationConfig?.service_tier).toBe('priority');
+  });
+
+  it('clears existing service_tier when replaceExisting is true and no tier is submitted (R1-22)', () => {
+    const config = makeConfig({
+      service_tier: 'flex',
+    });
+    const inputs = testInputs(['model-a'], {
+      apiKey: 'k',
+    });
+    const initial = modelsOf(buildInstallPlanSrc(config, inputs));
+    const existing = [
+      {
+        ...initial[0]!,
+        generationConfig: { service_tier: 'priority' },
+      },
+    ];
+    const plan = buildInstallPlanSrc(
+      config,
+      { ...inputs, advancedConfig: { replaceExisting: true } },
+      existing,
+    );
+    const updated = plan.modelProviders?.[0]?.models[0];
+    expect(updated?.generationConfig?.service_tier).toBeUndefined();
+  });
+
+  it('applies contextWindowSize from inputs.modelSpecs to installed models (R1-34)', () => {
+    const config = makeConfig({
+      models: [{ id: 'known-spec' }],
+      modelsEditable: true,
+    });
+    const installed = modelsOf(
+      buildInstallPlanSrc(config, {
+        baseUrl: 'https://example.com/v1',
+        apiKey: 'k',
+        modelIds: ['dynamic-model-1'],
+        modelSpecs: [{ id: 'dynamic-model-1', contextWindowSize: 163840 }],
+      }),
+    );
+    expect(installed[0]?.generationConfig?.contextWindowSize).toBe(163840);
+  });
 });
 
 describe('resolveMetadataKey dotted-id guard', () => {
