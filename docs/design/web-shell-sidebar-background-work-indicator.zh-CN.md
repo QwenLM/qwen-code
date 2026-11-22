@@ -192,10 +192,12 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
    且其他活跃工作按 #18072 复用运行绿色、蓝色仅保留给完成未读）；触屏布局与
    既有悬停契约均成立。
 6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵（含逐支后缀出现计数与
-   unread 优先于 running 行）覆盖组合链；行侧见证以控制相钉住 running→idle
-   晋升与 background 优先于 unread 的槽位。行上 unread 优先于 running 的守卫
-   只覆盖 effect 前的渲染瞬态——tracker 在首次再看到会话运行的 effect 里即删除
-   unread 身份——故该环刻意留给 tooltip 矩阵。
+   unread 优先于 running 行）覆盖组合 hover 链；行侧见证以控制相钉住
+   running→idle 晋升、background 优先于 unread 的槽位、unread 优先于
+   active-work 的槽位（配仅 active 对照行）、以及已完成会话重新运行时 tracker
+   清除 unread 身份。行上 running 圆点的 `!completedUnread` 守卫是面向 effect
+   前渲染瞬态的防御性守卫，unread 优先于 running 这一环在 hover 侧由 tooltip
+   矩阵钉住。
 
 ## 待决问题 / 后续
 
