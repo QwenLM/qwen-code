@@ -6123,6 +6123,147 @@ describe('ChatEditor mobile composer actions', () => {
     });
   }
 
+  it('keeps Send from blurring the mobile editor before its click', () => {
+    const backend = mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    act(() => backend.textareaRef.current!.focus());
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      send.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(backend.textareaRef.current);
+    expect(backend.onBlur).not.toHaveBeenCalled();
+    act(() => send.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+  });
+
+  it('guards the mobile Stop touch-down the same way as Send', () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({ isRunning: true, onCancel });
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    );
+    expect(stop).not.toBeNull();
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      stop!.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      stop!.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(true);
+    act(() => stop!.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the desktop Send mousedown unprevented so outside clicks still close', () => {
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      send.dispatchEvent(mouseDown);
+    });
+
+    // The history-search panel closes on an unprevented window `mousedown`;
+    // preventing a desktop click on Send would leave the panel open over the
+    // just-cleared editor and restore the sent draft on the next click.
+    expect(mouseDown.defaultPrevented).toBe(false);
+  });
+
+  it('leaves a mouse click on Send unprevented while the mobile backend is active', () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    // The guard keys on the pointer, not `core.mobileComposer`: a mouse press
+    // must reach the history-search panel's window `mousedown` outside handler
+    // unprevented, or that panel survives over the just-sent draft.
+    act(() => {
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(false);
+  });
+
+  it('clears the touch flag when the press starts from a real mouse pointer', () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const pointerDown = new MouseEvent('pointerdown', { bubbles: true });
+    Object.defineProperty(pointerDown, 'pointerType', { value: 'mouse' });
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    // A hybrid device sends `pointerdown` for the mouse press that follows a
+    // touch press; that writer is the only one clearing the flag, so without
+    // it this `mousedown` stays prevented and the history-search outside
+    // handler bails, leaving the panel over the sent draft.
+    act(() => {
+      send.dispatchEvent(new Event('touchstart', { bubbles: true }));
+      send.dispatchEvent(pointerDown);
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(false);
+  });
+
+  it('marks a touch pointer press as touch so its mousedown stays prevented', () => {
+    mobileComposer('draft');
+    composerCoreState.hasContent = true;
+    const container = renderChatEditor({});
+    const send = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    const pointerDown = new MouseEvent('pointerdown', { bubbles: true });
+    Object.defineProperty(pointerDown, 'pointerType', { value: 'touch' });
+    const mouseDown = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+
+    act(() => {
+      send.dispatchEvent(pointerDown);
+      send.dispatchEvent(mouseDown);
+    });
+
+    expect(mouseDown.defaultPrevented).toBe(true);
+  });
+
   it('opens history from the add drawer without simulated keyboard keys', async () => {
     mobileComposer();
     renderChatEditor({ visibleToolbarActions: ['addMenu'] });
