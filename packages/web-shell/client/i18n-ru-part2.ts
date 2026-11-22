@@ -181,6 +181,10 @@ export const RU_PART2: Record<
   'approval.goal.failed': 'Не удалось отправить выбор. Повторите попытку.',
   'approval.execQuestion': (v) => `Разрешить выполнение: '${v?.tool ?? ''}'?`,
   'approval.changeQuestion': 'Применить это изменение?',
+  'approval.diffOmitted':
+    'Различия скрыты: они слишком велики для безопасного отображения.',
+  'approval.trailingNewlineAdded': 'В конце файла добавлен перевод строки.',
+  'approval.trailingNewlineRemoved': 'Перевод строки в конце файла удалён.',
   'approval.launchAgentQuestion': 'Запустить этого агента?',
   'approval.explain': 'Объяснить',
   'approval.explanation': 'Объяснение команды',

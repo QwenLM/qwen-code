@@ -630,6 +630,7 @@ export const RU_PART1: Record<
   'gitDiff.fileError': 'Не удалось загрузить этот diff',
   'gitDiff.truncated':
     'Diff обрезан — файл слишком большой, чтобы показать целиком',
+  'gitDiff.escapedCharacter': 'Невидимый символ',
   'gitDiff.hidden': (v) =>
     `ещё ${v?.count ?? 0} ${ruPlural(v?.count, 'файл не показан', 'файла не показаны', 'файлов не показано')}`,
   'gitDiff.expand': (v) => `Показать изменения для ${v?.path ?? 'файла'}`,
