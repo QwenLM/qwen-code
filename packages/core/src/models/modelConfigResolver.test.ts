@@ -670,6 +670,74 @@ describe('modelConfigResolver', () => {
     });
   });
 
+  describe('service_tier reaches the provider through configuration', () => {
+    it('carries a settings generationConfig value onto the resolved config', () => {
+      const result = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: {
+          apiKey: 'key',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          model: 'deepseek-ai/DeepSeek-V3',
+          generationConfig: {
+            service_tier: 'flex',
+          },
+        },
+      });
+
+      expect(result.config.service_tier).toBe('flex');
+      expect(result.sources['service_tier'].kind).toBe('settings');
+    });
+
+    it('lets modelProvider generationConfig set service_tier', () => {
+      const result = resolve({
+        authType: AuthType.USE_OPENAI,
+        modelProvider: {
+          id: 'deepseek-ai/DeepSeek-V3',
+          baseUrl: 'https://api.deepinfra.com/v1/openai',
+          envKey: 'DEEPINFRA_API_KEY',
+          generationConfig: { service_tier: 'flex' },
+        },
+        env: { DEEPINFRA_API_KEY: 'test-key' },
+      });
+
+      expect(result.config.service_tier).toBe('flex');
+      expect(result.sources['service_tier'].kind).toBe('modelProviders');
+    });
+
+    it('resolves service_tier from OPENAI_SERVICE_TIER and DEEPINFRA_SERVICE_TIER env vars', () => {
+      const fromOpenAi = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: { apiKey: 'key', model: 'gpt-4' },
+        env: { OPENAI_SERVICE_TIER: 'flex' },
+      });
+      expect(fromOpenAi.config.service_tier).toBe('flex');
+      expect(fromOpenAi.sources['service_tier'].kind).toBe('env');
+
+      const fromDeepinfra = resolve({
+        authType: AuthType.USE_OPENAI,
+        settings: { apiKey: 'key', model: 'gpt-4' },
+        env: { DEEPINFRA_SERVICE_TIER: 'flex' },
+      });
+      expect(fromDeepinfra.config.service_tier).toBe('flex');
+      expect(fromDeepinfra.sources['service_tier'].kind).toBe('env');
+    });
+
+    it('prioritizes CLI serviceTier over settings and env', () => {
+      const result = resolve({
+        authType: AuthType.USE_OPENAI,
+        cli: { serviceTier: 'flex' },
+        settings: {
+          apiKey: 'key',
+          generationConfig: { service_tier: 'priority' },
+        },
+        env: { OPENAI_SERVICE_TIER: 'auto' },
+      });
+
+      expect(result.config.service_tier).toBe('flex');
+      expect(result.sources['service_tier'].kind).toBe('cli');
+    });
+  });
+
   describe('[Regression] issue-4219 — env-var-only path must call defaultModalities()', () => {
     it('[Regression] env-var-only path: modalities auto-detected for qwen3.6-35b-a3b', () => {
       // REPRODUCES issue-4219: with the model supplied only via OPENAI_MODEL
