@@ -85,7 +85,7 @@ final class HostedCleanupReferences {
                 jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
                         + " tenant_id, workspace_id, session_id, journal_revision, resource_id,"
                         + " gmt_create, runtime_binding_id) VALUES ('HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        ManagedSchemaKeys.identity(owner), generation, tenant, ManagedSchemaKeys.identity(workspace),
+                        ManagedSchemaKeys.identity(owner), generation, tenant, workspace,
                         session, revision, ManagedSchemaKeys.identity(resourceId), now, binding);
             } catch (DuplicateKeyException race) {
                 requireSameIdentity(references(jdbc, tenant, session, owner, true), resourceId, binding, generation);

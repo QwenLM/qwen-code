@@ -65,7 +65,7 @@ public final class ExternalWorkspaceMaterializationStore {
             var registrations = jdbc.queryForList("SELECT registration_json FROM ma_storage"
                     + " WHERE tenant_id = ? AND storage_id = ?"
                     + " AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED' FOR UPDATE",
-                    String.class, tenant, ManagedSchemaKeys.identity(registeredAliasId));
+                    String.class, tenant, registeredAliasId);
             if (registrations.size() != 1) {
                 throw conflict("external_workspace_conflict");
             }
@@ -84,7 +84,7 @@ public final class ExternalWorkspaceMaterializationStore {
             if (!registeredAliasId.equals(registration.tenantWorkspaceId())
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage"
                             + " WHERE tenant_id = ? AND storage_id = ? AND physical_id = ? AND registration_revision = ?",
-                            Long.class, tenant, ManagedSchemaKeys.identity(registeredAliasId),
+                            Long.class, tenant, registeredAliasId,
                             ManagedSchemaKeys.identity(physical), revision) != 1
                     || jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?"
                             + " AND tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'"
@@ -92,16 +92,16 @@ public final class ExternalWorkspaceMaterializationStore {
                             + " AND holder_id IS NULL AND binding_id IS NULL AND runtime_generation IS NULL"
                             + " AND runtime_session_id IS NULL AND maintenance_id IS NULL AND maintenance_generation IS NULL FOR UPDATE",
                             String.class, ManagedSchemaKeys.identity(physical), tenant,
-                            ManagedSchemaKeys.identity(registeredAliasId), revision,
+                            registeredAliasId, revision,
                             registration.mountRoot()).size() != 1
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ?"
                             + " AND (workspace_id = ? OR storage_id = ?)", tenant,
-                            ManagedSchemaKeys.identity(registeredAliasId), ManagedSchemaKeys.identity(registeredAliasId)).isEmpty()
+                            registeredAliasId, registeredAliasId).isEmpty()
                     || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding"
                             + " WHERE (tenant_id = ? AND storage_id = ?)"
                             + " OR (tenant_id = ? AND (workspace_id = ? OR storage_id = ?))",
-                            tenant, ManagedSchemaKeys.identity(registeredAliasId), tenant,
-                            ManagedSchemaKeys.identity(registeredAliasId), ManagedSchemaKeys.identity(registeredAliasId)).isEmpty()) {
+                            tenant, registeredAliasId, tenant,
+                            registeredAliasId, registeredAliasId).isEmpty()) {
                 throw conflict("external_workspace_conflict");
             }
             long now = jdbc.queryForObject("SELECT " + ManagedSchemaTime.SQL_NOW, Long.class);

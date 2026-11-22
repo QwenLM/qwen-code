@@ -186,7 +186,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
                     "DELETE FROM ma_workspace_access WHERE tenant_id = ?",
                     "UPDATE ma_workspace SET state = 'DRAINING' WHERE tenant_id = ?",
                     "UPDATE ma_workspace SET workspace_generation = workspace_generation + 1 WHERE tenant_id = ?",
-                    "UPDATE ma_workspace SET storage_id = X'7265706c6163656d656e742d73746f72616765' WHERE tenant_id = ?")) {
+                    "UPDATE ma_workspace SET storage_id = 'replacement-storage' WHERE tenant_id = ?")) {
                 jdbc.update(change, tenant);
                 clearInvocations(client);
                 ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();

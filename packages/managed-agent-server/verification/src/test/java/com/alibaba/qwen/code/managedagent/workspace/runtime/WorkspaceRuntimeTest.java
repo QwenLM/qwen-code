@@ -427,7 +427,7 @@ class WorkspaceRuntimeTest {
         assertThat(resolver.resolve(session.sessionId())).isEqualTo(resolved);
         jdbc.update("UPDATE ma_workspace SET workspace_generation = 2 WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> resolver.resolve(session.sessionId()));
-        jdbc.update("UPDATE ma_workspace SET workspace_generation = 1, storage_id = X'6f74686572' WHERE tenant_id = ?",
+        jdbc.update("UPDATE ma_workspace SET workspace_generation = 1, storage_id = 'other' WHERE tenant_id = ?",
                 session.tenantId());
         assertUnavailable(() -> resolver.resolve(session.sessionId()));
     }
@@ -460,7 +460,7 @@ class WorkspaceRuntimeTest {
         assertUnavailable(() -> authority.authorize(snapshot));
 
         jdbc.update("UPDATE ma_session SET status = 'ACTIVE', deleted_at = NULL,"
-                + " workspace_storage_id = X'7265706c6163656d656e74' WHERE session_id = ?", snapshot.sessionId());
+                + " workspace_storage_id = 'replacement' WHERE session_id = ?", snapshot.sessionId());
         assertUnavailable(() -> authority.authorize(snapshot));
     }
 

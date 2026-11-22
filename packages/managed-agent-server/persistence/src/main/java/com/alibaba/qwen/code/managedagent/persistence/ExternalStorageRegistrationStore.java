@@ -67,11 +67,11 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 return decode(prior.resultJson(), Receipt.class);
             }
             if (!jdbc.queryForList("SELECT 1 FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
-                    tenant, ManagedSchemaKeys.identity(workspace)).isEmpty()
+                    tenant, workspace).isEmpty()
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ? AND (storage_id = ? OR workspace_id = ?)",
-                    tenant, ManagedSchemaKeys.identity(workspace), ManagedSchemaKeys.identity(workspace)).isEmpty()
+                    tenant, workspace, workspace).isEmpty()
                     || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ? AND storage_id = ?",
-                    tenant, ManagedSchemaKeys.identity(workspace)).isEmpty()
+                    tenant, workspace).isEmpty()
                     || !jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?",
                     ManagedSchemaKeys.identity(physical)).isEmpty()) {
                 throw conflict("alias_conflict");
@@ -85,13 +85,13 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             try {
                 jdbc.update("INSERT INTO ma_storage_owner (physical_id, tenant_id, storage_id,"
                         + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, 'EXTERNAL', ?, ?)",
-                        ManagedSchemaKeys.identity(physical), tenant, ManagedSchemaKeys.identity(workspace),
+                        ManagedSchemaKeys.identity(physical), tenant, workspace,
                         registration.alias().mountRoot(), registration.identity().registrationRevision());
                 jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
                         + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
                         + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                        tenant, ManagedSchemaKeys.identity(workspace), ManagedSchemaKeys.identity(physical),
+                        tenant, workspace, ManagedSchemaKeys.identity(physical),
                         registration.identity().registrationRevision(), encoded);
             } catch (DuplicateKeyException duplicate) {
                 // The global lock serializes registration, so the pre-checks above
@@ -148,7 +148,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                             + " WHERE s.tenant_id = ? AND s.storage_id = ?"
                             + " AND s.storage_kind = 'EXTERNAL'"
                             + " AND s.registration_state = 'REGISTERED'",
-                    tenant, ManagedSchemaKeys.identity(tenantWorkspaceId));
+                    tenant, tenantWorkspaceId);
         } catch (RuntimeException failure) {
             // A read that did not complete proves nothing about the registration,
             // so it must not bury a recoverable placement: retry it.
@@ -196,7 +196,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         }
         List<Object> arguments = new java.util.ArrayList<>(tenantWorkspaceIds.size() + 1);
         arguments.add(tenant);
-        tenantWorkspaceIds.forEach(id -> arguments.add(ManagedSchemaKeys.identity(id)));
+        tenantWorkspaceIds.forEach(id -> arguments.add(id));
         List<StoredRegistration> rows;
         try {
             rows = jdbc.query(

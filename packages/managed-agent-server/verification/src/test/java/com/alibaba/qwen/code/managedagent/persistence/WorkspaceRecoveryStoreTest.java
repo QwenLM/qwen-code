@@ -442,7 +442,7 @@ class WorkspaceRecoveryStoreTest {
         // The pinned Session carries non-empty agent instructions published
         // through the production publisher; W1 must read them back.
         head(pinned);
-        jdbc.update("UPDATE ma_session_head SET workspace_id = X'776f726b73706163652d62'"
+        jdbc.update("UPDATE ma_session_head SET workspace_id = 'workspace-b'"
                 + " WHERE session_id = ?", pinned);
         var instructions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc).publishAgentInstructions(
                 "tenant", "workspace-b", pinned, "Keep the agent instructions. 保留指令。");

@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage;
@@ -382,7 +381,7 @@ public final class JdbcExternalWorkspaceOwnership {
     public static boolean externalStorage(org.springframework.jdbc.core.JdbcTemplate jdbc,
             com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
         return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
-                String.class, binding.getTenantId(), ManagedSchemaKeys.identity(binding.getStorageId())).contains("EXTERNAL");
+                String.class, binding.getTenantId(), binding.getStorageId()).contains("EXTERNAL");
     }
 
     private static void requireStopped(Connection connection, RuntimeBindingRecord current,

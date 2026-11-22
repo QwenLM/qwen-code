@@ -453,10 +453,9 @@ class ManagedSchemaMySqlIT {
         // indexed access at maximum width, not reference shape.
         String tenant = prefix.substring(0, 36);
         String session = prefix + "s".repeat(64 - prefix.length());
-        byte[] storage = "v".repeat(1024).getBytes(StandardCharsets.UTF_8);
-        byte[] bindingStorage = "v".repeat(256).getBytes(StandardCharsets.UTF_8);
-        byte[] workspace =
-                (prefix + "w".repeat(512 - prefix.length())).getBytes(StandardCharsets.UTF_8);
+        String storage = "v".repeat(256);
+        String bindingStorage = "v".repeat(256);
+        String workspace = prefix + "w".repeat(512 - prefix.length());
         byte[] binding =
                 (prefix + "b".repeat(2048 - prefix.length())).getBytes(StandardCharsets.UTF_8);
         String request = "r".repeat(3000);
@@ -469,7 +468,7 @@ class ManagedSchemaMySqlIT {
                             + " VALUES(?,?,'CONTROL',?,0,0)")) {
             insert.setString(1, tenant);
             insert.setString(2, session);
-            insert.setBytes(3, storage);
+            insert.setString(3, storage);
             insert.executeUpdate();
         }
         try {
@@ -491,7 +490,7 @@ class ManagedSchemaMySqlIT {
                                 + "0,0,0,0," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setString(1, tenant);
                 insert.setString(2, session);
-                insert.setBytes(3, workspace);
+                insert.setString(3, workspace);
                 insert.setString(4, session);
                 insert.executeUpdate();
             }
@@ -511,7 +510,7 @@ class ManagedSchemaMySqlIT {
                 insert.setString(5, session);
                 insert.setBytes(6, new byte[] {'1'});
                 insert.setBytes(7, new byte[] {'c'});
-                insert.setBytes(8, bindingStorage);
+                insert.setString(8, bindingStorage);
                 insert.executeUpdate();
             }
             try (var insert =
@@ -540,7 +539,7 @@ class ManagedSchemaMySqlIT {
                                     + " INDEX(idx_ma_head_workspace) WHERE tenant_id=? AND"
                                     + " workspace_id=?")) {
                 read.setString(1, tenant);
-                read.setBytes(2, workspace);
+                read.setString(2, workspace);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
                     assertEquals(session, row.getString(1));
@@ -553,7 +552,7 @@ class ManagedSchemaMySqlIT {
                                     + " INDEX(idx_ma_session_storage_scope) WHERE tenant_id=? AND"
                                     + " workspace_storage_id=? AND is_resource_gc_completed=0")) {
                 read.setString(1, tenant);
-                read.setBytes(2, storage);
+                read.setString(2, storage);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
                     assertEquals(session, row.getString(1));
@@ -567,7 +566,7 @@ class ManagedSchemaMySqlIT {
                                     + " tenant_id=? AND storage_id=? AND binding_state='ACTIVE' AND"
                                     + " is_provision_seeded=FALSE")) {
                 read.setString(1, tenant);
-                read.setBytes(2, bindingStorage);
+                read.setString(2, bindingStorage);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
                     org.junit.jupiter.api.Assertions.assertArrayEquals(binding, row.getBytes(1));

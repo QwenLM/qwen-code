@@ -206,7 +206,7 @@ public class ManagedNativeJournalSnapshots {
                 + " GROUP BY resource_id";
         // This setter bypasses schema coercion; binary identities are bound explicitly.
         var arguments = new org.springframework.jdbc.core.ArgumentPreparedStatementSetter(new Object[] {
-                ManagedSchemaKeys.identity(owner), revision, tenant, ManagedSchemaKeys.identity(request.workspaceId()),
+                ManagedSchemaKeys.identity(owner), revision, tenant, request.workspaceId(),
                 session, tenant, session,
                 ManagedSchemaKeys.identity(journalOwner(tenant, session)), revision
         });

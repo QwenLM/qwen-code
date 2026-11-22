@@ -38,7 +38,7 @@ public final class ManagedRuntimeRetentionGuard implements JdbcRuntimeRetention.
         return exists(connection, "SELECT 1 FROM ma_resource_ref WHERE owner_kind = 'HOSTED_CLEANUP'"
                         + " AND runtime_binding_id = ? AND owner_revision = ? AND tenant_id = ?"
                         + " AND workspace_id = ? LIMIT 1", binding.getBindingId(),
-                binding.getGeneration(), scope.getTenantId(), identity(scope.getWorkspaceId()));
+                binding.getGeneration(), scope.getTenantId(), scope.getWorkspaceId());
     }
 
     private static boolean unverifiedCleanupHistory(Connection connection, RuntimeBindingRecord binding)

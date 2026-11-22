@@ -262,7 +262,7 @@ public class WorkspaceFileUploadStore {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenant, scope.binding().getStorageId());
             String physical = jdbc.queryForObject("SELECT physical_id FROM ma_storage"
                     + " WHERE tenant_id = ? AND storage_id = ? FOR UPDATE", String.class,
-                    tenant, ManagedSchemaKeys.identity(scope.binding().getStorageId()));
+                    tenant, scope.binding().getStorageId());
             var owners = jdbc.queryForList("SELECT mount_state, mount_revision FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE",
                     physical == null ? null : ManagedSchemaKeys.identity(physical));
             if (owners.size() != 1 || !"READY".equals(owners.getFirst().get("mount_state"))
@@ -297,9 +297,9 @@ public class WorkspaceFileUploadStore {
                     + " available_at, gmt_create, gmt_modified) VALUES (?, 'TENANT', ?, ?, ?, ?, ?, ?, 'STORAGE', ?, ?, ?, ?, ?, ?, 'RUNNING', 'RUNNING', "
                     + ManagedSchemaTime.SQL_NOW + " + 60000, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                     ManagedSchemaKeys.identity(key), ManagedSchemaKeys.identity(tenant), KIND, uploadId.getBytes(StandardCharsets.UTF_8), tenant,
-                    workspace.getBytes(StandardCharsets.UTF_8), locator.sessionId(),
+                    workspace, locator.sessionId(),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
-                    scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
+                    scope.binding().getStorageId(),
                     ManagedSchemaKeys.identity(physical), actor, digest, encode(target));
             if (jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE physical_id = ?"
                     + " AND mount_state = 'READY' AND mount_revision = ?",

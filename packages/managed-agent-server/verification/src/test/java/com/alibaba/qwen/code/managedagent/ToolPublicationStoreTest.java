@@ -321,7 +321,7 @@ class ToolPublicationStoreTest {
                                     + " 'other-tenant'");
             case "runtime-workspace" -> jdbc.update(
                             "UPDATE ma_runtime_binding SET workspace_id ="
-                                    + " X'6f746865722d776f726b7370616365'");
+                                    + " 'other-workspace'");
             case "runtime-generation" -> jdbc.update("UPDATE ma_runtime_binding SET runtime_generation = 2");
             case "runtime-provisioner" -> jdbc.update("UPDATE ma_runtime_binding SET provisioner_kind = ?",
                     "ssh-process");

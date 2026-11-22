@@ -12,7 +12,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
-import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -72,14 +71,14 @@ class ChildWorkspaceStoreTest {
 
     private void alias(String id, String kind) {
         jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, storage_kind) VALUES (?, ?, ?)",
-                "tenant", id.getBytes(StandardCharsets.UTF_8), kind);
+                "tenant", id, kind);
         if ("LOCAL".equals(kind)) {
             String physical = WorkspaceTestStorage.key("tenant", id);
             jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, mount_state, mount_revision)"
                     + " VALUES (?, 'LOCAL', 'READY', 1)", physical);
             jdbc.update("UPDATE ma_storage SET physical_id = ?, registration_state = 'REGISTERED', registration_revision = 1,"
                     + " registration_json = '{}', mount_revision = 1 WHERE tenant_id = ? AND storage_id = ?",
-                    physical, "tenant", id.getBytes(StandardCharsets.UTF_8));
+                    physical, "tenant", id);
         }
     }
 

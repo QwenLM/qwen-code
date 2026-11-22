@@ -557,12 +557,12 @@ class Issue13181QueryBudgetTest {
         fixture.jdbc.update("INSERT INTO ma_workspace"
                 + " (tenant_id, workspace_id, workspace_generation,"
                 + " storage_id, display_name, config_ref, policy_ref, state)"
-                + " VALUES (?, X'776f726b737061636532', 1, 'storage', 'Workspace2', ?,"
+                + " VALUES (?, 'workspace2', 1, 'storage', 'Workspace2', ?,"
                 + " ?, 'ACTIVE')", tenant, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         fixture.jdbc.update("INSERT INTO ma_workspace_access"
                 + " (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES (?, X'776f726b737061636532', ?, 'OPERATOR')",
+                + " VALUES (?, 'workspace2', ?, 'OPERATOR')",
                 tenant, "actor".getBytes(StandardCharsets.UTF_8));
         List<String> ids = new ArrayList<>();
         for (int index = 0; index < 7; index++) {
@@ -601,7 +601,7 @@ class Issue13181QueryBudgetTest {
                         .build()))
                 .sessionId());
         fixture.jdbc.update("DELETE FROM ma_workspace_access"
-                + " WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365'"
+                + " WHERE tenant_id = ? AND workspace_id = 'workspace'"
                 + " AND actor_id = ?", tenant,
                 "ghost".getBytes(StandardCharsets.UTF_8));
         // One session is closed: the shape gate fences it. The workspace2
@@ -614,10 +614,10 @@ class Issue13181QueryBudgetTest {
                 ids.get(3));
         fixture.jdbc.update("UPDATE ma_workspace_access SET"
                 + " role = 'READER' WHERE tenant_id = ? AND workspace_id"
-                + " = X'776f726b737061636532'", tenant);
+                + " = 'workspace2'", tenant);
         fixture.jdbc.update("UPDATE ma_workspace_access SET role ="
                 + " 'READER' WHERE tenant_id = ? AND workspace_id ="
-                + " X'776f726b7370616365' AND actor_id = ?", tenant,
+                + " 'workspace' AND actor_id = ?", tenant,
                 "other".getBytes(StandardCharsets.UTF_8));
         fixture.ledger.reset();
         var page = fixture.service.listWebShellSessions(tenant, "actor",
@@ -745,7 +745,7 @@ class Issue13181QueryBudgetTest {
         // does not.
         fixture.jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "other".getBytes(StandardCharsets.UTF_8));
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("modelChange").asBoolean()).isTrue();
-        fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = X'776f726b7370616365' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
+        fixture.jdbc.update("UPDATE ma_workspace_access SET role = 'READER' WHERE tenant_id = ? AND workspace_id = 'workspace' AND actor_id = ?", tenant, "other".getBytes(StandardCharsets.UTF_8));
         assertThat(JSON.valueToTree(fixture.service.getWebShellSession(tenant, "other", id)).path("capabilities").path("modelChange").asBoolean()).isFalse();
         for (String mutation : new String[] {
                 "UPDATE ma_workspace SET state = 'DRAINING'",

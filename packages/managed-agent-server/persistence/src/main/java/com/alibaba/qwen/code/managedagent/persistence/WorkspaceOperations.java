@@ -79,7 +79,7 @@ final class WorkspaceOperations {
                 key(kind, id), "TENANT", tenant.getBytes(StandardCharsets.UTF_8), kind.name(), id.getBytes(StandardCharsets.UTF_8),
                 tenant, data.get("session_id"),
                 data.containsKey("binding_id") ? "RUNTIME_BINDING" : "STORAGE", target.getBytes(StandardCharsets.UTF_8), revision,
-                storage == null ? null : storage.getBytes(StandardCharsets.UTF_8),
+                storage,
                 physical, state, data.getOrDefault("phase", state), data.get("delivery_state"),
                 data.getOrDefault("request_digest", hash(request)), request, envelope(data), data.getOrDefault("available_at", 0L));
     }

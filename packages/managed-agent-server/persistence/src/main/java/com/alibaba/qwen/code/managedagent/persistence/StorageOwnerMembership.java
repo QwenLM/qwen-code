@@ -43,9 +43,11 @@ public final class StorageOwnerMembership {
     static boolean isWorktreePreparation(Connection connection, String physical, String maintenance, long generation)
             throws SQLException {
         // Identity survives BLOCKED/expired claims. Do not lock the operation after its owner row.
+        boolean h2 = "H2".equals(connection.getMetaData().getDatabaseProductName());
         try (var statement = connection.prepareStatement("SELECT 1 FROM ma_session_worktree w JOIN ma_operation o"
                 + " ON o.tenant_id = w.tenant_id AND o.session_id = w.session_id AND o.operation_id = CAST(w.worktree_id AS BINARY(32))"
-                + " AND o.physical_id = w.physical_id AND o.target_id = w.storage_id"
+                + " AND o.physical_id = w.physical_id AND o.target_id = "
+                + ManagedSchemaJdbcTemplate.binaryIdentity("w.storage_id", h2)
                 + " WHERE o.operation_kind = 'SESSION_WORKTREE' AND o.target_kind = 'STORAGE'"
                 + " AND w.worktree_id = ? AND w.physical_id = ? AND o.claim_generation = ?")) {
             statement.setString(1, maintenance);

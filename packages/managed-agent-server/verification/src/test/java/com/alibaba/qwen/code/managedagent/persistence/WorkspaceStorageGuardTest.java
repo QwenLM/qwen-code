@@ -425,7 +425,7 @@ class WorkspaceStorageGuardTest {
         doAnswer(invocation -> {
             invocation.callRealMethod();
             assertThat(jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                    + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'")).isEqualTo(1);
+                    + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'")).isEqualTo(1);
             return null;
         }).doCallRealMethod().when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
@@ -436,7 +436,7 @@ class WorkspaceStorageGuardTest {
         // A revoked creation grant is operator-reversible: the refusal must
         // stay retryable so a restored grant still delivers the answer.
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -444,9 +444,9 @@ class WorkspaceStorageGuardTest {
                 });
         // So is a registry that left ACTIVE.
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
-                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");
@@ -455,13 +455,13 @@ class WorkspaceStorageGuardTest {
         verify(client, never()).resolveAction(any(), any(), any(), anyLong(), any());
         // Restored, the committed decision reaches the Harness.
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
-                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         connector.resolveAction("tenant", sessionId, "action", response);
         verify(client).resolveAction(attached, "action", "allow", 1L, "policy");
         // Generation drift after a re-registration stays structural: the
         // terminal exit keeps its verdict.
         jdbc.update("UPDATE ma_workspace SET workspace_generation = 2"
-                + " WHERE tenant_id = 'tenant' AND workspace_id = X'776f726b7370616365'");
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
         assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("workspace_unavailable");

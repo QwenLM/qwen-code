@@ -196,7 +196,7 @@ public final class JdbcRuntimeBindingRepository
                             if (!rows.next()
                                     || !claim.getRequest().getScope().getTenantId().equals(rows.getString("tenant_id"))
                                     || !claim.getRequest().getStorageId().equals(
-                                            ManagedSchemaRows.identity(rows, "storage_id"))) {
+                                            rows.getString("storage_id"))) {
                                 throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
                             }
                         }
@@ -731,7 +731,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requestStorageFence(String tenantId, String storageId, String operationId) {
         BrokerValues.requireId(tenantId, "tenantId");
-        BrokerValues.requireId(storageId, "storageId");
+        BrokerValues.requireStorageId(storageId, "storageId");
         BrokerValues.requireId(operationId, "operationId");
         JdbcRepositorySupport.transaction(
                 dataSource,

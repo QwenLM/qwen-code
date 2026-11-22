@@ -362,7 +362,7 @@ public class JdbcPhysicalStorageReleaseTest {
                         + " ma_storage(tenant_id,storage_id,physical_id,registration_state,storage_kind,registration_revision,registration_json)"
                         + " VALUES(?,?,?,'REGISTERED',?,1,'{}')",
                     aliasTenant,
-                    storage.getBytes(StandardCharsets.UTF_8),
+                    storage,
                     physical, storageKind);
         }
 

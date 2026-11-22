@@ -22,6 +22,16 @@ public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
         super(source);
     }
 
+    /**
+     * Renders a text identity comparable with a binary column. MySQL coerces
+     * the non-binary operand of a binary comparison to bytes itself (keeping
+     * the column index usable); H2 refuses VARCHAR = VARBINARY outright, so
+     * the text is converted to its exact UTF-8 bytes there.
+     */
+    public static String binaryIdentity(String expression, boolean h2) {
+        return h2 ? "STRINGTOUTF8(" + expression + ")" : expression;
+    }
+
     @Override
     protected RowMapper<Map<String, Object>> getColumnMapRowMapper() {
         return (row, index) -> ManagedSchemaRows.read(row);

@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -233,13 +232,13 @@ public class WorkspaceFileStore {
         }
         var rows = jdbc.queryForList("SELECT storage_kind, registration_json, registration_revision, mount_revision, fence_operation_id FROM ma_storage"
                 + " WHERE tenant_id = ? AND storage_id = ?" + (lock ? " FOR UPDATE" : ""),
-                tenant, ManagedSchemaKeys.identity(binding.getStorageId()));
+                tenant, binding.getStorageId());
         if (rows.size() != 1 || rows.getFirst().get("fence_operation_id") != null) {
             throw unavailable();
         }
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id FROM ma_storage_owner"
                 + " WHERE physical_id = (SELECT physical_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ?)",
-                tenant, ManagedSchemaKeys.identity(binding.getStorageId()));
+                tenant, binding.getStorageId());
         try {
             var identity = locator.sessionId() == null ? List.of(actor, binding.getContextDigest(), rows, owner)
                     : List.of(actor, binding.getContextDigest(), rows, owner, locator.sessionId(), worktreeRevision);

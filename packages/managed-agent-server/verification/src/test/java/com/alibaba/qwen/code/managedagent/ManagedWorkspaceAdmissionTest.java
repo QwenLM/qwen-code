@@ -2313,7 +2313,7 @@ class ManagedWorkspaceAdmissionTest {
                 .capabilities().workspaceTurns()).isTrue();
 
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'77732d61'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws-a'"
                 + " AND actor_id = ?", tenant,
                 "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         assertThat(service.getWebShellSession(tenant, "operator2", sessionId)
@@ -2415,7 +2415,7 @@ class ManagedWorkspaceAdmissionTest {
         // drains, so the Session's creator-keyed facts fail while the
         // second operator's own role is intact.
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'77732d61'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws-a'"
                 + " AND actor_id = ?", tenant,
                 "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
@@ -2472,7 +2472,7 @@ class ManagedWorkspaceAdmissionTest {
         String sessionId = boundSession(tenant);
         ManagedAgentService enabled = boundService(true);
         jdbc.update("UPDATE ma_workspace SET"
-                + (storageOnly ? " storage_id = X'7265706c6163656d656e742d73746f72616765'"
+                + (storageOnly ? " storage_id = 'replacement-storage'"
                         : " workspace_generation = workspace_generation + 1")
                 + " WHERE tenant_id = ?", tenant);
 

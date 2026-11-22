@@ -35,7 +35,7 @@ class WorkspaceQueryScaleMySqlIT {
             String session = transactions.execute(ignored -> store.insertSessionCommand("tenant", "actor", "CREATE_SESSION",
                     "create", "digest", "qwen-code", null, null, List.of(), null)).sessionId();
             ManagedReceipts.insertCreation(jdbc, "tenant", "actor".getBytes(java.nio.charset.StandardCharsets.UTF_8), "creation", "digest", session, null, 1);
-            jdbc.update("UPDATE ma_session SET workspace_id = X'726f6f74', workspace_generation = 1, workspace_storage_id = X'73746f72616765',"
+            jdbc.update("UPDATE ma_session SET workspace_id = 'root', workspace_generation = 1, workspace_storage_id = 'storage',"
                     + " cwd_relative = '.', context_config_ref = ?, context_revision = 1, workspace_config_ref = ?, workspace_policy_ref = ?"
                     + " WHERE tenant_id = 'tenant' AND session_id = ?", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF, session);
@@ -165,7 +165,7 @@ class WorkspaceQueryScaleMySqlIT {
                     session, "CHILD_WORKSPACE", child, "merged", "IDLE"});
             operations.add(new Object[] {ManagedIdentityRefs.operationRef("CLOSE", "tenant", "SESSION", session, session, "close-" + child), "SESSION", session, "close-" + child,
                     session, "CLOSE", session, "COMPLETED", "CONFIRMED"});
-            workspaces.add(new Object[] {child.getBytes(java.nio.charset.StandardCharsets.UTF_8), child.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            workspaces.add(new Object[] {child, child,
                     session, rawRun.getBytes(java.nio.charset.StandardCharsets.UTF_8)});
             String resourceId = "history-resource-" + index;
             resources.add(new Object[] {session,

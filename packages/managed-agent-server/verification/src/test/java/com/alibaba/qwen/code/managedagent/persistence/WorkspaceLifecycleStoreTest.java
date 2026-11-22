@@ -224,7 +224,7 @@ class WorkspaceLifecycleStoreTest {
         var fixture = fixture();
         String storage = fixture.jdbc.queryForObject(
                 "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
-                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
+                (row, index) -> row.getString(1),
                 "tenant", "workspace");
         fixture.jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, storage_kind) VALUES ('tenant', ?, 'EXTERNAL')",
                 storage);

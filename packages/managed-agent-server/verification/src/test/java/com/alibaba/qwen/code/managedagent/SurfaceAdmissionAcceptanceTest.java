@@ -289,7 +289,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .isEqualTo(admitted);
         byte[] operator = OPERATOR.getBytes(StandardCharsets.UTF_8);
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant, operator);
         try {
             assertThat(mvc.perform(cancel.get())
@@ -299,7 +299,7 @@ public class SurfaceAdmissionAcceptanceTest {
         } finally {
             jdbc.update("UPDATE ma_workspace_access SET role ="
                     + " 'OPERATOR' WHERE tenant_id = ? AND workspace_id ="
-                    + " X'7773' AND actor_id = ?", tenant, operator);
+                    + " 'ws' AND actor_id = ?", tenant, operator);
         }
         jdbc.update("UPDATE ma_session SET status = 'DELETED'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
@@ -664,7 +664,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // The state gate fires after the grants: a non-ACTIVE Workspace is
         // a domain refusal on the same family.
         jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -675,7 +675,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
         // The legacy arm: no Workspace selection, no actor, admitted.
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -946,7 +946,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // reaches the files gate's domain 409 rather than the role
         // family's 403.
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/close")
@@ -957,7 +957,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         // Action respond by the recorded owner is admitted.
@@ -1058,7 +1058,7 @@ public class SurfaceAdmissionAcceptanceTest {
         for (String caller : List.of(OPERATOR, OWNER)) {
             String action = insertAction(tenant, bound);
             jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -1073,7 +1073,7 @@ public class SurfaceAdmissionAcceptanceTest {
                             .value("workspace_unavailable"));
             jdbc.update("UPDATE ma_workspace_access"
                     + " SET role = 'OPERATOR'"
-                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -1108,7 +1108,7 @@ public class SurfaceAdmissionAcceptanceTest {
         String operationId = JSON.readTree(first.getResponse()
                 .getContentAsString()).path("id").asText();
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -1131,7 +1131,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
     }

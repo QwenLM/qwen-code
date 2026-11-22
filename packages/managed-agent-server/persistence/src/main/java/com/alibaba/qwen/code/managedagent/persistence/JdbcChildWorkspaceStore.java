@@ -10,6 +10,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -47,7 +48,13 @@ public class JdbcChildWorkspaceStore
             "base_commit", "result_commit", "parent_tree", "merged_tree", "finish_request", "outcome_code",
             "conflict_paths", "last_error");
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final String SELECT = "SELECT w.tenant_id, w.parent_session_id, w.child_run_id, w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id, w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit, w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code, w.conflict_paths, w.last_error, o.claim_owner AS claimed_by, FLOOR(o.claim_until) AS claimed_until, o.claim_generation, o.attempt_count AS attempts, o.available_at AS next_retry_at, w.gmt_create, w.gmt_modified, o.request_json FROM ma_workspace w JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = w.child_workspace_id AND o.operation_kind = 'CHILD_WORKSPACE'";
+    private String select() {
+        boolean h2 = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                "H2".equals(connection.getMetaData().getDatabaseProductName())));
+        return "SELECT w.tenant_id, w.parent_session_id, w.child_run_id, w.child_workspace_id, w.parent_workspace_id AS workspace_id, w.workspace_generation, w.storage_id, w.parent_cwd_relative, w.repository_relative, w.child_cwd_relative, w.base_commit, w.result_commit, w.parent_tree, w.merged_tree, w.child_state AS state, w.finish_request, w.outcome_code, w.conflict_paths, w.last_error, o.claim_owner AS claimed_by, FLOOR(o.claim_until) AS claimed_until, o.claim_generation, o.attempt_count AS attempts, o.available_at AS next_retry_at, w.gmt_create, w.gmt_modified, o.request_json FROM ma_workspace w JOIN ma_operation o ON o.tenant_id = w.tenant_id AND o.operation_id = "
+                + ManagedSchemaJdbcTemplate.binaryIdentity("w.child_workspace_id", h2)
+                + " AND o.operation_kind = 'CHILD_WORKSPACE'";
+    }
     private static final WorkspaceOperations.Kind KIND = WorkspaceOperations.Kind.CHILD_WORKSPACE;
 
     /** One child Workspace row. */
@@ -126,7 +133,7 @@ public class JdbcChildWorkspaceStore
     }
 
     public Row find(String tenantId, String parentSessionId, String childRunId) {
-        List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.parent_session_id = ?"
+        List<Row> rows = jdbc.query(select() + " WHERE w.tenant_id = ? AND w.parent_session_id = ?"
                 + " AND w.child_run_id = ?", this::row, tenantId, parentSessionId, childRunId);
         return rows.isEmpty() ? null : rows.getFirst();
     }
@@ -138,7 +145,7 @@ public class JdbcChildWorkspaceStore
      * live claim is a step running right now.
      */
     public List<Row> findDue(long now, int limit) {
-        return jdbc.query(SELECT + " WHERE o.delivery_state = 'PENDING' AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ?) ORDER BY o.available_at, o.operation_ref LIMIT ?",
+        return jdbc.query(select() + " WHERE o.delivery_state = 'PENDING' AND o.available_at <= ? AND (o.claim_until IS NULL OR o.claim_until <= ?) ORDER BY o.available_at, o.operation_ref LIMIT ?",
                 this::row, now, now, limit);
     }
 
@@ -279,7 +286,7 @@ public class JdbcChildWorkspaceStore
             throw new IllegalArgumentException("Unknown child Workspace finish " + finish);
         }
         return transaction.execute(status -> {
-            List<Row> rows = jdbc.query(SELECT + " WHERE w.tenant_id = ? AND w.parent_session_id = ?"
+            List<Row> rows = jdbc.query(select() + " WHERE w.tenant_id = ? AND w.parent_session_id = ?"
                     + " AND w.child_run_id = ? FOR UPDATE", this::row, tenantId, parentSessionId, childRunId);
             if (rows.isEmpty()) {
                 throw new ManagedAgentException(404, "child_workspace_not_found",

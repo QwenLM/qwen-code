@@ -31,7 +31,7 @@ public final class RuntimeScope {
             String canonicalCwd, String capabilityDigest, String isolationClass, RuntimeLifecycleAuthority authority) {
         this.lifecycleAuthority = authority;
         this.tenantId = BrokerValues.requireTenantId(tenantId, "tenantId");
-        this.workspaceId = BrokerValues.requireId(workspaceId, "workspaceId");
+        this.workspaceId = BrokerValues.requireWorkspaceId(workspaceId, "workspaceId");
         this.workspaceGeneration = BrokerValues.requireId(
                 workspaceGeneration, "workspaceGeneration");
         this.canonicalCwd = BrokerValues.requireId(canonicalCwd,

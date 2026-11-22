@@ -123,8 +123,7 @@ final class AgentSessionPolicies {
 
     boolean isSshWorkspace(ContextBinding binding) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'SSH_LOCAL'",
-                Long.class, binding.getTenantId(),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(binding.getStorageId())) == 1;
+                Long.class, binding.getTenantId(), binding.getStorageId()) == 1;
     }
 
     static void requireSshToolProfile(String profile) {

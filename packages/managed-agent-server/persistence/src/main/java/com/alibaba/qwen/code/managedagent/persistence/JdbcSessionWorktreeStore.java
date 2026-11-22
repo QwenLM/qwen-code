@@ -404,7 +404,7 @@ public class JdbcSessionWorktreeStore
     private String storageIdentity(ContextBinding binding, boolean lock) {
         var alias = jdbc.queryForList("SELECT physical_id, registration_revision, mount_revision, fence_operation_id"
                         + " FROM ma_storage WHERE tenant_id = ? AND storage_id = ?" + (lock ? " FOR UPDATE" : ""),
-                binding.getTenantId(), ManagedSchemaKeys.identity(binding.getStorageId()));
+                binding.getTenantId(), binding.getStorageId());
         var owner = jdbc.queryForList("SELECT mount_revision, mount_registration_id, mount_state, mount_operation_id"
                         + " FROM ma_storage_owner WHERE physical_id = ?" + (lock ? " FOR UPDATE" : ""),
                 ManagedSchemaKeys.identity(lock ? JdbcWorkspaceExecutionStore.storageKey(jdbc, binding)

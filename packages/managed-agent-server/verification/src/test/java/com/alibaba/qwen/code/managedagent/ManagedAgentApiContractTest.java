@@ -964,7 +964,7 @@ class ManagedAgentApiContractTest {
                 artifactSession,
                 resultId.getBytes(StandardCharsets.UTF_8), tenant,
                 artifactSession,
-                artifactWorkspace.getBytes(StandardCharsets.UTF_8),
+                artifactWorkspace,
                 resultId.getBytes(StandardCharsets.UTF_8), "contract-digest", source.toString());
         ObjectNode descriptor = objectMapper.createObjectNode()
                 .put("object", "agent.artifact")

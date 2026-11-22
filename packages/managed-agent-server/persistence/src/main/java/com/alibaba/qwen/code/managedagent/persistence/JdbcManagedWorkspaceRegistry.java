@@ -7,7 +7,6 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -178,7 +177,7 @@ public class JdbcManagedWorkspaceRegistry
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
         byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
-        byte[] after = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(afterId == null ? "" : afterId);
+        String after = afterId == null ? "" : afterId;
         List<WorkspaceRow> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, r.workspace_generation,"
                         + " r.storage_id, r.config_ref, r.policy_ref, s.storage_kind, a.role FROM ma_workspace r"
                         + " JOIN ma_workspace_access a ON a.tenant_id = r.tenant_id AND a.workspace_id = r.workspace_id"
@@ -500,7 +499,7 @@ public class JdbcManagedWorkspaceRegistry
     void requireSshNodeAccess(String tenantId, String actorId, String storageId) {
         var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage"
                 + " WHERE tenant_id = ? AND storage_id = ? AND storage_kind = 'SSH_LOCAL'",
-                String.class, tenantId, ManagedSchemaKeys.identity(storageId));
+                String.class, tenantId, storageId);
         if (!remote.isEmpty()) {
             boolean allowed = false;
             if (ssh != null && ssh.isEnabled()) {

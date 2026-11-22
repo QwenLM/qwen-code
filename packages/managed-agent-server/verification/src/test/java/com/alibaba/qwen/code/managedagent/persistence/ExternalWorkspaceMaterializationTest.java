@@ -583,7 +583,7 @@ class ExternalWorkspaceMaterializationTest {
             register("tenant", "healthy");
             store.materialize("tenant", "healthy", "Healthy", "owner", "healthy-key");
             jdbc.update("UPDATE ma_storage SET registration_json = 'not-json' WHERE storage_id = ?",
-                    "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    "workspace");
 
             assertThat(registry.listReadable("tenant", "owner", null, 10))
                     .hasSize(2)

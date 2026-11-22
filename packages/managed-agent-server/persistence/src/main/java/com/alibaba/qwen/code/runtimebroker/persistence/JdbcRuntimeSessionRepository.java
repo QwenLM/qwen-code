@@ -449,7 +449,7 @@ public final class JdbcRuntimeSessionRepository
     static RuntimeSessionRecord mapSession(ResultSet result)
             throws SQLException {
         RuntimeScope scope = new RuntimeScope(result.getString("tenant_id"),
-                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "workspace_id"),
+                result.getString("workspace_id"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "workspace_generation"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "canonical_cwd"),
                 com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.identity(result, "capability_digest"),

@@ -89,7 +89,7 @@ public class JdbcManagedToolResultStore
                         ManagedIdentityRefs.operationRef(OperationKind.TOOL_RESULT_PROJECTION.name(),
                                 tenant, "SESSION", session, executionCallId, source.id()),
                         ManagedSchemaKeys.identity(session), ManagedSchemaKeys.identity(source.id()),
-                        tenant, ManagedSchemaKeys.identity(workspace), session,
+                        tenant, workspace, session,
                         ManagedSchemaKeys.identity(executionCallId), ManagedSchemaKeys.identity(executionCallId),
                         JSON.valueToTree(source).toString(), source.sourceDigest(),
                         createdAt, createdAt});

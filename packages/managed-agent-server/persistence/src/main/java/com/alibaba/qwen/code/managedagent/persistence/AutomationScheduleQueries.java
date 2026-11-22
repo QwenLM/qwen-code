@@ -39,13 +39,15 @@ final class AutomationScheduleQueries {
                         + " UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!')"
                         + " FROM ma_workspace c JOIN readable_workspace p"
                         + " ON c.tenant_id = " + unsuffixedTenant("p.tenant_identity")
-                        + " AND c.parent_workspace_id = " + unsuffixedIdentity("p.workspace_identity", h2)
+                        + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("c.parent_workspace_id", h2)
+                        + " = " + unsuffixedIdentity("p.workspace_identity", h2)
                         + " WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT')"
                         + " SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s")
                         + " FROM ma_schedule s WHERE s.tenant_id = ?"
                         + " AND EXISTS (SELECT 1 FROM readable_workspace r WHERE s.tenant_id = "
                         + unsuffixedTenant("r.tenant_identity")
-                        + " AND s.workspace_id = " + unsuffixedIdentity("r.workspace_identity", h2) + ")"
+                        + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("s.workspace_id", h2)
+                        + " = " + unsuffixedIdentity("r.workspace_identity", h2) + ")"
                         + " AND EXISTS (SELECT 1 FROM ma_session ms WHERE ms.tenant_id = s.tenant_id"
                         + " AND ms.session_id = s.session_id AND (ms.owner_only = 0"
                         + " OR COALESCE(ms.owner_actor_key, ms.creator_actor_key) = ?))";

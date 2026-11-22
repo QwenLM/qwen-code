@@ -36,6 +36,37 @@ class BrokerValuesTest {
     }
 
     @Test
+    void workspaceIdsUseThe512CharacterNoTrailingSpaceBudget() {
+        String workspace = "w".repeat(512);
+        assertEquals(workspace, BrokerValues.requireWorkspaceId(workspace, "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId("w".repeat(513), "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId("workspace ", "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId("work\ud800space", "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkspaceId(null, "workspaceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> new RuntimeScope("tenant", "workspace ", "1",
+                        "/workspace", "digest", "session"));
+    }
+
+    @Test
+    void storageIdsUseThe256CharacterNoTrailingSpaceBudget() {
+        String storage = "s".repeat(256);
+        assertEquals(storage, BrokerValues.requireStorageId(storage, "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId("s".repeat(257), "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId("storage ", "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId("stor\ud800age", "storageId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireStorageId(null, "storageId"));
+    }
+
+    @Test
     void tenantIdsUseTheShared36CharacterBudget() {
         String tenant = "t".repeat(36);
         assertTrue(BrokerValues.isTenantId(tenant));

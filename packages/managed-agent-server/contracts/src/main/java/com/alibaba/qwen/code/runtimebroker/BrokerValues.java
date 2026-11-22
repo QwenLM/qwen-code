@@ -60,6 +60,32 @@ public final class BrokerValues {
     }
 
     /**
+     * A Workspace identity stored in a VARCHAR column. PAD SPACE collations
+     * fold trailing spaces, so two distinct ids would compare equal; the
+     * boundary refuses them rather than relying on the column to preserve
+     * exactness. The 512 budget is the global {@link #requireId} bound that
+     * RuntimeScope and automation still admit.
+     */
+    public static String requireWorkspaceId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-512 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /** A logical storage identity stored in a VARCHAR(256) column. */
+    public static String requireStorageId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 256 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-256 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
      * An id the worker admits on its provider envelope, where it becomes a
      * file name: ASCII letters, digits, {@code .}, {@code _} and {@code -},
      * never {@code .} and never containing {@code ..}. The Broker releases
