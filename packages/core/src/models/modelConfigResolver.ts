@@ -338,21 +338,39 @@ export function resolveModelConfig(
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
   applyTimeoutEnvOverride(env, generationConfig, sources, modelProvider);
 
-  if (generationConfig.service_tier === undefined) {
-    const envServiceTier =
-      env['OPENAI_SERVICE_TIER'] || env['DEEPINFRA_SERVICE_TIER'];
-    if (envServiceTier) {
-      generationConfig.service_tier = envServiceTier;
-      const key = env['OPENAI_SERVICE_TIER']
-        ? 'OPENAI_SERVICE_TIER'
-        : 'DEEPINFRA_SERVICE_TIER';
-      sources['service_tier'] = { kind: 'env', envKey: key, detail: key };
-    }
+  const serviceTier = resolveServiceTier({
+    modelProvider,
+    cli,
+    env,
+    settings,
+    authType,
+    modelId: modelProvider?.id ?? modelResult.value,
+    baseUrl: baseUrlResult?.value,
+    apiKeyEnvKey,
+    sources,
+  });
+  if (serviceTier !== undefined) {
+    generationConfig.service_tier = serviceTier;
   }
 
-  if (cli?.serviceTier !== undefined) {
-    generationConfig.service_tier = cli.serviceTier;
-    sources['service_tier'] = cliSource('--service-tier');
+  // DeepInfra Flex queue timeout:
+  // If request is DeepInfra Flex and no explicit timeout was set by user,
+  // apply 10-minute (600,000ms) default to accommodate scheduling queues.
+  const effectiveBaseUrl = baseUrlResult?.value || modelProvider?.baseUrl;
+  const isDeepInfra =
+    (modelProvider?.id === 'deepinfra' ||
+      modelProvider?.envKey === 'DEEPINFRA_ENV_KEY' ||
+      apiKeyEnvKey === 'DEEPINFRA_API_KEY' ||
+      modelProvider?.envKey === 'DEEPINFRA_API_KEY') &&
+    isDeepInfraEndpoint(effectiveBaseUrl);
+
+  if (
+    isDeepInfra &&
+    generationConfig.service_tier === 'flex' &&
+    generationConfig.timeout === undefined
+  ) {
+    generationConfig.timeout = 600000;
+    sources['timeout'] = defaultSource('DeepInfra flex queue default (10m)');
   }
 
   // Build final config
@@ -436,21 +454,17 @@ function resolveQwenOAuthConfig(
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
   applyTimeoutEnvOverride(input.env, generationConfig, sources, modelProvider);
 
-  if (generationConfig.service_tier === undefined) {
-    const envServiceTier =
-      input.env['OPENAI_SERVICE_TIER'] || input.env['DEEPINFRA_SERVICE_TIER'];
-    if (envServiceTier) {
-      generationConfig.service_tier = envServiceTier;
-      const key = input.env['OPENAI_SERVICE_TIER']
-        ? 'OPENAI_SERVICE_TIER'
-        : 'DEEPINFRA_SERVICE_TIER';
-      sources['service_tier'] = { kind: 'env', envKey: key, detail: key };
-    }
-  }
-
-  if (input.cli?.serviceTier !== undefined) {
-    generationConfig.service_tier = input.cli.serviceTier;
-    sources['service_tier'] = cliSource('--service-tier');
+  const serviceTier = resolveServiceTier({
+    modelProvider,
+    cli: input.cli,
+    env: input.env,
+    settings: input.settings,
+    authType: AuthType.QWEN_OAUTH,
+    modelId: resolvedModel,
+    sources,
+  });
+  if (serviceTier !== undefined) {
+    generationConfig.service_tier = serviceTier;
   }
 
   const config: ContentGeneratorConfig = {
@@ -462,6 +476,109 @@ function resolveQwenOAuthConfig(
   };
 
   return { config, sources, warnings };
+}
+
+function isDeepInfraEndpoint(baseUrl?: string): boolean {
+  if (!baseUrl) return false;
+  try {
+    const host = new URL(baseUrl).hostname;
+    return (
+      host === 'api.deepinfra.com' ||
+      host === 'deepinfra.com' ||
+      host.endsWith('.deepinfra.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function resolveServiceTier(params: {
+  modelProvider?: ModelProviderConfig;
+  cli?: CliConfig;
+  env: Record<string, string | undefined>;
+  settings?: SettingsConfig;
+  authType?: AuthType;
+  modelId?: string;
+  baseUrl?: string;
+  apiKeyEnvKey?: string;
+  sources: ConfigSources;
+}): string | undefined {
+  const {
+    modelProvider,
+    cli,
+    env,
+    settings,
+    authType,
+    modelId,
+    baseUrl,
+    apiKeyEnvKey,
+    sources,
+  } = params;
+
+  // 1. ModelProvider (highest priority: modelProvider > CLI > env > settings)
+  if (authType && modelProvider?.generationConfig?.service_tier !== undefined) {
+    sources['service_tier'] = modelProvidersSource(
+      authType,
+      modelProvider.id ?? modelId ?? '',
+      'generationConfig.service_tier',
+    );
+    return modelProvider.generationConfig.service_tier;
+  }
+
+  // 2. CLI
+  if (cli?.serviceTier !== undefined) {
+    sources['service_tier'] = cliSource('--service-tier');
+    return cli.serviceTier;
+  }
+
+  // Check if provider is DeepInfra (endpoint + credential)
+  const effectiveBaseUrl = baseUrl || modelProvider?.baseUrl;
+  const isDeepInfra =
+    (modelProvider?.id === 'deepinfra' ||
+      modelProvider?.envKey === 'DEEPINFRA_ENV_KEY' ||
+      apiKeyEnvKey === 'DEEPINFRA_API_KEY' ||
+      modelProvider?.envKey === 'DEEPINFRA_API_KEY') &&
+    isDeepInfraEndpoint(effectiveBaseUrl);
+
+  // 3. Environment variables
+  if (isDeepInfra) {
+    if (env['DEEPINFRA_SERVICE_TIER']) {
+      sources['service_tier'] = {
+        kind: 'env',
+        envKey: 'DEEPINFRA_SERVICE_TIER',
+        detail: 'DEEPINFRA_SERVICE_TIER',
+      };
+      return env['DEEPINFRA_SERVICE_TIER'];
+    }
+    if (env['OPENAI_SERVICE_TIER']) {
+      sources['service_tier'] = {
+        kind: 'env',
+        envKey: 'OPENAI_SERVICE_TIER',
+        detail: 'OPENAI_SERVICE_TIER',
+      };
+      return env['OPENAI_SERVICE_TIER'];
+    }
+  } else {
+    // Non-DeepInfra provider: only OPENAI_SERVICE_TIER applies; DEEPINFRA_SERVICE_TIER is ignored.
+    if (env['OPENAI_SERVICE_TIER']) {
+      sources['service_tier'] = {
+        kind: 'env',
+        envKey: 'OPENAI_SERVICE_TIER',
+        detail: 'OPENAI_SERVICE_TIER',
+      };
+      return env['OPENAI_SERVICE_TIER'];
+    }
+  }
+
+  // 4. Settings (lowest priority)
+  if (settings?.generationConfig?.service_tier !== undefined) {
+    sources['service_tier'] = settingsSource(
+      'model.generationConfig.service_tier',
+    );
+    return settings.generationConfig.service_tier;
+  }
+
+  return undefined;
 }
 
 /**
@@ -477,6 +594,9 @@ function resolveGenerationConfig(
   const result: Partial<ContentGeneratorConfig> = {};
 
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+    if (field === 'service_tier') {
+      continue;
+    }
     // ModelProvider config takes priority over settings config
     if (authType && modelProviderConfig && field in modelProviderConfig) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
