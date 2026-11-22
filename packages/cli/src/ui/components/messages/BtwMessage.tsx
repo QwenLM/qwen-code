@@ -10,6 +10,7 @@ import type { BtwProps } from '../../types.js';
 import { Colors } from '../../colors.js';
 import { t } from '../../../i18n/index.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { getCachedStringWidth } from '../../utils/textUtils.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { ScrollableList } from '../shared/ScrollableList.js';
 
@@ -42,10 +43,25 @@ function normalizeCodeFences(text: string): string {
   return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
 }
 
-/** Keeps a streaming answer inside the viewport by showing its last lines. */
-function streamingTail(text: string, rows: number): string {
+/** Keeps a streaming answer inside the viewport by showing its last lines.
+ *  Counts wrapped rows, not source lines: a line wider than the content
+ *  width renders as several rows. Always keeps at least the last line. */
+function streamingTail(text: string, rows: number, width: number): string {
   const lines = text.split('\n');
-  return lines.length > rows ? lines.slice(-rows).join('\n') : text;
+  let used = 0;
+  let start = lines.length - 1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const height = Math.max(
+      1,
+      Math.ceil(getCachedStringWidth(lines[i]!) / Math.max(1, width)),
+    );
+    if (i < lines.length - 1 && used + height > rows) {
+      break;
+    }
+    used += height;
+    start = i;
+  }
+  return lines.slice(start).join('\n');
 }
 
 function footerHint(btw: BtwProps): string {
@@ -135,7 +151,7 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
               text={normalizeCodeFences(
                 maxAnswerRows === undefined
                   ? btw.answer
-                  : streamingTail(btw.answer, maxAnswerRows),
+                  : streamingTail(btw.answer, maxAnswerRows, contentWidth),
               )}
               isPending={true}
               contentWidth={contentWidth}

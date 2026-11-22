@@ -315,4 +315,25 @@ describe('BtwMessage', () => {
     expect(output).toContain('line-25');
     expect(output).not.toContain('line-24');
   });
+
+  it('counts wrapped rows when tailing a long streaming answer', () => {
+    const wideAnswer = (lines: number) =>
+      Array.from(
+        { length: lines },
+        (_, i) => `line-${i}${'x'.repeat(120)}`,
+      ).join('\n');
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{ question: 'q', answer: wideAnswer(30), isPending: true }}
+        containerWidth={60}
+        maxAnswerRows={5}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    // Each line is 127 columns wide and wraps to 3 rows at content width
+    // 56, so only the last line fits in the 5-row budget.
+    expect(output).toContain('line-29');
+    expect(output).not.toContain('line-28');
+  });
 });
