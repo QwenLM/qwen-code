@@ -47445,9 +47445,263 @@ describe('idle suspension', () => {
         },
         { timeout: 5000 },
       );
+      const after = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requested = after.events.filter(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      );
+      expect(requested).toHaveLength(1);
+      expect(requested[0].payload['requestId']).toBe(requestId);
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
       // The reloaded resident suspends on its own; let it go before the next
       // test reads the shared wake stamps.
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('denies a parked approval after cold recovery without executing the sealed call', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server, undefined, 30_000);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          optionId: 'deny',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      // Deny executes the sealed call zero times.
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      const after = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requested = after.events.filter(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      );
+      expect(requested).toHaveLength(1);
+      expect(requested[0].payload['requestId']).toBe(requestId);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      // No later stamp carries a parkedTurn for the denied prompt.
+      expect(
+        state.wakeStamps.filter(
+          (stamp) =>
+            (stamp as { parkedTurn?: { promptId: string } }).parkedTurn
+              ?.promptId === PROMPT_ID,
+        ),
+      ).toHaveLength(1);
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('resumes a parked approval through a mode change that allows on behalf', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server, undefined, 30_000);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      // The mode change unparks at the control plane; the recovered driver
+      // must re-read the new selection and allow on the user's behalf.
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'auto-edit',
+        revision: 1,
+      });
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      // No manual resolve: the live poll allowed on behalf under the new mode.
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('ends a parked approval expired once the wake time passes', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const prompt = [{ type: 'text', text: 'write notes' }];
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 1_500,
+        })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          deadlineMs: 30_000,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      // Outlive the approval expiry: the sweep dispatches as usual once
+      // retry_after passes, and the resumed driver ends the Action expired.
+      await sleep(2_000);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'expired',
+        ),
+      ).toBe(true);
       await vi.waitFor(
         async () => {
           expect(
@@ -47547,6 +47801,22 @@ describe('idle suspension', () => {
         },
         { timeout: 5000 },
       );
+      const after = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requested = after.events.filter(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      );
+      expect(requested).toHaveLength(1);
+      expect(requested[0].payload['requestId']).toBe(requestId);
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
       await vi.waitFor(
         async () => {
@@ -47764,6 +48034,22 @@ describe('idle suspension', () => {
         },
         { timeout: 5000 },
       );
+      const after = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requested = after.events.filter(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      );
+      expect(requested).toHaveLength(1);
+      expect(requested[0].payload['requestId']).toBe(requestId);
       // The resumed Turn still executes against the retained runtime.
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
       await vi.waitFor(
@@ -47839,13 +48125,25 @@ describe('idle suspension', () => {
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
     const get = state.approvalSelections.get.bind(state.approvalSelections);
     let failed = false;
+    let bumped = false;
     const read = vi
       .spyOn(state.approvalSelections, 'get')
       .mockImplementation((key) => {
-        if (failed || waiting.mock.calls.length === 0) return get(key);
+        if (failed || waiting.mock.calls.length === 0) {
+          const value = get(key);
+          if (failed && !bumped) {
+            bumped = true;
+            // The retry's pre-gate pass still reads revision 1; only the
+            // closing gate re-read may observe revision 2, so the sealed
+            // stamp witnesses the re-read itself, not the pre-gate pass.
+            state.approvalSelections.set(SESSION_ID, {
+              mode: 'default',
+              revision: 2,
+            });
+          }
+          return value;
+        }
         failed = true;
-        // The gate re-read must observe this bump: the sealed certificate
-        // has to carry the revision read after the failure, not a stale one.
         state.approvalSelections.set(SESSION_ID, {
           mode: 'default',
           revision: 1,
@@ -47860,8 +48158,14 @@ describe('idle suspension', () => {
       });
       expect(failed).toBe(true);
       expect(state.wakeStamps[0]).toMatchObject({
-        parkedTurn: { promptId: PROMPT_ID, approvalRevision: 1 },
+        parkedTurn: { promptId: PROMPT_ID, approvalRevision: 2 },
       });
+      // This cell's Turn has no deadline: wakeAt is the approval expiry
+      // itself, the other arm of the clamp.
+      const wakeAt = (state.wakeStamps[0] as { parkedTurn: { wakeAt: number } })
+        .parkedTurn.wakeAt;
+      expect(wakeAt).toBeGreaterThan(Date.now() + 55_000);
+      expect(wakeAt).toBeLessThanOrEqual(Date.now() + 60_000);
     } finally {
       read.mockRestore();
       waiting.mockRestore();
