@@ -17,13 +17,16 @@ import {
 } from 'react';
 import type {
   CSSProperties,
+  ComponentProps,
   ReactNode,
   RefObject,
   DragEvent as ReactDragEvent,
   ChangeEvent as ReactChangeEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { useOptionalWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import { useOptionalComposerWorkspace } from '../hooks/useComposerWorkspace.js';
 import type { CommandInfo } from '../adapters/types';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { EXECUTION_APPROVAL_MODES } from '../utils/planMode';
@@ -35,7 +38,10 @@ import type {
   ReasoningSelection,
 } from '@qwen-code/sdk/daemon';
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
-import type { SkillInfo } from '../completions/slashCompletion';
+import type {
+  SkillInfo,
+  SlashArgumentCompleter,
+} from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
 import type {
   DaemonReasoningControls,
@@ -83,7 +89,11 @@ import { computePrependSkillTransaction } from './composer/prependSkillInvocatio
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getShadowAwareActiveElement } from '../utils/dom';
 import { POPOVER_MIN_HEIGHT, popoverTopEdge } from '../utils/popoverRoom';
-import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
+import {
+  isCoarsePointerDevice,
+  MODEL_SHEET_QUERY,
+} from '../hooks/useIsTouchComposer';
+import { useIsLargeScreen } from '../hooks/useIsLargeScreen';
 import {
   getComposerTagIconUrl,
   isBuiltinComposerTagIconUrl,
@@ -121,6 +131,7 @@ import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ChevronDownIcon,
   ChevronRightIcon,
+  ChevronUpIcon,
   GitBranchIcon,
   PanelBottomCloseIcon,
   Settings2Icon,
@@ -145,6 +156,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from './ui/popover';
+import { Drawer, DrawerContent, DrawerTitle, DrawerTrigger } from './ui/drawer';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
 import { Switch } from './ui/switch';
@@ -252,6 +264,8 @@ interface ChatEditorProps {
   skillsLoadError?: boolean;
   skillsLoaded?: boolean;
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Completes arguments the static subcommand trees cannot (`/send`). */
+  slashArgumentCompleter?: SlashArgumentCompleter;
   autoSubmitSlashCommands?: boolean;
   queuedMessages?: string[];
   onPopQueuedMessages?: () => boolean;
@@ -841,6 +855,7 @@ function ToolbarDropdownRow({
   hasCheckItems,
   onSelect,
   itemTooltipMount,
+  itemTooltipSide,
   modelPicker,
   pickerContext,
   overlayRoot,
@@ -851,6 +866,7 @@ function ToolbarDropdownRow({
   hasCheckItems: boolean;
   onSelect: (id: string) => void;
   itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  itemTooltipSide?: ComponentProps<typeof UnavailableModelTooltip>['side'];
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
   overlayRoot: HTMLElement | null;
@@ -946,6 +962,7 @@ function ToolbarDropdownRow({
       enabled={!customActive}
       model={{ id: item.id, label: item.label, tooltip: item.tooltip }}
       mount={itemTooltipMount}
+      side={itemTooltipSide}
     >
       {button}
     </UnavailableModelTooltip>
@@ -980,7 +997,7 @@ function ToolbarPopover({
   items: DropdownItem[];
   activeId: string;
   onOpenChange: (open: boolean) => void;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, source?: 'sheet') => void;
   trigger: ReactNode;
   tooltip?: ReactNode;
   showCheck?: boolean;
@@ -1001,14 +1018,20 @@ function ToolbarPopover({
   modelPicker?: WebShellModelPickerOptions;
   pickerContext?: ModelPickerContext;
 }) {
+  const { t } = useI18n();
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
+  // Touch and narrow viewports have no room beside the popover for the model
+  // list, so the whole control becomes a bottom sheet with inline sections.
+  const mobileSheet = useIsLargeScreen(MODEL_SHEET_QUERY) && !modePopover;
   const [collisionBoundary, setCollisionBoundary] =
     useState<HTMLElement | null>(null);
   const selectionRef = useRef(false);
   const handoffRef = useRef(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
+  const sheetBodyRef = useRef<HTMLDivElement>(null);
+  const sheetListRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
   const scopeKey = JSON.stringify([
@@ -1036,6 +1059,24 @@ function ToolbarPopover({
   }, [open]);
 
   useEffect(() => {
+    if (mobileSheet) {
+      // Focus non-input containers so touch interaction never opens the
+      // software keyboard, while keyboard and screen-reader focus stays in
+      // the dialog and enters the expanded list.
+      if (open && submenuOpen) {
+        sheetListRef.current?.focus();
+      } else if (open && returningFromSubmenuRef.current) {
+        returningFromSubmenuRef.current = false;
+        submenuTriggerRef.current?.focus();
+      } else if (open) {
+        // The Drawer portal mounts after this effect on the initial opening.
+        // If no submenu state changed, focus its body once that mount commits.
+        queueMicrotask(() => {
+          if (!submenuOpen) sheetBodyRef.current?.focus();
+        });
+      }
+      return;
+    }
     if (open && submenuOpen) {
       searchInputRef.current?.focus();
       return;
@@ -1044,7 +1085,7 @@ function ToolbarPopover({
       returningFromSubmenuRef.current = false;
       submenuTriggerRef.current?.focus();
     }
-  }, [open, submenuOpen]);
+  }, [open, submenuOpen, mobileSheet]);
 
   const hasCheckItems = hasRichItems || showCheck;
   const dropdownItems = (
@@ -1066,9 +1107,19 @@ function ToolbarPopover({
           hasCheckItems={hasCheckItems}
           onSelect={(id) => {
             selectionRef.current = true;
+            if (mobileSheet) {
+              // Keep the sheet open so reasoning controls stay reachable;
+              // only the floating model card collapses on selection.
+              returningFromSubmenuRef.current = true;
+              setSubmenuOpen(false);
+              setSearchQuery('');
+              onSelect(id, 'sheet');
+              return;
+            }
             onSelect(id);
           }}
           itemTooltipMount={itemTooltipMount}
+          itemTooltipSide={mobileSheet ? 'top' : undefined}
           modelPicker={modelPicker}
           pickerContext={pickerContext}
           overlayRoot={overlayRoot}
@@ -1081,6 +1132,12 @@ function ToolbarPopover({
       )}
     </div>
   );
+  // iOS zooms the page when a focused field is under 16px. The sheet also
+  // opens on landscape tablets, which still match the Input's md: shrink to
+  // text-sm, so the touch field holds text-base at every breakpoint. The
+  // sheet doubles as the popover in narrow desktop windows, where a mouse
+  // wants the compact field and its spell-check, so gate on the pointer too.
+  const touchSearchField = mobileSheet && isCoarsePointerDevice();
   const searchInput = searchable ? (
     <Input
       ref={searchInputRef}
@@ -1089,6 +1146,11 @@ function ToolbarPopover({
       aria-label={searchLabel}
       placeholder={searchLabel}
       autoComplete="off"
+      className={touchSearchField ? 'h-11 text-base md:text-base' : undefined}
+      autoCapitalize={touchSearchField ? 'off' : undefined}
+      autoCorrect={touchSearchField ? 'off' : undefined}
+      spellCheck={touchSearchField ? false : undefined}
+      enterKeyHint={touchSearchField ? 'search' : undefined}
       onChange={(event) => setSearchQuery(event.target.value)}
       onKeyDown={(event) => {
         if (!submenu || event.key !== 'ArrowLeft' || searchQuery) return;
@@ -1125,6 +1187,107 @@ function ToolbarPopover({
       {dropdownItems}
     </>
   );
+
+  if (mobileSheet) {
+    return (
+      <Drawer
+        open={open}
+        onOpenChange={onOpenChange}
+        shouldScaleBackground={false}
+      >
+        <DrawerTrigger ref={triggerRef} asChild>
+          {trigger}
+        </DrawerTrigger>
+        <DrawerContent
+          aria-describedby={undefined}
+          data-web-shell-model-sheet
+          className="pb-[max(1rem,env(safe-area-inset-bottom))]"
+          onClick={(event) => event.stopPropagation()}
+          onOpenAutoFocus={(event) => event.preventDefault()}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            triggerRef.current?.focus();
+          }}
+          onEscapeKeyDown={(event) => {
+            if (isHostOverlayEvent(event)) event.preventDefault();
+          }}
+          onPointerDownOutside={(event) => {
+            if (isHostOverlayEvent(event.detail.originalEvent)) {
+              event.preventDefault();
+            }
+          }}
+          onInteractOutside={(event) => {
+            if (isHostOverlayEvent(event.detail.originalEvent)) {
+              event.preventDefault();
+            }
+          }}
+        >
+          <DrawerTitle className="sr-only">
+            {submenu?.sectionLabel ?? t('model.select')}
+          </DrawerTitle>
+          <div
+            ref={sheetBodyRef}
+            tabIndex={-1}
+            className="min-h-0 overflow-y-auto px-3 outline-none"
+            data-vaul-no-drag
+          >
+            {header}
+            {!submenu && searchableItems}
+          </div>
+          {submenu && (
+            <div className="relative px-3">
+              <button
+                type="button"
+                ref={submenuTriggerRef}
+                className={`${styles.dropdownItem} ${styles.sheetSectionRow}`}
+                data-web-shell-model-submenu-trigger
+                aria-expanded={submenuOpen}
+                aria-label={submenu.triggerAriaLabel}
+                onClick={() => {
+                  if (submenuOpen) returningFromSubmenuRef.current = true;
+                  setSubmenuOpen((value) => !value);
+                  setSearchQuery('');
+                }}
+              >
+                <span>{submenu.sectionLabel}</span>
+                <span className={styles.sheetSectionValue}>
+                  <span title={submenu.triggerLabel}>
+                    {submenu.triggerLabel}
+                  </span>
+                  {submenuOpen ? (
+                    <ChevronUpIcon aria-hidden="true" />
+                  ) : (
+                    <ChevronDownIcon aria-hidden="true" />
+                  )}
+                </span>
+              </button>
+              {submenuOpen && (
+                <div
+                  ref={sheetListRef}
+                  tabIndex={-1}
+                  data-web-shell-model-sheet-list
+                  className="absolute inset-x-3 bottom-[calc(100%+8px)] max-h-[60vh] overflow-y-auto rounded-xl border bg-popover p-2 shadow-lg outline-none"
+                  data-vaul-no-drag
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  {searchableItems}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="px-3 pt-2">
+            <Button
+              className="w-full"
+              data-web-shell-model-sheet-done
+              onClick={() => onOpenChange(false)}
+            >
+              {t('common.done')}
+            </Button>
+          </div>
+        </DrawerContent>
+      </Drawer>
+    );
+  }
 
   return (
     <Popover
@@ -1346,7 +1509,7 @@ function ModelReasoningControls({
       <div className={styles.reasoningSectionTitle}>
         {t('reasoning.options')}
       </div>
-      <div className={styles.reasoningThinkingRow}>
+      <div className={styles.reasoningThinkingRow} data-web-shell-thinking-row>
         <span>{t('reasoning.thinking')}</span>
         <Switch
           checked={reasoning.enabled}
@@ -1746,6 +1909,7 @@ export const ChatEditor = memo(
       skillsLoadError = false,
       skillsLoaded = false,
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands = false,
       queuedMessages = [],
       onPopQueuedMessages,
@@ -1858,6 +2022,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      composerGlowEnabled = true,
       modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
@@ -1881,7 +2046,7 @@ export const ChatEditor = memo(
 
     // Resolve the upload target BEFORE useComposerCore so the @ panel's upload
     // item can be capability-gated (hidden on daemons without the feature).
-    const uploadWorkspace = useOptionalWorkspace();
+    const uploadWorkspace = useOptionalComposerWorkspace();
     const uploadTarget = useMemo(() => {
       // The host switch also applies to an explicitly scoped Managed target;
       // daemon targets require their own capability and trust checks below.
@@ -2010,6 +2175,7 @@ export const ChatEditor = memo(
         Boolean(onSkillsOpenChange) &&
         (!skillsLoaded || skillsLoading || skillsLoadError),
       slashCommandCategoryOrder,
+      slashArgumentCompleter,
       autoSubmitSlashCommands,
       queuedMessages,
       onPopQueuedMessages,
@@ -2502,11 +2668,38 @@ export const ChatEditor = memo(
       focusComposer,
     ]);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
+    const mobileModelSheet = useIsLargeScreen(MODEL_SHEET_QUERY);
     useEffect(() => {
-      if (modelControlsDisabled) setModelDropdownOpen(false);
-    }, [modelControlsDisabled]);
+      // Model changes disable Sheet controls while it stays open for adjustments.
+      if (modelControlsDisabled && !mobileModelSheet)
+        setModelDropdownOpen(false);
+    }, [modelControlsDisabled, mobileModelSheet]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
+    // Touch-down blur guard shared by the mobile Send and Stop controls. Do
+    // not dismiss the software keyboard between touch-down and click: the
+    // resulting viewport resize would move the control out from under the same
+    // tap before its click is dispatched (#12462).
+    //
+    // Gate it on the pointer that started the press, not the composer backend:
+    // the history-search panel closes on an *unprevented* window `mousedown`
+    // (useComposerCore's outside handler bails on `defaultPrevented`), so
+    // swallowing a real mouse press would leave the panel open over the
+    // just-sent draft. A finger always emits `touchstart` first — which closes
+    // the panel — before the compatibility `mousedown`, so only touch presses
+    // suppress the blur.
+    const pressWasTouchRef = useRef(false);
+    const touchDownGuard = {
+      onTouchStart: () => {
+        pressWasTouchRef.current = true;
+      },
+      onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+        pressWasTouchRef.current = event.pointerType !== 'mouse';
+      },
+      onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+        if (pressWasTouchRef.current) event.preventDefault();
+      },
+    };
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
@@ -2629,16 +2822,13 @@ export const ChatEditor = memo(
       };
     }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
-    // editorViewRef is stable for the component's lifetime, so this effect
-    // runs once and the glow stays attached to the initial contentDOM; it
-    // re-attaches only if the view ref itself is replaced (CodeMirror
-    // recreates contentDOM on view swap, which is uncommon).
     useEffect(() => {
+      if (!composerGlowEnabled) return undefined;
       const glowRoot = containerRef.current;
       const inputEl = editorViewRef.current?.contentDOM;
       if (!glowRoot || !inputEl) return undefined;
       return attachComposerGlow(glowRoot, inputEl);
-    }, [editorViewRef]);
+    }, [composerGlowEnabled, editorViewRef]);
 
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
@@ -2778,12 +2968,13 @@ export const ChatEditor = memo(
     }, [onTogglePlan, core, planControlsDisabled]);
 
     const handleModelSelect = useCallback(
-      (modelId: string) => {
+      (modelId: string, source?: 'sheet') => {
         if (modelControlsDisabled) return;
         if (modelItems.some((item) => item.id === modelId && item.disabled)) {
           return;
         }
         onSelectModel?.(modelId);
+        if (source === 'sheet') return;
         setModelDropdownOpen(false);
         core.focus();
       },
@@ -3185,24 +3376,18 @@ export const ChatEditor = memo(
           Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
         const toolbarWidth = Math.floor(toolbar.getBoundingClientRect().width);
-        const rightWidth = Math.ceil(
-          toolbarRight.getBoundingClientRect().width,
-        );
         const rightGap =
           Number.parseFloat(getComputedStyle(toolbarRight).columnGap) || 0;
         const toggle = widthToggleRef.current;
-        // Exclude the toggle so its own visibility cannot affect the result.
         const toggleSpace = toggle
           ? toggle.getBoundingClientRect().width + rightGap
           : 0;
-        setWidthToggleFits(
-          toolbarWidth - currentLeadingWidth - rightWidth + toggleSpace - gap >=
-            50,
-        );
         const availableWidth = getToolbarExpansionBudget({
           toolbarWidth,
           leadingWidth: currentLeadingWidth,
-          rightWidth,
+          rightWidth: Math.ceil(
+            toolbarRight.getBoundingClientRect().width - toggleSpace,
+          ),
           currentExpansionWidth,
           gap,
         });
@@ -3215,6 +3400,13 @@ export const ChatEditor = memo(
           // expanding so a collapsed/expanded pair cannot form a two-cycle.
           expansionMargin: items.length,
         });
+        // Give labels first use of the space so the toggle cannot evict them.
+        const nextExpansionWidth = items.reduce(
+          (total, item) =>
+            total + (itemVisibility[item.id] ? item.expansionWidth : 0),
+          0,
+        );
+        setWidthToggleFits(availableWidth - nextExpansionWidth >= 50);
         const next = {
           workspaceSelect: itemVisibility.workspaceSelect ?? false,
           workspace: itemVisibility.workspace ?? false,
@@ -3712,7 +3904,10 @@ export const ChatEditor = memo(
                 activeId={currentModel}
                 onOpenChange={(open) => {
                   setModelDropdownOpen(open);
-                  if (open) setModeDropdownOpen(false);
+                  if (open) {
+                    setModeDropdownOpen(false);
+                    void modelRefresh?.refreshLocal?.();
+                  }
                 }}
                 onSelect={handleModelSelect}
                 itemTooltipMount={mountUnavailableModelTooltip}
@@ -4044,6 +4239,7 @@ export const ChatEditor = memo(
                   className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
                   disabled={cancelPreparing || !onCancel}
                   data-web-shell-composer-stop
+                  {...touchDownGuard}
                   aria-label={t('composerMobile.stop')}
                   onClick={(event) => {
                     event.stopPropagation();
@@ -4069,6 +4265,7 @@ export const ChatEditor = memo(
                     : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
+              {...touchDownGuard}
               onClick={(e) => {
                 e.stopPropagation();
                 if (submitLoading) {
@@ -4249,10 +4446,8 @@ export const ChatEditor = memo(
           onDragOver={handleUploadDragOver}
           onDragLeave={handleUploadDragLeave}
           onDropCapture={handleUploadDrop}
-          // Legacy marker from the pre-#8098 glow implementation; no CSS or
-          // script consumes it today, kept as-is to stay faithful to the
-          // restored original.
-          data-dac-glow
+          // Preserve the legacy marker for composers with the glow enabled.
+          data-dac-glow={composerGlowEnabled || undefined}
           onClick={(event) => {
             setModeDropdownOpen(false);
             setModelDropdownOpen(false);
@@ -4264,8 +4459,12 @@ export const ChatEditor = memo(
             core.focus();
           }}
         >
-          <div className={styles.dacAura} aria-hidden="true" />
-          <div className={styles.dacHalo} aria-hidden="true" />
+          {composerGlowEnabled && (
+            <>
+              <div className={styles.dacAura} aria-hidden="true" />
+              <div className={styles.dacHalo} aria-hidden="true" />
+            </>
+          )}
           {uploadEnabled && (
             <input
               ref={fileInputRef}

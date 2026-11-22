@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -25,6 +26,7 @@ import {
 function makeMockConfig(targetDir = '/tmp/mock-repo'): Config {
   return {
     getTargetDir: vi.fn(() => targetDir),
+    getWorktreeSymlinkDirectories: () => [],
   } as unknown as Config;
 }
 
@@ -140,6 +142,24 @@ describe('EnterWorktreeTool.execute', () => {
     await withTmpDir('qwen-no-git-', async (cwd) => {
       const result = await enterFrom(cwd, 'doesnt-matter');
       expect(result.error?.message).toMatch(/not a git repository/i);
+    });
+  });
+
+  it('forwards the invocation signal to worktree creation', async () => {
+    await withTmpDir('qwen-worktree-signal-', async (cwd) => {
+      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd });
+      const create = vi
+        .spyOn(GitWorktreeService.prototype, 'createUserWorktree')
+        .mockResolvedValue({ success: false, error: 'test stopped creation' });
+      const signal = new AbortController().signal;
+      const tool = new EnterWorktreeTool(makeMockConfig(cwd));
+      try {
+        await tool.build({ name: 'signal-probe' }).execute(signal);
+        expect(create).toHaveBeenCalledOnce();
+        expect(create.mock.calls[0]?.[2]?.signal).toBe(signal);
+      } finally {
+        create.mockRestore();
+      }
     });
   });
 });

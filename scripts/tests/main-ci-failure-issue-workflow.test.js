@@ -156,6 +156,12 @@ describe('main CI failure issue workflow', () => {
     );
     for (const name of scheduledNames) {
       expect(Object.keys(watchedFiles), name).toContain(name);
+      expect(
+        parse(
+          readFileSync(`.github/workflows/${watchedFiles[name]}.yml`, 'utf8'),
+        ).on?.schedule ?? [],
+        name,
+      ).not.toHaveLength(0);
     }
     // Nothing above reads the other direction: a watched workflow with a cron
     // must be in that arm, or its nightly red is filtered out here while this

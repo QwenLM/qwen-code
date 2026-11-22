@@ -15,6 +15,7 @@ import {
   createSidebarMocks,
   DAEMON_APPROVAL_MODES,
   installSidebarDomShims,
+  makeSidebarSession,
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { setLivePresence } from '../../live/live-presence';
@@ -3000,7 +3001,10 @@ describe('WebShellSidebar workspace removal', () => {
     const onLoadSession = vi.fn();
     vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
 
-    renderSidebar({ onLoadSession });
+    renderSidebar({
+      onLoadSession,
+      sessionActions: { inlineItems: ['pin', 'rename'] },
+    });
     await expandWorkspace('project');
 
     const row = inlineSessionAction(
@@ -3035,7 +3039,7 @@ describe('WebShellSidebar workspace removal', () => {
     );
     vi.spyOn(HTMLInputElement.prototype, 'focus').mockImplementation(() => {});
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin', 'rename'] } });
     await expandWorkspace('project');
 
     const row = inlineSessionAction(
@@ -3071,7 +3075,7 @@ describe('WebShellSidebar workspace removal', () => {
         },
       );
 
-      renderSidebar();
+      renderSidebar({ sessionActions: { inlineItems: ['pin', 'rename'] } });
       await expandWorkspace('project');
 
       const row = inlineSessionAction(
@@ -3732,7 +3736,7 @@ describe('WebShellSidebar workspace removal', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin', 'rename'] } });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -3744,7 +3748,10 @@ describe('WebShellSidebar workspace removal', () => {
     expect(items).toEqual(expect.arrayContaining(['Delete']));
     expect(items).not.toContain('Rename');
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -5106,7 +5113,10 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/danger' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/danger',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('danger');
     expect(container.textContent).toContain('Untrusted active');
     expect(sessionAction('Untrusted active')).toBeUndefined();
@@ -5704,6 +5714,13 @@ describe('WebShellSidebar session source switch', () => {
     expect(Boolean(row?.querySelector(scenario.selector))).toBe(
       scenario.activeWorkState === 'active',
     );
+    if (scenario.activeWorkState === 'active') {
+      expect(
+        row
+          ?.querySelector(scenario.selector)
+          ?.classList.contains(sidebarStyles.sessionStatusDotRunning),
+      ).toBe(true);
+    }
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
@@ -7228,6 +7245,175 @@ describe('WebShellSidebar Live group', () => {
       container.querySelector('[data-live-starting-session]'),
     ).not.toBeNull();
   });
+  it('shows the starting cue in the hover details until presence clears', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Preparing voice chat',
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, undefined);
+    });
+    const settled = document.querySelector('[role="dialog"]')?.textContent;
+    expect(settled).toContain('Idle');
+    expect(settled).not.toContain('Preparing voice chat');
+  });
+  it('names hidden background work while the voice row is starting', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+              hasRunningBackgroundTasks: true,
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    const details = document.querySelector('[role="dialog"]')?.textContent;
+    expect(details).toContain('Preparing voice chat');
+    expect(details).toContain('Background tasks running');
+  });
+  it.each([
+    ['isWaitingForPermission', 'Needs approval'],
+    ['isWaitingForUserQuestion', 'User input needed'],
+  ] as const)(
+    'keeps %s ahead of the starting cue in the hover details',
+    async (flag, expected) => {
+      const liveWorkspace: DaemonWorkspaceCapability = {
+        id: 'live',
+        cwd: '/tmp/live',
+        primary: false,
+        trusted: true,
+        kind: 'live',
+      };
+      const voiceSession: DaemonSessionSummary = {
+        sessionId: 'voice-session',
+        workspaceCwd: liveWorkspace.cwd,
+        displayName: 'Voice chat',
+        sourceType: 'qwen-live',
+        sourceId: 'realtime_voice:voice-call',
+        ...(flag === 'isWaitingForPermission'
+          ? { isWaitingForPermission: true }
+          : { isWaitingForUserQuestion: true }),
+      };
+      useWorkspaceSessionCatalog(async (cwd) =>
+        cwd === liveWorkspace.cwd ? [voiceSession] : [],
+      );
+      act(() => {
+        setLivePresence(workspace.client as unknown as DaemonClient, {
+          state: 'starting',
+          callId: 'voice-call',
+          coordinator: {
+            workspaceCwd: liveWorkspace.cwd,
+            sessionId: 'voice-session',
+          },
+        });
+      });
+      renderSidebar({
+        showLive: true,
+        workspaces: [...capabilities.workspaces, liveWorkspace],
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const voiceRow = Array.from(
+        container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+      ).find((row) => row.textContent?.includes('Voice chat'));
+      expect(voiceRow).toBeDefined();
+      await act(async () => {
+        voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      });
+      const details = document.querySelector('[role="dialog"]')?.textContent;
+      expect(details).toContain(expected);
+      expect(details).not.toContain('Preparing voice chat');
+    },
+  );
   it('hides Live sessions by default', async () => {
     const liveWorkspace: DaemonWorkspaceCapability = {
       id: 'live',
@@ -7715,7 +7901,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
@@ -8617,5 +8803,161 @@ describe('WebShellSidebar standalone grouping', () => {
         callsBeforeRetry,
       );
     });
+  });
+});
+
+describe('WebShellSidebar goal markers', () => {
+  const goalSession = (
+    goal: NonNullable<DaemonSessionSummary['goal']>,
+  ): DaemonSessionSummary =>
+    makeSidebarSession('goal-session', { displayName: 'Goal session', goal });
+
+  const rowFor = (label: string, root: ParentNode = container) =>
+    Array.from(
+      root.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes(label));
+
+  it('renders the running marker and opens the session on marker click', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'active',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+    );
+    const onLoadSession = vi.fn();
+    renderSidebar({ onLoadSession });
+    await ensureWorkspaceExpanded('project');
+
+    const row = rowFor('Goal session');
+    expect(row).toBeDefined();
+    const marker = row!.querySelector<HTMLElement>(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker).not.toBeNull();
+    expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
+      'running',
+    );
+    expect(marker!.tagName).toBe('BUTTON');
+    expect(marker!.getAttribute('aria-label')).toBe(
+      'Goal: In progress — ship it',
+    );
+
+    await act(async () => click(marker!));
+    expect(onLoadSession).toHaveBeenCalledOnce();
+    expect(onLoadSession).toHaveBeenCalledWith('goal-session', '/tmp/project');
+  });
+
+  it('reserves the actions width for a goal-only row without a PR badge', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'active',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      {
+        sessionId: 'plain-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Plain session',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const goalRow = rowFor('Goal session')!;
+    // No PR badge is rendered, so the reservation must come from the goal
+    // marker alone (reserveActionsWidth's `|| hasGoalMarker` arm).
+    expect(goalRow.querySelector('[class*="sessionPrBadge"]')).toBeNull();
+    expect(
+      goalRow.querySelector('[data-testid="session-goal-marker"]'),
+    ).not.toBeNull();
+    expect(
+      goalRow.querySelector('[class*="sessionMetaSlotReserved"]'),
+    ).not.toBeNull();
+
+    // A goal-less, PR-less row reserves nothing.
+    expect(
+      rowFor('Plain session')!.querySelector(
+        '[class*="sessionMetaSlotReserved"]',
+      ),
+    ).toBeNull();
+  });
+
+  it('paints the attention tone for a paused goal', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    const marker = rowFor('Goal session')!.querySelector(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker?.querySelector('svg')?.getAttribute('data-status')).toBe(
+      'attention',
+    );
+  });
+
+  it('renders no marker for a completed goal or a goal-less session', async () => {
+    active.sessions.push(
+      goalSession({
+        status: 'complete',
+        objective: 'done',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      {
+        sessionId: 'plain-session',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Plain session',
+      },
+    );
+    renderSidebar();
+    await ensureWorkspaceExpanded('project');
+
+    expect(
+      rowFor('Goal session')!.querySelector(
+        '[data-testid="session-goal-marker"]',
+      ),
+    ).toBeNull();
+    expect(
+      rowFor('Plain session')!.querySelector(
+        '[data-testid="session-goal-marker"]',
+      ),
+    ).toBeNull();
+    // The goal-only reservation above already pins the || hasGoalMarker arm
+    // (a goal without a PR badge forces the reservation). This case adds the
+    // completed-specific arm: dropping status !== 'complete' would reserve
+    // the hover-actions slot on every completed row, shifting its icons left.
+    for (const name of ['Goal session', 'Plain session']) {
+      expect(
+        rowFor(name)!.querySelector('[class*="sessionMetaSlotReserved"]'),
+      ).toBeNull();
+    }
+  });
+
+  it('renders the archived-row marker as a pure indicator', async () => {
+    archived.sessions.push({
+      ...goalSession({
+        status: 'paused',
+        objective: 'ship it',
+        updatedAt: '2026-11-17T00:00:00.000Z',
+      }),
+      isArchived: true,
+    });
+    renderSidebar();
+    await openArchiveSettings();
+
+    const marker = archivedSessionsTarget.querySelector<HTMLElement>(
+      '[data-testid="session-goal-marker"]',
+    );
+    expect(marker).not.toBeNull();
+    expect(marker!.tagName).toBe('SPAN');
+    expect(marker!.querySelector('svg')!.getAttribute('data-status')).toBe(
+      'attention',
+    );
   });
 });

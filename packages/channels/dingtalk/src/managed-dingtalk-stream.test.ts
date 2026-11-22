@@ -18,6 +18,7 @@ const mockState = vi.hoisted(() => ({
   constructorOptions: null as unknown,
   // Mirror the SDK getEndpoint() credential log when armed (R12).
   logEndpoint: false,
+  getEndpointCalls: 0,
   // Whether the constructed socket ever emits 'open'. The real SDK resolves
   // connect() on construction; the deps wrapper must wait for 'open' (R10-1).
   socketOpen: true,
@@ -33,12 +34,40 @@ const mockState = vi.hoisted(() => ({
 
 vi.mock('dingtalk-stream-sdk-nodejs', () => {
   class DWClient {
-    config = { autoReconnect: true };
+    config: {
+      clientId?: string;
+      clientSecret?: string;
+      autoReconnect: boolean;
+      subscriptions: Array<{ type: string; topic: string }>;
+    };
     debug = false;
     socket: unknown = null;
     constructor(options?: unknown) {
       mockState.constructorOptions = options;
+      const opts = options as
+        | { clientId?: string; clientSecret?: string }
+        | undefined;
+      this.config = {
+        clientId: opts?.clientId,
+        clientSecret: opts?.clientSecret,
+        autoReconnect: true,
+        subscriptions: [],
+      };
       mockState.instance = this as unknown as typeof mockState.instance;
+    }
+    // Mirror the real SDK's structure: connect() awaits getEndpoint(), and the
+    // credential log lives in getEndpoint(), not in connect(). The wrapper
+    // replaces getEndpoint with its own silent discovery (#17173 R11), so this
+    // log is what must never run.
+    async getEndpoint(): Promise<this> {
+      mockState.getEndpointCalls += 1;
+      if (mockState.logEndpoint) {
+        // eslint-disable-next-line no-console -- mirrors the real SDK credential log
+        console.log('getEndpoint config', {
+          clientSecret: this.config.clientSecret,
+        });
+      }
+      return this;
     }
     // Simulate the SDK dispatch: it console.log()s every raw frame (ungated by
     // its debug flag) and JSON.parse + routes with NO error boundary — the deps
@@ -62,16 +91,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     }
     async connect(): Promise<void> {
       mockState.calls += 1;
-      if (mockState.logEndpoint) {
-        // Mirror the SDK getEndpoint(): it console.log()s the resolved config,
-        // clientSecret included, ungated by the debug flag (R12).
-        // eslint-disable-next-line no-console -- mirrors the real SDK credential log
-        console.log('getEndpoint config', {
-          clientSecret: (
-            mockState.constructorOptions as { clientSecret?: string } | null
-          )?.clientSecret,
-        });
-      }
+      await this.getEndpoint();
       if (mockState.connectGate) {
         await mockState.connectGate.promise;
       }
@@ -154,13 +174,26 @@ beforeEach(() => {
   mockState.acks = [];
   mockState.constructorOptions = null;
   mockState.logEndpoint = false;
+  mockState.getEndpointCalls = 0;
   mockState.socketOpen = true;
   mockState.socketFailEvent = null;
   mockState.socket = null;
+  // The wrapper's own endpoint discovery uses fetch (#17173 R11).
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => ({
+      ok: true,
+      json: async () =>
+        String(url).includes('gettoken')
+          ? { access_token: 'token' }
+          : { endpoint: 'wss://fake.invalid', ticket: 'tk' },
+    })),
+  );
 });
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
@@ -354,7 +387,7 @@ describe('managed DingTalk stream reconnect lifecycle (R4-2 / R4-3)', () => {
 });
 
 describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
-  it('passes clientId, clientSecret and keepAlive to the SDK constructor', () => {
+  it('passes clientId, clientSecret and keepAlive, and turns SDK autoReconnect off', () => {
     const { createStreamClient } = createManagedDingtalkDeps();
     createStreamClient(SETTINGS, () => true);
     expect(mockState.constructorOptions).toEqual({
@@ -362,17 +395,30 @@ describe('managed DingTalk stream SDK wiring pins (#17173 R12)', () => {
       clientSecret: 'secret',
       keepAlive: true,
     });
+    // Reconnect is owned by the wrapper; the SDK's own close-triggered
+    // reconnect would run a second chain alongside it (#17173 R11). The
+    // constructor's options type omits the field, so it is assigned on the
+    // instance, whose config type carries it.
+    expect(
+      (mockState.instance as unknown as { config: { autoReconnect: boolean } })
+        .config.autoReconnect,
+    ).toBe(false);
   });
 
-  it('suppresses the SDK getEndpoint credential log during connect', async () => {
+  it('never runs the SDK credential log, because discovery is replaced', async () => {
     mockState.logEndpoint = true;
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
     await stream.connect();
-    // The SDK logs the clientSecret inside connect; the wrapper must mute it.
+    // The double logs the clientSecret inside its own getEndpoint, as the real
+    // SDK does. The wrapper replaces that method with silent discovery, so the
+    // log must never run — not be muted after the fact (#17173 R11).
     expect(logSpy).not.toHaveBeenCalled();
-    // Suppression is scoped to the attempt: logging works again afterwards.
+    // A mute would also leave the spy uncalled, so pin the replacement itself:
+    // the SDK's own discovery must not have run at all.
+    expect(mockState.getEndpointCalls).toBe(0);
+    // Logging is untouched throughout: it works again afterwards.
     // eslint-disable-next-line no-console -- probing the restored console
     console.log('after connect');
     expect(logSpy).toHaveBeenCalledTimes(1);

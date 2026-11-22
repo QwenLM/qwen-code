@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellSidebarSessionActionsOptions } from './WebShellSidebar';
+import { TOUCH_COMPOSER_QUERY } from '../../hooks/useIsTouchComposer';
 import sidebarStyles from './WebShellSidebar.module.css';
+import { setLivePresence } from '../../live/live-presence';
 import {
   clickSidebarElement as click,
   createSidebarMocks,
@@ -533,6 +535,12 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       renderSidebar(false);
       await flushSidebar();
     };
+    const busyMarker = () =>
+      container.querySelector(`.${sidebarStyles.sessionLoading}`);
+    const isBackgroundBusy = () =>
+      busyMarker()?.classList.contains(
+        sidebarStyles.sessionLoadingBackground,
+      ) === true;
     await update(true, true);
     expect(
       container.querySelector('[data-web-shell-session-running]'),
@@ -540,6 +548,13 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
     ).toBeNull();
+    // The dot is prompt-gated, so during a turn the busy marker is the only
+    // surface left that can name the background work.
+    expect(busyMarker()?.getAttribute('aria-label')).toBe('Running');
+    expect(busyMarker()?.getAttribute('title')).toBe(
+      'Running · Background tasks running',
+    );
+    expect(isBackgroundBusy()).toBe(true);
     await update(false, true);
     expect(
       container.querySelector('[data-web-shell-session-running]'),
@@ -553,14 +568,118 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(
       container.querySelector('[data-web-shell-session-active-work]'),
     ).toBeNull();
+    // The dot is the named carrier in this shape, so the marker must stay
+    // unnamed and carry no title: the row would otherwise announce the same
+    // string twice, and the title only repeats it.
+    expect(busyMarker()?.getAttribute('aria-label')).toBeNull();
+    expect(busyMarker()?.getAttribute('title')).toBeNull();
+    expect(
+      container.querySelectorAll('[aria-label="Background tasks running"]')
+        .length,
+    ).toBe(1);
+    expect(isBackgroundBusy()).toBe(true);
     await update(false, false);
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
     ).toBeNull();
+    expect(isBackgroundBusy()).toBe(false);
+    expect(busyMarker()?.getAttribute('title')).toBeNull();
     await update(false);
     expect(
       container.querySelector('[data-web-shell-session-background-running]'),
     ).toBeNull();
+    expect(isBackgroundBusy()).toBe(false);
+  });
+
+  it('keeps the busy marker when background work is the only activity', async () => {
+    // A monitor holds no active-work category, so the daemon grades the row
+    // idle while background tasks are running. Reading only the turn and
+    // active-work terms would drop the marker here and leave the row looking
+    // finished — and would leave Archive enabled on a row that says it is busy.
+    const capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: [
+        'session_organization',
+        'session_archive',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    connection.capabilities = capabilities;
+    workspace.capabilities = capabilities;
+    active.sessions = [
+      makeSession('monitor-only', {
+        hasActivePrompt: false,
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+    const marker = container.querySelector(`.${sidebarStyles.sessionLoading}`);
+    expect(marker).not.toBeNull();
+    expect(marker?.getAttribute('aria-label')).toBeNull();
+    expect(
+      marker?.classList.contains(sidebarStyles.sessionLoadingBackground),
+    ).toBe(true);
+    expect(
+      container.querySelector('[data-web-shell-session-active-work]'),
+    ).toBeNull();
+
+    const row = [
+      ...container.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find((element) => element.textContent?.includes('monitor-only'))!;
+    const trigger = row.querySelector<HTMLButtonElement>(
+      'button[aria-label="More actions"]',
+    );
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+    });
+    await flushSidebar();
+    const archiveItem = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent?.includes('Archive'));
+    expect(archiveItem).toBeDefined();
+    expect(archiveItem!.hasAttribute('data-disabled')).toBe(true);
+  });
+
+  it('names background work on the marker when a live-starting row hides the dot', async () => {
+    // A live-starting row swaps the status dot for its own spinner, so the
+    // marker becomes the only carrier and must take the name back.
+    active.sessions = [
+      makeSession('live-bg', {
+        hasRunningBackgroundTasks: true,
+        activeWorkState: 'idle',
+      }),
+    ];
+    active.data = active.sessions;
+    setLivePresence(workspace.client, {
+      state: 'starting',
+      coordinator: { workspaceCwd: '/tmp/project', sessionId: 'live-bg' },
+    });
+    try {
+      renderSidebar(false);
+      await flushSidebar();
+      expect(
+        container.querySelector('[data-web-shell-session-background-running]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-live-starting-session]'),
+      ).not.toBeNull();
+      const marker = container.querySelector(
+        `.${sidebarStyles.sessionLoading}`,
+      );
+      expect(marker?.getAttribute('aria-label')).toBe(
+        'Background tasks running',
+      );
+    } finally {
+      setLivePresence(workspace.client, undefined);
+    }
   });
 
   it('shows completion from a secondary workspace on the collapsed icon', async () => {
@@ -1088,6 +1207,30 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     ).toBe(true);
   });
 
+  it('forwards the session artifact count to onLoadSession when the summary carries one', async () => {
+    // The click-time hint path: a summary with artifactCount must reach
+    // onLoadSession as a third argument; without one the call keeps its
+    // two-argument shape (pinned by the collapsed-switcher tests below).
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(false);
+    await flushSidebar();
+
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((el) => el.textContent?.includes('API review'));
+    expect(row).toBeDefined();
+    await act(async () => click(row!));
+
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
+  });
+
   it('keeps project sessions available from the collapsed sidebar', async () => {
     connection.capabilities = {
       qwenCodeVersion: '1.2.3',
@@ -1249,6 +1392,82 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       'calc(var(--web-shell-popover-z-index, 1000) + 1)',
     );
     expect(switcher?.dataset.state).toBe('open');
+  });
+
+  it('keeps a coarse-pointer Recent menu inside the collapsed switcher', async () => {
+    const previousMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query === TOUCH_COMPOSER_QUERY,
+      media: query,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })) as unknown as typeof window.matchMedia;
+    try {
+      active.sessions = [
+        makeSession('session-a', {
+          displayName: 'Recent coarse row',
+          isPinned: false,
+        }),
+      ];
+      active.data = active.sessions;
+      const capabilities = {
+        qwenCodeVersion: '1.2.3',
+        features: [
+          'session_organization',
+          'session_archive',
+          'workspace_qualified_rest_core',
+          'standalone_sessions_v1',
+        ],
+      };
+      connection.capabilities = capabilities;
+      workspace.capabilities = capabilities;
+      workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+        sessions: active.sessions,
+      });
+      renderSidebar(true, { layout: 'single' });
+      await flushSidebar();
+
+      const trigger = container.querySelector<HTMLElement>(
+        '[data-web-shell-collapsed-session-trigger]',
+      );
+      act(() => {
+        trigger?.dispatchEvent(
+          new PointerEvent('pointerover', { bubbles: true }),
+        );
+      });
+      await flushSidebar();
+
+      const switcher = document.querySelector<HTMLElement>(
+        '[data-web-shell-collapsed-session-switcher]',
+      );
+      const recent = switcher?.querySelector('[data-testid="recent-sessions"]');
+      const more = recent?.querySelector<HTMLElement>(
+        'button[aria-label="More actions"]',
+      );
+      expect(more).not.toBeNull();
+      act(() => {
+        more!.dispatchEvent(
+          new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+      });
+      await flushSidebar();
+      const menu = document.querySelector<HTMLElement>('[role="menu"]');
+      expect(menu).not.toBeNull();
+      expect(menu?.style.zIndex).toBe(
+        'calc(var(--web-shell-popover-z-index, 1000) + 1)',
+      );
+
+      await act(async () => {
+        switcher?.dispatchEvent(
+          new PointerEvent('pointerout', { bubbles: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      });
+      expect(switcher?.dataset.state).toBe('open');
+      expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    } finally {
+      window.matchMedia = previousMatchMedia;
+    }
   });
 
   it('keeps the collapsed session switcher open when deleting a session', async () => {
@@ -1857,6 +2076,50 @@ describe('WebShellSidebar collapsed session group persistence', () => {
     expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
   });
 
+  it('forwards the artifact count when search selects a counted session', async () => {
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar(true);
+    await flushSidebar();
+
+    const trigger = container.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-trigger]',
+    );
+    act(() => {
+      trigger!.dispatchEvent(
+        new PointerEvent('pointerover', { bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    const switcher = document.querySelector<HTMLElement>(
+      '[data-web-shell-collapsed-session-switcher]',
+    );
+    const searchButton = switcher!.querySelector<HTMLButtonElement>(
+      'button[aria-label="Search sessions"]',
+    );
+    act(() => {
+      searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+
+    const row = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="dialog"] [role="option"]'),
+    ).find((element) => element.textContent?.includes('API review'));
+    expect(row).not.toBeUndefined();
+    act(() => {
+      row!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flushSidebar();
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
+  });
+
   it('resets collapsed search state when the sidebar expands', async () => {
     renderSidebar(true);
     await flushSidebar();
@@ -2014,7 +2277,7 @@ describe('WebShellSidebar collapsed session group persistence', () => {
 
   it('cancels an in-flight rename when the collapsed switcher is dismissed', async () => {
     connection.sessionId = 'session-a';
-    renderSidebar(true);
+    renderSidebar(true, { sessionActions: { inlineItems: ['pin', 'rename'] } });
     await flushSidebar();
 
     const trigger = container.querySelector<HTMLElement>(
@@ -2780,7 +3043,9 @@ describe('Recent sessions shared rows', () => {
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
       sessions: [active.sessions[0]],
     });
-    renderSidebar();
+    renderSidebar(false, {
+      sessionActions: { inlineItems: ['pin', 'rename'] },
+    });
     await flushSidebar();
     const recent = container.querySelector('[data-testid="recent-sessions"]')!;
     const row = recent.querySelector<HTMLElement>(
@@ -2815,6 +3080,28 @@ describe('Recent sessions shared rows', () => {
     expect(loadSession).not.toHaveBeenCalled();
   });
 
+  it('forwards the artifact count when opening a counted recent session', async () => {
+    enableRecentSessions();
+    active.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        artifactCount: 3,
+      }),
+    ];
+    active.data = active.sessions;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: active.sessions,
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const row = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    await act(async () => click(row));
+    expect(loadSession).toHaveBeenCalledWith('session-a', '/tmp/project', 3);
+  });
+
   it('hides a stale recent row when the pinned catalog already contains it', async () => {
     enableRecentSessions();
     pinned.sessions = [{ ...active.sessions[0], isPinned: true }];
@@ -2838,7 +3125,7 @@ describe('Recent sessions shared rows', () => {
     workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
       sessions: active.sessions,
     });
-    renderSidebar();
+    renderSidebar(false, { sessionActions: { inlineItems: ['pin'] } });
     await flushSidebar();
     const recent = container.querySelector('[data-testid="recent-sessions"]')!;
     expect(recent.textContent).not.toContain('Pinned chat');
@@ -3228,5 +3515,35 @@ describe('Recent sessions shared rows', () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       'API review',
     );
+  });
+
+  it('disables archive for a background-only recent row but not for an idle one', async () => {
+    enableRecentSessions();
+    connection.sessionId = 'some-other-session';
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [
+        makeSession('idle-recent', { displayName: 'Idle recent' }),
+        makeSession('background-recent', {
+          displayName: 'Background recent',
+          hasRunningBackgroundTasks: true,
+          activeWorkState: 'idle',
+        }),
+      ],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const archiveFor = (label: string) =>
+      [
+        ...recent.querySelectorAll<HTMLElement>(
+          `div.${sidebarStyles.sessionRow}`,
+        ),
+      ]
+        .find((row) => row.textContent?.includes(label))!
+        .querySelector<HTMLButtonElement>('[aria-label="Archive"]')!;
+    // The idle control keeps this from passing merely because every archive
+    // button in the list happens to be disabled.
+    expect(archiveFor('Idle recent').disabled).toBe(false);
+    expect(archiveFor('Background recent').disabled).toBe(true);
   });
 });
