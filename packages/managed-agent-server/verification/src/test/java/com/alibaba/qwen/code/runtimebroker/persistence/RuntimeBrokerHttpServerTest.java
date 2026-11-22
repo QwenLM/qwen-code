@@ -609,6 +609,44 @@ public class RuntimeBrokerHttpServerTest {
     }
 
     @Test
+    void prepareRejectsRetiredPrivateCsiInlineFields() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            Map<String, Object> reference = Map.of("sessionId", "runtime", "promptId", "turn",
+                    "callId", "call", "argsDigest", "sha256:" + "a".repeat(64));
+            for (Map<String, Object> extra : List.<Map<String, Object>>of(
+                    Map.of("inputBytesBase64", "e30=", "toolDefinitionBytesBase64", "e30="),
+                    Map.of("inputBytesBase64", "e30="),
+                    Map.of("toolDefinitionBytesBase64", "e30="),
+                    Map.of("toolProtocol", "v3", "publicationId", "pub-1",
+                            "inputBytesBase64", "e30="))) {
+                Map<String, Object> body = new java.util.LinkedHashMap<>(Map.ofEntries(
+                        Map.entry("protocolVersion", 1), Map.entry("requestId", "csi-prepare"),
+                        Map.entry("idempotencyKey", "csi-prepare"), Map.entry("harnessSessionId", "harness"),
+                        Map.entry("runtimeSessionId", "runtime"), Map.entry("turnId", "turn"),
+                        Map.entry("toolCallId", "call"), Map.entry("requestDigest", "sha256:" + "a".repeat(64)),
+                        Map.entry("reference", reference)));
+                body.putAll(extra);
+                HttpResponse<String> response = fixture.post("/executions:prepare", body);
+                assertEquals(400, response.statusCode(), response.body());
+                assertTrue(response.body().contains("runtime_broker_csi_removed"), response.body());
+            }
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void readBatchStaysRetiredAsNotImplemented() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            HttpResponse<String> response = fixture.post("/executions:read-batch",
+                    Map.of("protocolVersion", 1, "harnessSessionId", "harness"));
+            assertEquals(501, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_broker_csi_removed"), response.body());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void v3InstallsOneGrantAndReconcilesTheOriginalFinishedResult() throws Exception {
         try (Fixture fixture = new Fixture(true)) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
