@@ -2897,6 +2897,20 @@ contains whitelisted metadata from the agent, shell, and monitor task
 registries; controllers, timers, offsets, pending messages, and raw registry
 objects are never exposed.
 
+A response with active in-memory scheduled work also has an optional
+`scheduledTasks` array. Each entry carries `id`, `source` (`"cron"` for a
+session-only `cron_create` job or `"wakeup"` for a pending self-paced
+`loop_wakeup`), `cronExpr`, `prompt`, `recurring`, `createdAt`, `expiresAt`,
+`lastFiredAt`, `nextRunAt`, and optional `gate`. These entries never appear
+in the ordinary background `tasks` array. Durable tasks created through
+`/scheduled-tasks` are excluded and remain owned by that CRUD surface.
+`POST /session/:id/tasks/:taskId/cancel` accepts `kind: "cron"` only for these
+session-owned entries; a durable task must be disabled or deleted through its
+workspace-scoped scheduled-task route instead. As with the snapshot itself,
+cancellation resolves the live-session owner and returns
+`{ "cancelled": false }` without mutating another runtime or primary session
+when the task is unknown, disabled, already gone, or durable.
+
 Agent tasks spawned by another sub-agent (nested sub-agents, bounded by
 `maxSubagentDepth`) carry three optional lineage fields: `parentAgentId` (the
 spawning agent task's `id`), `parentName` (the spawning agent's

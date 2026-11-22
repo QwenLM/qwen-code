@@ -54,6 +54,8 @@ let taskActivityKey = 'monitor:running';
 let taskActivityActive = false;
 let refreshTrigger = 0;
 let workflowsEnabled = false;
+let scheduledTaskActivityKey = '';
+const scheduledTasksHandler = vi.fn();
 let latestTasks: DaemonSessionTaskWithWorkflowStatus[] = [];
 
 function deferred<T>(): Deferred<T> {
@@ -116,6 +118,8 @@ function Harness() {
     connected,
     refreshTrigger,
     workflowsEnabled,
+    scheduledTasksHandler,
+    scheduledTaskActivityKey,
   );
   return null;
 }
@@ -144,6 +148,8 @@ beforeEach(() => {
   taskActivityActive = false;
   refreshTrigger = 0;
   workflowsEnabled = false;
+  scheduledTaskActivityKey = '';
+  scheduledTasksHandler.mockReset();
   latestTasks = [];
   sdkMock.actions.getTasks.mockReset();
   sdkMock.actions.getWorkflowTasks.mockReset();
@@ -637,5 +643,37 @@ describe('useBackgroundTasks', () => {
       await oldRequest.promise;
     });
     expect(latestTasks).toEqual([runningMonitor]);
+  });
+
+  it('opens the shared snapshot channel for scheduled-task activity without a second request path', async () => {
+    taskActivityKey = '';
+    sdkMock.actions.getTasks.mockResolvedValue({
+      ...snapshot('session-a'),
+      scheduledTasks: [
+        {
+          id: 'session-wakeup-1',
+          source: 'wakeup',
+          cronExpr: '@wakeup',
+          prompt: 'continue checking',
+          recurring: false,
+          createdAt: 100,
+          expiresAt: null,
+          lastFiredAt: null,
+          nextRunAt: 10_000,
+        },
+      ],
+    });
+    await renderHarness();
+    expect(sdkMock.actions.getTasks).not.toHaveBeenCalled();
+
+    scheduledTaskActivityKey = 'wakeup:create:completed';
+    await rerenderHarness();
+
+    expect(sdkMock.actions.getTasks).toHaveBeenCalledExactlyOnceWith({
+      silent: true,
+    });
+    expect(scheduledTasksHandler).toHaveBeenCalledExactlyOnceWith([
+      expect.objectContaining({ id: 'session-wakeup-1', source: 'wakeup' }),
+    ]);
   });
 });

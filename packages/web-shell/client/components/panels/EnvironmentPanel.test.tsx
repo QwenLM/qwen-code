@@ -1153,6 +1153,7 @@ describe('EnvironmentPanel', () => {
     const manageAllBtn = Array.from(
       section?.querySelectorAll('button') ?? [],
     ).find((btn) => btn.textContent === 'Manage all');
+    const confirmDelete = vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     act(() => {
       disableBtn?.click();
@@ -1164,6 +1165,7 @@ describe('EnvironmentPanel', () => {
 
     expect(onToggleScheduledTask).toHaveBeenCalledWith(durableEntry);
     expect(onRunScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(confirmDelete).toHaveBeenCalledOnce();
     expect(onDeleteScheduledTask).toHaveBeenCalledWith(durableEntry);
     expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(sessionEntry);
     expect(onManageAllScheduledTasks).toHaveBeenCalledOnce();

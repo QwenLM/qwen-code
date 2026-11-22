@@ -369,6 +369,7 @@ import {
   type ContextInstructionFileContent,
 } from './components/artifacts/readContextInstructionFile';
 import {
+  enrichScheduledTasksByTurn,
   getArtifactsByTurn,
   getFileChangesByTurn,
   getScheduledTasksByTurn,
@@ -9520,7 +9521,14 @@ export function App({
       projectFeaturesAvailable &&
       !managedMode &&
       scheduledTaskWorkspaceTarget.resolvable,
+    durableSeeded: currentSessionSummary?.sourceType === 'scheduled_task',
     activityKey: scheduledTaskActivityKey,
+    onRunPrompt: (
+      prompt: string,
+      boundSessionId: string | null,
+      workspaceCwd?: string,
+    ) => runTaskManually(prompt, boundSessionId, workspaceCwd),
+    onError: (error, fallback) => reportError(error, fallback),
     refreshTrigger: backgroundTasksRefreshTrigger,
   });
   const openSessionScheduledTaskDetail = useCallback(
@@ -9546,30 +9554,13 @@ export function App({
     [activeWorkspaceCwd, connection.sessionId, openScheduledTaskPanel],
   );
   const enrichedScheduledTasksByTurn = useMemo(() => {
-    if (scheduledTasksByTurn.size === 0) return scheduledTasksByTurn;
     const { taskStatusById, hasLiveDurableSnapshot, hasLiveSessionSnapshot } =
       sessionScheduledTasks;
-    if (!hasLiveDurableSnapshot && !hasLiveSessionSnapshot) {
-      return scheduledTasksByTurn;
-    }
-    const next = new Map<string, readonly TurnOutputScheduledTask[]>();
-    for (const [turnId, items] of scheduledTasksByTurn) {
-      next.set(
-        turnId,
-        items.map((item) => {
-          const live = taskStatusById.get(item.id);
-          if (live) return { ...item, liveStatus: live };
-          const snapshotReady = item.durable
-            ? hasLiveDurableSnapshot
-            : hasLiveSessionSnapshot;
-          if (snapshotReady) {
-            return { ...item, liveStatus: 'cancelled' as const };
-          }
-          return item;
-        }),
-      );
-    }
-    return next;
+    return enrichScheduledTasksByTurn(scheduledTasksByTurn, {
+      taskStatusById,
+      hasLiveDurableSnapshot,
+      hasLiveSessionSnapshot,
+    });
   }, [scheduledTasksByTurn, sessionScheduledTasks]);
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
@@ -9579,6 +9570,7 @@ export function App({
     backgroundTasksRefreshTrigger,
     workflowsEnabled,
     sessionScheduledTasks.syncSessionTasks,
+    scheduledTaskActivityKey,
   );
   // Bumped after a `/send` so its chip shows without waiting for the event.
   const [subSessionTasksRefresh, setSubSessionTasksRefresh] = useState(0);
@@ -24010,10 +24002,12 @@ export function App({
     setEnvironmentPanelOpen(false);
   }, [persistEnvironmentPanelOpen]);
   const [focusScheduledTasksNonce, setFocusScheduledTasksNonce] = useState(0);
+  const refreshSessionScheduledTasks = sessionScheduledTasks.refresh;
   const openEnvironmentScheduledTasks = useCallback(() => {
+    refreshSessionScheduledTasks();
     handleEnvironmentPanelOpenChange(true);
     setFocusScheduledTasksNonce((n) => n + 1);
-  }, [handleEnvironmentPanelOpenChange]);
+  }, [handleEnvironmentPanelOpenChange, refreshSessionScheduledTasks]);
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -25620,7 +25614,9 @@ export function App({
                           : undefined
                       }
                       onOpenScheduledTasks={
-                        scheduledTasksHeaderItemVisible && connection.sessionId
+                        scheduledTasksHeaderItemVisible &&
+                        environmentPanelReachable &&
+                        connection.sessionId
                           ? openEnvironmentScheduledTasks
                           : undefined
                       }
@@ -28037,6 +28033,7 @@ export function App({
                 agentTasks={environmentAgentTasks}
                 scheduledTasks={sessionScheduledTasks.tasks}
                 scheduledTaskBusyIds={sessionScheduledTasks.busyIds}
+                manualRunActive={sessionScheduledTasks.manualRunActive}
                 focusScheduledTasksNonce={focusScheduledTasksNonce}
                 attachments={
                   logicalSessionKey

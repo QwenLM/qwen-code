@@ -83,7 +83,7 @@ function buildScenario(now: number) {
           id: 2,
           rawOutput: {
             returnDisplay:
-              'Scheduled job cron-build-watch (*/5 * * * *, recurring)',
+              'Scheduled cron-build-watch (*/5 * * * *, recurring)',
             llmContent: 'Created scheduled task (id: cron-build-watch)',
           },
         },
@@ -244,6 +244,9 @@ test('surfaces durable and session-scoped scheduled tasks in header, composer ch
   await expect(section).toContainText('Session');
   await expect(section).toContainText('Verify canary rollout metrics');
   await expect(section).toContainText('Loop');
+  await expect(
+    page.locator('[data-scheduled-task-status="active"]'),
+  ).toHaveCount(1);
 
   const captureDir = process.env['CAPTURE_SESSION_SCHEDULED_DIR'];
   if (captureDir) {
@@ -276,6 +279,33 @@ test('surfaces durable and session-scoped scheduled tasks in header, composer ch
     });
   }
 
+  // Narrow Chromium viewport (not a claim of native mobile WebKit coverage):
+  // the environment moves behind its reachable header entry rather than
+  // keeping the desktop dock forced open, so explicitly reopen it here.
+  await page.setViewportSize({ width: 430, height: 780 });
+  await expect(headerEntry).toBeVisible();
+  await headerEntry.click();
+  await expect(section).toBeVisible();
+  const viewportMetrics = await page.evaluate(() => ({
+    scrollWidth: document.documentElement.scrollWidth,
+    clientWidth: document.documentElement.clientWidth,
+  }));
+  expect(viewportMetrics.scrollWidth).toBeLessThanOrEqual(
+    viewportMetrics.clientWidth + 1,
+  );
+  if (captureDir) {
+    await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
+    });
+    await page.screenshot({
+      path: join(captureDir, 'session-scheduled-tasks-narrow-chromium.png'),
+      animations: 'disabled',
+    });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // Stop the session-scoped cron task inline.
   const cronRow = section
     .locator('[data-testid="environment-scheduled-task"]')
@@ -290,6 +320,9 @@ test('surfaces durable and session-scoped scheduled tasks in header, composer ch
   ).toHaveCount(2);
   await expect(composerChip).toContainText('1 scheduled task');
   await expect(headerEntry).toContainText('2');
+  await expect(
+    page.locator('[data-scheduled-task-status="cancelled"]'),
+  ).toHaveCount(1);
 
   // Pause the durable task inline.
   const durableRow = section

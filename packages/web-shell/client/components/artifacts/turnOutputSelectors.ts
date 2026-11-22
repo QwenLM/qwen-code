@@ -207,6 +207,44 @@ export function getFileChangesByTurn(
   return byTurn;
 }
 
+export interface SessionScheduledTaskLiveSnapshots {
+  taskStatusById: ReadonlyMap<string, 'active' | 'paused'>;
+  hasLiveDurableSnapshot: boolean;
+  hasLiveSessionSnapshot: boolean;
+}
+
+export function enrichScheduledTasksByTurn(
+  byTurn: ReadonlyMap<string, readonly TurnOutputScheduledTask[]>,
+  live: SessionScheduledTaskLiveSnapshots,
+): ReadonlyMap<string, readonly TurnOutputScheduledTask[]> {
+  if (
+    byTurn.size === 0 ||
+    (!live.hasLiveDurableSnapshot && !live.hasLiveSessionSnapshot)
+  ) {
+    return byTurn;
+  }
+  const next = new Map<string, readonly TurnOutputScheduledTask[]>();
+  for (const [turnId, items] of byTurn) {
+    next.set(
+      turnId,
+      items.map((item) => {
+        const status = live.taskStatusById.get(item.id);
+        if (status) return { ...item, liveStatus: status };
+        // No structured id from the tool result was recovered. Equality with
+        // the synthetic callId proves nothing; never infer cancellation from it.
+        if (item.id === item.toolCallId) return item;
+        const hasSnapshot = item.durable
+          ? live.hasLiveDurableSnapshot
+          : live.hasLiveSessionSnapshot;
+        return hasSnapshot
+          ? { ...item, liveStatus: 'cancelled' as const }
+          : item;
+      }),
+    );
+  }
+  return next;
+}
+
 export function getScheduledTasksByTurn(
   messages: readonly Message[],
 ): ReadonlyMap<string, readonly TurnOutputScheduledTask[]> {

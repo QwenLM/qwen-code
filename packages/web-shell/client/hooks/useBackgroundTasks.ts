@@ -44,6 +44,11 @@ export function useBackgroundTasks(
   onScheduledTasks?: (
     tasks: readonly DaemonSessionScheduledTaskStatus[],
   ) => void,
+  /**
+   * Session cron / loop activity. Shares the one request-driven snapshot
+   * channel instead of opening an independent session-status request path.
+   */
+  scheduledTaskActivityKey = '',
 ): DaemonSessionTaskWithWorkflowStatus[] {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -76,14 +81,20 @@ export function useBackgroundTasks(
   }, [sessionId]);
 
   useEffect(() => {
-    if (!connected || !sessionId || (!taskActivityKey && refreshTrigger === 0))
+    if (
+      !connected ||
+      !sessionId ||
+      (!taskActivityKey && !scheduledTaskActivityKey && refreshTrigger === 0)
+    ) {
       return;
+    }
     emptyPollsRef.current = 0;
     setPollingActive(true);
   }, [
     connected,
     owner,
     refreshTrigger,
+    scheduledTaskActivityKey,
     sessionId,
     taskActivityActive,
     taskActivityKey,

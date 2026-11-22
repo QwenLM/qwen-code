@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  enrichScheduledTasksByTurn,
   getArtifactsByTurn,
   getFileChangesByTurn,
   getScheduledTasksByTurn,
@@ -1120,5 +1121,70 @@ describe('turnOutputSelectors', () => {
       id: 'cron-call',
       title: 'standup',
     });
+  });
+});
+
+describe('live scheduled-task labels', () => {
+  const syntheticOnly = {
+    id: 'tool-cron-1',
+    toolCallId: 'tool-cron-1',
+    title: 'poll',
+    cron: '*/5 * * * *',
+    prompt: 'poll build',
+    recurring: true,
+    durable: false,
+  } as const;
+  const knownId = {
+    id: 'cron-known',
+    toolCallId: 'tool-cron-2',
+    title: 'report',
+    cron: '0 9 * * *',
+    prompt: 'daily report',
+    recurring: true,
+    durable: false,
+  } as const;
+  const knownPaused = {
+    id: 'durable-paused',
+    toolCallId: 'tool-cron-3',
+    title: 'weekly report',
+    cron: '0 9 * * 1',
+    prompt: 'weekly report',
+    recurring: true,
+    durable: true,
+  } as const;
+  const byTurn = new Map([['turn-1', [syntheticOnly, knownId, knownPaused]]]);
+
+  it('marks only recognized ids from the current snapshots', () => {
+    const knownGone = { ...knownId, id: 'cron-gone' };
+    const merged = enrichScheduledTasksByTurn(
+      new Map([
+        ['turn-1', [knownId, knownPaused]],
+        ['turn-2', [knownGone]],
+      ]),
+      {
+        taskStatusById: new Map([
+          ['cron-known', 'active'],
+          ['durable-paused', 'paused'],
+        ]),
+        hasLiveDurableSnapshot: true,
+        hasLiveSessionSnapshot: true,
+      },
+    );
+    expect(merged.get('turn-1')?.map((task) => task.liveStatus)).toEqual([
+      'active',
+      'paused',
+    ]);
+    expect(merged.get('turn-2')?.[0]?.liveStatus).toBe('cancelled');
+  });
+
+  it('never infers cancellation from a synthetic tool-call id fallback', () => {
+    const merged = enrichScheduledTasksByTurn(byTurn, {
+      taskStatusById: new Map(),
+      hasLiveDurableSnapshot: true,
+      hasLiveSessionSnapshot: true,
+    });
+    // Known ids are labeled; an unidentifiable historical tool call is not.
+    expect(merged.get('turn-1')?.[0]).toEqual(syntheticOnly);
+    expect(merged.get('turn-1')?.[0]).not.toHaveProperty('liveStatus');
   });
 });

@@ -66,6 +66,7 @@ interface EnvironmentPanelProps {
   agentTasks?: readonly EnvironmentAgentTask[];
   scheduledTasks?: readonly SessionScheduledTask[];
   scheduledTaskBusyIds?: ReadonlySet<string>;
+  manualRunActive?: boolean;
   focusScheduledTasksNonce?: number;
   attachments?: readonly DaemonSessionAttachmentReference[];
   attachmentsLoading?: boolean;
@@ -201,6 +202,7 @@ export function EnvironmentPanel({
   agentTasks,
   scheduledTasks,
   scheduledTaskBusyIds,
+  manualRunActive = false,
   focusScheduledTasksNonce,
   attachments,
   attachmentsLoading = false,
@@ -681,7 +683,7 @@ export function EnvironmentPanel({
                                 className={styles.scheduledIconButton}
                                 aria-label={t('scheduledTasks.runNow')}
                                 title={t('scheduledTasks.runNow')}
-                                disabled={busy}
+                                disabled={busy || manualRunActive}
                                 onClick={() => onRunScheduledTask(entry)}
                               >
                                 <RefreshCwIcon />
@@ -694,7 +696,17 @@ export function EnvironmentPanel({
                                 aria-label={t('scheduledTasks.delete')}
                                 title={t('scheduledTasks.delete')}
                                 disabled={busy}
-                                onClick={() => onDeleteScheduledTask(entry)}
+                                onClick={() => {
+                                  if (
+                                    window.confirm(
+                                      t('scheduledTasks.deleteConfirm', {
+                                        name: entry.title,
+                                      }),
+                                    )
+                                  ) {
+                                    onDeleteScheduledTask(entry);
+                                  }
+                                }}
                               >
                                 <Trash2Icon />
                               </button>
