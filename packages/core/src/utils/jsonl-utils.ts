@@ -48,6 +48,7 @@ type JsonlReadLinesOptions = {
 interface ParsedJsonlLine<T> {
   records: T[];
   complete: boolean;
+  salvagedCount?: number;
 }
 
 /**
@@ -112,6 +113,12 @@ export function canStartRecoveredSuffix(
     if (previous === '[' || previous === ',' || previous === ':') return false;
   }
 
+  // In JSON, an object's first token must be a string key or close brace;
+  // a '{' immediately followed by another '{' can never start a valid object.
+  let next = recordStart + 1;
+  while (next < line.length && /\s/.test(line[next]!)) next++;
+  if (next < line.length && line[next] === '{') return false;
+
   return inString || depth === 0;
 }
 
@@ -142,7 +149,7 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
   let candidateSuffixStarts: number[] = [];
 
   const recordCandidate = (offset: number) => {
-    if (candidateSuffixStarts.length >= 64) {
+    if (candidateSuffixStarts.length >= 512) {
       candidateSuffixStarts.shift();
     }
     candidateSuffixStarts.push(offset);
@@ -232,9 +239,9 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
     idx < candidateSuffixStarts.length && attempts < MAX_SUFFIX_ATTEMPTS;
     idx++
   ) {
-    attempts++;
     const candidate = candidateSuffixStarts[idx];
     if (canStartRecoveredSuffix(line, candidate)) {
+      attempts++;
       try {
         const parsed = JSON.parse(line.slice(candidate));
         if (
@@ -246,6 +253,7 @@ function recoverObjectsFromLine<T = unknown>(line: string): ParsedJsonlLine<T> {
           return {
             records: [...out, parsed as T],
             complete: false,
+            salvagedCount: 1,
           };
         }
       } catch {
@@ -381,10 +389,14 @@ async function readLinesWithIntegrityInternal<T = unknown>(
       scannedLines++;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       complete &&= parsed.complete;
-      for (const obj of parsed.records) {
+      const salvagedCount = parsed.salvagedCount ?? 0;
+      const cleanCount = parsed.records.length - salvagedCount;
+      for (let idx = 0; idx < parsed.records.length; idx++) {
+        const obj = parsed.records[idx]!;
         if (budget === 'records' && results.length >= count) break;
+        const isSalvaged = idx >= cleanCount;
         if (
-          !parsed.complete &&
+          isSalvaged &&
           isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
         ) {
           continue;
@@ -474,9 +486,13 @@ export async function read<T = unknown>(
       if (trimmed.length === 0) continue;
       const parsed = parseLineTolerantWithIntegrity<T>(trimmed, filePath);
       if (!parsed.complete) options.onIncompleteRead?.();
-      for (const obj of parsed.records) {
+      const salvagedCount = parsed.salvagedCount ?? 0;
+      const cleanCount = parsed.records.length - salvagedCount;
+      for (let idx = 0; idx < parsed.records.length; idx++) {
+        const obj = parsed.records[idx]!;
+        const isSalvaged = idx >= cleanCount;
         if (
-          !parsed.complete &&
+          isSalvaged &&
           isOrphanTranscriptSalvage(obj, knownUuids, results.length > 0)
         ) {
           continue;

@@ -308,6 +308,7 @@ describe('_recoverObjectsFromLine', () => {
     ).toEqual({
       records: [{ a: 1 }, { c: 2 }],
       complete: false,
+      salvagedCount: 1,
     });
   });
 
@@ -365,6 +366,14 @@ describe('_recoverObjectsFromLine', () => {
     expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
   });
 
+  it('salvages complete suffix record containing 64 or more nested object opens', () => {
+    // 70 nested items inside suffix record; outer start brace must not be evicted
+    const items = Array.from({ length: 70 }, (_, i) => ({ i }));
+    const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
+    const line = '{"backgroundTurn":{"sess' + JSON.stringify(suffixRecord);
+    expect(_recoverObjectsFromLine(line)).toEqual([suffixRecord]);
+  });
+
   it('salvages complete suffix record when torn prefix contains more than 64 braces', () => {
     const items = Array.from({ length: 20 }, (_, i) => ({ i }));
     const suffixRecord = { uuid: 'c2fdde8f', type: 'turn', items };
@@ -399,6 +408,7 @@ describe('_recoverObjectsFromLine', () => {
       {
         records: [{ uuid: 'c2fdde8f' }],
         complete: false,
+        salvagedCount: 1,
       },
     );
   });
@@ -1841,6 +1851,30 @@ describe('writeLine / writeLineSync / write', () => {
 
     const records = await read<{ uuid?: string }>(file);
     expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1']);
+  });
+
+  it('preserves clean mid-file root when glued to torn tail', async () => {
+    // Witness R5-1: line carries complete mid-file root (such as /rewind) glued to torn tail
+    const file = tmpFile(
+      '{"uuid":"u1","parentUuid":null,"type":"user"}\n' +
+        '{"uuid":"a1","parentUuid":"u1","type":"assistant"}\n' +
+        '{"uuid":"r2","parentUuid":null,"type":"rewind"}{"uuid":"u3","content":"unclosed...\n' +
+        '{"uuid":"u4","parentUuid":"r2","type":"user"}',
+    );
+
+    const records = await read<{ uuid?: string }>(file);
+    expect(records.map((r) => r.uuid)).toEqual(['u1', 'a1', 'r2', 'u4']);
+
+    const lineRecords = await readLinesWithIntegrity<{ uuid?: string }>(
+      file,
+      Infinity,
+    );
+    expect(lineRecords.records.map((r) => r.uuid)).toEqual([
+      'u1',
+      'a1',
+      'r2',
+      'u4',
+    ]);
   });
 
   it('write() creates parent dirs when missing', () => {
