@@ -6,6 +6,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release-managed-agent-reference.yml'
+      - '.github/scripts/maven-cache-seed.sh'
       - 'scripts/package-managed-agent-reference.mjs'
       - 'scripts/generate-managed-agent-configuration-reference.mjs'
       - 'scripts/contract-version-utils.js'
@@ -330,12 +331,19 @@ jobs:
             # resolver rewrites its bookkeeping through hardlinked seeds, so
             # this build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
-            mkdir -p "${repo}"
-            cp -aln "${HOME}/.m2/repository/." "${repo}/" 2>/dev/null || true
-            find "${repo}" -depth -type d \
-              \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-              -exec rm -rf {} + 2>/dev/null || true
-            find "${repo}" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name '*.tmp' \) -delete 2>/dev/null || true
+            seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+            if [ ! -f "${seed_helper}" ]; then
+              # Missing helper tooling for an older checkout must stay tied
+              # to this workflow revision, not to an unsafe host cache.
+              seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+              curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+                "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+                -o "${seed_helper}" || {
+                  echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+                  exit 1
+              }
+            fi
+            source "${seed_helper}"
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install

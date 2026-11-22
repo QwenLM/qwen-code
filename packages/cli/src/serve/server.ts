@@ -24,6 +24,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
+import { resolveDaemonExportChannel } from '../config/acp-channel-fallback.js';
 import type {
   DaemonMetricsBucket,
   DaemonPerfSnapshot,
@@ -934,6 +935,13 @@ export function createServeApp(
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  // Resolved once per daemon from the frozen launch env; both transcript
+  // export surfaces (workspace sessions and standalone conversations) share
+  // it so a co-resident daemon cannot relabel either.
+  const exportChannel = resolveDaemonExportChannel(
+    opts.profile,
+    daemonEnvAtBoot,
+  );
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
     opts.maxRegisteredWorkspaces,
     daemonEnvAtBoot,
@@ -2063,6 +2071,7 @@ export function createServeApp(
     );
     standaloneSessionService = new StandaloneSessionService({
       daemonLog,
+      exportChannel,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -3692,6 +3701,7 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    exportChannel,
     // Late-bound: the refresh timer is started before this app exists, so the
     // serve root installs the hook on locals and it is read per restore.
     onSessionRestored: ({ workspaceCwd, sessionId }) => {
