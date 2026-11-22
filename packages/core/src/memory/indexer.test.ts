@@ -27,6 +27,7 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import * as trustedMemoryFilesystem from './trusted-memory-filesystem.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+import { formatIndexEntry, parseIndexEntry } from './index-budget.js';
 
 vi.mock('./trusted-memory-filesystem.js', { spy: true });
 
@@ -68,6 +69,35 @@ describe('managed auto-memory indexer', () => {
       retryDelay: 10,
     });
   });
+
+  it.each(['hook', 'h'.repeat(120)])(
+    'keeps the writer and reader grammar aligned for grouped description %j',
+    (description) => {
+      const doc = (relativePath: string) => ({
+        scope: 'team' as const,
+        type: 'reference' as const,
+        relativePath,
+        filePath: `/tmp/${relativePath}`,
+        filename: path.basename(relativePath),
+        title: 'Topic — title',
+        description,
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      });
+      const primary = `notes/${'a'.repeat(85)}.md`;
+      const index = buildTeamAutoMemoryIndex([doc(primary), doc('notes/b.md')]);
+      const entry = parseIndexEntry(index);
+      expect(entry).toEqual({
+        link: `- [Topic — title](${primary})`,
+        description: description.length > 24 ? undefined : description,
+        suffix: ' (also: notes/b.md)',
+      });
+      expect(entry && formatIndexEntry(entry)).toBe(index);
+    },
+  );
 
   it('does not create a missing compatibility root while rebuilding', async () => {
     const missingRoot = path.join(tempDir, 'missing-memory-root');

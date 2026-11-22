@@ -25,6 +25,7 @@ import {
 import { OpenAIContentConverter } from './converter.js';
 import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import {
@@ -58,10 +59,13 @@ import {
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+/** Span attribute writes made through the attempt handle, keyed as recorded. */
+const mockSpanAttributes = vi.hoisted(() => new Map<string, unknown>());
 
 vi.mock('./converter.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./converter.js')>();
@@ -257,6 +261,11 @@ function expectStopWithUsage(response: GenerateContentResponse) {
 }
 
 describe('ContentGenerationPipeline', () => {
+  const httpResponse = (
+    headers: Record<string, string>,
+    body: ReadableStream | null = null,
+  ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
+
   let pipeline: ContentGenerationPipeline;
   let mockConfig: PipelineConfig;
   let mockProvider: OpenAICompatibleProvider;
@@ -268,6 +277,9 @@ describe('ContentGenerationPipeline', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSpanAttributes.clear();
+    activeHandle = attemptHandle();
+    mockReportOpenAiRequest.mockReturnValue(activeHandle);
 
     mockClient = {
       chat: {
@@ -320,6 +332,26 @@ describe('ContentGenerationPipeline', () => {
   });
 
   const createMock = () => mockClient.chat.completions.create as Mock;
+
+  /**
+   * The handle the pipeline is given for one attempt. `recordResponseAttribute`
+   * is the only member the OpenRouter capture uses, so it records into a map
+   * rather than standing up a real span.
+   */
+  const attemptHandle = () => ({
+    controller: {
+      recordResponseAttribute: (
+        handle: unknown,
+        key: string,
+        value: unknown,
+      ) => {
+        if (handle !== activeHandle) return;
+        mockSpanAttributes.set(key, value);
+      },
+    },
+    generation: 1,
+  });
+  let activeHandle: ReturnType<typeof attemptHandle> | undefined;
 
   /** The body the SDK received on its `index`-th create() call. */
   const sentBody = (index = 0) => createMock().mock.calls.at(index)![0];
@@ -898,28 +930,158 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('never ships the max tier to the tiered DashScope family end to end', async () => {
-      // `/effort max` persists the tier in config, so a raw pass-through 400s
-      // on this and every later request of the session: through the real
-      // provider, the wire body must carry the tier capped at xhigh.
+    it.each([
+      'qwen3.8-max',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])(
+      'never ships the max tier to the tiered DashScope family end to end (%s)',
+      async (model) => {
+        // `/effort max` persists the tier in config, so a raw pass-through 400s
+        // on this and every later request of the session: through the real
+        // provider, the wire body must carry the tier capped at xhigh.
+        const apiCall = await executeWith(
+          {
+            baseUrl: DASHSCOPE_URL,
+            model,
+            authType: AuthType.QWEN_OAUTH,
+            reasoning: { effort: 'max' },
+          },
+          userRequest(model, {
+            thinkingConfig: { includeThoughts: true },
+          }),
+          'prompt-id',
+          DashScopeOpenAICompatibleProvider,
+        );
+
+        // The tier ships alone — no competing nested knob.
+        expectFields(apiCall, {
+          reasoning_effort: 'xhigh',
+          reasoning: undefined,
+        });
+      },
+    );
+
+    it('clamps qwen4 non-thinking output to the 131072 range', async () => {
+      // The auto budget is sized for thinking mode (262144, ceiling-exempt).
+      // With thinking disabled the non-thinking cap is 131072, so a short
+      // prompt must not ship the thinking-sized max_tokens (400 range error).
       const apiCall = await executeWith(
         {
           baseUrl: DASHSCOPE_URL,
-          model: 'qwen3.8-max',
+          model: 'qwen4-max',
           authType: AuthType.QWEN_OAUTH,
-          reasoning: { effort: 'max' },
+          samplingParams: undefined,
+          reasoning: false,
         },
-        userRequest('qwen3.8-max', {
-          thinkingConfig: { includeThoughts: true },
-        }),
+        userRequest('qwen4-max'),
         'prompt-id',
         DashScopeOpenAICompatibleProvider,
       );
-
-      // The tier ships alone — no competing nested knob.
       expectFields(apiCall, {
-        reasoning_effort: 'xhigh',
-        reasoning: undefined,
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('keeps the qwen4 thinking-mode output budget above the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: undefined,
+          reasoning: { effort: 'high' },
+        },
+        userRequest('qwen4-max', { thinkingConfig: { includeThoughts: true } }),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'high',
+        max_tokens: 262144,
+      });
+    });
+
+    it('clamps an explicit user max_tokens to the non-thinking cap when thinking is off', async () => {
+      // samplingParams merge into the base request before the reasoning
+      // shaping, so the clamp bounds an explicit user ceiling too — it only
+      // shrinks the value, never raises it.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('clamps a provider output-budget key to the non-thinking cap when thinking is off', async () => {
+      // The budget can travel under max_completion_tokens (samplingParams
+      // escape hatch) instead of max_tokens; the non-thinking clamp must
+      // bound that key too, not just max_tokens.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 262144 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 131072,
+      });
+    });
+
+    it('keeps an explicit provider output-budget key below the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 50000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 50000,
+      });
+    });
+
+    it('does not apply the qwen4-max non-thinking cap to other qwen4 routes', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-plus',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-plus'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 200000,
       });
     });
 
@@ -1212,6 +1374,103 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
+    it('returns a required-thinking error on a single attempt', async () => {
+      const model = 'qwen3.8-max-preview';
+      pipelineWith({
+        baseUrl: TOKEN_PLAN_URL,
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      const error = requiredThinkingError();
+      createMock().mockRejectedValueOnce(error);
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () =>
+          pipeline.execute(sideQuery(model), 'side-query:mod-model-complete'),
+        ),
+      ).rejects.toBe(error);
+      expect(createMock()).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ reasoning_effort: 'none' }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
+    });
+
+    it.each([
+      ['max_tokens', 111, 8],
+      ['max_completion_tokens', 111, 8],
+      ['max_new_tokens', 4, 4],
+    ])(
+      'keeps the isolated Mod request envelope and bounds %s',
+      async (outputField, configuredLimit, expectedLimit) => {
+        const body = await retryContext.run(
+          {
+            attempt: 1,
+            retryTotalDelayMs: 0,
+            requestSetupMs: 0,
+            singleAttempt: true,
+          },
+          () =>
+            executeWith(
+              {
+                samplingParams: {
+                  messages: [{ role: 'system', content: 'sampling override' }],
+                  enable_search: true,
+                  n: 2,
+                },
+                extra_body: {
+                  model: 'different-model',
+                  messages: [{ role: 'user', content: 'body override' }],
+                  tools: [{ type: 'function' }],
+                  functions: [{ name: 'legacy-function' }],
+                  web_search_options: { search_context_size: 'low' },
+                  search_options: { forced_search: true },
+                  stream: true,
+                  fixture_option: 'preserved',
+                  [outputField]: configuredLimit,
+                },
+              },
+              userRequest('requested-model', { maxOutputTokens: 8 }),
+              'side-query:mod-model-complete',
+              DefaultOpenAICompatibleProvider,
+            ),
+        );
+
+        expectFields(body, {
+          model: 'requested-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: undefined,
+          functions: undefined,
+          enable_search: undefined,
+          web_search_options: undefined,
+          search_options: undefined,
+          n: undefined,
+          stream: false,
+          fixture_option: 'preserved',
+          max_tokens: undefined,
+          [outputField]: expectedLimit,
+        });
+      },
+    );
+
+    it('keeps configured hosted search options for ordinary requests', async () => {
+      const search = { search_context_size: 'low' };
+      const body = await executeWith(
+        { extra_body: { web_search_options: search } },
+        userRequest(),
+        'normal-prompt',
+        DefaultOpenAICompatibleProvider,
+      );
+      expect(body['web_search_options']).toEqual(search);
+    });
+
     it.each([
       {
         name: 'preserving unrelated chat_template_kwargs',
@@ -1362,7 +1621,9 @@ describe('ContentGenerationPipeline', () => {
     async function executeWithCapability(
       capability: unknown,
       configOverrides: Partial<ContentGeneratorConfig>,
-      model = 'deepseek-v4-pro',
+      // Neutral id: the DeepSeek-V4 prefix now carries a built-in contract on
+      // every host, which would mask the declared-capability path under test.
+      model = 'capability-probe',
     ): Promise<Record<string, unknown>> {
       mockCliConfig = {
         getResolvedModelConfig: vi
@@ -1457,6 +1718,10 @@ describe('ContentGenerationPipeline', () => {
       ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
       ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
       ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
+      [
+        'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+        'enable_thinking',
+      ],
     ])(
       'sends built-in DeepSeek selection and defaults through %s',
       async (baseUrl, field) => {
@@ -1544,6 +1809,79 @@ describe('ContentGenerationPipeline', () => {
               field === 'thinking' ? { type: 'disabled' } : false,
             );
           }
+        }
+      },
+    );
+
+    it('preserves a declared static effort for a newly recognized MaaS alias', async () => {
+      // The alias was not a known id before prefix recognition, so even on a
+      // MaaS host the declaration governs: the built-in normalizer must not
+      // flatten or re-tier the static nested effort.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          samplingParams: { reasoning: { effort: 'medium' } },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toEqual({ effort: 'medium' });
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it('preserves a declared configured effort for a newly recognized MaaS alias', async () => {
+      // A tier outside the declaration is dropped by the declared-capability
+      // path (the pre-PR contract); the new built-in must not normalize it
+      // into a declared tier and ship that instead.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'xhigh' },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toBeUndefined();
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'a toggle-only declaration',
+        {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+        false,
+      ],
+      ['no declaration', undefined, true],
+    ] as const)(
+      'disables a qwen4 route with %s using the knob it reads',
+      async (_label, capability, tiered) => {
+        const wire = await deepSeekWire(
+          { baseUrl: DASHSCOPE_URL, reasoning: false },
+          capability,
+          'qwen4-plus',
+        );
+        if (tiered) {
+          expect(wire.reasoning_effort).toBe('none');
+          expect(wire.enable_thinking).toBeUndefined();
+        } else {
+          expect(wire.enable_thinking).toBe(false);
+          expect(wire.reasoning_effort).toBeUndefined();
         }
       },
     );
@@ -1937,6 +2275,111 @@ describe('ContentGenerationPipeline', () => {
         thinking_budget: undefined,
         enable_thinking: undefined,
       });
+    });
+
+    it('maps qwen4 subscription effort to the qwen4 thinking_budget ladder', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen4-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 262144,
+        reasoning_effort: undefined,
+      });
+    });
+
+    it('keeps the qwen3.8 subscription budget table for qwen3.8-max', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen3.8-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 32768,
+      });
+    });
+
+    it('clamps qwen4 subscription non-thinking output to the 131072 range', async () => {
+      // The subscription gateway is not DashScope-detected, yet its disable
+      // shape (enable_thinking:false) ships through the same pipeline path.
+      // The real provider sizes the thinking-mode auto budget (262144); the
+      // clamp must still bound it to the non-thinking cap or the gateway
+      // rejects the max_tokens range (400).
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          samplingParams: undefined,
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DefaultOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        enable_thinking: false,
+        max_tokens: 131072,
+      });
+    });
+
+    it('clamps legacy tiers onto the declared qwen4 ladder instead of dropping them', async () => {
+      // The presets declare efforts:['low','high','xhigh'] without a profile.
+      // A persisted `max`/`medium` must ship as xhigh/high per the documented
+      // contract, not vanish into the server default (high).
+      const capability = {
+        thinking: true,
+        efforts: ['low', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      };
+      const maxWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'max' } },
+        'qwen4-max',
+      );
+      expectFields(maxWire, { reasoning_effort: 'xhigh' });
+      const mediumWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'medium' } },
+        'qwen4-max',
+      );
+      expectFields(mediumWire, { reasoning_effort: 'high' });
+    });
+
+    it('keeps the drop-to-server-default semantics for non-qwen4 declarations', async () => {
+      // Profile-less legacy declarations are not re-tiered; an unsupported
+      // tier stays dropped outside the qwen4 generation.
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        { reasoning: { effort: 'max' } },
+        'capability-probe',
+      );
+      expectFields(wire, { reasoning_effort: undefined });
     });
 
     it.each(
@@ -2564,6 +3007,134 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('OpenRouter routing attributes (non-streaming)', () => {
+    /** Serves `completion` from an OpenRouter-configured pipeline. */
+    const completeFromOpenRouter = async (
+      completion: Record<string, unknown>,
+      headers: Record<string, string> = {},
+    ) => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(Promise.resolve(completion), {
+          withResponse: () =>
+            Promise.resolve({
+              data: completion,
+              response: httpResponse(headers),
+            }),
+        }),
+      );
+      await pipeline.execute(userRequest(), 'test-id');
+    };
+
+    it('records the X-Generation-Id response header', async () => {
+      await completeFromOpenRouter(
+        { id: 'r', choices: [{ message: { content: 'ok' } }] },
+        { 'x-generation-id': 'gen-abc123' },
+      );
+
+      expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+        'gen-abc123',
+      );
+    });
+
+    it('records the provider from the response body', async () => {
+      await completeFromOpenRouter({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'DigitalOcean',
+      });
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+        'DigitalOcean',
+      );
+    });
+
+    it('still reads the body when withResponse is unavailable', async () => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'SiliconFlow',
+      });
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe('SiliconFlow');
+      expect(mockSpanAttributes.has('openrouter.generation_id')).toBe(false);
+    });
+
+    it('records nothing for a non-OpenRouter endpoint', async () => {
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+
+    it('records nothing when the exchange is disabled for telemetry', async () => {
+      // `reportOpenAiRequest` returns undefined whenever telemetry is off, so
+      // an OpenRouter response still reaches the capture with no controller.
+      mockReportOpenAiRequest.mockReturnValue(undefined);
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const response = await pipeline.execute(userRequest(), 'test-id');
+
+      expect(response).toBeDefined();
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+  });
+
   describe('executeStream', () => {
     /** An APIPromise for `stream` whose withResponse() returns `withResponse()`. */
     const apiPromise = (
@@ -2584,11 +3155,6 @@ describe('ContentGenerationPipeline', () => {
         ),
       );
     }
-
-    const httpResponse = (
-      headers: Record<string, string>,
-      body: ReadableStream | null = null,
-    ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
 
     const bodyOf = (text: string) =>
       new ReadableStream({
@@ -3413,6 +3979,64 @@ describe('ContentGenerationPipeline', () => {
       // streamFrom resolves create() plainly — no withResponse method.
       const results = await streamed(chunkOf({ content: 'Hello' }, 'stop'));
       expect(results.length).toBeGreaterThan(0);
+    });
+
+    describe('OpenRouter routing attributes (streaming)', () => {
+      /** Streams `chunks` from an OpenRouter-configured pipeline. */
+      const streamFromOpenRouter = async (...chunks: unknown[]) => {
+        pipelineWith({ baseUrl: OPENROUTER_URL });
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(httpResponse({}), null, streamOf(...chunks));
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+      };
+
+      it('records the X-Generation-Id response header', async () => {
+        pipelineWith({ baseUrl: OPENROUTER_URL });
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(
+          httpResponse({ 'x-generation-id': 'gen-abc123' }),
+          null,
+        );
+
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+
+        expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+          'gen-abc123',
+        );
+      });
+
+      it('records the provider from the first chunk that carries one', async () => {
+        await streamFromOpenRouter(
+          chunkOf({ content: 'a' }, null, { provider: 'SiliconFlow' }),
+          chunkOf({ content: 'b' }, null, { provider: 'DigitalOcean' }),
+        );
+
+        expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+          'SiliconFlow',
+        );
+      });
+
+      it('skips chunks without a provider until the first one that has it', async () => {
+        await streamFromOpenRouter(
+          chunkOf({ content: 'a' }),
+          chunkOf({ content: 'b' }, null, { provider: 'Parasail' }),
+        );
+
+        expect(mockSpanAttributes.get('openrouter.provider')).toBe('Parasail');
+      });
+
+      it('records nothing for a non-OpenRouter endpoint with the same fields', async () => {
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(
+          httpResponse({ 'x-generation-id': 'gen-abc123' }),
+          null,
+          streamOf(chunkOf({ content: 'a' }, null, { provider: 'X' })),
+        );
+
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+
+        expect(mockSpanAttributes.size).toBe(0);
+      });
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {
@@ -4587,6 +5211,24 @@ describe('ContentGenerationPipeline', () => {
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalResponse);
     });
+  });
+
+  it('reports the request dispatch after building the request and before the SDK call', async () => {
+    convertEveryChunkTo(new GenerateContentResponse());
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, async () => {
+      await collect(await streamFrom(streamOf(), userRequest(), 'p'));
+    });
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    const dispatchOrder = onDispatch.mock.invocationCallOrder[0];
+    expect(
+      (mockProvider.buildRequest as Mock).mock.invocationCallOrder[0],
+    ).toBeLessThan(dispatchOrder);
+    expect(dispatchOrder).toBeLessThan(
+      createMock().mock.invocationCallOrder[0],
+    );
   });
 
   describe('openaiRequestCaptureContext integration', () => {

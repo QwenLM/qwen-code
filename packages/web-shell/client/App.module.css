@@ -1,6 +1,10 @@
 .app {
   --chat-content-width: 1000px;
-  --chat-shell-width: 1040px;
+  --chat-responsive-content-width: min(
+    1000px,
+    clamp(440px, 85cqw, calc(100cqw - 128px))
+  );
+  --chat-shell-width: calc(var(--chat-responsive-content-width) + 40px);
   --chat-regular-content-width: 1000px;
   --chat-regular-shell-width: 1040px;
   --font-mono:
@@ -76,7 +80,7 @@
 
 .appShell {
   position: relative;
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-height: 0;
   display: flex;
   width: 100%;
@@ -85,7 +89,7 @@
 
 .contextShell {
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
@@ -110,7 +114,7 @@
 .contextBody {
   position: relative;
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -128,7 +132,9 @@
 }
 
 .chatPane {
-  flex: 1 1 auto;
+  position: relative;
+  container-type: inline-size;
+  flex: 1 1 0%;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -432,6 +438,35 @@
   overflow-y: auto;
 }
 
+/* iOS overlays its software keyboard without resizing the layout viewport.
+   Keep both the centered welcome composer and the bottom-anchored session
+   composer inside the visible viewport reported by visualViewport. */
+.app[data-compact-sidebar] .chatPane {
+  padding-bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
+}
+
+/* The reservation above shrinks the box that vertically centres the welcome
+   group, so a group taller than the reduced box overflows equally at both
+   ends; with the compact empty pane's `overflow: hidden` the top is clipped
+   and, worse, Send is pushed back under the keyboard. While the keyboard
+   occludes the viewport (the inset is non-zero), anchor the group to the
+   bottom of the padded content box, so any overflow goes upward only and the
+   composer always sits on the reserved inset. Without occlusion the compact
+   empty state keeps the centring from `.appChatEmpty .chatPane` above. */
+.appChatEmpty[data-compact-sidebar][data-visual-viewport-occluded] .chatPane {
+  justify-content: flex-end;
+}
+
+/* Only the session layout wraps the composer in an absolutely positioned
+   `.chatViewWrap` whose bottom edge must be lifted. The empty welcome state
+   resets the wrap to `position: static` (and the custom-footer variant makes
+   it `position: relative` as the bottom-panel anchor), where `bottom` would
+   displace the whole shrink-to-content group above the overflow-hidden pane
+   on top of the pane padding that already reserves the inset. */
+.app:not(.appChatEmpty)[data-compact-sidebar] .chatViewWrap {
+  bottom: var(--web-shell-visual-viewport-inset-bottom, 0px);
+}
+
 .themeDark {
   --background: #0d0d0d;
   --foreground: #fafafa;
@@ -581,7 +616,8 @@
 }
 
 .content {
-  flex: 1 1 auto;
+  container-type: inline-size;
+  flex: 1 1 0%;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -589,7 +625,7 @@
 }
 
 .contentHasMessages {
-  flex: 1 1 auto;
+  flex: 1 1 0%;
 }
 
 .appChatEmpty .content {
@@ -715,16 +751,40 @@
 }
 
 .managedHome {
-  flex: 1 1 auto;
+  flex: 1 1 0%;
   min-height: 0;
   overflow: hidden;
 }
 
+/* Host-mounted managed home has no .appChatEmpty ancestor, so give its
+   empty conversation the same shrink-to-content behavior here. Centering
+   uses auto margins on the content wrapper rather than justify-content:
+   centering every in-flow child would float the session header mid-pane
+   and, once the group is taller than the pane, push its top out of reach
+   because overflow scrolling cannot reach negative offsets. */
+.chatPane[data-managed-home][data-managed-empty] .content {
+  flex: 0 0 auto;
+  margin-top: auto;
+  margin-bottom: auto;
+  overflow: visible;
+}
+
+.chatPane[data-managed-home][data-managed-empty] {
+  overflow-y: auto;
+}
+
 /* The chat view (message list + composer) stays mounted while a panel is shown,
    just hidden — so the composer keeps its unsent draft and attachments instead
-   of losing them on unmount. */
+   of losing them on unmount. Establish a Blink relayout boundary so typing in
+   the composer stays inside the chat view instead of propagating through
+   ancestor flex containers and invalidating the sibling message list's layout
+   cache. */
 .chatViewWrap {
-  flex: 1 1 auto;
+  position: absolute;
+  inset: 0;
+  contain: layout size style;
+  container-type: inline-size;
+  flex: 1 1 0%;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -748,8 +808,15 @@
    the wrapper must shrink to its content instead of filling the pane — the same
    thing `.content` already does in this state. */
 .appChatEmpty .chatViewWrap {
+  position: static;
+  inset: auto;
+  contain: none;
   flex: 0 0 auto;
   overflow: visible;
+}
+
+.appChatEmpty .chatViewWithApproval {
+  position: relative;
 }
 
 .footer {

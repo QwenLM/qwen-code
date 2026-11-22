@@ -18,6 +18,7 @@ import type {
 import {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
   CHANNEL_BTW_METHOD,
   CHANNEL_PROMPT_DISPLAY_TEXT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
@@ -25,7 +26,12 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
+  MID_TURN_DRAIN_BATCH,
+  MID_TURN_QUEUE_MAX_CHARS,
+  MID_TURN_QUEUE_MAX_MESSAGES,
   parseBackgroundResponseContext,
   resolvePromptImages,
   type AvailableCommand,
@@ -34,14 +40,19 @@ import {
   type ChannelAgentBridgePromptOptions,
   type ChannelAgentBridgeSessionOptions,
   type ChannelLoopToolHandler,
+  type ChannelToolDefinition,
+  type MidTurnQueueReceipt,
   type ToolCallEvent,
 } from './ChannelAgentBridge.js';
 import {
   CHANNEL_LOOP_MCP_SERVER_NAME,
+  CHANNEL_LOOP_MCP_TOOLS,
   CLIENT_MCP_MESSAGE_METHOD,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
   ChannelLoopMcpServer,
-  WORKSPACE_MCP_RUNTIME_ADD_METHOD,
+  SESSION_MCP_RUNTIME_ADD_METHOD,
+  SESSION_MCP_RUNTIME_REMOVE_METHOD,
+  selectChannelToolsForSession,
   type JsonRpcMessage,
 } from './ChannelLoopTools.js';
 import { sanitizeLogText } from './sanitize.js';
@@ -50,6 +61,13 @@ export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
   'craft/claimTodoStopGuardContinuation';
+/**
+ * Opt-in trace of the session→owner resolution the channel tool surface
+ * depends on. An unresolvable session silently narrows `tools/list` to no
+ * tools, which is invisible in the model transcript, so operators need a
+ * switch that costs nothing when unset.
+ */
+const CHANNEL_TOOL_DIAG_ENV = 'QWEN_CHANNEL_TOOL_DIAG';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -59,6 +77,14 @@ export interface AcpBridgeOptions {
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
 export const ACP_START_TIMEOUT_MS = 30 * 1000;
+/**
+ * Bound for the session-scoped channel_loop MCP runtime add/remove. The add is
+ * not a local write: the child discovers the server inside the call and drives
+ * `initialize`/`tools/list` back into this bridge, so a stalled child would
+ * otherwise hang session creation (and with it every later message for that
+ * chat) with no stderr line.
+ */
+export const CHANNEL_TOOL_BIND_TIMEOUT_MS = 30 * 1000;
 export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
@@ -96,18 +122,50 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private _availableCommands: AvailableCommand[] = [];
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly channelTools: ChannelToolDefinition[] = [];
+  /** Channel instance that owns each session, for adapter-tool scoping. */
+  private readonly sessionOwners = new Map<string, string>();
   private readonly knownSessionIds = new Set<string>();
   private readonly sessionBindingTokens = new Map<string, object | undefined>();
   private readonly toolCallKindsBySession = new Map<
     string,
     Map<string, string>
   >();
-  private channelLoopMcpRegistered = false;
-  private channelLoopMcpRegistration: Promise<void> | null = null;
+  /**
+   * Text queued by `queueMidTurnMessage` and handed to the ACP child on its
+   * next `craft/drainMidTurnQueue`, when the child asks between tool batches.
+   * A drain consumes at most `MID_TURN_DRAIN_BATCH` per response; whatever the
+   * owning turn never drained is taken back by the channel at the turn boundary
+   * (`takeUndrainedMidTurnMessages`) and replayed as a new turn. Session
+   * teardown (discard, process exit, stop) clears it.
+   */
+  private readonly midTurnMessageQueues = new Map<string, string[]>();
+  /**
+   * Messages the owning turn ended without draining. They belong to that turn,
+   * NOT to whatever turn runs next: the channel takes them back at the turn
+   * boundary and replays them as a new turn. Held here so a drain request can
+   * never leak them into the next turn in the window before that happens.
+   */
+  private readonly undrainedMidTurnMessages = new Map<string, string[]>();
+  /**
+   * Sessions this bridge bound the channel_loop MCP server to. The binding is
+   * the session's channel-tool identity: a `client_mcp/message` frame is served
+   * only for a session in this ledger, never because the frame names one.
+   */
+  private readonly channelLoopMcpBoundSessions = new Set<string>();
+  /**
+   * Ownership token of the bind attempt that added each session to the bound
+   * ledger. A bind can outlive a discard/reload of its session, so a failed
+   * attempt must only release a claim it still owns.
+   */
+  private readonly channelLoopMcpBindClaims = new Map<string, object>();
+  /** In-flight per-session bindings, so one session binds once. */
+  private readonly channelLoopMcpBindings = new Map<string, Promise<boolean>>();
   private readonly pendingPermissions = new Map<
     string,
     {
       sessionId: string;
+      backgroundWorkflowToolCallId?: string;
       resolve: (response: RequestPermissionResponse) => void;
       timeout: ReturnType<typeof setTimeout>;
     }
@@ -166,6 +224,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.resolvePendingPermissions();
       this.knownSessionIds.clear();
       this.sessionBindingTokens.clear();
+      this.midTurnMessageQueues.clear();
+      this.undrainedMidTurnMessages.clear();
+      this.sessionOwners.clear();
+      this.channelLoopMcpBoundSessions.clear();
+      this.channelLoopMcpBindClaims.clear();
+      this.channelLoopMcpBindings.clear();
       this.toolCallKindsBySession.clear();
       this.connection = null;
       this.child = null;
@@ -219,7 +283,6 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         ACP_START_TIMEOUT_MS,
         `ACP initialization timed out after ${ACP_START_TIMEOUT_MS}ms`,
       );
-      await this.registerChannelLoopMcpServer();
     } catch (error) {
       this.stop();
       throw error;
@@ -230,15 +293,111 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     if (!this.channelLoopToolHandlers.includes(handler)) {
       this.channelLoopToolHandlers.push(handler);
     }
-    this.channelLoopMcpServer ??= new ChannelLoopMcpServer({
-      create: (sessionId, input) =>
-        this.resolveChannelLoopToolHandler(sessionId).create(sessionId, input),
-      list: (sessionId) =>
-        this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
-      cancel: (sessionId, id) =>
-        this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
-    });
-    void this.registerChannelLoopMcpServer();
+    this.ensureChannelToolServer();
+    this.bindKnownSessions();
+  }
+
+  registerChannelTool(tool: ChannelToolDefinition): void {
+    if (!this.addChannelTool(tool)) return;
+    this.ensureChannelToolServer();
+    this.bindKnownSessions();
+  }
+
+  /**
+   * Shared registration guard: one tool per name per owning channel, and never
+   * a name the built-in channel_loop_* tools already own. Two instances of the
+   * same channel type register the same names, so the owner scopes the entry
+   * instead of the second registration being dropped.
+   */
+  private addChannelTool(tool: ChannelToolDefinition): boolean {
+    if (
+      CHANNEL_LOOP_MCP_TOOLS.some((loopTool) => loopTool.name === tool.name)
+    ) {
+      process.stderr.write(
+        `[AcpBridge] Channel tool "${sanitizeLogText(tool.name, 64)}" ignored: name is reserved for the built-in channel loop tools\n`,
+      );
+      return false;
+    }
+    if (
+      this.channelTools.some(
+        (existing) =>
+          existing.name === tool.name && existing.owner === tool.owner,
+      )
+    ) {
+      process.stderr.write(
+        `[AcpBridge] Channel tool "${sanitizeLogText(tool.name, 64)}" ignored: already registered for owner "${sanitizeLogText(tool.owner ?? '', 64)}"\n`,
+      );
+      return false;
+    }
+    this.channelTools.push(tool);
+    return true;
+  }
+
+  /**
+   * Adapter tools one bound session may see. Visibility follows the session's
+   * channel: a session this bridge bound the server to sees its owner's tools
+   * plus the ownerless ones; a session that never bound it sees nothing.
+   */
+  private channelToolsForSession(sessionId: string): ChannelToolDefinition[] {
+    if (
+      sessionId.length === 0 ||
+      !this.channelLoopMcpBoundSessions.has(sessionId)
+    ) {
+      return [];
+    }
+    return selectChannelToolsForSession(
+      this.channelTools,
+      this.sessionOwners.get(sessionId),
+    );
+  }
+
+  /**
+   * Channel-tool identity for one `client_mcp/message` frame. The frame's
+   * `sessionId` is a carrier, not a credential: it resolves only when this
+   * bridge itself bound the channel_loop server to that session, so an id the
+   * bridge never bound resolves to nothing and no channel tool can run.
+   *
+   * This is a membership check, not a transport check: every id in the bound
+   * ledger resolves, so a bound session that named another bound session would
+   * be treated as that one. The child injects the id into its own reverse
+   * frames and the model cannot set it, which is what makes the ledger — not
+   * the frame — the authority on which chat a call may touch.
+   */
+  private boundSessionId(params: Record<string, unknown>): string | undefined {
+    const sessionId = params['sessionId'];
+    return typeof sessionId === 'string' &&
+      this.channelLoopMcpBoundSessions.has(sessionId)
+      ? sessionId
+      : undefined;
+  }
+
+  /** Bind the channel_loop server to every session this bridge already knows. */
+  private bindKnownSessions(): void {
+    for (const sessionId of this.knownSessionIds) {
+      if (!this.channelLoopMcpBoundSessions.has(sessionId)) {
+        void this.registerChannelLoopMcpServer(sessionId);
+      }
+    }
+  }
+
+  private ensureChannelToolServer(): ChannelLoopMcpServer {
+    return (this.channelLoopMcpServer ??= new ChannelLoopMcpServer(
+      {
+        create: (sessionId, input) =>
+          this.resolveChannelLoopToolHandler(sessionId).create(
+            sessionId,
+            input,
+          ),
+        list: (sessionId) =>
+          this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
+        cancel: (sessionId, id) =>
+          this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
+      },
+      {
+        extraTools: (sessionId) => this.channelToolsForSession(sessionId),
+        loopToolsEnabled: () => this.channelLoopToolHandlers.length > 0,
+      },
+    ));
   }
 
   private async applySessionApprovalMode(
@@ -267,7 +426,6 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
-    await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
     await this.applySessionApprovalMode(
       conn,
@@ -276,6 +434,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     );
     this.knownSessionIds.add(response.sessionId);
     this.sessionBindingTokens.set(response.sessionId, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(response.sessionId, options.sourceId);
+    }
+    await this.registerChannelLoopMcpServer(response.sessionId);
     return response.sessionId;
   }
 
@@ -286,7 +448,6 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     bindingToken?: object,
   ): Promise<string> {
     const conn = this.ensureConnection();
-    await this.registerChannelLoopMcpServer();
     await conn.unstable_resumeSession({
       sessionId,
       cwd,
@@ -295,6 +456,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     await this.applySessionApprovalMode(conn, sessionId, options?.approvalMode);
     this.knownSessionIds.add(sessionId);
     this.sessionBindingTokens.set(sessionId, bindingToken);
+    if (options?.sourceId) {
+      this.sessionOwners.set(sessionId, options.sourceId);
+    }
+    await this.registerChannelLoopMcpServer(sessionId);
     return sessionId;
   }
 
@@ -304,14 +469,35 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
+    // A new turn must never inherit text the previous turn left queued: the
+    // channel takes undrained messages at the turn boundary, so anything still
+    // here was abandoned and is dropped rather than read as this turn's input.
+    this.dropStaleUndrainedMidTurnMessages(sessionId);
+    // A binding skipped at session creation (MCP budget, one transient
+    // runtime-add failure) must not cost the session every channel tool for its
+    // lifetime. Retry it on the next turn, fire-and-forget so a slow or skipped
+    // bind never delays the prompt; registerChannelLoopMcpServer is idempotent
+    // and deduplicates concurrent attempts.
+    if (
+      this.knownSessionIds.has(sessionId) &&
+      !this.channelLoopMcpBoundSessions.has(sessionId)
+    ) {
+      void this.registerChannelLoopMcpServer(sessionId);
+    }
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
+    // A turn notice rides the reply, so it keeps its own buffer that response
+    // boundaries never clear.
+    let turnNotice = '';
     const onChunk = (sid: string, chunk: string) => {
       if (sid === sessionId) chunks.push(chunk);
     };
     const onSlashCommandOutput = (sid: string, chunk: string) => {
       if (sid === sessionId) slashCommandOutput = chunk;
+    };
+    const onTurnNotice = (sid: string, notice: string) => {
+      if (sid === sessionId) turnNotice = notice;
     };
     const clearChunks = (sid: string) => {
       if (sid === sessionId) {
@@ -321,6 +507,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     };
     this.on('textChunk', onChunk);
     this.on('slashCommandOutput', onSlashCommandOutput);
+    this.on('turnNotice', onTurnNotice);
     this.on('responseBoundary', clearChunks);
 
     const prompt: Array<Record<string, unknown>> = [];
@@ -339,6 +526,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         prompt: prompt as Array<{ type: 'text'; text: string }>,
         _meta: {
           [CHANNEL_PROMPT_META_KEY]: true,
+          ...(options?.workflowOrigin
+            ? { [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: options.workflowOrigin }
+            : {}),
           ...(options?.outputMode === 'per_task'
             ? { [CHANNEL_OUTPUT_MODE_META_KEY]: 'per_task' }
             : {}),
@@ -362,15 +552,25 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             result?._meta?.[CHANNEL_TASK_RESULT_PARTIAL_META_KEY] === true,
         });
       }
-      return options?.outputMode === 'per_task' &&
+      const body =
+        options?.outputMode === 'per_task' &&
         typeof taskResult === 'string' &&
         taskResult.trim()
-        ? taskResult
-        : chunks.join('') || slashCommandOutput;
+          ? taskResult
+          : chunks.join('') || slashCommandOutput;
+      return turnNotice && body
+        ? `${turnNotice}\n\n${body}`
+        : turnNotice || body;
     } finally {
       this.off('textChunk', onChunk);
       this.off('slashCommandOutput', onSlashCommandOutput);
+      this.off('turnNotice', onTurnNotice);
       this.off('responseBoundary', clearChunks);
+      // The turn boundary: anything still queued belongs to THIS turn and must
+      // not be read by the next one. Hand it back through the settled slot so
+      // the channel can replay it as its own turn (the drain response can no
+      // longer return it).
+      this.settleUndrainedMidTurnQueue(sessionId);
     }
   }
 
@@ -409,8 +609,74 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     try {
       await conn.cancel({ sessionId });
     } finally {
-      this.resolvePendingPermissions(sessionId);
+      this.resolvePendingPermissions(sessionId, (toolCallId) => !toolCallId);
     }
+  }
+
+  queueMidTurnMessage(sessionId: string, text: string): MidTurnQueueReceipt {
+    // A blank entry would make the child treat the whole drain as malformed
+    // (it rejects whitespace-only messages), so it never enters the queue.
+    if (!text.trim()) return { accepted: false, reason: 'blank' };
+    if (!this.knownSessionIds.has(sessionId)) {
+      return { accepted: false, reason: 'unknown-session' };
+    }
+    const queue = this.midTurnMessageQueues.get(sessionId) ?? [];
+    const queuedChars = queue.reduce((total, item) => total + item.length, 0);
+    if (
+      queue.length >= MID_TURN_QUEUE_MAX_MESSAGES ||
+      queuedChars + text.length > MID_TURN_QUEUE_MAX_CHARS
+    ) {
+      // Reject rather than truncate: a half instruction can steer the running
+      // turn wrong. The bridge does NOT know whether the caller can still
+      // deliver the text (it owns a bounded fallback and may replay it next
+      // turn), so only report the refusal here; the CALLER's log states the
+      // outcome. Never log the message bytes: the queue carries private chat
+      // text, and the sanitizer only strips controls — it does not redact.
+      process.stderr.write(
+        `[AcpBridge] Mid-turn queue at capacity for session ${sanitizeLogText(sessionId, 128)} (reason=capacity, queue=${queue.length}/${MID_TURN_QUEUE_MAX_MESSAGES} messages, ${queuedChars}/${MID_TURN_QUEUE_MAX_CHARS} chars); caller owns fallback (${text.length} chars)\n`,
+      );
+      return { accepted: false, reason: 'capacity' };
+    }
+    queue.push(text);
+    this.midTurnMessageQueues.set(sessionId, queue);
+    return { accepted: true };
+  }
+
+  takeUndrainedMidTurnMessages(sessionId: string): string[] {
+    const settled = this.undrainedMidTurnMessages.get(sessionId) ?? [];
+    // A message accepted in the window between the turn settling and the
+    // channel taking back ownership still belongs to that turn, so it is
+    // included rather than left for the next drain.
+    const queued = this.midTurnMessageQueues.get(sessionId) ?? [];
+    if (settled.length === 0 && queued.length === 0) return [];
+    this.undrainedMidTurnMessages.delete(sessionId);
+    this.midTurnMessageQueues.delete(sessionId);
+    return [...settled, ...queued];
+  }
+
+  dropMidTurnMessages(sessionId: string): void {
+    this.undrainedMidTurnMessages.delete(sessionId);
+    this.midTurnMessageQueues.delete(sessionId);
+  }
+
+  private settleUndrainedMidTurnQueue(sessionId: string): void {
+    const queued = this.midTurnMessageQueues.get(sessionId);
+    if (!queued || queued.length === 0) return;
+    this.midTurnMessageQueues.delete(sessionId);
+    const settled = this.undrainedMidTurnMessages.get(sessionId);
+    this.undrainedMidTurnMessages.set(
+      sessionId,
+      settled ? [...settled, ...queued] : queued,
+    );
+  }
+
+  private dropStaleUndrainedMidTurnMessages(sessionId: string): void {
+    const settled = this.undrainedMidTurnMessages.get(sessionId);
+    if (!settled || settled.length === 0) return;
+    this.undrainedMidTurnMessages.delete(sessionId);
+    process.stderr.write(
+      `[AcpBridge] Dropped ${settled.length} undrained mid-turn message(s) for session ${sanitizeLogText(sessionId, 128)}: the channel never took them back\n`,
+    );
   }
 
   async discardSession(
@@ -425,11 +691,20 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
     if (!this.knownSessionIds.delete(sessionId)) return;
     this.sessionBindingTokens.delete(sessionId);
+    this.midTurnMessageQueues.delete(sessionId);
+    this.undrainedMidTurnMessages.delete(sessionId);
+    this.sessionOwners.delete(sessionId);
     this.toolCallKindsBySession.delete(sessionId);
+    this.channelLoopMcpBindings.delete(sessionId);
+    this.channelLoopMcpBindClaims.delete(sessionId);
+    const wasBound = this.channelLoopMcpBoundSessions.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
     const conn = this.connection;
     if (!conn || !this.isConnected) return;
+    if (wasBound) {
+      await this.removeChannelLoopMcpServer(conn, sessionId);
+    }
     await conn.extMethod('qwen/control/session/close', { sessionId });
   }
 
@@ -455,6 +730,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.resolvePendingPermissions();
     this.knownSessionIds.clear();
     this.sessionBindingTokens.clear();
+    this.midTurnMessageQueues.clear();
+    this.undrainedMidTurnMessages.clear();
+    this.sessionOwners.clear();
+    this.channelLoopMcpBoundSessions.clear();
+    this.channelLoopMcpBindClaims.clear();
+    this.channelLoopMcpBindings.clear();
     this.toolCallKindsBySession.clear();
     if (this.child) {
       this.child.kill();
@@ -517,6 +798,11 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           break;
         }
         if (content?.type === 'text' && content.text) {
+          if (meta?.[CHANNEL_TURN_NOTICE_META_KEY] === true) {
+            // Keep notices outside the text buffer cleared by tool boundaries.
+            this.emit('turnNotice', sessionId, content.text);
+            break;
+          }
           this.emit(
             meta?.['source'] === 'slash_command'
               ? 'slashCommandOutput'
@@ -534,6 +820,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         const explicitKind =
           typeof update['kind'] === 'string' ? update['kind'] : '';
         const meta = update['_meta'] as Record<string, unknown> | undefined;
+        if (
+          type === 'tool_call_update' &&
+          meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true &&
+          (update['status'] === 'completed' || update['status'] === 'failed')
+        ) {
+          this.resolvePendingPermissions(sessionId, (id) => id === toolCallId);
+          break;
+        }
         if (
           meta?.['toolLifecycle'] !== undefined &&
           update['status'] === undefined &&
@@ -622,6 +916,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       typeof request.sessionId === 'string' && request.sessionId.length > 0
         ? request.sessionId
         : request.toolCall.toolCallId;
+    const backgroundWorkflowToolCallId =
+      request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] === true
+        ? request.toolCall.toolCallId
+        : undefined;
 
     return new Promise<RequestPermissionResponse>((resolve) => {
       const timeout = setTimeout(() => {
@@ -643,8 +941,13 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         });
       }, ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
       timeout.unref?.();
-      this.pendingPermissions.set(requestId, { sessionId, resolve, timeout });
-      this.emitResponseBoundary(sessionId);
+      this.pendingPermissions.set(requestId, {
+        sessionId,
+        backgroundWorkflowToolCallId,
+        resolve,
+        timeout,
+      });
+      if (!backgroundWorkflowToolCallId) this.emitResponseBoundary(sessionId);
       this.emit('permissionRequest', {
         requestId,
         sessionId,
@@ -657,12 +960,20 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.emit('responseBoundary', sessionId);
   }
 
-  private resolvePendingPermissions(sessionId?: string): void {
+  private resolvePendingPermissions(
+    sessionId?: string,
+    matches: (
+      backgroundWorkflowToolCallId: string | undefined,
+    ) => boolean = () => true,
+  ): void {
     const response: RequestPermissionResponse = {
       outcome: { outcome: 'cancelled' },
     };
     for (const [requestId, pending] of this.pendingPermissions) {
-      if (sessionId !== undefined && pending.sessionId !== sessionId) {
+      if (
+        (sessionId !== undefined && pending.sessionId !== sessionId) ||
+        !matches(pending.backgroundWorkflowToolCallId)
+      ) {
         continue;
       }
       clearTimeout(pending.timeout);
@@ -695,47 +1006,101 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     child.kill('SIGKILL');
   }
 
-  private async registerChannelLoopMcpServer(): Promise<void> {
-    if (
-      !this.connection ||
-      !this.channelLoopMcpServer ||
-      this.channelLoopMcpRegistered
-    ) {
-      return;
-    }
-    if (this.channelLoopMcpRegistration) {
-      await this.channelLoopMcpRegistration;
-      return;
-    }
-    this.channelLoopMcpRegistration = this.connection
-      .extMethod(WORKSPACE_MCP_RUNTIME_ADD_METHOD, {
-        name: CHANNEL_LOOP_MCP_SERVER_NAME,
-        originatorClientId: 'channel',
-        config: {
-          type: 'sdk',
-          [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
-        },
-      })
-      .then((result: unknown) => {
-        if (isSkippedMcpRegistration(result)) {
-          this.channelLoopMcpRegistered = false;
-          process.stderr.write(
-            `[AcpBridge] Channel loop MCP server registration skipped${formatSkippedRegistrationReason(result)}\n`,
-          );
-          return;
-        }
-        this.channelLoopMcpRegistered = true;
-      })
-      .catch((error: unknown) => {
-        this.channelLoopMcpRegistered = false;
+  /**
+   * Bind the channel_loop SDK MCP server to ONE session through the child's
+   * session-scoped runtime-add. The child then drives that server through the
+   * session's own `sendSdkMcpMessage`, so its reverse frames carry the session
+   * id, and the binding here is what makes that id trustworthy.
+   */
+  private async registerChannelLoopMcpServer(
+    sessionId: string,
+  ): Promise<boolean> {
+    if (!this.connection || !this.channelLoopMcpServer) return false;
+    const inFlight = this.channelLoopMcpBindings.get(sessionId);
+    if (inFlight) return inFlight;
+    if (this.channelLoopMcpBoundSessions.has(sessionId)) return true;
+    const binding = this.bindChannelLoopMcpServer(sessionId).finally(() => {
+      if (this.channelLoopMcpBindings.get(sessionId) === binding) {
+        this.channelLoopMcpBindings.delete(sessionId);
+      }
+    });
+    this.channelLoopMcpBindings.set(sessionId, binding);
+    return binding;
+  }
+
+  private async bindChannelLoopMcpServer(sessionId: string): Promise<boolean> {
+    // Claim the binding before the runtime-add can answer: the child discovers
+    // the newly added server inside that call, so its `tools/list` frame can
+    // arrive before the add resolves, and it must already resolve here.
+    this.channelLoopMcpBoundSessions.add(sessionId);
+    // The claim is ownership-checked: a discard can drop it and a reload can
+    // bind the same session again while this attempt is still in flight, so a
+    // late failure must not erase the newer attempt's claim.
+    const claim: object = {};
+    this.channelLoopMcpBindClaims.set(sessionId, claim);
+    try {
+      const result = await withTimeout(
+        this.connection!.extMethod(SESSION_MCP_RUNTIME_ADD_METHOD, {
+          sessionId,
+          name: CHANNEL_LOOP_MCP_SERVER_NAME,
+          originatorClientId: 'channel',
+          config: {
+            type: 'sdk',
+            [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+          },
+        }),
+        CHANNEL_TOOL_BIND_TIMEOUT_MS,
+        `channel loop MCP bind timed out after ${CHANNEL_TOOL_BIND_TIMEOUT_MS}ms`,
+      );
+      if (isSkippedMcpRegistration(result)) {
+        this.releaseChannelLoopMcpBindClaim(sessionId, claim);
         process.stderr.write(
-          `[AcpBridge] Failed to register channel loop MCP server: ${error instanceof Error ? error.message : String(error)}\n`,
+          `[AcpBridge] Channel loop MCP server binding for session ${sanitizeLogText(sessionId, 128)} skipped${formatSkippedRegistrationReason(result)}\n`,
         );
-      })
-      .finally(() => {
-        this.channelLoopMcpRegistration = null;
-      });
-    await this.channelLoopMcpRegistration;
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.releaseChannelLoopMcpBindClaim(sessionId, claim);
+      process.stderr.write(
+        `[AcpBridge] Failed to bind channel loop MCP server to session ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Release a failed bind's optimistic claim, but only while this attempt
+   * still owns it: a newer bind for the same session may have claimed it.
+   */
+  private releaseChannelLoopMcpBindClaim(
+    sessionId: string,
+    claim: object,
+  ): void {
+    if (this.channelLoopMcpBindClaims.get(sessionId) !== claim) return;
+    this.channelLoopMcpBindClaims.delete(sessionId);
+    this.channelLoopMcpBoundSessions.delete(sessionId);
+  }
+
+  private async removeChannelLoopMcpServer(
+    conn: ClientSideConnection,
+    sessionId: string,
+  ): Promise<void> {
+    try {
+      await withTimeout(
+        conn.extMethod(SESSION_MCP_RUNTIME_REMOVE_METHOD, {
+          sessionId,
+          name: CHANNEL_LOOP_MCP_SERVER_NAME,
+          originatorClientId: 'channel',
+        }),
+        CHANNEL_TOOL_BIND_TIMEOUT_MS,
+        `channel loop MCP unbind timed out after ${CHANNEL_TOOL_BIND_TIMEOUT_MS}ms`,
+      );
+    } catch (error) {
+      process.stderr.write(
+        `[AcpBridge] Failed to remove channel loop MCP server from session ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+    }
   }
 
   private async handleExtMethod(
@@ -746,7 +1111,26 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       return this.handleClientMcpMessage(params);
     }
     if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
-      return { messages: [], hasQueuedPrompt: false };
+      const sessionId =
+        typeof params['sessionId'] === 'string' ? params['sessionId'] : '';
+      const queued =
+        sessionId && this.knownSessionIds.has(sessionId)
+          ? this.midTurnMessageQueues.get(sessionId)
+          : undefined;
+      // One response may carry at most what the ACP child consumes
+      // (MAX_MID_TURN_DRAIN_ITEMS in the child); it DROPS the overflow rather
+      // than deferring it, so anything past the batch stays queued for the
+      // child's next drain request.
+      const batch = queued?.slice(0, MID_TURN_DRAIN_BATCH) ?? [];
+      if (queued) {
+        const rest = queued.slice(MID_TURN_DRAIN_BATCH);
+        if (rest.length > 0) {
+          this.midTurnMessageQueues.set(sessionId, rest);
+        } else {
+          this.midTurnMessageQueues.delete(sessionId);
+        }
+      }
+      return { messages: batch, hasQueuedPrompt: false };
     }
     if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
       const sessionId =
@@ -773,18 +1157,89 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     if (typeof payload !== 'object' || payload === null) {
       throw new Error('Invalid client MCP payload.');
     }
-    const sessionId =
-      typeof params['sessionId'] === 'string'
-        ? (params['sessionId'] as string)
+    const sessionId = this.boundSessionId(params);
+    const rawSessionId = params['sessionId'];
+    const carriedSessionId =
+      sessionId === undefined &&
+      typeof rawSessionId === 'string' &&
+      rawSessionId.length > 0
+        ? rawSessionId
         : undefined;
     const response = await this.channelLoopMcpServer.handleMessage(
       payload as JsonRpcMessage,
-      { sessionId },
+      { sessionId, carriedSessionId },
     );
+    this.logChannelToolDiagnostic(params, sessionId, response);
     if (!response) {
       return { payload: { jsonrpc: '2.0', id: 0, result: {} } };
     }
     return { payload: response };
+  }
+
+  /**
+   * `QWEN_CHANNEL_TOOL_DIAG=1` trace of one `client_mcp/message` frame: which
+   * method it is, which session id the frame carried, whether this bridge had
+   * bound that session, and what the reply contained. Off by default because
+   * the read runs per frame on a hot path.
+   */
+  private logChannelToolDiagnostic(
+    params: Record<string, unknown>,
+    sessionId: string | undefined,
+    response: JsonRpcMessage | undefined,
+  ): void {
+    if (process.env[CHANNEL_TOOL_DIAG_ENV] !== '1') return;
+    const payload = params['payload'];
+    const message =
+      typeof payload === 'object' && payload !== null
+        ? (payload as Record<string, unknown>)
+        : undefined;
+    const method =
+      typeof message?.['method'] === 'string'
+        ? (message['method'] as string)
+        : '<none>';
+    if (method !== 'tools/list' && method !== 'tools/call') return;
+    const rawSessionId = params['sessionId'];
+    const carried =
+      typeof rawSessionId === 'string' && rawSessionId.length > 0
+        ? rawSessionId
+        : undefined;
+    // A known-but-unbound session is exactly the state this switch exists to
+    // explain, so resolve the owner from the id the frame carried too. An id
+    // in neither ledger acquires nothing (fail closed).
+    const ownerId =
+      sessionId ??
+      (carried !== undefined && this.knownSessionIds.has(carried)
+        ? carried
+        : undefined);
+    const owner =
+      ownerId === undefined ? undefined : this.sessionOwners.get(ownerId);
+    const result = response?.['result'];
+    const resultRecord =
+      typeof result === 'object' && result !== null
+        ? (result as Record<string, unknown>)
+        : undefined;
+    const listed = resultRecord?.['tools'];
+    const rpcError = response?.['error'];
+    let detail: string;
+    if (method === 'tools/list') {
+      detail = `tools=${Array.isArray(listed) ? listed.length : '?'}`;
+    } else {
+      // The tool name is what separates a loop-handler failure from a platform
+      // failure; the JSON-RPC error arm never carries a result, so read it
+      // alongside the result arm or a failed call looks like a success.
+      const toolName = readToolCallName(message);
+      detail =
+        `tool=${toolName === undefined ? '<none>' : sanitizeLogText(toolName, 64)}` +
+        ` isError=${resultRecord?.['isError'] === true || rpcError !== undefined}` +
+        ` rpcError=${rpcError === undefined ? 'none' : sanitizeLogText(describeRpcError(rpcError), 256)}`;
+    }
+    process.stderr.write(
+      `[AcpBridge] channel-tool-diag method=${method} sessionId=${
+        carried === undefined ? '<absent>' : sanitizeLogText(carried, 128)
+      } bound=${sessionId !== undefined} known=${
+        carried !== undefined && this.knownSessionIds.has(carried)
+      } owner=${owner === undefined ? '<none>' : sanitizeLogText(owner, 64)} ${detail}\n`,
+    );
   }
 
   private resolveChannelLoopToolHandler(
@@ -847,6 +1302,25 @@ function createAbortError(): Error {
   const error = new Error('BTW request aborted');
   error.name = 'AbortError';
   return error;
+}
+
+/** Tool name a `tools/call` payload names, for the diagnostic trace. */
+function readToolCallName(
+  message: Record<string, unknown> | undefined,
+): string | undefined {
+  const callParams = message?.['params'];
+  if (typeof callParams !== 'object' || callParams === null) return undefined;
+  const name = (callParams as Record<string, unknown>)['name'];
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
+/** Stringify a JSON-RPC error reply for the diagnostic trace. */
+function describeRpcError(error: unknown): string {
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }
 
 function isSkippedMcpRegistration(result: unknown): boolean {

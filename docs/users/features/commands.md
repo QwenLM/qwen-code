@@ -34,6 +34,11 @@ These commands help you save, restore, and summarize work progress.
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
 | `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
+| `/pr`            | Bind a GitHub pull request to this session                               | `/pr 123`, `/pr #123`, or `/pr <PR URL>`                      |
+
+> [!note]
+>
+> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command. To fix a bare-number bind, re-run `/pr` with the full URL of the PR you meant — when the intended PR carries the same number, that replaces the wrong entry in place; otherwise the wrong entry stays until you bind enough further PRs to push it past the session's 10-binding cap, or edit the session's PR sidecar file.
 
 > [!note]
 >
@@ -105,7 +110,7 @@ Commands for managing AI tools and models.
 | `/model`              | Switch model used in current session                                                             | `/model`, `/model <model-id>` (switch immediately)                                                        |
 | `/model --fast`       | Set a lighter model for prompt suggestions                                                       | `/model --fast qwen3-coder-flash`                                                                         |
 | `/model --voice`      | Set the model used for voice transcription                                                       | `/model --voice <model-id>`                                                                               |
-| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model                 | `/model --vision <model-id>`                                                                              |
+| `/model --vision`     | Set the vision-bridge model used to transcribe images for a text-only main model, or its timeout | `/model --vision <model-id>`, `/model --vision --timeout 60` (seconds; also `60s`, `90000ms`)             |
 | `/model --compaction` | Set the model used for chat compression                                                          | `/model --compaction <model-id>`, `/model --compaction clear`                                             |
 | `/model --image`      | Set an image-generation-capable model for the built-in image generation tool                     | `/model --image <model-id>`                                                                               |
 | `/effort`             | Set reasoning effort for thinking-capable models                                                 | `/effort` (opens picker), `/effort high` (low/medium/high/xhigh/max; mapped & clamped per provider)       |
@@ -140,7 +145,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the user/system-scoped `tools.lspEnabled` setting, its `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` env pair, or the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` and `tools.lspEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 > [!note]
 >
@@ -166,10 +171,10 @@ See [Code Review](./code-review.md) for full `/review` documentation, and [Autof
 
 The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
 
-| Command                | Description                           |
-| ---------------------- | ------------------------------------- |
-| `/btw <your question>` | Ask a quick side question             |
-| `?btw <your question>` | Alternative syntax for side questions |
+| Command                | Description                                                                                    |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `/btw <your question>` | Ask a side question.                                                                           |
+| `?btw <your question>` | Ask a side question in OpenTUI. In Ink, this sends a regular message to the main conversation. |
 
 **How It Works:**
 
@@ -468,6 +473,8 @@ Commands for obtaining information and performing system settings.
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
 | `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                               | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
 | `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/logout`        | Sign out of the active Qwen Subscription account (available with Qwen Subscription login)                                      | `/logout`                                                                           |
+| `/upgrade`       | Open Qwen subscription plans (available with Qwen Subscription login)                                                          | `/upgrade`                                                                          |
 | `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
 | → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
 | → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |
@@ -608,6 +615,8 @@ Use {{args}} for parameter injection.
 | ---------------- | --------------------------------------- | --------------------- | ------------------------ |
 | Raw Injection    | `prompt = "Fix: {{args}}"`              | `/fix "Button issue"` | `Fix: "Button issue"`    |
 | In Shell Command | `prompt = "Search: !{grep {{args}} .}"` | `/search "hello"`     | Execute `grep "hello" .` |
+
+Argument text is inserted literally: dollar sequences such as `$$` and `$&` keep their characters, and placeholder names inside the arguments are not expanded again. Arguments inside `!{...}` still receive shell escaping before permission checks and execution.
 
 #### 2. Default Parameter Processing
 
@@ -789,7 +798,12 @@ front-end, a relay), and `headless` or `serve` for a session another
 program drives. Several `serve` or `headless` rows can share one PID: a
 `qwen --acp` child hosts all its sessions in one process — `serve` when
 the daemon spawned it, `headless` when a client is driving it directly —
-and each of them registers separately. It is a self-report, like NAME and DIRECTORY: every field
+and each of them registers separately when peer messaging is active. A hosted
+session does not register here when its own environment puts it in bare or
+safe mode. A daemon's `--bare` does not reach the sessions it hosts
+(`QWEN_CODE_SIMPLE` is scrubbed from the child environment); an inherited
+`QWEN_CODE_SAFE_MODE` does, keeping those hosted sessions out of this listing. It is a
+self-report, like NAME and DIRECTORY: every field
 here was written by the process it describes, and nothing about what a
 session is allowed to do depends on it. An Agent View record marked
 `managed` uses `managed` for KIND and `-` for PID and AGE. It remains a
@@ -837,17 +851,23 @@ qwen sessions ps --json | jq -r .cwd
 ## 6. Messaging Another Running Session
 
 Two interactive sessions on the same machine can send each other
-messages. The feature is **on by default**: a session is discoverable by
-the other sessions of the same user on the machine, and what they send
+messages. The feature is **on by default**, but `--bare` and `--safe-mode`
+disable it regardless of the setting. With a listening inbox, a session is
+discoverable by the other sessions of the same user on the machine, and what they send
 it goes through the review rules below before its model sees any of it.
-To keep a session invisible and unreachable, turn it off in
+To disable peer discovery and messaging, turn it off in
 `settings.json` and restart:
 
 ```json
 { "agents": { "crossSessionMessaging": false } }
 ```
 
-With it on, the model in one session can discover the others with
+An interactive session with peer messaging disabled can still appear in
+`qwen sessions ps`, but has no `ipcPath` and is not a reachable peer in
+`list_agents`. The OpenTUI interface does not bind a peer inbox either;
+enabling the setting alone does not make it messageable.
+
+With messaging active, the model in one session can discover the others with
 `list_agents` — each appears under `sessions` with the `name` that
 `qwen sessions ps --json` records (the table view may truncate long
 names) — and address one with `send_message` using
@@ -1066,11 +1086,29 @@ you have open. Several of them share one process and one inbox, so a
 sender has to name the session it means — every Qwen Code session does
 that automatically.
 
-Messages sent _to_ one are refused rather than held. Holding is a
-question put to a person, and nobody is watching a held-message list on a
-driven session's behalf; a sender is told at once instead of
-waiting out an expiry. Where a held message should surface for those
-sessions is not settled yet.
+It can receive messages from sessions in the same review class and from
+trusted controllers when the inbound policy is unset. It shows an
+accepted message and hands it to the model as a turn of its own once
+the session is idle. A message the rules would hold is
+refused instead, because nobody is watching a held-message list on a
+driven session's behalf, and the sender is told at once rather than
+waiting out an expiry. An explicit `hold` setting is answered the same
+way. Where a held message should surface for these sessions is not
+settled yet.
+
+The shared ACP inbox accepts peer and controller credentials. The
+own-process credential described above is available to single-session
+terminal inboxes.
+
+After you stop a turn, messages that the gate would otherwise accept
+receive `queue-full` until you send another prompt. Inbound policy and
+rate limits still apply. Senders can retry after the next prompt.
+
+When the session closes or `/clear` switches its conversation, the host
+sends `expired` for messages still waiting in the old queue. Messages
+appear in the transcript when a turn takes them. A message whose turn
+was cancelled before the model saw it is not corrected. That gap exists
+in a terminal session too.
 
 A session registers unless its own settings turn
 `agents.crossSessionMessaging` off, or it was started with `--bare` or

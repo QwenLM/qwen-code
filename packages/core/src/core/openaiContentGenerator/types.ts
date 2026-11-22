@@ -47,6 +47,8 @@ export interface StreamingTextDeltaState {
 export interface RequestContext {
   model: string;
   modalities: InputModalities;
+  // Optional `detail` stamped on each image_url part (see ContentGeneratorConfig).
+  imageDetail?: 'low' | 'high' | 'auto';
   startTime: number;
   /**
    * Effective output-token ceiling sent on the wire (`max_tokens` or a

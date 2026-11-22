@@ -14,6 +14,10 @@ import { useState } from 'react';
  */
 export const TOUCH_COMPOSER_QUERY = '(hover: none) and (pointer: coarse)';
 
+// The model list also needs the sheet in narrow desktop windows, where its
+// nested desktop popover cannot fit beside the composer.
+export const MODEL_SHEET_QUERY = `${TOUCH_COMPOSER_QUERY}, (max-width: 639px)`;
+
 /**
  * Raw device detection, ignoring the URL override. Used to gate programmatic
  * (non-gesture) `view.focus()` calls: on iOS, focusing an editable element

@@ -5,12 +5,17 @@
  */
 
 import { CLAUDE_CODE_EVENTS } from './claude-events.js';
-import { INVALIDATABLE_EVENTS, TERMINAL_ELEMENTS } from './render-tree.js';
+import {
+  DESKTOP_ELEMENTS,
+  INVALIDATABLE_EVENTS,
+  MOD_RENDER_SITES,
+  TERMINAL_ELEMENTS,
+} from './render-tree.js';
 import { MOD_MAX_DEPTH } from './types.js';
 
 // Executed only inside QuickJS. The factory's handles stay private to the host.
 export const MOD_GUEST_FACTORY = String.raw`
-((bridge, status, identity) => {
+((bridge, status, identity, drawnOn) => {
   const parse = JSON.parse.bind(JSON);
   const stringify = JSON.stringify.bind(JSON);
   const Depths = Map;
@@ -104,7 +109,6 @@ export const MOD_GUEST_FACTORY = String.raw`
       ...(kids.length ? { children: kids } : {})
     });
   };
-  const elementTags = ${JSON.stringify(TERMINAL_ELEMENTS)};
   const h = (tag, props, ...children) => {
     // A component, as in Claude Code, gets its children flattened, always an array.
     if (typeof tag === 'function') return tag({ ...(object(props) ? props : {}), children: flatten(children) });
@@ -114,14 +118,22 @@ export const MOD_GUEST_FACTORY = String.raw`
   const Fragment = props => build('Box', { flexDirection: 'column' }, [object(props) ? props.children : undefined]);
   for (const [name, value] of [['h', h], ['Fragment', Fragment]])
     Object.defineProperty(globalThis, name, { value: freeze(value), writable: false, configurable: false });
-  const terminal = Object.create(null);
-  for (const tag of elementTags) terminal[tag] = freeze(props => {
-    const { children, ...rest } = object(props) ? props : {};
-    const element = build(tag, rest, Array.isArray(children) ? children : [children]);
-    if (!object(element)) throw new TypeError('the element constructor did not build an element');
-    return element;
-  });
-  freeze(terminal);
+  // The element tables, read by the event's surface: the terminal's, and the
+  // desktop's on a host that draws there.
+  const table = tags => {
+    const elements = Object.create(null);
+    for (const tag of tags) elements[tag] = freeze(props => {
+      const { children, ...rest } = object(props) ? props : {};
+      const element = build(tag, rest, Array.isArray(children) ? children : [children]);
+      if (!object(element)) throw new TypeError('the element constructor did not build an element');
+      return element;
+    });
+    return freeze(elements);
+  };
+  const tables = Object.create(null);
+  tables.terminal = table(${JSON.stringify(TERMINAL_ELEMENTS)});
+  if (drawnOn === 'desktop') tables.desktop = table(${JSON.stringify(DESKTOP_ELEMENTS)});
+  freeze(tables);
   const invalidatable = new Set(${JSON.stringify(INVALIDATABLE_EVENTS)});
   const matches = (m, e) => {
     if (Array.isArray(m)) return m.some(v => matches(v, e));
@@ -152,10 +164,13 @@ export const MOD_GUEST_FACTORY = String.raw`
       hook.caught = handler;
     }});
   };
-  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(json => {
+  let modelTokens = 0;
+  const abortedModel = frozen({ isAnswered: false, reason: 'aborted', usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } });
+  const unpack = json => {
     const envelope = parse(json);
     return frozen(envelope.voidValue ? {value: undefined} : envelope.value);
-  });
+  };
+  const call = (id, frames, kind, value) => bridge(id, kind, encode({ value, frames })).then(unpack);
   const api = (id, frames) => {
     const invoke = (name, value) => call(id, frames, name, value);
     const namespaces = {
@@ -188,7 +203,44 @@ export const MOD_GUEST_FACTORY = String.raw`
           });
         }
       },
+      model: {
+        // The signal stays here, as a sleep's does; aborting it cuts the
+        // call, which then resolves aborted. No hook reads it.
+        complete: async (request, options = {}) => {
+          if (!object(options) || keys(options).some(k => k !== 'signal')) throw new Error('Invalid Mod model.complete options');
+          const { signal } = options;
+          if (signal !== undefined && (!object(signal) || typeof signal.addEventListener !== 'function')) throw new Error('Invalid Mod model.complete signal');
+          if (signal?.aborted) return abortedModel;
+          const token = ++modelTokens;
+          let aborted = false;
+          let published = false;
+          const abort = () => {
+            aborted = true;
+            if (published) bridge(id, 'model.abort', token);
+          };
+          try {
+            signal?.addEventListener('abort', abort);
+            if (signal?.aborted || aborted) return abortedModel;
+            const json = encode({ value: request, frames });
+            if (signal?.aborted || aborted) return abortedModel;
+            const pending = bridge(id, 'model.complete', json, token);
+            published = true;
+            return await pending.then(unpack);
+          } finally {
+            signal?.removeEventListener?.('abort', abort);
+          }
+        }
+      },
+      // Async, so an input too large for the bridge rejects like a wrong shape.
+      prompt: { submit: async input => invoke('prompt.submit', input) },
       turn: { abort: input => invoke('turn.abort', input) },
+      // Async, so a value that is no JSON (a cycle) rejects as a wrong shape does.
+      store: {
+        get: async key => invoke('store.get', { key }),
+        set: async (key, value) => invoke('store.set', { key, value }),
+        delete: async key => invoke('store.delete', { key }),
+        keys: async () => invoke('store.keys', {})
+      },
       ui: {
         log: (text, options = {}) => {
           if (!object(options) || keys(options).some(k => k !== 'to')) throw new Error('Invalid Mod log');
@@ -196,8 +248,9 @@ export const MOD_GUEST_FACTORY = String.raw`
         },
         // A read of the table, not a dispatch.
         resolve: e => {
-          if (!object(e) || e.surface !== 'terminal') throw new TypeError('$.ui.resolve takes a ui.render event drawn on a surface this host draws');
-          return terminal;
+          const elements = object(e) && typeof e.surface === 'string' ? tables[e.surface] : undefined;
+          if (!elements) throw new TypeError('$.ui.resolve takes a ui.render event drawn on a surface this host draws');
+          return elements;
         },
         invalidate: event => {
           if (!invalidatable.has(event)) throw new TypeError('$.ui.invalidate takes ui.render or a cached-answer event, not ' + String(event));
@@ -243,7 +296,15 @@ export const MOD_GUEST_FACTORY = String.raw`
       if (typeof register !== 'function') throw new Error('Mod must export register(on, options)');
       registering = true;
       try { await register(on, frozen(parse(options))); } finally { registering = false; }
-      return stringify(hooks.map(h => h.event));
+      // A render hook names the sites its matcher's component allows, so the
+      // host raises a site only where some hook may hear it.
+      const sites = ${JSON.stringify(MOD_RENDER_SITES)};
+      return stringify(hooks.map(h => ({
+        event: h.event,
+        sites: object(h.matcher) && hasOwn(h.matcher, 'component')
+          ? sites.filter(site => matches(h.matcher.component, site))
+          : null
+      })));
     },
     run: async json => {
       const run = parse(json);
@@ -254,21 +315,39 @@ export const MOD_GUEST_FACTORY = String.raw`
       run.signal = signalFor(run);
       runs.set(run.id, run);
       run.selected = hooks.filter(h => patternMatches(h.event, run.event) && !run.leftOut.includes(h.id));
+      // A caught late-drop error must not leave a stale plugin fallback.
+      const promptFallbacks = new Map();
       const invoke = async (index, input, frames) => {
         const hook = run.selected[index];
         if (!hook) return call(run.id, frames, 'next', input);
         run.inputs.set(hook.id, input);
         if (hook.matcher !== undefined && !matches(hook.matcher, input)) return invoke(index + 1, input, frames);
         const nested = [...frames, hook.id];
+        let last;
         const next = nextFor(run, async e => {
           status(run.id, 'validate', encode(e));
-          const result = await invoke(index + 1, frozen(e), nested);
+          last = invoke(index + 1, frozen(e), nested);
+          const result = await last;
           if (!result) throw new Error('Mod hook returned no result');
           return result;
         });
-        return hook.handler(api(run.id, nested), frozen(input), next);
+        const answer = await hook.handler(api(run.id, nested), frozen(input), next);
+        if (run.event !== 'prompt.submit' || !last) return answer;
+        // What a hook answers after its next is not checked: only a drop counts.
+        const below = await last;
+        if (object(answer) && 'drop' in answer && (!object(below) || answer.drop !== below.drop)) {
+          const error = new Error('a drop after its next(e) was answered');
+          promptFallbacks.set(error, below);
+          throw error;
+        }
+        return below;
       };
-      return encode(await invoke(0, run.input, []));
+      try {
+        return encode(await invoke(0, run.input, []));
+      } catch (error) {
+        if (promptFallbacks.has(error)) status(run.id, 'promptFallback', encode(promptFallbacks.get(error)));
+        throw error;
+      }
     },
     recover: async json => {
       const recovery = parse(json);

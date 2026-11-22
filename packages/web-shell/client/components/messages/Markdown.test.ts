@@ -20,6 +20,7 @@ import {
   getCodeHighlighter,
 } from './codeHighlighter';
 import {
+  isLocalFilePath,
   isSafeHref,
   isSafeImageSrc,
   Markdown,
@@ -55,6 +56,42 @@ function cleanup(container: HTMLDivElement) {
   (container as HTMLDivElement & { __unmount: () => void }).__unmount();
   container.remove();
 }
+
+describe('Markdown math', () => {
+  it('renders inline and display math with accessible annotations', () => {
+    const view = renderMd('Inline $x^2$.\n\n$$\ny = x + 1\n$$');
+    try {
+      expect(view.querySelectorAll('.katex')).toHaveLength(2);
+      expect(view.querySelectorAll('.katex-display')).toHaveLength(1);
+      expect(
+        [...view.querySelectorAll('annotation')].map(
+          (node) => node.textContent,
+        ),
+      ).toEqual(['x^2', 'y = x + 1']);
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('does not inherit a polluted KaTeX trust option', () => {
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, 'trust');
+    Object.defineProperty(Object.prototype, 'trust', {
+      value: true,
+      configurable: true,
+      writable: true,
+    });
+    let view: HTMLDivElement | undefined;
+    try {
+      view = renderMd('$\\href{https://example.com/untrusted}{click}$');
+      expect(view.querySelector('.katex')).not.toBeNull();
+      expect(view.querySelector('a')).toBeNull();
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, 'trust', previous);
+      else Reflect.deleteProperty(Object.prototype, 'trust');
+      if (view) cleanup(view);
+    }
+  });
+});
 
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
@@ -206,7 +243,7 @@ describe('qwen-session:// links', () => {
     // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
     // href to '' before `components.a` runs, so the interception branch never
     // fires and the link renders as an inert anchor.
-    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const c = renderMd('[abc12345](qwen-session://abc12345-full-id)');
     const a = c.querySelector('a')!;
     expect(a).toBeTruthy();
     expect(a.getAttribute('role')).toBe('button');
@@ -214,18 +251,28 @@ describe('qwen-session:// links', () => {
     c.remove();
   });
 
-  it('dispatches qwen:open-session with the session id on click', () => {
+  it.each([
+    { target: 'abc12345-full-id', detail: 'abc12345-full-id' },
+    {
+      target: 'abc12345-full-id?workspace=%2Fwork%2Fproject+%28copy%29',
+      detail: {
+        sessionId: 'abc12345-full-id',
+        workspaceCwd: '/work/project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('dispatches a session event for $target', ({ target, detail }) => {
     const seen: unknown[] = [];
     const handler = (e: Event) => seen.push((e as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const c = renderMd(`[abc12345](qwen-session://${target})`);
     act(() => {
       c.querySelector('a')!.dispatchEvent(
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
     window.removeEventListener('qwen:open-session', handler);
-    expect(seen).toEqual(['abc12345-full-id']);
+    expect(seen).toEqual([detail]);
     // The scheme is never written to the DOM: the anchor is a plain '#'.
     expect(c.querySelector('a')!.getAttribute('href')).toBe('#');
     (c as HTMLDivElement & { __unmount: () => void }).__unmount();
@@ -286,8 +333,9 @@ describe('document image policy', () => {
       );
     });
 
-    expect(container.querySelector('img')?.getAttribute('src')).toBeNull();
+    expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).not.toContain('https://example.com');
+    expect(container.textContent).toContain('remote');
 
     act(() => root.unmount());
     container.remove();
@@ -314,6 +362,307 @@ describe('document image policy', () => {
       '{"series":[]}',
     );
     expect(container.textContent).not.toContain('Show chart');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+});
+
+describe('isLocalFilePath', () => {
+  it.each([
+    '/Users/foo/shot.png',
+    '/home/foo/shot.png',
+    '/tmp/shot.png',
+    '/var/folders/shot.png',
+    '/opt/shot.png',
+    '/private/tmp/shot.png',
+    '/Volumes/Data/shot.png',
+    '/mnt/data/shot.png',
+    '/media/usb/shot.png',
+    '/srv/www/shot.png',
+    'C:\\temp\\shot.png',
+    'C:/temp/shot.png',
+    '\\\\server\\share\\shot.png',
+    '~/shot.png',
+    '~\\shot.png',
+  ])('detects %s', (src) => {
+    expect(isLocalFilePath(src)).toBe(true);
+  });
+
+  it.each([
+    '/images/logo.png',
+    '/assets/foo.png',
+    '/e2e/repro-image-ok.png',
+    '/Users.png',
+    'https://example.com/img.png',
+    '//evil.com/img.png',
+    'data:image/png;base64,iVBOR',
+    'images/logo.png',
+    undefined,
+    '',
+  ])('does not flag %s', (src) => {
+    expect(isLocalFilePath(src)).toBe(false);
+  });
+});
+
+describe('markdown image fallback', () => {
+  it('renders local filesystem paths as text, not a broken img', () => {
+    const view = renderMd('![screenshot](/Users/foo/Projects/demo/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        '/Users/foo/Projects/demo/shot.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it.each([
+    [
+      '![screenshot](/Users/张三/Desktop/截图.png)',
+      '/Users/张三/Desktop/截图.png',
+    ],
+    [
+      '![screenshot](</Users/foo/My Screenshots/shot.png>)',
+      '/Users/foo/My Screenshots/shot.png',
+    ],
+  ])('shows the decoded path for %s', (markdown, path) => {
+    // micromark percent-encodes destinations; the chip must stay copyable.
+    const view = renderMd(markdown);
+    try {
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        path,
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('exposes the alt text to plain-text extraction like the img it replaces', () => {
+    const view = renderMd('![screenshot](/Users/foo/shot.png)');
+    try {
+      const chip = view.querySelector('[class*="imageFallback"]');
+      expect(chip?.getAttribute('data-markdown-image-alt')).toBe('screenshot');
+      expect(chip?.getAttribute('role')).toBe('img');
+      expect(chip?.getAttribute('aria-label')).toBe('screenshot');
+    } finally {
+      cleanup(view);
+    }
+    const empty = renderMd('![](/Users/foo/shot.png)');
+    try {
+      const chip = empty.querySelector('[class*="imageFallback"]');
+      expect(chip?.getAttribute('data-markdown-image-alt')).toBe('');
+      expect(chip?.getAttribute('aria-label')).toBe('/Users/foo/shot.png');
+    } finally {
+      cleanup(empty);
+    }
+  });
+
+  it('carries the raw src for selection markdown copy outside document mode', () => {
+    const view = renderMd('![screenshot](/Users/foo/shot.png)');
+    try {
+      expect(
+        view
+          .querySelector('[class*="imageFallback"]')
+          ?.getAttribute('data-markdown-image-src'),
+      ).toBe('/Users/foo/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('keeps percent-escapes in a failed remote URL', () => {
+    // Escapes are part of the URL's resource identity; only local paths decode.
+    const view = renderMd('![](https://example.invalid/a%2Fb.png)');
+    try {
+      const img = view.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'https://example.invalid/a%2Fb.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders gate-failing local paths as text chips', () => {
+    const view = renderMd('![shot](~/shots/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        '~/shots/shot.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it.each([
+    'C:\\temp\\shot.png',
+    'C:/temp/shot.png',
+    'file:///tmp/shot.png',
+    '\\\\server\\share\\shot.png',
+  ])('shows the alt text for %s', (src) => {
+    // Drive-letter paths and file:// URLs are rewritten to '' by
+    // react-markdown's urlTransform; UNC backslashes arrive percent-encoded
+    // (%5C). Either way the chip falls back to the alt text.
+    const view = renderMd(`![shot](${src})`);
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'shot',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('still renders same-origin asset paths as images', () => {
+    const view = renderMd('![logo](/images/logo.png)');
+    try {
+      expect(view.querySelector('img')?.getAttribute('src')).toBe(
+        '/images/logo.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('degrades a failed image load to the alt text', () => {
+    const view = renderMd('![chart](https://example.invalid/missing.png)');
+    try {
+      const img = view.querySelector('img')!;
+      expect(img).toBeTruthy();
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('img')).toBeNull();
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'chart',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('degrades a failed load without alt to the src', () => {
+    const view = renderMd('![](https://example.invalid/missing.png)');
+    try {
+      const img = view.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('[class*="imageFallback"]')?.textContent).toBe(
+        'https://example.invalid/missing.png',
+      );
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('retries when the src changes after a failure', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (content: string) =>
+      act(() => {
+        root.render(
+          createElement(
+            I18nProvider,
+            { language: 'en' },
+            createElement(Markdown, { content }),
+          ),
+        );
+      });
+
+    render('![chart](https://example.invalid/a.png)');
+    const img = container.querySelector('img')!;
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+    expect(container.querySelector('img')).toBeNull();
+
+    render('![chart](https://example.invalid/b.png)');
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(
+      'https://example.invalid/b.png',
+    );
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it.each([
+    'data:image/png;base64,iVBORw0KGgo=',
+    'DATA:image/png;base64,iVBORw0KGgo=',
+  ])('keeps an undecodable data URI img in document mode (%s)', (uri) => {
+    // The transcript-document browser gate pins src preservation for
+    // approved data URIs even when the browser cannot decode them, so
+    // document mode must not swap the img for the fallback chip.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            TranscriptRenderModeProvider,
+            { value: 'document' },
+            createElement(Markdown, {
+              content: `![](${uri})`,
+            }),
+          ),
+        ),
+      );
+    });
+
+    const img = container.querySelector('img')!;
+    expect(img).toBeTruthy();
+    act(() => {
+      img.dispatchEvent(new Event('error'));
+    });
+    expect(container.querySelector('img')?.getAttribute('src')).toBe(uri);
+    expect(container.querySelector('[class*="imageFallback"]')).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('does not echo a remote URL for empty-alt images in document mode', () => {
+    // urlTransform passes https through in document mode; the gate, not the
+    // transform, keeps it out of the img src. The chip must not reintroduce
+    // it as text (hidden copy sources render raw markdown in document mode).
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(
+            TranscriptRenderModeProvider,
+            { value: 'document' },
+            createElement(Markdown, {
+              content: '![](https://example.com/secret.png)',
+            }),
+          ),
+        ),
+      );
+    });
+
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.innerHTML).not.toContain('https://example.com');
+    expect(container.textContent).toContain('Failed to load');
+    expect(
+      container
+        .querySelector('[class*="imageFallback"]')
+        ?.hasAttribute('data-markdown-image-src'),
+    ).toBe(false);
 
     act(() => root.unmount());
     container.remove();

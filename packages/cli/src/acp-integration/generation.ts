@@ -31,10 +31,16 @@ export interface GenerationThinkingEvent {
   type: 'thinking';
 }
 
+/** A retry restarted the answer; text from earlier deltas is void. */
+export interface GenerationResetEvent {
+  type: 'reset';
+}
+
 export type GenerationEvent =
   | GenerationStartedEvent
   | GenerationThinkingEvent
-  | GenerationDeltaEvent;
+  | GenerationDeltaEvent
+  | GenerationResetEvent;
 
 export interface GenerationResult {
   model: string;

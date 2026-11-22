@@ -8,6 +8,11 @@ import { AuthType } from '../core/contentGenerator.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
+import {
+  readCachedSubscriptionCatalog,
+  type SubscriptionModelMetadata,
+} from '../qwen/subscription-models.js';
 import {
   type ModelConfig,
   type ModelProvidersConfig,
@@ -225,6 +230,8 @@ export class ModelRegistry {
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    const { models, modelMetadata } = readCachedSubscriptionCatalog();
+    this.setSubscriptionModels(models, modelMetadata);
 
     // Register user-configured models for other providers
     this.registerProvidersConfig(modelProvidersConfig);
@@ -266,7 +273,10 @@ export class ModelRegistry {
       }
 
       // qwen-oauth uses hard-coded models and cannot be overridden
-      if (protocol === AuthType.QWEN_OAUTH) {
+      if (
+        protocol === AuthType.QWEN_OAUTH ||
+        protocol === AuthType.QWEN_SUBSCRIPTION
+      ) {
         if (Array.isArray(models)) {
           for (const model of models) {
             resolveModelProtocol(
@@ -455,7 +465,8 @@ export class ModelRegistry {
     // the parent session's modalities instead of the agent's own.
     if (
       generationConfig.modalities === undefined ||
-      shouldUseCanonicalModalities(config.id)
+      (authType !== AuthType.QWEN_SUBSCRIPTION &&
+        shouldUseCanonicalModalities(config.id))
     ) {
       generationConfig.modalities = defaultModalities(config.id);
     }
@@ -492,6 +503,30 @@ export class ModelRegistry {
         `Model "${config.id}" in authType "${authType}" has multiple selector-only flags. It will be unreachable in at least one model selector.`,
       );
     }
+  }
+
+  setSubscriptionModels(
+    ids: string[],
+    modelMetadata?: SubscriptionModelMetadata[],
+  ): void {
+    const metadataById = new Map(
+      modelMetadata?.map((entry) => [entry.id, entry]),
+    );
+    this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
+    this.registerAuthTypeModels(
+      AuthType.QWEN_SUBSCRIPTION,
+      ids.map((id) => {
+        const metadata = metadataById.get(id);
+        return {
+          id,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          generationConfig: {
+            modalities: metadata?.modalities,
+            contextWindowSize: metadata?.contextWindowSize ?? tokenLimit(id),
+          },
+        };
+      }),
+    );
   }
 
   /**

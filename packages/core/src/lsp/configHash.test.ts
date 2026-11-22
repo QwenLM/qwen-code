@@ -50,6 +50,9 @@ describe('lspServerConfigHash', () => {
 
   it('changes when runtime config fields change', () => {
     expect(
+      lspServerConfigHash({ ...baseConfig, source: 'workspace' }),
+    ).not.toBe(lspServerConfigHash({ ...baseConfig, source: 'extension' }));
+    expect(
       lspServerConfigHash({
         ...baseConfig,
         command: 'other-server',

@@ -2,7 +2,7 @@
 
 [English](2026-10-23-managed-agent-admin-launcher.md) | [简体中文](2026-10-23-managed-agent-admin-launcher.zh-CN.md)
 
-Status: proposed and implemented in the same change.
+Status: proposed and implemented in the same change. The classified jars and the dedicated operator-recovery launcher were later removed by the pre-production single-jar convergence; every command, including operator-recovery, now runs from the executable server jar.
 
 ## Problem
 
@@ -25,7 +25,7 @@ That form does not work for an operator who installed the reference distribution
 ## Non-goals
 
 - Changing any entry point's arguments or behaviour.
-- Removing the classified jars from the module build, or the operator-recovery jar and launcher from the distribution.
+- Removing the classified jars from the module build, or the operator-recovery jar and launcher from the distribution. (Superseded: the pre-production single-jar convergence removed them.)
 - Making a command safe to run online. Each remains an offline procedure with its own preconditions.
 
 ## Design
@@ -36,18 +36,18 @@ That form does not work for an operator who installed the reference distribution
 
 | Command                  | Entry point                                    |
 | ------------------------ | ---------------------------------------------- |
-| `storage-registration`   | `persistence.WorkspaceStorageRegistrationMain` |
-| `workspace-recovery`     | `persistence.WorkspaceRecoveryMain`            |
-| `workspace-migration`    | `workspace.runtime.WorkspaceMigrationMain`     |
-| `maintenance-recovery`   | `persistence.WorkspaceMaintenanceRecoveryMain` |
-| `operator-recovery`      | `workspace.runtime.WorkspaceRecoveryCommand`   |
-| `csi-registration`       | `persistence.WorkspaceCsiRegistrationMain`     |
-| `csi-protection`         | `workspace.runtime.WorkspaceCsiProtectionMain` |
-| `csi-session`            | `persistence.WorkspaceCsiSessionMain`          |
-| `csi-runtime`            | `persistence.WorkspaceCsiRuntimeMain`          |
-| `csi-retirement`         | `persistence.WorkspaceCsiRetirementMain`       |
-| `csi-worker-ack`         | `persistence.WorkspaceCsiWorkerAckMain`        |
-| `resident-retirement`    | `persistence.ResidentWorkspaceRetirementMain`  |
+| `storage-registration`   | `maintenance.WorkspaceStorageRegistrationMain` |
+| `workspace-recovery`     | `maintenance.WorkspaceRecoveryMain`            |
+| `workspace-migration`    | `maintenance.WorkspaceMigrationMain`           |
+| `maintenance-recovery`   | `maintenance.WorkspaceMaintenanceRecoveryMain` |
+| `operator-recovery`      | `maintenance.WorkspaceRecoveryCommand`         |
+| `csi-registration`       | `maintenance.WorkspaceCsiRegistrationMain`     |
+| `csi-protection`         | `maintenance.WorkspaceCsiProtectionMain`       |
+| `csi-session`            | `maintenance.WorkspaceCsiSessionMain`          |
+| `csi-runtime`            | `maintenance.WorkspaceCsiRuntimeMain`          |
+| `csi-retirement`         | `maintenance.WorkspaceCsiRetirementMain`       |
+| `csi-worker-ack`         | `maintenance.WorkspaceCsiWorkerAckMain`        |
+| `resident-retirement`    | `maintenance.ResidentWorkspaceRetirementMain`  |
 | `resolved-configuration` | `preflight.ResolvedConfiguration`              |
 
 All classes are under `com.alibaba.qwen.code.managedagent`.
@@ -100,4 +100,4 @@ Before writing the launcher, the packager reads each class's source under `packa
 
 ## Follow-up work
 
-- Drop the classified jars once the module-build documentation no longer names them.
+- Drop the classified jars once the module-build documentation no longer names them. (Done: the pre-production single-jar convergence dropped all classified jars and the dedicated operator-recovery launcher.)

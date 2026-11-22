@@ -11,6 +11,9 @@ import {
   extractLastUserPrompt,
   registerSessionCommit,
   clearSessionCommits,
+  amendNeedsApproval,
+  isAmendOfSessionCommit,
+  getSessionCommitGeneration,
 } from './destructive-commands.js';
 import { modelText, userText } from '../test-utils/model-fixtures.js';
 
@@ -182,26 +185,85 @@ describe('isDestructiveCommand — IaC patterns', () => {
 });
 
 describe('isDestructiveCommand — git commit --amend', () => {
-  it('blocks git commit --amend when no session commits registered', () => {
-    expectBlocked('git commit --amend --no-edit', 'amend the commit', 'amend');
+  it('no longer hard-blocks an amend; it routes to approval', () => {
+    // #13570: the block had no escape hatch and fired ahead of the user's own
+    // ask rule. The mention now asks instead.
+    expectAllowed(['git commit --amend --no-edit'], 'amend the commit');
+    expect(amendNeedsApproval('git commit --amend --no-edit')).toBe(true);
   });
 
   it('allows git commit (without --amend)', () => {
     expectAllowed(['git commit -m "fix"'], 'commit changes');
+    expect(amendNeedsApproval('git commit -m "fix"')).toBe(false);
+  });
+
+  it.each([
+    'git commit --amend',
+    'git commit --amend --no-edit',
+    "bash -c 'git commit --amend'",
+    '/usr/bin/git commit --amend',
+    'git.exe commit --amend',
+    'git checkout HEAD~1 && git commit --amend',
+    // git accepts any unambiguous prefix of `--amend` from `--am` on.
+    'git commit --am',
+    'git commit --amen',
+    'GIT COMMIT --AMEND',
+    // Quote-split spellings: the raw text never contains `commit`, so only the
+    // quote-removed reading sees these. bash runs every one as an amend.
+    "git com''mit --amend",
+    'git "commit" --amend',
+    'git com""mit --amend',
+    "git commit --$'amend'",
+  ])('asks for %s', (command) => {
+    expect(amendNeedsApproval(command)).toBe(true);
+  });
+
+  it.each([
+    // The issue's own reproductions: text that only mentions the phrase must
+    // not hard-block. It still asks; inertness is #16604.
+    "grep -rn 'git commit --amend' docs/",
+    "echo 'the guard blocks git commit --amend'",
+    'node -e "console.log(\'git commit --amend\')"',
+    "cat <<'EOF'\ngit commit --amend\nEOF",
+    'git commit -m "docs: explain git commit --amend"',
+  ])('asks rather than blocks for inert text: %s', (command) => {
+    expectAllowed([command], 'look into the amend guard');
+    expect(amendNeedsApproval(command)).toBe(true);
+  });
+
+  it.each([
+    'git status',
+    'git log --oneline',
+    'git commit -m "fix"',
+    'git push origin main',
+    'npm run build',
+    "awk '{print $1}' data.csv",
+    'git push origin $BRANCH',
+    'echo $HOME; git commit -m x',
+    'git commit -am "feat: x"',
+  ])('does not ask for %s', (command) => {
+    expect(amendNeedsApproval(command)).toBe(false);
   });
 });
 
 describe('session commit tracking', () => {
-  it('registerSessionCommit and clearSessionCommits work', () => {
+  it('clearSessionCommits empties the registry and bumps the generation', () => {
+    // A no-throw smoke test asserted nothing: the registry has no reader that
+    // takes a SHA, so observe it through the exported cwd reader (a real repo)
+    // and through the generation counter a deferred writer checks.
     registerSessionCommit('abc123');
-    // isAmendOfSessionCommit needs a real git repo; this only checks that
-    // clearSessionCommits doesn't throw.
+    const generation = getSessionCommitGeneration();
+    expect(isAmendOfSessionCommit(process.cwd())).toBe(false);
     clearSessionCommits();
+    expect(getSessionCommitGeneration()).toBe(generation + 1);
+    expect(isAmendOfSessionCommit(process.cwd())).toBe(false);
   });
 
-  it('isAmendOfSessionCommit returns false with no session commits', () => {
-    // isAmendOfSessionCommit is not exported; tested via isDestructiveCommand.
-    expectBlocked('git commit --amend', 'amend commit');
+  it('asks for an amend even when this session made the commit', () => {
+    // The registry resolved its target from the decision-time cwd, which
+    // wrappers and history moves disagree with, so it no longer waives the ask.
+    registerSessionCommit('abc123');
+    expect(amendNeedsApproval('git commit --amend')).toBe(true);
   });
 });
 

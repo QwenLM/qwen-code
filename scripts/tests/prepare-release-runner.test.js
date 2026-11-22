@@ -28,6 +28,7 @@ it
     'normal',
     'workspace-leaf-link',
     'workspace-parent-link',
+    'workspace-contained-parent-link',
     'runner-link',
     'workspace-outside',
     'workspace-equals-runner',
@@ -57,6 +58,11 @@ it
     else if (kind === 'workspace-parent-link') {
       symlinkSync(outside, join(runner, 'parent'), 'dir');
       mkdirSync(join(outside, 'repo'));
+      workspaceInput = join(runner, 'parent', 'repo');
+    } else if (kind === 'workspace-contained-parent-link') {
+      mkdirSync(workspace);
+      writeFileSync(join(workspace, 'sentinel'), 'KEEP_INTERNAL');
+      symlinkSync(runner, join(runner, 'parent'), 'dir');
       workspaceInput = join(runner, 'parent', 'repo');
     } else if (kind === 'runner-link') {
       mkdirSync(workspace);
@@ -99,6 +105,11 @@ it
       'KEEP_EXTERNAL',
     );
     assert.equal(statSync(join(outside, 'sentinel')).mode & 0o777, 0o444);
+    if (kind === 'workspace-contained-parent-link')
+      assert.equal(
+        readFileSync(join(workspace, 'sentinel'), 'utf8'),
+        'KEEP_INTERNAL',
+      );
     if (success) {
       assert.ok(lstatSync(workspace).isDirectory());
       assert.deepEqual(readdirSync(workspace), []);

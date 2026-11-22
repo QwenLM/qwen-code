@@ -394,6 +394,30 @@ describe('LoopTickResolver', () => {
     expect(tick.modelText).toContain('(home)');
   });
 
+  it('buildClassifierOutageTick reports the classifier, not a loop.md read failure (D7)', () => {
+    // The loop.md read SUCCEEDED; only the fire-time re-review is down. The
+    // tick must not reuse the transient tick's "could not be read" claim.
+    const tick = resolver.buildClassifierOutageTick('dynamic');
+    expect(tick.full).toBe(false);
+    expect(tick.modelText).not.toContain('could not be read');
+    expect(tick.modelText).toContain(
+      'fire-time classifier is temporarily unavailable',
+    );
+    expect(tick.modelText).toContain('Treat this as a no-op tick');
+    // The dynamic re-arm instruction keeps the loop alive to retry.
+    expect(tick.modelText).toContain(LOOP_SENTINEL_DYNAMIC);
+  });
+
+  it('cron buildClassifierOutageTick keeps cron pacing (D7)', () => {
+    const tick = resolver.buildClassifierOutageTick('cron');
+    expect(tick.modelText).not.toContain('could not be read');
+    expect(tick.modelText).toContain(
+      'fire-time classifier is temporarily unavailable',
+    );
+    expect(tick.modelText).toContain('recurring cron fires the next tick');
+    expect(tick.modelText).not.toContain(LOOP_SENTINEL_DYNAMIC);
+  });
+
   it('a transient-error tick clears the change-detection cache so the next read re-delivers full', async () => {
     // The degraded tick caches like absent: identical content later re-expands
     // FULL, not a reminder to a block no longer surely in context. Mutation

@@ -4,6 +4,7 @@ WORKDIR /workspace
 COPY packages/sdk-java/qwencode packages/sdk-java/qwencode
 COPY packages/managed-agent-server packages/managed-agent-server
 COPY packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json packages/core/src/managed-runtime/contracts/
+COPY packages/core/src/managed-runtime/contracts/managed-loop-skill-*.json packages/core/src/managed-runtime/contracts/
 
 RUN mvn --batch-mode --no-transfer-progress \
       -f packages/sdk-java/qwencode/pom.xml \
@@ -17,7 +18,7 @@ RUN mvn --batch-mode --no-transfer-progress \
     # exists. sh has no nullglob, so a zero-match glob yields the pattern
     # itself — break on it so the count check below still fails, and name
     # the expectation loudly instead of dying at cp.
-    && cd packages/managed-agent-server/target \
+    && cd packages/managed-agent-server/server/target \
     && main="" && count=0 \
     && for f in qwen-managed-agent-server-*-exec.jar; do \
          [ -e "$f" ] || break; \

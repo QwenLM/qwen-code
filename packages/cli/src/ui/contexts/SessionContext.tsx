@@ -141,7 +141,10 @@ function areGenerationMetricsEqual(
     a.timedRequests !== b.timedRequests ||
     a.totalTtftMs !== b.totalTtftMs ||
     a.totalGenerationDurationMs !== b.totalGenerationDurationMs ||
-    a.totalThroughputOutputTokens !== b.totalThroughputOutputTokens
+    a.totalThroughputOutputTokens !== b.totalThroughputOutputTokens ||
+    a.totalTimedGenerationDurationMs !== b.totalTimedGenerationDurationMs ||
+    a.totalOutputSpeedTokens !== b.totalOutputSpeedTokens ||
+    a.totalOutputSpeedDurationMs !== b.totalOutputSpeedDurationMs
   ) {
     return false;
   }
@@ -261,7 +264,15 @@ export interface SessionStatsState {
   sessionStartTime: Date;
   metrics: SessionMetrics;
   lastPromptTokenCount: number;
+  // Monotonic prompt-id mint counter. Advances for every top-level turn that
+  // mints a fresh id (user, cron, teammate, notification, goal, retry) so each
+  // minted id is unique; the model-availability ledger keys on it. Distinct
+  // from userPromptCount, the user-visible statistic (R8-F3 decouple).
   promptCount: number;
+  // User-visible "Prompts" statistic (/stats, feedback threshold, tip cadence).
+  // Advances for the historical prompt set (user query, cron, teammate), not
+  // for background notification/goal/retry mints that still advance promptCount.
+  userPromptCount: number;
 }
 
 export interface ComputedSessionStats {
@@ -286,8 +297,9 @@ interface SessionStatsContextValue {
   stats: SessionStatsState;
   startNewSession: (sessionId: string) => void;
   startNewPrompt: () => void;
+  recordUserPrompt: () => void;
   getPromptCount: () => number;
-  seedPromptCount: (count: number) => void;
+  seedPromptCount: (count: number, userPromptCountSeed?: number) => void;
 }
 
 function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
@@ -331,6 +343,11 @@ function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
               metrics.generation.totalGenerationDurationMs,
             totalThroughputOutputTokens:
               metrics.generation.totalThroughputOutputTokens,
+            totalTimedGenerationDurationMs:
+              metrics.generation.totalTimedGenerationDurationMs,
+            totalOutputSpeedTokens: metrics.generation.totalOutputSpeedTokens,
+            totalOutputSpeedDurationMs:
+              metrics.generation.totalOutputSpeedDurationMs,
             ...(metrics.generation.last
               ? { last: { ...metrics.generation.last } }
               : {}),
@@ -402,6 +419,7 @@ const createDefaultStats = (sessionId: string = ''): SessionStatsState => ({
   metrics: getMetricsForDisplay(sessionId),
   lastPromptTokenCount: 0,
   promptCount: 0,
+  userPromptCount: 0,
 });
 
 // --- Provider Component ---
@@ -466,27 +484,51 @@ export const SessionStatsProvider: React.FC<{
     }));
   }, []);
 
+  const recordUserPrompt = useCallback(() => {
+    setStats((prevState) => ({
+      ...prevState,
+      userPromptCount: prevState.userPromptCount + 1,
+    }));
+  }, []);
+
   const getPromptCount = useCallback(
     () => stats.promptCount,
     [stats.promptCount],
   );
 
-  const seedPromptCount = useCallback((count: number) => {
-    setStats((prevState) => ({
-      ...prevState,
-      promptCount: Math.max(prevState.promptCount, count),
-    }));
-  }, []);
+  const seedPromptCount = useCallback(
+    (count: number, userPromptCountSeed?: number) => {
+      setStats((prevState) => ({
+        ...prevState,
+        promptCount: Math.max(prevState.promptCount, count),
+        // The visible Prompts statistic resumes from the user-turn count, not
+        // the mint counter seed (which background mints can push higher).
+        userPromptCount: Math.max(
+          prevState.userPromptCount,
+          userPromptCountSeed ?? count,
+        ),
+      }));
+    },
+    [],
+  );
 
   const value = useMemo(
     () => ({
       stats,
       startNewSession,
       startNewPrompt,
+      recordUserPrompt,
       getPromptCount,
       seedPromptCount,
     }),
-    [stats, startNewSession, startNewPrompt, getPromptCount, seedPromptCount],
+    [
+      stats,
+      startNewSession,
+      startNewPrompt,
+      recordUserPrompt,
+      getPromptCount,
+      seedPromptCount,
+    ],
   );
 
   return (

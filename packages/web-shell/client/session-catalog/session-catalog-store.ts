@@ -116,6 +116,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
   return JSON.stringify([
     query.routeKind,
     query.workspaceCwd,
+    options?.sortBy ?? 'updatedAt',
     options?.pageSize ?? null,
     options?.cursor ?? null,
     options?.archiveState ?? null,
@@ -124,6 +125,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
     options?.parentSessionId ?? null,
     options?.sourceType ?? null,
     options?.sourceId ?? null,
+    options?.liveOnly ?? null,
   ]);
 }
 
@@ -181,6 +183,7 @@ function liveSessionSnapshotsEqual(
         JSON.stringify(session.backgroundTurn) ||
       prior.isWaitingForPermission !== session.isWaitingForPermission ||
       prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
+      prior.hasTurnError !== session.hasTurnError ||
       prior.updatedAt !== session.updatedAt
     ) {
       return false;
@@ -855,6 +858,7 @@ export class SessionCatalogStore {
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
+        const hasTurnError = live?.hasTurnError ?? session.hasTurnError;
         // The daemon watermark only ever advances recency; an equal or older
         // stamp (e.g. a staged page committed fresher data mid-flight) must
         // not regress the row.
@@ -865,12 +869,19 @@ export class SessionCatalogStore {
         const liveActivityTime =
           liveUpdatedAt !== undefined ? Date.parse(liveUpdatedAt) : Number.NaN;
         if (Number.isFinite(liveActivityTime)) absorbed.add(session.sessionId);
-        const updatedAt =
+        const activityAdvances =
           liveUpdatedAt !== undefined &&
           Number.isFinite(liveActivityTime) &&
-          liveActivityTime > getSessionActivityTime(session)
-            ? liveUpdatedAt
-            : session.updatedAt;
+          liveActivityTime > getSessionActivityTime(session);
+        const updatedAt = activityAdvances ? liveUpdatedAt : session.updatedAt;
+        // A terminal observed in the current bridge that is newer than the
+        // row's persisted activity supersedes the cut-off hint: the
+        // continuation (or a fresh prompt) already settled, so the stale
+        // ledger evidence must not wait for the rate-limited full catalog
+        // reconcile to clear.
+        const needsContinuation = activityAdvances
+          ? undefined
+          : session.needsContinuation;
         if (
           session.clientCount === clientCount &&
           session.hasActivePrompt === hasActivePrompt &&
@@ -881,6 +892,8 @@ export class SessionCatalogStore {
             JSON.stringify(live?.backgroundTurn) &&
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
+          session.hasTurnError === hasTurnError &&
+          session.needsContinuation === needsContinuation &&
           session.updatedAt === updatedAt
         ) {
           return session;
@@ -896,11 +909,16 @@ export class SessionCatalogStore {
           hasRunningBackgroundTasks: live?.hasRunningBackgroundTasks,
           isWaitingForPermission,
           isWaitingForUserQuestion,
+          hasTurnError,
+          needsContinuation,
           ...(updatedAt !== undefined ? { updatedAt } : {}),
         };
       });
       if (!changed) continue;
-      if (activityAdvanced) {
+      if (
+        activityAdvanced &&
+        entry.query.options.sortBy !== 'lastUserPromptAt'
+      ) {
         sessions.sort((a, b) =>
           compareSessionsByActivity(
             entry.query.options.view === 'organized',

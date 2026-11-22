@@ -64,6 +64,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 const {
   useSessionCatalogQuery,
+  useSessionCatalogQueries,
   useSessionCatalogController,
   useSessionActivePromptState,
   useDaemonActivePromptBridge,
@@ -262,6 +263,32 @@ describe('session catalog hooks', () => {
       );
     });
     expect(invalidateDeleted).not.toHaveBeenCalled();
+  });
+
+  it('forwards a page that is stale mid-refresh without an error', async () => {
+    legacy
+      .mockResolvedValueOnce({ sessions: [{ sessionId: 'primary' }] })
+      .mockReturnValueOnce(new Promise(() => {}));
+    let facade: ReturnType<typeof useWebShellSessions> | undefined;
+
+    function FacadeProbe() {
+      facade = useWebShellSessions({ autoLoad: true });
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<FacadeProbe />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(facade!.stale).toBe(false);
+    act(() => {
+      void facade!.reload();
+    });
+    // Retained while the refresh is in flight: not a fresh answer, and not
+    // an error either.
+    expect(facade!.stale).toBe(true);
+    expect(facade!.error).toBeUndefined();
   });
 
   it('keeps the legacy reload contract when a list request fails', async () => {
@@ -700,6 +727,44 @@ describe('useSessionActivePromptState (#9487)', () => {
       // catalog keeps reconciling instead of freezing on the failed refresh.
       expect(legacy.mock.calls.length).toBeGreaterThan(callsAfterTrailing);
       expect(latestFlag!).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('applies the polling predicate independently to each query', async () => {
+    vi.useFakeTimers();
+    try {
+      legacy.mockResolvedValue({ sessions: [] });
+      const client = mocks.workspace.client as DaemonClient;
+      const queries: SessionCatalogQuery[] = [
+        { routeKind: 'legacy', workspaceCwd: '/work', options: {} },
+        {
+          routeKind: 'legacy',
+          workspaceCwd: '/work',
+          options: { cursor: 'history' },
+        },
+      ];
+      function Probe() {
+        useSessionCatalogQueries(client, queries, {
+          autoLoad: true,
+          pollIntervalMs: 30_000,
+          pollQueries: (_query, index) => index === 0,
+        });
+        return null;
+      }
+      await act(async () => {
+        root.render(<Probe />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(legacy).toHaveBeenCalledTimes(2);
+      legacy.mockClear();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(30_000);
+      });
+      expect(legacy).toHaveBeenCalledTimes(1);
+      expect(legacy.mock.calls[0]?.[1]?.cursor).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }

@@ -667,7 +667,9 @@ async function createPerAgentConfig(
       config: override as Config,
       contentGenerator:
         dedicatedContentGenerator ??
-        (authOverrides?.authType ? undefined : base.getContentGenerator()),
+        (authOverrides?.authType
+          ? undefined
+          : base.getContentGenerator({ allowUninitialized: true })),
       contentGeneratorError,
       runtimeView,
       cleanup,

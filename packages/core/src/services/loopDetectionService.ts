@@ -240,6 +240,15 @@ export interface TurnToolCallCapHalt {
   limit: number;
 }
 
+/** One queued loop-protection warning, keyed by its pattern. */
+export interface LoopReminderEntry {
+  text: string;
+  loopType: LoopType;
+  detail: LoopStopDetail;
+  /** The prompt id that queued it, since a side query's reset moves promptId. */
+  promptId: string;
+}
+
 /**
  * Halt classifier of the per-turn tool-call cap, shared with the daemon's
  * turn-loop guard (ACP Session's recordDaemonToolCalls) so both runtimes
@@ -511,15 +520,15 @@ export class LoopDetectionService {
   // Reminders waiting for the next request that carries tool results, keyed
   // by the pattern that queued them so a retry can undo them. Each keeps the
   // prompt id that queued it, since a side query's reset moves promptId.
-  private pendingReminders = new Map<
-    string,
-    {
-      text: string;
-      loopType: LoopType;
-      detail: LoopStopDetail;
-      promptId: string;
-    }
-  >();
+  private pendingReminders = new Map<string, LoopReminderEntry>();
+
+  // A delivery takeLoopReminder() handed to the client for the request it is
+  // assembling. It waits here — not yet credited, not re-queued — until the
+  // client commits it at the model-acceptance boundary or abandons it, so
+  // neither the handled decisions nor the `reminded` telemetry settle from a
+  // draft request array that may never reach the model.
+  private preparedReminderDelivery: Array<[string, LoopReminderEntry]> | null =
+    null;
 
   // False while a concurrent side query feeds the detectors: its calls and
   // retries must not queue, drop or observe the running turn's decisions.
@@ -574,18 +583,58 @@ export class LoopDetectionService {
 
   /**
    * Returns the loop-protection reminder queued since the last call, for the
-   * next request that carries tool results.
+   * next request that carries tool results. The delivery is only prepared
+   * here: the caller credits it with commitLoopReminderDelivery() once the
+   * model accepts the request, or returns it with abandonLoopReminderDelivery()
+   * when the request never reaches the model.
    */
   takeLoopReminder(): string | undefined {
     if (this.pendingReminders.size === 0) return undefined;
-    const pending = [...this.pendingReminders.values()];
+    const pending = [...this.pendingReminders.entries()];
     this.pendingReminders.clear();
+    this.preparedReminderDelivery = pending;
+    return pending.map(([, { text }]) => text).join('\n\n');
+  }
+
+  /**
+   * Credits the `reminded` decision for the delivery takeLoopReminder()
+   * prepared. The client calls this at the model-acceptance boundary — the
+   * first event of the request that carries the reminder — so a send that is
+   * abandoned or fails before acceptance stays un-credited.
+   */
+  commitLoopReminderDelivery(): void {
+    const prepared = this.preparedReminderDelivery;
+    if (!prepared) return;
+    this.preparedReminderDelivery = null;
     // Logged on delivery, so a reminder dropped by a retry or never sent
     // before a stop is not counted.
-    for (const { loopType, detail, promptId } of pending) {
+    for (const [, { loopType, detail, promptId }] of prepared) {
       this.logLoopProtectionDecision(loopType, 'reminded', detail, promptId);
     }
-    return pending.map(({ text }) => text).join('\n\n');
+  }
+
+  /**
+   * Puts the delivery takeLoopReminder() prepared back into the pending map
+   * after the request carrying it exited without model acceptance, so the
+   * same streak's warning stays eligible for the next send.
+   *
+   * The keys stay marked handled here: the remind decision stood, and
+   * unmarking would let a refire queue a duplicate beside the restored entry.
+   * They do not survive everything — a Retry drops the consecutive streak
+   * through resetToolCallCount(), which deletes `identical`,
+   * `identical-unverified` and `shell` from loopProtectionHandled. The
+   * retry's dropPendingReminders() cannot do that on this path, because the
+   * taken entries are no longer in pendingReminders when it runs. A reset
+   * clears this prepared delivery instead, so an abandoned send cannot leak
+   * a stale warning into a new prompt.
+   */
+  abandonLoopReminderDelivery(): void {
+    const prepared = this.preparedReminderDelivery;
+    if (!prepared) return;
+    this.preparedReminderDelivery = null;
+    for (const [key, reminder] of prepared) {
+      this.pendingReminders.set(key, reminder);
+    }
   }
 
   // A retry replays the attempt's calls, which queue the reminders again. A
@@ -2063,6 +2112,9 @@ export class LoopDetectionService {
     if (keepReminders) return;
     this.loopProtectionHandled.clear();
     this.pendingReminders.clear();
+    // A prepared delivery belongs to a send of the old prompt: dropping it
+    // keeps a late abandon from resurrecting the stale warning here.
+    this.preparedReminderDelivery = null;
     this.loopProtectionStopLogged = false;
   }
 

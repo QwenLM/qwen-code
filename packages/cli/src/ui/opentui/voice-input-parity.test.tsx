@@ -248,6 +248,12 @@ vi.mock('../hooks/extension-mention-ref.js', () => ({
 vi.mock('./slash-dispatch.js', () => ({
   loadInteractiveCommands: async () => [],
 }));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = () => false;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('./commands-dispatch.js', () => ({
   OpenTuiSlashDispatcher: class {
     commands = [];
@@ -271,6 +277,11 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
   useMcpApproval: () => ({
     isMcpApprovalDialogOpen: false,
     pendingMcpApprovals: [],
+  }),
+}));
+vi.mock('../hooks/use-project-hooks-approval.js', () => ({
+  useProjectHooksApproval: () => ({
+    isProjectHooksApprovalDialogOpen: false,
   }),
 }));
 vi.mock('../hooks/useWorktreeSession.js', () => ({
@@ -298,10 +309,19 @@ vi.mock('./dialogs-confirm.js', () => ({
   OpenTuiShellConfirmation: () => null,
   OpenTuiActionConfirmation: () => null,
   OpenTuiMcpApprovalDialog: () => null,
+  OpenTuiProjectHooksApprovalDialog: () => null,
 }));
 vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
+const extensionManager = {
+  setRequestConsent: vi.fn(),
+  setRequestSetting: vi.fn(),
+  setRequestChoicePlugin: vi.fn(),
+};
 const config = {
+  getAuthType: () => 'openai',
+  getResumedSessionData: () => undefined,
+  getExtensionManager: () => extensionManager,
   getSessionId: () => 'owned-voice-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
@@ -309,6 +329,7 @@ const config = {
   getModel: () => 'owned-chat-model',
   getFastModel: mocks.fastModel,
   onModelChange: () => () => {},
+  setSubscriptionPlan: () => {},
 } as unknown as Config;
 const getSessionStats = () => ({}) as SessionStatsState;
 

@@ -31,7 +31,11 @@ export const ScreenReaderAppLayout: React.FC = () => {
     uiState.terminalHeight,
     uiState.staticExtraHeight,
   );
-  const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  const constrainDialogHeight =
+    uiState.constrainHeight &&
+    !uiState.auth.isAuthDialogOpen &&
+    !uiState.auth.authError;
+  const dialogHeight = constrainDialogHeight ? dialogMaxHeight : undefined;
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -55,7 +59,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
           flexDirection="column"
           width={uiState.mainAreaWidth}
           height={dialogHeight}
-          overflow={uiState.constrainHeight ? 'hidden' : undefined}
+          overflow={constrainDialogHeight ? 'hidden' : undefined}
         >
           <DialogManager
             terminalWidth={uiState.terminalWidth}

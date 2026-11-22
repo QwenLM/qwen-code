@@ -21,7 +21,7 @@
  * past 30s on 5 of its first 6 runs — banner rendered, prompt never
  * arriving — so hosted macOS x64 joins the 90s stall tier. Any budget here
  * must stay under the suite's testTimeout (TB_TIMEOUT_MINUTES, default 5min;
- * the distribution suite pins 120s per case).
+ * the distribution suite pins 240s per case).
  *
  * InteractiveSession.start and the skill-hooks invocation-parity suite's
  * TestRig readiness wait use this budget; other TestRig readiness waits keep

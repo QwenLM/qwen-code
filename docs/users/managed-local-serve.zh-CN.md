@@ -92,6 +92,13 @@ Harness 使用正常的 Qwen 模型配置与 provider 凭据。第一次发送 p
 普通 Qwen CLI 流程配置模型。文件和 Shell 使用 `default` 审批模式，需要审批的
 操作会在 Managed UI 中等待批准。
 
+支持 Shell 的 Managed 会话还会提供“终端”。浏览器先获取一次性票，再通过
+同一个需要认证的本地前门建立连接。这是人用 shell，不是模型工具：获授权的
+操作者可以不经逐命令模型审批、以服务器 OS 账户执行任意命令。本地 worker
+没有容器隔离，因此此启动器仅供你信任其拥有该账户权限的操作者使用。本地
+启动器始终启用终端，无法选择关闭；剩下的本地控制点是谁能访问打印的页面
+及其 bearer token，而不是是否启用终端。模型操作的 Shell 审批不等于终端授权。
+
 重启后继续已有 Session 时，可能需要等待原 SQL writer 租约到期（默认 60 秒）。
 保留原数据目录，等待后重试；重启进程不会清除所有权。
 
@@ -147,14 +154,14 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
 
 runtime 构建器只要求匹配的服务 JAR、Java runtime 和本 checkout 中的 CLI 版本，
 不依赖编译好的 CLI 资源或 Node archive。默认输出到
-`packages/managed-agent-server/target/managed-runtime`，位于 CLI 的 `dist/` 资源树
+`packages/managed-agent-server/server/target/managed-runtime`，位于 CLI 的 `dist/` 资源树
 之外。输出 runtime archive 及单独的 `.sha256`
 文件。普通 CLI 独立构建和发行。
 
@@ -163,7 +170,7 @@ runtime 构建器只要求匹配的服务 JAR、Java runtime 和本 checkout 中
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -175,7 +182,7 @@ npm run package:managed-runtime -- \
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --managed-server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```

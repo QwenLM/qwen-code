@@ -32,6 +32,7 @@ import type {
 import { buildAdvisorReminder } from './advisor-policy.js';
 import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
 import { createUserContent } from './genai-compat.js';
+import type { Span } from '@opentelemetry/api';
 import process from 'node:process';
 
 // Config
@@ -87,7 +88,10 @@ import {
   type RepairOrphanedToolUseOptions,
   userContentPushSnapshotKey,
 } from './llm-chat.js';
-import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
+import {
+  findRestorableAskUserQuestion,
+  restorableAskUserQuestionCallIds,
+} from './ask-user-question-restore.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -95,9 +99,12 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  loadCoreSystemPromptSource,
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
+  type CoreSystemPromptSource,
 } from './prompts.js';
+import { getSystemPromptModel } from './request-model.js';
 import { buildOmniMediaGuidanceSection } from '../omni/media-guidance.js';
 import { getOutputStyleTurnReminder } from './output-styles.js';
 import {
@@ -114,7 +121,10 @@ import {
   LoopDetectionService,
 } from '../services/loopDetectionService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-import type { UserPromptRecordPayload } from '../services/chatRecordingService.js';
+import type {
+  NotificationRecordPayload,
+  UserPromptRecordPayload,
+} from '../services/chatRecordingService.js';
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
@@ -176,7 +186,9 @@ import {
 // Utilities
 import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
-  formatDateForContext,
+  buildDateReminder,
+  DATE_REMINDER_METADATA,
+  findLastAnnouncedDate,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
@@ -212,8 +224,16 @@ import { logApiRetry } from '../telemetry/loggers.js';
 import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import {
   createUserPromptSubmitContextPart,
-  hasUserPromptSubmitContext,
+  deliveredUserPromptSubmitContexts,
+  isUserPromptSubmitContextPartText,
 } from '../hooks/user-prompt-submit-context.js';
+import {
+  appendAsyncHookContextPart,
+  drainAsyncHookContextPart,
+  isAsyncHookContextPartText,
+  isStampedAsyncHookContextPart,
+  mergeAsyncHookContextParts,
+} from '../hooks/async-hook-context.js';
 import {
   TrustedUserAnswers,
   type TrustedUserAnswerQuestion,
@@ -281,14 +301,123 @@ function hostContinuationOptions(
 ): Partial<SendMessageOptions> {
   return {
     ...(options?.toolCallPreparations && { toolCallPreparations: true }),
-    ...(options?.interactionSpanByHost && { interactionSpanByHost: true }),
-    ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
+    ...(options?.interactionSpan && {
+      interactionSpan: options.interactionSpan,
+    }),
+    ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
+    // A side query's client-initiated continuation (Stop-hook / stop-policy)
+    // must keep the flag: it is a Hook send, so without it the async-drain gate
+    // would not recognise it as a side query and it would drain the owning
+    // turn's pending block. The owning turn's own continuations carry no flag
+    // and keep draining.
+    ...(options?.isConcurrentSideQuery && { isConcurrentSideQuery: true }),
+    // A Goal turn's continuation runs under the same permit.
+    ...(options?.goalPermit && {
+      goalPermit: options.goalPermit,
+      goalTurnKey: options.goalTurnKey,
+      goalSignal: options.goalSignal,
+      goalOrigin: options.goalOrigin,
+      getInterruptedGoalPauseReason: options.getInterruptedGoalPauseReason,
+      getQueuedGoalTurnKey: options.getQueuedGoalTurnKey,
+    }),
+    // A client-initiated Stop-hook/stop-policy continuation keeps the turn's
+    // ledger key: its prompt id carries a continuation suffix, so without the
+    // base key beginTurn would read it as a new turn and reset the consumed
+    // marks mid-turn (R16).
+    ...(options?.ledgerTurnKey && { ledgerTurnKey: options.ledgerTurnKey }),
   };
 }
 
 /** Upper bound on prompt ids tracked for an in-flight Stop-hook chain. */
 export const MAX_STOP_HOOK_CHAIN_PROMPT_IDS = 32;
+
+/** Upper bound on background-interaction prompt ids retained for ledger exclusion. */
+export const MAX_BACKGROUND_INTERACTION_PROMPT_IDS = 32;
+
+export type UserTurnRecord =
+  | {
+      kind: 'user';
+      message: PartListUnion;
+      payload?: UserPromptRecordPayload;
+      promptId?: string;
+      daemonPromptId?: string;
+      goalPermit?: GoalTurnPermit;
+    }
+  | {
+      kind: 'goal';
+      message: PartListUnion;
+      goalPermit: GoalTurnPermit;
+    }
+  | {
+      kind: 'cron';
+      message: PartListUnion;
+      displayText?: string;
+    }
+  | {
+      kind: 'notification';
+      message: PartListUnion;
+      displayText?: string;
+      backgroundTask?: NotificationRecordPayload['backgroundTask'];
+    };
+
+/**
+ * What the host already recorded and set up for this turn: either it wrote the
+ * record through {@link recordUserTurn} at its existing timing, or the message
+ * is already in history. A matching `promptId` tells core to record nothing
+ * itself.
+ */
+export interface UserTurnInput {
+  promptId: string;
+  todoWorkChain?: { promptId: string };
+  /**
+   * Present when the host ran the snapshot phase for this turn, in any of its
+   * three outcomes: the snapshot was taken, it was deliberately skipped for a
+   * restore, or it was attempted and failed. Core records no snapshot of its
+   * own either way and does not retry a failed one.
+   */
+  fileHistory?: { promptId: string };
+}
+
+/** Writes the host's record at its existing timing. */
+export function recordUserTurn(config: Config, record: UserTurnRecord): void {
+  const recorder = config.getChatRecordingService();
+  switch (record.kind) {
+    case 'user':
+      recorder?.recordUserMessage(
+        record.message,
+        record.goalPermit,
+        record.payload,
+        record.promptId,
+        record.daemonPromptId,
+      );
+      break;
+    case 'goal':
+      recorder?.recordGoalRuntimeMessage(record.message, record.goalPermit);
+      break;
+    case 'cron':
+      recorder?.recordCronPrompt(record.message, record.displayText);
+      break;
+    case 'notification':
+      if (record.backgroundTask !== undefined) {
+        recorder?.recordNotification(
+          record.message,
+          record.displayText,
+          record.backgroundTask,
+        );
+      } else {
+        recorder?.recordNotification(record.message, record.displayText);
+      }
+      break;
+    default: {
+      // A new kind without a case has to fail HERE, at compile time. This runs
+      // outside the caller's `try` (Session.ts), so a runtime throw escapes the
+      // turn handler instead of being turned into a turn error.
+      const _exhaustive: never = record;
+      void _exhaustive;
+    }
+  }
+}
 
 interface StopHookChain {
   count: number;
@@ -315,18 +444,37 @@ export interface SendMessageOptions {
   onPromptAdmitted?: () => void;
   /**
    * {@link LlmClient.admitUserPrompt}'s verdict on this prompt, applied in
-   * place of running UserPromptSubmit again. It is spent by the UserQuery with
-   * the prompt id it was issued for; any other use throws.
+   * place of running UserPromptSubmit again. It is spent by the UserQuery or
+   * Retry with the prompt id it was issued for; any other use throws.
    */
   promptAdmission?: UserPromptAdmission;
+  /**
+   * What the Mods' `prompt.submit` hooks attached for the model to read
+   * beside this UserQuery's prompt. It joins UserPromptSubmit's context in
+   * the hidden block the person never sees, ahead of it.
+   */
+  promptContext?: readonly string[];
+  /**
+   * The Mod that submitted this UserQuery's prompt with `$.prompt.submit`.
+   * The transcript records it as the Mod's prompt, not the person's.
+   */
+  submittedByMod?: string;
+  /** The Mod sent its prompt as the person's own words, unframed. */
+  submittedAsUser?: true;
   /** A UserQuery running beside an active turn, without replacing its state. */
   isConcurrentSideQuery?: boolean;
   /**
-   * The host already recorded this UserQuery's user message, started its todo
-   * work chain and took its file-history snapshot, as ACP does when it admits
-   * a prompt, so the client does none of them.
+   * The turn answers a message the host relays, as a channel's turn does, so
+   * its stop schedules no memory extraction or Dream. The host sets it on each
+   * round it sends; the client carries it to the continuations it starts.
    */
-  userTurnRecordedByHost?: boolean;
+  skipMemoryExtraction?: boolean;
+  userTurn?: UserTurnInput;
+  /**
+   * The rewindable identity a Retry's request carries in history: that of the
+   * attempt it replaces. Spent by the first request.
+   */
+  historyPromptId?: string;
   /** Also yield `ToolCallPreparation` for calls the model starts streaming. */
   toolCallPreparations?: boolean;
   /**
@@ -335,18 +483,16 @@ export interface SendMessageOptions {
    */
   stopPolicies?: readonly StopPolicy[];
   /**
-   * The host keeps the interaction span open around its turn, so this send
-   * neither starts nor ends one.
+   * The host owns this span: it starts and ends it, and owns its attributes.
+   * Passing it here does NOT hand the lifecycle to core — this client never
+   * starts or ends the span, never writes the input-message or
+   * resolved-request attributes, and only records activity on it. This is the
+   * one field that turns core's own span bookkeeping off
+   * (`startInteractionSpan`, `addAgentInputMessageAttributes`,
+   * `addUserPromptAttributes`, and `endCurrentInteraction` all step aside), so
+   * a caller that passes a span it does not own gets no lifecycle at all.
    */
-  interactionSpanByHost?: boolean;
-  /**
-   * The host runs its own tool-call guards and exploration budget and builds
-   * the tool-result message with its todo reminder, so this send checks no
-   * tool-call patterns and adds neither reminder. The content and thought
-   * heuristics still run, and a tool-result send still carries their loop
-   * reminder and the memory recall.
-   */
-  toolLoopGuardsByHost?: boolean;
+  interactionSpan?: Span;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -384,6 +530,14 @@ export interface SendMessageOptions {
    * (#13319).
    */
   retractDeliveredOutputOnRetry?: boolean;
+  /**
+   * Stable model-availability ledger turn key for this send, when it differs
+   * from the send's `prompt_id`. A headless runtime Goal run keeps the
+   * foreground turn's `prompt_id` for identity but opens its own ledger turn
+   * so a fallback the foreground turn exhausted is re-probed for the Goal run.
+   * Forwarded to `LlmChat`; defaults to `prompt_id` when unset.
+   */
+  ledgerTurnKey?: string;
 }
 
 /** UserPromptSubmit's verdict on a prompt, taken before the prompt expands. */
@@ -531,13 +685,15 @@ type MainSessionPromptConfig = Pick<
 
 export function getMainSessionBaseSystemPrompt(
   config: MainSessionPromptConfig,
+  model = config.getModel(),
+  source?: CoreSystemPromptSource,
 ): string {
   const overrideSystemPrompt = config.getSystemPrompt();
   return overrideSystemPrompt
     ? getCustomSystemPrompt(overrideSystemPrompt)
     : getCoreSystemPrompt(
         undefined,
-        config.getModel(),
+        model,
         undefined,
         resolveInteractionMode(config),
         // The prompt and the per-turn reminder must agree on which style is
@@ -555,12 +711,14 @@ export function getMainSessionBaseSystemPrompt(
           executionSandboxBackend:
             config.getShellExecutionSandbox?.()?.effectiveBackend,
           executionSandboxNetwork: config.getShellExecutionSandbox?.()?.network,
+          ...(source && { source }),
         },
       );
 }
 
 export class LlmClient {
   private chat?: LlmChat;
+  private coreSystemPromptSource?: CoreSystemPromptSource;
   private readonly trustedUserAnswers = new TrustedUserAnswers();
   private initializedSessionId: string | undefined;
   /**
@@ -621,6 +779,33 @@ export class LlmClient {
   // is bound to its owning interaction: every budget entrypoint below is a
   // no-op for an invocation that does not own it.
   private toolExplorationBudgetPromptId: string | undefined;
+  // Prompt ids claimed by background interactions: concurrent `/btw` side
+  // queries, Notification and Teammate sends. The CLI advances the prompt
+  // counter for each, so their ids are unique (R6-1/R7-1 root fix). Their
+  // ToolResult/Hook/Steer continuations are resubmitted without the background
+  // flag, so model-availability ledger membership must exclude the whole
+  // interaction by prompt id, not just the first send's messageType. Within a
+  // session the id is never reused by a foreground turn (the mint counter
+  // advances); a rewind/resume can re-mint a transcript id, but startNewSession
+  // clears this set at the session boundary, so a reused id never hits a stale
+  // registration. The set is bounded FIFO like stopHookChains, evicting by
+  // insertion order (R8-F11); this is safe because a background interaction's
+  // continuations drain within its turn, long before 32 newer interactions
+  // would evict its id — the bound is not a drain check.
+  private readonly backgroundInteractionPromptIds = new Set<string>();
+  // Prompt ids introduced by a flagged concurrent side query. Their tool-result
+  // continuations arrive unflagged, so the recorded id — not the flag — is what
+  // keeps them from draining the owning turn's pending async hook block. Kept
+  // for the client's lifetime: a side query still awaiting its continuation must
+  // stay refused even after a new main turn starts, and prompt ids are per-turn
+  // unique, so a recorded id is never legitimately reused.
+  private readonly concurrentSideQueryPromptIds = new Set<string>();
+  // Async hook blocks drained by a send that consumed them but never pushed
+  // them to history (a pre-send exit or a chat-side pre-push throw). Held here
+  // so the next drain-eligible send re-attaches them instead of losing them;
+  // settled by the history-push snapshot, never by prompt id (a TUI Retry mints
+  // a new id). Re-attachment re-checks the ownership gate.
+  private readonly retainedAsyncHookParts: Array<{ text: string }> = [];
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -696,17 +881,10 @@ export class LlmClient {
   }
 
   /**
-   * Tracks the most recently injected date string to prevent injecting
-   * duplicate or conflicting dates when a session spans midnight.
-   * Only UserQuery turns inject dates; Cron/ToolResult turns reuse the
-   * startup-context date which is still current within the same session.
-   */
-  private lastInjectedDate: string | undefined;
-
-  /**
    * Promises for pending background memory tasks (dream / extract / skill review).
    * Each promise resolves with a count of memory files touched (0 = nothing written).
-   * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
+   * The TUI consumes these promises; headless waiters snapshot them without
+   * transferring ownership.
    */
   private pendingMemoryTaskPromises: Array<Promise<number>> = [];
 
@@ -734,6 +912,16 @@ export class LlmClient {
     this.compressionObserver = observer;
     this.compressionObserverOptions = options;
     this.chat?.setCompressionObserver(observer, options);
+  }
+
+  /**
+   * Drop the background prompt-id registry on a session swap. The registered
+   * Notification/Teammate/side-query ids belong to the outgoing conversation;
+   * a resumed transcript can reuse an id, so a stale registration must not
+   * exclude a new foreground turn from the ledger (P2).
+   */
+  clearBackgroundInteractionPromptIds(): void {
+    this.backgroundInteractionPromptIds.clear();
   }
 
   async initialize(
@@ -1106,6 +1294,16 @@ export class LlmClient {
    * Host-supported sessions settle after classifying their own protective
    * exits, so core must leave their single-take proposal latch untouched.
    */
+  /**
+   * Drops the turn's parked Goal proposal when the send ends abnormally. A
+   * host that settles proposals itself takes it when its turn ends, so it can
+   * still report that the Goal did not start.
+   */
+  private dropUnsettledGoalProposal(promptId: string): void {
+    if (this.config.getGoalProposalHostSupported?.()) return;
+    this.config.takePendingGoalProposal?.(promptId);
+  }
+
   private async settlePendingGoalProposal(
     turnEnded: boolean,
     signal: AbortSignal,
@@ -1235,8 +1433,10 @@ export class LlmClient {
    * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
    * `LlmChat.getHistoryToolCallFingerprints` for the implementation.
    */
-  getHistoryToolCallFingerprints(): Map<string, string> {
-    return this.getChat().getHistoryToolCallFingerprints();
+  getHistoryToolCallFingerprints(
+    onlyCallIds?: ReadonlySet<string>,
+  ): Map<string, string> {
+    return this.getChat().getHistoryToolCallFingerprints(onlyCallIds);
   }
 
   /**
@@ -2172,7 +2372,30 @@ export class LlmClient {
         ...(gitStatus ? [{ text: wrapSystemReminder(gitStatus) }] : []),
       ],
     };
-    this.getChat().addHistory(markApiHistoryDirectoryContext(context));
+    const chat = this.getChat();
+    const pendingQuestion = chat.peekLastHistoryEntry();
+    if (findRestorableAskUserQuestion(pendingQuestion)) {
+      const directoryContext: Content = {
+        role: 'user',
+        parts: [{ text: await getDirectoryContextString(this.config) }],
+      };
+      if (chat.peekLastHistoryEntry() === pendingQuestion) {
+        // Keep the pending call last and adjacent to its future answer.
+        const history = chat.getHistoryShallow();
+        history.splice(
+          -1,
+          0,
+          markApiHistoryDirectoryContext(context),
+          markApiHistoryDirectoryContext(directoryContext),
+        );
+        chat.setHistory(history, chat.getCompletedToolCallIds());
+      } else {
+        chat.addHistory(markApiHistoryDirectoryContext(context));
+        chat.addHistory(markApiHistoryDirectoryContext(directoryContext));
+      }
+      return;
+    }
+    chat.addHistory(markApiHistoryDirectoryContext(context));
     await this.addDirectoryContext();
   }
 
@@ -2193,8 +2416,20 @@ export class LlmClient {
     return this.cachedGitStatus;
   }
 
-  private getMainSessionSystemInstruction(): string {
-    const base = getMainSessionBaseSystemPrompt(this.config);
+  private getMainSessionSystemInstruction(
+    model = getSystemPromptModel(
+      this.config.getContentGeneratorConfig() ?? {},
+      this.config.getModel(),
+    ),
+  ): string {
+    const base = getMainSessionBaseSystemPrompt(
+      this.config,
+      model,
+      this.coreSystemPromptSource,
+    );
+    if (!this.coreSystemPromptSource && !this.config.getSystemPrompt()) {
+      this.coreSystemPromptSource = loadCoreSystemPromptSource();
+    }
     const stableLayers = {
       base,
       // Progressive media understanding contract: WHY deliveries carry
@@ -2216,7 +2451,15 @@ export class LlmClient {
     // the repository does, and providers that only cache at the end of the
     // system message (DashScope) would lose the whole system prompt across
     // sessions. It is announced in the startup prelude instead.
-    this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
+    if (
+      model ===
+      getSystemPromptModel(
+        this.config.getContentGeneratorConfig() ?? {},
+        this.config.getModel(),
+      )
+    ) {
+      this.config.setStaticSystemPrefix(assembleSystemPrompt(stableLayers));
+    }
     return assembleSystemPrompt({
       ...stableLayers,
       autoMemory: this.config.getAutoMemoryPrompt(),
@@ -2241,10 +2484,18 @@ export class LlmClient {
     // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
     // the orphaned model-ack entry behind when re-prepending the prelude.
     const remaining = currentHistory.slice(startupLength);
+    // The turns kept ran under the date the old startup context recorded.
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
       undefined,
-      { gitStatus: this.getCachedGitStatus() },
+      {
+        gitStatus: this.getCachedGitStatus(),
+        announcedDate:
+          remaining.length > 0
+            ? (findLastAnnouncedDate(currentHistory.slice(0, startupLength)) ??
+              null)
+            : undefined,
+      },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2281,10 +2532,11 @@ export class LlmClient {
       return;
     }
 
+    // The summary and the turns kept may come from another date.
     const [[startupContext], snapshotEntries] = await getInitialChatHistory(
       this.config,
       undefined,
-      { gitStatus: this.getCachedGitStatus() },
+      { gitStatus: this.getCachedGitStatus(), announcedDate: null },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
@@ -2310,6 +2562,7 @@ export class LlmClient {
       return;
     }
     await this.config.getToolRegistry().warmAll();
+    this.coreSystemPromptSource = undefined;
     this.chat.setSystemInstruction(this.getMainSessionSystemInstruction());
     if (this.lastSessionStartContext && this.lastSessionStartSource) {
       this.chat.applySessionStartContext(
@@ -2831,7 +3084,8 @@ export class LlmClient {
     if (
       this.config.getDisableAllHooks() ||
       !hookSystem ||
-      !this.config.hasHooksForEvent('SessionStart')
+      (!this.config.hasHooksForEvent('SessionStart') &&
+        !this.config.hasHooksForEvent('FileChanged'))
     ) {
       return undefined;
     }
@@ -2870,7 +3124,6 @@ export class LlmClient {
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
-    this.lastInjectedDate = undefined;
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
@@ -2983,6 +3236,7 @@ export class LlmClient {
       await profiler.time('agent_reminder_seed', () =>
         this.seedAgentReminderDedupFromCurrent(),
       );
+      this.coreSystemPromptSource = undefined;
       const systemInstruction = profiler.timeSync('system_instruction', () =>
         this.getMainSessionSystemInstruction(),
       );
@@ -2999,6 +3253,9 @@ export class LlmClient {
             this.config.getChatRecordingService(),
             uiTelemetryService,
           ),
+      );
+      chat.setSystemInstructionResolver((model) =>
+        this.getMainSessionSystemInstruction(model),
       );
       chat.enableManualPlanExitNotices();
       chat.setCompressionObserver(
@@ -3267,8 +3524,12 @@ export class LlmClient {
   /**
    * Schedules the memory work due when a response ends without tool calls.
    * A host calls this at turn completion if the client did not schedule it.
+   * `skipMemoryExtraction` is {@link SendMessageOptions.skipMemoryExtraction}.
    */
-  runManagedAutoMemoryBackgroundTasks(messageType: SendMessageType): void {
+  runManagedAutoMemoryBackgroundTasks(
+    messageType: SendMessageType,
+    { skipMemoryExtraction = false }: { skipMemoryExtraction?: boolean } = {},
+  ): void {
     // During shutdown, skip all background memory tasks so the process
     // can exit cleanly without spawning new work.
     if (this.shutdownRequested) {
@@ -3381,6 +3642,12 @@ export class LlmClient {
     if (this.config.isSessionAgentSession?.() === true) {
       return;
     }
+    // A relayed message is often not the person's own: extracting at its stop
+    // would add model calls to every relayed event, learning from turns the
+    // person did not take.
+    if (skipMemoryExtraction) {
+      return;
+    }
 
     const sessionId = this.config.getSessionId();
     const history = this.getHistoryShallow();
@@ -3445,6 +3712,19 @@ export class LlmClient {
     const promises = this.pendingMemoryTaskPromises;
     this.pendingMemoryTaskPromises = [];
     return promises;
+  }
+
+  getPendingMemoryTaskPromises(): Array<Promise<number>> {
+    return [...this.pendingMemoryTaskPromises];
+  }
+
+  removePendingMemoryTaskPromises(
+    promises: ReadonlyArray<Promise<number>>,
+  ): void {
+    const completed = new Set(promises);
+    this.pendingMemoryTaskPromises = this.pendingMemoryTaskPromises.filter(
+      (promise) => !completed.has(promise),
+    );
   }
 
   recordCompletedToolCall(
@@ -3686,8 +3966,8 @@ export class LlmClient {
 
   /**
    * Runs UserPromptSubmit on a prompt before the caller expands it, so a block
-   * also stops the expansion. The prompt's first UserQuery send takes the
-   * result as `promptAdmission` and applies it instead of running the hook on
+   * also stops the expansion. The prompt's first UserQuery or Retry send takes
+   * the result as `promptAdmission` and applies it instead of running the hook on
    * the expanded text, so hooks registered during the expansion do not check
    * this prompt, even when none was configured here.
    */
@@ -3741,7 +4021,8 @@ export class LlmClient {
     const owner = captureHookExecutionOwner(this.config);
     if (
       !issued ||
-      messageType !== SendMessageType.UserQuery ||
+      (messageType !== SendMessageType.UserQuery &&
+        messageType !== SendMessageType.Retry) ||
       issued.promptId !== promptId ||
       issued.sessionId !== this.config.getSessionId() ||
       issued.owner?.runtimeId !== owner?.runtimeId ||
@@ -3811,12 +4092,14 @@ export class LlmClient {
       !options.isConcurrentSideQuery &&
       isTopLevelSession();
     const onPromptAdmitted = options?.onPromptAdmitted;
+    const historyPromptId = options?.historyPromptId;
     if (
       options &&
       (options.humanInput ||
         onWorkflowIntentApplied ||
         options.workflowModeEligible ||
-        onPromptAdmitted)
+        onPromptAdmitted ||
+        historyPromptId !== undefined)
     ) {
       options = {
         ...options,
@@ -3824,6 +4107,7 @@ export class LlmClient {
         onWorkflowIntentApplied: undefined,
         workflowModeEligible: undefined,
         onPromptAdmitted: undefined,
+        historyPromptId: undefined,
       };
     }
     const startsInteraction =
@@ -3833,11 +4117,15 @@ export class LlmClient {
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate ||
       messageType === SendMessageType.Goal;
-    const interactionSpanByHost = options?.interactionSpanByHost === true;
+    const userTurn =
+      options?.userTurn?.promptId === prompt_id ? options.userTurn : undefined;
+    const hasUserTurnRecord = userTurn !== undefined;
+    const hasTodoWorkChain = userTurn?.todoWorkChain?.promptId === prompt_id;
+    const hasFileHistory = userTurn?.fileHistory?.promptId === prompt_id;
+    const hostInteractionSpan = options?.interactionSpan;
     let interactionOwner =
-      startsInteraction || interactionSpanByHost
-        ? undefined
-        : getActiveInteractionSpan(prompt_id);
+      hostInteractionSpan ??
+      (startsInteraction ? undefined : getActiveInteractionSpan(prompt_id));
     if (interactionOwner) {
       recordInteractionActivity(prompt_id, interactionOwner);
     }
@@ -3847,6 +4135,10 @@ export class LlmClient {
       errorMessage?: string,
       errorType?: string,
     ) => {
+      if (hostInteractionSpan) {
+        this.interactionStartTypes.delete(prompt_id);
+        return;
+      }
       if (
         interactionOwner &&
         getActiveInteractionSpan(prompt_id) !== interactionOwner
@@ -4098,6 +4390,9 @@ export class LlmClient {
       return typeof published === 'number' ? published : undefined;
     };
     let pushInitiated = false;
+    // Async hook blocks attached to this send's request; settled in the finally
+    // by the push snapshot (retained for the next send if the push never landed).
+    const attachedAsyncHookParts: Array<{ text: string }> = [];
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -4147,6 +4442,33 @@ export class LlmClient {
 
     if (messageType === SendMessageType.Retry) {
       strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      // The stripped orphaned entry carries the async block the failed attempt
+      // drained and pushed. Recover it into the retention so the drain point
+      // re-attaches it (the registry is already cleared); removing it from the
+      // stripped entry keeps the restore path from re-adding a second copy.
+      let recoveredAsyncParts = 0;
+      for (const entry of strippedRetryEntries) {
+        const parts = entry.parts;
+        if (!parts) continue;
+        // Recover only parts this client stamped when it appended them; a
+        // shape-matched part the caller authored stays in the entry as text.
+        const isAsyncPart = (p: (typeof parts)[number]) =>
+          typeof p.text === 'string' && isStampedAsyncHookContextPart(p);
+        const asyncTexts = parts
+          .filter(isAsyncPart)
+          .map((p) => ({ text: p.text as string }));
+        if (asyncTexts.length > 0) {
+          entry.parts = parts.filter((p) => !isAsyncPart(p));
+          this.retainedAsyncHookParts.push(...asyncTexts);
+          recoveredAsyncParts += asyncTexts.length;
+        }
+      }
+      if (recoveredAsyncParts > 0) {
+        debugLogger.info('[AsyncHook] recovered blocks from stripped entries', {
+          entries: strippedRetryEntries.length,
+          recovered: recoveredAsyncParts,
+        });
+      }
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -4171,15 +4493,40 @@ export class LlmClient {
       // nor take over (or clear) the running turn's exploration phase, which
       // the ownership check below every budget entrypoint enforces for the
       // side turn's tool results too.
+      // Register background interactions so their unflagged ToolResult/Hook/
+      // Steer continuations stay excluded from the ledger by prompt id (see
+      // backgroundInteractionPromptIds), not just the first send's messageType.
+      // Notification/Teammate/side-query ids are unique: the CLI advances the
+      // prompt counter for each (R6-1/R7-1 root fix), so a registered id is
+      // never reused by a foreground turn and cannot drop it from the ledger.
+      if (
+        options?.isConcurrentSideQuery ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
+      ) {
+        this.backgroundInteractionPromptIds.add(prompt_id);
+        while (
+          this.backgroundInteractionPromptIds.size >
+          MAX_BACKGROUND_INTERACTION_PROMPT_IDS
+        ) {
+          const oldest = this.backgroundInteractionPromptIds
+            .keys()
+            .next().value;
+          if (oldest === undefined) break;
+          this.backgroundInteractionPromptIds.delete(oldest);
+        }
+      }
       if (!options?.isConcurrentSideQuery) {
         this.toolExplorationBudget.reset();
         this.toolExplorationBudgetPromptId = prompt_id;
         this.beginTurnBudget(messageType, request, prompt_id);
+      } else {
+        this.concurrentSideQueryPromptIds.add(prompt_id);
       }
       // New input starts this interaction, so its first Stop is not
       // hook-forced even when a retry or goal turn reuses the prompt id.
       this.clearStopHookChain(prompt_id);
-      if (!interactionSpanByHost) {
+      if (!hostInteractionSpan) {
         startInteractionSpan(this.config, {
           promptId: prompt_id,
           model: options?.modelOverride ?? this.config.getModel(),
@@ -4191,6 +4538,7 @@ export class LlmClient {
       this.interactionStartTypes.set(prompt_id, messageType);
       if (
         interactionOwner &&
+        !hostInteractionSpan &&
         messageType === SendMessageType.UserQuery &&
         typeof options?.submittedPrompt === 'string'
       ) {
@@ -4208,6 +4556,8 @@ export class LlmClient {
     let userPromptRecordPayload: UserPromptRecordPayload | undefined;
     /** Hook context appended to this turn's request, if any. */
     let appendedHookContext: string | undefined;
+    /** The separate contexts `appendedHookContext` joins. */
+    let appendedHookContexts: readonly string[] | undefined;
     /** Hook context suppressed as already delivered; compression may need it back. */
     let suppressedHookContext: string | undefined;
     let hooksEnabled: boolean;
@@ -4223,6 +4573,14 @@ export class LlmClient {
           ? options.submittedPrompt
           : undefined;
       let verdict: (UserPromptSubmitDecision & { prompt: string }) | undefined;
+      const promptContext =
+        messageType === SendMessageType.UserQuery
+          ? options?.promptContext?.filter((text) => text.trim())
+          : undefined;
+      if (options?.promptContext) {
+        // Spent here, as the admission below is.
+        options = { ...options, promptContext: undefined };
+      }
       if (options?.promptAdmission) {
         const { promptAdmission } = options;
         // Spent here: the continuation sends below re-spread `options`.
@@ -4260,8 +4618,8 @@ export class LlmClient {
         };
       }
 
-      if (verdict) {
-        if (verdict.blockReason !== undefined) {
+      if (verdict || promptContext?.length) {
+        if (verdict?.blockReason !== undefined) {
           if (goalPermit) {
             userPromptSubmitFailureMessage = 'Goal turn finalization failed';
             const runtime = await loadGoalRuntime(true);
@@ -4308,7 +4666,9 @@ export class LlmClient {
           // A blocked send never reaches the history push: settle the
           // attached carrier by unconditional restore, never by the push
           // counter (a concurrent push inside the hook window above would
-          // otherwise masquerade as this send's acceptance).
+          // otherwise masquerade as this send's acceptance). A blocked Retry
+          // puts back the attempt it stripped above.
+          restoreStrippedRetryEntries();
           settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
@@ -4318,39 +4678,66 @@ export class LlmClient {
         // distinguishable from user-authored text in model history, resume,
         // and offline transcript analysis. `getAdditionalContext()` escapes
         // `<`/`>`, so hook output cannot forge the closing tag.
-        // An unchanged payload is already in history from an earlier turn, so
-        // re-appending it would duplicate it once per turn for the rest of the
-        // session; the earlier copy still carries the same text. History is
-        // scanned newest-first over the raw entries, so the check stays off
-        // the deep-cloning accessor on this per-turn path.
+        // A context already in history from an earlier turn is not sent
+        // again, or it would repeat once per turn for the rest of the
+        // session; the earlier copy still carries the same text. Each context
+        // counts on its own, the Mods' contexts and UserPromptSubmit's, so a
+        // Mod whose context changes every turn does not make an unchanged
+        // UserPromptSubmit context repeat. History is scanned newest-first
+        // over the raw entries, so the check stays off the deep-cloning
+        // accessor on this per-turn path.
         // A request with no parts of its own keeps the block, which is then
         // all that keeps it non-empty (`toParts` rejects an empty array).
-        const additionalContext = verdict.additionalContext;
-        if (additionalContext) {
+        // The Mods' context comes first, as their hooks run above the
+        // settings hooks, and is escaped the same way.
+        const contexts = [
+          ...new Set([
+            ...(promptContext ?? []).map((text) =>
+              text.replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+            ),
+            ...(verdict?.additionalContext ? [verdict.additionalContext] : []),
+          ]),
+        ];
+        if (contexts.length > 0) {
           const requestArray = Array.isArray(request) ? request : [request];
-          const alreadyDelivered =
-            requestArray.length > 0 &&
-            Boolean(
-              this.getChat().findLastHistoryEntry((entry) =>
-                hasUserPromptSubmitContext(entry, additionalContext),
-              ),
-            );
-          if (!alreadyDelivered) {
+          const undelivered = new Set(contexts);
+          if (requestArray.length > 0) {
+            this.getChat().findLastHistoryEntry((entry) => {
+              for (const context of deliveredUserPromptSubmitContexts(entry)) {
+                undelivered.delete(context);
+              }
+              return undelivered.size === 0;
+            });
+          }
+          const pending = contexts.filter((context) =>
+            undelivered.has(context),
+          );
+          const delivered = contexts.filter(
+            (context) => !undelivered.has(context),
+          );
+          const additionalContext = pending.join('\n\n');
+          if (pending.length > 0) {
             request = [
               ...requestArray,
-              createUserPromptSubmitContextPart(additionalContext),
+              createUserPromptSubmitContextPart(additionalContext, pending),
             ];
             appendedHookContext = additionalContext;
-          } else {
-            suppressedHookContext = additionalContext;
+            appendedHookContexts = pending;
+          }
+          if (delivered.length > 0) {
+            suppressedHookContext = delivered.join('\n\n');
           }
           if (messageType === SendMessageType.UserQuery) {
             // A suppressed turn appends nothing, so it records no
             // hookContext, but the user-authored projection still belongs in
             // the transcript.
             userPromptRecordPayload = {
-              displayText: submittedPrompt ?? verdict.prompt,
-              hookContext: alreadyDelivered ? '' : additionalContext,
+              displayText:
+                submittedPrompt ??
+                verdict?.prompt ??
+                preHookUserPromptText ??
+                '',
+              hookContext: additionalContext,
             };
           }
         }
@@ -4361,7 +4748,7 @@ export class LlmClient {
         signal.aborted ? undefined : userPromptSubmitFailureMessage,
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4373,9 +4760,8 @@ export class LlmClient {
       // never pushed: settle the attached carrier here by unconditional
       // restore instead of leaving it to caller-side failure handling.
       // Symmetric with the Goal-admission catch below: re-add any Retry
-      // orphan entries popped above (a no-op today — hooks never fire for
-      // Retry, the only type that populates the entries — but keeps this
-      // exit safe under future hook-scope changes).
+      // orphan entries popped above (a Retry reaches this try when the host
+      // admitted its prompt).
       restoreStrippedRetryEntries();
       settleSteerInput(attachedSteerInput);
       throw error;
@@ -4441,7 +4827,7 @@ export class LlmClient {
         signal.aborted ? undefined : 'Goal turn admission failed',
         signal.aborted ? undefined : getErrorType(error),
       );
-      this.config.takePendingGoalProposal?.(prompt_id);
+      this.dropUnsettledGoalProposal(prompt_id);
       for (const goalEvent of await finalizeInterruptedGoalTurn(
         undefined,
         getErrorMessage(error),
@@ -4484,15 +4870,18 @@ export class LlmClient {
       // under them without losing the resumed info item this record exists to
       // restore. See `ChatRecord.deliveredTurn` for that accepted imprecision
       // and the test pinning it.
-      this.config
-        .getChatRecordingService()
-        ?.recordNotification(
-          request,
-          options?.notificationDisplayText,
-          undefined,
-          goalPermit,
-          /* deliveredTurn */ true,
-        );
+      if (!hasUserTurnRecord) {
+        this.config
+          .getChatRecordingService()
+          ?.recordNotification(
+            request,
+            options?.notificationDisplayText,
+            undefined,
+            goalPermit,
+            /* deliveredTurn */ true,
+            /* teammateTurn */ messageType === SendMessageType.Teammate,
+          );
+      }
     }
 
     // Notifications start a fresh Turn with a new prompt_id, so the loop
@@ -4500,7 +4889,7 @@ export class LlmClient {
     // LoopDetected early on the notification turn.
     if (messageType === SendMessageType.UserQuery) {
       this.activeAutomaticTodoWorkChainPromptIds.clear();
-      if (!options?.userTurnRecordedByHost) {
+      if (!hasTodoWorkChain) {
         // A registered reminder means the previous chain's plan still has
         // unfinished items (todo_write deletes it on completion): continue
         // that chain instead of discarding its context with the very turn
@@ -4519,10 +4908,12 @@ export class LlmClient {
       }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (messageType === SendMessageType.Retry) {
-      this.config.startActiveTodoWorkChain(
-        prompt_id,
-        this.activeTodoWorkChainPromptId,
-      );
+      if (!hasTodoWorkChain) {
+        this.config.startActiveTodoWorkChain(
+          prompt_id,
+          this.activeTodoWorkChainPromptId,
+        );
+      }
       this.activeTodoWorkChainPromptId = prompt_id;
     } else if (
       messageType === SendMessageType.Cron ||
@@ -4542,7 +4933,7 @@ export class LlmClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
     }
-    if (startsInteraction) {
+    if (startsInteraction && !hostInteractionSpan) {
       const interactionSpan = interactionOwner;
       if (
         interactionSpan &&
@@ -4569,6 +4960,11 @@ export class LlmClient {
     let memoryDeliveryToCommit: MemoryDeliveryResult | null = null;
     let memoryDeliveryStateInvalidated = false;
     let modelRequestAccepted = false;
+    // Set when this send took a loop-protection reminder into requestToSend;
+    // cleared when the model accepts the request (commit) or on exit
+    // (abandon), so the `reminded` accounting and the pending state settle at
+    // the real delivery boundary instead of the draft request assembly.
+    let loopReminderPrepared = false;
     // A concurrent `/btw` side query runs through this same client and its
     // tool-result continuation is submitted without the flag, so ownership is
     // carried by the prompt id the interaction claimed at its start: a
@@ -4577,8 +4973,7 @@ export class LlmClient {
     const ownsExplorationBudget =
       !options?.isConcurrentSideQuery &&
       prompt_id === this.toolExplorationBudgetPromptId;
-    const ownsToolLoopGuards =
-      ownsExplorationBudget && !options?.toolLoopGuardsByHost;
+    const ownsToolLoopGuards = ownsExplorationBudget;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -4604,9 +4999,11 @@ export class LlmClient {
     let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
       if (messageType === SendMessageType.Goal) {
-        this.config
-          .getChatRecordingService()
-          ?.recordGoalRuntimeMessage(request, goalPermit!);
+        if (!hasUserTurnRecord) {
+          this.config
+            .getChatRecordingService()
+            ?.recordGoalRuntimeMessage(request, goalPermit!);
+        }
       } else if (
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
@@ -4630,25 +5027,39 @@ export class LlmClient {
         // attribution trailer (one user message becomes "10-shotted" when it
         // triggered ten tool calls).
         const attributionService = CommitAttributionService.getInstance();
-        if (messageType === SendMessageType.UserQuery) {
+        // A prompt a Mod submitted is not one the user typed either.
+        if (
+          messageType === SendMessageType.UserQuery &&
+          options?.submittedByMod === undefined
+        ) {
           attributionService.incrementPromptCount();
         }
 
         // record user/cron message for session management
         if (messageType === SendMessageType.Cron) {
-          this.config
-            .getChatRecordingService()
-            ?.recordCronPrompt(
-              request,
-              options?.notificationDisplayText,
-              goalPermit,
-            );
-        } else if (!options?.userTurnRecordedByHost) {
+          if (!hasUserTurnRecord) {
+            this.config
+              .getChatRecordingService()
+              ?.recordCronPrompt(
+                request,
+                options?.notificationDisplayText,
+                goalPermit,
+              );
+          }
+        } else if (!hasUserTurnRecord) {
           const recorder = this.config.getChatRecordingService();
           recorder?.recordUserMessage(
             request,
             goalPermit,
-            userPromptRecordPayload,
+            options?.submittedByMod === undefined
+              ? userPromptRecordPayload
+              : {
+                  displayText: options.submittedPrompt ?? '',
+                  hookContext: '',
+                  ...userPromptRecordPayload,
+                  mod: options.submittedByMod,
+                  ...(options.submittedAsUser && { asUser: true }),
+                },
             prompt_id,
           );
         }
@@ -4698,10 +5109,7 @@ export class LlmClient {
 
         this.sessionTurnCount++;
 
-        if (
-          messageType === SendMessageType.UserQuery &&
-          !options?.userTurnRecordedByHost
-        ) {
+        if (messageType === SendMessageType.UserQuery && !hasFileHistory) {
           try {
             await this.config.getFileHistoryService().makeSnapshot(prompt_id);
             try {
@@ -4908,14 +5316,33 @@ export class LlmClient {
         this.getChat(),
         prompt_id,
         goalPermit,
-        // Only a first-party user prompt opens a rewindable identity. Re-entry
-        // stays unmarked, so a replaced identified turn fails closed.
-        messageType === SendMessageType.UserQuery ? prompt_id : undefined,
+        // Only a first-party user prompt opens a rewindable identity, or a
+        // retry the host gives the identity of the attempt it replaces.
+        // Other re-entry stays unmarked, so a replaced identified turn fails
+        // closed.
+        messageType === SendMessageType.UserQuery
+          ? prompt_id
+          : messageType === SendMessageType.Retry
+            ? historyPromptId
+            : undefined,
         options?.retractDeliveredOutputOnRetry,
         options?.onPreparedRequest,
         options?.toolCallPreparations,
         suppressedHookContext,
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
+        messageType === SendMessageType.Retry,
+        // Ledger membership is decided here, where the sender is known: the
+        // live turn's own sends participate. Notification/Teammate first sends
+        // are background, not this turn, and are excluded by messageType.
+        // Notification, Teammate and concurrent side queries are additionally
+        // registered by prompt id so their unflagged ToolResult/Hook/Steer
+        // continuations stay excluded (the flag/messageType is only on the first
+        // send). Their ids are unique (the CLI advances the prompt counter), so
+        // a registered id never drops a foreground turn (R6-1/R7-1).
+        messageType !== SendMessageType.Notification &&
+          messageType !== SendMessageType.Teammate &&
+          !this.backgroundInteractionPromptIds.has(prompt_id),
+        options?.ledgerTurnKey,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
@@ -4929,8 +5356,14 @@ export class LlmClient {
         // that history carries the same provenance resume restores from the
         // recorded payload.
         requestToSend[requestToSend.length - 1] =
-          createUserPromptSubmitContextPart(appendedHookContext);
+          createUserPromptSubmitContextPart(
+            appendedHookContext,
+            appendedHookContexts,
+          );
       }
+      // The async hook drain runs immediately before turn.run (below), not at
+      // assembly: a turn that exits between here and the send must not consume
+      // the get-and-clear block (capability ledger L11, #17284 R1-2).
       if (ideContextText) {
         const firstText = requestToSend.find(
           (part) => typeof part === 'string' || 'text' in part,
@@ -4964,21 +5397,16 @@ export class LlmClient {
           systemReminders.push(PAUSED_GOAL_SYSTEM_REMINDER);
         }
 
-        // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
-        // reuse the same session and the startup-context date is still current.
-        if (messageType === SendMessageType.UserQuery) {
-          const today = formatDateForContext();
-
-          // Only inject if the date has changed since the last injection.
-          // This prevents accumulating conflicting dates when a session
-          // spans midnight.
-          if (today !== this.lastInjectedDate) {
-            systemReminders.push(
-              `<system-reminder>\nThe current date is: ${today}. Note: This is the authoritative current date — it may differ from the "Today's date" mentioned earlier in the conversation startup context.\n</system-reminder>`,
-            );
-            this.lastInjectedDate = today;
-          }
-        }
+        // Tell the model today's date only when the last date the history
+        // gives it is a different one, or there is none. The startup context
+        // that starts a conversation carries the date, so the first turn adds
+        // nothing; a reminder follows once the date changes, after a session
+        // runs past midnight, a rewind drops the reminder, or a resume or
+        // compaction rebuilds the startup context in front of earlier turns.
+        // The reminder part carries its date as part metadata, which the next
+        // turn reads back.
+        const dateReminder = buildDateReminder(this.getHistoryShallow());
+        if (dateReminder) systemReminders.push(dateReminder);
 
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
@@ -5074,6 +5502,24 @@ export class LlmClient {
         requestToSend = [...systemReminders, ...requestToSend];
       }
 
+      // A retry pops the failed entry and resends the parts the caller gave,
+      // without the date reminder the client added to that entry. Tell the
+      // date again, as the history now lacks it.
+      if (messageType === SendMessageType.Retry) {
+        const toldDate = (part: unknown) =>
+          typeof part === 'object' &&
+          part !== null &&
+          typeof (part as Part).partMetadata?.[DATE_REMINDER_METADATA] ===
+            'string';
+        if (
+          strippedRetryEntries.some((entry) => entry.parts?.some(toldDate)) &&
+          !requestToSend.some(toldDate)
+        ) {
+          const dateReminder = buildDateReminder(this.getHistoryShallow());
+          if (dateReminder) requestToSend = [dateReminder, ...requestToSend];
+        }
+      }
+
       if (!signal.aborted) {
         const workflowIntent = resolveWorkflowIntent(this.config, humanInput);
         const preparedWorkflow =
@@ -5164,132 +5610,126 @@ export class LlmClient {
 
       if (messageType === SendMessageType.ToolResult) {
         let carriesAgentToolResult = false;
-        // A host that runs its own tool-call guards also builds the
-        // tool-result message with its own todo reminder.
-        if (!options?.toolLoopGuardsByHost) {
-          // Record executed tool results for stateful read tools (task_list)
-          // so the loop guards can distinguish productive re-polling — the
-          // shared task board changed between identical calls — from a stuck
-          // loop (issue #9450). A detection here (the result-aware global
-          // duplicate count) halts the turn exactly like the event-loop
-          // guards below.
-          for (const part of requestToSend) {
-            if (
-              typeof part !== 'object' ||
-              part === null ||
-              !('functionResponse' in part)
-            ) {
-              continue;
-            }
-            const functionResponseId = (part as Part).functionResponse?.id;
-            if (!functionResponseId) continue;
-            if (
-              this.loopDetector.recordToolResultByCallId(
-                functionResponseId,
-                [part as Part],
-                { queueReminders: ownsExplorationBudget },
-              )
-            ) {
-              for (const goalEvent of await finalizeInterruptedGoalTurn(
-                undefined,
-                'loop detected',
-              )) {
-                yield goalEvent;
-              }
-              const loopType = this.loopDetector.getLastLoopType();
-              yield {
-                type: LlmEventType.LoopDetected,
-                ...(loopType && {
-                  value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-                }),
-              };
-              await arenaAgentClient?.reportError('Loop detected');
-              this.lastApiCompletionTimestamp = Date.now();
-              endCurrentInteraction('error', 'loop detected', 'loop_detected');
-              this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-              this.fireLoopDetectedStopFailure(loopType);
-              return turn;
-            }
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
           }
-          // A top-level Agent tool result means a delegated execution just
-          // returned (#10953): real work advanced while the parent earned a
-          // single tool turn, so the turn budget cannot come due on its own.
-          // Force the reminder exactly where the progress information arrives.
-          // A bridged delegation returns under the tool_call envelope (the
-          // scheduler keeps the model-facing request name on the response
-          // part), so also correlate by call id with the functionCall recorded
-          // in history and unwrap the resolved target — the same correlation
-          // seedRecentCompletedToolNamesFromHistory uses. The force stays
-          // specific to calls that actually resolved to Agent: the goal tools
-          // are bridged too, and per-turn injection grows context linearly.
-          let bridgedResponseIds: Set<string> | undefined;
-          for (const part of requestToSend) {
-            if (typeof part !== 'object' || part === null) {
-              continue;
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(
+              functionResponseId,
+              [part as Part],
+              { queueReminders: ownsExplorationBudget },
+            )
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              'loop detected',
+            )) {
+              yield goalEvent;
             }
-            const response = part.functionResponse;
-            if (!response) {
-              continue;
-            }
-            if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
-              carriesAgentToolResult = true;
-              break;
-            }
-            if (response.name === ToolNames.TOOL_CALL && response.id) {
-              // The bridge prefixes mark calls that never started. A bridged
-              // Agent that ran before failing or being cancelled carries an
-              // unprefixed error: real work advanced, so force the reminder
-              // like the direct-Agent branch and the history seeding pass.
-              const errorText = (
-                response.response as Record<string, unknown> | undefined
-              )?.['error'];
-              if (
-                typeof errorText === 'string' &&
-                (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
-                  errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
-              ) {
-                continue;
-              }
-              (bridgedResponseIds ??= new Set<string>()).add(response.id);
-            }
-          }
-          if (!carriesAgentToolResult && bridgedResponseIds) {
-            // Newest-first over raw history: the matching functionCall is the
-            // model message that just ran, so the scan exits at the first
-            // hit instead of cloning and walking the whole history per send.
-            carriesAgentToolResult =
-              this.getChat().findLastHistoryEntry((message) =>
-                (message.parts ?? []).some((historyPart) => {
-                  const call = historyPart.functionCall;
-                  if (
-                    call?.name !== ToolNames.TOOL_CALL ||
-                    !call.id ||
-                    !bridgedResponseIds.has(call.id)
-                  ) {
-                    return false;
-                  }
-                  const bridgedName = (
-                    call.args as Record<string, unknown> | undefined
-                  )?.['name'];
-                  if (typeof bridgedName !== 'string') {
-                    return false;
-                  }
-                  const targetName = canonicalToolName(bridgedName);
-                  return (
-                    (resolveRegisteredToolName(
-                      targetName,
-                      this.config.getToolRegistry().getAllToolNames(),
-                    ) ?? targetName) === ToolNames.AGENT
-                  );
-                }),
-              ) !== undefined;
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
           }
         }
-        const activeTodoReminder = options?.toolLoopGuardsByHost
-          ? undefined
-          : carriesAgentToolResult
-            ? this.config.takeActiveTodoReminder(prompt_id, true)
-            : this.config.takeActiveTodoReminder(prompt_id);
+        // A top-level Agent tool result means a delegated execution just
+        // returned (#10953): real work advanced while the parent earned a
+        // single tool turn, so the turn budget cannot come due on its own.
+        // Force the reminder exactly where the progress information arrives.
+        // A bridged delegation returns under the tool_call envelope (the
+        // scheduler keeps the model-facing request name on the response
+        // part), so also correlate by call id with the functionCall recorded
+        // in history and unwrap the resolved target — the same correlation
+        // seedRecentCompletedToolNamesFromHistory uses. The force stays
+        // specific to calls that actually resolved to Agent: the goal tools
+        // are bridged too, and per-turn injection grows context linearly.
+        let bridgedResponseIds: Set<string> | undefined;
+        for (const part of requestToSend) {
+          if (typeof part !== 'object' || part === null) {
+            continue;
+          }
+          const response = part.functionResponse;
+          if (!response) {
+            continue;
+          }
+          if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
+            carriesAgentToolResult = true;
+            break;
+          }
+          if (response.name === ToolNames.TOOL_CALL && response.id) {
+            // The bridge prefixes mark calls that never started. A bridged
+            // Agent that ran before failing or being cancelled carries an
+            // unprefixed error: real work advanced, so force the reminder
+            // like the direct-Agent branch and the history seeding pass.
+            const errorText = (
+              response.response as Record<string, unknown> | undefined
+            )?.['error'];
+            if (
+              typeof errorText === 'string' &&
+              (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
+                errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
+            ) {
+              continue;
+            }
+            (bridgedResponseIds ??= new Set<string>()).add(response.id);
+          }
+        }
+        if (!carriesAgentToolResult && bridgedResponseIds) {
+          // Newest-first over raw history: the matching functionCall is the
+          // model message that just ran, so the scan exits at the first
+          // hit instead of cloning and walking the whole history per send.
+          carriesAgentToolResult =
+            this.getChat().findLastHistoryEntry((message) =>
+              (message.parts ?? []).some((historyPart) => {
+                const call = historyPart.functionCall;
+                if (
+                  call?.name !== ToolNames.TOOL_CALL ||
+                  !call.id ||
+                  !bridgedResponseIds.has(call.id)
+                ) {
+                  return false;
+                }
+                const bridgedName = (
+                  call.args as Record<string, unknown> | undefined
+                )?.['name'];
+                if (typeof bridgedName !== 'string') {
+                  return false;
+                }
+                const targetName = canonicalToolName(bridgedName);
+                return (
+                  (resolveRegisteredToolName(
+                    targetName,
+                    this.config.getToolRegistry().getAllToolNames(),
+                  ) ?? targetName) === ToolNames.AGENT
+                );
+              }),
+            ) !== undefined;
+        }
+        const activeTodoReminder = carriesAgentToolResult
+          ? this.config.takeActiveTodoReminder(prompt_id, true)
+          : this.config.takeActiveTodoReminder(prompt_id);
         const explorationReminder =
           this.loopDetector.isDisabledForSession() || !ownsToolLoopGuards
             ? undefined
@@ -5304,7 +5744,10 @@ export class LlmClient {
         const loopReminder = ownsExplorationBudget
           ? this.loopDetector.takeLoopReminder()
           : undefined;
-        if (loopReminder) requestToSend.push({ text: loopReminder });
+        if (loopReminder) {
+          requestToSend.push({ text: loopReminder });
+          loopReminderPrepared = true;
+        }
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -5373,6 +5816,87 @@ export class LlmClient {
             )
           : null;
 
+      // Background (async) hooks may have produced output since the last turn.
+      // Drain (get-and-clear) and deliver on this request immediately before the
+      // send — not at assembly — so a turn that exited earlier (loop detection,
+      // a pre-send throw, an abandoned stream) never consumed the block
+      // (capability ledger L11, #17284 R1-2). Re-attach any block a prior send
+      // consumed but never pushed. This stays upstream of the send's
+      // auto-compaction, so the threshold sees the same tail the provider will.
+      // Splice ahead of a trailing UserPromptSubmit receipt so that block stays
+      // last for the resume/projection/title strips. The ownership gate refuses
+      // a concurrent side query and its unflagged ToolResult continuations (the
+      // recorded prompt id, not the flag); getHookSystem is read defensively.
+      const skipAsyncHookDrain =
+        options?.isConcurrentSideQuery === true ||
+        (messageType === SendMessageType.ToolResult &&
+          this.concurrentSideQueryPromptIds.has(prompt_id));
+      if (!skipAsyncHookDrain) {
+        const retained = this.retainedAsyncHookParts.splice(0);
+        const drained = drainAsyncHookContextPart(
+          this.config.getHookSystem?.(),
+        );
+        const candidates = drained ? [...retained, drained] : retained;
+        // A continue-interrupted Retry payload clones the pushed trailing entry
+        // (envelope included), so drop a candidate the request already carries
+        // and any byte-identical repeat; merge the rest into one bounded block so
+        // repeated pre-push exits cannot stack N envelopes on a single request.
+        const present = new Set(
+          requestToSend
+            .map((p) =>
+              typeof p === 'object' &&
+              p !== null &&
+              'text' in p &&
+              typeof p.text === 'string'
+                ? p.text
+                : undefined,
+            )
+            .filter(
+              (t): t is string =>
+                typeof t === 'string' && isAsyncHookContextPartText(t),
+            )
+            .map((t) => t.trim()),
+        );
+        const seen = new Set<string>();
+        const deduped: Array<{ text: string }> = [];
+        for (const part of candidates) {
+          if (present.has(part.text.trim())) {
+            // The request already carries it, so do not append a second copy —
+            // but the retention entry was consumed above, and only this send's
+            // push snapshot decides whether it survives. Register it for
+            // settlement without re-appending, or a pre-push exit would lose it
+            // (the restored Retry entry no longer carries it).
+            attachedAsyncHookParts.push({ text: part.text });
+            continue;
+          }
+          if (seen.has(part.text.trim())) continue;
+          seen.add(part.text.trim());
+          deduped.push(part);
+        }
+        const merged = mergeAsyncHookContextParts(deduped);
+        if (merged) {
+          const lastPart = requestToSend[requestToSend.length - 1];
+          const syncReceiptTrailing =
+            typeof lastPart === 'object' &&
+            lastPart !== null &&
+            'text' in lastPart &&
+            typeof lastPart.text === 'string' &&
+            isUserPromptSubmitContextPartText(lastPart.text);
+          requestToSend = appendAsyncHookContextPart(
+            requestToSend,
+            merged,
+            syncReceiptTrailing,
+          );
+          attachedAsyncHookParts.push(merged);
+        }
+        debugLogger.info('[AsyncHook] drain before send', {
+          retained: retained.length,
+          drained: drained ? 1 : 0,
+          droppedDuplicates: candidates.length - deduped.length,
+          attached: merged ? 1 : 0,
+        });
+      }
+
       // The acceptance snapshot for the attached carrier is published by
       // `chat.sendMessageStream` on `requestToSend` immediately before the
       // actual history push (see `userContentPushSnapshotKey`); a
@@ -5409,6 +5933,15 @@ export class LlmClient {
                 .reconcileMemoryBodiesPresentInHistory(
                   collectResidentMemoryBodies(this.getHistoryShallow()),
                 );
+            }
+            if (loopReminderPrepared) {
+              // First model-accepted event: the request carrying the prepared
+              // loop-protection reminder is being consumed, so commit its
+              // delivery accounting here — not at take time, where a draft
+              // request cancelled at a yield or failed before acceptance
+              // would credit telemetry for a warning the model never saw.
+              this.loopDetector.commitLoopReminderDelivery();
+              loopReminderPrepared = false;
             }
           }
           if (!steerInputSettled) {
@@ -5467,7 +6000,6 @@ export class LlmClient {
           // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
-            !options?.toolLoopGuardsByHost &&
             this.loopDetector.checkAlwaysOnSafeties(event, {
               queueReminders: ownsExplorationBudget,
             });
@@ -5550,7 +6082,7 @@ export class LlmClient {
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event, {
               queueReminders: ownsExplorationBudget,
-              toolCallPatterns: !options?.toolLoopGuardsByHost,
+              toolCallPatterns: true,
             });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
@@ -6094,7 +6626,9 @@ export class LlmClient {
 
         if (this.config.getSkipNextSpeakerCheck()) {
           if (!isGoalRuntimeTurn) {
-            this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
+            this.runManagedAutoMemoryBackgroundTasks(managedMemoryType, {
+              skipMemoryExtraction: options?.skipMemoryExtraction === true,
+            });
           }
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
@@ -6177,7 +6711,9 @@ export class LlmClient {
         }
 
         if (!isGoalRuntimeTurn) {
-          this.runManagedAutoMemoryBackgroundTasks(managedMemoryType);
+          this.runManagedAutoMemoryBackgroundTasks(managedMemoryType, {
+            skipMemoryExtraction: options?.skipMemoryExtraction === true,
+          });
         }
 
         if (arenaAgentClient) {
@@ -6240,6 +6776,15 @@ export class LlmClient {
       throw error;
     } finally {
       settleMemoryDelivery();
+      if (loopReminderPrepared) {
+        // The send exited before the model accepted the request that carried
+        // the prepared loop-protection reminder (cancelled at a yield, failed
+        // before any model event, ...): put it back so the streak's warning
+        // stays eligible for the next real send instead of being lost while
+        // the telemetry already counted it.
+        this.loopDetector.abandonLoopReminderDelivery();
+        loopReminderPrepared = false;
+      }
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
       }
@@ -6270,6 +6815,29 @@ export class LlmClient {
         settleSteerInput(attachedSteerInput);
       }
       restoreStrippedRetryEntries();
+      // Settle the async hook blocks attached to this send by the same push
+      // snapshot: if the push landed they are already in history (a post-push
+      // failure rides the next request), so do not retain them; otherwise the
+      // send consumed them without pushing — keep them for the next
+      // drain-eligible send. Settling by acceptance instead would retain a
+      // block already in history after a post-push failure and double-deliver.
+      if (attachedAsyncHookParts.length > 0) {
+        const asyncPushSnapshot = attachedPushSnapshot();
+        const asyncPushed =
+          pushInitiated &&
+          asyncPushSnapshot !== undefined &&
+          currentPushCount() > asyncPushSnapshot;
+        if (!asyncPushed) {
+          this.retainedAsyncHookParts.push(...attachedAsyncHookParts);
+        }
+        debugLogger.info('[AsyncHook] settle attached blocks', {
+          attached: attachedAsyncHookParts.length,
+          pushInitiated,
+          asyncPushSnapshot,
+          pushCount: currentPushCount(),
+          retained: !asyncPushed,
+        });
+      }
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught
       // exception thrown out of the streaming loop still ends the message,
@@ -6283,7 +6851,7 @@ export class LlmClient {
         // Only a natural end can hand a hook-forced turn's tool calls back to
         // the caller for a ToolResult re-entry; any other exit ends it.
         this.clearStopHookChain(prompt_id);
-        this.config.takePendingGoalProposal?.(prompt_id);
+        this.dropUnsettledGoalProposal(prompt_id);
         this.cancelPendingMemoryPrefetch(
           signal?.aborted ? 'abort' : 'no_safe_delivery_point',
         );
@@ -6311,20 +6879,6 @@ export class LlmClient {
     let currentAttemptModel: string = model;
 
     try {
-      const finalSystemInstruction = generationConfig.systemInstruction
-        ? assembleSystemPrompt({
-            base: getCustomSystemPrompt(generationConfig.systemInstruction),
-            contextFiles: this.config.getUserMemory(),
-            autoMemory: this.config.getAutoMemoryPrompt(),
-          })
-        : this.getMainSessionSystemInstruction();
-
-      const requestConfig: GenerateContentConfig = {
-        abortSignal,
-        ...generationConfig,
-        systemInstruction: finalSystemInstruction,
-      };
-
       // When the requested model differs from the main model (e.g. fast model
       // side queries for session recap / title / summary), resolve the target
       // model's own ContentGeneratorConfig so that per-model settings like
@@ -6339,6 +6893,22 @@ export class LlmClient {
         retryErrorCodes,
         model: requestModel,
       } = await this.config.getBaseLlmClient().resolveForModel(model);
+      const finalSystemInstruction = generationConfig.systemInstruction
+        ? assembleSystemPrompt({
+            base: getCustomSystemPrompt(generationConfig.systemInstruction),
+            contextFiles: this.config.getUserMemory(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          })
+        : this.getMainSessionSystemInstruction(
+            getSystemPromptModel(contentGeneratorConfig ?? {}, requestModel),
+          );
+
+      const requestConfig: GenerateContentConfig = {
+        abortSignal,
+        ...generationConfig,
+        systemInstruction: finalSystemInstruction,
+      };
+
       const requestContents = appendAutoMemoryContext(
         slimCompactionInput(contents, contentGeneratorConfig?.modalities ?? {})
           .slimmedHistory,

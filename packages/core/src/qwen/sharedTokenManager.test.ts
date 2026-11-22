@@ -7,7 +7,7 @@
 
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { promises as fs, unlinkSync, type Stats } from 'node:fs';
+import { promises as fs, readFileSync, unlinkSync, type Stats } from 'node:fs';
 import * as os from 'os';
 import path from 'node:path';
 
@@ -35,6 +35,7 @@ vi.mock('node:fs', () => ({
     rename: vi.fn(),
   },
   unlinkSync: vi.fn(),
+  readFileSync: vi.fn(),
 }));
 
 vi.mock('../utils/atomicFileWrite.js', () => ({
@@ -182,6 +183,7 @@ describe('SharedTokenManager', () => {
   const mockOs = vi.mocked(os);
   const mockPath = vi.mocked(path);
   const mockUnlinkSync = vi.mocked(unlinkSync);
+  const mockReadFileSync = vi.mocked(readFileSync);
 
   /** stat resolves with `mtimeMs`. */
   const statAt = (mtimeMs: number) =>
@@ -669,17 +671,130 @@ describe('SharedTokenManager', () => {
   });
 
   describe('Lock File Management', () => {
-    it('should clean up lock file during process cleanup', () => {
-      // Create a new instance to trigger cleanup handler registration
-      SharedTokenManager.getInstance();
+    /** The cleanup handler registered for process exit. */
+    const processExitHandler = () => {
+      const handlers = process.listeners('exit');
+      return handlers[handlers.length - 1] as () => void;
+    };
 
-      // Access the private cleanup method for testing
-      const cleanupHandlers = process.listeners('exit');
-      const cleanup = cleanupHandlers[cleanupHandlers.length - 1] as () => void;
+    it('should not clean up a lock file it does not own during process cleanup', () => {
+      const cleanup = processExitHandler();
 
-      // Should not throw when lock file doesn't exist
+      // Should not throw when there is no lock to clean up
       expect(() => cleanup()).not.toThrow();
-      expect(mockUnlinkSync).toHaveBeenCalled();
+      expect(mockReadFileSync).not.toHaveBeenCalled();
+      expect(mockUnlinkSync).not.toHaveBeenCalled();
+    });
+
+    it('should clean up the lock file it owns during process cleanup', () => {
+      const cleanup = processExitHandler();
+      setPrivateProperty(tokenManager, 'lockOwnerId', 'owned-lock');
+      mockReadFileSync.mockReturnValueOnce('owned-lock');
+
+      cleanup();
+
+      expect(mockUnlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('oauth_creds.lock'),
+      );
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+    });
+
+    it('should not delete a lock file that another process now owns', () => {
+      const cleanup = processExitHandler();
+      // The lock was evicted as stale and replaced by another process.
+      setPrivateProperty(tokenManager, 'lockOwnerId', 'evicted-lock');
+      mockReadFileSync.mockReturnValueOnce('other-owner-lock');
+
+      cleanup();
+
+      expect(mockUnlinkSync).not.toHaveBeenCalled();
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+    });
+
+    it('should ignore a missing lock file during process cleanup', () => {
+      const cleanup = processExitHandler();
+      setPrivateProperty(tokenManager, 'lockOwnerId', 'owned-lock');
+      mockReadFileSync.mockImplementationOnce(() => {
+        throw enoent();
+      });
+
+      expect(() => cleanup()).not.toThrow();
+      expect(mockUnlinkSync).not.toHaveBeenCalled();
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+    });
+
+    it('should retry a failed cleanup while it still owns the lock', () => {
+      const cleanup = processExitHandler();
+      setPrivateProperty(tokenManager, 'lockOwnerId', 'owned-lock');
+      mockReadFileSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+
+      cleanup();
+
+      expect(mockUnlinkSync).not.toHaveBeenCalled();
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBe(
+        'owned-lock',
+      );
+
+      mockReadFileSync.mockReturnValueOnce('owned-lock');
+      cleanup();
+
+      expect(mockUnlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining('oauth_creds.lock'),
+      );
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+    });
+
+    it('should not delete a lock file another process now owns when releasing', async () => {
+      const mockClient = refreshingClient(
+        vi.fn().mockResolvedValue(createSuccessfulRefreshResponse()),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir', 'rename');
+      mockFs.readFile.mockImplementation(async (filePath) => {
+        if (String(filePath).endsWith('oauth_creds.lock')) {
+          return 'peer-lock';
+        }
+        throw enoent();
+      });
+
+      await tokenManager.getValidCredentials(mockClient);
+
+      expect(mockFs.unlink).not.toHaveBeenCalledWith(
+        expect.stringContaining('oauth_creds.lock'),
+      );
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
+      mockFs.readFile.mockReset();
+    });
+
+    it('should track lock ownership only while the refresh holds the lock', async () => {
+      const refresh = deferredRefresh();
+      const mockClient = refreshingClient(
+        vi.fn().mockReturnValue(refresh.promise),
+      );
+      statAt(1000);
+      resolveFs('writeFile', 'mkdir', 'rename');
+
+      const pending = tokenManager.getValidCredentials(mockClient);
+      await vi.waitFor(
+        () => {
+          expect(
+            getPrivateProperty(tokenManager, 'lockOwnerId'),
+          ).not.toBeNull();
+        },
+        { timeout: 5000 },
+      );
+
+      // The retained token must be exactly what was written to the lock file.
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBe(
+        mockFs.writeFile.mock.calls[0][1],
+      );
+
+      refresh.resolve(createSuccessfulRefreshResponse());
+      await pending;
+
+      expect(getPrivateProperty(tokenManager, 'lockOwnerId')).toBeNull();
     });
 
     it('should handle stale lock cleanup', async () => {

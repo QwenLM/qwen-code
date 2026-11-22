@@ -32,6 +32,7 @@ import type {
   DaemonSessionBtwStreamEvent,
   DaemonSessionAgentsStatus,
   DaemonAgentTrace,
+  DaemonSessionArtifact,
   DaemonSessionAttachmentData,
   DaemonSessionAttachmentReference,
   DaemonSessionTranscriptPage,
@@ -53,6 +54,8 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionResourcesStatus,
   DaemonSessionRecapResult,
+  DaemonModRow,
+  DaemonModRowAnswer,
   DaemonSessionSummary,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
@@ -79,6 +82,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SessionMetadataResult,
   DaemonSessionPrInfo,
@@ -140,12 +144,15 @@ export interface DaemonSessionClientOptions {
    * in the retained window.
    */
   historyAnchorRecordId?: string;
+  /** Optional source-projection boundary from the full load snapshot. */
+  replayProjectionWatermark?: number;
   /**
-   * True when the daemon reported the replay snapshot as degraded (the
-   * compaction engine failed at least once for this session). Consumers
-   * should prefer the full transcript over the snapshot when set.
+   * True when the daemon reported publication retention or compaction failure.
+   * Consumers should prefer the full transcript over the snapshot when set.
    */
   replayDegraded?: boolean;
+  /** Restored artifact snapshot embedded in the load/resume response. */
+  restoredArtifacts?: DaemonSessionArtifact[];
   /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
@@ -208,11 +215,13 @@ function createStandaloneRestoredClient(
     lifecycleReplayIncomplete,
     historyHasMore,
     historyAnchorRecordId,
+    replayProjectionWatermark,
     replayDegraded,
     partial,
     replayError,
     lastEventId,
     eventEpoch,
+    artifacts,
     ...session
   } = restored;
   return new DaemonSessionClient({
@@ -222,6 +231,7 @@ function createStandaloneRestoredClient(
     state,
     lastEventId: lastEventId ?? 0,
     eventEpoch,
+    restoredArtifacts: artifacts,
     ...(includeReplay
       ? {
           replaySnapshot: {
@@ -238,6 +248,7 @@ function createStandaloneRestoredClient(
           replayError,
           historyHasMore,
           historyAnchorRecordId,
+          replayProjectionWatermark,
           replayDegraded,
         }
       : {}),
@@ -281,13 +292,17 @@ export class DaemonSessionClient {
    * could not read one from the persisted transcript.
    */
   readonly historyAnchorRecordId: string | undefined;
+  /** Snapshot observation only; not advanced with the live SSE cursor. */
+  readonly replayProjectionWatermark: number | undefined;
   /**
    * True when the load response flagged the replay snapshot as degraded
-   * (`replayDegraded` — compaction failed at least once, so
+   * (`replayDegraded` — publication retention or compaction failed, so
    * `replaySnapshot` may lag behind live events). Prefer the full
    * transcript (see `fullTranscriptAvailable`) when set.
    */
   readonly replayDegraded: boolean;
+  /** Restored artifact snapshot from the load/resume response, if embedded. */
+  readonly restoredArtifacts?: DaemonSessionArtifact[];
   private lastSeenEventId: number | undefined;
   /**
    * Epoch token paired with {@link lastSeenEventId}. Seeded from the
@@ -346,7 +361,9 @@ export class DaemonSessionClient {
     this.hasRunningBackgroundTasks = opts.session.hasRunningBackgroundTasks;
     this.historyHasMore = opts.historyHasMore ?? false;
     this.historyAnchorRecordId = opts.historyAnchorRecordId;
+    this.replayProjectionWatermark = opts.replayProjectionWatermark;
     this.replayDegraded = opts.replayDegraded ?? false;
+    this.restoredArtifacts = opts.restoredArtifacts;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
@@ -456,11 +473,13 @@ export class DaemonSessionClient {
       lifecycleReplayIncomplete,
       historyHasMore,
       historyAnchorRecordId,
+      replayProjectionWatermark,
       replayDegraded,
       partial,
       replayError,
       lastEventId: serverLastEventId,
       eventEpoch,
+      artifacts,
       ...session
     } = restored;
     const result = new DaemonSessionClient({
@@ -470,6 +489,7 @@ export class DaemonSessionClient {
       state,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
+      restoredArtifacts: artifacts,
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
@@ -483,6 +503,7 @@ export class DaemonSessionClient {
       replayError,
       historyHasMore,
       historyAnchorRecordId,
+      replayProjectionWatermark,
       replayDegraded,
     });
     await result.hydrateReplaySnapshot(req.signal);
@@ -506,6 +527,7 @@ export class DaemonSessionClient {
       hasActivePrompt,
       lastEventId: serverLastEventId,
       eventEpoch,
+      artifacts,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -515,6 +537,7 @@ export class DaemonSessionClient {
       state,
       lastEventId: serverLastEventId ?? 0,
       eventEpoch,
+      restoredArtifacts: artifacts,
     });
   }
 
@@ -1012,6 +1035,23 @@ export class DaemonSessionClient {
     return this.client.setSessionModel(this.sessionId, modelId, this.clientId);
   }
 
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Fire-and-forget callers should swallow failures: the mark is local UI
+   * state and never depends on this call's outcome.
+   */
+  rateSessionTurn(
+    promptId: string,
+    rating: 'up' | 'down',
+  ): Promise<RateSessionTurnResult> {
+    return this.client.rateSessionTurn(
+      this.sessionId,
+      promptId,
+      rating,
+      this.clientId,
+    );
+  }
+
   setConfigOption(
     configId: 'reasoning_effort',
     value: ReasoningSelection,
@@ -1102,6 +1142,17 @@ export class DaemonSessionClient {
    */
   recap(opts?: { signal?: AbortSignal }): Promise<DaemonSessionRecapResult> {
     return this.client.recapSession(this.sessionId, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  /** Ask this session's Mods for a row; see `DaemonClient.askSessionModRow`. */
+  askModRow(
+    row: DaemonModRow,
+    opts?: { signal?: AbortSignal },
+  ): Promise<DaemonModRowAnswer> {
+    return this.client.askSessionModRow(this.sessionId, row, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
@@ -1327,8 +1378,10 @@ export class DaemonSessionClient {
     return this.client.sessionSupportedCommands(this.sessionId, this.clientId);
   }
 
-  tasks(): Promise<DaemonSessionTasksStatus> {
-    return this.client.sessionTasks(this.sessionId, this.clientId);
+  tasks(
+    opts: { includeSubSessions?: boolean } = {},
+  ): Promise<DaemonSessionTasksStatus> {
+    return this.client.sessionTasks(this.sessionId, this.clientId, opts);
   }
 
   taskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus> {
@@ -1462,6 +1515,8 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    /** Best-effort initial title for a session without a custom title. */
+    initialDisplayName?: string;
     pr?: Omit<DaemonSessionPrInfo, 'issues'>;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(

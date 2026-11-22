@@ -97,7 +97,7 @@ import {
   type OpenTuiRestoredDraft,
   type OpenTuiInputSubmission,
   type OpenTuiCancelSettled,
-  type OpenTuiComposerHandle,
+  type OpenTuiComposerSlot,
 } from './input-submission.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
@@ -131,6 +131,7 @@ import {
 import { OpenTuiVoiceIndicator } from './OpenTuiVoiceIndicator.js';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import {
   CompletionMode,
   EscapeClearModel,
@@ -246,6 +247,7 @@ const newDraft = (): Draft => ({
 });
 
 export interface InputPromptProps {
+  screenReader?: boolean;
   onSubmit: (
     text: string,
     imagePaths?: readonly string[],
@@ -278,9 +280,7 @@ export interface InputPromptProps {
   /** Reports the double-Esc armed state (the footer hint). */
   onEscapeArmedChange?: (armed: boolean) => void;
   /** Lets the parent read/clear the composer buffer (Ctrl+Q queue). */
-  composerHandle?: {
-    current: OpenTuiComposerHandle | null;
-  };
+  composerHandle?: OpenTuiComposerSlot;
   /** Queued prompts awaiting the next turn (drives Esc/↑ pop-back parity). */
   queueLength?: number;
   /** Returns editable queued payloads with their attachments and source. */
@@ -555,7 +555,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const unknownHistoryInputRef = useRef(false);
   const restoredQueueDraftRef = useRef<OpenTuiRestoredDraft | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
-  const commandsRef = useRef<readonly SlashCommand[]>([]);
+  const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const presentedCommands = useSubscriptionCommandVisibility(
+    commands,
+    config ?? null,
+  );
+  const commandsRef = useRef(presentedCommands);
+  useLayoutEffect(() => {
+    commandsRef.current = presentedCommands;
+  }, [presentedCommands]);
   // Query-relative replacement range for the current buffer's SLASH target.
   // The perfect-match verdict is deliberately not cached alongside it: Enter
   // recomputes that one from the buffer (see the Enter branch below).
@@ -668,7 +676,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     let cancelled = false;
     loadInteractiveCommands(config ?? null)
       .then((commands) => {
-        if (!cancelled) commandsRef.current = commands;
+        if (!cancelled) setCommands(commands);
       })
       .catch(() => {});
     return () => {
@@ -837,7 +845,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // way useCommandSuggestions re-runs when its recentCommands dep changes.
   useEffect(() => {
     refreshCompletion();
-  }, [recentSlashCommands, refreshCompletion]);
+  }, [recentSlashCommands, presentedCommands, refreshCompletion]);
 
   const applyTextToEditor = useCallback(
     (line: string, cursorCol?: number) => {
@@ -1113,7 +1121,14 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       cancelTurn,
       submitDraft,
       invalidateImportedInput,
+      restoreSubmission: (submission) => restoreSubmission(submission, '\n'),
     };
+    // A prompt handed back while a dialog had the composer unmounted.
+    const returned = props.composerHandle.returned;
+    if (returned && editorRef.current) {
+      props.composerHandle.returned = undefined;
+      restoreSubmission(returned, '\n');
+    }
     return () => {
       if (props.composerHandle) props.composerHandle.current = null;
     };
@@ -1123,6 +1138,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     submitDraft,
     invalidateImportedInput,
     replaceText,
+    restoreSubmission,
   ]);
 
   const acceptSuggestion = useCallback(
@@ -1488,7 +1504,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         key.preventDefault();
         bufferRef.current.newline();
         setTextVersion((v) => v + 1);
-      } else if (handleEditorKey(el, bufferRef.current, key, true)) {
+      } else if (
+        handleEditorKey(el, bufferRef.current, key, true, props.screenReader)
+      ) {
         setTextVersion((v) => v + 1);
       } else if (isPrintableKeyInput(key)) {
         insertText(key.sequence);
@@ -1700,7 +1718,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
     }
-    if (handleEditorKey(el, bufferRef.current, key)) {
+    if (
+      handleEditorKey(el, bufferRef.current, key, false, props.screenReader)
+    ) {
       setTextVersion((v) => v + 1);
       return;
     }
@@ -1841,7 +1861,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (key.name === 'c' && key.ctrl) {
+    if (matchesCommand(Command.CLEAR_INPUT, key)) {
       // Parity with CLEAR_INPUT: a non-empty buffer is cleared first; the
       // app-level quit only fires on an empty prompt.
       if (
@@ -2099,7 +2119,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
       return;
     }
-    if (handleEditorKey(el, bufferRef.current, key, true)) {
+    if (handleEditorKey(el, bufferRef.current, key, true, props.screenReader)) {
       setTextVersion((v) => v + 1);
     } else if (
       !key.ctrl &&
@@ -2220,6 +2240,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           {attachments.map((a, index) => (
             <text
               key={a.id}
+              id={
+                index === selectedAttachment
+                  ? 'screen-reader-selected-attachment'
+                  : 'screen-reader-unselected-attachment'
+              }
               fg={index === selectedAttachment ? C.accent : C.purple}
             >{`${index === selectedAttachment ? '>' : '📎'} ${a.filename}`}</text>
           ))}
@@ -2229,8 +2254,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         status={voiceInput.status}
         interimText={voiceInput.interimText}
         audioLevel={voiceInput.audioLevel}
+        screenReader={props.screenReader}
       />
-      <text fg={borderColor}>{topBorderLine}</text>
+      <text fg={borderColor}>
+        {props.screenReader ? renderedLabel : topBorderLine}
+      </text>
       <box
         flexDirection="row"
         border={['bottom']}
@@ -2252,6 +2280,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       >
         <text fg={chrome.color ?? C.accent}>{chrome.prefix} </text>
         <textarea
+          id="screen-reader-prompt"
           ref={(el) => {
             editorRef.current = el as TextareaRenderable | null;
           }}
@@ -2303,6 +2332,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                 return (
                   <box key={cat} marginLeft={i === 0 ? 0 : 1}>
                     <text
+                      id={
+                        active
+                          ? 'screen-reader-selected-category'
+                          : 'screen-reader-unselected-category'
+                      }
                       fg={active ? C.hover : C.dim}
                       bg={active ? C.accent : undefined}
                     >
@@ -2333,6 +2367,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
               return (
                 <box
                   key={`${suggestion.value}-${originalIndex}`}
+                  id={
+                    isActive
+                      ? 'screen-reader-selected-suggestion'
+                      : 'screen-reader-unselected-suggestion'
+                  }
                   flexDirection="row"
                 >
                   <box width={2} flexShrink={0}>
@@ -2420,6 +2459,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             return (
               <box
                 key={`${suggestion.value}-${originalIndex}`}
+                id={
+                  isActive
+                    ? 'screen-reader-selected-suggestion'
+                    : 'screen-reader-unselected-suggestion'
+                }
                 flexDirection="row"
               >
                 <box width={2} flexShrink={0}>

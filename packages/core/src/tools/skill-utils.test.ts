@@ -103,8 +103,8 @@ describe('applySkillAllowedTools', () => {
 });
 
 describe('canApplySkillSideEffects', () => {
-  const trusted = { isTrustedFolder: () => true };
-  const untrusted = { isTrustedFolder: () => false };
+  const trusted = { isExplicitlyTrustedFolder: () => true };
+  const untrusted = { isExplicitlyTrustedFolder: () => false };
 
   it('gates project skills on folder trust', () => {
     expect(canApplySkillSideEffects({ level: 'project' }, trusted)).toBe(true);
@@ -156,7 +156,7 @@ describe('applySkillSideEffects', () => {
 
   function makeConfig(
     overrides: Partial<{
-      isTrustedFolder: () => boolean;
+      isExplicitlyTrustedFolder: () => boolean;
       getHookSystem: () => unknown;
       getSessionId: () => string | undefined;
       isWorkspaceAgentSession: () => boolean;
@@ -165,7 +165,7 @@ describe('applySkillSideEffects', () => {
     const { pm, addSessionAllowRule } = mockPermissionManager();
     const addSessionHook = vi.fn();
     const config = {
-      isTrustedFolder: () => true,
+      isExplicitlyTrustedFolder: () => true,
       getPermissionManager: () => pm,
       getSessionId: () => 'session-1',
       enableReviewWorkflow: vi.fn().mockResolvedValue(undefined),
@@ -254,7 +254,7 @@ describe('applySkillSideEffects', () => {
 
   it('applies neither for a project skill in an untrusted folder', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
-      isTrustedFolder: () => false,
+      isExplicitlyTrustedFolder: () => false,
     });
     const projectSkill = {
       ...gatedSkill,
@@ -267,7 +267,7 @@ describe('applySkillSideEffects', () => {
 
   it('warns for a project skill in an untrusted folder that declares only hooks', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
-      isTrustedFolder: () => false,
+      isExplicitlyTrustedFolder: () => false,
     });
     // The sibling test above uses a skill carrying both halves, so it passes
     // on the `allowedTools` operand alone. This one pins the `|| skill.hooks`
@@ -283,7 +283,7 @@ describe('applySkillSideEffects', () => {
     expect(addSessionAllowRule).not.toHaveBeenCalled();
     expect(addSessionHook).not.toHaveBeenCalled();
     expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
-      expect.stringContaining('untrusted folder'),
+      expect.stringContaining('requires explicit folder trust'),
     );
   });
 

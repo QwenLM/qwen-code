@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
+} from '../session-agents.js';
 import type {
   DaemonPromptCancelledTranscriptBlock,
   DaemonResourceLink,
@@ -71,6 +75,7 @@ export function isTrimmedPermissionBlockId(
 }
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
+const MAX_PENDING_TOOL_NAMES = 256;
 const MAX_CLONE_DEPTH = 16;
 const truncationCallbacks = new WeakMap<
   DaemonTranscriptState,
@@ -91,6 +96,7 @@ export function createDaemonTranscriptState(
     blocks: [],
     blockIndexById: createIndex(),
     toolBlockByCallId: createIndex(),
+    pendingToolNameByCallId: createIndex(),
     trimmedToolNotificationByCallId: createIndex(),
     permissionBlockByRequestId: createIndex(),
     activeAssistantBlockByParent: createIndex(),
@@ -220,6 +226,7 @@ export function reduceDaemonTranscriptEvents(
     Object.freeze(result.blocks);
     Object.freeze(result.blockIndexById);
     Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.pendingToolNameByCallId);
     Object.freeze(result.activeAssistantBlockByParent);
     Object.freeze(result.activeThoughtBlockByParent);
     Object.freeze(result.trimmedToolNotificationByCallId);
@@ -522,6 +529,7 @@ function applyDaemonTranscriptEvent(
     case 'session.metadata.changed':
     case 'session.artifact.changed':
     case 'session.source.changed':
+    case 'session.sub_session_task.changed':
     case 'session.available_commands':
       // Intentional no-op against `blocks[]`.
       break;
@@ -999,6 +1007,13 @@ function canMergeTextDelta(
   if (!sameRecordedUser && existing.segmentId !== event.segmentId) {
     return false;
   }
+  if (
+    event.type === 'assistant.text.delta' &&
+    (existing.meta?.source === 'slash_command') !==
+      (event.meta?.source === 'slash_command')
+  ) {
+    return false;
+  }
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }
@@ -1046,6 +1061,36 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  if (event.nameOnly) {
+    const namedId = state.toolBlockByCallId[event.toolCallId];
+    const index =
+      namedId !== undefined ? state.blockIndexById[namedId] : undefined;
+    const named = index !== undefined ? state.blocks[index] : undefined;
+    // A lifecycle frame can arrive before the block it names (mid-run attach:
+    // the client never saw the create frame). Hold the name until the create
+    // path can seed it, otherwise the card keeps the "unknown Tool" label.
+    // #16301
+    if (named?.kind !== 'tool') {
+      if (event.toolName) {
+        rememberPendingToolName(state, event.toolCallId, event.toolName);
+      }
+      return;
+    }
+    // Every named block's `ended` frame is a no-op; returning before the
+    // copy-on-write path keeps it from swapping identities and bumping the
+    // store revision for nothing.
+    if (named.toolName !== undefined || !event.toolName) {
+      return;
+    }
+    const writable = getWritableBlockById(state, namedId);
+    if (writable?.kind === 'tool') {
+      const bytesBefore = estimateBlockBytes(writable);
+      writable.toolName = event.toolName;
+      writable.updatedAt = state.now;
+      state.retainedBytes += estimateBlockBytes(writable) - bytesBefore;
+    }
+    return;
+  }
   const compactTaskOutput =
     !state.retainSubagentBlocks &&
     isRecord(event.rawOutput) &&
@@ -1229,13 +1274,21 @@ function upsertToolBlock(
       toolName: event.toolName,
       toolKind: event.toolKind,
     });
+  // A lifecycle frame that arrived before this create (mid-run attach) left
+  // its name here; consume it exactly once so the card is named from the
+  // start instead of showing "unknown Tool" until a later frame. #16301
+  const pendingToolName = state.pendingToolNameByCallId[event.toolCallId];
+  if (pendingToolName !== undefined) {
+    delete state.pendingToolNameByCallId[event.toolCallId];
+  }
+  const toolName = event.toolName ?? pendingToolName;
   const block: DaemonToolTranscriptBlock = {
     id: allocateBlockId(state, 'tool'),
     kind: 'tool',
     toolCallId: event.toolCallId,
     ...(event.startedAt !== undefined ? { startedAt: event.startedAt } : {}),
     ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}),
-    title: event.title ?? event.toolName ?? event.toolKind ?? 'Tool',
+    title: event.title ?? toolName ?? event.toolKind ?? 'Tool',
     status: event.status ?? 'pending',
     preview: createDaemonToolPreview(event.rawInput, {
       title: event.title,
@@ -1272,7 +1325,7 @@ function upsertToolBlock(
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
     ...(rawOutput !== undefined ? { rawOutput } : {}),
-    ...(event.toolName ? { toolName: event.toolName } : {}),
+    ...(toolName ? { toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
     ...(event.parentToolCallId
       ? { parentToolCallId: event.parentToolCallId }
@@ -1312,6 +1365,27 @@ function upsertToolBlock(
 
 function isBackgroundToolOutput(value: unknown): boolean {
   return isRecord(value) && value['status'] === 'background';
+}
+
+/**
+ * Park a late lifecycle name until its block is created. Bounded so a stream
+ * of lifecycle frames for call ids that never materialise cannot grow the
+ * snapshot without limit; the oldest entry is evicted first.
+ */
+function rememberPendingToolName(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+  toolName: string,
+): void {
+  const pending = state.pendingToolNameByCallId;
+  if (pending[toolCallId] === undefined) {
+    const parked = Object.keys(pending);
+    if (parked.length >= MAX_PENDING_TOOL_NAMES) {
+      const oldest = parked[0];
+      if (oldest !== undefined) delete pending[oldest];
+    }
+  }
+  pending[toolCallId] = toolName;
 }
 
 function discardToolBlock(
@@ -1775,7 +1849,9 @@ function appendStatusBlock(
     ...((event?.type === 'status' || event?.type === 'debug') && event.source
       ? { source: event.source }
       : {}),
-    ...((event?.type === 'status' || event?.type === 'debug') &&
+    ...((event?.type === 'status' ||
+      event?.type === 'debug' ||
+      event?.type === 'error') &&
     event.data !== undefined
       ? { data: event.data }
       : {}),
@@ -1919,6 +1995,9 @@ function cloneTranscriptState(
     toolBlockByCallId: shareSideIndexes
       ? state.toolBlockByCallId
       : createIndex(state.toolBlockByCallId),
+    pendingToolNameByCallId: shareSideIndexes
+      ? state.pendingToolNameByCallId
+      : createIndex(state.pendingToolNameByCallId),
     activeAssistantBlockByParent: shareSideIndexes
       ? state.activeAssistantBlockByParent
       : createIndex(state.activeAssistantBlockByParent),
@@ -1985,19 +2064,44 @@ function trimTranscriptState(
     1,
     Math.floor(Number.isFinite(state.maxBlocks) ? state.maxBlocks : 1),
   );
-  let removeCount = Math.max(0, state.blocks.length - effectiveMaxBlocks);
   let bytes = state.retainedBytes;
+  let remainingCount = state.blocks.length;
+  const droppedModLogs = new Set<string>();
+  // Replayed Mod logs can follow a persisted page. Drop these ephemeral rows
+  // before trimming the record-bearing prefix that anchors older history.
+  for (const block of state.blocks) {
+    if (
+      remainingCount <= 1 ||
+      (remainingCount <= effectiveMaxBlocks && bytes <= state.maxRetainedBytes)
+    ) {
+      break;
+    }
+    if (
+      block.kind === 'status' &&
+      block.source === 'mod_log' &&
+      !block.sourceRecordIds?.length
+    ) {
+      droppedModLogs.add(block.id);
+      remainingCount -= 1;
+      bytes -= estimateBlockBytes(block);
+    }
+  }
+  const retainedBlocks =
+    droppedModLogs.size > 0
+      ? state.blocks.filter((block) => !droppedModLogs.has(block.id))
+      : state.blocks;
+  let removeCount = Math.max(0, retainedBlocks.length - effectiveMaxBlocks);
   for (let i = 0; i < removeCount; i += 1) {
-    bytes -= estimateBlockBytes(state.blocks[i]!);
+    bytes -= estimateBlockBytes(retainedBlocks[i]!);
   }
   // Byte budget: keep evicting oldest blocks until the retained estimate is
   // back under the budget. The last block always survives, so the ceiling is
   // budget + one worst-case block rather than strictly the budget.
   while (
-    removeCount < state.blocks.length - 1 &&
+    removeCount < retainedBlocks.length - 1 &&
     bytes > state.maxRetainedBytes
   ) {
-    bytes -= estimateBlockBytes(state.blocks[removeCount]!);
+    bytes -= estimateBlockBytes(retainedBlocks[removeCount]!);
     removeCount += 1;
   }
   // Snap the cut to record boundaries: one persisted record fans out into
@@ -2010,13 +2114,13 @@ function trimTranscriptState(
   // inside a record, keeping the at-least-one-block floor.
   while (
     removeCount > 0 &&
-    removeCount < state.blocks.length - 1 &&
+    removeCount < retainedBlocks.length - 1 &&
     sharesSourceRecordId(
-      state.blocks[removeCount - 1]!,
-      state.blocks[removeCount]!,
+      retainedBlocks[removeCount - 1]!,
+      retainedBlocks[removeCount]!,
     )
   ) {
-    bytes -= estimateBlockBytes(state.blocks[removeCount]!);
+    bytes -= estimateBlockBytes(retainedBlocks[removeCount]!);
     removeCount += 1;
   }
   // The forward snap can be pinned by the floor: the byte loop evicts down to
@@ -2033,19 +2137,19 @@ function trimTranscriptState(
   while (
     removeCount > 0 &&
     sharesSourceRecordId(
-      state.blocks[removeCount - 1]!,
-      state.blocks[removeCount]!,
+      retainedBlocks[removeCount - 1]!,
+      retainedBlocks[removeCount]!,
     )
   ) {
     removeCount -= 1;
-    bytes += estimateBlockBytes(state.blocks[removeCount]!);
+    bytes += estimateBlockBytes(retainedBlocks[removeCount]!);
   }
   // Nothing evictable (e.g. one oversized block): skip the callback and
-  // rebuild. Firing `kind: 'blocks'` with zero removals records a false
-  // truncation and churns snapshot identity on every dispatch.
-  if (removeCount === 0) return state;
+  // rebuild so the snapshot remains stable.
+  if (removeCount === 0 && droppedModLogs.size === 0) return state;
   state.retainedBytes = Math.max(0, bytes);
-  const blocks = state.blocks.slice(removeCount);
+  const blocks =
+    removeCount > 0 ? retainedBlocks.slice(removeCount) : retainedBlocks;
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(blocks);
@@ -2137,7 +2241,7 @@ function trimTranscriptState(
   truncationCallbacks.get(state)?.({
     kind: 'blocks',
     oldestRetainedRecordId: oldestRetainedBlock?.sourceRecordIds?.[0],
-    evictedOldest: true,
+    evictedOldest: removeCount > 0,
     blockCount: state.blocks.length,
     retainedBytes: state.retainedBytes,
     maxBlocks: state.maxBlocks,
@@ -2202,10 +2306,13 @@ export function isDaemonRewindUserBlock(
   block: DaemonTranscriptBlock | undefined,
 ): boolean {
   if (block?.kind !== 'user') return false;
-  const source = block.meta?.['source'];
+  const meta = block.meta;
+  const source = meta?.['source'];
   return (
     source !== 'background_notification' &&
-    source !== 'mid_turn_message_injected'
+    source !== 'mid_turn_message_injected' &&
+    parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY])?.sentTo ===
+      undefined
   );
 }
 
@@ -2292,6 +2399,7 @@ function truncateTranscriptBeforeBlock(
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
   state.toolBlockByCallId = createIndex();
+  state.pendingToolNameByCallId = createIndex();
   state.permissionBlockByRequestId = createIndex();
   state.trimmedToolNotificationByCallId = createIndex();
   state.activeUserBlockId = undefined;

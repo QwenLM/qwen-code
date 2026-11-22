@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
@@ -141,4 +141,84 @@ it('cancels archive reads on unmount and ignores a late response', async () => {
   await act(async () => finish({ sessions: [summary('late')] }));
   expect(onSessionsChange).toHaveBeenCalledTimes(updates);
   expect(container.textContent).toBe('');
+});
+
+it('settles when the host re-renders with a fresh inline status callback', async () => {
+  listSessions.mockResolvedValue({ sessions: [summary('a')] });
+  const seen: Array<{ count: number; loading: boolean; error: boolean }> = [];
+  function Host() {
+    const [status, setStatus] = useState<{
+      count: number;
+      loading: boolean;
+      error: boolean;
+    }>({ count: -1, loading: true, error: false });
+    return (
+      <I18nProvider language="en">
+        <span data-managed-archived-count>{status.count}</span>
+        <ManagedArchivedSessions
+          provider={provider}
+          clientId="client-archive"
+          active={false}
+          onSelectSession={onSelectSession}
+          renderSessionActions={(session) => <span>{session.sessionId}</span>}
+          onSessionsChange={onSessionsChange}
+          onStatusChange={(next) => {
+            seen.push(next);
+            // A host keeps the whole status object, so every emit is a fresh
+            // state value and therefore a re-render with a new callback. Cap
+            // the state writes so a regression fails on the count instead of
+            // looping until the test times out.
+            if (seen.length <= 6) setStatus({ ...next });
+          }}
+        />
+      </I18nProvider>
+    );
+  }
+
+  await act(async () => {
+    root.render(<Host />);
+  });
+
+  // Re-emitting on callback identity alone would loop without bound: the host
+  // stores the status in state and therefore re-renders with a new closure.
+  expect(seen.length).toBeLessThan(5);
+  expect(
+    container.querySelector('[data-managed-archived-count]')?.textContent,
+  ).toBe('1');
+  expect(seen.at(-1)).toEqual({ count: 1, loading: false, error: false });
+});
+
+it('delivers the settled status to a callback supplied after the list settled', async () => {
+  listSessions.mockResolvedValue({ sessions: [summary('a')] });
+  const late = vi.fn();
+  const tree = (
+    onStatusChange?: (status: {
+      count: number;
+      loading: boolean;
+      error: boolean;
+    }) => void,
+  ) => (
+    <I18nProvider language="en">
+      <ManagedArchivedSessions
+        provider={provider}
+        clientId="client-archive"
+        active={false}
+        onSelectSession={onSelectSession}
+        renderSessionActions={(session) => <span>{session.sessionId}</span>}
+        onSessionsChange={onSessionsChange}
+        onStatusChange={onStatusChange}
+      />
+    </I18nProvider>
+  );
+
+  await act(async () => root.render(tree(undefined)));
+  expect(container.textContent).toContain('Archive a');
+  expect(late).not.toHaveBeenCalled();
+
+  // A host that only learns the count after mounting supplies the callback
+  // later; the settled list will not change again, so this transition is the
+  // only chance to deliver it.
+  await act(async () => root.render(tree(late)));
+  expect(late).toHaveBeenCalledTimes(1);
+  expect(late).toHaveBeenCalledWith({ count: 1, loading: false, error: false });
 });

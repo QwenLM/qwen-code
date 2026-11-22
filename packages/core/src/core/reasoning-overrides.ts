@@ -15,8 +15,10 @@ import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
 import {
   getBuiltinDeepSeekReasoning,
+  isDeepSeekEstablishedHost,
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
+import { getBuiltinGeminiReasoning } from './gemini-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 import {
@@ -148,7 +150,19 @@ export function validateReasoningCapabilities(
   route: Route,
   declaration: unknown,
 ): ResolvedReasoning | undefined {
-  if (declaration === undefined) return getBuiltinDeepSeekReasoning(route);
+  if (declaration === undefined) {
+    if (route.authType === 'qwen-subscription') {
+      return {
+        thinking: true,
+        efforts: ['low', 'medium', 'xhigh'],
+        defaultEffort: 'medium',
+        disableField: 'enable_thinking',
+      };
+    }
+    return (
+      getBuiltinDeepSeekReasoning(route) ?? getBuiltinGeminiReasoning(route)
+    );
+  }
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
   if (input.profile === undefined && 'thinking' in input)
@@ -173,7 +187,9 @@ export function validateReasoningCapabilities(
     route.authType === 'anthropic'
       ? parseClaudeModelVersion(route.model)
       : undefined;
-  if (!inherited && !gpt && !claude && !input.profile)
+  const gemini = getBuiltinGeminiReasoning(route);
+  const tieredGemini = gemini?.toggleOnly ? undefined : gemini;
+  if (!inherited && !gpt && !claude && !gemini && !input.profile)
     return invalidReasoning(route);
   const auth = route.authType;
   let host = '';
@@ -233,7 +249,9 @@ export function validateReasoningCapabilities(
       protocol !==
         (auth === 'vertex-ai'
           ? 'gemini'
-          : auth === 'qwen-oauth' || auth === 'openai-responses'
+          : auth === 'qwen-oauth' ||
+              auth === 'qwen-subscription' ||
+              auth === 'openai-responses'
             ? 'openai'
             : auth))
   )
@@ -251,12 +269,14 @@ export function validateReasoningCapabilities(
     inherited && !inherited.toggleOnly
       ? inherited.efforts
       : (gpt?.efforts ??
-        (claude ? anthropicSupportedEffortTiers(route.model) : undefined));
+        (claude
+          ? anthropicSupportedEffortTiers(route.model)
+          : tieredGemini?.efforts));
   const efforts = input.efforts ?? inheritedEfforts;
   const inheritedDefault =
     inherited && !inherited.toggleOnly
       ? inherited.defaultEffort
-      : gpt?.defaultEffort;
+      : (gpt?.defaultEffort ?? tieredGemini?.defaultEffort);
   const defaultEffort =
     input.defaultEffort ??
     (inheritedDefault && efforts
@@ -324,14 +344,18 @@ export function captureReasoningSnapshot(
   );
 }
 
-export function resolveReasoningForModel(
+/**
+ * The raw `capabilities.reasoning` declaration governing a route, before any
+ * built-in fallback: the route-aware snapshot row when present, else the
+ * registry entry. Exposed so wire-shaping consumers can stand the built-in
+ * normalizer down whenever an explicit declaration governs.
+ */
+export function resolveReasoningDeclaration(
   config: Pick<Config, 'getResolvedModelConfig'> | undefined,
   generation: ContentGeneratorConfig,
   model = generation.model,
-  strict = false,
-): ResolvedReasoning | undefined {
+): unknown {
   model = getRequestModel(generation, model);
-  let declaration: unknown;
   if (generation.reasoningSnapshot) {
     const rows = generation.reasoningSnapshot.filter(
       (row) => row.authType === generation.authType && row.id === model,
@@ -350,16 +374,25 @@ export function resolveReasoningForModel(
                 row.registryBaseUrl === undefined &&
                 row.baseUrl === generation.baseUrl,
             ));
-    declaration = row?.reasoning;
-  } else {
-    declaration = generation.authType
-      ? config?.getResolvedModelConfig?.(
-          generation.authType,
-          model,
-          generation.baseUrl,
-        )?.capabilities?.reasoning
-      : undefined;
+    return row?.reasoning;
   }
+  return generation.authType
+    ? config?.getResolvedModelConfig?.(
+        generation.authType,
+        model,
+        generation.baseUrl,
+      )?.capabilities?.reasoning
+    : undefined;
+}
+
+export function resolveReasoningForModel(
+  config: Pick<Config, 'getResolvedModelConfig'> | undefined,
+  generation: ContentGeneratorConfig,
+  model = generation.model,
+  strict = false,
+): ResolvedReasoning | undefined {
+  model = getRequestModel(generation, model);
+  const declaration = resolveReasoningDeclaration(config, generation, model);
   return (
     strict ? validateReasoningCapabilities : resolveReasoningCapabilities
   )(
@@ -373,6 +406,14 @@ export function resolveReasoningForModel(
   );
 }
 
+/**
+ * The effective reasoning setting for display and request shaping. A
+ * profile-less resolved capability means an explicit declaration governs the
+ * route; on newly recognized model/host combinations the built-in DeepSeek
+ * normalizer stands down so the declared/static tier is neither re-tiered for
+ * the wire nor for the display. Established combinations keep their shipped
+ * interaction.
+ */
 export function getEffectiveReasoning(
   generation: Pick<ContentGeneratorConfig, 'reasoning'> &
     Partial<
@@ -397,8 +438,9 @@ export function getEffectiveReasoning(
     return selected ?? (resolved.profile ? {} : undefined);
   const model = getRequestModel(generation);
   const knownDeepSeek =
-    (resolved.profile === undefined ||
-      resolved.profile === 'deepseek-openai') &&
+    (resolved.profile === 'deepseek-openai' ||
+      (resolved.profile === undefined &&
+        isDeepSeekEstablishedHost(generation.baseUrl, model))) &&
     getBuiltinDeepSeekReasoning({ ...generation, model });
   let effort = selected?.effort ?? resolved.defaultEffort;
   if (effort && knownDeepSeek && !resolved.efforts.includes(effort))

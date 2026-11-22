@@ -63,6 +63,7 @@ describe('normalize', () => {
     // form above — so the half worth keeping is the left one.
     expect(normalize('qwen/qwen3-coder:free')).toBe('qwen3-coder');
     expect(normalize('google/gemini-2.5-pro:online')).toBe('gemini-2.5-pro');
+    expect(normalize('qwen/qwen3-coder:exacto')).toBe('qwen3-coder');
     expect(normalize('qwen2.5-coder:32b')).toBe('qwen2.5-coder');
     expect(normalize('llama3.1:8b-instruct-q4_k_m')).toBe('llama3.1');
     expect(normalize('qwen2.5-coder:latest')).toBe('qwen2.5-coder');
@@ -162,6 +163,12 @@ describe('tokenLimit', () => {
   });
 
   describe('Google Gemini', () => {
+    it('should return 1M for Gemini 4.x and its aliases', () => {
+      expect(tokenLimit('gemini-4-neon')).toBe(1000000);
+      expect(tokenLimit('gemini-4-pro-preview-20261121')).toBe(1000000);
+      expect(tokenLimit('vertex_ai/gemini-4-flash')).toBe(1000000);
+    });
+
     it('should return 1M for Gemini 3.x (latest)', () => {
       expect(tokenLimit('gemini-3-pro-preview')).toBe(1000000);
       expect(tokenLimit('gemini-3-flash-preview')).toBe(1000000);
@@ -387,6 +394,22 @@ describe('tokenLimit', () => {
       expect(tokenLimit('kimi-k2-0905')).toBe(262144);
       expect(tokenLimit('kimi-k2-turbo')).toBe(262144);
     });
+
+    it('should return 1M for the K3 generation, prefixed or bare', () => {
+      expect(tokenLimit('kimi-k3')).toBe(1000000);
+      expect(tokenLimit('kimi-k3.1-pro')).toBe(1000000);
+      expect(tokenLimit('kimi-k3.1-pro-highspeed')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro-highspeed')).toBe(1000000);
+      expect(tokenLimit('k3.1-pro-high-speed')).toBe(1000000);
+      expect(tokenLimit('moonshot/k3.1-pro')).toBe(1000000);
+    });
+
+    it('should keep the K3 256K variant out of the 1M rule', () => {
+      expect(tokenLimit('k3-256k')).toBe(262144);
+      expect(tokenLimit('kimi-k3-256k')).toBe(262144);
+      expect(tokenLimit('moonshot/k3-256k')).toBe(262144);
+    });
   });
 
   describe('Other models', () => {
@@ -422,6 +445,8 @@ describe('variant-tagged model ids', () => {
       ['openai/gpt-5:free', 'openai/gpt-5'],
       ['qwen2.5-coder:32b', 'qwen2.5-coder'],
       ['qwen3-coder-plus:nitro', 'qwen3-coder-plus'],
+      ['qwen/qwen3-coder:exacto', 'qwen/qwen3-coder'],
+      ['moonshotai/kimi-k2-0905:exacto', 'moonshotai/kimi-k2-0905'],
     ] as Array<[string, string]>) {
       expect(tokenLimit(tagged)).toBe(tokenLimit(bare));
       expect(tokenLimit(tagged, 'output')).toBe(tokenLimit(bare, 'output'));
@@ -435,6 +460,7 @@ describe('variant-tagged model ids', () => {
     expect(tokenLimit('google/gemini-2.5-pro:online')).toBe(1_000_000);
     expect(tokenLimit('openai/gpt-5:free')).toBe(272_000);
     expect(tokenLimit('qwen2.5-coder:32b')).toBe(262_144);
+    expect(tokenLimit('qwen/qwen3-coder:exacto')).toBe(262_144);
   });
 
   it('still keeps the right half of a prefixed id', () => {
@@ -465,6 +491,13 @@ describe('tokenLimit with output type', () => {
     it('should return correct output limits for GPT-5.x', () => {
       expect(tokenLimit('gpt-5.2', 'output')).toBe(131072);
       expect(tokenLimit('gpt-5-mini', 'output')).toBe(131072);
+    });
+
+    it('should return 64K output for Gemini 4.x and its aliases', () => {
+      expect(tokenLimit('gemini-4-neon', 'output')).toBe(65536);
+      expect(tokenLimit('gemini-4-pro-preview-20261121', 'output')).toBe(65536);
+      expect(tokenLimit('vertex_ai/gemini-4-flash', 'output')).toBe(65536);
+      expect(hasExplicitOutputLimit('gemini-4-neon')).toBe(true);
     });
 
     it('should return correct output limits for Gemini 3.x', () => {
@@ -528,6 +561,28 @@ describe('tokenLimit with output type', () => {
       // Models without specific output limits fall back to Qwen default (32K)
       expect(tokenLimit('qwen3-max', 'output')).toBe(32768);
       expect(tokenLimit('qwen3-max-2026-01-23', 'output')).toBe(32768);
+    });
+
+    it('should size qwen4-max output for thinking + answer (262,144)', () => {
+      expect(tokenLimit('qwen4-max', 'output')).toBe(262144);
+      expect(tokenLimit('qwen4-max-2026-10-01', 'output')).toBe(262144);
+      expect(hasExplicitOutputLimit('qwen4-max')).toBe(true);
+    });
+
+    it('keeps other qwen4 routes on the shipped output fallback', () => {
+      // The combined thinking+answer cap is a qwen4-max contract, not a
+      // whole-generation one; other qwen4* ids keep the 32K Qwen fallback.
+      expect(tokenLimit('qwen4-plus', 'output')).toBe(32768);
+      expect(tokenLimit('qwen4.5-max', 'output')).toBe(32768);
+    });
+
+    it('should exempt qwen4-max from the flat auto output ceiling', () => {
+      // max_tokens caps CoT + answer together, so the 64K auto ceiling would
+      // be consumed by thinking alone.
+      expect(defaultOutputCeiling('qwen4-max')).toBe(262144);
+      // qwen3.8-max keeps the flat auto ceiling (its max_tokens excludes CoT).
+      expect(defaultOutputCeiling('qwen3.8-max')).toBe(64000);
+      expect(defaultOutputCeiling('qwen4-plus')).toBe(32768);
     });
   });
 

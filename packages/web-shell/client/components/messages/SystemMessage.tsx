@@ -1,4 +1,5 @@
 import { parseDaemonBackgroundTurn } from '@qwen-code/sdk/daemon';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { memo, useCallback } from 'react';
 import {
@@ -26,6 +27,7 @@ import {
   ContextUsageMessage,
   parseContextUsageMessage,
 } from './ContextUsageMessage';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { StatsMessage, parseStatsMessage } from './StatsMessage';
 import { StatusMessage, parseStatusMessage } from './StatusMessage';
 import { McpStatusMessage, parseMcpStatusMessage } from './McpStatusMessage';
@@ -52,6 +54,11 @@ interface SystemMessageProps {
   }>;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -158,6 +165,7 @@ export const SystemMessage = memo(function SystemMessage({
   images,
   files,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
@@ -165,7 +173,24 @@ export const SystemMessage = memo(function SystemMessage({
   onRetryClick,
 }: SystemMessageProps) {
   const { language, t } = useI18n();
-  const backgroundDetails = useSubagentDetails()?.onOpenBackground;
+  if (
+    variant === 'error' &&
+    data &&
+    typeof data === 'object' &&
+    'subscriptionQuota' in data
+  ) {
+    content =
+      formatSubscriptionQuotaDisplay(data.subscriptionQuota, t) ?? content;
+  }
+  if (
+    content ===
+    'Your login credentials are no longer valid. Run /auth to sign in again.'
+  ) {
+    content = t('subscription.loginRequired');
+  }
+  const subagentDetails = useSubagentDetails();
+  const backgroundDetails = subagentDetails?.onOpenBackground;
+  const openSession = subagentDetails?.onOpenSession;
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
     void writeClipboardText(content)
@@ -176,9 +201,30 @@ export const SystemMessage = memo(function SystemMessage({
   }, [content, flashCopied]);
   if (source === 'background_notification_turn_started') {
     const turn = parseDaemonBackgroundTurn(data);
-    const taskStatus = (
-      data as { backgroundTask?: { status?: string } } | undefined
-    )?.backgroundTask?.status;
+    const backgroundTask = (
+      data as
+        | {
+            backgroundTask?: {
+              status?: string;
+              fromSession?: { sessionId?: unknown; workspaceCwd?: unknown };
+            };
+          }
+        | undefined
+    )?.backgroundTask;
+    // A reply from another session opens that session, not task details.
+    const fromSession = backgroundTask?.fromSession;
+    const openFromSession =
+      openSession && turn && typeof fromSession?.sessionId === 'string'
+        ? () =>
+            openSession({
+              sessionId: fromSession.sessionId as string,
+              ...(typeof fromSession.workspaceCwd === 'string'
+                ? { workspaceCwd: fromSession.workspaceCwd }
+                : {}),
+              title: turn.label ?? turn.kind,
+            })
+        : undefined;
+    const taskStatus = backgroundTask?.status;
     const markerLabel =
       taskStatus === 'completed'
         ? t('system.taskCompleted')
@@ -218,10 +264,10 @@ export const SystemMessage = memo(function SystemMessage({
         </span>
         <span className="shrink-0 text-muted-foreground">
           {t(
-            turn?.kind === 'agent'
-              ? 'background.agent'
-              : turn?.kind === 'peer'
-                ? 'background.peer'
+            turn?.kind === 'peer' || backgroundTask?.fromSession
+              ? 'background.peer'
+              : turn?.kind === 'agent'
+                ? 'background.agent'
                 : 'background.task',
           )}
         </span>
@@ -248,13 +294,16 @@ export const SystemMessage = memo(function SystemMessage({
             </Button>
           )}
           {/* A peer turn has no task behind it to show the details of. */}
-          {backgroundDetails && turn && turn.kind !== 'peer' && (
+          {(openFromSession ||
+            (backgroundDetails && turn && turn.kind !== 'peer')) && (
             <Button
               type="button"
               variant="ghost"
               size="sm"
               className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
-              onClick={() => backgroundDetails(turn)}
+              onClick={() =>
+                openFromSession ? openFromSession() : backgroundDetails?.(turn!)
+              }
             >
               <FileTextIcon size={12} aria-hidden="true" />
               {t('background.details')}
@@ -304,6 +353,15 @@ export const SystemMessage = memo(function SystemMessage({
         <ContextUsageMessage
           status={contextUsage}
           onShowDetail={onShowContextDetail}
+          onOpenMemoryFile={
+            onOpenMemoryFile
+              ? (file) =>
+                  onOpenMemoryFile(
+                    file,
+                    contextUsage.workspaceRoot ?? contextUsage.workspaceCwd,
+                  )
+              : undefined
+          }
         />
       </div>
     );

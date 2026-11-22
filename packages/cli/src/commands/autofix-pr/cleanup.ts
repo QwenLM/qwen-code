@@ -6,7 +6,8 @@
 
 // `qwen autofix-pr cleanup`: end a watch. The worktree, its branch and the
 // state file go away together, unless the worktree or the branch still holds
-// work the PR does not have; then all three stay so the user can pick it up.
+// work the PR does not have, or another checkout has the branch; then all
+// three stay so the user can pick it up.
 
 import type { CommandModule } from 'yargs';
 import {
@@ -30,6 +31,7 @@ import {
   readState,
   repoRoot,
   resolveWatchRoot,
+  statePaths,
   trustAnchor,
   requireState,
   withWatchLock,
@@ -39,7 +41,11 @@ import {
 } from './state.js';
 import { assertNoFixInFlight } from './fix.js';
 import {
+  branchHolder,
+  checkoutHoldsWork,
+  freeing,
   remoteRef,
+  untrustedCheckoutGit,
   untrustedGitfile,
   untrustedSubmodules,
 } from './worktree.js';
@@ -68,6 +74,7 @@ export function unsavedWork(
   prHeads: string[] | null,
   liveHead: () => string | null = () => null,
   trustRoot: string = repoRoot(),
+  inPlace = false,
 ): string | null {
   const hasWorktree = existsSync(paths.worktreePath);
   if (hasWorktree) {
@@ -75,7 +82,9 @@ export function unsavedWork(
     // worktree: a sibling checkout's `.git` can be rewritten by code that ran
     // inside it, so it must not vouch for a watch nested in it.
     const untrusted =
-      untrustedGitfile(paths.worktreePath, trustRoot) ??
+      (inPlace
+        ? untrustedCheckoutGit(paths.worktreePath, trustRoot)
+        : untrustedGitfile(paths.worktreePath, trustRoot)) ??
       untrustedSubmodules(paths.worktreePath, trustRoot);
     // Not read: git would take the config of a git directory the tree holds.
     if (untrusted !== null) return untrusted;
@@ -96,17 +105,21 @@ export function unsavedWork(
     // changes inside it.
     // No optional locks: `status` asks while a round's agent may commit
     // there, and a refreshed index would take its index.lock.
-    const status = gitOpt(
-      '--no-optional-locks',
-      '-C',
-      paths.worktreePath,
-      'status',
-      '--porcelain',
-      '--untracked-files=normal',
-      '--ignore-submodules=none',
-    );
-    if (status === null) return `git cannot read ${paths.worktreePath}`;
-    if (status !== '') return 'it has uncommitted changes';
+    // An in-place checkout holds the watch's own files under .qwen/tmp:
+    // checkoutHoldsWork does not count them as the user's work.
+    const holds = inPlace
+      ? checkoutHoldsWork(paths.worktreePath)
+      : gitOpt(
+          '--no-optional-locks',
+          '-C',
+          paths.worktreePath,
+          'status',
+          '--porcelain',
+          '--untracked-files=normal',
+          '--ignore-submodules=none',
+        );
+    if (holds === null) return `git cannot read ${paths.worktreePath}`;
+    if (inPlace ? holds : holds !== '') return 'it has uncommitted changes';
   }
   const hasBranch = refExists(`refs/heads/${paths.branch}`);
   if (!hasWorktree && !hasBranch) return null;
@@ -151,16 +164,10 @@ export function runCleanup(
   takeOver = false,
 ): void {
   const root = resolveWatchRoot(prNumber);
-  const paths = autofixPrPaths(root, prNumber);
-  if (
-    existsSync(paths.worktreePath) &&
-    isWithinRoot(realpathSync(process.cwd()), realpathSync(paths.worktreePath))
-  ) {
-    throw new Error(
-      `cannot remove ${paths.worktreePath} from inside it; run cleanup from ${root}.`,
-    );
-  }
-  // With --force too: the worktree is the one a fix agent works in now.
+  let paths = autofixPrPaths(root, prNumber);
+  // With --force too, and before the state is read: a state file it cannot
+  // read would otherwise send the user to --force, which then refuses the
+  // same. The worktree is the one a fix agent works in now.
   assertNoFixInFlight(paths, prNumber);
   let state: AutofixPrState | null;
   try {
@@ -185,7 +192,130 @@ export function runCleanup(
       assertOwnedBySession(current);
     }
   };
+  // What the watch posted and handled outlives it, so a later watch of the
+  // PR does not answer the same comments again. The state file and
+  // everything else this PR's watch wrote beside it (CI logs, briefs) go;
+  // the gate cursor belongs to the scheduled task, which outlives a watch
+  // and would report everything again without it.
+  const removeWatchFiles = (watch: AutofixPrState | null): string | null => {
+    const kept = watch ? keepHistory(paths, watch) : null;
+    const tmp = dirname(paths.statePath);
+    const prefix = `autofix-pr-${prNumber}-`;
+    for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
+      const path = join(tmp, name);
+      if (
+        name.startsWith(prefix) &&
+        path !== paths.gatePath &&
+        !name.startsWith(historyPrefix(paths))
+      ) {
+        // Recursive: a directory planted under one of these names would
+        // otherwise outlive the --force meant to discard it.
+        rmSync(path, { force: true, recursive: true });
+      }
+    }
+    return kept;
+  };
+  // Named, so a later watch of another repository's PR of this number
+  // knows which file its gate refuses.
+  const reportRemoved = (history: string | null, inPlace: boolean): void => {
+    const kept = {
+      ...(existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {}),
+      ...(history ? { history } : {}),
+      ...(inPlace ? { inPlace: true } : {}),
+    };
+    writeStdoutLine(
+      JSON.stringify({
+        removed: true,
+        worktreePath: paths.worktreePath,
+        ...kept,
+      }),
+    );
+  };
+  if (state?.inPlace) {
+    // An in-place watch ends by removing only its files: the checkout and
+    // the branch are the user's, and no --force touches them.
+    paths = statePaths(root, state);
+    assertNoFixInFlight(paths, prNumber);
+    if (!force) {
+      assertStoppable(state);
+      withWatchLock(paths, prNumber, () => {
+        const current = requireState(paths.statePath, prNumber);
+        assertStoppable(current);
+        assertNoFixInFlight(paths, prNumber);
+        const history = removeWatchFiles(current);
+        // The private ref the in-place prepare fetched the PR head into.
+        gitOpt('update-ref', '-d', paths.headRef);
+        reportRemoved(history, true);
+      });
+    } else {
+      const history = removeWatchFiles(state);
+      gitOpt('update-ref', '-d', paths.headRef);
+      // A lock a killed helper left behind would otherwise outlive the
+      // watch; so would a cursor that is no regular file.
+      rmSync(paths.lockPath, { force: true, recursive: true });
+      rmSync(`${paths.lockPath}.break`, { force: true, recursive: true });
+      if (
+        lstatSync(paths.gatePath, { throwIfNoEntry: false }) &&
+        !isRegularFile(paths.gatePath)
+      ) {
+        rmSync(paths.gatePath, { force: true, recursive: true });
+      }
+      reportRemoved(history, true);
+    }
+    return;
+  }
+  if (
+    existsSync(paths.worktreePath) &&
+    isWithinRoot(realpathSync(process.cwd()), realpathSync(paths.worktreePath))
+  ) {
+    throw new Error(
+      `cannot remove ${paths.worktreePath} from inside it; run cleanup from ${root}.`,
+    );
+  }
   if (state && !force) assertStoppable(state);
+
+  // The watch has ended all the same when all three are kept. A round of it
+  // that still runs — a fire queued before its task was deleted, a second
+  // process of the session — is refused by its helpers, or it would discard
+  // what is kept; and `resume` does not start its task again. A start does.
+  const endKept = (reason: string) => {
+    if (!state) return;
+    withWatchLock(paths, prNumber, () => {
+      const current = readState(paths.statePath);
+      if (!current) return;
+      // Taken over meanwhile: the watch is the new owner's, and goes on.
+      if (!force) assertStoppable(current);
+      assertNoFixInFlight(paths, prNumber);
+      const { watch: _ended, ...rest } = current;
+      // Ended under this session, as a stop of its own would.
+      writeState(paths.statePath, {
+        ...rest,
+        sessionId: currentSessionId(),
+        ended: { at: new Date().toISOString(), reason },
+      });
+      // Its gate answers `watch_ended` from now on and checks nothing,
+      // so no check of it may look recent.
+      rmSync(paths.checkedPath, { force: true });
+    });
+  };
+
+  // A branch another checkout has is one git refuses to delete, --force or
+  // not, and the worktree would be gone before git said so: all three stay
+  // until that checkout lets the branch go.
+  const holder = branchHolder(root, paths.worktreePath, paths.branch);
+  if (holder) {
+    const reason = `${paths.branch} is checked out in ${holder.path}`;
+    endKept(reason);
+    writeStdoutLine(
+      JSON.stringify({
+        removed: false,
+        worktreePath: paths.worktreePath,
+        heldBy: holder.path,
+        reason: `kept because ${reason}${freeing(holder, root)}; then run \`qwen autofix-pr cleanup ${prNumber}\` again`,
+      }),
+    );
+    return;
+  }
 
   if (!force) {
     const reason = unsavedWork(
@@ -195,29 +325,7 @@ export function runCleanup(
       state ? trustAnchor(state) : repoRoot(),
     );
     if (reason) {
-      // The watch has ended all the same. A round of it that still runs —
-      // a fire queued before its task was deleted, a second process of the
-      // session — is refused by its helpers, or it would discard what is
-      // kept; and `resume` does not start its task again. A start does.
-      if (state) {
-        withWatchLock(paths, prNumber, () => {
-          const current = readState(paths.statePath);
-          if (!current) return;
-          // Taken over meanwhile: the watch is the new owner's, and goes on.
-          assertStoppable(current);
-          assertNoFixInFlight(paths, prNumber);
-          const { watch: _ended, ...rest } = current;
-          // Ended under this session, as a stop of its own would.
-          writeState(paths.statePath, {
-            ...rest,
-            sessionId: currentSessionId(),
-            ended: { at: new Date().toISOString(), reason },
-          });
-          // Its gate answers `watch_ended` from now on and checks nothing,
-          // so no check of it may look recent.
-          rmSync(paths.checkedPath, { force: true });
-        });
-      }
+      endKept(reason);
       writeStdoutLine(
         JSON.stringify({
           removed: false,
@@ -242,27 +350,7 @@ export function runCleanup(
     if (refExists(`refs/heads/${paths.branch}`)) {
       git('branch', '-D', paths.branch);
     }
-    // What the watch posted and handled outlives it, so a later watch of
-    // the PR does not answer the same comments again.
-    const kept = watch ? keepHistory(paths, watch) : null;
-    // The state file and everything else this PR's watch wrote beside it
-    // (CI logs, briefs). The gate cursor belongs to the scheduled task,
-    // which outlives a watch and would report everything again without it.
-    const tmp = dirname(paths.statePath);
-    const prefix = `autofix-pr-${prNumber}-`;
-    for (const name of existsSync(tmp) ? readdirSync(tmp) : []) {
-      const path = join(tmp, name);
-      if (
-        name.startsWith(prefix) &&
-        path !== paths.gatePath &&
-        !name.startsWith(historyPrefix(paths))
-      ) {
-        // Recursive: a directory planted under one of these names would
-        // otherwise outlive the --force meant to discard it.
-        rmSync(path, { force: true, recursive: true });
-      }
-    }
-    return kept;
+    return removeWatchFiles(watch);
   };
   // Under the lock, the ownership checked again: taken over while the
   // checks above asked the remote, the watch is the new owner's, and no
@@ -290,19 +378,7 @@ export function runCleanup(
       rmSync(paths.gatePath, { force: true, recursive: true });
     }
   }
-  // Named, so a later watch of another repository's PR of this number
-  // knows which file its gate refuses.
-  const kept = {
-    ...(existsSync(paths.gatePath) ? { gateCursor: paths.gatePath } : {}),
-    ...(history ? { history } : {}),
-  };
-  writeStdoutLine(
-    JSON.stringify({
-      removed: true,
-      worktreePath: paths.worktreePath,
-      ...kept,
-    }),
-  );
+  reportRemoved(history, false);
 }
 
 export const cleanupCommand: CommandModule = {

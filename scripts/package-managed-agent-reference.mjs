@@ -37,11 +37,10 @@ const VERSION_PATTERN = new RegExp(
   `^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*$`,
 );
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
-const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/src/main/java';
-const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.persistence';
+const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/server/src/main/java';
+const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.maintenance';
 const PREFLIGHT = 'com.alibaba.qwen.code.managedagent.preflight';
-const WORKSPACE_RUNTIME =
-  'com.alibaba.qwen.code.managedagent.workspace.runtime';
+const WORKSPACE_RUNTIME = 'com.alibaba.qwen.code.managedagent.maintenance';
 
 // The offline maintenance entry points, each a main class in the server jar.
 // bin/qwen-managed-agent-admin runs them through Spring Boot's
@@ -63,6 +62,11 @@ export const ADMIN_COMMANDS = Object.freeze([
     'Retire, prepare, promote, abort or inspect a Workspace migration.',
   ],
   [
+    'workspace-identity-reattest',
+    `${PERSISTENCE}.WorkspaceIdentityReattestationMain`,
+    'Plan, fence, retire or complete an offline macOS storage identity upgrade.',
+  ],
+  [
     'maintenance-recovery',
     `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
     'Inspect or reconcile a Workspace held by maintenance.',
@@ -71,41 +75,6 @@ export const ADMIN_COMMANDS = Object.freeze([
     'operator-recovery',
     `${WORKSPACE_RUNTIME}.WorkspaceRecoveryCommand`,
     'Prepare, complete or inspect a Hosted Shell lease recovery.',
-  ],
-  [
-    'csi-registration',
-    `${PERSISTENCE}.WorkspaceCsiRegistrationMain`,
-    'Register or inspect a reviewed CSI Workspace registration.',
-  ],
-  [
-    'csi-protection',
-    `${WORKSPACE_RUNTIME}.WorkspaceCsiProtectionMain`,
-    'Render the protection policy for a CSI registration.',
-  ],
-  [
-    'csi-session',
-    `${PERSISTENCE}.WorkspaceCsiSessionMain`,
-    'Create a reviewed CSI Session offline.',
-  ],
-  [
-    'csi-runtime',
-    `${PERSISTENCE}.WorkspaceCsiRuntimeMain`,
-    'Serve, prompt or retire one reviewed CSI Session Runtime.',
-  ],
-  [
-    'csi-retirement',
-    `${PERSISTENCE}.WorkspaceCsiRetirementMain`,
-    'Inspect or begin a CSI Workspace retirement.',
-  ],
-  [
-    'csi-worker-ack',
-    `${PERSISTENCE}.WorkspaceCsiWorkerAckMain`,
-    'Acknowledge or inspect a CSI worker publication.',
-  ],
-  [
-    'resident-retirement',
-    `${PERSISTENCE}.ResidentWorkspaceRetirementMain`,
-    'Inspect, begin or delete the pod of a resident Workspace retirement.',
   ],
   [
     'resolved-configuration',
@@ -224,6 +193,64 @@ async function verifyChecksums(directory, checksumFile) {
       throw new Error(`Checksum mismatch for ${found[2]}.`);
     }
   }
+}
+
+// What the archive ships from the repository, and under which name.
+export const DOCUMENTATION = Object.freeze([
+  ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
+  [
+    'docs/users/managed-agent-reference-deployment.zh-CN.md',
+    'docs/deployment.zh-CN.md',
+  ],
+  [
+    'docs/users/managed-agent-configuration-reference.md',
+    'docs/configuration.md',
+  ],
+  [
+    'docs/users/managed-agent-configuration-reference.zh-CN.md',
+    'docs/configuration.zh-CN.md',
+  ],
+  ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
+  [
+    'docs/users/hosted-workspace-recovery.md',
+    'docs/hosted-workspace-recovery.md',
+  ],
+  [
+    'docs/users/hosted-workspace-recovery.zh-CN.md',
+    'docs/hosted-workspace-recovery.zh-CN.md',
+  ],
+  ['LICENSE', 'LICENSE'],
+]);
+
+/**
+ * `text`, a document shipped from `source`, with each link to another shipped
+ * document pointed at the name the archive gives it: the archive renames the
+ * documents, so a link written against the repository would name a file the
+ * archive does not have. Every other link is left as written: a URL or an
+ * anchor names no shipped path, and an absolute path is the reader's own.
+ */
+export function shippedDocumentLinks(
+  text,
+  source,
+  documentation = DOCUMENTATION,
+) {
+  const shipped = new Map(documentation);
+  const directory = path.posix.dirname(shipped.get(source));
+  return text.replace(
+    /\]\(([^()\s#]+)(#[^()\s]*)?\)/g,
+    (link, target, anchor = '') => {
+      // path.posix.join would read it as relative.
+      if (target.startsWith('/')) {
+        return link;
+      }
+      const renamed = shipped.get(
+        path.posix.join(path.posix.dirname(source), target),
+      );
+      return renamed === undefined
+        ? link
+        : `](${path.posix.relative(directory, renamed)}${anchor})`;
+    },
+  );
 }
 
 async function copy(root, stage, source, destination) {
@@ -375,7 +402,7 @@ export async function createReferenceDistribution({
   const serverPom = path.join(root, 'packages/managed-agent-server/pom.xml');
   const serverVersion = await pomVersion(
     serverPom,
-    'qwen-managed-agent-server',
+    'qwen-managed-agent-parent',
   );
   const packageJson = JSON.parse(
     await readFile(path.join(root, 'package.json')),
@@ -387,7 +414,7 @@ export async function createReferenceDistribution({
     throw new Error(`${CONTRACT_DOCUMENT} ${publicApi.error}.`);
   }
   const capabilities = await readFile(
-    path.join(root, 'packages/cli/src/serve/capabilities.ts'),
+    path.join(root, 'packages/sdk-typescript/src/daemon/capabilities.ts'),
     'utf8',
   );
   const brokerClient = await readFile(
@@ -397,7 +424,7 @@ export async function createReferenceDistribution({
   const applicationConfiguration = await readFile(
     path.join(
       root,
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     ),
     'utf8',
   );
@@ -417,31 +444,30 @@ export async function createReferenceDistribution({
   }
   const lifecycleV2ProfilesDefault = uniqueMatch(
     withoutComments(hostedHarnessContract),
-    /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
+    // The default may wrap across lines (Prettier splits a long `??`), so allow
+    // an optional newline between the operator and the literal.
+    /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*\r?\n?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+  // D3: ordinary files closes on v2 too, so the reference distribution advertises
+  // files alongside canonical Shell by default; external-files keeps v1.
+  if (
+    lifecycleV2ProfilesDefault !==
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
+  ) {
     throw new Error(
-      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+      'Hosted lifecycle v2 profiles must default to canonical files and Shell.',
     );
   }
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
-  const recoveryJar = `qwen-managed-agent-server-${serverVersion}-operator-recovery.jar`;
   const componentSources = [
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
+      source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
-    },
-    {
-      name: 'qwen-managed-agent-operator-recovery',
-      version: serverVersion,
-      source: `packages/managed-agent-server/target/${recoveryJar}`,
-      destination: `lib/${recoveryJar}`,
-      role: 'operator-recovery',
     },
   ];
 
@@ -483,45 +509,31 @@ export async function createReferenceDistribution({
       `bin/${file}`,
     );
   }
-  const documentation = [
-    ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
-    [
-      'docs/users/managed-agent-reference-deployment.zh-CN.md',
-      'docs/deployment.zh-CN.md',
-    ],
-    ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
-    [
-      'docs/users/hosted-workspace-recovery.md',
-      'docs/hosted-workspace-recovery.md',
-    ],
-    [
-      'docs/users/hosted-workspace-recovery.zh-CN.md',
-      'docs/hosted-workspace-recovery.zh-CN.md',
-    ],
-    ['LICENSE', 'LICENSE'],
-  ];
-  for (const [source, destination] of documentation) {
-    await copy(root, stage, source, destination);
+  for (const [source, destination] of DOCUMENTATION) {
+    if (!source.endsWith('.md')) {
+      await copy(root, stage, source, destination);
+      continue;
+    }
+    const target = path.join(stage, destination);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(
+      target,
+      shippedDocumentLinks(
+        await readFile(path.join(root, source), 'utf8'),
+        source,
+      ),
+    );
   }
 
   const serverLauncher = path.join(stage, 'bin/qwen-managed-agent-server');
-  const recoveryLauncher = path.join(
-    stage,
-    'bin/qwen-managed-agent-operator-recovery',
-  );
   const adminCommand = path.join(stage, 'bin/qwen-managed-agent-admin');
   await verifyAdminCommands(root);
   await mkdir(path.dirname(serverLauncher), { recursive: true });
   await Promise.all([
     writeFile(serverLauncher, launcher(serverJar)),
-    writeFile(recoveryLauncher, launcher(recoveryJar)),
     writeFile(adminCommand, adminLauncher(serverJar)),
   ]);
-  await Promise.all([
-    chmod(serverLauncher, 0o755),
-    chmod(recoveryLauncher, 0o755),
-    chmod(adminCommand, 0o755),
-  ]);
+  await Promise.all([chmod(serverLauncher, 0o755), chmod(adminCommand, 0o755)]);
 
   const components = [];
   for (const component of componentSources) {
@@ -588,6 +600,8 @@ export async function createReferenceDistribution({
     documentation: {
       deployment: 'docs/deployment.md',
       deploymentChinese: 'docs/deployment.zh-CN.md',
+      configuration: 'docs/configuration.md',
+      configurationChinese: 'docs/configuration.zh-CN.md',
       serverReference: 'docs/server-reference.md',
       operatorRecovery: 'docs/hosted-workspace-recovery.md',
     },
@@ -606,7 +620,6 @@ export async function createReferenceDistribution({
     `${rootName}/manifest.json`,
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
-    `${rootName}/bin/qwen-managed-agent-operator-recovery`,
     `${rootName}/bin/qwen-managed-agent-admin`,
     // The two launchers exec these modules.
     `${rootName}/bin/qwen-managed-agent-bootstrap`,

@@ -17,16 +17,19 @@
  * or a directory named without the `-verify-` infix all produce a round whose
  * report is about another PR or is discarded outright.
  *
- * This script resolves those coordinates and nothing else. It does not checkout
- * a worktree, build, or execute PR code. It also cannot gate on isolation:
- * resolving the coordinates needs `gh`, and `gh` and the boundary are mutually
- * exclusive, so this path always runs on the host. The gate is the separate
- * `--require-isolation` mode, meant to run inside the boundary before the round
- * executes anything.
+ * This script resolves those coordinates and checks the tree the round will
+ * reuse; it does not checkout a worktree, build, or execute PR code. The tree
+ * check exists because the round runs the head side of its A/B in the current
+ * tree: prepare refuses a HEAD other than the PR head or any uncommitted
+ * change, and never stashes for the maintainer. It also cannot gate on
+ * isolation: resolving the coordinates needs `gh`, and `gh` and the boundary
+ * are mutually exclusive, so this path always runs on the host. The gate is
+ * the separate `--require-isolation` mode, meant to run inside the boundary
+ * before the round executes anything.
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
- *   node scripts/verify-pr-prepare.mjs --require-isolation
+ *   node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
  *
  * Options:
  *   --repo <owner>/<repo>  required for the coordinate path: never inferred
@@ -34,18 +37,31 @@
  *                          same PR number to an unrelated PR
  *   --require-isolation    check the process this runs in and exit 4 when no
  *                          boundary is detected; run it inside the boundary
+ *   --artifact-dir <dir>   with --require-isolation, a pass writes boundary-gate.json
+ *                          into the round's artifact directory — the record the
+ *                          checker requires beside a mode:"container" declaration
  *
  * Exit codes:
  *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
- *   3  metadata, OID, or filesystem failure
+ *   3  metadata, OID, tree-state, or filesystem failure (incl. writing the gate record)
  *   4  --require-isolation found no boundary — do not run PR code here
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -62,14 +78,21 @@ const FIELDS = [
 ].join(',');
 
 const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
-       node scripts/verify-pr-prepare.mjs --require-isolation
+       node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
 metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
 
   - fetches the PR snapshot with gh, from the repository you name
   - verifies the base and head OIDs exist in this clone
+  - refuses a tree that is not a clean checkout of the PR head, so the round
+    can reuse the current tree as the head side of the A/B; the gitignored
+    install/build still needs a freshness check before it is reused
   - creates tmp/pr<n>-verify-<YYYYMMDD-HHMMSS>/ with an evidence/ subdirectory
+    and a context.json holding repo, pr, baseRefOid and headRefOid
+  - snapshots the PR's review threads and standing change requests beside
+    the metadata, as the CI lane does; best-effort, so a failed fetch leaves
+    no file and the round lists that review state as not covered
   - reports the isolation signals this process can observe
 
 The coordinate path runs on the host by construction: it needs gh, and gh and
@@ -79,7 +102,11 @@ isolated and must not execute PR code. A container marker alone does not pass:
 the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
 and copies model API keys, so the check also requires the credential-free
 attestation and refuses when a known credential signal is visible. The
-built-in macOS sandbox (SANDBOX=sandbox-exec) never counts.
+built-in macOS sandbox (SANDBOX=sandbox-exec) never counts. With
+--artifact-dir, a pass also writes boundary-gate.json there — the record the
+checker requires alongside a mode:"container" declaration. The artifact tree
+is PR-writable, so the record corroborates an operator who ran the gate; it
+is not proof against a round that forges it.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -168,8 +195,13 @@ export function detectCredentialSignals(
   for (const name of CREDENTIAL_ENV) {
     if (env[name]) signals.push(name);
   }
-  for (const [relative, label] of CREDENTIAL_PATHS) {
-    if (exists(join(home, relative))) signals.push(label);
+  // An unresolvable home (null/empty) has no credential paths to scan; the
+  // gate fails on it at the nonce write below. join(home, …) on a non-string
+  // would throw, and on '' would scan the PR-writable CWD instead (R5-1).
+  if (typeof home === 'string' && home !== '') {
+    for (const [relative, label] of CREDENTIAL_PATHS) {
+      if (exists(join(home, relative))) signals.push(label);
+    }
   }
   return signals;
 }
@@ -182,18 +214,33 @@ export function detectCredentialSignals(
  */
 export function detectIsolation(env = process.env, exists = existsSync) {
   const signals = [];
+  // Observed markers are filesystem facts the process can check, not strings
+  // an operator chooses. A self-chosen `container=<name>` is a DECLARATION;
+  // on its own it cannot distinguish a boundary from a bare host, so the
+  // gate and the checker treat it as insufficient for a container claim.
+  const observed = [];
   if (env.container) signals.push(`container=${env.container}`);
-  if (exists('/.dockerenv')) signals.push('/.dockerenv');
-  if (exists('/run/.containerenv')) signals.push('/run/.containerenv');
+  if (exists('/.dockerenv')) {
+    signals.push('/.dockerenv');
+    observed.push('/.dockerenv');
+  }
+  if (exists('/run/.containerenv')) {
+    signals.push('/run/.containerenv');
+    observed.push('/run/.containerenv');
+  }
   // A boolean-looking value reads as "sandbox disabled"; the CLI's transport
   // writes a container name or `sandbox-exec`, neither of which is a marker.
   const sandbox = (env.SANDBOX ?? '').trim();
-  if (sandbox && !['false', 'true', '0', '1'].includes(sandbox)) {
-    if (sandbox !== SEATBELT) signals.push(`SANDBOX=${sandbox}`);
-  }
+  const sandboxRuntime =
+    sandbox &&
+    !['false', 'true', '0', '1'].includes(sandbox) &&
+    sandbox !== SEATBELT;
+  if (sandboxRuntime) signals.push(`SANDBOX=${sandbox}`);
   return {
     isolated: signals.length > 0,
     signals,
+    observed,
+    sandboxRuntime: sandboxRuntime ? sandbox : null,
     seatbelt: sandbox === SEATBELT,
   };
 }
@@ -216,6 +263,73 @@ export function validateContext(json) {
   };
 }
 
+// The CI lane's verify job runs this query and reshapes it with jq into the
+// same review-threads.json; a test runs both over the same pages.
+export const REVIEW_STATE_QUERY =
+  'query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { latestOpinionatedReviews(first: 100) { nodes { state submittedAt url body author { login } authorAssociation commit { oid } } } reviewThreads(first: 50, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { isResolved isOutdated path line originalLine comments(first: 50) { totalCount nodes { createdAt url body author { login } authorAssociation originalCommit { oid } pullRequestReview { url } } } } } } } }';
+
+/**
+ * Reshapes `gh api graphql --paginate --slurp` pages of REVIEW_STATE_QUERY into
+ * the review state a round reads: every review thread, resolved ones included
+ * (resolving is the author's claim, not a measurement), and each reviewer's
+ * standing CHANGES_REQUESTED review. Null when the pages are not that query's
+ * answer.
+ */
+export function reviewState(pages) {
+  if (!Array.isArray(pages) || pages.length === 0) return null;
+  const isObject = (value) => value !== null && typeof value === 'object';
+  const pulls = pages.map((page) => page?.data?.repository?.pullRequest);
+  if (
+    pulls.some(
+      (pull) =>
+        !Array.isArray(pull?.reviewThreads?.nodes) ||
+        !Array.isArray(pull?.latestOpinionatedReviews?.nodes) ||
+        !pull.latestOpinionatedReviews.nodes.every(isObject) ||
+        !pull.reviewThreads.nodes.every(
+          (thread) =>
+            isObject(thread) &&
+            Array.isArray(thread.comments?.nodes) &&
+            thread.comments.nodes.every(isObject),
+        ),
+    )
+  ) {
+    return null;
+  }
+  const who = (node) => ({
+    author: node.author?.login ?? null,
+    association: node.authorAssociation ?? null,
+  });
+  return {
+    threads: pulls
+      .flatMap((pull) => pull.reviewThreads.nodes)
+      .map((thread) => ({
+        resolved: thread.isResolved ?? null,
+        outdated: thread.isOutdated ?? null,
+        path: thread.path ?? null,
+        line: thread.line ?? null,
+        originalLine: thread.originalLine ?? null,
+        commentCount: thread.comments.totalCount ?? null,
+        comments: thread.comments.nodes.map((comment) => ({
+          ...who(comment),
+          createdAt: comment.createdAt ?? null,
+          url: comment.url ?? null,
+          review: comment.pullRequestReview?.url ?? null,
+          commit: comment.originalCommit?.oid ?? null,
+          body: comment.body ?? null,
+        })),
+      })),
+    changeRequests: pulls[0].latestOpinionatedReviews.nodes
+      .filter((review) => review.state === 'CHANGES_REQUESTED')
+      .map((review) => ({
+        ...who(review),
+        submittedAt: review.submittedAt ?? null,
+        commit: review.commit?.oid ?? null,
+        url: review.url ?? null,
+        body: review.body ?? null,
+      })),
+  };
+}
+
 /** Drops C0/C1 control characters, which a terminal would interpret. */
 export function printable(text) {
   return [...String(text ?? '')]
@@ -232,6 +346,8 @@ export function parseArgs(argv) {
     pr: null,
     repo: null,
     requireIsolation: false,
+    artifactDir: null,
+    contextOut: null,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -240,6 +356,16 @@ export function parseArgs(argv) {
       options.help = true;
     } else if (arg === '--require-isolation') {
       options.requireIsolation = true;
+    } else if (arg === '--artifact-dir') {
+      options.artifactDir = argv[(index += 1)] ?? null;
+      if (!options.artifactDir) {
+        return { error: '--artifact-dir needs <round-dir>' };
+      }
+    } else if (arg === '--context-out') {
+      options.contextOut = argv[(index += 1)] ?? null;
+      if (!options.contextOut) {
+        return { error: '--context-out needs <host-snapshot-path>' };
+      }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
@@ -252,6 +378,9 @@ export function parseArgs(argv) {
     }
   }
   if (options.help || options.requireIsolation) return options;
+  if (options.artifactDir !== null) {
+    return { error: '--artifact-dir only applies with --require-isolation' };
+  }
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
   }
@@ -261,8 +390,170 @@ export function parseArgs(argv) {
   return options;
 }
 
-function run(command, args) {
-  return spawnSync(command, args, { encoding: 'utf8' });
+function run(command, args, options = {}) {
+  return spawnSync(command, args, { encoding: 'utf8', ...options });
+}
+
+/** `{state}` on success, `{error}` naming why the review state is unknown. */
+function fetchReviewState(owner, name, pr) {
+  const view = run(
+    'gh',
+    [
+      'api',
+      'graphql',
+      '--paginate',
+      '--slurp',
+      '-f',
+      `owner=${owner}`,
+      '-f',
+      `name=${name}`,
+      '-F',
+      `number=${pr}`,
+      '-f',
+      `query=${REVIEW_STATE_QUERY}`,
+    ],
+    // Every thread's comment bodies, resolved ones included, arrive before
+    // the filter: one busy PR's pages measured 790 KB, near spawnSync's 1 MB
+    // default.
+    { maxBuffer: 256 * 1024 * 1024 },
+  );
+  if (view.status !== 0) {
+    const detail =
+      (view.stderr || '').trim().split('\n')[0] ||
+      view.error?.message ||
+      `exit ${view.status}`;
+    return { error: `gh api graphql failed: ${detail}` };
+  }
+  let pages;
+  try {
+    pages = JSON.parse(view.stdout);
+  } catch {
+    return { error: 'gh api graphql returned output that is not JSON' };
+  }
+  const state = reviewState(pages);
+  return state
+    ? { state }
+    : { error: 'gh api graphql returned pages without review threads' };
+}
+
+// The tree under inspection is PR-controlled and can persist hostile git
+// config in .git/config: fsmonitor, hooks and clean/smudge/process filters all
+// execute on an ordinary `git status`. On the host these run as the maintainer,
+// outside the boundary, so every git command disables the fixed vectors and
+// empties every locally defined filter before reading the tree. The fixed
+// vectors come LAST in every argument list: git applies the last `-c` for a
+// key, so an enumerated entry must never be able to outrank them.
+export const GIT_HARDENING = [
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.hooksPath=/dev/null',
+  '-c',
+  'credential.helper=',
+  '-c',
+  'core.excludesFile=/dev/null',
+];
+
+const FILTER_NAME = /^filter\..+\.(clean|smudge|process)$/;
+
+/**
+ * A filter name git allows (e.g. `filter.a=b.clean`) but `-c key=value`
+ * cannot represent: git splits the argument at the FIRST `=`, so emitting an
+ * override would set a different key and leave the real filter armed. The
+ * gate refuses such names instead, with their own remedy.
+ */
+export class UnsafeFilterNameError extends Error {
+  constructor(name) {
+    super(
+      `filter name ${name} contains '=' and cannot be safely disabled with -c — remove the filter from the tree's git config, or re-clone, then re-run prepare`,
+    );
+    this.name = 'UnsafeFilterNameError';
+  }
+}
+
+/**
+ * Empty `-c` overrides for every locally defined filter command. The filter
+ * name is attacker-chosen, so the override set has to be enumerated from the
+ * tree's own config instead of hardcoded. Three properties are load-bearing:
+ * `--includes` follows `include.path` the way the config parsing `git status`
+ * uses does; `--null --name-only` frames KEY NAMES only, because a filter
+ * VALUE may contain newlines that would forge extra entries if the rendered
+ * `key value` output were parsed; and each name is re-validated before it
+ * becomes a `-c` argument. When `extensions.worktreeConfig` is set,
+ * `git status` also reads `.git/config.worktree`, so that scope is enumerated
+ * too. Names containing `=` throw UnsafeFilterNameError — no override can
+ * represent them.
+ */
+export function localFilterOverrides(root) {
+  const prefix = root ? ['-C', root] : [];
+  const scopes = ['--local'];
+  const worktreeConfig = run('git', [
+    ...prefix,
+    'config',
+    '--local',
+    '--includes',
+    '--bool',
+    'extensions.worktreeConfig',
+  ]);
+  if (worktreeConfig.status === 0 && worktreeConfig.stdout.trim() === 'true') {
+    scopes.push('--worktree');
+  }
+  const overrides = [];
+  for (const scope of scopes) {
+    const result = run('git', [
+      ...prefix,
+      'config',
+      scope,
+      '--includes',
+      '--null',
+      '--name-only',
+      '--get-regexp',
+      '^filter\\..*\\.(clean|smudge|process)$',
+    ]);
+    if (result.status === 1) continue;
+    if (result.status !== 0) {
+      throw new Error('could not enumerate local git filters');
+    }
+    for (const name of result.stdout.split('\0')) {
+      if (!name || !FILTER_NAME.test(name)) continue;
+      if (name.includes('=')) throw new UnsafeFilterNameError(name);
+      overrides.push('-c', `${name}=`);
+    }
+  }
+  return overrides;
+}
+
+export function gitStatusArgs(root) {
+  return [
+    ...localFilterOverrides(root),
+    ...GIT_HARDENING,
+    '-C',
+    root,
+    'status',
+    '--porcelain',
+    '--untracked-files=normal',
+  ];
+}
+
+function runGit(args) {
+  return run('git', [...localFilterOverrides(), ...GIT_HARDENING, ...args]);
+}
+
+/**
+ * True when `.git/info/exclude` carries active patterns. A fresh clone has
+ * only git's commented default there; patterns hide untracked files from the
+ * clean-tree check, and unlike core.excludesFile no `-c` can neutralize this
+ * file, so the gate refuses it instead of reading a steered status.
+ */
+export function hasHostileInfoExclude(root) {
+  const path = join(root, '.git', 'info', 'exclude');
+  if (!existsSync(path)) return false;
+  return readFileSync(path, 'utf8')
+    .split('\n')
+    .some((line) => {
+      const trimmed = line.trim();
+      return trimmed !== '' && !trimmed.startsWith('#');
+    });
 }
 
 function report(lines) {
@@ -284,12 +575,22 @@ function main(argv) {
     process.stdout.write(HELP);
     return 0;
   }
-  if (options.requireIsolation) return requireBoundary();
+  if (options.requireIsolation) return requireBoundary(options.artifactDir);
 
   const { owner, name } = parseRepo(options.repo);
   const slug = `${owner}/${name}`;
 
-  const toplevel = run('git', ['rev-parse', '--show-toplevel']);
+  let toplevel;
+  try {
+    toplevel = runGit(['rev-parse', '--show-toplevel']);
+  } catch (error) {
+    // A hostile filter name is a refusal with its own remedy, not a missing
+    // worktree; it must surface before any guarded status could run it.
+    if (error instanceof UnsafeFilterNameError) {
+      return fail(3, error.message);
+    }
+    return fail(3, 'not inside a git worktree — run this from the clone');
+  }
   if (toplevel.status !== 0) {
     return fail(3, 'not inside a git worktree — run this from the clone');
   }
@@ -331,7 +632,7 @@ function main(argv) {
   ];
   for (const [label, oid, ref] of probes) {
     if (
-      run('git', ['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
+      runGit(['-C', root, 'cat-file', '-e', `${oid}^{commit}`]).status !== 0
     ) {
       return fail(
         3,
@@ -340,9 +641,85 @@ function main(argv) {
     }
   }
 
+  // The round runs the head side of its A/B in this tree, so a HEAD other
+  // than the PR head or an uncommitted change would measure code the report
+  // does not name. Checked before the artifact directory exists, so a refusal
+  // leaves nothing behind.
+  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
+  if (treeHead.status !== 0) {
+    return fail(3, 'could not read HEAD in this clone');
+  }
+  if (treeHead.stdout.trim() !== context.head) {
+    return fail(
+      3,
+      `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`,
+    );
+  }
+  // The ignore channel is steerable from the same PR-controlled .git:
+  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
+  // has no `-c` override, so active patterns there are refused outright
+  // rather than read through.
+  if (hasHostileInfoExclude(root)) {
+    return fail(
+      3,
+      '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare',
+    );
+  }
+  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
+  // hide the untracked files this check exists to refuse.
+  const dirty = run('git', gitStatusArgs(root));
+  if (dirty.status !== 0) {
+    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
+    return fail(3, `could not read the working tree status: ${detail}`);
+  }
+  if (dirty.stdout.trim() !== '') {
+    // Name the entries and a remedy that actually clears them: a plain
+    // `git stash` leaves untracked files behind, so the advice would loop.
+    const entries = dirty.stdout.trim().split('\n');
+    const shown = entries.slice(0, 5).map(printable).join(', ');
+    return fail(
+      3,
+      `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`,
+    );
+  }
+  // git status trusts the index: skip-worktree / assume-unchanged entries
+  // (a sparse checkout sets them en masse) hide tracked divergence from it,
+  // so refuse anything that is not a plain cached 'H' entry.
+  const flagged = runGit(['-C', root, 'ls-files', '-v']);
+  if (flagged.status !== 0) {
+    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
+    return fail(3, `could not read the index flags: ${detail}`);
+  }
+  const opaque = flagged.stdout
+    .split('\n')
+    .filter((line) => line && !line.startsWith('H '));
+  if (opaque.length > 0) {
+    const shown = opaque.slice(0, 5).map(printable).join(', ');
+    return fail(
+      3,
+      `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`,
+    );
+  }
+
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  // The tmp/ container is PR-controlled: a PR-committed symlink there would
+  // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
+  // it before anything is created. A fresh clone has no tmp/ — that is fine.
+  const tmpDir = join(root, 'tmp');
+  try {
+    if (lstatSync(tmpDir).isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${tmpDir}`,
+      );
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return fail(3, `could not inspect ${tmpDir}: ${error.message}`);
+    }
+  }
   try {
     mkdirSync(contextDir, { recursive: true });
     // Recursive, so a retry within the same second lands in the directory this
@@ -352,10 +729,116 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
-  writeFileSync(contextPath, `${JSON.stringify(snapshot, null, 2)}\n`);
+  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
+  // path redirects the host-side write, and a hard link at the snapshot path
+  // would make writeFileSync truncate a file the round does not own (R5-4).
+  // Refuse both rather than follow them.
+  for (const p of [contextDir, contextPath]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the snapshot path ${p}: ${error.message}`,
+        );
+      }
+      continue; // not created yet (first run) — nothing to redirect
+    }
+    if (st.isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${p}`,
+      );
+    }
+    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a non-single-link file: ${p}`,
+      );
+    }
+  }
+  // The host-held snapshot carries the slug too: the checker compares a
+  // waiver's approval permalink against these coordinates, and gh's field
+  // selector has no repo member, so it is added where the snapshot is
+  // written, not to FIELDS.
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  writeFileSync(contextPath, contextBytes);
+  // Structural fix (R5-1): the authoritative snapshot also goes to a host
+  // destination outside the clone (--context-out), so the trusted source the
+  // checker reads never depends on the PR-writable in-tree copy, which stays
+  // only as the checker's untrusted no---context default.
+  let reportedContextPath = contextPath;
+  if (options.contextOut) {
+    // The host destination must be outside the PR-writable clone: step 1 runs
+    // with the clone as cwd, so a relative --context-out resolves inside it,
+    // where a PR-committed symlink would redirect this host-side write (R7-1).
+    // Apply the same containment + leaf guards the in-tree snapshot path uses.
+    const outPath = resolve(options.contextOut);
+    const realRoot = realpathSync(root);
+    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+      );
+    }
+    try {
+      const st = lstatSync(outPath);
+      if (st.isSymbolicLink()) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a symlink: ${outPath}`,
+        );
+      }
+      if (!st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, contextBytes);
+    } catch (error) {
+      return fail(
+        3,
+        `could not write the host snapshot to ${outPath}: ${error.message}`,
+      );
+    }
+    reportedContextPath = outPath;
+  }
+  // The digest binds the snapshot's content for the checker (--context-sha256):
+  // it is computed here host-side, before the round runs, so a later rewrite of
+  // the clone-side file cannot produce matching bytes (R2-1).
+  const contextSha256 = createHash('sha256')
+    .update(contextBytes, 'utf8')
+    .digest('hex');
+  // Best-effort, like the lane: the round reads a missing file as "review
+  // state unknown", so an earlier prepare's copy must not outlive a failed
+  // fetch.
+  const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
+  rmSync(reviewPath, { force: true });
+  const review = fetchReviewState(owner, name, context.pr);
+  if (review.state) {
+    writeFileSync(reviewPath, `${JSON.stringify(review.state, null, 2)}\n`);
+  }
   writeFileSync(
     join(artifacts, 'context.json'),
-    `${JSON.stringify({ headRefOid: context.head })}\n`,
+    `${JSON.stringify({
+      repo: slug,
+      pr: context.pr,
+      baseRefOid: context.base,
+      headRefOid: context.head,
+    })}\n`,
   );
 
   const isolation = detectIsolation();
@@ -368,7 +851,12 @@ function main(argv) {
     `  pr         #${context.pr}${title ? ` ${title}` : ''}`,
     `  base       ${context.base}`,
     `  head       ${context.head}`,
-    `  context    ${contextPath}`,
+    '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
+    `  context    ${reportedContextPath}`,
+    `  context-sha256  ${contextSha256}`,
+    review.state
+      ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
+      : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
     `  artifacts  ${artifacts}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);
@@ -382,9 +870,24 @@ function main(argv) {
     '',
     `Next: build the round in ${artifacts}. This preflight ran on the host,`,
     'because resolving the coordinates needs `gh` and `gh` is mutually',
-    'exclusive with the boundary. Before executing PR code, run inside it:',
+    'exclusive with the boundary. Before executing PR code, run inside the',
+    "boundary — the container recipe's spelling (step 5), with the clone",
+    'mounted at /work:',
     '',
-    '  node scripts/verify-pr-prepare.mjs --require-isolation',
+    `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
+    '',
+    'The path is the in-container one: the gate runs from the read-only',
+    "/trusted-scripts mount, never the PR head's own copy of the script,",
+    'and the record lands in the mounted artifact directory so it survives',
+    'the container. A VM boundary takes the same trusted copy but runs',
+    'NO --require-isolation gate (a VM carries no observed container marker):',
+    'there is no in-boundary gate command and no boundary-gate.json for a VM.',
+    'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+    'reason, attestation (what the operator confirmed: nothing mounted,',
+    "no host credentials), and approval (a permalink to the maintainer's",
+    'approval comment). The container gate writes boundary-gate.json into',
+    'the artifact directory; the checker requires that record alongside',
+    'the container declaration.',
   ]);
   return 0;
 }
@@ -393,18 +896,75 @@ function main(argv) {
  * The in-boundary check, and the only place its answer means anything: the
  * coordinate path necessarily runs on the host, so a gate there would fire
  * every round and teach the maintainer to ignore it.
+ *
+ * On a pass with `artifactDir`, writes `boundary-gate.json` there: the
+ * record that the gate actually ran and exited 0, which the checker
+ * requires alongside a `mode:"container"` declaration. The declaration is
+ * a value a round can mint for itself; this record ties it to a gate run.
+ * (The artifact tree is PR-writable, so the record corroborates against an
+ * operator who skipped the gate — the incident's shape — not against PR
+ * code that forges it; the CI publisher writes its own lane record.)
  */
-function requireBoundary() {
-  const isolation = detectIsolation();
-  const credentials = detectCredentialSignals();
-  const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
+export function requireBoundary(artifactDir = null, options = {}) {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  // Resolve home lazily and defensively: os.homedir() throws SystemError when
+  // the UID has no passwd entry and HOME is unset (the arbitrary-UID container
+  // shape --user <uid>:<gid> invites), and returns '' when HOME is set but
+  // empty. Evaluating it in a default parameter let the throw escape as exit 1
+  // before invalidateRecord could run, leaving a stale pass record behind;
+  // both shapes must reach the gate's exit-3 refusal below (R5-1).
+  let home = options.home;
+  if (home === undefined) {
+    try {
+      home = homedir();
+    } catch {
+      home = null;
+    }
+  }
+  const recordPath = artifactDir
+    ? join(artifactDir, 'boundary-gate.json')
+    : null;
+  // A failed re-run must not leave an earlier pass's record behind: the
+  // checker would still accept the container declaration against evidence
+  // that predates the refusal. Every non-pass exit invalidates the record.
+  const invalidateRecord = () => {
+    if (!recordPath) return;
+    try {
+      rmSync(recordPath, { force: true });
+    } catch {
+      // Best-effort; the refusal exit is the contract.
+    }
+  };
+  const isolation = detectIsolation(env, exists);
+  const credentials = detectCredentialSignals(env, exists, home);
+  const attested = env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
+  // A refusal from OUTSIDE any boundary does not contradict a record minted
+  // INSIDE one: a host-side sanity re-run must not destroy the in-container
+  // gate record (R10-30). Only a refusal that contradicts the record — an
+  // attested boundary leaking credentials, or a failed record write —
+  // invalidates it (below).
   if (!isolation.isolated) {
     const detail = isolation.seatbelt
       ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
       : 'no container marker was found';
     process.stderr.write(
       `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
+    );
+    return 4;
+  }
+
+  // A self-chosen `container=<name>` string — or an inherited `SANDBOX=`
+  // string — is a declaration, not an observed boundary: on a bare host it
+  // would mint a container claim with no isolation, and the checker refuses
+  // every non-ci-lane record whose observed list is empty, so such a pass
+  // could never be published anyway (R11-1). The gate needs an OBSERVED
+  // filesystem marker; a launcher container always carries one. An attested
+  // VM uses mode:"vm" with approval, not this path.
+  if (isolation.observed.length === 0) {
+    process.stderr.write(
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
     );
     return 4;
   }
@@ -424,7 +984,78 @@ function requireBoundary() {
     process.stderr.write(
       `verify-pr boundary: ${isolation.signals.join(', ')} but ${refusals.join('; ')} — do not execute PR code here\n`,
     );
+    invalidateRecord();
     return 4;
+  }
+  if (artifactDir) {
+    // A per-round nonce ties the declaration to execution inside THIS
+    // container (R16-1). The plaintext is written to a container-local path
+    // (the process home, NOT the shared artifact mount) so the round must
+    // read it from inside the container and echo it into its raw harness
+    // logs; the checker refuses mode:"container" unless a log line's sha256
+    // matches the record. Only the HASH rides the gate record: a host
+    // battery cannot recover the plaintext from the hash, so it cannot copy
+    // it out of the PR-writable record into a forged log line. Like the
+    // record itself, this corroborates an operator who ran the round in the
+    // container — it is not proof against a round that forges both.
+    const nonce = randomBytes(16).toString('hex');
+    const record = {
+      gate: 'require-isolation',
+      passed: true,
+      at: new Date().toISOString(),
+      signals: isolation.signals,
+      // Observed filesystem markers, kept apart from the declared strings:
+      // the checker requires one to back a container claim.
+      observed: isolation.observed,
+      credentialFree: true,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
+    };
+    // An unresolvable $HOME (no passwd entry for this UID with HOME unset, or
+    // HOME set but empty) cannot host the container-local plaintext:
+    // join('', …) would write it into the PR-writable CWD instead, and a
+    // homedir() throw would escape as exit 1. Refuse with exit 3 and
+    // invalidate any stale record before the pass line (R5-1).
+    if (typeof home !== 'string' || home === '') {
+      invalidateRecord();
+      return fail(
+        3,
+        'could not resolve a container-local $HOME (no passwd entry for this UID and HOME unset or empty): the nonce plaintext cannot be written outside the PR-writable mount, so the round cannot declare mode:"container"',
+      );
+    }
+    // The plaintext must exist somewhere the battery can read it, or the
+    // record's hash binds a nonce nobody can echo and the round is silently
+    // uncertifiable after the whole battery ran (R1-4). Fail the gate now,
+    // before the pass line, naming $HOME. This refusal is reached only inside
+    // the boundary (a host re-run exits 4 above), so invalidating the record
+    // here does not contradict a record minted inside one.
+    const noncePath = join(home, '.qwen-verify-nonce');
+    try {
+      writeFileSync(noncePath, `${nonce}\n`);
+    } catch (error) {
+      invalidateRecord();
+      return fail(
+        3,
+        `could not write the container-local nonce to ${noncePath} ($HOME unwritable or absent): the round cannot declare mode:"container" without it: ${error.message}`,
+      );
+    }
+    const tmp = `${recordPath}.${process.pid}.tmp`;
+    // A filesystem failure here is the documented exit-3 path, not an
+    // uncaught throw after the pass line: a driver keyed on exit 4 must
+    // not proceed on a pass the record never landed.
+    try {
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
+      renameSync(tmp, recordPath);
+    } catch (error) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // Best-effort: force only covers ENOENT, and a cleanup failure
+        // (ENOTDIR on a non-directory parent) must not mask the original.
+      }
+      invalidateRecord();
+      return fail(3, `could not write the gate record: ${error.message}`);
+    }
   }
   report([
     `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,

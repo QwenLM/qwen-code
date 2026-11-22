@@ -167,6 +167,30 @@ export const SERVE_STATUS_EXT_METHODS = {
 } as const;
 
 /**
+ * The client capability (`clientCapabilities._meta`) naming the Mod row
+ * sites a client draws. The child then runs each session's Mods on the
+ * `desktop` surface and answers `sessionModRow` for those sites.
+ */
+export const MOD_ROWS_CLIENT_CAPABILITY = 'qwen.modRows';
+
+/** The Mod row sites the Web Shell draws, which the bridge declares. */
+export const WEB_SHELL_MOD_ROW_SITES: readonly string[] = [
+  'AssistantMessage',
+  'Thinking',
+];
+
+/**
+ * A session's answer for one row: no hook hears its site, so the client asks
+ * no more of the session; its hooks did not answer in time or the session
+ * moved on, so it may ask again; or their answer, with `props` to draw only
+ * where they rewrote the row.
+ */
+export type BridgeModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
+
+/**
  * Control-plane (mutation) ACP extMethods introduced in Mutation control.
  * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
  * surface independently from read-only diagnostics. Each route in
@@ -180,6 +204,11 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionSideTask: 'qwen/control/session/side_task',
   sessionForkAgent: 'qwen/control/session/fork_agent',
   sessionRecap: 'qwen/control/session/recap',
+  /**
+   * Ask a session's Mods for a transcript row the client draws. Params:
+   * `{ sessionId, component, props }`; result: `BridgeModRowAnswer`.
+   */
+  sessionModRow: 'qwen/control/session/mod_row',
   sessionGenerationStart: 'qwen/control/session/generation/start',
   sessionGenerationCancel: 'qwen/control/session/generation/cancel',
   sessionBtw: 'qwen/control/session/btw',
@@ -206,6 +235,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
+  /**
+   * Record the user's decision on the workspace's pending project hooks.
+   * A dedicated control route, not session/request_permission: permission
+   * prompts are auto-answered by automation clients, while this decision
+   * persists a hash-bound approval and must be an explicit user act.
+   * Params: `{ decision: 'approve' | 'reject' }`; result:
+   * `{ decision, reloaded }`.
+   */
+  projectHooksApprove: 'qwen/control/workspace/hooks/approve',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
@@ -255,6 +293,15 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
   /** Read a bounded settled `turn_result` from the active transcript. */
   sessionTurnStatus: 'qwen/control/session/turn_status',
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the session's
+   * telemetry pipeline. Params: `{ sessionId, promptId, rating: 'up' |
+   * 'down' }`; result: `{ recorded }` — false when the session workspace's
+   * `ui.enableUserFeedback` setting suppresses collection. The child maps
+   * the rating onto `UserFeedbackRating` and calls `logUserFeedback` with
+   * its own session Config.
+   */
+  sessionFeedback: 'qwen/control/session/feedback',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceModelProvidersReload:
@@ -296,6 +343,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
     'qwen/control/session/managed-conversation-binding/commit',
   sessionManagedConversationBindingRelease:
     'qwen/control/session/managed-conversation-binding/release',
+  resolveSubSessionWorkspace: 'qwen/control/resolve-sub-session-workspace',
   /**
    * Also called by the CHILD UP into the parent (like `clientMcpMessage`): the
    * `create_sub_session` tool, running inside a child's agent turn, asks the
@@ -666,6 +714,8 @@ export interface ServeSessionContextStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /** Whether the session can durably accept a daemon completion notification. */
+  canAcceptBackgroundNotifications?: boolean;
   recovery?: {
     kind:
       | 'clean'
@@ -683,22 +733,26 @@ export interface ServeSessionContextStatus {
   };
 }
 
+/** Local category estimates are independent of the reported totalTokens. */
 export interface ServeContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
   startupContext?: number;
   /**
-   * Conversation tokens after the startup prelude. When `totalTokens` is 0
+   * Independent conversation estimate after the startup prelude, never derived
+   * from or capped by totalTokens. When `totalTokens` is 0
    * (no provider count yet: after a model switch, `/restore` or a resume) this
    * is a local estimate of the history rather than 0, so the rows include the
    * conversation. Older servers report 0 there.
    */
   messages: number;
-  /** Provider total not accounted for by any category. Absent from older servers. */
+  /** @deprecated Legacy residual; accepted from old servers but no longer emitted or displayed. */
   unattributed?: number;
   /** Cached prefix tokens; an annotation that overlaps categories. Absent from older servers. */
   cachedTokens?: number;
@@ -714,6 +768,13 @@ export interface ServeContextToolDetail {
 export interface ServeContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older servers.
+   */
+  absolutePath?: string;
 }
 
 export interface ServeContextSkillDetail {
@@ -730,6 +791,7 @@ export interface ServeSessionContextUsage {
   breakdown: ServeContextCategoryBreakdown;
   builtinTools: ServeContextToolDetail[];
   mcpTools: ServeContextToolDetail[];
+  instructionFiles?: ServeContextMemoryDetail[];
   memoryFiles: ServeContextMemoryDetail[];
   skills: ServeContextSkillDetail[];
   isEstimated?: boolean;
@@ -740,6 +802,14 @@ export interface ServeSessionContextUsageStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older servers.
+   */
+  workspaceRoot?: string;
   usage: ServeSessionContextUsage;
   formattedText: string;
 }
@@ -930,6 +1000,12 @@ export interface ServeWorkflowPhaseVisit {
   title: string;
   startedAt: number;
   endedAt?: number;
+}
+
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface ServeWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
 }
 
 export type ServeWorkflowDispatchStatus =
@@ -1123,6 +1199,13 @@ export interface ServeSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: ServeWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: ServeWorkflowPlannedPhase[];
   dispatches: ServeWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
@@ -1255,11 +1338,56 @@ export interface ServeSessionStatsModelMetrics {
     totalTtftMs: number;
     /**
      * Time from the first to the last visible output, summed over requests
-     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     * whose window is at least 100 ms. With `totalThroughputOutputTokens` it
+     * gives the generation-window rate that clients before
+     * `totalOutputSpeedDurationMs` show.
      */
     totalGenerationDurationMs: number;
     /** Output tokens of the requests in `totalGenerationDurationMs`. */
     totalThroughputOutputTokens: number;
+    /**
+     * Time from the first to the last visible output, summed over every timed
+     * request like `totalTtftMs`. Absent from older daemons.
+     */
+    totalTimedGenerationDurationMs?: number;
+    /**
+     * Output tokens, reasoning counted once, of the timed requests that
+     * reported any. Absent from older daemons.
+     */
+    totalOutputSpeedTokens?: number;
+    /**
+     * TTFT plus generation time of the requests in `totalOutputSpeedTokens`:
+     * output speed divides the tokens by it. Absent from older daemons.
+     */
+    totalOutputSpeedDurationMs?: number;
+  };
+  /**
+   * Most recent timed, non-internal responses (oldest first, at most 200).
+   * Absent until a streamed response records its timing, and from older
+   * daemons.
+   */
+  timingSamples?: Array<{
+    /** Event time, epoch ms. */
+    at: number;
+    ttftMs: number;
+    /**
+     * From the first to the last visible output. Output speed divides
+     * `outputTokens` by `ttftMs + generationMs`; for a daemon without
+     * `generation.totalOutputSpeedDurationMs`, by `generationMs` when it is at
+     * least 100 ms.
+     */
+    generationMs: number;
+    /** Reasoning counted once; older daemons sent the provider's count. */
+    outputTokens: number;
+    /** Subagent that issued the request; absent for the main conversation. */
+    source?: string;
+  }>;
+  /** Failed API calls; absent until the first failure, and from older daemons. */
+  failures?: {
+    /** Count per HTTP status code, else error type, else `unknown`. */
+    byKind: Record<string, number>;
+    /** Most recent failures, oldest first, at most 50. */
+    recent: Array<{ at: number; kind: string; source?: string }>;
   };
 }
 
@@ -1356,10 +1484,10 @@ export interface ServeWorkspaceMemoryFile {
    */
   content?: string;
   /**
-   * True when the served text is not the file's full content: either
-   * `content` stops at the daemon's read cap, or the read raced a
-   * concurrent write (byte count differed from `bytes`, in which case
-   * `content` is omitted entirely).
+   * Present and true when `content` stops at the daemon's read cap, the
+   * read raced a concurrent write, or the on-disk bytes are not BOM-free
+   * UTF-8. `content` is omitted for the latter two cases; retrying
+   * unchanged bytes cannot repair an encoding issue.
    */
   truncated?: boolean;
 }
@@ -1531,6 +1659,8 @@ export interface ServeHookEntry {
   matcher?: string;
   sequential?: boolean;
   enabled: boolean;
+  /** Why a disabled hook is off; absent when enabled or the reason is entry-local. */
+  disabledReason?: string;
   hookId?: string;
   skillRoot?: string;
 }
@@ -1542,6 +1672,21 @@ export interface ServeWorkspaceHooksStatus {
   disabled: boolean;
   hooks: ServeHookEntry[];
   events: Record<string, ServeHookEventMeta>;
+  /**
+   * The workspace's project hooks await the user's approval decision. A
+   * client renders its approval affordance from this flag and records the
+   * decision via SERVE_CONTROL_EXT_METHODS.projectHooksApprove.
+   */
+  pendingApproval?: boolean;
+  /** Sanitized display lines of the withheld hooks, for the approval prompt. */
+  pendingApprovalHooks?: string[];
+  /**
+   * The canonical hash of the block this prompt renders. The client echoes
+   * it back with the decision so the daemon binds that decision to the
+   * exact block the user reviewed; a block that changed since the render
+   * stays pending instead of being approved unseen.
+   */
+  pendingApprovalHash?: string;
   errors?: ServeStatusCell[];
 }
 
@@ -1618,6 +1763,10 @@ export const IDLE_HOOK_EVENTS: Record<HookEventName, ServeHookEventMeta> = {
   TodoCompleted: { description: 'When a todo item is marked as completed' },
   InstructionsLoaded: {
     description: 'When an instruction or context file is loaded',
+    matcherKind: 'filePath',
+  },
+  FileChanged: {
+    description: 'When a watched file is added, changed, or deleted',
     matcherKind: 'filePath',
   },
 };

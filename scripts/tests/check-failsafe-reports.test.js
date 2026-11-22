@@ -152,7 +152,7 @@ describe('check-failsafe-reports', () => {
     // The real module name, because the exemption is keyed on it: the pom binds
     // ManagedAgentPackagingIT to a surefire execution and excludes it from the
     // mysql-integration failsafe, so it can never satisfy the non-hosted roster.
-    const name = 'packages/managed-agent-server';
+    const name = 'packages/managed-agent-server/verification';
     const sources = [
       'com.example.ManagedAgentPackagingIT',
       'com.example.OrdersIT',
@@ -293,7 +293,10 @@ describe('check-failsafe-reports', () => {
     expect(result.status).toBe(1);
     const noFamily = join(root, 'no-family');
     mkdirSync(join(noFamily, 'src', 'test', 'java'), { recursive: true });
-    expect(check('hosted', noFamily).status).toBe(0);
+    expect(check('hosted', noFamily).status).toBe(1);
+    expect(check('hosted', noFamily).output).toContain(
+      'no hosted test sources found',
+    );
   });
 
   it('hosts admission gates as their own family and rejects drift in both directions', () => {

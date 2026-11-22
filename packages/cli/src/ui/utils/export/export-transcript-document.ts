@@ -234,11 +234,54 @@ export interface ExportTranscriptDocumentV1 {
   readonly metadata: ExportMetadataPresentationV1;
 }
 
+/** V2 adds only replay's canonical routing tag to an existing user block. */
+export type ExportTranscriptBlockV2 =
+  | ExportTranscriptBlockV1
+  | (Extract<ExportTranscriptBlockV1, { kind: 'user' }> & {
+      meta?: { source: 'cron' };
+    });
+
+export type ExportTranscriptDocumentV2 = Omit<
+  ExportTranscriptDocumentV1,
+  'schemaVersion' | 'blocks'
+> & {
+  readonly schemaVersion: 2;
+  readonly blocks: readonly ExportTranscriptBlockV2[];
+};
+
+type ExportTranscriptDocument =
+  | ExportTranscriptDocumentV1
+  | ExportTranscriptDocumentV2;
+
 export interface CreateExportTranscriptDocumentOptions {
   readonly rendererVersion: string;
   readonly exportedAt: string;
   readonly title?: string;
 }
+
+const exportTranscriptDocumentV2Schema = {
+  ...exportTranscriptDocumentV1Schema,
+  $id: 'https://qwen-code.invalid/export-transcript-document-v2.schema.json',
+  properties: {
+    ...exportTranscriptDocumentV1Schema.properties,
+    schemaVersion: { const: 2 },
+  },
+  $defs: {
+    ...exportTranscriptDocumentV1Schema.$defs,
+    userBlock: {
+      ...exportTranscriptDocumentV1Schema.$defs.userBlock,
+      properties: {
+        ...exportTranscriptDocumentV1Schema.$defs.userBlock.properties,
+        meta: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['source'],
+          properties: { source: { const: 'cron' } },
+        },
+      },
+    },
+  },
+};
 
 export class ExportTranscriptDocumentError extends Error {
   constructor(readonly code: string) {
@@ -252,6 +295,35 @@ export function createExportTranscriptDocumentV1(
   sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
   options: CreateExportTranscriptDocumentOptions,
 ): ExportTranscriptDocumentV1 {
+  return createTranscriptDocumentVersion(records, sessionData, options, 1);
+}
+
+export function createExportTranscriptDocumentV2(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+): ExportTranscriptDocumentV2 {
+  return createTranscriptDocumentVersion(records, sessionData, options, 2);
+}
+
+function createTranscriptDocumentVersion(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  schemaVersion: 1,
+): ExportTranscriptDocumentV1;
+function createTranscriptDocumentVersion(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  schemaVersion: 2,
+): ExportTranscriptDocumentV2;
+function createTranscriptDocumentVersion(
+  records: readonly unknown[],
+  sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
+  options: CreateExportTranscriptDocumentOptions,
+  schemaVersion: 1 | 2,
+): ExportTranscriptDocument {
   if (!isSafeRendererVersion(options.rendererVersion)) {
     throw new ExportTranscriptDocumentError('invalid_renderer_version');
   }
@@ -276,10 +348,10 @@ export function createExportTranscriptDocumentV1(
       sourceRecordIds.some((recordId) => policy.visibleRecordIds.has(recordId))
     );
   });
-  const blocks: ExportTranscriptBlockV1[] = [];
+  const blocks: ExportTranscriptBlockV2[] = [];
   for (const block of visibleBlocks) {
     const checkpoint = budget.checkpoint();
-    const safe = sanitizeBlock(block, budget, ids, diagnostics);
+    const safe = sanitizeBlock(block, budget, ids, diagnostics, schemaVersion);
     if (budget.cumulativeTextBudgetExceeded) {
       budget.restore(checkpoint);
       break;
@@ -305,22 +377,26 @@ export function createExportTranscriptDocumentV1(
     complete: !degraded,
     truncated,
   };
-  let document: ExportTranscriptDocumentV1 = {
-    schemaVersion: 1,
+  let document: ExportTranscriptDocument = {
+    schemaVersion,
     rendererVersion: options.rendererVersion,
     blocks,
     diagnostics: diagnostics.toArray(),
     metadata,
   };
   document = fitDocumentToEnvelope(document, diagnostics);
-  assertExportTranscriptDocumentV1(document);
+  if (schemaVersion === 1) {
+    assertExportTranscriptDocumentV1(document);
+  } else {
+    assertExportTranscriptDocumentV2(document);
+  }
   return document;
 }
 
 function fitDocumentToEnvelope(
-  document: ExportTranscriptDocumentV1,
+  document: ExportTranscriptDocument,
   diagnostics: DiagnosticCounter,
-): ExportTranscriptDocumentV1 {
+): ExportTranscriptDocument {
   if (
     serializedEnvelopeBytes(document) <=
     EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes
@@ -328,7 +404,7 @@ function fitDocumentToEnvelope(
     return document;
   }
   diagnostics.add('envelope_budget_exceeded', 'warning', 1, true);
-  const buildCandidate = (blockCount: number): ExportTranscriptDocumentV1 => ({
+  const buildCandidate = (blockCount: number): ExportTranscriptDocument => ({
     ...document,
     blocks: document.blocks.slice(0, blockCount),
     diagnostics: diagnostics.toArray(),
@@ -360,15 +436,25 @@ function fitDocumentToEnvelope(
 export function assertExportTranscriptDocumentV1(
   value: unknown,
 ): asserts value is ExportTranscriptDocumentV1 {
+  validateVersionedTranscriptDocument(value, exportTranscriptDocumentV1Schema);
+}
+
+export function assertExportTranscriptDocumentV2(
+  value: unknown,
+): asserts value is ExportTranscriptDocumentV2 {
+  validateVersionedTranscriptDocument(value, exportTranscriptDocumentV2Schema);
+}
+
+function validateVersionedTranscriptDocument(
+  value: unknown,
+  schema: Parameters<typeof SchemaValidator.validateStrict>[0],
+): void {
   assertDepthAndArrayBudgets(value);
   const bytes = serializedEnvelopeBytes(value);
   if (bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes) {
     throw new ExportTranscriptDocumentError('envelope_budget_exceeded');
   }
-  const schemaError = SchemaValidator.validateStrict(
-    exportTranscriptDocumentV1Schema,
-    value,
-  );
+  const schemaError = SchemaValidator.validateStrict(schema, value);
   if (schemaError) {
     throw new ExportTranscriptDocumentError('schema_validation_failed');
   }
@@ -450,7 +536,8 @@ function sanitizeBlock(
   budget: ExportBudget,
   ids: OpaqueDocumentIds,
   diagnostics: DiagnosticCounter,
-): ExportTranscriptBlockV1 | undefined {
+  schemaVersion: 1 | 2,
+): ExportTranscriptBlockV2 | undefined {
   const common = {
     id: ids.get('block', block.id),
     kind: block.kind,
@@ -484,6 +571,13 @@ function sanitizeBlock(
           : parseQwenAgentMessageMeta(
               block.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
             )?.author?.name.trim();
+      // V2 preserves only the canonical routing tag, not surrounding metadata.
+      const automaticSource =
+        block.kind === 'user' &&
+        schemaVersion === 2 &&
+        block.meta?.['source'] === 'cron'
+          ? 'cron'
+          : undefined;
       return {
         ...common,
         kind: block.kind,
@@ -492,6 +586,7 @@ function sanitizeBlock(
         ...(authorName
           ? { author: { name: budget.label(authorName, 128) } }
           : {}),
+        ...(automaticSource ? { meta: { source: automaticSource } } : {}),
         ...(block.collapsed ? { collapsed: true } : {}),
         ...(block.parentToolCallId
           ? {
@@ -1593,6 +1688,15 @@ function assertNoForbiddenFields(value: unknown): void {
     }
     if (!isRecord(entry)) return;
     for (const [key, item] of Object.entries(entry)) {
+      // The exporter constructs this one-key tag for replayed cron users.
+      if (
+        key === 'meta' &&
+        isRecord(item) &&
+        item['source'] === 'cron' &&
+        Object.keys(item).length === 1
+      ) {
+        continue;
+      }
       if (forbidden.has(key)) {
         throw new ExportTranscriptDocumentError('forbidden_field');
       }

@@ -558,6 +558,32 @@ describe('McpClientManager', () => {
     expect(McpClient).not.toHaveBeenCalled();
   });
 
+  it('reports unmatched disabled tools on pool and incremental discovery', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const getDisabledTools = () => new Set(['run_shel_command']);
+
+    const { config: poolConfiguration, manager: poolMcpManager } = poolManager(
+      () => ({ srv: {} }),
+      vi.fn().mockResolvedValue(mkConn('srv')),
+      { getDisabledTools },
+    );
+    await poolMcpManager.discoverAllMcpTools(poolConfiguration);
+
+    const incrementalConfig = mkConfig(() => ({}), {
+      isMcpServerDisabled: () => false,
+      getDisabledTools,
+    });
+    const incrementalManager = mkManager({ config: incrementalConfig });
+    await incrementalManager.discoverAllMcpToolsIncremental(incrementalConfig);
+
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(
+      warnSpy.mock.calls.every(([line]) =>
+        String(line).includes('run_shel_command'),
+      ),
+    ).toBe(true);
+  });
+
   it('refreshes metadata on a retained unpooled connection without transport churn', async () => {
     let serverConfig = {
       command: 'node',
