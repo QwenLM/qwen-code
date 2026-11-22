@@ -654,7 +654,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         );
         restored = draft.text;
         setPendingPastes(draft.pasteExpansions);
-      } else if (!recalledItem && pendingPastesBeforeHistoryRef.current) {
+      } else if (recalledItem) {
+        // A matched item with no usable map (JSON-restored checkpoint, resumed
+        // session) must not inherit the previous prompt's live map, or submit
+        // expands a byte-equal placeholder into the wrong body. Seed and keep
+        // the snapshot: it is the return-to-draft restore source.
+        pendingPastesBeforeHistoryRef.current ??= new Map(pendingPastes);
+        setPendingPastes(new Map());
+      } else if (pendingPastesBeforeHistoryRef.current) {
         setPendingPastes(new Map(pendingPastesBeforeHistoryRef.current));
         pendingPastesBeforeHistoryRef.current = undefined;
       }
