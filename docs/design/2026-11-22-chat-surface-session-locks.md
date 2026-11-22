@@ -77,13 +77,20 @@ restore the incoming session's latches:
   stale-owner return. If an inactive parked session's submit settles `unknown`
   (and not `rejected`), its parked entry records `admissionLocked = true`
   without disturbing the active session.
-- **Stop settlement errors stay on the requesting session.** `onCancel`
-  captures the requesting `controller.sessionId` (and `ownerTokenRef.current`
-  when unallocated) and reports `chat.stopNotConfirmed` only if that session is
-  active when `.then` or `.catch` settles (matching `refOwnerRef.current === cancelSessionId`
-  for durable sessions so a round-trip switch back still receives the error, or
-  matching `ownerTokenRef.current === token` for an unallocated `''` chat so a
-  brand-new `''` chat is not polluted).
+- **Stop settlement errors stay on the requesting session and turn.**
+  `SessionChatController` exposes an optional `activeTurnId?: string` (projected
+  live from `livePromptQueue[0]` in `createDaemonChatController`), and
+  `cancel()` stamps the dispatch-time target turn onto `IntentResult.target.turnId`
+  (leaving the per-session operation retention key bounded). `onCancel` captures
+  the requesting `controller.sessionId`, `controller.activeTurnId`, and
+  `ownerTokenRef.current`, and reports `chat.stopNotConfirmed` only if both the
+  session is active (`refOwnerRef.current === cancelSessionId` for durable
+  sessions, or `ownerTokenRef.current === token` for an unallocated `''` chat)
+  and the current controller's `activeTurnId` still matches
+  `result.target?.turnId ?? cancelTurnId`. A delayed stop failure for an older
+  turn `T1` therefore never misattributes an unqualified stop error to a newer
+  turn `T2` (or an idle session) in the same session, while `IntentResult.target.turnId`
+  and `controller.operations` retain the turn-attributed evidence.
 
 The switch updates the ref and the state halves together; updating only one
 would leave either a visible-but-dispatchable or an invisible-but-blocked

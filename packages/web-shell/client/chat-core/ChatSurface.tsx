@@ -125,6 +125,8 @@ export function ChatSurface({
   // so gating the ref mutation on refOwnerRef makes the transition idempotent
   // instead of overwriting or deleting the entry it just parked.
   const ownerTokenRef = useRef({});
+  const controllerRef = useRef(controller);
+  controllerRef.current = controller;
   const parkedLatchesRef = useRef<
     Map<string, { token: object; inFlight: boolean; admissionLocked: boolean }>
   >(new Map());
@@ -305,18 +307,25 @@ export function ChatSurface({
           }
           onCancel={() => {
             const cancelSessionId = controller.sessionId;
+            const cancelTurnId = controller.activeTurnId;
             const token = ownerTokenRef.current;
-            const isOwnerActive = () =>
-              cancelSessionId !== ''
-                ? refOwnerRef.current === cancelSessionId
-                : ownerTokenRef.current === token;
+            const isOwnerActive = (resultTurnId?: string) => {
+              const sameSession =
+                cancelSessionId !== ''
+                  ? refOwnerRef.current === cancelSessionId
+                  : ownerTokenRef.current === token;
+              if (!sameSession) return false;
+              const targetTurnId = resultTurnId ?? cancelTurnId;
+              return controllerRef.current.activeTurnId === targetTurnId;
+            };
             // A refused or unknown stop admission must not be silent on the
-            // session that requested it, while a late settlement after a
-            // session switch must not report a stop error on another session.
+            // session and turn that requested it, while a late settlement after
+            // a session switch or turn advance must not misattribute an older
+            // stop failure to a different session or a newer turn.
             void controller
               .cancel()
               .then((result) => {
-                if (!isOwnerActive()) return;
+                if (!isOwnerActive(result.target?.turnId)) return;
                 if (result.admission !== 'accepted') {
                   const message = t('chat.stopNotConfirmed');
                   reportError(new Error(message), message);

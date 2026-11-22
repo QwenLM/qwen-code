@@ -322,6 +322,9 @@ export function createDaemonChatController(
     get storageKey() {
       return deps.storageKey;
     },
+    get activeTurnId(): string | undefined {
+      return livePromptQueue[0];
+    },
     get operations(): readonly ChatOperation[] {
       return intents.operations;
     },
@@ -452,7 +455,12 @@ export function createDaemonChatController(
         else pendingCancelBinds.delete(cancelTarget);
       }
       pruneCorrelation();
-      return out;
+      // Attach the dispatch-time cancel subject to the returned IntentResult so
+      // callers can attribute a delayed stop failure to the turn it targeted
+      // without expanding the per-session operation retention key.
+      return cancelTarget !== undefined
+        ? { ...out, target: { ...out.target, turnId: cancelTarget } }
+        : out;
     },
     async respondApproval(id: string, optionId: string): Promise<IntentResult> {
       if (hasLiveDecision(id) || inFlightRequestIds.has(id)) {

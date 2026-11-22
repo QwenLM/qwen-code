@@ -1389,6 +1389,235 @@ describe('ChatSurface', () => {
     expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
   });
 
+  it('scopes cancel settlement errors to the active turn within the same session', async () => {
+    const onError = vi.fn();
+    // Negative 1: same session S, T1 stop delayed, S advances to T2 -> no error against T2.
+    let resolveT1Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1T1 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't1',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveT1Cancel = resolve;
+          }),
+      ),
+    });
+    const container = mountReact(
+      <ChatSurface controller={s1T1} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    // Swap to a second controller snapshot with the same sessionId but newer activeTurnId.
+    let rejectT2Cancel: ((reason: unknown) => void) | undefined;
+    const s1T2 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't2',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((_resolve, reject) => {
+            rejectT2Cancel = reject;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T2} onError={onError} />,
+    );
+    await act(async () => {
+      resolveT1Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't1' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    // Negative 2: same session S, T2 stop throws after S advances to idle (activeTurnId undefined).
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    const s1Idle = fakeController({ sessionId: 's1', activeTurnId: undefined });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1Idle} onError={onError} />,
+    );
+    await act(async () => {
+      rejectT2Cancel?.(new Error('delayed stop throw'));
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    // Negative 3: result.target.turnId identifies t1 when dispatch had no activeTurnId,
+    // and S is now idle (activeTurnId undefined) -> silent (pins resultTurnId ?? cancelTurnId).
+    let resolveResultTagged:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1UnknownDispatch = fakeController({
+      sessionId: 's1',
+      activeTurnId: undefined,
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveResultTagged = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1UnknownDispatch} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1Idle} onError={onError} />,
+    );
+    await act(async () => {
+      resolveResultTagged?.({
+        admission: 'rejected',
+        target: { sessionId: 's1', turnId: 't1' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    // Positive: same session S and same turn T3 still active -> reports on both
+    // unknown settlement and thrown transport.
+    const s1T3Unknown = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't3',
+      cancel: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't3' },
+      })),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T3Unknown} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+
+    const s1T3Throw = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't3',
+      cancel: vi.fn(async () => {
+        throw new Error('stop transport error');
+      }),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T3Throw} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+
+    // Round-trip S1(T4) -> S2 -> S1(T5): returning to S1 after T5 started stays silent;
+    // returning to S1 while T4 is still active reports.
+    let resolveT4Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1T4 = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't4',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveT4Cancel = resolve;
+          }),
+      ),
+    });
+    const s2 = fakeController({ sessionId: 's2', activeTurnId: 'other' });
+    const s1T5 = fakeController({ sessionId: 's1', activeTurnId: 't5' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T4} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T5} onError={onError} />,
+    );
+    await act(async () => {
+      resolveT4Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't4' },
+      });
+    });
+    expect(onError).not.toHaveBeenCalled();
+
+    let resolveT5Cancel:
+      | ((value: {
+          admission: string;
+          target: { sessionId: string; turnId?: string };
+        }) => void)
+      | undefined;
+    const s1T5Pending = fakeController({
+      sessionId: 's1',
+      activeTurnId: 't5',
+      cancel: vi.fn(
+        () =>
+          new Promise<{
+            admission: string;
+            target: { sessionId: string; turnId?: string };
+          }>((resolve) => {
+            resolveT5Cancel = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T5Pending} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    rerenderReact(
+      container,
+      <ChatSurface controller={s1T5Pending} onError={onError} />,
+    );
+    await act(async () => {
+      resolveT5Cancel?.({
+        admission: 'unknown',
+        target: { sessionId: 's1', turnId: 't5' },
+      });
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+  });
+
   it('preserves a parked in-flight latch when the switch render is discarded before commit (R1-4)', async () => {
     let resolveS1: ((value: { admission: string }) => void) | undefined;
     const s1 = fakeController({

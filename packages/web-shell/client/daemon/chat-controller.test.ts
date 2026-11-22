@@ -988,4 +988,38 @@ describe('daemon controller: in-flight and racing correlation', () => {
       ]).toEqual(keys.map((_, j) => i === j));
     }
   });
+
+  it('tracks activeTurnId along the FIFO prompt queue and stamps it on cancel results', async () => {
+    const h = harness();
+    expect(h.controller.activeTurnId).toBeUndefined();
+    const s1 = h.controller.submit(input);
+    h.admitSubmit('p1');
+    await s1;
+    expect(h.controller.activeTurnId).toBe('p1');
+    // Queueing p2 behind p1 keeps p1 as the active cancel target.
+    const s2 = h.controller.submit(input);
+    h.admitSubmit('p2');
+    await s2;
+    expect(h.controller.activeTurnId).toBe('p1');
+    // Even an unconfirmed cancel carries the dispatch-time turnId on its target.
+    const cancel1 = h.controller.cancel();
+    h.resolveCancel('unknown');
+    const res1 = await cancel1;
+    expect(res1.admission).toBe('unknown');
+    expect(res1.target.turnId).toBe('p1');
+    // Settling p1 advances activeTurnId to p2; settling p2 returns to undefined.
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBe('p2');
+    const cancel2 = h.controller.cancel();
+    h.resolveCancel('rejected');
+    const res2 = await cancel2;
+    expect(res2.admission).toBe('rejected');
+    expect(res2.target.turnId).toBe('p2');
+    h.emitPrompt({ promptId: 'p2', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBeUndefined();
+    const idleCancel = h.controller.cancel();
+    h.resolveCancel('rejected');
+    const resIdle = await idleCancel;
+    expect(resIdle.target.turnId).toBeUndefined();
+  });
 });

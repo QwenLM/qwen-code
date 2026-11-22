@@ -135,6 +135,10 @@ export interface SessionChatController {
   readonly kind: 'daemon' | 'managed';
   readonly sessionId: string;
   readonly storageKey: string;
+  // Opaque identifier of the active (FIFO-head) live turn, when known. Lets
+  // the surface distinguish a delayed stop settlement for an older turn from a
+  // newer turn running in the same session.
+  readonly activeTurnId?: string;
 
   // In-flight and recently settled intents, observable across refresh.
   // Retention is bounded: at most the latest terminal entry per kind and

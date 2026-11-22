@@ -58,11 +58,17 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
   `result.admission === 'accepted'` 调用 `commitAccepted?.()`。若非活动的已暂存会话的
   提交以 `unknown`（而非 `rejected`）结算，其暂存条目记录 `admissionLocked = true` 而不打
   扰当前活动会话。
-- **停止结算错误留在发起会话上。** `onCancel` 捕获发起请求的 `controller.sessionId`（未分
-  配时同时捕获 `ownerTokenRef.current`），仅当 `.then` 或 `.catch` 结算时该会话仍处于活动
-  态（持久会话匹配 `refOwnerRef.current === cancelSessionId` 以使往返切回仍能收到错误，未
-  分配 `''` 聊天匹配 `ownerTokenRef.current === token` 以免污染全新 `''` 聊天）才上报
-  `chat.stopNotConfirmed`。
+- **停止结算错误留在发起会话与对应回合上。** `SessionChatController` 暴露可选的
+  `activeTurnId?: string`（`createDaemonChatController` 从 `livePromptQueue[0]` 实时
+  投影），`cancel()` 将派发时的目标回合写入返回的 `IntentResult.target.turnId`（同时保
+  持按会话的 operation 保留键有界）。`onCancel` 捕获发起请求的 `controller.sessionId`、
+  `controller.activeTurnId` 与 `ownerTokenRef.current`，仅当会话仍处于活动态（持久会话
+  匹配 `refOwnerRef.current === cancelSessionId`，未分配 `''` 聊天匹配
+  `ownerTokenRef.current === token`）且当前控制器的 `activeTurnId` 仍等于
+  `result.target?.turnId ?? cancelTurnId` 时才上报 `chat.stopNotConfirmed`。因此旧回合
+  `T1` 迟到的停止失败绝不会在同一会话内把无回合限定的停止错误误报给新回合 `T2`（或已空闲
+  会话），而 `IntentResult.target.turnId` 与 `controller.operations` 仍保留带回合归属的
+  证据。
 
 切换同时更新 ref 与 state 两半；只更新其一会留下「可见但可派发」或「不可见但被阻塞」
 的 composer。这镜像了 `App` 与 `ChatPane` 已有的会话归属准入状态

@@ -662,4 +662,23 @@ describe('useDaemonChatController', () => {
       controller!.operations.find((op) => op.kind === 'question')?.state,
     ).toBe('established');
   });
+
+  it('tracks activeTurnId across admitted prompts and prompt settlements', async () => {
+    mountReact(<Probe />);
+    expect(controller!.activeTurnId).toBeUndefined();
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p1' });
+    await controller!.submit({ text: 'turn 1' });
+    expect(controller!.activeTurnId).toBe('p1');
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p2' });
+    await controller!.submit({ text: 'turn 2' });
+    expect(controller!.activeTurnId).toBe('p1');
+    harness.cancel.mockRejectedValueOnce(new Error('cancel timeout'));
+    const cancelRes = await controller!.cancel();
+    expect(cancelRes.admission).toBe('unknown');
+    expect(cancelRes.target.turnId).toBe('p1');
+    harness.promptSettledListener?.({ promptId: 'p1', outcome: 'completed' });
+    expect(controller!.activeTurnId).toBe('p2');
+    harness.promptSettledListener?.({ promptId: 'p2', outcome: 'completed' });
+    expect(controller!.activeTurnId).toBeUndefined();
+  });
 });
