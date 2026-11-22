@@ -101,6 +101,16 @@ final class RuntimeExecutionRecovery {
             return failed(notFound("runtime_execution_not_found",
                     "The background process was not found"));
         }
+        // Tenant-scoped read-only pre-check before any adoption side effect.
+        // Adoption resolves the tenant from harnessSessionId (not the caller's)
+        // and may recover a binding and send control RPCs that settle rows, so
+        // a mismatched caller tenant must 404 here with zero side effects —
+        // the raw registry lookup this replaces was a read-only map check.
+        if (sessionRepository.findHistorical(
+                tenantId, harnessSessionId, row.getRuntimeSessionId()) == null) {
+            return failed(notFound("runtime_execution_not_found",
+                    "The background process was not found"));
+        }
         // Adopt the durable Session like observeBackgroundProcess does: a
         // cancel can land on a Broker that restarted (or a replica) and has
         // no in-memory registry entry yet, and the raw registry would 404.

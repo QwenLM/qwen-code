@@ -12,7 +12,7 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, type Server } from 'node:http';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
@@ -291,15 +291,17 @@ function driveRealProcess(
     // still queued, so anchoring here keeps exited+drained ordering honest.
     child.on('close', (code, signal) => resolve({ code, signal }));
   });
-  // A getter, not a snapshot: chain is reassigned by every data/end handler,
-  // so a captured promise would freeze at the initial Promise.resolve() and
-  // make `await drained` a no-op.
+  // drained must survive the immediate destructuring at every call site
+  // (`const { exited, drained } = driveRealProcess(...)` reads the property
+  // synchronously, before any data/end handler runs). A getter or a bare
+  // `chain` snapshot would both freeze at the initial Promise.resolve().
+  // exited.then(() => chain) reads chain lazily at resolution time — after
+  // 'close', when the write chain is final — so awaiting it waits for the
+  // pipe tail even when destructured.
   return {
     child,
     exited,
-    get drained() {
-      return chain;
-    },
+    drained: exited.then(() => chain),
   };
 }
 
@@ -490,6 +492,43 @@ describe.skipIf(process.platform === 'win32')('real-process delivery', () => {
     expect(stdout.digest).toBe(
       createHash('sha256').update(expected).digest('hex'),
     );
+  });
+
+  it('drained stays pending until the destructured write chain completes', async () => {
+    const r = await rig();
+    // Hold sink.write open so the write chain is still pending after the
+    // process closes. This pins the drain ordering deterministically: a
+    // drained frozen at the initial Promise.resolve() (eager snapshot or a
+    // getter read by destructuring) resolves immediately and fails here.
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const realWrite = r.sink.write.bind(r.sink);
+    let writeDone = false;
+    const writeSpy = vi
+      .spyOn(r.sink, 'write')
+      .mockImplementation(async (stream, chunk) => {
+        await writeGate;
+        await realWrite(stream, chunk);
+        writeDone = true;
+      });
+    try {
+      const { exited, drained } = driveRealProcess(r.sink, `printf 'tail\\n'`);
+      await exited;
+      let drainedDone = false;
+      void drained.then(() => {
+        drainedDone = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(writeDone).toBe(false);
+      expect(drainedDone).toBe(false);
+      releaseWrite();
+      await drained;
+      expect(writeDone).toBe(true);
+    } finally {
+      writeSpy.mockRestore();
+    }
   });
 
   it('a forced stop under backpressure still produces its exit proof', async () => {

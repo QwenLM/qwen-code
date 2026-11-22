@@ -341,12 +341,17 @@ describe('managed session resource store', () => {
         store.publish('managed-input', bytes, resourceId),
       ).rejects.toThrow(/resourceId must be a single path segment/);
     }
-    // Nothing landed outside the kind directory.
+    // Nothing landed outside the kind directory. '../../escaped' from the
+    // kind dir (sessionRoot/managed-input) would resolve to
+    // dirname(sessionRoot)/escaped, so aim the on-disk check there too.
     const kindDir = path.join(store.sessionRoot, 'managed-input');
     const entries = await fs.readdir(kindDir).catch(() => []);
     expect(entries).toEqual([]);
     await expect(
       fs.stat(path.join(store.sessionRoot, 'escaped')),
+    ).rejects.toThrow();
+    await expect(
+      fs.stat(path.join(path.dirname(store.sessionRoot), 'escaped')),
     ).rejects.toThrow();
     // A well-formed client-chosen id still publishes and reads back under it.
     const ref = await store.publish('managed-input', bytes, 'worker-chosen-id');

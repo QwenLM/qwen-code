@@ -56,6 +56,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * End-to-end H2 + loopback HTTP verification for Phase 3b observation-pull,
@@ -279,6 +280,38 @@ class RuntimeObservationPullerTest {
                 .toCompletableFuture().join();
         assertThat(stopped.isTerminal()).isTrue();
         assertThat(executionRepo.findByExecutionCallId("call-stop:process").isTerminal()).isTrue();
+    }
+
+    @Test
+    void stopBackgroundProcessRejectsAMismatchedTenantOnAFreshBrokerWithoutSideEffects() throws Exception {
+        RuntimeBrokerService brokerA = newBroker("broker-a");
+        RuntimeBrokerHttpServer serverA = newHttpServer(brokerA);
+        HttpResponse<String> acquired = postBroker(serverA, "/tool-sessions:acquire", Map.of(
+                "protocolVersion", 1,
+                "requestId", "acq-1",
+                "harnessSessionId", harnessSessionId,
+                "runtimeSessionId", runtimeSessionId,
+                "turnKind", "bootstrap"));
+        assertThat(acquired.statusCode()).isEqualTo(200);
+        var binding = bindingRepo.findActive(new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(
+                scope, null, "static"));
+        seedBackgroundRun(binding.getBindingId(), binding.getGeneration(), "call-xtenant");
+
+        serverA.close();
+        brokerA.close();
+        openServers.clear();
+        openServices.clear();
+        RuntimeBrokerService brokerC = newBroker("broker-c");
+        acquireWriter();
+
+        // A mismatched caller tenant on the empty-registry Broker must 404
+        // before adoption: no binding recovery, no control RPC, no settlement.
+        assertThatThrownBy(() -> brokerC.stopBackgroundProcess(
+                "other-tenant", harnessSessionId, "call-xtenant")
+                .toCompletableFuture().join())
+                .isInstanceOf(java.util.concurrent.CompletionException.class)
+                .hasCauseInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
+        assertThat(executionRepo.findByExecutionCallId("call-xtenant:process").isTerminal()).isFalse();
     }
 
     @Test
