@@ -154,8 +154,8 @@ final class AgentSessionQueries {
                                 + " s.workspace_generation AND r.storage_id ="
                                 + " s.workspace_storage_id AND r.state = 'ACTIVE' LEFT JOIN"
                                 + " ma_workspace_access a ON a.tenant_id = r.tenant_id AND"
-                                + " a.workspace_id = r.workspace_id AND CAST(a.actor_id AS"
-                                + " BINARY(2048)) = CAST(s.creator_actor_key AS BINARY(2048))"
+                                + " a.workspace_id = r.workspace_id AND a.actor_id ="
+                                + " s.creator_actor_key"
                                 + " AND a.role IN ('OPERATOR', 'OWNER') WHERE"
                                 + " s.tenant_id = ? AND s.session_id IN ("
                                     + AgentStoreRows.placeholders(pending.size())
@@ -219,10 +219,12 @@ final class AgentSessionQueries {
 
     SessionPage listSessions(String tenantId, String actorId,
             Long beforeCreatedAt, String beforeSessionId, int limit, String archiveState, String titleQuery) {
+        if (actorId != null) {
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        }
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
-        arguments.add(actorId == null ? null
-                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+        arguments.add(actorId);
         arguments.add(actorId);
         String archiveClause = switch (archiveState) {
             case "archived" -> " AND ma_session.status = 'ARCHIVED'";

@@ -129,6 +129,16 @@ public class ManagedChannelService {
     public ChannelInstanceView register(String tenantId, String channelId,
             RegisterChannelRequest request) {
         requireChannelId(channelId);
+        // The actor column is VARCHAR under a PAD SPACE collation: a
+        // trailing-space variant would fold onto another actor's identity.
+        String actorId = request.actorId();
+        if (actorId == null || actorId.isBlank()
+                || Character.isWhitespace(
+                        actorId.codePointBefore(actorId.length()))) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The channel actor must be non-blank text without"
+                            + " trailing spaces.");
+        }
         String policyJson;
         try {
             policyJson = mapper.writeValueAsString(request.policy());

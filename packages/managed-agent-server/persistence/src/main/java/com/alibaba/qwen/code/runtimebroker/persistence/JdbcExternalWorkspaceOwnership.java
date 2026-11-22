@@ -196,8 +196,8 @@ public final class JdbcExternalWorkspaceOwnership {
         try (var statement = connection.prepareStatement("SELECT w.workspace_generation, w.storage_id FROM ma_workspace w"
                 + " JOIN ma_session s ON s.tenant_id = w.tenant_id AND s.workspace_id = w.workspace_id"
                 + " JOIN ma_workspace_access a ON a.tenant_id = w.tenant_id AND a.workspace_id = w.workspace_id"
-                + " AND CAST(a.actor_id AS BINARY(2048)) = CAST(COALESCE(s.owner_actor_key,"
-                + " s.creator_actor_key) AS BINARY(2048)) WHERE w.tenant_id = ? AND w.workspace_id = ?"
+                + " AND a.actor_id = COALESCE(s.owner_actor_key,"
+                + " s.creator_actor_key) WHERE w.tenant_id = ? AND w.workspace_id = ?"
                 + " AND s.session_id = ? AND w.state = 'ACTIVE' AND a.role IN ('OPERATOR', 'OWNER') FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());

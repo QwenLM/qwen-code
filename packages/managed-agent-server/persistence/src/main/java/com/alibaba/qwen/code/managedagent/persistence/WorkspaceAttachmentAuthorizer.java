@@ -67,7 +67,7 @@ final class WorkspaceAttachmentAuthorizer {
         }
         // Verdicts per matched row: 0 structural mismatch, 1 refused only by
         // operator-mutable grant or registry state, 2 authorized.
-        byte[] executionActor = cancellation || committedStop ? null
+        String executionActor = cancellation || committedStop ? null
                 : external ? externalExecutionActor(binding, session.sessionId())
                         : inheritedExecutionActor(jdbc, binding, session.sessionId());
         List<Integer> grants = jdbc.query("SELECT s.tenant_id, s.session_id,"
@@ -176,7 +176,7 @@ final class WorkspaceAttachmentAuthorizer {
         throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
     }
 
-    static byte[] inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
+    static String inheritedExecutionActor(JdbcTemplate jdbc, ContextBinding binding, String sessionId) {
         java.util.Set<String> visited = new java.util.HashSet<>();
         String current = sessionId;
         while (visited.add(current)) {
@@ -199,16 +199,14 @@ final class WorkspaceAttachmentAuthorizer {
                 if (!(row.get("creator_actor_key") instanceof String actor)) {
                     throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                 }
-                // The Session column holds raw actor text; the access grant it
-                // binds into stays VARBINARY actor bytes.
-                return actor.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                return actor;
             }
             current = parent;
         }
         throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
     }
 
-    private byte[] externalExecutionActor(ContextBinding binding, String sessionId) {
+    private String externalExecutionActor(ContextBinding binding, String sessionId) {
         var actors = jdbc.query("SELECT COALESCE(owner_actor_key, creator_actor_key) AS execution_actor"
                 + " FROM ma_session WHERE tenant_id = ? AND session_id = ? AND parent_session_id IS NULL",
                 (row, index) -> row.getString("execution_actor"),
@@ -216,7 +214,7 @@ final class WorkspaceAttachmentAuthorizer {
         if (actors.size() != 1 || actors.getFirst() == null) {
             throw unavailable();
         }
-        return actors.getFirst().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        return actors.getFirst();
     }
 
     // qwen-code, or a Session that pinned a compiled definition (D8c-1).

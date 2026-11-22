@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -559,7 +558,7 @@ public class ManagedSchemaBusinessStoreTest {
     private void grantWorkspace(String ownerTenant, String workspace, String actor) {
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'READER')",
-                ownerTenant, workspace, ManagedWorkspaceRegistry.actorKey(ownerTenant, actor));
+                ownerTenant, workspace, actor);
     }
 
     private void seedSchedule(String ownerTenant, String ownerSession, String workspace, String id, long time) {
@@ -568,7 +567,7 @@ public class ManagedSchemaBusinessStoreTest {
                         + " session_mode, overlap, catch_up, is_enabled, state, armed_at, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, ?, ?, ?, 1, 1, ?, 'goal', '0 * * * *', 'UTC', 'new_session',"
                         + " 'skip', 'none', TRUE, 'armed', 0, ?, ?)",
-                ownerTenant, id, ownerSession, workspace, ManagedWorkspaceRegistry.actorKey(ownerTenant, "operator"),
+                ownerTenant, id, ownerSession, workspace, "operator",
                 "a".repeat(64), time, time);
     }
 

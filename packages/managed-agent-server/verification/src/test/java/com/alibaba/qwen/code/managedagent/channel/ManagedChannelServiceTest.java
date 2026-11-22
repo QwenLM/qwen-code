@@ -327,6 +327,20 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void refusesAChannelActorWithTrailingSpaces() {
+        RegisterChannelRequest padded = new RegisterChannelRequest("email",
+                "agent@example.com", 1, ACTOR + " ", WORKSPACE, ".",
+                new ChannelPolicy("email", "allowlist",
+                        List.of("alice@example.com"), "followup"));
+        assertThatThrownBy(() -> service.register(TENANT, "padded-actor",
+                padded))
+                .isInstanceOf(ManagedAgentException.class)
+                .extracting(e -> ((ManagedAgentException) e).getCode())
+                .isEqualTo("invalid_request");
+        assertThat(instances.findInstance(TENANT, "padded-actor")).isEmpty();
+    }
+
+    @Test
     void claimsReceiptsAndSettlesDeliveriesThroughTheLedger() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:70", "please reply"));

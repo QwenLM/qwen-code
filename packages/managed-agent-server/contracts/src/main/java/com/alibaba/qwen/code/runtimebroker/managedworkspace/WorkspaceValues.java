@@ -34,11 +34,20 @@ public final class WorkspaceValues {
         return BrokerValues.requireTenantId(value, name);
     }
 
+    /**
+     * An actor identity stored in a VARCHAR(36) column. PAD SPACE collations
+     * fold trailing spaces, so two distinct actors would compare equal; the
+     * boundary refuses them rather than relying on the column to preserve
+     * exactness.
+     */
     static String requireActor(String value, String name) {
         String actor = requireText(value, name);
-        if (actor.codePointCount(0, actor.length()) > MAXIMUM_ACTOR_CODE_POINTS) {
+        if (actor.codePointCount(0, actor.length()) > MAXIMUM_ACTOR_CODE_POINTS
+                || Character.isWhitespace(
+                        actor.codePointBefore(actor.length()))) {
             throw new IllegalArgumentException(name + " must be 1 to "
-                    + MAXIMUM_ACTOR_CODE_POINTS + " characters");
+                    + MAXIMUM_ACTOR_CODE_POINTS
+                    + " characters without trailing spaces");
         }
         return actor;
     }

@@ -34,7 +34,6 @@ public final class ExternalWorkspaceMaterializationStore {
 
     public Receipt materialize(String tenant, String registeredAliasId, String displayName,
             String ownerActorId, String idempotencyKey) {
-        byte[] owner;
         try {
             if (tenant == null || !tenant.matches("[A-Za-z0-9._:-]{1,128}")
                     || registeredAliasId == null || !registeredAliasId.matches("[A-Za-z0-9._-]{1,128}")
@@ -44,8 +43,9 @@ public final class ExternalWorkspaceMaterializationStore {
                     || idempotencyKey == null || !idempotencyKey.matches("[A-Za-z0-9._:-]{1,128}")) {
                 throw new IllegalArgumentException();
             }
-            // This key encodes the operator's grantee, not an authenticated request actor.
-            owner = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
+            // The grantee is the operator's actor, not an authenticated
+            // request actor; it passes the same identity admission.
+            com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, ownerActorId);
         } catch (IllegalArgumentException error) {
             throw new RuntimeBrokerException(400, "invalid_external_workspace_materialization",
                     "Invalid external Workspace materialization.", false);
@@ -114,7 +114,7 @@ public final class ExternalWorkspaceMaterializationStore {
                     registeredAliasId, registeredAliasId, displayName, WorkspaceExecutionProfile.CONFIG_REF,
                     WorkspaceExecutionProfile.POLICY_REF, now, now);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                    + " VALUES (?, ?, ?, 'OWNER')", tenant, registeredAliasId, owner);
+                    + " VALUES (?, ?, ?, 'OWNER')", tenant, registeredAliasId, ownerActorId);
             ManagedReceipts.insert(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT, tenant, idempotencyKey,
                     digest, "MATERIALIZE_EXTERNAL_WORKSPACE", null, null, null, "COMPLETED", null, null, now);
             jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE receipt_key = ?", encode(receipt), receiptKey);

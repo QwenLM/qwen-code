@@ -131,9 +131,8 @@ public class JdbcManagedWorkspaceRegistry
         if (actorId == null || actorId.isEmpty()) {
             return WorkspaceAccess.NONE;
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return WorkspaceAccess.NONE;
         }
@@ -160,7 +159,7 @@ public class JdbcManagedWorkspaceRegistry
                         + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
                         + " 'OWNER')",
                 String.class, tenantId, workspaceId,
-                key);
+                actorId);
         // An out-of-enum stored value (only reachable by an out-of-band
         // write past V53's CHECK) fails closed exactly like a revoked
         // grant, never into valueOf's IllegalArgumentException.
@@ -176,7 +175,7 @@ public class JdbcManagedWorkspaceRegistry
 
     public List<WorkspaceSummary> listReadable(String tenantId,
             String actorId, String afterId, int limit) {
-        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         String after = afterId == null ? "" : afterId;
         List<WorkspaceRow> rows = jdbc.query("SELECT r.workspace_id, r.display_name, r.state, r.workspace_kind, r.workspace_generation,"
                         + " r.storage_id, r.config_ref, r.policy_ref, s.storage_kind, a.role FROM ma_workspace r"
@@ -184,13 +183,13 @@ public class JdbcManagedWorkspaceRegistry
                         + " LEFT JOIN ma_storage s ON s.tenant_id = r.tenant_id AND s.storage_id = r.storage_id"
                         + " WHERE r.tenant_id = ? AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
                         + " AND r.workspace_id > ? ORDER BY r.workspace_id LIMIT ?",
-                (result, row) -> workspaceRow(result), tenantId, key, after, limit);
+                (result, row) -> workspaceRow(result), tenantId, actorId, after, limit);
         return withDefaults(tenantId, summarize(tenantId, rows));
     }
 
     public WorkspaceSummary findReadable(String tenantId, String actorId,
             String workspaceId) {
-        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.display_name, r.state,"
                         + " r.workspace_kind, r.workspace_generation, r.storage_id,"
@@ -202,7 +201,7 @@ public class JdbcManagedWorkspaceRegistry
                         + " WHERE r.tenant_id = ? AND r.workspace_id = ?"
                         + " AND a.actor_id = ? AND a.role IN ('READER',"
                         + " 'OPERATOR', 'OWNER')",
-                (result, row) -> workspaceRow(result), tenantId, workspaceId, key);
+                (result, row) -> workspaceRow(result), tenantId, workspaceId, actorId);
         return rows.isEmpty() ? null : findOneReadable(tenantId, rows.getFirst());
     }
 
@@ -218,14 +217,14 @@ public class JdbcManagedWorkspaceRegistry
         if (workspaceIds.isEmpty()) {
             return java.util.Map.of();
         }
-        byte[] key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+        ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         String plain = String.join(", ", java.util.Collections.nCopies(
                 workspaceIds.size(), "?"));
         List<Object> arguments = new java.util.ArrayList<>(
                 workspaceIds.size() + 2);
         arguments.add(tenantId);
         arguments.addAll(workspaceIds);
-        arguments.add(key);
+        arguments.add(actorId);
         List<WorkspaceRow> rows = jdbc.query(
                 "SELECT r.workspace_id, r.workspace_generation,"
                         + " r.storage_id, r.state, r.config_ref, r.policy_ref,"
@@ -424,9 +423,8 @@ public class JdbcManagedWorkspaceRegistry
             throw new ManagedAgentException(401,
                     "actor_required", "A trusted actor is required.");
         }
-        byte[] key;
         try {
-            key = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             throw new ManagedAgentException(403,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
@@ -456,7 +454,7 @@ public class JdbcManagedWorkspaceRegistry
                         + " 'OWNER')" + (lock ? " FOR UPDATE" : ""),
                 (result, row) -> new AccessRow(WorkspaceAccess.valueOf(
                         result.getString("role"))), tenantId,
-                workspaceId, key);
+                workspaceId, actorId);
         if (access.isEmpty() || !access.getFirst().value().canRead()) {
             if (selection == null) {
                 throw workspaceRequired();

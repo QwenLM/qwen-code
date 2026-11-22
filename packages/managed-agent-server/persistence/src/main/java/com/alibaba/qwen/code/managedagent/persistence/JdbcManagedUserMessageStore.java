@@ -69,7 +69,7 @@ public class JdbcManagedUserMessageStore
         var replay = jdbc.query("SELECT request_digest, result_json FROM ma_user_message_command"
                         + " WHERE tenant_id = ? AND session_id = ? AND actor_id = ? AND idempotency_key = ?",
                 (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(actor),
+                actor,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(key));
         if (!replay.isEmpty()) {
             if (!digest.equals(replay.getFirst().getKey())) {
@@ -147,7 +147,7 @@ public class JdbcManagedUserMessageStore
         jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, idempotency_key, actor_id, request_digest, result_json)"
                 + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session,
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(key),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(actor), digest, encode(result));
+                actor, digest, encode(result));
         return result;
     }
 

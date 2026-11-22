@@ -21,9 +21,8 @@ final class AutomationScheduleQueries {
         if (actorId == null || actorId.isEmpty()) {
             return new SchedulePage(List.of(), false);
         }
-        byte[] actorKey;
         try {
-            actorKey = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return new SchedulePage(List.of(), false);
         }
@@ -54,11 +53,11 @@ final class AutomationScheduleQueries {
         List<ScheduleRow> rows = cursor == null
                 ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
                         + " s.schedule_id DESC LIMIT ?", mapper, tenantId,
-                        actorKey, tenantId, tenantId, actorId, limit + 1)
+                        actorId, tenantId, tenantId, actorId, limit + 1)
                 : jdbc.query(select + " AND (s.gmt_create < ?"
                         + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
                         + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
-                        + " LIMIT ?", mapper, tenantId, actorKey, tenantId, tenantId, actorId,
+                        + " LIMIT ?", mapper, tenantId, actorId, tenantId, tenantId, actorId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.scheduleId(), limit + 1);
         boolean hasMore = rows.size() > limit;

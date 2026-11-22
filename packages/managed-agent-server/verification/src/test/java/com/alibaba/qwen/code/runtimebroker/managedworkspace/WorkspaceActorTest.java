@@ -28,8 +28,8 @@ class WorkspaceActorTest {
                 actor);
         assertNotEquals(new WorkspaceActor("tenant-a", "Alice@example.com"),
                 actor);
-        assertNotEquals(new WorkspaceActor("tenant-a", "alice@example.com "),
-                actor);
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", "alice@example.com "));
         assertFalse(actor.equals(null));
         assertFalse(actor.equals("tenant-a"));
     }
@@ -41,10 +41,13 @@ class WorkspaceActorTest {
                 .getActorId().length());
         assertThrows(IllegalArgumentException.class,
                 () -> new WorkspaceActor("tenant-a", clef.repeat(37)));
-        // Spaces count and are kept.
-        assertEquals(" ", new WorkspaceActor("tenant-a", " ").getActorId());
-        assertEquals(36, new WorkspaceActor("tenant-a", "x".repeat(35) + " ")
-                .getActorId().length());
+        // Interior spaces count and are kept; trailing spaces are refused
+        // so a PAD SPACE collation cannot fold two actors together.
+        assertEquals("a b", new WorkspaceActor("tenant-a", "a b").getActorId());
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", " "));
+        assertThrows(IllegalArgumentException.class,
+                () -> new WorkspaceActor("tenant-a", "x".repeat(35) + " "));
         assertThrows(IllegalArgumentException.class,
                 () -> new WorkspaceActor("tenant-a", "x".repeat(36) + " "));
     }

@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -78,7 +77,6 @@ public class ManagedSchemaSessionStoreTest {
     @Test
     void executionFactsReadNullableUnsignedWorkspaceGenerations() {
         assertThat(store.sessionsWithExecutionRegistryFacts(tenant, List.of(session))).isEmpty();
-        byte[] actor = ManagedWorkspaceRegistry.actorKey(tenant, "actor");
         jdbc.update(
                 "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id,"
                         + " display_name, config_ref, policy_ref, state) VALUES"
@@ -87,7 +85,7 @@ public class ManagedSchemaSessionStoreTest {
         jdbc.update(
                 "INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES"
                         + " (?, 'workspace', ?, 'OPERATOR')",
-                tenant, actor);
+                tenant, "actor");
         jdbc.update(
                 "UPDATE ma_session SET workspace_id = 'workspace', workspace_generation = 7,"
                         + " workspace_storage_id = 'storage', cwd_relative = '',"

@@ -887,7 +887,8 @@ final class AgentExecutionOperations {
                         + " workspace_id = ? AND actor_id = ? AND role IN"
                         + " ('READER', 'OPERATOR', 'OWNER')",
                 String.class, session.tenantId(),
-                session.workspace().getWorkspaceId(), operation.actorKey());
+                session.workspace().getWorkspaceId(),
+                new String(operation.actorKey(), StandardCharsets.UTF_8));
         return !roles.isEmpty() && WorkspaceAccess.valueOf(roles.getFirst())
                 .atLeast(WorkspaceAccess.OPERATOR);
     }
