@@ -47,12 +47,14 @@ function isWindowsAbsolutePath(p: string): boolean {
 
 /**
  * Escapes the glob metacharacters picomatch would read in a literal path, so a
- * directory named `Photos [2024]` or `share[1]` matches only itself. Each one
- * goes in a one-character class: `resolvePathPattern` turns backslashes into
- * separators, so a backslash escape would not survive.
+ * directory named `Photos [2024]`, `share[1]` or `a|b` matches only itself.
+ * `|` matters most: a trailing one leaves an empty alternation branch that
+ * matches every path. Each character goes in a one-character class, because
+ * `resolvePathPattern` turns backslashes into separators and a backslash
+ * escape would not survive.
  */
 function escapeGlobLiteral(p: string): string {
-  return p.replace(/[[\]?*{}()!+@]/g, (c) => `[${c}]`);
+  return p.replace(/[[\]?*{}()!+@|"]/g, (c) => `[${c}]`);
 }
 
 /**
@@ -773,15 +775,18 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         //    `///server/share/**` resolves back to `//server/share/**`.
         //  - Any other absolute path gets the `//` prefix. On POSIX `//tmp`
         //    is just `/tmp`.
-        // Trailing separators (`dirname` keeps one on a share root) are
-        // dropped so the rule doesn't end in `//**`; a loop, not a regex, so
-        // a long run of separators stays linear. Glob metacharacters in the
-        // directory name are escaped so the rule covers only that directory.
+        // Doubled separators inside the path are collapsed, and trailing
+        // ones (`dirname` keeps one on a share root) are dropped, so the rule
+        // matches the paths the tools produce and doesn't end in `//**`.
+        // Glob metacharacters in the directory name are escaped so the rule
+        // covers only that directory.
         const posixDir = toPosixPath(dirPath);
         let lead = 0;
         while (posixDir[lead] === '/') lead++;
-        let body = posixDir.slice(lead);
-        while (body.endsWith('/')) body = body.slice(0, -1);
+        let body = posixDir
+          .slice(lead)
+          .replace(/\/{2,}/g, '/')
+          .replace(/\/$/, '');
         const isDrive = /^[A-Za-z]:(\/|$)/.test(body);
         if (isDrive && body.length === 2) body = `${body}/`;
         const isUnc =
@@ -868,6 +873,8 @@ function cleanPathSpecifier(specifier: string): string {
   let cleaned = specifier;
   // Remove trailing glob patterns like /** or /*
   cleaned = cleaned.replace(/\/\*\*$/, '/').replace(/\/\*$/, '/');
+  // Show escaped glob characters (`[[]`, `[|]`) as the plain character
+  cleaned = cleaned.replace(/\[(.)\]/g, '$1');
   // Convert rule grammar `//absolute` → `/absolute`
   if (cleaned.startsWith('//')) {
     cleaned = cleaned.substring(1);

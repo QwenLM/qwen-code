@@ -3136,6 +3136,56 @@ describe('buildPermissionRules', () => {
       );
 
       it.each([
+        ['a forward-slash drive directory', '//D:/proj', 'D:\\proj\\a.txt'],
+        [
+          'a doubled trailing separator',
+          '//server/share//',
+          '//server/share/a.txt',
+        ],
+        [
+          'a doubled interior separator',
+          'D:\\proj\\\\docs',
+          'D:\\proj\\docs\\a.txt',
+        ],
+      ] as const)('on win32, %s matches files in it', async (_l, dir, file) => {
+        setPlatform('win32');
+        expect(readsUnder(dir)(file)).toBe(true);
+      });
+
+      it('on win32, a forward-slash drive directory keeps the drive rule', async () => {
+        setPlatform('win32');
+        expect(build({ toolName: 'glob', filePath: '//D:/proj' })).toEqual([
+          'Read(//D:/proj/**)',
+        ]);
+      });
+
+      it('on win32, a single leading slash is not a UNC share', async () => {
+        setPlatform('win32');
+        const rules = build({
+          toolName: 'glob',
+          filePath: '/server/share/proj',
+        });
+        expect(rules).toEqual(['Read(//server/share/proj/**)']);
+      });
+
+      it('scopes read_file on a UNC file to its share directory (win32)', async () => {
+        setPlatform('win32');
+        const rules = build({
+          toolName: 'read_file',
+          filePath: '//server/share/proj/a.txt',
+        });
+        expect(rules).toEqual(['Read(///server/share/proj/**)']);
+        const parsed = parseRule(rules[0]!);
+        const ctx = { projectRoot: 'C:\\work', cwd: 'C:\\work' };
+        expect(
+          matchesPath(parsed, 'read_file', '//server/share/proj/b.txt', ctx),
+        ).toBe(true);
+        expect(
+          matchesPath(parsed, 'read_file', '//server/share/other/b.txt', ctx),
+        ).toBe(false);
+      });
+
+      it.each([
         [
           '\\\\server\\share[1]\\proj',
           '//server/share[1]/proj/a.txt',
@@ -3150,6 +3200,10 @@ describe('buildPermissionRules', () => {
         ['/data/q?', '/data/q?/x.txt', '/data/qz/x.txt'],
         ['/data/s*', '/data/s*/x.txt', '/data/sz/x.txt'],
         ['/data/+(x)', '/data/+(x)/f.txt', '/data/x/f.txt'],
+        ['/d/a|', '/d/a|/f.txt', '/etc/passwd'],
+        ['/d/a|b', '/d/a|b/f.txt', '/d/a/f.txt'],
+        ['/d/|x', '/d/|x/f.txt', '/d/x/f.txt'],
+        ['/d/"x"', '/d/"x"/f.txt', '/d/x/f.txt'],
       ] as const)(
         'treats glob characters in %s as literal',
         async (dir, inside, sibling) => {
@@ -3321,6 +3375,12 @@ describe('buildHumanReadableRuleLabel', () => {
 
   it('returns empty string for empty rules array', () => {
     expect(buildHumanReadableRuleLabel([])).toBe('');
+  });
+
+  it('shows escaped glob characters in a path as written', () => {
+    expect(label('Read(///server/share[[]1[]]/Photos [[]2024[]]/**)')).toBe(
+      'read files in //server/share[1]/Photos [2024]/',
+    );
   });
 
   it.each([
