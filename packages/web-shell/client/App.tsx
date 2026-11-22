@@ -57,6 +57,7 @@ import {
   parseWebPreviewUrl,
   type WebPreviewState,
 } from './components/preview/web-preview';
+import { visualViewportBottomInset } from './utils/visualViewportInset';
 import {
   forwardRef,
   memo,
@@ -4048,7 +4049,7 @@ export function App({
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -4074,15 +4075,12 @@ export function App({
       // a touchmove starting on the backdrop must still be blocked, otherwise
       // iOS Safari scrolls the page behind the open drawer.
       const el = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
-      // [data-web-shell-dialog] joins this allowlist because DialogShell
-      // portals outside the drawer subtree but stacks above it — without the
-      // exemption, a dialog opened over the drawer loses all touch scrolling
-      // on a phone. The exemption covers DialogShell only, not other
-      // portaled overlays.
+      // Dialogs and dropdown menus portal outside the drawer subtree but stack
+      // above it. They must keep native touch scrolling over the drawer.
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual], [data-slot="dropdown-menu-content"], [data-web-shell-session-group-menu]',
         )
       ) {
         return;
@@ -11408,6 +11406,43 @@ export function App({
   // when an embedded container disagrees with the viewport.
   const compactShell =
     sidebarLayoutWidth !== undefined && sidebarLayoutWidth <= 760;
+  useLayoutEffect(() => {
+    const root = appRootRef.current;
+    const viewport = window.visualViewport;
+    if (!root) return;
+    if (!compactShell || !viewport) {
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
+      return;
+    }
+
+    const updateInset = () => {
+      const inset = visualViewportBottomInset(
+        root.getBoundingClientRect(),
+        viewport,
+      );
+      root.style.setProperty(
+        '--web-shell-visual-viewport-inset-bottom',
+        `${inset}px`,
+      );
+      // The compact welcome layout only anchors its group to the bottom of the
+      // reserved box while the keyboard actually occludes the viewport, so the
+      // unoccluded welcome state keeps its vertical centring.
+      root.toggleAttribute('data-visual-viewport-occluded', inset > 0);
+    };
+    updateInset();
+    viewport.addEventListener('resize', updateInset);
+    // Safari changes offsetTop while scrolling or revealing browser chrome.
+    viewport.addEventListener('scroll', updateInset);
+    window.addEventListener('resize', updateInset);
+    return () => {
+      viewport.removeEventListener('resize', updateInset);
+      viewport.removeEventListener('scroll', updateInset);
+      window.removeEventListener('resize', updateInset);
+      root.style.removeProperty('--web-shell-visual-viewport-inset-bottom');
+      root.removeAttribute('data-visual-viewport-occluded');
+    };
+  }, [compactShell]);
   const channelSidebarEnabled =
     sidebarOptions.enabled &&
     projectFeaturesAvailable &&
