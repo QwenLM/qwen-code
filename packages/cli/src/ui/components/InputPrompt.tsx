@@ -336,15 +336,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   useLayoutEffect(() => {
     const ids = new Map<number, Set<number>>();
-    for (const placeholder of pendingPastes.keys()) {
+    const reserve = (placeholder: string) => {
       const parsed = parsePlaceholder(placeholder);
-      if (!parsed) continue;
+      if (!parsed) return;
       const active = ids.get(parsed.charCount) ?? new Set<number>();
       active.add(parsed.id);
       ids.set(parsed.charCount, active);
+    };
+    for (const placeholder of pendingPastes.keys()) {
+      reserve(placeholder);
+    }
+    // A placeholder can be visible without a map entry (map-less recall).
+    for (const match of buffer.text.matchAll(
+      /\[Pasted Content \d+ chars\](?: #\d+)?/g,
+    )) {
+      reserve(match[0]);
     }
     activePlaceholderIds.current = ids;
-  }, [pendingPastes, parsePlaceholder]);
+  }, [pendingPastes, parsePlaceholder, buffer.text]);
 
   // Free a placeholder ID when deleted so it can be reused
   const freePlaceholderId = useCallback((charCount: number, id: number) => {

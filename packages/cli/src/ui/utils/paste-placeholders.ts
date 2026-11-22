@@ -26,7 +26,7 @@ function placeholderPattern(pastes: ReadonlyMap<string, string>): RegExp {
     .map((placeholderValue) =>
       placeholderValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
     );
-  return new RegExp(escapedPlaceholders.join('|'), 'g');
+  return new RegExp(`(?:${escapedPlaceholders.join('|')})(?! #\\d+)`, 'g');
 }
 
 /**
@@ -97,13 +97,22 @@ export function restorePasteDraft(
   text: string,
   restored: ReadonlyMap<string, string>,
   pending: ReadonlyMap<string, string>,
+  occupiedText = '',
 ): { text: string; pasteExpansions: Map<string, string> } {
   const pasteExpansions = new Map(pending);
   const reserved = new Set([...pending.keys(), ...restored.keys()]);
+  const visiblePattern = /\[Pasted Content \d+ chars\](?: #\d+)?/g;
+  const occupied = new Set(occupiedText.match(visiblePattern) ?? []);
+  for (const match of `${text}\n${occupiedText}`.matchAll(visiblePattern)) {
+    reserved.add(match[0]);
+  }
   const renamed = new Map<string, string>();
   for (const [placeholder, body] of restored) {
     let target = placeholder;
-    if (pasteExpansions.has(target) && pasteExpansions.get(target) !== body) {
+    if (
+      (pasteExpansions.has(target) || occupied.has(target)) &&
+      pasteExpansions.get(target) !== body
+    ) {
       const base = placeholder.replace(/ #\d+$/, '');
       let id = 2;
       while (reserved.has(`${base} #${id}`)) id++;
@@ -178,7 +187,7 @@ export function framePasteExpansion(
     placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
   );
   const placeholderRegex = new RegExp(
-    `[ \\t]*(?:${escapedPlaceholders.join('|')})[ \\t]*`,
+    `[ \\t]*(?:${escapedPlaceholders.join('|')})(?! #\\d+)[ \\t]*`,
     'g',
   );
   let matched = 0;

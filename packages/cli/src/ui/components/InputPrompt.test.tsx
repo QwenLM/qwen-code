@@ -461,10 +461,6 @@ describe('InputPrompt', () => {
     // <clipboard-paste> framing must only ever exist at submit time — never
     // persisted into something the editor later shows as user-typed text.
     const largeContent = 'x'.repeat(1001);
-    mockBuffer.text = '[Pasted Content 1001 chars]';
-    mockBuffer.lines = [mockBuffer.text];
-    mockBuffer.cursor = [0, mockBuffer.text.length];
-
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
@@ -472,6 +468,9 @@ describe('InputPrompt', () => {
       stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
     });
     await wait();
+    mockBuffer.text = '[Pasted Content 1001 chars]';
+    mockBuffer.lines = [mockBuffer.text];
+    mockBuffer.cursor = [0, mockBuffer.text.length];
 
     act(() => {
       stdin.write('\x13');
@@ -626,70 +625,85 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('submitting a recalled map-less item does not expand the previous paste', async () => {
-    const placeholder = '[Pasted Content 1200 chars]';
-    const body = 'B'.repeat(1200);
-    const onPendingPastesChange = vi.fn();
-    mockedUseUIState.mockReturnValue({
-      isFeedbackDialogOpen: false,
-      messageQueue: [],
-      pendingLlmHistoryItems: [],
-      history: [
-        {
-          id: 1,
-          type: 'user',
-          text: placeholder,
-          recallText: body,
-          pasteExpansions: new Map([[placeholder, body]]),
-        },
-        {
-          id: 2,
-          type: 'user',
-          text: placeholder,
-          recallText: placeholder,
-          pasteExpansions: JSON.parse(
-            JSON.stringify(new Map([[placeholder, body]])),
-          ),
-        },
-      ],
-    } as unknown as ReturnType<typeof useUIState>);
+  it.each([
+    { label: 'base', recalledSuffix: '', nextSuffix: ' #2' },
+    { label: 'suffixed', recalledSuffix: ' #2', nextSuffix: '' },
+  ])(
+    'a recalled map-less $label placeholder stays inert across a later same-size paste',
+    async ({ recalledSuffix, nextSuffix }) => {
+      const placeholder = `[Pasted Content 1200 chars]${recalledSuffix}`;
+      const body = 'B'.repeat(1200);
+      const onPendingPastesChange = vi.fn();
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+        history: [
+          {
+            id: 1,
+            type: 'user',
+            text: placeholder,
+            recallText: body,
+            pasteExpansions: new Map([[placeholder, body]]),
+          },
+          {
+            id: 2,
+            type: 'user',
+            text: placeholder,
+            recallText: placeholder,
+            pasteExpansions: JSON.parse(
+              JSON.stringify(new Map([[placeholder, body]])),
+            ),
+          },
+        ],
+      } as unknown as ReturnType<typeof useUIState>);
 
-    function StatefulPrompt() {
-      const [pastes, setPastes] = useState<Map<string, string>>(new Map());
-      return (
-        <InputPrompt
-          {...props}
-          pendingPastes={pastes}
-          onPendingPastesChange={(next) => {
-            onPendingPastesChange(next);
-            setPastes(next);
-          }}
-        />
+      function StatefulPrompt() {
+        const [pastes, setPastes] = useState<Map<string, string>>(new Map());
+        return (
+          <InputPrompt
+            {...props}
+            pendingPastes={pastes}
+            onPendingPastesChange={(next) => {
+              onPendingPastesChange(next);
+              setPastes(next);
+            }}
+          />
+        );
+      }
+
+      const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
+      const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!historyArgs) throw new Error('useInputHistory was not called');
+      act(() => historyArgs.onChange(body));
+      await flush();
+      const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+      if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+      act(() => secondHistoryArgs.onChange(placeholder));
+      await flush();
+      expect(mockBuffer.text).toBe(placeholder);
+
+      const newBody = 'N'.repeat(1200);
+      act(() => stdin.write(`\x1b[200~${newBody}\x1b[201~`));
+      await flush();
+      const newPlaceholder = `[Pasted Content 1200 chars]${nextSuffix}`;
+      expect(props.buffer.insert).toHaveBeenCalledWith(newPlaceholder, {
+        paste: false,
+      });
+      props.buffer.setText(`${placeholder}${newPlaceholder}`);
+
+      act(() => stdin.write('\r'));
+      await flush();
+      expect(props.onSubmit).toHaveBeenCalledWith(
+        `${placeholder}\n${wrapClipboardPaste(newBody)}\n${CLIPBOARD_PASTE_FRAMING}`,
+        expect.objectContaining({
+          humanInput: { text: `${placeholder}${newBody}` },
+          pasteExpansions: new Map([[newPlaceholder, newBody]]),
+        }),
       );
-    }
-
-    const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
-    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
-    if (!historyArgs) throw new Error('useInputHistory was not called');
-    act(() => historyArgs.onChange(body));
-    await flush();
-    const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
-    if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
-    act(() => secondHistoryArgs.onChange(placeholder));
-    await flush();
-    expect(mockBuffer.text).toBe(placeholder);
-
-    act(() => stdin.write('\r'));
-    await flush();
-    expect(props.onSubmit).toHaveBeenCalledWith(
-      placeholder,
-      expect.objectContaining({ humanInput: { text: placeholder } }),
-    );
-    expect(props.onSubmit.mock.calls.at(-1)?.[1]).not.toHaveProperty(
-      'pasteExpansions',
-    );
-    unmount();
-  });
+      unmount();
+    },
+  );
 
   it('a map-less recall keeps the draft map restorable on return', async () => {
     const placeholder = '[Pasted Content 1200 chars]';
@@ -6558,10 +6572,6 @@ describe('InputPrompt', () => {
 
     it('should expand placeholder to full content on submit', async () => {
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6574,6 +6584,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);
@@ -6718,10 +6731,6 @@ describe('InputPrompt', () => {
     it('should write expanded placeholder content to shell history', async () => {
       props.shellModeActive = true;
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6733,6 +6742,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);
@@ -6763,10 +6775,6 @@ describe('InputPrompt', () => {
     it('frames a shell-mode paste when shell mode is exited before submit', async () => {
       props.shellModeActive = true;
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount, rerender } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -6778,6 +6786,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);
@@ -7156,10 +7167,6 @@ describe('InputPrompt', () => {
 
     it('keeps a normal-mode paste raw when shell mode is active at submit time', async () => {
       const largeContent = 'x'.repeat(1001);
-      mockBuffer.text = '[Pasted Content 1001 chars]';
-      mockBuffer.lines = [mockBuffer.text];
-      mockBuffer.cursor = [0, mockBuffer.text.length];
-
       const { stdin, unmount, rerender } = renderWithProviders(
         <InputPrompt {...props} />,
       );
@@ -7171,6 +7178,9 @@ describe('InputPrompt', () => {
           stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
         });
         await flush();
+        mockBuffer.text = '[Pasted Content 1001 chars]';
+        mockBuffer.lines = [mockBuffer.text];
+        mockBuffer.cursor = [0, mockBuffer.text.length];
 
         // Advance the protection timer without sleeping in real time.
         await advanceTimers(500);

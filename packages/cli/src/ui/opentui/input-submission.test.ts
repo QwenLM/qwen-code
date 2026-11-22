@@ -59,6 +59,23 @@ it.each([false, true])(
   },
 );
 
+it('keeps an earlier map-less placeholder inert when a later paste reuses its base', () => {
+  const base = '[Pasted Content 1200 chars]';
+  const body = 'N'.repeat(1200);
+  const restored = restoreInputSubmissions([
+    { text: base, displayText: base },
+    {
+      text: body,
+      displayText: base,
+      pasteExpansions: new Map([[base, body]]),
+    },
+  ]);
+  expect(restored.text).toBe(`${base}\n\n${base} #2`);
+  expect(restored.restoredDraft?.pasteExpansions).toEqual(
+    new Map([[`${base} #2`, body]]),
+  );
+});
+
 it.each(['', ' NOT EXACT'])(
   'does not unframe an untrusted lookalike or mark its text human: suffix=%s',
   (suffix) => {
