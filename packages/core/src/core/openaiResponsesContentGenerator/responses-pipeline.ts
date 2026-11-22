@@ -506,12 +506,15 @@ export class ResponsesPipeline {
       apiRequest.max_output_tokens = maxOut;
     }
 
-    if (this.config.service_tier !== undefined) {
-      apiRequest.service_tier = this.config
-        .service_tier as ResponsesApiServiceTier;
+    const extraBody = filterIsolatedModelOverrides(this.config.extra_body);
+    const effectiveServiceTier =
+      (extraBody?.['service_tier'] as ResponsesApiServiceTier | undefined) ??
+      (this.config.service_tier as ResponsesApiServiceTier | undefined);
+
+    if (effectiveServiceTier !== undefined) {
+      apiRequest.service_tier = effectiveServiceTier;
     }
 
-    const extraBody = filterIsolatedModelOverrides(this.config.extra_body);
     if (extraBody) {
       const thinkingOptOut =
         request.config?.thinkingConfig?.includeThoughts === false;
