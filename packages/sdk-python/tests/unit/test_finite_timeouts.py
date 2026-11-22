@@ -5,7 +5,7 @@ import threading
 
 import pytest
 from qwen_code_sdk import query
-from qwen_code_sdk.types import TimeoutOptions
+from qwen_code_sdk.types import _SYNC_TIMEOUT_MARGIN, TimeoutOptions
 
 
 @pytest.mark.parametrize("name", ["can_use_tool", "control_request", "stream_close"])
@@ -28,14 +28,18 @@ def test_timeout_object_rejects_nonnumeric_deadlines(value: object) -> None:
         TimeoutOptions(control_request=value)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("value", [0.001, 1, 60.0, threading.TIMEOUT_MAX - 5.0])
+@pytest.mark.parametrize(
+    "value", [0.001, 1, 60.0, threading.TIMEOUT_MAX - _SYNC_TIMEOUT_MARGIN]
+)
 def test_finite_positive_timeouts_remain_valid(value: float) -> None:
     options = TimeoutOptions(control_request=value)
     assert options.control_request == value
     assert TimeoutOptions.from_mapping({"control_request": value}) == options
 
 
-@pytest.mark.parametrize("value", [10**10, threading.TIMEOUT_MAX - 4.0])
+@pytest.mark.parametrize(
+    "value", [10**10, threading.TIMEOUT_MAX - _SYNC_TIMEOUT_MARGIN + 1.0]
+)
 @pytest.mark.parametrize("via_mapping", [False, True])
 def test_control_timeout_rejects_unrepresentable_sync_wait(
     value: float, via_mapping: bool

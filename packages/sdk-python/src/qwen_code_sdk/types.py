@@ -111,6 +111,8 @@ class TimeoutOptions:
     def from_mapping(cls, value: Mapping[str, Any] | None) -> TimeoutOptions:
         if value is None:
             return cls()
+        if not isinstance(value, Mapping):
+            raise TypeError("timeout must be a mapping")
 
         return cls(
             can_use_tool=value.get("can_use_tool", 60.0),

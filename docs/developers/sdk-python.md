@@ -455,9 +455,12 @@ delegates the selection of the latest session to the CLI.
 
 ## Error Model
 
-- `ValidationError`: invalid options, invalid UUIDs, unsupported combinations
-- `TypeError`: an option value has the wrong Python type (for a timeout, a value
-  that is not an `int` or `float`, or is a `bool`)
+- `ValidationError`: invalid options, invalid UUIDs, unsupported combinations,
+  including a rejected field such as `max_session_turns` on a directly
+  constructed `QueryOptions`
+- `TypeError`: wrong types while parsing an options mapping or constructing
+  `TimeoutOptions` (for example, a numeric `timeout` container, or a timeout value that
+  is not an `int` or `float`, or is a `bool`)
 - `ValueError`: a timeout value is non-positive, non-finite, or out of range
 - `ControlRequestTimeoutError`: initialize, interrupt, or other control request
   timed out
