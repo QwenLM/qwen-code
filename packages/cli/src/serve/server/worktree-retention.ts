@@ -282,7 +282,7 @@ async function discardPreservedAttemptSnapshot(
   const [hiddenIndex, pending, populatedGitlink] = await Promise.all([
     hasHiddenIndexBit(current.lockKey),
     worktreeHasPendingGitOperation(current.lockKey),
-    worktreeHasPopulatedGitlink(current.lockKey, selected.meta.headCommit),
+    worktreeHasPopulatedGitlink(current.lockKey),
   ]);
   if (hiddenIndex || pending || populatedGitlink) return;
   if (
