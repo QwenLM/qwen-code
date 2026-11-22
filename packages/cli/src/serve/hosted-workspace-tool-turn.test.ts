@@ -3474,27 +3474,48 @@ it('offers glob under the unified Shell, file-search and read profiles', async (
   ]);
 });
 
-it('refuses an external files Skill lane before warming the Broker', () => {
+it('admits the skill catalog on the external files lane as turn content', async () => {
   broker.warm.mockClear();
-  expect(
-    () =>
-      new HostedWorkspaceToolTurn(
-        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-        session,
-        harness,
-        'prompt',
-        commit,
-        messageFitsInline,
-        undefined,
-        undefined,
-        undefined,
-        {
-          profile: 'hosted-workspace-external-files/1',
-          skills: publishedSkills(),
-        },
-      ),
-  ).toThrow('External files profile does not support optional lanes.');
-  expect(broker.warm).not.toHaveBeenCalled();
+  const skills = publishedSkills();
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    {
+      profile: 'hosted-workspace-external-files/1',
+      skills,
+    },
+  );
+  const declared = await turn.declarations(new AbortController().signal);
+  expect(declared.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+    'glob',
+    'skill',
+  ]);
+  expect(declared).toContainEqual(skills.declaration());
+  // The catalog is served from the pinned definition, so a Skill call resolves
+  // without touching the Broker; only the declaration makes it reachable.
+  const call = { ...calls[0], name: 'skill', args: { skill: 'review' } };
+  const responses = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: 'skill', args: call.args } }],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['output']).toBe(
+    skills.response(call.args),
+  );
+  expect(broker.acquire).not.toHaveBeenCalled();
+  expect(broker.prepare).not.toHaveBeenCalled();
+  expect(broker.execute).not.toHaveBeenCalled();
 });
 
 it('declares the external Shell tool set: file tools, foreground Shell and glob', async () => {
@@ -3530,7 +3551,7 @@ it('declares the external Shell tool set: file tools, foreground Shell and glob'
   expect(schema.properties?.['is_background']).toBeUndefined();
 });
 
-it('refuses an external Shell Turn without its publication or with another lane', () => {
+it('refuses an external Shell Turn without its publication or with another lane', async () => {
   const build = (
     publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
     extras?: { skills?: ReturnType<typeof publishedSkills> },
@@ -3552,14 +3573,12 @@ it('refuses an external Shell Turn without its publication or with another lane'
   expect(() => build()).toThrow(
     'External Shell profile requires a publication and no other lanes.',
   );
-  expect(() =>
-    build(
-      { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
-      { skills: publishedSkills() },
-    ),
-  ).toThrow(
-    'External Shell profile requires a publication and no other lanes.',
+  const withSkills = build(
+    { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
+    { skills: publishedSkills() },
   );
+  const declared = await withSkills.declarations(new AbortController().signal);
+  expect(declared.map((tool) => tool.name)).toContain('skill');
 });
 
 it('dispatches exactly the external file tools with ordinary capture controls', async () => {
