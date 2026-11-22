@@ -233,7 +233,7 @@ requirement. The shapes:
   beside the gate's `boundary-gate.json` (which records the observed marker).
 - On an attested VM or a waived host: select `--execution vm` or
   `--execution host` and give prepare exactly one approval path, plus
-  `--round <n>`, `--reason <text>` and `--context-out <fresh host snapshot>`.
+  `--round <r>`, `--reason <text>` and `--context-out <fresh host snapshot>`.
   VM also needs `--attestation 'nothing mounted, no host credentials'`.
   A fresh **local-trust** round without a marker uses round 1; each new
   invocation includes the explicit trust flag. A comment approval must use
@@ -294,7 +294,12 @@ requirement. The shapes:
   markers, an approval for another PR or a previous registration, and a
   synthetic/completed marker fail closed. Register completion with the
   existing `--complete` form only after publication succeeds. Reserve
-  `--release` for abandoning a failed setup, not for changing modes.
+  `--release` for abandoning a failed setup, not for changing modes. When the
+  comment path used an explicit `--state-root`, pass that **identical trusted
+  root** to every prepare retry and to the registration's `--complete` or
+  `--release`; omitting it selects the helper's default trusted main worktree
+  instead. An unattended container retains the old default and needs neither
+  a comment marker nor this approval path.
 
 - Prepare writes the resulting `executionApproval` into the host-held
   context and the same object to artifact `boundary.json`: `mode` is `vm` or

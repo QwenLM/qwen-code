@@ -37,7 +37,7 @@ coordinate path 新增以下参数：
 | `--trust-pr-head`        | 对维护者本人或同仓 PR head 的显式本地信任；与 `--approval` 互斥。                                                 |
 | `--approval <permalink>` | 用于他人 fork 的维护者 issue comment 永久链接；替代 `--trust-pr-head`。                                           |
 | `--state-root <dir>`     | 存放批准所在 head/round/registrationNonce in-flight 注册的可信绝对目录，必须位于 PR 克隆之外；`--approval` 必填。 |
-| `--round <n>`            | 正整数轮次号；`vm` 和 `host` 必填。                                                                               |
+| `--round <r>`            | 正整数轮次号；`vm` 和 `host` 必填。                                                                               |
 | `--reason <text>`        | 本轮为何在可观测容器之外运行；`vm` 和 `host` 必填。                                                               |
 | `--attestation <text>`   | 运营方对 VM 确认了什么；仅 `vm` 必填。                                                                            |
 
@@ -81,13 +81,15 @@ VM 的 `mode` 为 `vm`。prepare 在创建产物目录前，通过经过认证�
 
 记录的 `by` 取评论作者 login。上一轮的标记、碰巧引用某个 head 的普通评论、以及其他 PR 的批准都不能满足本契约。本地信任与评论互斥，调用方不能组合两份可能分歧的批准声明。
 
+所有 GitHub、Git 调用与 review-state 拉取完成后，评论批准进入与 start、release、complete 相同的协作式 watch-state 锁。prepare 在锁内重新读取注册，复核 repo、PR、规范化 head/round 和精确 `registrationNonce`，然后写宿主 context 与产物声明。因此评论响应暂停期间发生 release 加新 start 时，旧 prepare 必须 exit 3 且不写批准字节。锁竞争同样 exit 3，绝不把旧批准当成仍然有效；不变的 in-flight 注册重试保留 nonce，可以正常签发。实际 release 后重新 start 会轮换 nonce，需要新评论；无 nonce 的 legacy 条目仍可由现有 complete/release 读取，但必须释放并重启后才能由新的评论批准授权执行。
+
 ## 记录与发布
 
 prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效时，把 `executionApproval` 对象加入 `--context-out` 原本就写出的同一份宿主 context 字节。对象包含 `mode`、`source`、`by`、`basis`、`reason`、可选 `attestation`、`head`、`round` 和认证所得权限。`source` 为 `local-trust` 或 `comment`；`basis` 对本地信任为 `own-pr` 或 `same-repository`，对评论为 `maintainer-comment`。本地决定没有 `approval` 永久链接；评论决定增加 `approval`、观测到的评论 id 和正文 sha256，以及它的 `registrationNonce`。声明的 `mode` 沿用现有词汇：`vm` 或 `waived`。
 
-产物中的 `boundary.json` 携带同一对象。现有检查器规则忽略声明中的额外字段，所以声明 schema 不分叉。prepare 打印的 context sha256 同时覆盖批准字节。
+产物中的 `boundary.json` 携带同一对象。发布使用与宿主 `executionApproval` 的深度严格对账，不是忽略额外字段的子集检查：声名字段键必须完全一致，评论批准还必须包括同一个 `registrationNonce`。prepare 打印的 context sha256 同时覆盖批准字节。
 
-`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。
+`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。产物 `context.json` 同样必须不存在或是单链接普通文件，防止 symlink/hardlink 覆盖原物。`--context-out` containment 使用规范化 PR clone root 和父目录存在后的完整规范化父路径；不存在的新 leaf 不直接传给 `realpath`，真实父目录重定向回 clone 的 alias 在写批准字节前以 exit 3 拒绝。
 
 容器与 CI lane 行为不变。缺少宿主记录的旧宿主或 VM 产物会被有意拒绝，不再呈现为已经预检批准的轮次。
 
@@ -104,7 +106,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 → 只有相关边界/批准门禁通过后才执行 PR 代码
 ```
 
-等待批准不移到注册之前：watch cursor 已经交付 head，等待中被杀也必须留下可恢复的 in-flight 标记。从 container 切换到 host/VM 时，同一注册贯穿 prepare、电池、发布和 `--complete`，不得仅为切换模式而释放。注册也先于本地信任，但后者的 prepare 不需要公开标记或 `--state-root`。
+等待批准不移到注册之前：watch cursor 已经交付 head，等待中被杀也必须留下可恢复的 in-flight 标记。从 container 切换到 host/VM 时，同一注册贯穿 prepare、电池、发布和 `--complete`，不得仅为切换模式而释放。注册也先于本地信任，但后者的 prepare 不需要公开标记或 `--state-root`。评论路径一旦使用显式 state root，后续每次 prepare 重试以及该注册的 `--complete`/`--release` 都必须沿用同一个可信 root；默认 container 路径仍不需要评论标记。
 
 新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。in-flight 状态唯一的 schema 新增是 `registrationNonce`；没有平行批准文件或新的 next-round 命令。瞬时 prepare 失败保留注册和 nonce，所以其重试可以沿用匹配评论。实际释放后再 `--start` 总是分配新 nonce：即使 head/round 相同，也需要新的评论标记。非评论容器重试或后续轮次只需匹配的 head/round 注册，不需要评论批准。
 

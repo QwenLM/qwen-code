@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
@@ -141,6 +141,11 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
     permission,
     "import { existsSync, readFileSync } from 'node:fs';\nconst match = /\\/collaborators\\/([^/]+)\\/permission$/.exec(process.argv[3]);\nconst users = existsSync(process.env.FAKE_GH_PERMISSIONS) ? JSON.parse(readFileSync(process.env.FAKE_GH_PERMISSIONS, 'utf8')) : {};\nconst login = decodeURIComponent(match?.[1] ?? '');\nif (!(login in users)) { process.stderr.write(`unexpected permission lookup for ${login}\\n`); process.exit(1); }\nprocess.stdout.write(JSON.stringify(users[login]));\n",
   );
+  const comment = join(dir, 'comment.mjs');
+  writeFileSync(
+    comment,
+    "import { appendFileSync, existsSync, readFileSync } from 'node:fs';\nconst gate = process.env.FAKE_GH_COMMENT_GATE;\nif (gate) {\n  appendFileSync(`${gate}.paused`, '');\n  const deadline = Date.now() + 15000;\n  while (!existsSync(`${gate}.release`)) {\n    if (Date.now() > deadline) { process.stderr.write('comment gate timeout\\n'); process.exit(2); }\n    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);\n  }\n}\nif (!existsSync(process.env.FAKE_GH_COMMENT)) { process.stderr.write('HTTP 502: Bad Gateway\\n'); process.exit(1); }\nprocess.stdout.write(readFileSync(process.env.FAKE_GH_COMMENT, 'utf8'));\n",
+  );
   writeFileSync(
     gh,
     [
@@ -152,7 +157,7 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
       '  if [ "$2" = graphql ] && [ -f "$FAKE_GH_REVIEW" ]; then exec cat "$FAKE_GH_REVIEW"; fi',
       '  case "$2" in',
       '    */issues/comments/*)',
-      '      [ -f "$FAKE_GH_COMMENT" ] && exec cat "$FAKE_GH_COMMENT" ;;',
+      '      exec node "$FAKE_GH_COMMENT_SERVER" "$@" ;;',
       '    */collaborators/*/permission) exec node "$FAKE_GH_PERMISSION" "$@" ;;',
       '  esac',
       '  echo "HTTP 502: Bad Gateway" >&2',
@@ -172,6 +177,7 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
     FAKE_GH_USER: paths.user,
     FAKE_GH_PERMISSIONS: paths.permissions,
     FAKE_GH_COMMENT: paths.comment,
+    FAKE_GH_COMMENT_SERVER: comment,
     FAKE_GH_LOG_ARGS: logger,
     FAKE_GH_PR_VIEW: prView,
     FAKE_GH_PERMISSION: permission,
@@ -817,6 +823,34 @@ describe('parseArgs', () => {
         [...hostArgs, '--attestation', 'not valid on host'],
         /--attestation applies only to --execution vm/,
       ],
+      [
+        hostArgs.map((arg, index) =>
+          hostArgs[index - 1] === '--round' ? '0' : arg,
+        ),
+        /--round needs a positive integer/,
+      ],
+      [
+        [
+          ...without(hostArgs, '--trust-pr-head'),
+          '--approval',
+          'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1',
+          '--state-root',
+          'relative-state',
+        ],
+        /--state-root needs an absolute trusted directory/,
+      ],
+      [
+        [...hostArgs, '--state-root', '/tmp/trusted-state'],
+        /--state-root applies only to --approval/,
+      ],
+      [
+        [
+          ...without(hostArgs, '--trust-pr-head'),
+          '--approval',
+          'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1',
+        ],
+        /--approval needs --state-root/,
+      ],
     ]) {
       expect(parseArgs(args).error).toMatch(expected);
     }
@@ -1420,6 +1454,129 @@ describe.skipIf(process.platform === 'win32')(
       expect(readdirSync(join(dir, 'tmp'))).toEqual(before);
     });
 
+    it('refuses a paused approval after release and restart rotates its registration', async () => {
+      const { dir, base, head } = makeRepo();
+      const { artifactArgs, stateRoot, hostDir, registrationNonce } = command({
+        trust: false,
+        approval: permalink,
+        head,
+        round: 1,
+      });
+      const commentFor = (registrationNonce) => ({
+        id: 900001,
+        issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+        body: marker({ head, round: 1, registrationNonce }),
+        user: { login: 'approver' },
+      });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: commentFor(registrationNonce),
+        permissions: { approver: { permission: 'admin' } },
+      });
+      const gate = join(makeTmpDir(), 'comment-gate');
+      const child = spawn(process.execPath, [SCRIPT, ...artifactArgs], {
+        cwd: dir,
+        env: { ...env, FAKE_GH_COMMENT_GATE: gate },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      const waitFor = async (path, deadline = Date.now() + 10000) => {
+        while (!existsSync(path)) {
+          if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for ${path}; ${stderr}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      };
+      const closed = new Promise((resolve) => {
+        child.once('close', (code) => resolve({ code, stdout, stderr }));
+      });
+      try {
+        await waitFor(`${gate}.paused`);
+        expect(watchState(stateRoot, head, 1, '--release').status).toBe(0);
+        expect(watchState(stateRoot, head, 1).status).toBe(0);
+        const currentNonce = registrationNonceFor(stateRoot);
+        expect(currentNonce).not.toBe(registrationNonce);
+        writeFileSync(`${gate}.release`, '');
+        const stale = await closed;
+        expect(stale.code, stale.stderr).toBe(3);
+        expect(stale.stderr).toMatch(/registration changed|one in-flight/);
+        expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+        expect(
+          existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json')),
+        ).toBe(false);
+        for (const entry of readdirSync(join(dir, 'tmp'))) {
+          if (entry.startsWith('pr42-verify-')) {
+            expect(existsSync(join(dir, 'tmp', entry, 'boundary.json'))).toBe(
+              false,
+            );
+          }
+        }
+        expect(
+          existsSync(
+            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json.lock'),
+          ),
+        ).toBe(false);
+
+        writeFileSync(
+          env.FAKE_GH_COMMENT,
+          JSON.stringify(commentFor(currentNonce)),
+        );
+        const fresh = runPrepare(dir, artifactArgs, env);
+        expect(fresh.status, fresh.stderr).toBe(0);
+        expect(
+          existsSync(
+            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json.lock'),
+          ),
+        ).toBe(false);
+      } finally {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL');
+        }
+      }
+    }, 20000);
+
+    it('refuses lock contention instead of treating the old approval as live', () => {
+      const { dir, base, head } = makeRepo();
+      const { artifactArgs, stateRoot, hostDir, registrationNonce } = command({
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      const lock = join(
+        stateRoot,
+        '.qwen',
+        'tmp',
+        'verify-pr-watch-42.json.lock',
+      );
+      writeFileSync(lock, 'someone-else\n');
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body: marker({ head, registrationNonce }),
+          user: { login: 'approver' },
+        },
+        permissions: { approver: { permission: 'admin' } },
+      });
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(3);
+      expect(result.stderr).toMatch(/watch-state lock is held/);
+      expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+      expect(existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json'))).toBe(
+        false,
+      );
+      expect(readFileSync(lock, 'utf8')).toBe('someone-else\n');
+    });
+
     const refusalCases = [
       {
         name: 'another PR in the permalink',
@@ -1473,6 +1630,12 @@ describe.skipIf(process.platform === 'win32')(
         body: () =>
           '<!-- verify-pr-boundary-approval: {"mode":"host",} -->\nApproved.',
         expected: /approval marker is not valid JSON/,
+      },
+      {
+        name: 'extra bare approval prefix beside one valid marker',
+        body: (head, registrationNonce) =>
+          `${marker({ head, registrationNonce })}\n<!-- verify-pr-boundary-approval: bare prefix`,
+        expected: /exactly one well-formed/,
       },
       {
         name: 'read-only approver with an admin decoy',
@@ -1555,6 +1718,46 @@ describe.skipIf(process.platform === 'win32')(
       expect(existsSync(join(dir, 'tmp'))).toBe(false);
       expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
     });
+
+    it.each(['symlink', 'hardlink'])(
+      'refuses a %s at the watch registration without changing its origin',
+      (alias) => {
+        const { dir, base, head } = makeRepo();
+        const { artifactArgs, stateRoot, hostDir, registrationNonce } = command(
+          { trust: false, approval: permalink, head },
+        );
+        const registrationPath = join(
+          stateRoot,
+          '.qwen',
+          'tmp',
+          'verify-pr-watch-42.json',
+        );
+        const origin = join(makeTmpDir(), 'registration-origin.json');
+        writeFileSync(origin, readFileSync(registrationPath));
+        const before = readFileSync(origin, 'utf8');
+        rmSync(registrationPath);
+        if (alias === 'symlink') symlinkSync(origin, registrationPath);
+        else linkSync(origin, registrationPath);
+        const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+          comment: {
+            id: 900001,
+            issue_url:
+              'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+            body: marker({ head, registrationNonce }),
+            user: { login: 'approver' },
+          },
+          permissions: { approver: { permission: 'admin' } },
+        });
+        const result = runPrepare(dir, artifactArgs, env);
+        expect(result.status).toBe(3);
+        expect(result.stderr).toMatch(
+          /watch registration must be a single-link regular file/,
+        );
+        expect(readFileSync(origin, 'utf8')).toBe(before);
+        expect(existsSync(join(dir, 'tmp'))).toBe(false);
+        expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+      },
+    );
 
     it.skipIf(process.getuid?.() === 0)(
       'reports an unwritable approval through the controlled filesystem failure',
@@ -1646,6 +1849,80 @@ describe.skipIf(process.platform === 'win32')(
         expect(readFileSync(target, 'utf8'), alias).toBe(before);
       }
     });
+
+    it('refuses a --context-out parent alias into the clone before writing approval', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permissions: { maintainer: { permission: 'write' } },
+        },
+      );
+      const { artifactArgs, hostDir } = command({ round: 1 });
+      const alias = join(makeTmpDir(), 'alias');
+      symlinkSync(join(dir, 'tmp', 'verify-context'), alias, 'dir');
+      artifactArgs[artifactArgs.indexOf('--context-out') + 1] = join(
+        alias,
+        'pr42.json',
+      );
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(3);
+      expect(result.stderr).toMatch(/inside the PR clone/);
+      expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+      expect(existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json'))).toBe(
+        false,
+      );
+      expect(existsSync(join(alias, 'pr42.json'))).toBe(false);
+
+      artifactArgs[artifactArgs.indexOf('--context-out') + 1] = join(
+        hostDir,
+        'pr.json',
+      );
+      const outside = runPrepare(dir, artifactArgs, env);
+      expect(outside.status, outside.stderr).toBe(0);
+      expect(
+        JSON.parse(readFileSync(join(hostDir, 'pr.json'), 'utf8'))
+          .executionApproval,
+      ).toMatchObject({ source: 'local-trust', head, round: 1 });
+    });
+
+    it.each(['symlink', 'hardlink'])(
+      'refuses a %s at artifact context.json without changing its origin',
+      (alias) => {
+        const { dir, base, head } = makeRepo();
+        const env = installFakeGh(snapshotFor({ base, head }), reviewPages());
+        const clock = join(makeTmpDir(), `freeze-context-${alias}.cjs`);
+        writeFileSync(
+          clock,
+          'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+        );
+        const artifacts = join(
+          dir,
+          'tmp',
+          artifactDirName(42, new Date(1700000000000)),
+        );
+        mkdirSync(artifacts, { recursive: true });
+        const origin = join(makeTmpDir(), 'origin.json');
+        const before = 'ORIGINAL-ARTIFACT-CONTEXT\n';
+        writeFileSync(origin, before);
+        const artifactContext = join(artifacts, 'context.json');
+        if (alias === 'symlink') symlinkSync(origin, artifactContext);
+        else linkSync(origin, artifactContext);
+        const result = runPrepare(dir, ['42', '--repo', REPO], {
+          ...env,
+          NODE_OPTIONS: `--require=${clock}`,
+        });
+        expect(result.status).toBe(3);
+        expect(result.stderr).toMatch(/artifact context through a/);
+        expect(readFileSync(origin, 'utf8')).toBe(before);
+      },
+    );
 
     it('refuses a redirected or non-directory artifact parent before any context write', () => {
       for (const shape of ['symlink', 'regular-file']) {

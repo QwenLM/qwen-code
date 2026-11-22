@@ -1911,6 +1911,42 @@ describe('executionApproval host binding', () => {
     ).toEqual([expect.stringMatching(/mode\/head does not match/)]);
   });
 
+  it('accepts a local-trust VM with its attestation in both authority checks', () => {
+    const vm = localTrustApproval({
+      mode: 'vm',
+      attestation: 'nothing mounted, no host credentials',
+    });
+    expect(
+      executionApprovalErrors(JSON.stringify(vm), snapshot(vm), verified),
+    ).toEqual([]);
+    expect(checkBoundary(JSON.stringify(vm)).errors).toEqual([]);
+  });
+
+  it('requires local-trust VM attestation at both authority layers', () => {
+    const missing = localTrustApproval({ mode: 'vm' });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(missing),
+        snapshot(missing),
+        verified,
+      ),
+    ).toEqual([expect.stringMatching(/VM attestation/)]);
+    expect(checkBoundary(JSON.stringify(missing)).errors).toEqual([
+      expect.stringMatching(/mode vm needs a non-empty attestation/),
+    ]);
+  });
+
+  it('rejects invalid permission and non-40-hex approval heads explicitly', () => {
+    for (const bad of [
+      localTrustApproval({ permission: 'read' }),
+      localTrustApproval({ head: 'abc123' }),
+    ]) {
+      expect(
+        executionApprovalErrors(JSON.stringify(bad), snapshot(bad), verified),
+      ).toEqual([expect.stringMatching(/valid round and permission/)]);
+    }
+  });
+
   it('rejects local trust by another fork even when artifact and record agree', () => {
     const local = localTrustApproval();
     const forged = { ...snapshot(local), author: { login: 'someone-else' } };

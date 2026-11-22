@@ -69,6 +69,7 @@ import {
   inFlightRegistration,
   readState as readWatchState,
   statePath as watchStatePath,
+  withStateLock,
 } from './verify-pr-watch-state.mjs';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -905,6 +906,23 @@ function commentApproval(options, snapshot, owner, name, cloneRoot) {
   };
 }
 
+function singleLinkFileError(path, label) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    return `could not inspect the ${label} path ${path}: ${error.message}`;
+  }
+  if (st.isSymbolicLink()) {
+    return `refusing to write the ${label} through a symlink: ${path}`;
+  }
+  if (!st.isFile() || st.nlink !== 1) {
+    return `refusing to write the ${label} through a non-single-link file: ${path}`;
+  }
+  return null;
+}
+
 function localTrustApproval(options, snapshot, owner, name) {
   const current = ghJson(['api', 'user'], 'current-user lookup');
   if (current.error) return current;
@@ -1152,36 +1170,6 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
-  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
-  // path redirects the host-side write, and a hard link at the snapshot path
-  // would make writeFileSync truncate a file the round does not own (R5-4).
-  // Refuse both rather than follow them.
-  for (const p of [contextDir, contextPath]) {
-    let st;
-    try {
-      st = lstatSync(p);
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        return fail(
-          3,
-          `could not inspect the snapshot path ${p}: ${error.message}`,
-        );
-      }
-      continue; // not created yet (first run) — nothing to redirect
-    }
-    if (st.isSymbolicLink()) {
-      return fail(
-        3,
-        `refusing to write the host snapshot through a symlink: ${p}`,
-      );
-    }
-    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
-      return fail(
-        3,
-        `refusing to write the host snapshot through a non-single-link file: ${p}`,
-      );
-    }
-  }
   // The host-held snapshot carries the slug too: the checker compares a
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
@@ -1195,111 +1183,201 @@ function main(argv) {
     null,
     2,
   )}\n`;
-  writeFileSync(contextPath, contextBytes);
-  // Structural fix (R5-1): the authoritative snapshot also goes to a host
-  // destination outside the clone (--context-out), so the trusted source the
-  // checker reads never depends on the PR-writable in-tree copy, which stays
-  // only as the checker's untrusted no---context default.
-  let reportedContextPath = contextPath;
-  if (options.contextOut) {
-    // The host destination must be outside the PR-writable clone: step 1 runs
-    // with the clone as cwd, so a relative --context-out resolves inside it,
-    // where a PR-committed symlink would redirect this host-side write (R7-1).
-    // Apply the same containment + leaf guards the in-tree snapshot path uses.
-    const outPath = resolve(options.contextOut);
-    const realRoot = realpathSync(root);
-    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
-      return fail(
-        3,
-        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+
+  // Network access never happens under the registration lock. The write
+  // stage below rechecks the registration after these calls complete.
+  const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
+  const review = fetchReviewState(owner, name, context.pr);
+
+  const writeRound = () => {
+    if (executionApproval?.source === 'comment') {
+      const current = registeredRoundApproval(
+        options,
+        snapshot,
+        owner,
+        name,
+        root,
       );
+      if (
+        current.error ||
+        current.registrationNonce !== executionApproval.registrationNonce
+      ) {
+        return fail(
+          3,
+          `execution approval: ${current.error ?? 'the in-flight registration changed while approval was being resolved; obtain a fresh marked approval for the current registration'}`,
+        );
+      }
     }
-    try {
-      const st = lstatSync(outPath);
+
+    // The snapshot dir/file live in the PR-controlled tree: a symlink at
+    // either path redirects the host-side write, and a hard link at the
+    // snapshot path would truncate a file the round does not own.
+    for (const p of [contextDir, contextPath]) {
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          return fail(
+            3,
+            `could not inspect the snapshot path ${p}: ${error.message}`,
+          );
+        }
+        continue;
+      }
       if (st.isSymbolicLink()) {
         return fail(
           3,
-          `refusing to write the host snapshot through a symlink: ${outPath}`,
+          `refusing to write the host snapshot through a symlink: ${p}`,
         );
       }
-      if (!st.isFile() || st.nlink !== 1) {
+      if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
         return fail(
           3,
-          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
-        );
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        return fail(
-          3,
-          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+          `refusing to write the host snapshot through a non-single-link file: ${p}`,
         );
       }
     }
-    try {
-      mkdirSync(dirname(outPath), { recursive: true });
-      writeFileSync(outPath, contextBytes);
-    } catch (error) {
-      return fail(
-        3,
-        `could not write the host snapshot to ${outPath}: ${error.message}`,
-      );
+    // Structural fix (R5-1): the authoritative snapshot also goes to a host
+    // destination outside the clone (--context-out), so the trusted source the
+    // checker reads never depends on the PR-writable in-tree copy, which stays
+    // only as the checker's untrusted no---context default.
+    let reportedContextPath = contextPath;
+    if (options.contextOut) {
+      // The host destination must be outside the PR-writable clone: step 1 runs
+      // with the clone as cwd, so a relative --context-out resolves inside it,
+      // where a PR-committed symlink would redirect this host-side write (R7-1).
+      // Apply the same containment + leaf guards the in-tree snapshot path uses.
+      const outPath = resolve(options.contextOut);
+      const realRoot = realpathSync(root);
+      if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+        return fail(
+          3,
+          `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+        );
+      }
+      try {
+        const st = lstatSync(outPath);
+        if (st.isSymbolicLink()) {
+          return fail(
+            3,
+            `refusing to write the host snapshot through a symlink: ${outPath}`,
+          );
+        }
+        if (!st.isFile() || st.nlink !== 1) {
+          return fail(
+            3,
+            `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+          );
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          return fail(
+            3,
+            `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+          );
+        }
+      }
+      try {
+        mkdirSync(dirname(outPath), { recursive: true });
+        const realParent = realpathSync(dirname(outPath));
+        if (realParent === realRoot || realParent.startsWith(realRoot + sep)) {
+          return fail(
+            3,
+            `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+          );
+        }
+        writeFileSync(outPath, contextBytes);
+      } catch (error) {
+        return fail(
+          3,
+          `could not write the host snapshot to ${outPath}: ${error.message}`,
+        );
+      }
+      reportedContextPath = outPath;
     }
-    reportedContextPath = outPath;
+    writeFileSync(contextPath, contextBytes);
+    // The digest binds the snapshot's content for the checker (--context-sha256):
+    // it is computed here host-side, before the round runs, so a later rewrite of
+    // the clone-side file cannot produce matching bytes (R2-1).
+    const contextSha256 = createHash('sha256')
+      .update(contextBytes, 'utf8')
+      .digest('hex');
+    const artifactContextPath = join(artifacts, 'context.json');
+    const artifactContextError = singleLinkFileError(
+      artifactContextPath,
+      'artifact context',
+    );
+    if (artifactContextError) return fail(3, artifactContextError);
+    writeFileSync(
+      artifactContextPath,
+      `${JSON.stringify({
+        repo: slug,
+        pr: context.pr,
+        baseRefOid: context.base,
+        headRefOid: context.head,
+      })}\n`,
+    );
+    if (executionApproval) {
+      const boundaryPath = join(artifacts, 'boundary.json');
+      try {
+        const st = lstatSync(boundaryPath);
+        if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+          return fail(
+            3,
+            `refusing to write the execution approval through a non-single-link file: ${boundaryPath}`,
+          );
+        }
+      } catch (error) {
+        if (error.code !== 'ENOENT') {
+          return fail(
+            3,
+            `could not inspect the execution approval path ${boundaryPath}: ${error.message}`,
+          );
+        }
+      }
+      try {
+        writeFileSync(
+          boundaryPath,
+          `${JSON.stringify(executionApproval, null, 2)}\n`,
+        );
+      } catch (error) {
+        return fail(
+          3,
+          `could not write the execution approval to ${boundaryPath}: ${error.message}`,
+        );
+      }
+    }
+    return { contextSha256, reportedContextPath };
+  };
+
+  let written;
+  try {
+    written =
+      executionApproval?.source === 'comment'
+        ? withStateLock(options.stateRoot, context.pr, writeRound)
+        : writeRound();
+  } catch (error) {
+    return fail(3, `could not finish the prepare writes: ${error.message}`);
   }
-  // The digest binds the snapshot's content for the checker (--context-sha256):
-  // it is computed here host-side, before the round runs, so a later rewrite of
-  // the clone-side file cannot produce matching bytes (R2-1).
-  const contextSha256 = createHash('sha256')
-    .update(contextBytes, 'utf8')
-    .digest('hex');
-  // Best-effort, like the lane: the round reads a missing file as "review
-  // state unknown", so an earlier prepare's copy must not outlive a failed
-  // fetch.
-  const reviewPath = join(contextDir, `pr${context.pr}-review-threads.json`);
-  rmSync(reviewPath, { force: true });
-  const review = fetchReviewState(owner, name, context.pr);
-  if (review.state) {
-    writeFileSync(reviewPath, `${JSON.stringify(review.state, null, 2)}\n`);
+  if (written.locked) {
+    return fail(
+      3,
+      'execution approval: the watch-state lock is held by another invocation; retry shortly instead of treating the old approval as current',
+    );
   }
-  writeFileSync(
-    join(artifacts, 'context.json'),
-    `${JSON.stringify({
-      repo: slug,
-      pr: context.pr,
-      baseRefOid: context.base,
-      headRefOid: context.head,
-    })}\n`,
-  );
-  if (executionApproval) {
-    const boundaryPath = join(artifacts, 'boundary.json');
-    try {
-      const st = lstatSync(boundaryPath);
-      if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
-        return fail(
-          3,
-          `refusing to write the execution approval through a non-single-link file: ${boundaryPath}`,
-        );
-      }
-    } catch (error) {
-      if (error.code !== 'ENOENT') {
-        return fail(
-          3,
-          `could not inspect the execution approval path ${boundaryPath}: ${error.message}`,
-        );
-      }
+  if (typeof written === 'number') return written;
+  const { contextSha256, reportedContextPath } = written;
+
+  // Best-effort, like the lane: a missing review file means "unknown", so an
+  // earlier prepare's copy must not outlive a failed fetch.
+  try {
+    rmSync(reviewPath, { force: true });
+    if (review.state) {
+      writeFileSync(reviewPath, `${JSON.stringify(review.state, null, 2)}\n`);
     }
-    try {
-      writeFileSync(
-        boundaryPath,
-        `${JSON.stringify(executionApproval, null, 2)}\n`,
-      );
-    } catch (error) {
-      return fail(
-        3,
-        `could not write the execution approval to ${boundaryPath}: ${error.message}`,
-      );
-    }
+  } catch (error) {
+    return fail(3, `could not write the review snapshot: ${error.message}`);
   }
 
   const isolation = detectIsolation();

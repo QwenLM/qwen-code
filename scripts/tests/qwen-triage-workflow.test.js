@@ -7431,6 +7431,10 @@ describe('qwen-triage verify hardening round 2', () => {
       'an agent-forwarded shell carries `SSH_AUTH_SOCK` even under a scratch home',
     );
     expect(flat).toContain('Prepare writes the resulting `executionApproval`');
+    expect(flat).toContain(
+      'and the object also names `basis`, `by`, `permission`, `head`, `round`, `reason`, optional `attestation`, and for a comment its permalink, id, body digest and registrationNonce.',
+    );
+    expect(flat).toContain('checks the object shapes and their deep equality');
     expect(flat).toContain('`mode`, `source`, `basis`, `by`, `permission`');
     expect(flat).toContain(
       '--trust-pr-head` after the maintainer approves that whole current head for this round',
@@ -7444,6 +7448,12 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(flat).toContain(
       "--attestation 'nothing mounted, no host credentials'",
+    );
+    expect(flat).toContain(
+      "pass that **identical trusted root** to every prepare retry and to the registration's `--complete` or `--release`",
+    );
+    expect(flat).toContain(
+      'An unattended container retains the old default and needs neither a comment marker nor this approval path.',
     );
     expect(flat).not.toContain(
       "--attestation '<nothing mounted, no host credentials>'",

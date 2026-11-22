@@ -969,18 +969,71 @@ describe('local container recipe pins', () => {
       ),
       'utf8',
     );
-    expect(english).toContain(
+    expect(english.replace(/\s+/g, ' ')).toContain(
       "`boundary.json` retains prepare's `waived` executionApproval",
     );
     expect(english).not.toContain('`boundary.json` records container mode');
+    expect(english).toContain('4. **Pre-seed execution approval.**');
+    expect(english).toContain('5. **Declaration.**');
+    expect(english).toContain(
+      'verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r>',
+    );
+    expect(english).toContain('--approval <url> --state-root "<trusted-dir>"');
     expect(english).toContain(
       'keeps the same registration while changing modes',
+    );
+    expect(english.replace(/\s+/g, ' ')).toContain(
+      'and does not ask the independent offline battery for a container nonce or gate record',
     );
     expect(chinese).toContain(
       '`boundary.json` 保留 prepare 生成、与宿主 context 一致的 `waived` executionApproval',
     );
     expect(chinese).not.toContain('`boundary.json` 记录 container 模式');
+    expect(chinese).toContain('4. **预置前执行批准。**');
+    expect(chinese).toContain('5. **声明。**');
+    expect(chinese).toContain(
+      'verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r>',
+    );
     expect(chinese).toContain('在切换模式时保留同一注册');
+    expect(chinese).toContain(
+      '不要求独立离线电池提供 container nonce 或门禁记录',
+    );
+  });
+
+  it('pins locked registration rotation and exact publication reconciliation in both designs', () => {
+    const readDesign = (suffix) =>
+      readFileSync(
+        fileURLToPath(
+          new URL(
+            `../../docs/design/verify-pr-execution-preflight${suffix}`,
+            import.meta.url,
+          ),
+        ),
+        'utf8',
+      );
+    const english = readDesign('.md');
+    const chinese = readDesign('.zh-CN.md');
+    const flatEnglish = english.replace(/\s+/g, ' ');
+    expect(english).not.toContain('--round <n>');
+    expect(flatEnglish).toContain(
+      'the declaration keys must match exactly, including `registrationNonce` for a comment approval',
+    );
+    expect(english).not.toContain('ignore additional declaration fields');
+    expect(flatEnglish).toContain('the same cooperative watch-state lock');
+    expect(flatEnglish).toContain(
+      'A release plus a new start while the comment response is paused therefore makes the old prepare exit 3 without writing approval bytes.',
+    );
+    expect(flatEnglish).toContain(
+      'a legacy entry without a nonce remains usable by the existing complete/release commands but must be released and restarted',
+    );
+    expect(chinese).not.toContain('--round <n>');
+    expect(chinese).toContain('声名字段键必须完全一致');
+    expect(chinese).not.toContain('检查器规则忽略声明中的额外字段');
+    expect(chinese).toContain('相同的协作式 watch-state 锁');
+    expect(chinese).toContain('实际 release 后重新 start 会轮换 nonce');
+    expect(chinese).toContain(
+      '无 nonce 的 legacy 条目仍可由现有 complete/release 读取，但必须释放并重启',
+    );
   });
 
   it('hashes the base-pinned skill copy in the publish footer', () => {

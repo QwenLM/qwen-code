@@ -65,7 +65,7 @@ The coordinate path adds the following options:
 | `--trust-pr-head`        | Explicit local trust for the maintainer's own or a same-repository PR head; mutually exclusive with `--approval`. |
 | `--approval <permalink>` | Maintainer's issue-comment permalink for another fork; alternative to `--trust-pr-head`.                          |
 | `--state-root <dir>`     | Absolute, PR-external trusted directory holding the approval's in-flight head/round; required with `--approval`.  |
-| `--round <n>`            | Positive round number; required for `vm` and `host`.                                                              |
+| `--round <r>`            | Positive round number; required for `vm` and `host`.                                                              |
 | `--reason <text>`        | Why this round runs outside an observed container; required for `vm` and `host`.                                  |
 | `--attestation <text>`   | What the operator confirmed about the VM; required only for `vm`.                                                 |
 
@@ -158,6 +158,19 @@ an ordinary comment that happens to quote a head, and an approval for another
 PR cannot satisfy this contract. Local trust and a comment are mutually
 exclusive so a caller cannot combine two divergent approval claims.
 
+After all GitHub and Git calls and the review-state fetch finish, comment
+approval enters the same cooperative watch-state lock used by start, release
+and complete. Inside that lock prepare reads the registration again, rechecks
+its repo, PR, normalized head/round and exact `registrationNonce`, then writes
+the host context and artifact declaration. A release plus a new start while the
+comment response is paused therefore makes the old prepare exit 3 without
+writing approval bytes. Lock contention also exits 3; it never treats the old
+approval as live. A retry of the unchanged in-flight registration retains its
+nonce and can issue normally. An actual release followed by a new start rotates
+the nonce and needs a fresh comment; a legacy entry without a nonce remains
+usable by the existing complete/release commands but must be released and
+restarted before a new comment approval can authorize execution.
+
 ## Recording and publication
 
 Prepare validates the current checkout before writing as it does today. On a
@@ -171,9 +184,11 @@ permalink; a comment decision adds `approval`, the observed comment id and
 body sha256, and its `registrationNonce`. The declaration's `mode` remains
 the existing vocabulary: `vm` or `waived`.
 
-The artifact's `boundary.json` carries the same object. Existing checker
-rules ignore additional declaration fields, so the declaration schema does
-not fork. The context sha256 printed by prepare covers the approval bytes too.
+The artifact's `boundary.json` carries the same object. Publication uses a
+deep strict comparison with the host-held `executionApproval`, not an
+additional-fields-ignored subset check: the declaration keys must match
+exactly, including `registrationNonce` for a comment approval. The context
+sha256 printed by prepare covers the approval bytes too.
 
 When `verify-pr-check.mjs` sees a `vm` or `waived` artifact declaration, it
 requires a trusted `--context` snapshot whose validated `executionApproval`
@@ -187,7 +202,13 @@ context or approval file is written, the time-stamped artifact directory must
 be a real directory, not a symbolic link or other file, whose fully canonical
 path is exactly the expected direct child of the real `tmp/` directory. An
 ordinary same-second retry still reuses that existing real directory; a
-redirect or non-directory exits 3 without writing into its target.
+redirect or non-directory exits 3 without writing into its target. Artifact
+`context.json` must likewise be absent or a single-link regular file, so a
+symlink or hard link cannot overwrite its origin. `--context-out` containment
+uses the canonical PR-clone root and the canonical parent directory after that
+parent exists; a nonexistent new leaf is not passed to `realpath`, and an alias
+whose real parent leads back into the clone exits 3 before approval bytes are
+written.
 
 Container and CI-lane behavior remains unchanged. Older host or VM artifacts
 without the host-held record are deliberately refused rather than presented
@@ -212,6 +233,9 @@ recoverable in-flight marker. When changing container to host/VM, keep the
 same registration through prepare, battery, publication and `--complete`.
 Do not release merely to change modes. Registration runs ahead even for
 local trust, whose prepare itself needs no public marker or `--state-root`.
+A comment path that used an explicit state root repeats that identical trusted
+root on every prepare retry and on this registration's `--complete` or
+`--release`; the default container path still needs no comment marker.
 
 A fresh local-trust round without a marker uses round 1 because its explicit
 flag is a new trust decision on every invocation. A comment-backed round,
