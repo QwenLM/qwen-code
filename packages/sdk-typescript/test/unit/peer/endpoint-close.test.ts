@@ -78,6 +78,10 @@ describe('concurrent peer endpoint close', () => {
       await endpoint.close();
       expect(close).toHaveBeenCalledOnce();
       expect(removeOwnRecord).toHaveBeenCalledOnce();
+      expect(removeOwnRecord).toHaveBeenCalledWith(
+        '/home/sessions/record.json',
+        endpoint.sessionId,
+      );
     } finally {
       inbox.resolve();
       record.resolve();
