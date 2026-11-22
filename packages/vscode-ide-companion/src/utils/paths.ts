@@ -65,9 +65,11 @@ let envBootstrapped = false;
 
 /**
  * Pre-resolves QWEN_HOME / QWEN_RUNTIME_DIR from the default global Qwen
- * dir's `.env` and `<homedir>/.env`. Mirrors the CLI's
- * `preResolveHomeEnvOverrides` so the companion's lock-file location agrees
- * with the CLI even when these vars are only configured via `.env`.
+ * dir's `.env`, a leftover `<homedir>/.qwen/.env` and `<homedir>/.env`, in
+ * the CLI's loader order. Mirrors the CLI's `preResolveHomeEnvOverrides` so
+ * the companion's lock-file location agrees with the CLI even when these
+ * vars are only configured via `.env`. The leftover legacy file may fill
+ * QWEN_RUNTIME_DIR but not QWEN_HOME, exactly as the CLI restricts it.
  * Idempotent.
  */
 function bootstrapHomeEnvOverrides(): void {
@@ -91,10 +93,10 @@ function bootstrapHomeEnvOverrides(): void {
     : getDefaultQwenDir(homeDir);
 
   const KEYS = ['QWEN_HOME', 'QWEN_RUNTIME_DIR'] as const;
-  const readInto = (file: string) => {
+  const readInto = (file: string, keys: readonly string[] = KEYS) => {
     try {
       const parsed = dotenv.parse(fs.readFileSync(file, 'utf-8'));
-      for (const key of KEYS) {
+      for (const key of keys) {
         if (parsed[key] && !Object.hasOwn(process.env, key)) {
           process.env[key] = parsed[key];
         }
@@ -106,6 +108,13 @@ function bootstrapHomeEnvOverrides(): void {
 
   readInto(path.join(currentQwenDir, '.env'));
   if (!initialQwenHome) {
+    // The CLI's loader order: a leftover ~/.qwen/.env on an XDG install
+    // comes before ~/.env and fills QWEN_RUNTIME_DIR, but it cannot set
+    // QWEN_HOME — that would split the runtime base from the global dir.
+    const legacyDir = path.join(homeDir, '.qwen');
+    if (path.normalize(legacyDir) !== path.normalize(currentQwenDir)) {
+      readInto(path.join(legacyDir, '.env'), ['QWEN_RUNTIME_DIR']);
+    }
     readInto(path.join(homeDir, '.env'));
   }
 

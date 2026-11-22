@@ -321,3 +321,77 @@ describe('vscode-ide-companion paths – .env bootstrap', () => {
     }
   });
 });
+
+describe('vscode-ide-companion paths – leftover legacy .env on an XDG install', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  const originalHome = process.env['QWEN_HOME'];
+  const originalRuntime = process.env['QWEN_RUNTIME_DIR'];
+  const originalXdg = process.env['XDG_CONFIG_HOME'];
+  let home: ReturnType<typeof withCleanHome>;
+
+  beforeEach(() => {
+    resetEnvBootstrapForTesting();
+    home = withCleanHome();
+    delete process.env['QWEN_HOME'];
+    delete process.env['QWEN_RUNTIME_DIR'];
+    delete process.env['XDG_CONFIG_HOME'];
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    // An XDG install whose ~/.qwen was recreated after the marker landed.
+    fs.mkdirSync(path.join(home.tempHome, '.config', 'qwen'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(home.tempHome, '.config', 'qwen', '.qwen-global-dir'),
+      '',
+    );
+    fs.mkdirSync(path.join(home.tempHome, '.qwen'), { recursive: true });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', platform);
+    home.cleanup();
+    if (originalHome !== undefined) {
+      process.env['QWEN_HOME'] = originalHome;
+    } else {
+      delete process.env['QWEN_HOME'];
+    }
+    if (originalRuntime !== undefined) {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntime;
+    } else {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    }
+    if (originalXdg !== undefined) {
+      process.env['XDG_CONFIG_HOME'] = originalXdg;
+    } else {
+      delete process.env['XDG_CONFIG_HOME'];
+    }
+  });
+
+  it('fills QWEN_RUNTIME_DIR from the leftover ~/.qwen/.env but not QWEN_HOME', () => {
+    const runtimeDir = path.join(home.tempHome, 'run-qwen');
+    const hijackDir = path.join(home.tempHome, 'hijack');
+    fs.writeFileSync(
+      path.join(home.tempHome, '.qwen', '.env'),
+      `QWEN_RUNTIME_DIR=${runtimeDir}\nQWEN_HOME=${hijackDir}\n`,
+    );
+    expect(getRuntimeBaseDir()).toBe(runtimeDir);
+    expect(getGlobalQwenDir()).toBe(
+      path.join(home.tempHome, '.config', 'qwen'),
+    );
+    expect(process.env['QWEN_HOME']).toBeUndefined();
+  });
+
+  it('ranks the leftover ~/.qwen/.env before ~/.env, as the CLI loader does', () => {
+    const legacyRuntime = path.join(home.tempHome, 'legacy-run');
+    const homeRuntime = path.join(home.tempHome, 'home-run');
+    fs.writeFileSync(
+      path.join(home.tempHome, '.qwen', '.env'),
+      `QWEN_RUNTIME_DIR=${legacyRuntime}\n`,
+    );
+    fs.writeFileSync(
+      path.join(home.tempHome, '.env'),
+      `QWEN_RUNTIME_DIR=${homeRuntime}\n`,
+    );
+    expect(getRuntimeBaseDir()).toBe(legacyRuntime);
+  });
+});
