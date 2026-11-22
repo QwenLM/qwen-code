@@ -20,7 +20,7 @@ workspace 选择器先精确匹配注册的 workspace id，再匹配 URL 解码�
 
 ## 安全边界
 
-workspace 限定路由不得调用 bridge 方法、启动或预热 ACP、加载设置、解析 agents 或 skills、发现工具、运行外部命令、创建持久化游标密钥，或写入路由专属的 daemon/debug 日志。既有的 daemon 级 HTTP 访问日志与遥测不属于本路由专属的无写入保证。singular 路由共享同一 daemon-local 读取与回放（不加载设置、不使用项目工具注册表），但其归属解析与 live 首个 backward 页的 flush 仍经 bridge，故不携带此无 bridge 保证。
+workspace 限定路由不得启动或预热 ACP、加载设置、解析 agents 或 skills、发现工具、运行外部命令、创建持久化游标密钥，或写入路由专属的 daemon/debug 日志。它以 daemon-local 读取持久化 JSONL；唯一可能经 bridge 的调用是在首个 backward 页前 flush 一个已存活会话的 recorder（live-flush 屏障），它排空待写记录而不启动子进程。既有的 daemon 级 HTTP 访问日志与遥测不属于本路由专属的无写入保证。singular 路由共享同一 daemon-local 读取、回放（不加载设置、不使用项目工具注册表）与 live-flush 屏障，并额外经 live bridge 状态解析归属。
 
 直接持久化 transcript 读取在 debug 会话日志被抑制的状态下运行。归档协调器在位置检查、索引构建、记录读取、session-id 校验与回放全程持有共享会话锁。每条返回记录必须携带请求的 session id；不匹配以快照冲突失败关闭。
 

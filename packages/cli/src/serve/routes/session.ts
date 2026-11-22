@@ -1105,9 +1105,11 @@ export function registerSessionRoutes(
   // Daemon-local transcript read shared by the workspace-qualified route and
   // the default (singular) route. Reading in the daemon process keeps the
   // index cache alive across ACP child exits (session switch, the session
-  // idle TTL, daemon restart), so default-route pagination stops rebuilding
-  // the whole transcript on every cold reopen. readerCodec selects how
-  // incoming cursors and snapshots are decoded: the workspace route passes
+  // idle TTL, a child crash/respawn), so default-route pagination stops
+  // rebuilding the whole transcript on every cold reopen. The cache is an
+  // in-memory Map, so a daemon restart still rebuilds it once. readerCodec
+  // selects how incoming cursors and snapshots are decoded: the workspace
+  // route passes
   // its per-runtime codec; the singular route passes undefined so the reader
   // falls back to the persisted per-workspace key the ACP child also uses,
   // keeping cursors issued by either side interchangeable. encodeCursor must
@@ -1135,11 +1137,12 @@ export function registerSessionRoutes(
       opts;
     return runWithWorkspaceRuntimeStorage(runtime, async () => {
       const service = createWorkspaceRuntimeSessionService(runtime);
-      // The default route's resolution already asserted loadability (with the
-      // stricter allowActiveConflict:false); the readPage ENOENT mapping below
-      // still distinguishes archived/conflict/missing, so it skips the redundant
-      // re-check. The workspace route's resolution does not assert, so it keeps
-      // the re-check.
+      // The default route's resolution already gated loadability: the
+      // active-runtime path asserts it (allowActiveConflict:false) and the
+      // persisted fallback only returns loadable conversations. The readPage
+      // ENOENT mapping below still distinguishes archived/conflict/missing, so
+      // the redundant re-check is skipped. The workspace route's resolution
+      // does not gate loadability, so it keeps the re-check.
       if (recheckLoadable && cursor === undefined) {
         await assertSessionLoadable(
           runtime.workspaceCwd,
@@ -7393,7 +7396,7 @@ export function registerSessionRoutes(
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
           // Read daemon-local so the index cache survives ACP child exits
-          // (session switch, idle TTL, daemon restart) instead of rebuilding
+          // (session switch, idle TTL, child respawn) instead of rebuilding
           // in a fresh child on every cold reopen. undefined readerCodec =>
           // the reader's persisted per-workspace key, the same key the ACP
           // child signs cursors with, so cursors issued by either side stay
@@ -7857,6 +7860,28 @@ export function registerSessionRoutes(
           // default transcript route that consumes this snapshot. Resolution
           // already asserted loadability, so skip the redundant re-check.
           return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            // Mirror the child handler's live-first-page flush barrier: a
+            // snapshot-less read must drain the recorder so a just-accepted
+            // turn is not omitted from the index and its anchor snapshot. Stay
+            // behind the liveness check so a cold session does not ensure a
+            // child (which would undo the cold-start win); the workspace-
+            // qualified turn-index route carries no such barrier (no-bridge).
+            if (snapshot === undefined) {
+              let live = false;
+              try {
+                runtime.bridge.getSessionSummary(sessionId);
+                live = true;
+              } catch (error) {
+                if (!(error instanceof SessionNotFoundError)) throw error;
+              }
+              if (live) {
+                try {
+                  await runtime.bridge.flushSessionTranscript?.(sessionId);
+                } catch (error) {
+                  if (!(error instanceof SessionNotFoundError)) throw error;
+                }
+              }
+            }
             try {
               const page = await new SessionTranscriptReader(
                 runtime.workspaceCwd,

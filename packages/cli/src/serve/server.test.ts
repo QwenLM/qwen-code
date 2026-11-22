@@ -36046,6 +36046,127 @@ describe('createServeApp', () => {
       }
     });
 
+    it('round-trips a singular-route cursor, propagates hasOlder, and crosses the turn-index snapshot key', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff3';
+      const bridge = fakeBridge();
+      await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const appendUser = async (n: number, parent: string, text: string) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            uuid: `${sid}-user-${n}`,
+            parentUuid: parent,
+            sessionId: sid,
+            timestamp: `2026-05-28T12:00:0${n}.000Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text }] },
+            cwd: wsDir,
+            version: '1.0.0',
+          }) + '\n',
+        );
+      };
+      await appendUser(2, `${sid}-user-1`, 'second message');
+      await appendUser(3, `${sid}-user-2`, 'third message');
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const textOf = (page: {
+        events: Array<{ data?: Record<string, unknown> }>;
+      }) => {
+        const u = (page.events[0]?.data?.['update'] ?? page.events[0]?.data) as
+          | Record<string, unknown>
+          | undefined;
+        return (u?.['content'] as { text?: string } | undefined)?.text;
+      };
+
+      const page1 = await request(app)
+        .get(`/session/${sid}/transcript?limit=1&direction=backward`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page1.status).toBe(200);
+      expect(textOf(page1.body)).toBe('third message');
+      expect(page1.body.hasMore).toBe(true);
+      expect(typeof page1.body.nextCursor).toBe('string');
+
+      // Cursor round-trip: the next page continues from the frozen cursor.
+      const page2 = await request(app)
+        .get(
+          `/session/${sid}/transcript?limit=1&cursor=${encodeURIComponent(page1.body.nextCursor)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(page2.status).toBe(200);
+      expect(textOf(page2.body)).toBe('second message');
+      expect(bridge.sessionTranscriptCalls).toEqual([]);
+
+      // Cross-route snapshot-key contract: the turn-index ROUTE mints a
+      // snapshot the transcript ROUTE consumes for an anchored read.
+      const ti = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(ti.status).toBe(200);
+      const anchored = await request(app)
+        .get(
+          `/session/${sid}/transcript?atRecordId=${sid}-user-2&snapshot=${encodeURIComponent(ti.body.snapshot)}`,
+        )
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(anchored.status).toBe(200);
+      expect(anchored.body.targetRecordId).toBe(`${sid}-user-2`);
+      // hasOlder propagates on the anchored read (user-1 precedes user-2).
+      expect(anchored.body.hasOlder).toBe(true);
+      expect(bridge.sessionTurnIndexCalls).toEqual([]);
+    });
+
+    it('flushes the live recorder before a snapshot-less turn-index page', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff2';
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      // A live session whose recorder drains a just-accepted turn on flush:
+      // the snapshot-less turn-index page must include it (R11-1 barrier).
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          createdAt: '2026-05-28T12:00:00.000Z',
+          clientCount: 1,
+          hasActivePrompt: false,
+        }),
+        flushSessionTranscriptImpl: async (sessionId) => {
+          await fsp.appendFile(
+            chatsFile,
+            JSON.stringify({
+              uuid: `${sessionId}-user-2`,
+              parentUuid: `${sessionId}-user-1`,
+              sessionId,
+              timestamp: '2026-05-28T12:00:02.000Z',
+              type: 'user',
+              message: { role: 'user', parts: [{ text: 'second turn' }] },
+              cwd: wsDir,
+              version: '1.0.0',
+            }) + '\n',
+          );
+        },
+      });
+      await writeTranscriptSession(sid);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+      const res = await request(app)
+        .get(`/session/${sid}/turn-index`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(res.status).toBe(200);
+      expect(res.body.totalTurns).toBe(2);
+      expect(bridge.flushSessionTranscriptCalls).toEqual([sid]);
+    });
+
     it('pins the daemon-local replay tool-metadata fallback (accepted trade)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeef';
       const bridge = fakeBridge();
@@ -36139,6 +36260,27 @@ describe('createServeApp', () => {
       expect(update['title']).toBe('read_file');
       expect(update['kind']).toBe('other');
       expect(update['locations']).toEqual([]);
+    });
+
+    it('throws page-too-large from daemon-local serialization (413 source)', async () => {
+      // The default route's 413 arises daemon-side when the serialized replay
+      // page exceeds the response budget (no bridge involved). Pin that throw
+      // with a small budget override; error-response maps the class to 413.
+      const { serializeWorkspaceTranscriptResponseForTesting } = await import(
+        './routes/session.js'
+      );
+      const { SessionTranscriptPageTooLargeError } = await import(
+        '@qwen-code/qwen-code-core/services/session-transcript-reader.js'
+      );
+      const sid = '55555555-bbbb-cccc-dddd-fffffffffff4';
+      const oversized = {
+        v: 1,
+        sessionId: sid,
+        events: [{ data: { text: 'x'.repeat(200) } }],
+      };
+      expect(() =>
+        serializeWorkspaceTranscriptResponseForTesting(oversized, sid, 100),
+      ).toThrow(SessionTranscriptPageTooLargeError);
     });
 
     it('forwards snapshot-bound turn anchors and response metadata', async () => {
