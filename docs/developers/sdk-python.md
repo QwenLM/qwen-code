@@ -214,12 +214,15 @@ When the CLI emits a `can_use_tool` control request, the SDK routes it through
 - Callback context: `cancel_event`, `suggestions`, and `blocked_path`
 - Callback contract: `can_use_tool` must be an async callable: an `async def`
   function or an instance with an async `__call__` method accepting
-  `(tool_name, tool_input, context)`. `stderr` must be a synchronous callable
+  `(tool_name, tool_input, context)`. It may be wrapped in `functools.partial`;
+  validation checks the remaining arguments after binding. `stderr` must be a synchronous callable
   accepting one positional string argument. Neither callback may require
   additional keyword-only arguments. An inspectable decorated callback is
   checked against the wrapper that the SDK calls. When a `stderr` wrapper has
   no inspectable signature, validation checks the first inspectable wrapped
-  callback instead.
+  callback instead. If a stderr callback returns an awaitable or async generator,
+  the SDK writes the original line to standard error without executing the
+  asynchronous result.
 
 Example:
 

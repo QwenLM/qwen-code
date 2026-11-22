@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
 import pytest
@@ -21,13 +22,14 @@ class StatefulPermission:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("as_partial", [False, True])
 async def test_async_callable_permission_can_approve_tool(
-    fake_qwen_path: str, as_object: bool
+    fake_qwen_path: str, as_object: bool, as_partial: bool
 ) -> None:
     permission = StatefulPermission()
     options: QueryOptions | dict[str, Any] = {
         "path_to_qwen_executable": fake_qwen_path,
-        "can_use_tool": permission,
+        "can_use_tool": partial(permission) if as_partial else permission,
     }
     if as_object:
         options = QueryOptions(**options)

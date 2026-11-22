@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
+from functools import partial
 from inspect import Signature, iscoroutinefunction, signature
 from typing import (
     Any,
@@ -300,7 +301,7 @@ def _validate_can_use_tool_callable(value: object, error_type: type[Exception]) 
     if not callable(value):
         raise error_type("can_use_tool must be callable")
 
-    if not iscoroutinefunction(value) and not iscoroutinefunction(type(value).__call__):
+    if not _is_async_callable(value):
         raise error_type("can_use_tool must be an async callable")
 
     try:
@@ -322,7 +323,7 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
     inspected: set[int] = set()
     while callable(value) and id(value) not in inspected:
         inspected.add(id(value))
-        if iscoroutinefunction(value) or iscoroutinefunction(type(value).__call__):
+        if _is_async_callable(value):
             raise error_type("stderr must be a sync callable")
 
         try:
@@ -339,6 +340,12 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
                 "and no required keyword-only arguments"
             )
         return
+
+
+def _is_async_callable(value: object) -> bool:
+    while isinstance(value, partial):
+        value = value.func
+    return iscoroutinefunction(value) or iscoroutinefunction(type(value).__call__)
 
 
 def _supports_argument_count(sig: Signature, count: int) -> bool:

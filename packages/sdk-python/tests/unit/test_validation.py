@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from functools import cache, lru_cache, wraps
+from functools import cache, lru_cache, partial, wraps
 from pathlib import Path
 from typing import Any, cast, get_args
 
@@ -256,7 +256,9 @@ def test_cached_stderr_with_wrong_arity_is_rejected(
             QueryOptions.from_mapping({"stderr": callback})
 
 
-@pytest.mark.parametrize("callback_kind", ["function", "instance", "cached_function"])
+@pytest.mark.parametrize(
+    "callback_kind", ["function", "instance", "cached_function", "partial_instance"]
+)
 @pytest.mark.parametrize("as_object", [False, True])
 def test_async_stderr_is_rejected(callback_kind: str, as_object: bool) -> None:
     async def stderr(text: str) -> None:
@@ -266,10 +268,15 @@ def test_async_stderr_is_rejected(callback_kind: str, as_object: bool) -> None:
         async def __call__(self, text: str) -> None:
             pass
 
+    class PrefixedAsyncStderr:
+        async def __call__(self, prefix: str, text: str) -> None:
+            pass
+
     callback = {
         "function": stderr,
         "instance": AsyncStderr(),
         "cached_function": cache(stderr),
+        "partial_instance": partial(PrefixedAsyncStderr(), "cli: "),
     }[callback_kind]
     with pytest.raises(
         ValidationError if as_object else TypeError,
@@ -279,6 +286,35 @@ def test_async_stderr_is_rejected(callback_kind: str, as_object: bool) -> None:
             validate_query_options(QueryOptions(stderr=cast(Any, callback)))
         else:
             QueryOptions.from_mapping({"stderr": callback})
+
+
+@pytest.mark.parametrize("as_object", [False, True])
+@pytest.mark.parametrize("bind_prefix", [False, True])
+def test_async_callable_partial_preserves_bound_arity(
+    as_object: bool, bind_prefix: bool
+) -> None:
+    class Permission:
+        async def __call__(
+            self, prefix: str, name: str, payload: dict[str, Any], context: Any
+        ) -> dict[str, Any]:
+            return {"behavior": "allow", "updatedInput": payload}
+
+    callback = partial(Permission(), "cli: ") if bind_prefix else partial(Permission())
+
+    def validate() -> None:
+        if as_object:
+            validate_query_options(QueryOptions(can_use_tool=cast(Any, callback)))
+        else:
+            QueryOptions.from_mapping({"can_use_tool": callback})
+
+    if bind_prefix:
+        validate()
+    else:
+        with pytest.raises(
+            ValidationError if as_object else TypeError,
+            match="can_use_tool must accept exactly 3 positional arguments",
+        ):
+            validate()
 
 
 @pytest.mark.parametrize("cached", [False, True])

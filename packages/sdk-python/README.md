@@ -303,11 +303,15 @@ The `context` argument includes `cancel_event`, `suggestions`, and
 `blocked_path` when the CLI provides a path-specific permission target.
 `can_use_tool` must be an async callable: an `async def` function or an instance
 with an async `__call__` method accepting `(tool_name, tool_input, context)`.
+It may be wrapped in `functools.partial`; validation checks the remaining
+arguments after binding.
 `stderr` must be a synchronous callable accepting a single `str`. Neither
 callback may require additional keyword-only arguments. An inspectable
 decorated callback is checked against the wrapper that the SDK calls. When a
 `stderr` wrapper has no inspectable signature, validation checks the first
 inspectable wrapped callback instead.
+If a stderr callback returns an awaitable or async generator, the SDK writes
+the original line to standard error without executing the asynchronous result.
 
 ### Handling `ask_user_question`
 
