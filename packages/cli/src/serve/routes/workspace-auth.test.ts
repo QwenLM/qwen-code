@@ -13,8 +13,13 @@ import {
 } from './workspace-auth.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 
+const mockClose = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const mockUndiciFetch = vi.hoisted(() => vi.fn());
-const mockEnvHttpProxyAgent = vi.hoisted(() => vi.fn());
+const mockEnvHttpProxyAgent = vi.hoisted(() =>
+  vi.fn().mockImplementation(() => ({
+    close: mockClose,
+  })),
+);
 
 vi.mock('../../utils/load-undici.js', () => ({
   loadUndici: async () => ({
@@ -49,7 +54,10 @@ describe('workspace-auth routes', () => {
     resetDeepinfraModelsCacheForTest();
     vi.restoreAllMocks();
     mockUndiciFetch.mockReset();
-    mockEnvHttpProxyAgent.mockReset();
+    mockClose.mockClear();
+    mockEnvHttpProxyAgent.mockImplementation(() => ({
+      close: mockClose,
+    }));
   });
 
   afterEach(() => {
@@ -82,6 +90,7 @@ describe('workspace-auth routes', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual(mockModels);
       expect(mockEnvHttpProxyAgent).toHaveBeenCalled();
+      expect(mockClose).toHaveBeenCalled();
       expect(mockUndiciFetch).toHaveBeenCalledWith(
         'https://api.deepinfra.com/models/list',
         expect.objectContaining({
@@ -190,19 +199,23 @@ describe('workspace-auth routes', () => {
     it('aborts and returns 502 when response body hangs past timeout (R1-1)', async () => {
       const app = makeApp();
       mockUndiciFetch.mockImplementationOnce(
-        async (_url: string, _opts: { signal: AbortSignal }) => ({
+        async (_url: string, opts: { signal: AbortSignal }) => {
+          expect(opts.signal).toBeDefined();
+          return {
             ok: true,
             json: async () => {
               const abortErr = new Error('This operation was aborted');
               abortErr.name = 'AbortError';
               throw abortErr;
             },
-          }),
+          };
+        },
       );
 
       const res = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res.status).toBe(502);
       expect(res.body.code).toBe('upstream_error');
+      expect(mockClose).toHaveBeenCalled();
     });
 
     it('returns 502 upstream_error when DeepInfra API fails and no cache exists', async () => {
