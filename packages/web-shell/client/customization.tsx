@@ -585,6 +585,8 @@ export interface WebShellAtProvider {
 }
 
 export interface WebShellComposerApi {
+  /** Prepare this composer's session without submitting a prompt. */
+  ensureSession?(): Promise<string>;
   focus?(): void;
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;
