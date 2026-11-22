@@ -627,17 +627,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   }, [uiActions, handleSubmitAndClear]);
 
   const customSetTextAndResetCompletionSignal = useCallback(
-    (newText: string) => {
+    (newText: string, navigation: 'recall' | 'draft' = 'recall') => {
       uiActions.invalidateSubmittedPromptProvenance();
       // Recall restores the user's own characters, not model-facing framing;
       // a collapsed paste also recovers the map back to its raw body.
       let restored = unframeClipboardPastes(newText);
-      const recalledItem = uiState.history?.findLast(
-        (item) =>
-          item.type === 'user' &&
-          item.sentToModel !== false &&
-          (item.recallText ?? item.text) === newText,
-      );
+      const recalledItem =
+        navigation === 'recall'
+          ? uiState.history?.findLast(
+              (item) =>
+                item.type === 'user' &&
+                item.sentToModel !== false &&
+                (item.recallText ?? item.text) === newText,
+            )
+          : undefined;
       const recalledPastes =
         recalledItem?.type === 'user' &&
         recalledItem.pasteExpansions instanceof Map &&

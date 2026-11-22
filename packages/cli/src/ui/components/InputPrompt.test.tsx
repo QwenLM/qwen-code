@@ -740,6 +740,59 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('restores a paste-bearing draft that matches map-less history text', async () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const body = 'D'.repeat(1200);
+    const draftText = `fix ${placeholder}`;
+    const originalPastes = new Map([[placeholder, body]]);
+    const onPendingPastesChange = vi.fn();
+    props.buffer.text = draftText;
+    mockedUseUIState.mockReturnValue({
+      isFeedbackDialogOpen: false,
+      messageQueue: [],
+      pendingLlmHistoryItems: [],
+      history: [{ id: 1, type: 'user', text: draftText }],
+    } as unknown as ReturnType<typeof useUIState>);
+
+    function StatefulPrompt() {
+      const [pastes, setPastes] = useState<Map<string, string>>(originalPastes);
+      return (
+        <InputPrompt
+          {...props}
+          pendingPastes={pastes}
+          onPendingPastesChange={(next) => {
+            onPendingPastesChange(next);
+            setPastes(next);
+          }}
+        />
+      );
+    }
+
+    const { stdin, unmount } = renderWithProviders(<StatefulPrompt />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) throw new Error('useInputHistory was not called');
+    act(() => historyArgs.onChange(draftText, 'recall'));
+    await flush();
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(new Map());
+
+    const secondHistoryArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!secondHistoryArgs) throw new Error('useInputHistory was not called');
+    act(() => secondHistoryArgs.onChange(draftText, 'draft'));
+    await flush();
+    expect(onPendingPastesChange).toHaveBeenLastCalledWith(originalPastes);
+
+    act(() => stdin.write('\r'));
+    await flush();
+    expect(props.onSubmit).toHaveBeenCalledWith(
+      `fix\n${wrapClipboardPaste(body)}\n${CLIPBOARD_PASTE_FRAMING}`,
+      expect.objectContaining({
+        humanInput: { text: `fix ${body}` },
+        pasteExpansions: originalPastes,
+      }),
+    );
+    unmount();
+  });
+
   it('history recall does not suffix identical placeholders across items', async () => {
     const placeholder = '[Pasted Content 1200 chars]';
     const firstBody = 'first'.padEnd(1200, 'x');
