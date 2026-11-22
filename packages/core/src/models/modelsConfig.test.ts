@@ -2229,6 +2229,41 @@ describe('Qwen Subscription model selection', () => {
       baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
     });
   });
+
+  it('preserves resolved service_tier across syncAfterAuthRefresh when model has no explicit tier (R1-19)', () => {
+    const config = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'deepseek-ai/DeepSeek-V3',
+            baseUrl: 'https://api.deepinfra.com/v1/openai',
+            envKey: 'DEEPINFRA_API_KEY',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'deepseek-ai/DeepSeek-V3',
+        service_tier: 'flex',
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        service_tier: {
+          kind: 'env',
+          envKey: 'DEEPINFRA_SERVICE_TIER',
+          detail: 'DEEPINFRA_SERVICE_TIER',
+        },
+      },
+    });
+
+    config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'deepseek-ai/DeepSeek-V3');
+
+    expect(config.getGenerationConfig().service_tier).toBe('flex');
+    expect(config.getGenerationConfigSources()['service_tier']).toEqual({
+      kind: 'env',
+      envKey: 'DEEPINFRA_SERVICE_TIER',
+      detail: 'DEEPINFRA_SERVICE_TIER',
+    });
+  });
 });
 
 vi.mock('../qwen/subscription-models.js', async (original) => ({
