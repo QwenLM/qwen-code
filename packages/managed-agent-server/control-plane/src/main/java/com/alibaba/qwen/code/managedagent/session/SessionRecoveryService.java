@@ -74,7 +74,13 @@ public class SessionRecoveryService {
         }
         boolean rechecked;
         if (TERMINAL.contains(turn.status())) {
-            rechecked = recheckCleanup(tenantId, sessionId, turn.promptId());
+            if (cancelledBeforeAdmission(turn)) {
+                RecoveryStatus evidence = evidence(session, turn);
+                rechecked = hasCleanupTarget(evidence)
+                        && recheckCleanup(tenantId, sessionId, evidence.promptId());
+            } else {
+                rechecked = recheckCleanup(tenantId, sessionId, turn.promptId());
+            }
         } else {
             rechecked = coordinator.recheckRecovery(tenantId, sessionId, turnId);
             if (!rechecked) {
@@ -145,8 +151,9 @@ public class SessionRecoveryService {
             return view("operator_required", reason == null ? "recovery_blocked" : reason,
                     turn, false, false, cancel);
         }
-        boolean initial = turn == null || "CANCELLED".equals(turn.status()) && !turn.submissionAttempted()
-                && turn.harnessEventEpoch() == null && recovery.nonInitialTurns(session.tenantId(), session.sessionId()) == 0;
+        boolean localCancellation = cancelledBeforeAdmission(turn);
+        boolean initial = turn == null || localCancellation
+                && recovery.nonInitialTurns(session.tenantId(), session.sessionId()) == 0;
         if (initial && (heads.isEmpty() || journals.hasPristineInitialJournal(session.tenantId(),
                 session.sessionId(), session.workspace() == null ? null : session.workspace().getWorkspaceId()))) {
             return view("ready", "ready", turn, true, false, false);
@@ -210,7 +217,7 @@ public class SessionRecoveryService {
             return view(active ? "awaiting_evidence" : "operator_required",
                     "recovery_evidence_unavailable", turn, false,
                     operator && (recheckIntent(turn)
-                            || turn != null && TERMINAL.contains(turn.status())), cancel);
+                            || turn != null && TERMINAL.contains(turn.status()) && !localCancellation), cancel);
         }
         if ("ready".equals(evidence.state()) && evidence.nextTurnAllowed() && evidence.inputSettled()
                 && evidence.continuationReady() && !active) {
@@ -224,7 +231,7 @@ public class SessionRecoveryService {
         }
         boolean cleanup = evidence.inputSettled() && "cleanup_pending".equals(state);
         boolean recheck = operator && !"operator_required".equals(state)
-                && (recheckIntent(turn) || cleanup);
+                && (recheckIntent(turn) || cleanup && (!localCancellation || hasCleanupTarget(evidence)));
         if (!active && !evidence.inputSettled() && !cleanup) {
             state = "operator_required";
             recheck = false;
@@ -236,14 +243,31 @@ public class SessionRecoveryService {
     }
 
     private RecoveryStatus evidence(SessionRecord session, TurnRecord turn) {
+        boolean localCancellation = cancelledBeforeAdmission(turn);
+        // With no prompt target, the Harness checks its last accepted input.
+        String target = turn == null || localCancellation ? null : turn.promptId();
         try {
             RecoveryStatus status = harness.inspectRecovery(session.tenantId(),
-                    session.sessionId(), turn == null ? null : turn.promptId());
-            return status != null && (turn == null
-                    || turn.promptId().equals(status.promptId())) ? status : null;
+                    session.sessionId(), target);
+            if (status == null || target != null && !target.equals(status.promptId())
+                    || localCancellation && turn.promptId().equals(status.promptId())) {
+                return null;
+            }
+            return status;
         } catch (RuntimeException unavailable) {
             return null;
         }
+    }
+
+    private static boolean hasCleanupTarget(RecoveryStatus evidence) {
+        return evidence != null && "cleanup_pending".equals(evidence.state())
+                && evidence.inputSettled() && evidence.continuationReady()
+                && org.apache.commons.lang3.StringUtils.isNotBlank(evidence.promptId());
+    }
+
+    private static boolean cancelledBeforeAdmission(TurnRecord turn) {
+        return turn != null && "CANCELLED".equals(turn.status())
+                && !turn.submissionAttempted() && turn.harnessEventEpoch() == null;
     }
 
     private TurnRecord latest(SessionRecord session) {
