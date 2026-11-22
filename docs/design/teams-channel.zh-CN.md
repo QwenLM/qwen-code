@@ -108,10 +108,10 @@ workspace 声明与 lockfile。协议代码只存在于该包，依赖 ChannelAg
 的旧版 peer。发布不能安装第二份 base，也不能排除本次发布的 base 版本。
 
 npm 要求包先存在，才能为其配置 trusted publishing，因此 publish 步骤由仓库变量
-`NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED` 控制，直到维护者完成一次性的公开
-bootstrap 发布，并在 `production-release` 环境中把该包绑定到 `release.yml`
-工作流。缺少这道门禁时，首个携带该包的发布会让整个 publish job 失败，v0.28.1
-即是如此。bootstrap 应发布首个真正包含该包的 Qwen 版本，不要另造一条版本线。
+`NPM_CHANNEL_MSTEAMS_TRUSTED_PUBLISHING_ENABLED` 控制，并且只在仓库为
+`QwenLM/qwen-code` 时开启，fork 永远不会发布该包。在该包于 `production-release`
+环境中绑定到 `release.yml` 工作流之前就发布它，会让整个 publish job 失败，
+v0.28.1 即是如此。
 
 ## 验证
 
