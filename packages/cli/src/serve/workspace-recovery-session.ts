@@ -876,6 +876,9 @@ export async function verifyRecoverySession(
           // The external lanes admit a Session skill catalog, so the malformed
           // reference the exclusion list used to reject needs its own check:
           // the resident load parses the same field and would fail every turn.
+          // Deliberately every hosted profile, not just external: a definition
+          // that reaches recovery carrying a broken reference must be refused
+          // whatever lane wrote it.
           admitsSessionSkillsRef(definition['sessionSkillsRef']) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
