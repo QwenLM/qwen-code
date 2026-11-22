@@ -5905,6 +5905,50 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.theme).toBe('default');
     });
 
+    it('commits only the provided top-level settings and updates memory after saving', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      const previous = {
+        visionModel: 'openai:old-vision',
+        visionBridgeTimeoutMs: 30_000,
+        imageModel: 'openai:image-model',
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH ? JSON.stringify(previous) : '{}',
+      );
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const updates = {
+        visionModel: 'openai:new-vision',
+        visionBridgeTimeoutMs: 45_000,
+      };
+      const mockFn = vi.mocked(jsoncEditor.updateSettingsFilePreservingFormat);
+      mockFn.mockClear();
+      mockFn.mockReturnValueOnce(false);
+
+      expect(() =>
+        settings.setTopLevelValues(SettingScope.User, updates),
+      ).toThrow(
+        /saveSettings: updateSettingsFilePreservingFormat returned false/,
+      );
+      expect(settings.user.originalSettings).toMatchObject(previous);
+      expect(settings.merged).toMatchObject(previous);
+
+      mockFn.mockClear();
+      mockFn.mockReturnValueOnce(true);
+      settings.setTopLevelValues(SettingScope.User, updates);
+
+      expect(mockFn).toHaveBeenCalledExactlyOnceWith(
+        USER_SETTINGS_PATH,
+        updates,
+        false,
+        [],
+      );
+      expect(settings.user.originalSettings).toMatchObject(updates);
+      expect(settings.merged).toMatchObject({ ...previous, ...updates });
+    });
+
     it('re-syncs uncommitted scopes from disk when setValues persistence fails', () => {
       (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
         [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(

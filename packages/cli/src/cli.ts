@@ -27,6 +27,7 @@ import {
 import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
+import { installBundledChunkResolver } from './utils/bundled-chunk-resolver.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
 import { CHECKED_NODE_VERSION_ENV } from './utils/env-provenance.js';
 import {
@@ -675,6 +676,7 @@ export async function runCliEntry(
   }
 
   if (route === 'serve') {
+    installBundledChunkResolver(import.meta.url);
     const { tryRunServeFastPath } = await import('./serve/fast-path.js');
     if (await tryRunServeFastPath(argv)) {
       return;
@@ -720,9 +722,13 @@ export async function runCliEntry(
     return;
   }
 
-  const acpStartupProfiler = rawArgv.some(
+  const isAcpStartup = rawArgv.some(
     (arg) => arg === '--acp' || arg === '--experimental-acp',
-  )
+  );
+  if (isAcpStartup && route !== 'serve') {
+    installBundledChunkResolver(import.meta.url);
+  }
+  const acpStartupProfiler = isAcpStartup
     ? await import('./utils/acp-startup-profiler.js')
     : undefined;
   acpStartupProfiler?.initializeAcpStartupProfiler();

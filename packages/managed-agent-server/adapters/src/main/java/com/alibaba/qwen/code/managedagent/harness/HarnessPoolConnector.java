@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessAttachmentLostFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
@@ -108,8 +109,8 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (settings.getToken().isBlank() || !settings.getCapabilityDigest().matches("sha256:[0-9a-f]{64}")) {
             throw new IllegalStateException("Harness pool requires a token and capability digest");
         }
-        if ("kubernetes".equals(settings.getPool().getDiscovery()) && tls == null) {
-            throw new IllegalStateException("Kubernetes Harness pool requires configured mTLS");
+        if (!"static".equals(settings.getPool().getDiscovery())) {
+            throw new IllegalStateException("Harness pool discovery must be static");
         }
         for (var endpoint : discovery.snapshot().endpoints()) {
             validateEndpoint(endpoint, tls);
@@ -304,6 +305,18 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     private <T> T call(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
         return call(select(tenant, session, true), action);
+    }
+
+    private <T> T admissionCall(String tenant, String session, Function<QwenHostedHarnessConnector, T> action) {
+        try {
+            return call(tenant, session, action);
+        } catch (HarnessAttachmentLostFailure lost) {
+            Selected fresh = select(tenant, session, true);
+            var selectedCall = fresh.call();
+            var retry = new QwenHostedHarnessConnector.PoolCall(tenant, session, selectedCall.placement(),
+                    selectedCall.writerToken(), true);
+            return call(new Selected(fresh.placement(), fresh.member(), retry), action);
+        }
     }
 
     private <T> T lifecycleCall(OperationRecord operation, Function<QwenHostedHarnessConnector, T> action) {
@@ -547,9 +560,14 @@ public class HarnessPoolConnector implements HarnessConnector {
         if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
             return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
         }
-        return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
-                ? isWorkspaceFilesAvailable() && contract.lifecycle() == 1
-                : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2 && contract.profiles().contains(profile));
+        // D3: ordinary files joins the negotiated v2 profiles, keeping its
+        // availability gate; external-files stays on the saved v1 path above.
+        if (WorkspaceToolProfiles.FILES.equals(profile) && !isWorkspaceFilesAvailable()) {
+            return false;
+        }
+        return contract != null
+                && WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
+                && contract.profiles().contains(profile);
     }
 
     @Override
@@ -557,6 +575,16 @@ public class HarnessPoolConnector implements HarnessConnector {
         return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
                 ? contract != null && contract.lifecycle() == 1 && contract.features().contains(WorkspaceToolProfiles.EXTERNAL_FILES)
                 : supportsLifecycle(profile);
+    }
+
+    @Override
+    public boolean supportsPublicChildAgents() {
+        // D5′: the negotiated pool contract gates children — the same feature
+        // token and lifecycle v2 Shell the single connector reads.
+        Contract negotiated = contract;
+        return negotiated != null
+                && HarnessFeature.PUBLIC_CHILD_AGENTS.in(negotiated.features())
+                && supportsLifecycle(WorkspaceToolProfiles.SHELL);
     }
 
     @Override
@@ -671,7 +699,7 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public void resolveAction(String tenant, String session, String action, JsonNode response) {
-        call(tenant, session, leaf -> {
+        admissionCall(tenant, session, leaf -> {
             leaf.resolveAction(tenant, session, action, response);
             return null;
         });
@@ -695,25 +723,36 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public Map<String, Object> runAutomationOperation(String tenant, String session, Map<String, Object> body) {
-        return call(tenant, session, leaf -> leaf.runAutomationOperation(tenant, session, body));
+        return "cancel_run".equals(body.get("kind"))
+                ? call(tenant, session, leaf -> leaf.runAutomationOperation(tenant, session, body))
+                : admissionCall(tenant, session, leaf -> leaf.runAutomationOperation(tenant, session, body));
     }
 
     @Override
     public void runChildOperation(String tenant, String session, Map<String, Object> body) {
-        call(tenant, session, leaf -> {
+        Function<QwenHostedHarnessConnector, Void> action = leaf -> {
             leaf.runChildOperation(tenant, session, body);
             return null;
-        });
+        };
+        if ("cancel".equals(body.get("kind")) || "close_scope".equals(body.get("kind"))) {
+            call(tenant, session, action);
+        } else {
+            admissionCall(tenant, session, action);
+        }
     }
 
     @Override
     public Map<String, Object> runMessageOperation(String tenant, String session, Map<String, Object> body) {
-        return call(tenant, session, leaf -> leaf.runMessageOperation(tenant, session, body));
+        return "stop".equals(body.get("kind"))
+                ? call(tenant, session, leaf -> leaf.runMessageOperation(tenant, session, body))
+                : admissionCall(tenant, session, leaf -> leaf.runMessageOperation(tenant, session, body));
     }
 
     @Override
     public Map<String, Object> runChannelOperation(String tenant, String session, Map<String, Object> body) {
-        return call(tenant, session, leaf -> leaf.runChannelOperation(tenant, session, body));
+        return "cancel_delivery".equals(body.get("kind"))
+                ? call(tenant, session, leaf -> leaf.runChannelOperation(tenant, session, body))
+                : admissionCall(tenant, session, leaf -> leaf.runChannelOperation(tenant, session, body));
     }
 
     @Override

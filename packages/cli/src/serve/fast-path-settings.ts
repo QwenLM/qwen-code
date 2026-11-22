@@ -53,7 +53,10 @@ export type ServeFastPathSettings = Pick<
   Settings,
   'advanced' | 'context' | 'env' | 'security' | 'tools'
 > & {
-  general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
+  general?: Pick<
+    NonNullable<Settings['general']>,
+    'chatRecording' | 'language'
+  >;
   policy?: ServeFastPathPolicyInput;
   serve?: {
     channels?: unknown;
@@ -551,8 +554,16 @@ function pickFastPathSettings(
         'Serve fast path settings general.chatRecording must be a boolean.',
       );
     }
-    if (chatRecording !== undefined) {
-      out.general = { chatRecording };
+    // Tolerated, not thrown: resolveChannelLocale already reads a non-string
+    // as English, and throwing here would discard the whole summary — taking
+    // the PR-watch subscription and the permission policy with it.
+    const language =
+      typeof general['language'] === 'string' ? general['language'] : undefined;
+    if (chatRecording !== undefined || language !== undefined) {
+      out.general = {
+        ...(chatRecording !== undefined ? { chatRecording } : {}),
+        ...(language !== undefined ? { language } : {}),
+      };
     }
   }
 

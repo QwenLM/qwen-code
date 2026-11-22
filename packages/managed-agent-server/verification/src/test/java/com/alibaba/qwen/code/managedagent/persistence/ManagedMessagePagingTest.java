@@ -191,8 +191,8 @@ class ManagedMessagePagingTest {
                 .extracting(StoreModels.ItemPartRecord::text).containsExactly("resource body");
         jdbc.update("UPDATE ma_resource SET sha256=? WHERE resource_key=?", "0".repeat(64), resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("digest differs");
-        jdbc.update("UPDATE ma_resource SET sha256=?,session_scope_key=? WHERE resource_key=?",
-                WorkspaceEvidenceResources.digest(bytes), ManagedSessionStore.sessionScopeKey("other", "session"), resource);
+        jdbc.update("UPDATE ma_resource SET sha256=?,tenant_id=?,session_id=? WHERE resource_key=?",
+                WorkspaceEvidenceResources.digest(bytes), "other", "session", resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("unavailable");
     }
 
@@ -208,20 +208,12 @@ class ManagedMessagePagingTest {
     private String resource(byte[] bytes) {
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         String key = ManagedSessionStore.resourceKey(scope, "page-parts");
-        jdbc.update("INSERT INTO ma_resource(resource_key,session_scope_key,tenant_id,session_id,resource_id,"
+        jdbc.update("INSERT INTO ma_resource(resource_key,tenant_id,session_id,resource_id,"
                         + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,last_verified_at)"
-                        + " VALUES(?,?,?,?,'page-parts','managed-message-parts',1,?,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
-                key, scope, "tenant", "session", bytes.length, WorkspaceEvidenceResources.digest(bytes), bytes);
+                        + " VALUES(?,?,?,'page-parts','managed-message-parts',1,?,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
+                key, "tenant", "session", bytes.length, WorkspaceEvidenceResources.digest(bytes), bytes);
         jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", key, id(1));
         return key;
-    }
-
-    @Test
-    void refusesPrivateCsiSessionsWithoutBorrowingTheirJournalAsMessages() {
-        seed(2, false);
-        jdbc.update("UPDATE ma_session SET tool_profile='csi-files-retirement/1' WHERE tenant_id=? AND session_id=?",
-                "tenant", "session");
-        assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("private CSI");
     }
 
     @Test

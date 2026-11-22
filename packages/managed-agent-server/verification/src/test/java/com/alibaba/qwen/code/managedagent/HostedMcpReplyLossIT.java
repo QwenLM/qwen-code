@@ -401,9 +401,9 @@ class HostedMcpReplyLossIT {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND session_id = ?",
-                String.class, scope, ref.path("resourceId").asText(), tenant,
+                String.class, tenant, session, ref.path("resourceId").asText(), tenant,
                 session);
         assertThat(body).as("published response body").isNotBlank();
         try {

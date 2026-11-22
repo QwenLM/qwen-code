@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore.Row;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.session.LeaseRenewalRunner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -27,10 +28,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -87,13 +85,9 @@ public class ChildWorkspaceService {
     private final WorkspaceExecutionStore leases;
     private final RuntimeWarmer warmer;
     private final Supplier<Long> clock;
+    private final LeaseRenewalRunner runner;
     private final String owner;
     private final long renewMillis;
-    private final ScheduledExecutorService renewals = Executors.newSingleThreadScheduledExecutor(task -> {
-        Thread thread = new Thread(task, "child-workspace-renewal");
-        thread.setDaemon(true);
-        return thread;
-    });
 
     @org.springframework.beans.factory.annotation.Autowired
     public ChildWorkspaceService(SessionQueryStore sessions, ChildWorkspaceStore store,
@@ -110,13 +104,14 @@ public class ChildWorkspaceService {
         this.leases = leases;
         this.warmer = warmer;
         this.clock = clock;
-        this.owner = owner;
+        this.runner = new LeaseRenewalRunner(owner, "child-workspace-renewal");
+        this.owner = this.runner.owner();
         this.renewMillis = renewMillis;
     }
 
     @PreDestroy
     void stopRenewals() {
-        renewals.shutdownNow();
+        runner.close();
     }
 
     /**
@@ -498,7 +493,7 @@ public class ChildWorkspaceService {
     private <T> T held(ChildWorkspaceProvider provider, Row claimed, Function<Path, T> work) {
         AtomicBoolean live = new AtomicBoolean(true);
         AtomicLong renewed = new AtomicLong(clock.get());
-        ScheduledFuture<?> renewal = renewals.scheduleWithFixedDelay(() -> {
+        ScheduledFuture<?> renewal = runner.scheduleWithFixedDelay(() -> {
             try {
                 if (store.renew(claimed, owner, clock.get() + LEASE_MS, clock.get())) {
                     renewed.set(clock.get());
@@ -513,7 +508,7 @@ public class ChildWorkspaceService {
                 }
                 LOG.warn("child workspace claim renewal failed run={}", claimed.childRunId(), error);
             }
-        }, renewMillis, renewMillis, TimeUnit.MILLISECONDS);
+        }, renewMillis);
         try {
             ContextBinding storage = new ContextBinding(claimed.tenantId(), claimed.workspaceId(),
                     claimed.workspaceGeneration(), claimed.storageId(), ".",

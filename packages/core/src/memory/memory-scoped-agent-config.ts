@@ -19,6 +19,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyASTInDirectory } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
+  AUTO_MEMORY_INDEX_FILENAME,
   AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getAutoMemoryTrustedAnchor,
@@ -41,6 +42,7 @@ export interface MemoryScopedAgentConfigOptions {
   bypassBaseAskForScopedPaths?: boolean;
   includeProjectMemory?: boolean;
   includeUserMemory?: boolean;
+  protectMemoryIndexes?: boolean;
   protectPinnedMemory?: boolean;
   restrictReadsToMemoryPaths?: boolean;
 }
@@ -165,6 +167,43 @@ function isProtectedPinnedMemoryPath(
       !!pinnedRoot.resolvedPath &&
       isWithinRootCaseInsensitive(resolvedCandidate, pinnedRoot.resolvedPath)
     );
+  });
+}
+
+export function isManagedMemoryIndexPath(
+  filePath: string | undefined,
+  projectRoot: string,
+  options: Pick<
+    MemoryScopedAgentConfigOptions,
+    'includeProjectMemory' | 'includeUserMemory'
+  > = {},
+): boolean {
+  if (!filePath) return false;
+  const includedRoots = [
+    ...((options.includeProjectMemory ?? true)
+      ? [getAutoMemoryRoot(projectRoot)]
+      : []),
+    ...((options.includeUserMemory ?? true) ? [getUserAutoMemoryRoot()] : []),
+  ];
+  const indexes = includedRoots.map((root) =>
+    path.resolve(root, AUTO_MEMORY_INDEX_FILENAME),
+  );
+  const literal = path.resolve(filePath);
+  if (indexes.includes(literal)) return true;
+
+  let resolved: string;
+  try {
+    // Native realpath returns the on-disk casing on case-insensitive volumes.
+    resolved = fs.realpathSync.native(literal);
+  } catch {
+    return false;
+  }
+  return indexes.some((index) => {
+    try {
+      return fs.realpathSync.native(index) === resolved;
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -329,7 +368,13 @@ async function evaluateScopedDecision(
           pinnedRoots,
           resolvedCandidate,
         );
-      if (isPinned) return 'deny';
+      if (
+        isPinned ||
+        (opts.protectMemoryIndexes &&
+          isManagedMemoryIndexPath(ctx.filePath, projectRoot, opts))
+      ) {
+        return 'deny';
+      }
       return isAllowedResolvedMemoryPath(resolvedCandidate, projectRoot, {
         includeProjectMemory: opts.includeProjectMemory,
         includeUserMemory: opts.includeUserMemory,
@@ -392,6 +437,13 @@ function getScopedDenyRule(
       ) {
         return `ManagedAutoMemory(${ctx.toolName}: pinned memory is read-only)`;
       }
+      if (
+        isAllowed &&
+        opts.protectMemoryIndexes &&
+        isManagedMemoryIndexPath(ctx.filePath, projectRoot, opts)
+      ) {
+        return `ManagedAutoMemory(${ctx.toolName}: memory indexes are read-only)`;
+      }
       return `ManagedAutoMemory(${ctx.toolName}: only within ${allowedRoots})`;
     }
     default:
@@ -409,6 +461,7 @@ export function createMemoryScopedAgentConfig(
     bypassBaseAskForScopedPaths: options.bypassBaseAskForScopedPaths ?? false,
     includeProjectMemory: options.includeProjectMemory ?? true,
     includeUserMemory: options.includeUserMemory ?? true,
+    protectMemoryIndexes: options.protectMemoryIndexes ?? false,
     protectPinnedMemory: options.protectPinnedMemory ?? false,
     restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
   };

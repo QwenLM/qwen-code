@@ -33,6 +33,7 @@ export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { getToolCallRepeatKey } from '../tools/tool-call-repeat-key.js';
 import type {
+  AnyToolInvocation,
   AutoModeFallbackConfirmation,
   ToolCallConfirmationDetails,
 } from '../tools/tools.js';
@@ -365,6 +366,40 @@ export function shouldForceAutoModeReviewForAllow(
     }
     return Boolean(op.filePath && isAutoModeProtectedWritePath(op.filePath));
   });
+}
+
+export function shouldRequireAutoModeReviewForAllow(
+  invocation: Pick<AnyToolInvocation, 'requiresAutoReviewOnAllow'>,
+  ctx: PermissionCheckContext,
+  toolName: string,
+  config: Config,
+): boolean {
+  return (
+    invocation.requiresAutoReviewOnAllow?.() === true ||
+    shouldForceAutoModeReviewForAllow(ctx, config.getCwd()) ||
+    shouldClassifyAllShellForAutoMode(toolName, config)
+  );
+}
+
+export async function confirmAutomaticReviewOnAllow(
+  config: Config,
+  invocation: AnyToolInvocation,
+  signal: AbortSignal,
+): Promise<'confirmed' | 'cancelled' | 'mode-changed' | 'requires-human'> {
+  if (invocation.requiresAutoReviewOnAllow?.() !== true) return 'confirmed';
+  const mode = config.getApprovalMode();
+  if (mode !== ApprovalMode.AUTO && mode !== ApprovalMode.YOLO) {
+    return 'mode-changed';
+  }
+  const confirmation = await invocation.getConfirmationDetails(signal);
+  if (signal.aborted) return 'cancelled';
+  const liveMode = config.getApprovalMode();
+  if (liveMode !== ApprovalMode.AUTO && liveMode !== ApprovalMode.YOLO) {
+    return 'mode-changed';
+  }
+  if (invocation.requiresUserInteraction?.()) return 'requires-human';
+  await confirmation.onAutoConfirm?.(liveMode);
+  return signal.aborted ? 'cancelled' : 'confirmed';
 }
 
 function hasRawProtectedRedirect(command: string, cwd: string): boolean {

@@ -7,11 +7,12 @@
 import { lstatSync, readdirSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import {
-  DEFAULT_BOUND_ROLE_GUIDANCE,
+  DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE,
   resolveBoundActionTemplate,
   renderBoundActionTemplate,
   buildBoundEventPrompt,
   type BoundActionValues,
+  type BoundPromptLanguage,
 } from '@qwen-code/channel-base';
 import type { SessionPrBindingSummary } from '../routes/session-pr-bindings.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
@@ -64,6 +65,15 @@ export interface PrWatchRecipient {
   url: string;
 }
 
+/**
+ * The provenance line, per language. The summary is not here: it was rendered
+ * in the detection language by the observation and is passed through.
+ */
+const DRAIN_PROVENANCE: Readonly<Record<BoundPromptLanguage, string>> = {
+  en: 'Detected by the daemon PR-state watch.',
+  zh: '由 daemon PR 状态监视检测。',
+};
+
 export interface PrWatchDrainDeps {
   watchDir: string;
   locks: PathMutexRegistry;
@@ -95,6 +105,12 @@ export interface PrWatchDrainDeps {
     host: string,
   ) => ReadonlyMap<string, string> | undefined;
   wakeDormant?: boolean;
+  /**
+   * The language of the envelope, role guidance and provenance this drain
+   * composes. Absent means English. The transition summary is unaffected: it
+   * was persisted in the detection language by the observation.
+   */
+  language?: BoundPromptLanguage;
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -425,7 +441,9 @@ export function buildDrainPrompt(
   entry: PrWatchPendingEntry,
   recipient: PrWatchRecipient,
   actions: ReadonlyMap<string, string> | undefined,
+  language?: BoundPromptLanguage,
 ): string {
+  const lang = language ?? 'en';
   const identity = state.pr;
   const repo = displayRepo(recipient.url, identity);
   const url = displayUrl(recipient.url, identity, repo);
@@ -452,7 +470,8 @@ export function buildDrainPrompt(
   ];
   return buildBoundEventPrompt({
     platform: 'GitHub',
-    provenance: 'Detected by the daemon PR-state watch.',
+    language: lang,
+    provenance: DRAIN_PROVENANCE[lang],
     ...(template !== undefined
       ? {
           instruction: {
@@ -468,7 +487,8 @@ export function buildDrainPrompt(
     ...(recipient.role !== undefined
       ? {
           role: recipient.role,
-          roleGuidance: DEFAULT_BOUND_ROLE_GUIDANCE[recipient.role],
+          roleGuidance:
+            DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[lang][recipient.role],
         }
       : {}),
     body: entry.summary,
@@ -838,7 +858,13 @@ async function drainEntry(
         });
         break;
       }
-      const promptText = buildDrainPrompt(current, entry, recipient, actions);
+      const promptText = buildDrainPrompt(
+        current,
+        entry,
+        recipient,
+        actions,
+        deps.language,
+      );
       state.inFlight.set(key, {
         sessionId: recipient.sessionId,
         admitted: false,
@@ -957,6 +983,7 @@ async function restoreAndAdmit(
           liveEntry ?? entry,
           recipient,
           actions,
+          deps.language,
         );
         try {
           await deps.admitPrompt(runtime, recipient.sessionId, promptText, key);

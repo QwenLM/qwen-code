@@ -195,30 +195,13 @@ final class AgentStoreRows {
                         "The Session was not found."));
     }
 
-    void requireLegacyMutation(String tenantId, String sessionId) {
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
-    }
-
-    SessionRecord requireLegacySessionForUpdate(String tenantId, String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, true);
-    }
-
-    SessionRecord requireSessionForUpdate(String tenantId,
-            String sessionId) {
-        return requireSessionForUpdate(tenantId, sessionId, false);
-    }
-
-    SessionRecord requireSessionForUpdate(
-            String tenantId, String sessionId, boolean legacyMutation) {
+    SessionRecord requireSessionForUpdate(String tenantId, String sessionId) {
         try {
             return jdbc.queryForObject(
                     "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session")
                             + " FROM ma_session WHERE ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id ="
                             + " ? AND ma_session.session_id = ? FOR UPDATE",
                     (rows, rowNumber) -> {
-                        if (legacyMutation) {
-                            ManagedLegacySessionGuard.requireLegacyMutation(rows.getBoolean("is_csi_guard"));
-                        }
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.
                         List<StreamCounters> streams = jdbc.query(
@@ -247,11 +230,6 @@ final class AgentStoreRows {
 
     LockedSessionTurn requireSessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
         return new LockedSessionTurn(requireSessionForUpdate(tenantId, sessionId),
-                requireTurnForUpdate(tenantId, sessionId, turnId));
-    }
-
-    LockedSessionTurn requireLegacySessionTurnForUpdate(String tenantId, String sessionId, String turnId) {
-        return new LockedSessionTurn(requireLegacySessionForUpdate(tenantId, sessionId),
                 requireTurnForUpdate(tenantId, sessionId, turnId));
     }
 

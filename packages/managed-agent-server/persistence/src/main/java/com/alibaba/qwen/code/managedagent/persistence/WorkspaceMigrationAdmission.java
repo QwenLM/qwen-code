@@ -30,10 +30,8 @@ final class WorkspaceMigrationAdmission {
 
     // With a lock clause, locks the storage row through alias_key, which locks
     // the alias record and then the primary record, as Runtime binding
-    // creation, execution membership and journal commits do. Locking it
-    // through (tenant_key, storage_key) took the primary record first, and
-    // requireOpen asked for the alias record afterwards, in
-    // requirePhysicalOpen, which deadlocked with them (#16320).
+    // creation, execution membership and journal commits do. Taking the
+    // primary record first deadlocked with them (#16320).
     private static String owner(JdbcTemplate jdbc, String tenant, String storage, String lock) {
         var rows = jdbc.query("SELECT tenant_id, storage_id, fence_operation_id FROM ma_storage"
                 + " WHERE alias_key = ?" + lock, (row, index) -> WorkspaceOperations.values(
@@ -132,16 +130,13 @@ final class WorkspaceMigrationAdmission {
         }
         var registered = registrations.getFirst();
         var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE storage_key = ?" + lock,
-                (row, index) -> registered.ownerKey().equals(row.getString("physical_key"))
+                (row, index) -> registered.ownerKey().equals(row.getString("storage_key"))
                         && "EXTERNAL".equals(row.getString("storage_kind"))
                         && tenant.equals(row.getString("tenant_id")) && storage.equals(row.getString("storage_id"))
                         && registered.mountRoot().equals(row.getString("mount_root"))
                         && registered.registrationRevision() == row.getLong("mount_revision")
                         && "UNVERIFIED".equals(row.getString("mount_state"))
-                        && row.getObject("maintenance_id") == null && row.getObject("maintenance_generation") == null
-                        && "RELEASED".equals(row.getString("csi_phase")) && row.getLong("csi_revision") == 0
-                        && row.getObject("csi_reservation_id") == null && row.getObject("csi_registration_key") == null
-                        && row.getObject("csi_registration_revision") == null && row.getObject("csi_provision_request_id") == null,
+                        && row.getObject("maintenance_id") == null && row.getObject("maintenance_generation") == null,
                 registered.ownerKey());
         if (owners.size() != 1 || !owners.getFirst()) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
@@ -187,9 +182,9 @@ final class WorkspaceMigrationAdmission {
         }
         if (workspace == null) {
             var heads = jdbc.query("SELECT tenant_id, session_id, workspace_id FROM ma_session_head"
-                    + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'",
+                    + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                     (row, index) -> new String[] {row.getString("tenant_id"), row.getString("session_id"), row.getString("workspace_id")},
-                    RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session));
+                    tenant, session);
             if (heads.isEmpty()) {
                 return null;
             }

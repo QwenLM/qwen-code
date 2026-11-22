@@ -39,35 +39,15 @@ final class ManagedModelDiagnosticProjection {
         this.store = store;
     }
 
-    static int storageFloor(byte[] records,
-            List<com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource> requested,
+    static boolean hasActivityDiagnostics(byte[] records,
             List<JournalResourceWrites.ValidatedResource> validated) {
-        boolean promotes = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHostedRecoveryRecords.requiresVersionTwo(records, requested)
-                || validated.stream().anyMatch(resource -> {
-                    if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
-                        return false;
-                    }
-                    JsonNode body = ManagedExtensionRecordStore.parse(new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
-                    return body != null && (body.path("v").asInt() == 3 || body.path("v").asInt() == 4);
-                });
-        boolean diagnostics = validated.stream().anyMatch(resource -> {
-            if (com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedModelDiagnostics.KINDS.contains(resource.resource().kind())) {
-                return true;
-            }
-            if (!"managed-history_maintenance".equals(resource.resource().kind()) || resource.bytes() == null) {
-                return false;
-            }
-            JsonNode body = ManagedExtensionRecordStore.parse(
-                    new String(resource.bytes(), java.nio.charset.StandardCharsets.UTF_8));
-            return body != null && body.path("schemaVersion").asInt() == 2;
-        });
         boolean activity = validated.stream().anyMatch(resource ->
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedActivityDiagnostics.KIND.equals(resource.resource().kind()));
         boolean measured = new String(records, StandardCharsets.UTF_8).lines().anyMatch(line -> {
             JsonNode envelope = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(line);
             return envelope != null && "tool.measured".equals(envelope.path("managedSession").path("kind").asText());
         });
-        return measured ? 5 : activity ? 4 : diagnostics ? 3 : promotes ? 2 : 1;
+        return activity || measured;
     }
 
     static void validateResource(StoredResource resource) {
@@ -122,10 +102,9 @@ final class ManagedModelDiagnosticProjection {
     private record DiagnosticRow(JsonNode body, long sequence, Long settledAt) { }
 
     private DiagnosticRow diagnosticRow(String tenantId, String sessionId, String domain) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         return jdbc.query("SELECT revision, settled_at, record_resource_id FROM ma_session_record"
-                        + " WHERE record_kind = 'DOMAIN' AND session_scope_key = ? AND record_key = ?"
-                        + " AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                        + " WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND record_key = ?"
+                        + " AND domain = ? AND record_id = ?",
                 (row, index) -> {
                     StoredResource resource = store.readResource(tenantId, sessionId, row.getString("record_resource_id"));
                     require(resource.schemaVersion() == 1 && resource.byteLength() <= 65_536,
@@ -142,8 +121,8 @@ final class ManagedModelDiagnosticProjection {
                     long settled = row.getLong("settled_at");
                     Long settledAt = row.wasNull() ? null : settled;
                     return new DiagnosticRow(body, row.getLong("revision"), settledAt);
-                }, scope, ManagedExtensionProjection.recordKey(sessionId, domain, "latest"),
-                tenantId, sessionId, domain, "latest").stream().findFirst().orElse(null);
+                }, tenantId, sessionId, ManagedExtensionProjection.recordKey(sessionId, domain, "latest"),
+                domain, "latest").stream().findFirst().orElse(null);
     }
 
     void projectModelStatistics(String tenantId, String workspaceId, String sessionId,
@@ -192,7 +171,7 @@ final class ManagedModelDiagnosticProjection {
         String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, ManagedModelDiagnostics.STATS_DOMAIN, "latest");
         List<String> existing = jdbc.queryForList("SELECT record_resource_id FROM ma_session_record"
-                + " WHERE session_scope_key = ? AND record_key = ?", String.class, scope, key);
+                + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?", String.class, tenantId, sessionId, key);
         JsonNode statistics = body.get("statistics");
         if (!existing.isEmpty()) {
             StoredResource previousResource = store.readResource(tenantId, sessionId, existing.getFirst());
@@ -207,8 +186,8 @@ final class ManagedModelDiagnosticProjection {
                 if (revision < before) {
                     Integer committed = jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref f JOIN ma_session_head h"
                             + " ON h.tenant_id = f.tenant_id AND h.session_id = f.session_id AND h.head_kind = 'MANAGED_SESSION'"
-                            + " WHERE f.session_scope_key = ? AND f.resource_id = ? AND f.owner_kind = 'JOURNAL'"
-                            + " AND f.journal_revision <= h.journal_revision", Integer.class, scope, resource.resourceId());
+                            + " WHERE f.tenant_id = ? AND f.session_id = ? AND f.resource_id = ? AND f.owner_kind = 'JOURNAL'"
+                            + " AND f.journal_revision <= h.journal_revision", Integer.class, tenantId, sessionId, resource.resourceId());
                     require(committed != null && committed > 0, "An older statistics snapshot must reference its original committed resource.");
                 }
                 return;
@@ -223,15 +202,17 @@ final class ManagedModelDiagnosticProjection {
         }
         long sequence = event.get("sequence").longValue();
         if (existing.isEmpty()) {
-            jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, workspace_id,"
+            jdbc.update("INSERT INTO ma_session_record (record_kind, record_key, tenant_id, workspace_id,"
                     + " session_id, domain, record_id, revision, record_resource_id, gmt_create, settled_at, first_sequence)"
-                    + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", scope, key, tenantId, workspaceId,
+                    + " VALUES ('DOMAIN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", key, tenantId, workspaceId,
                     sessionId, ManagedModelDiagnostics.STATS_DOMAIN, "latest", sequence, resource.resourceId(), occurredAt, occurredAt, sequence);
         } else {
             jdbc.update("UPDATE ma_session_record SET revision = ?, record_resource_id = ?, settled_at = ?"
-                    + " WHERE session_scope_key = ? AND record_key = ?", sequence, resource.resourceId(), occurredAt, scope, key);
+                    + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?", sequence, resource.resourceId(), occurredAt,
+                    tenantId, sessionId, key);
         }
-        jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
+        jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'SESSION_RECORD'"
+                + " AND owner_key = ?", tenantId, sessionId, key);
         JdbcManagedExtensionRecordStore.referenceProjectionResource(jdbc, scope, key, sequence, tenantId, workspaceId,
                 sessionId, resource.resourceId());
     }
@@ -251,22 +232,24 @@ final class ManagedModelDiagnosticProjection {
     }
 
     static void invalidateModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
-        jdbc.update("UPDATE ma_session_record SET settled_at = NULL WHERE session_scope_key = ? AND record_key = ?"
-                + " AND EXISTS (SELECT 1 FROM ma_resource u WHERE u.session_scope_key = ma_session_record.session_scope_key"
-                + " AND u.resource_id = ma_session_record.record_resource_id AND u.kind = ?)", scope,
+        jdbc.update("UPDATE ma_session_record SET settled_at = NULL WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
+                + " AND EXISTS (SELECT 1 FROM ma_resource u WHERE u.tenant_id = ma_session_record.tenant_id"
+                + " AND u.session_id = ma_session_record.session_id"
+                + " AND u.resource_id = ma_session_record.record_resource_id AND u.kind = ?)", tenantId, sessionId,
                 ManagedExtensionProjection.recordKey(sessionId, MODEL_CONTEXT_DOMAIN, "latest"), ManagedModelDiagnostics.MAIN_KIND);
     }
 
     static void clearLegacyModelContext(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         String key = ManagedExtensionProjection.recordKey(sessionId, MODEL_CONTEXT_DOMAIN, "latest");
         Integer legacy = jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_record r JOIN ma_resource u"
-                + " ON u.session_scope_key = r.session_scope_key AND u.resource_id = r.record_resource_id"
-                + " WHERE r.session_scope_key = ? AND r.record_key = ? AND u.kind = ?", Integer.class, scope, key, MODEL_USAGE_KIND);
+                + " ON u.tenant_id = r.tenant_id AND u.session_id = r.session_id AND u.resource_id = r.record_resource_id"
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_key = ? AND u.kind = ?", Integer.class,
+                tenantId, sessionId, key, MODEL_USAGE_KIND);
         if (legacy != null && legacy > 0) {
-            jdbc.update("DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind = 'SESSION_RECORD' AND owner_key = ?", scope, key);
-            jdbc.update("DELETE FROM ma_session_record WHERE session_scope_key = ? AND record_key = ?", scope, key);
+            jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'SESSION_RECORD'"
+                    + " AND owner_key = ?", tenantId, sessionId, key);
+            jdbc.update("DELETE FROM ma_session_record WHERE tenant_id = ? AND session_id = ? AND record_key = ?",
+                    tenantId, sessionId, key);
         }
     }
 
