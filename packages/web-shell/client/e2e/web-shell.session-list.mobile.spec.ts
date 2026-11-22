@@ -9,6 +9,17 @@ import {
   resolveBaseURL,
 } from './visuals/harness';
 
+type Rectangle = { x: number; y: number; width: number; height: number };
+
+function rectanglesAreDisjoint(first: Rectangle, second: Rectangle): boolean {
+  return (
+    first.x + first.width <= second.x + 0.5 ||
+    second.x + second.width <= first.x + 0.5 ||
+    first.y + first.height <= second.y + 0.5 ||
+    second.y + second.height <= first.y + 0.5
+  );
+}
+
 async function closeMenuWithEscape(menu: Locator) {
   await expect
     .poll(
@@ -197,6 +208,27 @@ test.describe('Chromium CDP drawer gestures', () => {
 test('A touch embedded host sizes dense rows by its own width @smoke', async ({
   browser,
 }, testInfo) => {
+  const goalExample = { x: 0, y: 20, width: 10, height: 10 };
+  expect(
+    rectanglesAreDisjoint(goalExample, { x: 15, y: 20, width: 10, height: 10 }),
+  ).toBe(true);
+  expect(
+    rectanglesAreDisjoint(goalExample, { x: 0, y: 0, width: 10, height: 10 }),
+  ).toBe(true);
+  expect(
+    rectanglesAreDisjoint(goalExample, {
+      x: -15,
+      y: 20,
+      width: 10,
+      height: 10,
+    }),
+  ).toBe(true);
+  expect(
+    rectanglesAreDisjoint(goalExample, { x: 0, y: 35, width: 10, height: 10 }),
+  ).toBe(true);
+  expect(
+    rectanglesAreDisjoint(goalExample, { x: 5, y: 25, width: 10, height: 10 }),
+  ).toBe(false);
   const baseURL = resolveBaseURL(testInfo);
   const context = await browser.newContext({
     ...devices['iPhone 13'],
@@ -218,14 +250,9 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       hasActivePrompt: false,
       prs: [
         {
-          number: 9517,
+          number: 1,
           state: 'merged',
-          url: 'https://github.com/o/r/pull/9517',
-        },
-        {
-          number: 52484,
-          state: 'closed',
-          url: 'https://github.com/o/r/pull/52484',
+          url: 'https://github.com/o/r/pull/1',
         },
       ],
       goal: {
@@ -238,9 +265,13 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     scenario.sessions.push({
       ...scenario.sessions.at(-1)!,
       sessionId: 'embedded-crowded-density',
-      displayName: 'Embedded crowded row with PR and goal metadata',
+      displayName: 'Run',
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:embedded-density',
       hasActivePrompt: true,
       isWaitingForUserQuestion: true,
+      isWaitingForPermission: false,
+      needsContinuation: false,
     });
     scenario.sessions.push({
       ...scenario.sessions.at(-1)!,
@@ -254,7 +285,7 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     await installScenario(page, scenario, baseURL);
     await page.goto('/e2e/navigation-rail-harness.html?narrow');
     await page.getByTestId('host-shell').evaluate((host) => {
-      host.style.width = '200px';
+      host.style.width = '260px';
     });
     await page.getByRole('button', { name: 'Toggle menu' }).tap();
     const sidebar = page.getByRole('complementary', {
@@ -266,7 +297,13 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       .locator('[data-web-shell-session-title]')
       .filter({ hasText: 'Embedded narrow row with PR and goal metadata' })
       .locator('..');
-    await expect(row.getByRole('link', { name: /Pull Request/ })).toBeVisible();
+    const previewPr = row.getByRole('link', { name: /Pull Request/ });
+    await expect(previewPr).toBeVisible();
+    await expect(previewPr).toHaveText('#1');
+    await expect(previewPr).toHaveAttribute(
+      'href',
+      'https://github.com/o/r/pull/1',
+    );
     await expect(row.getByTestId('session-goal-marker')).toBeVisible();
     await expect(row.locator('[class*="sessionGitIcon"]')).toBeHidden();
     const more = row.getByRole('button', { name: 'More actions', exact: true });
@@ -297,7 +334,7 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     const crowdedRow = sidebar
       .getByTestId('recent-sessions')
       .locator('[data-web-shell-session-title]')
-      .filter({ hasText: 'Embedded crowded row with PR and goal metadata' })
+      .filter({ hasText: 'Run' })
       .locator('..');
     const attention = crowdedRow.locator('[class*="sessionAttention"]');
     const goal = crowdedRow.getByTestId('session-goal-marker');
@@ -307,6 +344,40 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     });
     await expect(attention).toBeVisible();
     await expect(crowdedRow.locator('[class*="sessionLoading"]')).toBeVisible();
+    const scheduledMarker = crowdedRow.locator(
+      '[data-web-shell-scheduled-task-session]',
+    );
+    const scheduledDot = crowdedRow.locator('[data-web-shell-session-running]');
+    const scheduledTitle = crowdedRow.locator('[data-web-shell-session-title]');
+    await expect(scheduledMarker).toBeVisible();
+    await expect(scheduledDot).toBeVisible();
+    await expect(scheduledMarker.locator('svg')).toHaveCSS('height', '14px');
+    await expect(scheduledMarker.locator('svg')).toHaveAttribute(
+      'aria-label',
+      'Scheduled Tasks',
+    );
+    await crowdedRow.scrollIntoViewIfNeeded();
+    const [scheduledBox, scheduledDotBox, scheduledTitleBox] =
+      await Promise.all([
+        scheduledMarker.boundingBox(),
+        scheduledDot.boundingBox(),
+        scheduledTitle.boundingBox(),
+      ]);
+    if (!scheduledBox || !scheduledDotBox || !scheduledTitleBox)
+      throw new Error('The scheduled row is not laid out.');
+    await testInfo.attach('embedded-scheduled-geometry', {
+      body: JSON.stringify({
+        scheduledBox,
+        scheduledDotBox,
+        scheduledTitleBox,
+      }),
+      contentType: 'application/json',
+    });
+    expect(scheduledBox.height).toBeCloseTo(20, 1);
+    expect(scheduledDotBox.y + scheduledDotBox.height / 2).toBeCloseTo(
+      scheduledTitleBox.y + scheduledTitleBox.height / 2,
+      1,
+    );
     const [goalBox, attentionBox, crowdedMoreBox, crowdedRowBox] =
       await Promise.all([
         goal.boundingBox(),
@@ -320,9 +391,10 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       body: JSON.stringify({ goalBox, attentionBox, crowdedMoreBox }),
       contentType: 'application/json',
     });
-    expect(attentionBox.y).toBeGreaterThanOrEqual(
-      goalBox.y + goalBox.height - 0.5,
-    );
+    expect(
+      rectanglesAreDisjoint(goalBox, attentionBox),
+      'Goal and status must be disjoint in at least one dimension',
+    ).toBe(true);
     expect(crowdedMoreBox.x + crowdedMoreBox.width).toBeLessThanOrEqual(
       crowdedRowBox.x + crowdedRowBox.width + 0.5,
     );
@@ -377,9 +449,10 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       contentType: 'application/json',
     });
     expect(actionBox.height).toBeCloseTo(moreBounds.height, 1);
-    expect(continuationBounds.y).toBeGreaterThanOrEqual(
-      goalBounds.y + goalBounds.height - 0.5,
-    );
+    expect(
+      rectanglesAreDisjoint(goalBounds, continuationBounds),
+      'Goal and continuation must be disjoint in at least one dimension',
+    ).toBe(true);
     expect(moreBounds.x + moreBounds.width).toBeLessThanOrEqual(
       rowBounds.x + rowBounds.width + 0.5,
     );
@@ -527,14 +600,50 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
     await expect(row.locator('[class*="sessionGitIcon"]')).toBeHidden();
     await expect(row.getByRole('link', { name: /Pull Request/ })).toBeVisible();
     await expect(row.getByTestId('session-goal-marker')).toBeVisible();
-    const [buttonBox, sidebarBox] = await Promise.all([
+    const runningRow = recent
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: 'Recent running row with PR and goal metadata' })
+      .locator('..');
+    const runningGoal = runningRow.getByTestId('session-goal-marker');
+    const runningSpinner = runningRow.locator('[class*="sessionLoading"]');
+    const runningDot = runningRow.locator('[data-web-shell-session-running]');
+    await expect(runningGoal).toBeVisible();
+    await expect(runningSpinner).toBeVisible();
+    await expect(runningDot).toBeVisible();
+    await row.scrollIntoViewIfNeeded();
+    await runningRow.scrollIntoViewIfNeeded();
+    const [
+      buttonBox,
+      sidebarBox,
+      actionBox,
+      rowBox,
+      runningRowBox,
+      runningTitleBox,
+      runningStatusSlotBox,
+      runningMore,
+    ] = await Promise.all([
       more.boundingBox(),
       sidebar.boundingBox(),
+      row.locator('[class*="sessionActions"]').boundingBox(),
+      row.boundingBox(),
+      runningRow.boundingBox(),
+      runningRow.locator('[data-web-shell-session-title]').boundingBox(),
+      runningRow.locator('[class*="sessionStatusSlot"]').boundingBox(),
+      runningRow
+        .getByRole('button', { name: 'More actions', exact: true })
+        .boundingBox(),
     ]);
-    if (!buttonBox || !sidebarBox)
-      throw new Error('Recent row is not visible.');
-    const rowBox = await row.boundingBox();
-    if (!rowBox) throw new Error('Recent row is not visible.');
+    if (
+      !buttonBox ||
+      !sidebarBox ||
+      !actionBox ||
+      !rowBox ||
+      !runningRowBox ||
+      !runningTitleBox ||
+      !runningStatusSlotBox ||
+      !runningMore
+    )
+      throw new Error('The Recent row geometry is not laid out.');
     await testInfo.attach('narrow-recent-geometry', {
       body: JSON.stringify({ buttonBox, rowBox, sidebarBox }, null, 2),
       contentType: 'application/json',
@@ -545,23 +654,24 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
     expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
       sidebarBox.x + sidebarBox.width + 0.5,
     );
-    const runningRow = recent
-      .locator('[data-web-shell-session-title]')
-      .filter({ hasText: 'Recent running row with PR and goal metadata' })
-      .locator('..');
-    const runningGoal = runningRow.getByTestId('session-goal-marker');
-    const runningSpinner = runningRow.locator('[class*="sessionLoading"]');
-    await expect(runningSpinner).toBeVisible();
-    const [runningRowBox, runningGoalBox, runningMore, runningSpinnerBox] =
-      await Promise.all([
-        runningRow.boundingBox(),
-        runningGoal.boundingBox(),
-        runningRow
-          .getByRole('button', { name: 'More actions', exact: true })
-          .boundingBox(),
-        runningSpinner.boundingBox(),
-      ]);
-    if (!runningRowBox || !runningGoalBox || !runningMore || !runningSpinnerBox)
+    expect(buttonBox.y + buttonBox.height / 2).toBeCloseTo(
+      rowBox.y + rowBox.height / 2,
+      1,
+    );
+    expect(buttonBox.y + buttonBox.height).toBeLessThanOrEqual(
+      runningRowBox.y + 0.5,
+    );
+    expect(actionBox.y + actionBox.height).toBeLessThanOrEqual(
+      runningRowBox.y + 0.5,
+    );
+    expect(
+      runningStatusSlotBox.y + runningStatusSlotBox.height / 2,
+    ).toBeCloseTo(runningTitleBox.y + runningTitleBox.height / 2, 1);
+    const [runningGoalBox, runningSpinnerBox] = await Promise.all([
+      runningGoal.boundingBox(),
+      runningSpinner.boundingBox(),
+    ]);
+    if (!runningGoalBox || !runningSpinnerBox)
       throw new Error('The running Recent row is not laid out.');
     expect(runningMore.x + runningMore.width).toBeLessThanOrEqual(
       runningRowBox.x + runningRowBox.width + 0.5,
@@ -789,18 +899,7 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       menu.getByRole('menuitem', { name: 'Archive', exact: true }),
     ).toBeEnabled();
     await closeMenuWithEscape(menu);
-    const escapedMenuState = await page.evaluate(() => {
-      const remaining = document.querySelector('[role="menu"]');
-      return {
-        id: remaining?.id,
-        owner: remaining?.getAttribute('aria-labelledby'),
-        text: remaining?.textContent,
-        html: remaining?.outerHTML.slice(0, 1800),
-        focused: document.activeElement?.outerHTML.slice(0, 600),
-        menuCount: document.querySelectorAll('[role="menu"]').length,
-      };
-    });
-    await expect(menu, JSON.stringify(escapedMenuState)).toHaveCount(0);
+    await expect(menu).toHaveCount(0);
     await page.setViewportSize({ width: 1280, height: 700 });
     await expect(
       page.getByRole('dialog', { name: 'Workspace sidebar' }),

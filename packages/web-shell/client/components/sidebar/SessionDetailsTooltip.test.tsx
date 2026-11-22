@@ -879,6 +879,77 @@ describe('SessionDetailsTooltip', () => {
     act(() => root.unmount());
   });
 
+  it('suppresses queued and existing hover without blocking click details', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = async (suppressed: boolean, clickTriggered = false) => {
+      await act(async () =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'hover-suppression',
+                workspaceCwd: '/workspace',
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+              hoverSuppressed={suppressed}
+              openOnClick={clickTriggered}
+            >
+              <button type="button">Session row</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+    };
+    try {
+      await render(false);
+      const row = container.querySelector('button')!;
+      act(() => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      });
+      await render(true);
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+        await Promise.resolve();
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await render(false);
+      act(() => {
+        row.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      });
+      await render(true);
+      await act(async () => {
+        vi.advanceTimersByTime(100);
+        await Promise.resolve();
+      });
+      await render(false);
+      await act(async () => {
+        vi.advanceTimersByTime(200);
+        await Promise.resolve();
+      });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await openDetails(container);
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+      await render(true);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+      await render(true, true);
+      act(() => {
+        container.querySelector('button')!.click();
+      });
+      expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it('does not reopen after a row action opens its menu', async () => {
     vi.useFakeTimers();
     const container = document.createElement('div');

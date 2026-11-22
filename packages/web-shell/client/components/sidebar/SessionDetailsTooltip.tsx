@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -44,6 +45,7 @@ interface SessionDetailsTooltipProps {
   workspaceLabel?: string;
   details?: ReactNode;
   openOnClick?: boolean;
+  hoverSuppressed?: boolean;
   ownerToken?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -60,6 +62,7 @@ export function SessionDetailsTooltip({
   workspaceLabel,
   details,
   openOnClick = false,
+  hoverSuppressed = false,
   ownerToken,
   open: controlledOpen,
   onOpenChange,
@@ -82,6 +85,8 @@ export function SessionDetailsTooltip({
   const contentRef = useRef<HTMLDivElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
+  const hoverSuppressedRef = useRef(hoverSuppressed);
+  hoverSuppressedRef.current = hoverSuppressed;
   // The overview shares one token so its own entry points replace each
   // other; every other instance keeps its own, so a hover elsewhere (e.g.
   // the sidebar) never moves focus out of this popover.
@@ -174,12 +179,16 @@ export function SessionDetailsTooltip({
     }
   }, [session.sessionId, open]);
 
-  const cancelClose = () => window.clearTimeout(closeTimerRef.current);
+  const cancelClose = useCallback(
+    () => window.clearTimeout(closeTimerRef.current),
+    [],
+  );
   const openAfterDelay = () => {
     cancelClose();
-    if (open) return;
+    if (hoverSuppressedRef.current || open) return;
     window.clearTimeout(openTimerRef.current);
     openTimerRef.current = window.setTimeout(() => {
+      if (hoverSuppressedRef.current) return;
       const anchor = anchorRef.current;
       let activeElement = anchor?.ownerDocument.activeElement;
       while (activeElement?.shadowRoot?.activeElement) {
@@ -196,7 +205,7 @@ export function SessionDetailsTooltip({
       setOpen(true);
     }, 300);
   };
-  const close = () => {
+  const close = useCallback(() => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
     restoreFocusRef.current = true;
@@ -204,7 +213,16 @@ export function SessionDetailsTooltip({
     copyAttemptRef.current += 1;
     window.clearTimeout(copyResetTimerRef.current);
     setCopyStatus('idle');
-  };
+  }, [cancelClose, setOpen]);
+
+  useEffect(() => {
+    if (hoverSuppressed) {
+      window.clearTimeout(openTimerRef.current);
+    }
+    if (!hoverSuppressed || openOnClick || !open) return;
+    close();
+  }, [close, hoverSuppressed, open, openOnClick]);
+
   const closeAfterDelay = () => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();

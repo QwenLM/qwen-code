@@ -2225,9 +2225,11 @@ export function WebShellSidebar({
   }, []);
   const sessionMenuPointerDismissRef = useRef(false);
   const sessionMenuOpenRef = useRef(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const renameFocusSuppressRef = useRef(false);
   const handleSessionMenuOpenChange = useCallback((open: boolean) => {
     sessionMenuOpenRef.current = open;
+    setSessionMenuOpen(open);
     if (open) {
       // Pointer dismissal belongs to the menu that closed, not a later one.
       sessionMenuPointerDismissRef.current = false;
@@ -5665,6 +5667,7 @@ export function WebShellSidebar({
               label={label}
               time={time}
               completedUnread={completedUnread}
+              hoverSuppressed={sessionMenuOpen || groupMenu !== null}
               // The starting spinner outranks the run dots, not the
               // actionable approval/question cues.
               statusLabel={
@@ -6557,6 +6560,8 @@ export function WebShellSidebar({
       handleRenameFromMenu,
       handleSessionMenuCloseAutoFocus,
       handleSessionMenuOpenChange,
+      sessionMenuOpen,
+      groupMenu,
       handleSessionMenuPointerDownOutside,
       handleTogglePin,
       handleUnarchive,
