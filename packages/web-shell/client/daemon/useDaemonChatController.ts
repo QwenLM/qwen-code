@@ -26,6 +26,7 @@ import {
   useDaemonPendingPermissions,
   useDaemonPromptSettled,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptHistory,
 } from './session/DaemonSessionProvider.js';
 import {
   createDaemonChatController,
@@ -84,6 +85,7 @@ export function useDaemonChatController(): SessionChatController {
   const actions = useDaemonActions();
   const blocks = useDaemonTranscriptBlocks();
   const pendingPermissions = useDaemonPendingPermissions();
+  const transcriptHistory = useDaemonTranscriptHistory();
   const messages = useMessagesFromBlocks(t, blocks);
 
   const sessionId = connection.sessionId;
@@ -178,6 +180,9 @@ export function useDaemonChatController(): SessionChatController {
   const pendingPermissionsRef = useRef(pendingPermissions);
   pendingPermissionsRef.current = pendingPermissions;
 
+  const transcriptHistoryRef = useRef(transcriptHistory);
+  transcriptHistoryRef.current = transcriptHistory;
+
   const promptListenerRef = useRef<
     ((e: DaemonPromptSettlement) => void) | undefined
   >(undefined);
@@ -225,6 +230,10 @@ export function useDaemonChatController(): SessionChatController {
         get settledPhase() {
           return factsRef.current.settledPhase;
         },
+        // History pagination is a provider capability, not an intent: read the
+        // latest loader per call so a session-stable controller never pins a
+        // stale history handle.
+        loadOlder: () => transcriptHistoryRef.current.loadMore(),
         liveApprovalRequestIds: pendingApprovals.map((approval) => approval.id),
         async submitPrompt(input, onAdmitted) {
           try {

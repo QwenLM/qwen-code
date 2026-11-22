@@ -30,6 +30,13 @@ const harness = vi.hoisted(() => ({
   blocks: [] as readonly DaemonTranscriptBlock[],
   pendingPermissions: [] as readonly DaemonTranscriptBlock[],
   promptSettledListener: undefined as ((event: unknown) => void) | undefined,
+  history: {
+    loadMore: vi.fn(async () => {}),
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    paginationError: false,
+  },
 }));
 
 vi.mock('./session/DaemonSessionProvider.js', () => ({
@@ -42,6 +49,7 @@ vi.mock('./session/DaemonSessionProvider.js', () => ({
   }),
   useDaemonTranscriptBlocks: () => harness.blocks,
   useDaemonPendingPermissions: () => harness.pendingPermissions,
+  useDaemonTranscriptHistory: () => harness.history,
   useDaemonPromptSettled: (listener: unknown) => {
     harness.promptSettledListener = listener as (event: unknown) => void;
   },
@@ -120,6 +128,7 @@ beforeEach(() => {
   harness.blocks = [];
   harness.pendingPermissions = [];
   harness.promptSettledListener = undefined;
+  harness.history.loadMore.mockClear();
   controller = undefined;
   forceRerender = undefined;
 });
@@ -148,6 +157,15 @@ describe('useDaemonChatController', () => {
       'hi',
       expect.objectContaining({ inputAnnotations: annotations }),
     );
+  });
+
+  it('binds loadOlder to the transcript history loader', async () => {
+    mountReact(<Probe />);
+    // Dropping the loadOlder binding leaves the capability undefined, so the
+    // surface would silently lose older-history pagination.
+    expect(controller!.loadOlder).toBeDefined();
+    await controller!.loadOlder!();
+    expect(harness.history.loadMore).toHaveBeenCalledTimes(1);
   });
 
   it('splits question permissions from tool approvals', () => {

@@ -115,6 +115,30 @@ export function ChatSurface({
   // path) until the user explicitly acknowledges, mirroring the sibling surfaces.
   const admissionLockedRef = useRef(false);
   const [admissionLocked, setAdmissionLocked] = useState(false);
+  // Both latches belong to the session that armed them: a real session switch
+  // abandons them so a stale lock cannot block the next session's composer, and
+  // rotates the owner token so a late settlement from the abandoned submit
+  // cannot clobber the new session's latches or draft. The one change that is
+  // NOT a switch is the '' -> id allocation a new chat's first submit spans
+  // while that submit is still in flight — that is the same logical chat, so the
+  // in-flight latch and the owner token survive it (resetting there would let a
+  // duplicate send slip through mid-submit). An idle '' -> id (a sidebar click
+  // out of a locked new chat) has no submit spanning it and resets like any
+  // other switch. Mirrors the session-owned admission state in App/ChatPane.
+  const ownerTokenRef = useRef({});
+  const [lockOwner, setLockOwner] = useState(controller.sessionId);
+  if (lockOwner !== controller.sessionId) {
+    const allocatedMidSubmit =
+      lockOwner === '' && controller.sessionId !== '' && submitInFlight;
+    setLockOwner(controller.sessionId);
+    if (!allocatedMidSubmit) {
+      ownerTokenRef.current = {};
+      submitInFlightRef.current = false;
+      setSubmitInFlight(false);
+      admissionLockedRef.current = false;
+      setAdmissionLocked(false);
+    }
+  }
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =
     controller.phase === 'running' ||
@@ -277,11 +301,16 @@ export function ChatSurface({
             if (submitInFlightRef.current || admissionLockedRef.current) {
               return false;
             }
+            const token = ownerTokenRef.current;
             submitInFlightRef.current = true;
             setSubmitInFlight(true);
             void controller
               .submit({ text, images, files, metadata })
               .then((result) => {
+                // An abandoned submit (the user switched sessions while it was
+                // in flight) must not clear the new session's draft or lock the
+                // new session's composer.
+                if (ownerTokenRef.current !== token) return;
                 // Clear the draft on admission, not on establishment.
                 if (result.admission === 'accepted') {
                   commitAccepted?.();
@@ -298,12 +327,14 @@ export function ChatSurface({
                 }
               })
               .catch((cause: unknown) => {
+                if (ownerTokenRef.current !== token) return;
                 // The host sink displays error.message, so the localized text
                 // must be the Error's own message, not just the fallback.
                 const message = t('chat.failedToSend');
                 reportError(new Error(message, { cause }), message);
               })
               .finally(() => {
+                if (ownerTokenRef.current !== token) return;
                 submitInFlightRef.current = false;
                 setSubmitInFlight(false);
               });

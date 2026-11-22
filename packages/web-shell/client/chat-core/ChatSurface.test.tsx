@@ -51,7 +51,11 @@ vi.mock('../i18n.js', () => ({
 }));
 
 import { ChatSurface } from './ChatSurface.js';
-import { cleanupReact, mountReact } from '../test/reactHarness.js';
+import {
+  cleanupReact,
+  mountReact,
+  rerenderReact,
+} from '../test/reactHarness.js';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -784,5 +788,148 @@ describe('ChatSurface', () => {
     );
     expect(captured.editor?.atWorkspaceCwd).toBe('/w');
     expect(captured.editor?.composerScopeKey).toBe('standalone');
+  });
+
+  it('clears the admission lock on a session switch, including out of a locked new chat', async () => {
+    const onError = vi.fn();
+    // Start in an unallocated new chat ('') whose submit settles unknown, then
+    // sidebar-switch to an existing session ('s2') while no submit is in flight.
+    // An unconditional '' -> id exception would wrongly carry the lock into s2.
+    const first = fakeController({
+      sessionId: '',
+      submit: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: '' },
+      })),
+    });
+    const container = mountReact(
+      <ChatSurface controller={first} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'hello',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    await vi.waitFor(() => expect(captured.editor?.submitDisabled).toBe(true));
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).not.toBeNull();
+    const second = fakeController({ sessionId: 's2' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={second} onError={onError} />,
+    );
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
+    // The ref half must clear too: a submit in the new session must dispatch.
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'hi',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    expect(second.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the in-flight latch and owner across a mid-submit session id allocation', async () => {
+    let resolveSubmit: ((value: { admission: string }) => void) | undefined;
+    const first = fakeController({
+      sessionId: '',
+      submit: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveSubmit = resolve;
+          }),
+      ),
+    });
+    const container = mountReact(<ChatSurface controller={first} />);
+    const commitAccepted = vi.fn();
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'hello',
+        undefined,
+        undefined,
+        commitAccepted,
+        undefined,
+      );
+    });
+    expect(captured.editor?.submitDisabled).toBe(true);
+    // Mid-submit, the daemon allocates 's1' and the controller rebuilds under
+    // it: that is the same logical chat, so the in-flight guard must stay armed
+    // (preventing a duplicate send) and the owner token must survive so the
+    // settlement still commits the draft.
+    const allocated = fakeController({ sessionId: 's1' });
+    rerenderReact(container, <ChatSurface controller={allocated} />);
+    expect(captured.editor?.submitDisabled).toBe(true);
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'duplicate',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    expect(allocated.submit).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveSubmit?.({ admission: 'accepted' });
+    });
+    expect(commitAccepted).toHaveBeenCalledTimes(1);
+    expect(captured.editor?.submitDisabled).toBe(false);
+  });
+
+  it('clears the in-flight latch on a session switch and ignores the abandoned settlement', async () => {
+    let resolveFirst: ((value: { admission: string }) => void) | undefined;
+    const first = fakeController({
+      sessionId: 's1',
+      submit: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveFirst = resolve;
+          }),
+      ),
+    });
+    const onError = vi.fn();
+    const container = mountReact(
+      <ChatSurface controller={first} onError={onError} />,
+    );
+    const firstCommit = vi.fn();
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'hello',
+        undefined,
+        undefined,
+        firstCommit,
+        undefined,
+      );
+    });
+    expect(captured.editor?.submitDisabled).toBe(true);
+    // Switch to s2 while s1's submit is still in flight: the latch clears immediately.
+    const second = fakeController({ sessionId: 's2' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={second} onError={onError} />,
+    );
+    expect(captured.editor?.submitDisabled).toBe(false);
+    // s1's abandoned submit now settles as 'unknown': without the owner token,
+    // its callback would lock s2's composer and report an error on s2.
+    await act(async () => {
+      resolveFirst?.({ admission: 'unknown' });
+    });
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
+    expect(firstCommit).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 });
