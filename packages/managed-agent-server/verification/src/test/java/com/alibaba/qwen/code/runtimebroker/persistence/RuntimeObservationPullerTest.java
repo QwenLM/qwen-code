@@ -544,7 +544,7 @@ class RuntimeObservationPullerTest {
         entry.put("manifestRef", ref(manId, "managed-tool-result-manifest", manBytes));
         entry.put("manifestRevision", seq);
         entry.put("resources", List.of(
-                resource(segId, "managed-tool-result-segment", segBytes),
+                resource(segId, "managed-tool-result-content", segBytes),
                 resource(pageId, "managed-tool-result-page", pageBytes),
                 resource(manId, "managed-tool-result-manifest", manBytes)));
         return entry;

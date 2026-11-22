@@ -340,7 +340,7 @@ class RuntimeStageMySqlIT {
         entry.put("manifestRef", ref(manId, "managed-tool-result-manifest", manifest));
         entry.put("manifestRevision", seq);
         entry.put("resources", List.of(
-                resource(segId, "managed-tool-result-segment", segment),
+                resource(segId, "managed-tool-result-content", segment),
                 resource(pageId, "managed-tool-result-page", page),
                 resource(manId, "managed-tool-result-manifest", manifest)));
         return entry;

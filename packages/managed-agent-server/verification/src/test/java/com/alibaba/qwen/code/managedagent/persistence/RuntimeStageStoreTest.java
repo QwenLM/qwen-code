@@ -220,6 +220,48 @@ class RuntimeStageStoreTest {
     }
 
     @Test
+    void stagedTerminalPreservesRequiredNullCaptureReason() {
+        String callId = "call-null";
+        seedPreparedBackgroundProcess(callId);
+        PullerClaim claim = stageStore.claimBindingPuller(
+                bindingId, 1L, "broker-1", Duration.ofSeconds(30));
+        assertThat(claim).isNotNull();
+        byte[] manBytes = "{\"manifest\":\"man-n\",\"sealed\":true}"
+                .getBytes(StandardCharsets.UTF_8);
+        Map<String, Object> terminal = terminalEntry(
+                callId, 1L, "man-n", "exited", "success", false);
+        Map<String, Object> capture = new LinkedHashMap<>();
+        capture.put("captureStatus", "complete");
+        capture.put("captureReason", null);
+        capture.put("manifest", ref("man-n", "managed-tool-result-manifest", manBytes));
+        capture.put("previewTruncated", false);
+        capture.put("deliveryStatus", "pending");
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("executionStatus", "success");
+        envelope.put("responseParts", List.of());
+        envelope.put("capture", capture);
+        terminal.put("envelope", envelope);
+        sealWriter(new WakeStamp(1, false, System.currentTimeMillis() + 3_600_000L));
+        StageOutcome outcome = stageStore.stageBatch(new StageBatchRequest(
+                claim, TENANT, WORKSPACE, session, callId, List.of(terminal)));
+        assertThat(outcome.committed()).isTrue();
+        // The drain replay parses entry_json against a closed key set: a
+        // dropped captureReason null refuses the load forever.
+        String entryJson = jdbc.queryForObject(
+                "SELECT entry_json FROM ma_runtime_stage WHERE execution_call_id = ? AND delivery_seq = 1",
+                String.class, callId);
+        assertThat(entryJson).contains("\"captureReason\":null");
+        acquireWriter();
+        List<Map<String, Object>> listed = stageStore.listStagedDeliveries(
+                TENANT, session, "writer", writerGeneration);
+        assertThat(listed).hasSize(1);
+        Map<?, ?> storedCapture = (Map<?, ?>) ((Map<?, ?>) listed.get(0)
+                .get("envelope")).get("capture");
+        assertThat(storedCapture.containsKey("captureReason")).isTrue();
+        assertThat(storedCapture.get("captureReason")).isNull();
+    }
+
+    @Test
     void enforcesWatermarkWakeHardCapAndReservedTerminalSlot() {
         String callId = "call-cap";
         seedPreparedBackgroundProcess(callId);
@@ -437,7 +479,7 @@ class RuntimeStageStoreTest {
         entry.put("manifestRef", ref(manId, "managed-tool-result-manifest", manBytes));
         entry.put("manifestRevision", seq);
         entry.put("resources", List.of(
-                resource(segId, "managed-tool-result-segment", segBytes),
+                resource(segId, "managed-tool-result-content", segBytes),
                 resource(pageId, "managed-tool-result-page", pageBytes),
                 resource(manId, "managed-tool-result-manifest", manBytes)));
         return entry;

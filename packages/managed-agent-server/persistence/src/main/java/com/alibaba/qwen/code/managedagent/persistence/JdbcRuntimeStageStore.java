@@ -43,7 +43,9 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
     public static final long DEFAULT_STAGED_BYTES_WATERMARK = 4L * 1024 * 1024;
     public static final long DEFAULT_STAGED_BYTES_HARD_CAP = 16L * 1024 * 1024;
     private static final String PROCESS_SUFFIX = ":process";
-    private static final String SEGMENT_KIND = "managed-tool-result-segment";
+    // Design §4.5: segment bytes carry the managed-tool-result-content kind
+    // (the shape publishToolResult writes), not a separate segment kind.
+    private static final String SEGMENT_KIND = "managed-tool-result-content";
     private static final Set<String> ALLOWED_REFERENCED_KINDS = Set.of(
             "managed-tool-result-page",
             "managed-tool-result-manifest",
@@ -308,6 +310,9 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
 
                 Map<String, Object> stripped = new LinkedHashMap<>(entry);
                 stripped.put("resources", List.of());
+                // Delivery envelopes are closed key sets: a required null
+                // (capture.captureReason on a complete capture) must survive
+                // the round trip, or the drain replay refuses the entry.
                 String entryJson = JSON.toJSONString(stripped, JSONWriter.Feature.WriteNulls);
 
                 boolean inserted = insertStageRow(
