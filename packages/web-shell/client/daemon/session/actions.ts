@@ -1221,6 +1221,15 @@ export function createDaemonSessionActions({
           artifactCountHintSessionId: undefined,
         }));
       }
+      if (isSystemOverloadedError(error)) {
+        throw dispatchActionError(
+          addNotice,
+          `${capitalize(mode)} session failed`,
+          error,
+          getSessionLoadNoticeOperation(mode),
+          { code: 'system_overloaded' },
+        );
+      }
       throw error;
     });
   }
@@ -4427,16 +4436,20 @@ function dispatchActionError(
     return abortError;
   }
   const message = error instanceof Error ? error.message : String(error);
+  const overloaded =
+    isSystemOverloadedError(error) || opts?.code === 'system_overloaded';
   const noticeKey = opts?.noticeOnceKey;
   const dispatchedNoticeKeys = opts?.dispatchedNoticeKeys;
   if (!noticeKey || !dispatchedNoticeKeys?.has(noticeKey)) {
     addNotice({
-      severity: 'error',
+      severity: overloaded ? 'warning' : 'error',
       category: 'user_action',
       operation,
       code: isAcpChildCapacityError(error)
         ? 'acp_child_capacity_exhausted'
-        : (opts?.code ?? `daemon.${operation}.failed`),
+        : overloaded
+          ? 'system_overloaded'
+          : (opts?.code ?? `daemon.${operation}.failed`),
       message: `${action}: ${message}`,
       debugMessage: message,
       recoverable: true,

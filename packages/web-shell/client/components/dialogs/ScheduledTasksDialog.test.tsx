@@ -123,7 +123,7 @@ async function mount(
       trusted: boolean;
       kind: 'ordinary';
     };
-    shouldRefuseOneShotRun?: (task: {
+    shouldRefuseManualRun?: (task: {
       recurring: boolean;
       sessionId: string | null;
       sessionMode?: 'persistent' | 'per_run';
@@ -173,7 +173,7 @@ async function mount(
               autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
               workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
-              shouldRefuseOneShotRun={nextOpts.shouldRefuseOneShotRun}
+              shouldRefuseManualRun={nextOpts.shouldRefuseManualRun}
               overloadDetail={nextOpts.overloadDetail}
               onOverloadRefused={nextOpts.onOverloadRefused}
               onError={nextOpts.onError ?? vi.fn()}
@@ -1670,7 +1670,7 @@ describe('ScheduledTasksDialog run now', () => {
       ],
       {
         onRunPrompt,
-        shouldRefuseOneShotRun: (fresh) => !fresh.sessionId,
+        shouldRefuseManualRun: (fresh) => !fresh.sessionId,
         onOverloadRefused,
       },
     );
@@ -1681,6 +1681,71 @@ describe('ScheduledTasksDialog run now', () => {
     expect(onRunPrompt).not.toHaveBeenCalled();
     expect(onOverloadRefused).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain('One-shot backup');
+  });
+
+  it('refuses a cold bound one-shot before consuming it when allocation is required', async () => {
+    const onRunPrompt = vi.fn();
+    const onOverloadRefused = vi.fn();
+    const predicate = vi.fn(
+      (fresh: { sessionId: string | null }) =>
+        fresh.sessionId === 'cold-session',
+    );
+    await mount(
+      [
+        baseTask({
+          id: 'oneshot-cold',
+          recurring: false,
+          enabled: true,
+          sessionId: 'cold-session',
+          sessionMode: 'persistent',
+          prompt: 'cold run',
+        }),
+      ],
+      {
+        onRunPrompt,
+        shouldRefuseManualRun: predicate,
+        onOverloadRefused,
+      },
+    );
+
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    expect(predicate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'oneshot-cold' }),
+    );
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onOverloadRefused).toHaveBeenCalledOnce();
+  });
+
+  it('refuses a recurring per-run dispatch before recording it as attempted', async () => {
+    const onRunPrompt = vi.fn();
+    const onOverloadRefused = vi.fn();
+    await mount(
+      [
+        baseTask({
+          id: 'recurring-fresh',
+          recurring: true,
+          enabled: true,
+          sessionId: null,
+          sessionMode: 'per_run',
+          prompt: 'new isolated task',
+        }),
+      ],
+      {
+        onRunPrompt,
+        shouldRefuseManualRun: () => true,
+        onOverloadRefused,
+      },
+    );
+
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onOverloadRefused).toHaveBeenCalledOnce();
   });
 
   it('re-reads the overload predicate after the server refresh resolves', async () => {
@@ -1698,7 +1763,7 @@ describe('ScheduledTasksDialog run now', () => {
     });
     await mount([task], {
       onRunPrompt,
-      shouldRefuseOneShotRun: () => paused,
+      shouldRefuseManualRun: () => paused,
       onOverloadRefused,
     });
     actions.listScheduledTasks.mockImplementation(() => refreshed.promise);
@@ -1730,7 +1795,7 @@ describe('ScheduledTasksDialog run now', () => {
       ],
       {
         onRunPrompt,
-        shouldRefuseOneShotRun: () => false,
+        shouldRefuseManualRun: () => false,
         overloadDetail: 'Host is overloaded',
       },
     );

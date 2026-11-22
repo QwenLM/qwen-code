@@ -200,9 +200,9 @@ interface ScheduledTasksDialogProps {
   /** The daemon advertises `autofix_pr_watches`: the card of an
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
-  /** Re-read live App state after the async task refresh, before a one-shot
-   * is consumed and its fresh session allocation would be refused. */
-  shouldRefuseOneShotRun?: (task: DaemonScheduledTask) => boolean;
+  /** Re-read live App state after refresh, before a manual run consumes a
+   * one-shot or dispatches a fresh-session attempt that must be refused. */
+  shouldRefuseManualRun?: (task: DaemonScheduledTask) => boolean;
   overloadDetail?: string;
   onOverloadRefused?: () => void;
   onError: (error: unknown, fallback: string) => void;
@@ -672,7 +672,7 @@ export function ScheduledTasksDialog({
   deliveryAvailable = false,
   observedContactsAvailable = false,
   autofixPrWatchesAvailable = false,
-  shouldRefuseOneShotRun,
+  shouldRefuseManualRun,
   overloadDetail,
   onOverloadRefused,
   onError,
@@ -1545,12 +1545,10 @@ export function ScheduledTasksDialog({
           );
           return;
         }
-        // Refuse a one-shot run BEFORE consuming (/run deletes the task) when
-        // load admission would refuse its fresh session allocation aside from a
-        // genuinely reusable connection. The App predicate reads refs: this old
-        // callback and its props belong to the click-time render, while the
-        // server refresh and the live connection may still be changing.
-        if (!fresh.recurring && shouldRefuseOneShotRun?.(fresh)) {
+        // Check before consuming a one-shot or recording a per-run attempt.
+        // The App predicate reads refs: this old callback and its props belong
+        // to the click-time render, while the refresh and connection may change.
+        if (shouldRefuseManualRun?.(fresh)) {
           if (onOverloadRefused) {
             onOverloadRefused();
           } else {
@@ -1613,7 +1611,7 @@ export function ScheduledTasksDialog({
     },
     [
       actions,
-      shouldRefuseOneShotRun,
+      shouldRefuseManualRun,
       onError,
       onOverloadRefused,
       onRunPrompt,

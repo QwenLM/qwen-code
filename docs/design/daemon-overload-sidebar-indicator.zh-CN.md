@@ -19,7 +19,7 @@
 
 - 不新建仪表盘，侧栏不放原始 CPU/内存数字；那些留在 Daemon Status 对话框。
 - 指示条是仅在过载时占空间的薄警示条；正常运行视觉不变。
-- 只暂停新建：所有新建入口被禁用或省略，空白草稿的首条 prompt（会分配会话）以同一警告拒绝。已有会话的 prompt、cancel、导航不受影响。managed 模式豁免：其 home 按钮不创建 daemon 会话。
+- 只暂停新 ACP child 分配：新建入口禁用或拦截分配，空白草稿的首条 prompt（会分配会话）以同一警告拒绝。已有会话 prompt、cancel、导航与 warm runtime 复用不受影响。managed 模式豁免：其 home 按钮不创建 daemon 会话。
 - daemon 侧闸门、阈值与 status 契约在本切片不变。
 - **本 commit 上惰性，属设计。** 本树没有任何代码产生两个暂停来源：闸门、`runtime.loadAdmission` 发布、503 `system_overloaded` 路径、以及本文件链接的 `load-based-session-admission` 设计文档都随 #18052 交付，须先合（或同批）。在此之前轮询面对的 daemon 省略该字段，警示条只能经被动拒绝提示出现，而旧 daemon 从不发送它。SDK 成员保持可选正是为此。
 
@@ -30,13 +30,13 @@
 两个独立来源，渲染时 OR 组合：
 
 1. **主动轮询。** `useDaemonOverloadPause` 内部通过 `useOptionalDaemonWorkspace()` 将 `actions.loadDaemonStatus('summary')` 交给 `useDaemonResource`（`autoLoad: true`，门控在 `enabled && actions !== undefined && visible`），在 daemon 可用且标签页可见期间按 5 秒间隔 reload（挂载与定时间隔共用在途记账）。`report.runtime.loadAdmission.overloaded`（门控在 `enabled && error === undefined`）驱动暂停状态；tooltip 文案由快照的 `reason`、`loadRatio`、`eventLoopLagP99Ms` 经 i18n 组合。SDK 的 `DaemonStatusReport` runtime 类型按既有"旧 daemon 省略该字段"约定新增加性可选 `loadAdmission` 字段；没有闸门的 daemon 永远不上报它。
-2. **被动拒绝。** 已处理 `session_limit_exceeded` 的现有 notice effect 同时处理 `create_session`、`branch_session` 和 `fork_session` 上 `code === 'system_overloaded'`：以 `Date.now() + 15_000`（daemon 的 `Retry-After`）为过期时间存储 notice 消息，由 timeout 清除。覆盖轮询之间的窗口与 status 轮询失败的 daemon。
+2. **被动拒绝。** 已处理 `session_limit_exceeded` 的现有 notice effect 同时处理 `create_session`、`branch_session`、`fork_session`、`load_session` 和 `resume_session` 上 `code === 'system_overloaded'`：以 `Date.now() + 15_000`（daemon 的 `Retry-After`）为过期时间存储 notice 消息，由 timeout 清除。覆盖轮询之间的窗口与 status 轮询失败的 daemon。
 
 `overloadPaused = pollOverloaded || reactiveUnexpired`。tooltip 在轮询报告过载时优先用轮询的本地化读数，否则用拒绝消息。不做合并状态机：轮询侧每次渲染从资源派生，被动侧是单个带过期时间的状态值。
 
 ### 侧栏呈现
 
-`WebShellSidebar` 新增两个可选 prop：`overloadPaused?: boolean` 与 `overloadDetail?: string`。暂停期间：
+`WebShellSidebar` 新增 `overloadPaused`、`overloadDetail` 与可选 `onOverloadRefused` prop。暂停期间：
 
 - 新建任务 nav 行内、按钮上方渲染警示条：警告图标加 `sidebar.overloadPaused`（"系统过载 · 暂停新建"），`title`/`aria-label` 携带 `overloadDetail`。
 - `newSessionDisabled` 变为 `creatingSession || overloadPaused`，禁用按钮；`handleNewSession` 与 worktree 变体在暂停期间提前 return，使侧栏所有入口受同一谓词守卫。
@@ -49,6 +49,15 @@
 - 真正来自 daemon 的 `503 { code: "system_overloaded" }` 与预先拒绝分配并不相同。`forkSession` 和 `branchSession` 保留该 code，同时保留各自的 `fork_session` / `branch_session` operation，包括 branch 已发布后经 `startSessionSwitch` 延迟出现的失败。App 的 notice effect 同时识别它们与 `create_session`，因此意外返回的过载错误仍能触发被动暂停，而不只是普通命令失败 toast。不会把它们的真实 operation 误标为 `create_session`。
 - 延迟出现 branch-load overload 属于恢复状态，不应再次请求 branch。已发布 branch 保留其 sessionId，待准入恢复后由调用方显式 load。`actions` 测试在发布后直接拒绝真实的 `pendingSessionLoadRef`，检查延迟 notice 同时保留 `branch_session` 与 `system_overloaded`。
 - 两个来源都清除后警示条消失、按钮重新可用。
+
+#### 控制导航与恢复语义
+
+- **删除与归档恢复不被暂停阻断。** 已删除或归档的当前会话不能把失效历史留在屏幕上。明确的 workspace 目录 recovery reset 可以清除本地选择状态并准备草稿，这一步不分配 ACP child；随后首条 prompt 仍须通过 admission。继承的 live/intent 不获得暂停豁免。过载时 Session Overview 的 Back 只关闭面板并保留当前选中会话，既不清空也不分配新会话。
+- **异步准入可能返回“无目标会话”。** 若 pause 在预检或草稿创建的飞行途中到达，`sendPrompt` 在清空编辑器前检查 `sessionIdAfterEnsure`。缺少 ID 时恢复取消/预派发状态并返回 `false`，不会乐观提交、向未连接会话发送或擦除草稿；正常准入的会话继续走原有 owner 校验。
+- **任务消费以刷新后的真实状态为准。** `ScheduledTasksDialog` 刷新任务后，在删除一次性任务或派发新 child 之前调用 `shouldRefuseManualRun`。App 读取最新暂停与连接 ref，避免使用渲染闭包里的旧裁决。周期性 per-run 派发也受保护；匹配且已加载完毕的当前连接，或复用该连接的未绑定任务，仍可运行。不同 bound ID 按可能需要冷恢复来保守处理。
+- **`/send`、`load`、`resume` 保留各自资源边界。** 没有 `--session-id` 的 `/send` 会创建新 child，在 RPC 前就拒绝；显式 target 仍可通过 `byId` attach 到已有 runtime。它若返回真正的 overload，则转为可恢复的提示与 warning toast。`startSessionSwitch` 派发失败时，overload 转为 `load_session` 或 `resume_session` 的 warning，并携带 `code: system_overloaded` 和 `_alreadyDispatched`，避免第二个错误 toast。其它错误和 abort 保持原处理，主机恢复后仍能进行冷恢复重试。
+- **已发布 worktree branch 保持可恢复。** 发布后的过载使请求开始时捕获的源 workspace 缓存失效，而不是让错误到达时用户后来选择的 workspace 失效。持久化的 sessionId 在主机恢复后可显式打开。普通 branch 回调继续保持 pending Promise 契约。
+- **过载提示使用实时原因。** `dispatchActionError` 将 overload 发为 warning，其它失败仍保留原 error tone。侧栏可选的 `onOverloadRefused` 接收 App 当前的真实原因，而不是泛化的 error 占位文案。未提供此回调的嵌入方继续沿用既有 `onError` fallback，原生 disabled 仍是硬 UI 边界。
 
 轮询/过期/OR 逻辑放在 `useDaemonStatusReport` 旁的小 hook `useDaemonOverloadPause` 中，无需渲染 App 即可测试；App 持有 notice effect 喂入的拒绝状态并组合本地化 tooltip。
 
@@ -64,7 +73,7 @@
 - **复用先于拒绝。** `resolveSessionForWorkspace` 的暂停守卫位于两条复用分支（连接会话所有权、目录最新会话）之下、分配之上：GitDialog 提交/PR 生成不分配会话，过载时须继续工作；仅 forceCreate/分配被拒。
 - **轮询裁决的新鲜度界。** `useDaemonResource` 在轮询失败或禁用时保留旧 payload，故 `pollOverloaded` 要求 `enabled && error === undefined`；status 不可达或离线期间仅带过期的拒绝提示可暂停 UI。
 - **挂载请求记账与隐藏标签页门。** autoLoad/挂载请求与 interval 轮询共用同一在途记账；资源仅在标签页可见时 enabled（visibilitychange 监听在回到前台时重新启用并重拉），后台或饱和 daemon 的标签页不堆叠 summary 请求。
-- **所有受守卫入口共享同一 managed 豁免。** `App.tsx` 的全部守卫均带 `!managedModeRef.current`——`createNewSession`、`sendPrompt`、`ensureSessionForPrompt`、`resolveSessionForWorkspace`、`handleGoalSlashCommand`、`branchCurrentSession`（包括 checkpoint 在 worktree 预检前的提前检查）、`handleSubmit` 的 `!` 行内 shell 分支（需要新会话时，拒绝先于命令排队）、`ensureAgentMentionSession`（返回 `{ paused: true }` 使 `useAgentChatEntry` 跳过 `collab.mention.noSession`）、以及 side task 的两个创建边界。`createSideTask` 保持公共 boolean 契约，`createEmptySideTask` 不重复弹错误；`createSideTaskSession` 也会拒绝失败标签的 Retry 并回传已派发错误，避免重复提示。`WebShellSidebar` 与 `ArtifactPanel` 接收 `overloadPaused && !managedMode`。`ScheduledTasksDialog` 改收实时 predicate，在服务端刷新后读取 App 的暂停与连接 ref，只在 `/run` 消费前拦截真正未绑定或 per-run 的一次性任务，保留 warm session 复用。
+- **所有受守卫入口共享同一 managed 豁免。** `App.tsx` 的全部守卫均带 `!managedModeRef.current`——`createNewSession`、`sendPrompt`、`ensureSessionForPrompt`、`resolveSessionForWorkspace`、`handleGoalSlashCommand`、`branchCurrentSession`（包括 checkpoint 在 worktree 预检前的提前检查）、`handleSubmit` 的 `!` 行内 shell 分支（需要新会话时，拒绝先于命令排队）、`ensureAgentMentionSession`（返回 `{ paused: true }` 使 `useAgentChatEntry` 跳过 `collab.mention.noSession`）、以及 side task 的两个创建边界。`createSideTask` 保持公共 boolean 契约，`createEmptySideTask` 不重复弹错误；`createSideTaskSession` 也会拒绝失败标签的 Retry 并回传已派发错误，避免重复提示。`WebShellSidebar` 与 `ArtifactPanel` 接收 `overloadPaused && !managedMode`。`ScheduledTasksDialog` 改收 `shouldRefuseManualRun`，在服务端刷新后、消费一次性任务或记录 per-run 尝试前判断；predicate 重新读取实时的暂停 ref 与连接 ref。每个 per-run 派发都视为新分配；没有当前连接、正在加载 transcript 或绑定的是不同 session ID，都保守地视作可能需要冷恢复。只有与当前连接 ID 相符、`status: connected` 且没有进行中的 transcript 加载的连接，或由未绑定任务复用的这种当前连接，才允许在暂停期间继续已存在的工作。这样避免在冷加载被拒前先删除一次性任务，同时不声称任意 bound ID 都能由 UI 证明是 warm 会话。
 - **显式拒绝契约。** `sendPrompt` 暂停拒绝返回 `false`；composer submit 与设置语言同步遵从（保留草稿/不报假成功），`enqueueManualRun` 以带 `_alreadyDispatched: true` 的 Error 拒绝以防 `reportError` 弹出重复错误 toast，fire-and-forget 调用点不受影响。
 - **派生 OR，不做合并机器。** 两个生命周期不同的来源（渲染派生 vs 带过期状态）在一个表达式里组合；存储合并裁决需要在每次轮询与每次过期时对账。
 - **加性 SDK 字段。** 旧 daemon 省略 `loadAdmission`；可选字段保持客户端对它们与 opt-out flag（`enabled: false` 永不暂停）的兼容。
@@ -78,7 +87,7 @@
 ## 验证计划
 
 - 组件测试：`overloadPaused` 时侧栏渲染警示条并禁用按钮（且 create handler 提前 return），清除后两者恢复；tooltip 携带 detail 字符串。
-- Hook/App 级测试：轮询过载驱动暂停状态（轮询失败或 `enabled: false` 时清除）；`system_overloaded` notice 设置带过期的被动状态；过期清除；未过载的轮询不清除未过期的被动提示；暂停态的 `!ls`、`/goal set`、`@`-mention、新建 side task、`createNewSession`、未绑定手动运行各自仅弹一条警告 toast 且不创建会话，`ScheduledTasksDialog` 的未绑定一次性任务在 `runScheduledTask` 消费前被拒。暂停态的 `/branch` 与 checkpoint 激活在 branch 分配或 worktree 预检前被拒绝；普通 checkpoint 请求保留 pending Promise，两个 worktree fallback 均等待它。branch/fork 过载 notice 保留各自的 operation 与 code，包括已发布 branch 的延迟 load 拒绝；`/fork` 仍可沿用父 ACP runtime。
+- Hook/App 级测试：轮询过载驱动暂停状态（轮询失败或 `enabled: false` 时清除）；`system_overloaded` notice 设置带过期的被动状态；过期清除；未过载的轮询不清除未过期的被动提示；暂停态的 `!ls`、`/goal set`、`@`-mention、新建 side task、`createNewSession`、未绑定手动运行各自仅弹一条警告 toast 且不创建会话，`ScheduledTasksDialog` 的未绑定一次性任务在 `runScheduledTask` 消费前被拒。暂停态的 `/branch` 与 checkpoint 激活在 branch 分配或 worktree 预检前被拒绝；普通 checkpoint 请求保留 pending Promise，两个 worktree fallback 均等待它。branch/fork 过载 notice 保留各自的 operation 与 code，包括已发布 branch 的延迟 load 拒绝；`/fork` 仍可沿用父 ACP runtime。删除会话后不能阻塞视图，Overview Back 可退出，异步预检到过载要保留草稿；刷新后的冷绑定一次性任务与周期性 per-run 都在消费/分配前被拒，当前匹配会话仍可复用。缺省 target 的 `/send` 拒绝，显式 warm target 能发送，真实 503 触发 warning 与被动暂停。load/resume notice 保留 operation/code，已发布 worktree 过载刷新源 workspace。侧栏 warning 回调保留不创建会话的拒绝语义，不转入普通错误 handler。
 - `npm run build && npm run typecheck` 加 touched web-shell 套件；SDK 类型新增由 sdk typecheck 检查。
 - E2E 计划：`.qwen/e2e-tests/daemon-overload-sidebar-indicator.md`（组件级矩阵加对加载 daemon 的可选实机探针）。
 
@@ -102,14 +111,14 @@
 | `packages/web-shell/client/App.test.tsx`                                               | App 层暂停守卫与被动 notice 测试        |
 | `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` 分类器        |
 | `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | 分类器三形状与负向控制表                |
-| `packages/web-shell/client/daemon/session/actions.ts`                                  | `system_overloaded` notice code 映射    |
-| `packages/web-shell/client/daemon/session/actions.test.ts`                             | notice code 映射测试                    |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | 警示条、禁用谓词、handler 守卫          |
+| `packages/web-shell/client/daemon/session/actions.ts`                                  | overload notice 元数据与 warning        |
+| `packages/web-shell/client/daemon/session/actions.test.ts`                             | overload operation/code 测试            |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | 警示条、禁用谓词、warning 回调          |
 | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | 警示条与禁用头部按钮样式                |
 | `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop               |
 | `packages/web-shell/client/components/workspace-agents/useAgentChatEntry.ts`           | `@`-mention 的 `{ paused: true }` 短路  |
-| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.tsx`                | 一次性任务消费前暂停守卫                |
-| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.test.tsx`           | 一次性任务消费前守卫测试                |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.tsx`                | 手动任务消费/派发前暂停守卫             |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.test.tsx`           | 冷绑定与 per-run 守卫测试               |
 | `packages/web-shell/client/components/artifacts/ArtifactPanel.tsx`                     | 新建 side task 的 `overloadPaused` 禁用 |
 | `packages/web-shell/client/i18n.tsx`                                                   | `en` 过载文案                           |
 | `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` 过载文案                        |

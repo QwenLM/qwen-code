@@ -535,7 +535,10 @@ import {
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
 import { useCapacityRecovery } from './hooks/useCapacityRecovery';
-import { isAcpChildCapacityError } from './daemon/session/httpErrors.js';
+import {
+  isAcpChildCapacityError,
+  isSystemOverloadedError,
+} from './daemon/session/httpErrors.js';
 import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
@@ -12360,6 +12363,17 @@ export function App({
           )
             return;
         }
+        if (
+          command.sessionId === undefined &&
+          overloadPausedRef.current &&
+          !managedModeRef.current
+        ) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return;
+        }
         const result = await workspace.client.sendToSubSession(
           callerSessionId,
           {
@@ -12380,6 +12394,15 @@ export function App({
           setSubSessionTasksRefresh((value) => value + 1);
         }
       } catch (error) {
+        if (appMountedRef.current && isSystemOverloadedError(error)) {
+          const message = extractErrorDetail(error);
+          setOverloadRefusal({
+            message,
+            expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
+          });
+          pushToast('warning', message);
+          return;
+        }
         if (appMountedRef.current)
           pushToast('error', extractErrorDetail(error));
       } finally {
@@ -14050,6 +14073,10 @@ export function App({
       }
       const sessionIdAfterEnsure =
         connectionRef.current.sessionId ?? allocatedSessionId;
+      if (!sessionIdAfterEnsure) {
+        restoreCancelledSubmitState();
+        return false;
+      }
       const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
       const promptWorkspaceCwd = allocatedSessionId
         ? allocatedOwner?.sessionId === allocatedSessionId
@@ -15124,7 +15151,9 @@ export function App({
         notice.code === 'system_overloaded' &&
         (notice.operation === 'create_session' ||
           notice.operation === 'branch_session' ||
-          notice.operation === 'fork_session')
+          notice.operation === 'fork_session' ||
+          notice.operation === 'load_session' ||
+          notice.operation === 'resume_session')
       ) {
         setOverloadRefusal({
           message: notice.message,
@@ -17387,6 +17416,7 @@ export function App({
                 : undefined;
             const code = body?.['code'];
             if (
+              isSystemOverloadedError(error) ||
               code === 'branch_worktree_activation_failed' ||
               code === 'branch_worktree_outcome_unknown'
             ) {
@@ -17531,6 +17561,8 @@ export function App({
       opts?: {
         keepView?: boolean;
         keepPanel?: boolean;
+        // A directory recovery reset clears local state; a later prompt
+        // still observes fresh-child admission independently.
         allowRecoveryReset?: boolean;
         /**
          * Git mode the new workspace draft starts with. Set here, in the same
@@ -17541,7 +17573,12 @@ export function App({
         carryManualTitle?: string;
       },
     ) => {
-      if (overloadPausedRef.current && !managedModeRef.current) {
+      if (
+        overloadPausedRef.current &&
+        !managedModeRef.current &&
+        !opts?.allowRecoveryReset &&
+        intent.kind !== 'workspace'
+      ) {
         pushToast(
           'warning',
           overloadDetailRef.current ?? t('sidebar.overloadPaused'),
@@ -17824,6 +17861,7 @@ export function App({
         {
           keepView: true,
           keepPanel: true,
+          allowRecoveryReset: true,
         },
       );
       const latest = connectionRef.current;
@@ -25321,6 +25359,13 @@ export function App({
                   // comes from the Live controls.
                   overloadPaused={overloadPaused && !managedMode}
                   overloadDetail={overloadDetail}
+                  onOverloadRefused={() => {
+                    pushToast(
+                      'warning',
+                      overloadDetailRef.current ??
+                        t('sidebar.overloadPaused'),
+                    );
+                  }}
                   onNewSession={(workspaceCwd) => {
                     if (managedMode && typeof workspaceCwd !== 'string') {
                       if (
@@ -25831,6 +25876,13 @@ export function App({
                         splitFoldedByShrinkRef.current = false;
                         const current = connectionRef.current;
                         const currentSessionId = current.sessionId;
+                        if (
+                          overloadPausedRef.current &&
+                          !managedModeRef.current
+                        ) {
+                          closePanel();
+                          return;
+                        }
                         const currentWorkspaceCwd =
                           current.workspaceCwd ||
                           lockedWorkspaceCwd ||
@@ -26247,13 +26299,27 @@ export function App({
                         'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
-                      shouldRefuseOneShotRun={(fresh) =>
-                        overloadPausedRef.current &&
-                        !managedModeRef.current &&
-                        (fresh.sessionMode === 'per_run' ||
-                          (!fresh.sessionId &&
-                            !connectionRef.current.sessionId))
-                      }
+                      shouldRefuseManualRun={(fresh) => {
+                        if (
+                          !overloadPausedRef.current ||
+                          managedModeRef.current
+                        ) {
+                          return false;
+                        }
+                        if (fresh.sessionMode === 'per_run') return true;
+                        const current = connectionRef.current;
+                        if (
+                          !current.sessionId ||
+                          current.loadingTranscript ||
+                          current.status !== 'connected'
+                        ) {
+                          return true;
+                        }
+                        return (
+                          typeof fresh.sessionId === 'string' &&
+                          fresh.sessionId !== current.sessionId
+                        );
+                      }}
                       overloadDetail={overloadDetail}
                       onOverloadRefused={() => {
                         pushToast(

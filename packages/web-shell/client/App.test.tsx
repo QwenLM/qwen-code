@@ -1179,7 +1179,7 @@ const {
         };
         currentSessionSchedulingAvailable?: boolean;
         autofixPrWatchesAvailable?: boolean;
-        shouldRefuseOneShotRun?: (task: {
+        shouldRefuseManualRun?: (task: {
           recurring: boolean;
           sessionId: string | null;
           sessionMode?: 'persistent' | 'per_run';
@@ -13383,6 +13383,86 @@ describe('App /send', () => {
     expect(editorCommit).not.toHaveBeenCalled();
   });
 
+  it('refuses a new /send child while paused without clearing the draft', async () => {
+    overloadPauseStub.paused = true;
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/send independent work';
+
+    await clickSubmit(container);
+
+    expect(mockWorkspace.client.sendToSubSession).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send independent work');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+  });
+
+  it('still allows /send to an explicitly selected target while paused', async () => {
+    overloadPauseStub.paused = true;
+    mockWorkspace.client.sendToSubSession.mockResolvedValue({
+      sessionId: 'target-session',
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/send --session-id target-session hello';
+
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(
+        mockWorkspace.client.sendToSubSession,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'session-1',
+        { prompt: 'hello', targetSessionId: 'target-session' },
+        'client-1',
+      );
+    });
+    expect(editorCommit).toHaveBeenCalledOnce();
+  });
+
+  it('turns a real /send overload into a reactive warning and pause', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockWorkspace.client.sendToSubSession.mockRejectedValue(
+      new DaemonHttpError(
+        503,
+        {
+          error: 'System overloaded (cpu_load)',
+          code: 'system_overloaded',
+          reason: 'cpu_load',
+          loadRatio: 2.8,
+          eventLoopLagP99Ms: 24,
+        },
+        'System overloaded (cpu_load)',
+      ),
+    );
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/send independent work';
+
+    await clickSubmit(container);
+    await vi.waitFor(() => {
+      expect(toasts).toEqual([['warning', 'System overloaded (cpu_load)']]);
+    });
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('/send independent work');
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestArtifactPanelProps?.overloadPaused).toBe(true);
+  });
+
   it('offers a stable selector for a colliding workspace name and honors the lock', async () => {
     const { container } = renderApp({ lockedWorkspaceCwd: callerCwd });
     await flush();
@@ -18584,6 +18664,52 @@ describe('App session callbacks', () => {
       'error',
       'The branched session was created, but its worktree could not be opened automatically. Reopen it from the session list.',
     );
+  });
+
+  it('refreshes the source catalog after a published worktree overload', async () => {
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    let rejectBranch!: (error: unknown) => void;
+    mockSessionActions.branchSession.mockReturnValue(
+      new Promise((_resolve, reject) => {
+        rejectBranch = reject;
+      }),
+    );
+    const { rerender } = renderApp();
+    await flush();
+
+    let request: void | Promise<void>;
+    act(() => {
+      request =
+        testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/other-project';
+      rerender();
+    });
+    await act(async () => {
+      rejectBranch(
+        new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            sessionId: 'branch-1',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 27,
+          },
+          'System overloaded (cpu_load)',
+        ),
+      );
+      await request;
+    });
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(
+      sessionCatalogController.invalidateWorkspace,
+    ).not.toHaveBeenCalledWith('/tmp/other-project');
   });
 
   it('reloads the transcript when a historical checkpoint becomes stale', async () => {
@@ -43468,6 +43594,35 @@ describe('App session callbacks', () => {
     expect(testState.latestSessionOverviewProps?.manageLiveState).toBe(false);
   });
 
+  it('clears a removed current session without allocating during overload', async () => {
+    overloadPauseStub.paused = true;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+    expect(
+      container.querySelector('[data-testid="session-overview-panel"]'),
+    ).not.toBeNull();
+  });
+
   it('clears a legacy current session without a connection workspace cwd', async () => {
     mockConnection.workspaceCwd = '';
     mockWorkspace.capabilities = {
@@ -43732,6 +43887,34 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="session-overview-panel"]'),
     ).not.toBeNull();
+  });
+
+  it('leaves the Session Overview during overload without creating a new task', async () => {
+    overloadPauseStub.paused = true;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    onSessionIdChange.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="panel-back"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).not.toHaveBeenCalledWith(undefined);
   });
 
   it('starts a new session when leaving the Session Overview with Back', async () => {
@@ -60619,6 +60802,48 @@ describe('overload pause guards in App', () => {
     ]);
   });
 
+  it('keeps the draft when overload begins during async preflight', async () => {
+    mockConnection.sessionId = undefined;
+    const beforeSubmit = deferred<void>();
+    const onSubmitBefore = vi.fn(() => beforeSubmit.promise);
+    const toasts: Array<[string, string]> = [];
+    const { rerender } = renderApp({
+      onSubmitBefore,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = 'preserve this preflight draft';
+    let submitted: void | boolean | Promise<boolean | void>;
+    act(() => {
+      submitted = testState.latestChatEditorProps?.onSubmit(
+        'preserve this preflight draft',
+      );
+    });
+    await vi.waitFor(() => {
+      expect(onSubmitBefore).toHaveBeenCalledOnce();
+    });
+
+    await act(async () => {
+      armOverload();
+      rerender();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      beforeSubmit.resolve();
+      await submitted;
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('preserve this preflight draft');
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
   it('keeps /fork on the existing ACP runtime while paused', async () => {
     armOverload();
     mockConnection.sessionId = 'source-session';
@@ -60683,7 +60908,7 @@ describe('overload pause guards in App', () => {
     const handler = props?.onRunPrompt;
     if (!handler || !props) throw new Error('ScheduledTasksProps not captured');
     expect(
-      props.shouldRefuseOneShotRun?.({
+      props.shouldRefuseManualRun?.({
         recurring: false,
         sessionId: null,
         sessionMode: 'persistent',
@@ -60776,7 +61001,12 @@ describe('overload pause guards in App', () => {
     );
   });
 
-  it.each(['branch_session', 'fork_session'] as const)(
+  it.each([
+    'branch_session',
+    'fork_session',
+    'load_session',
+    'resume_session',
+  ] as const)(
     'reactively pauses creation on a %s overload notice',
     async (operation) => {
       const message = `System overloaded (cpu_load: ${operation})`;
@@ -60984,7 +61214,7 @@ describe('overload pause guards in App', () => {
     await flush();
 
     const predicate =
-      testState.latestScheduledTasksProps?.shouldRefuseOneShotRun;
+      testState.latestScheduledTasksProps?.shouldRefuseManualRun;
     expect(predicate).toBeTypeOf('function');
     const unbound = {
       recurring: false,
@@ -60992,9 +61222,16 @@ describe('overload pause guards in App', () => {
       sessionMode: 'persistent' as const,
     };
     expect(predicate?.(unbound)).toBe(false);
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(false);
     expect(predicate?.({ ...unbound, sessionId: 'another-live-session' })).toBe(
-      false,
+      true,
     );
+    mockConnection.status = 'disconnected';
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(true);
+    mockConnection.status = 'connected';
+    mockConnection.loadingTranscript = true;
+    expect(predicate?.({ ...unbound, sessionId: 'live-session' })).toBe(true);
+    mockConnection.loadingTranscript = false;
     expect(predicate?.({ ...unbound, sessionMode: 'per_run' })).toBe(true);
 
     mockConnection.sessionId = null;

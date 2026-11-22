@@ -153,6 +153,7 @@ function renderSidebar(
   props: {
     overloadPaused?: boolean;
     overloadDetail?: string;
+    onOverloadRefused?: () => void;
     onNewWorktreeSession?: (cwd?: string) => void;
     onLoadStandaloneSession?: (id: string) => void;
     onStandaloneNotice?: (message: string) => void;
@@ -315,6 +316,29 @@ describe('WebShellSidebar overload strip', () => {
       }),
       'System overloaded — new tasks paused',
     );
+  });
+
+  it('uses the overload warning callback without invoking a creation action', async () => {
+    connection.capabilities = {
+      features: ['workspace_qualified_rest_core'],
+    } as typeof connection.capabilities;
+    workspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+    } as typeof workspace.capabilities;
+    const onOverloadRefused = vi.fn();
+    renderSidebar({ overloadPaused: true, onOverloadRefused });
+    await flushSidebar();
+    const entry = capturedEntries.recent ?? capturedEntries.standalone;
+    expect(entry).toBeDefined();
+    expect(entry!.newSessionDisabled).toBe(true);
+
+    act(() => {
+      entry!.onNewSession!();
+    });
+
+    expect(onNewSession).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(onOverloadRefused).toHaveBeenCalledOnce();
   });
 
   it('omits workspace-menu creation actions and the git poll while paused', async () => {

@@ -7249,6 +7249,58 @@ describe('createDaemonSessionActions', () => {
     });
   });
 
+  describe('fresh-session load overload notices', () => {
+    it.each([
+      {
+        method: 'loadSession',
+        operation: 'load_session',
+        action: 'Load',
+      },
+      {
+        method: 'resumeSession',
+        operation: 'resume_session',
+        action: 'Resume',
+      },
+    ] as const)(
+      'preserves overload coding for $operation',
+      async ({ method, operation, action }) => {
+        const addNotice = vi.fn((notice) => notice);
+        const { actions, pendingSessionLoadRef } = createActionsHarness({
+          addNotice,
+        });
+        const pendingSession = actions[method]('cold-session');
+        const pendingLoad = pendingSessionLoadRef.current;
+        if (!pendingLoad) throw new Error('Expected the pending session load');
+        const error = new DaemonHttpError(
+          503,
+          {
+            error: 'System overloaded (cpu_load)',
+            code: 'system_overloaded',
+            reason: 'cpu_load',
+            loadRatio: 2.8,
+            eventLoopLagP99Ms: 42,
+          },
+          'System overloaded (cpu_load)',
+        );
+        clearTimeout(pendingLoad.timeout);
+        pendingSessionLoadRef.current = undefined;
+        pendingLoad.reject(error);
+
+        await expect(pendingSession).rejects.toBe(error);
+        expect(addNotice).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            operation,
+            code: 'system_overloaded',
+            severity: 'warning',
+            message: `${action} session failed: System overloaded (cpu_load)`,
+            recoverable: true,
+          }),
+        );
+        expect(error).toMatchObject({ _alreadyDispatched: true });
+      },
+    );
+  });
+
   it('lets the SDK own the branch deadline instead of adding a 30s action timeout', async () => {
     vi.useFakeTimers();
     try {

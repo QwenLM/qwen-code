@@ -620,6 +620,7 @@ interface WebShellSidebarProps {
    * and a warning strip explains the daemon overload. */
   overloadPaused?: boolean;
   overloadDetail?: string;
+  onOverloadRefused?: () => void;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
   standaloneSessionsReloadToken?: number;
   onLoadSession: (
@@ -1299,6 +1300,7 @@ export function WebShellSidebar({
   onNewSession,
   overloadPaused = false,
   overloadDetail,
+  onOverloadRefused,
   onNewStandaloneSession,
   standaloneSessionsReloadToken = 0,
   onLoadSession,
@@ -3878,10 +3880,14 @@ export function WebShellSidebar({
     (workspaceCwd?: string, fromRecent = false) => {
       if (creatingSessionRef.current) return;
       if (overloadPaused) {
-        onError(
-          new Error(t('sidebar.overloadPaused')),
-          t('sidebar.overloadPaused'),
-        );
+        if (onOverloadRefused) {
+          onOverloadRefused();
+        } else {
+          onError(
+            new Error(t('sidebar.overloadPaused')),
+            t('sidebar.overloadPaused'),
+          );
+        }
         return;
       }
 
@@ -3916,6 +3922,7 @@ export function WebShellSidebar({
       bumpWorkspaceReload,
       currentRowIdentity,
       onError,
+      onOverloadRefused,
       onNewSession,
       overloadPaused,
       primaryWorkspaceCwd,
@@ -3931,10 +3938,14 @@ export function WebShellSidebar({
     (workspaceCwd?: string) => {
       if (!onNewWorktreeSession || creatingSessionRef.current) return;
       if (overloadPaused) {
-        onError(
-          new Error(t('sidebar.overloadPaused')),
-          t('sidebar.overloadPaused'),
-        );
+        if (onOverloadRefused) {
+          onOverloadRefused();
+        } else {
+          onError(
+            new Error(t('sidebar.overloadPaused')),
+            t('sidebar.overloadPaused'),
+          );
+        }
         return;
       }
 
@@ -3963,6 +3974,7 @@ export function WebShellSidebar({
     [
       bumpWorkspaceReload,
       onError,
+      onOverloadRefused,
       onNewWorktreeSession,
       overloadPaused,
       primaryWorkspaceCwd,
