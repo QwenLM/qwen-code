@@ -35,6 +35,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
@@ -92,10 +93,15 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
   - boundary.json declares where the untrusted PR code ran: mode container
     with a non-empty detail, backed by the boundary-gate.json record a passing
-    --require-isolation --artifact-dir gate run wrote, or mode waived with the
-    approving maintainer (by), a permalink to the approval comment (approval)
-    and the reason; a round without the declaration is refused. When the
-    snapshot carries repo and pr, the approval permalink must cite that PR.
+    --require-isolation --artifact-dir gate run wrote, or a VM/waived
+    executionApproval written by prepare. Local-trust records carry source,
+    basis, authenticated by/permission, head and round without a public URL;
+    comment approvals carry the validated permalink and comment metadata.
+    Both must deeply equal the host-held --context executionApproval, bind
+    its bytes with --context-sha256, and match the trusted head; prepare has
+    already registered comment approvals to an in-flight head and round.
+    When the snapshot carries repo and pr, the approval permalink must cite
+    that PR. A shape-only waiver or a PR-side record alone is refused.
     The CI publish job's own ci-lane record is honored only under
     --publish-lane, the flag the publish job passes (an argv claim, not an
     authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
@@ -610,7 +616,10 @@ export function checkBoundary(
       ],
     };
   }
-  if (approvalMode) {
+  // A local trusted-head declaration has no public comment permalink. Its
+  // host-held executionApproval record is mandatory at the CLI check below;
+  // this pure shape check does not admit that record on its own.
+  if (approvalMode && parsed.source !== 'local-trust') {
     const match = APPROVAL_PERMALINK.exec(parsed.approval ?? '');
     if (!match) {
       return {
@@ -637,6 +646,105 @@ export function checkBoundary(
   // `by` is a recorded claim, not an identity the checker can verify; the
   // approval permalink and the maintainer's review are the enforcement there.
   return { errors: [] };
+}
+
+/** Validates a VM/host declaration against prepare's host-held approval. */
+export function executionApprovalErrors(
+  boundaryText,
+  snapshot,
+  { contextProvided = false, contextDigestVerified = false } = {},
+) {
+  let declared;
+  try {
+    declared = JSON.parse(boundaryText ?? '');
+  } catch {
+    return [];
+  }
+  if (!declared || !['vm', 'waived'].includes(declared.mode)) return [];
+  if (!contextProvided) {
+    return [
+      `boundary.json mode ${declared.mode} needs the host-held --context snapshot containing prepare's executionApproval`,
+    ];
+  }
+  if (!contextDigestVerified) {
+    return [
+      `boundary.json mode ${declared.mode} needs --context-sha256 matching the host snapshot's bytes so its executionApproval predates publication`,
+    ];
+  }
+  const approval = snapshot?.executionApproval;
+  if (!approval || typeof approval !== 'object' || Array.isArray(approval)) {
+    return [
+      'the trusted --context snapshot has no executionApproval object; prepare must approve this VM/host execution before artifacts are created',
+    ];
+  }
+  const stringFields = [
+    'mode',
+    'source',
+    'by',
+    'basis',
+    'permission',
+    'head',
+    'reason',
+  ];
+  if (
+    stringFields.some(
+      (field) => typeof approval[field] !== 'string' || !approval[field],
+    ) ||
+    !Number.isSafeInteger(approval.round) ||
+    approval.round <= 0 ||
+    !['vm', 'waived'].includes(approval.mode) ||
+    !/^[0-9a-f]{40}$/.test(approval.head) ||
+    !['admin', 'maintain', 'write'].includes(approval.permission) ||
+    (approval.mode === 'vm' &&
+      (typeof approval.attestation !== 'string' || !approval.attestation))
+  ) {
+    return [
+      'executionApproval must carry non-empty mode/source/by/basis/permission/head/reason, a valid round and permission, and VM attestation',
+    ];
+  }
+  if (approval.source === 'local-trust') {
+    const eligible =
+      (approval.basis === 'own-pr' &&
+        snapshot?.author?.login === approval.by) ||
+      (approval.basis === 'same-repository' &&
+        snapshot?.isCrossRepository === false);
+    if (!eligible) {
+      return [
+        'local-trust executionApproval does not match this snapshot: own-pr requires by == author.login; same-repository requires isCrossRepository == false',
+      ];
+    }
+  } else if (approval.source === 'comment') {
+    if (
+      approval.basis !== 'maintainer-comment' ||
+      !APPROVAL_PERMALINK.test(approval.approval ?? '') ||
+      !Number.isSafeInteger(approval.comment?.id) ||
+      approval.comment.id <= 0 ||
+      !/^[0-9a-f]{64}$/.test(approval.comment?.bodySha256 ?? '')
+    ) {
+      return [
+        'comment executionApproval needs basis maintainer-comment, an approval permalink, numeric comment.id and 64-hex comment.bodySha256',
+      ];
+    }
+  } else {
+    return [
+      'executionApproval source must be local-trust or comment, with its matching basis',
+    ];
+  }
+  const errors = [];
+  if (
+    approval.mode !== declared.mode ||
+    approval.head !== snapshot?.headRefOid
+  ) {
+    errors.push(
+      'executionApproval mode/head does not match the declaration and trusted headRefOid; a moved head needs a fresh approval',
+    );
+  }
+  if (!isDeepStrictEqual(approval, declared)) {
+    errors.push(
+      'boundary.json differs from the host-held executionApproval; restore the declaration prepare wrote instead of editing the PR-side copy',
+    );
+  }
+  return errors;
 }
 
 // GitHub renders CRLF and LF identically, so a Windows-authored artifact
@@ -1327,6 +1435,8 @@ function main(argv) {
       : null;
   };
   let coordinates = null;
+  let trustedSnapshot = null;
+  let contextDigestVerified = false;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the
@@ -1431,6 +1541,7 @@ function main(argv) {
         );
         return 1;
       }
+      contextDigestVerified = true;
     } else {
       // Disclose that provenance was never bound, rather than letting a clean
       // path/link check read as proof the host wrote the snapshot (deferred).
@@ -1443,6 +1554,7 @@ function main(argv) {
           expectedHead = snapshot.headRefOid;
           snapshotPath = contextPath;
         }
+        trustedSnapshot = snapshot;
         coordinates = coordinatesFrom(snapshot);
       } catch {
         // Reported below; never falls back to the writable artifact copy.
@@ -1500,6 +1612,12 @@ function main(argv) {
     evidenceUnreadable,
     unreadableKeys,
   });
+  result.errors.push(
+    ...executionApprovalErrors(files.boundary, trustedSnapshot, {
+      contextProvided: !!contextPath,
+      contextDigestVerified,
+    }),
+  );
   // The container nonce corroboration (R16-1) needs the round dir to scan the
   // battery's logs, so it lives here rather than in checkArtifacts. It runs
   // UNCONDITIONALLY: the exemption is the RECORD, not a flag — containerNonceErrors

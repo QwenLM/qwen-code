@@ -1,0 +1,147 @@
+# Verify-PR 执行预检
+
+[English](verify-pr-execution-preflight.md) | [简体中文](verify-pr-execution-preflight.zh-CN.md)
+
+状态：第一版已实现；验证证据见 E2E 记录。
+
+## 问题与现状
+
+本地 `/verify-pr` 轮次会执行不可信的 PR 代码。skill 的文字规则要求宿主或 VM 轮次在代码运行前得到维护者明确批准，但唯一的机器检查在发布检查器里。于是常见的失败既昂贵又令人困惑：整套电池已经在宿主上跑完，`verify-pr-check.mjs` 才来索要 `boundary.json` 和批准评论永久链接。
+
+不能在 coordinate path 自身套用 `--require-isolation` 来解决这个问题。该模式要求观测到容器标记，而坐标解析按设计必须在宿主上进行，因为它需要经过认证的 `gh`。单纯提前写声明也不行：产物目录位于 PR 可写克隆之内。
+
+当前批准检查也有意保持浅层。有可信 context 时，它比对永久链接中的仓库和 PR 号；没有时只查 URL 形状。它不能证明评论存在、作者有权批准执行，或者批准点名的就是当前 head 和 round。
+
+## 目标与范围
+
+第一版让受支持的本地流程在 PR 代码执行前 fail closed：
+
+1. coordinate prepare 默认按 `container` 执行，保留旧 watch prompt；只有 `vm` 和 `host` 要求显式选择新执行方式。
+2. VM 或宿主选择必须有以下两者之一：维护者对本人或同仓 PR 的显式本地信任决定；或对他人 fork、且绑定当前仓库、PR、head 和 round 的真实维护者批准评论及可信 watch 的 in-flight 注册。
+3. prepare 把形成的声明写入现有宿主 context 快照，并在产物目录保存一份副本。
+4. 发布检查器把副本与宿主快照对账，保留现有报告规则和 CI lane 检查。
+
+这是针对使用可信 prepare 与发布命令之轮次的流程约束，不是 OS 安全边界：绕过这些命令的 agent 仍能在宿主执行 shell。特权执行包装器或强制沙箱不在本版范围内。prepare 之后评论被编辑/删除以及仓库权限被撤销时的在线重新验证也不在本版范围内；记录保存预检时看到的评论元数据、权限与正文摘要。
+
+CI lane 继续使用发布方持有的 `container` 与 `ci-lane` 记录。本方案不打算修改 workflow。
+
+## 命令契约
+
+coordinate path 新增以下参数：
+
+| 参数                     | 含义                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------- |
+| `--execution container`  | 下一执行阶段将进入真实容器；prepare 不签发容器声明。                                            |
+| `--execution vm`         | 运营方选择 VM，并提供批准与 attestation。                                                       |
+| `--execution host`       | 运营方选择经豁免的宿主轮次，并提供批准。                                                        |
+| `--trust-pr-head`        | 对维护者本人或同仓 PR head 的显式本地信任；与 `--approval` 互斥。                               |
+| `--approval <permalink>` | 用于他人 fork 的维护者 issue comment 永久链接；替代 `--trust-pr-head`。                         |
+| `--state-root <dir>`     | 存放批准所在 head/round in-flight 注册的可信绝对目录，必须位于 PR 克隆之外；`--approval` 必填。 |
+| `--round <n>`            | 正整数轮次号；`vm` 和 `host` 必填。                                                             |
+| `--reason <text>`        | 本轮为何在可观测容器之外运行；`vm` 和 `host` 必填。                                             |
+| `--attestation <text>`   | 运营方对 VM 确认了什么；仅 `vm` 必填。                                                          |
+
+coordinate path 的 `--execution` 默认为 `container`，使旧 watch prompt 保持可用。省略它不会签发宿主/VM 批准或容器证明；真实容器仍须通过 gate。新调用可以显式写 `--execution container`。可信本地配方已经使用 `--context-out`；`vm` 和 `host` 现在必须提供它，使批准拥有 PR 克隆之外的权威落点。现有边界内 `--require-isolation` 形式不接受、也不需要 execution 选择。
+
+每个 VM 或宿主调用必须且只能提供 `--trust-pr-head` 与 `--approval` 之一，使用 `--approval` 时还必须提供 `--state-root`。`container` 不接受批准专用参数；容器仍然只有真实边界内门禁通过后才取得 `boundary.json` 与 `boundary-gate.json`。混入不适用参数或缺少必需批准字段属于用法错误。远端批准、权限、身份、注册或文件系统失败属于 prepare 拒绝（exit 3）。
+
+## 批准验证
+
+### 本地可信 head 批准
+
+对于维护者本人的 PR（包括其 fork）或同仓 collaboration PR，`--trust-pr-head` 记录显式本地决定，不要求公开批准评论。prepare 通过 `gh` 证明：
+
+- 当前用户就是预期的本地运营方；
+- 该用户对目标仓库有 `write`、`maintain` 或 `admin` 权限；
+- PR 作者是该用户，或 `isCrossRepository` 为 false；
+- 写出声明前，干净检出的 HEAD 与可信 `headRefOid` 精确相同。
+
+作者相同或同仓位置本身都不会自动选择宿主执行。显式标志信任当前完整 head 在本轮运行，包括合作者写的提交。head 与 round 绑定阻止记录被静默沿用。运营方用认证 login 表示，不设置 `--by`。无人值守 watch 不得自行添加该标志。
+
+### 他人 fork 的批准评论
+
+对于其他 fork，即使是新轮次，也先以 40 位 head、未使用的正整数轮次和位于 PR 克隆外的可信绝对 `--state-root` 调用 `verify-pr-watch-state --start`。轮次继续使用现有 complete/release 命令。prepare 要求单链接普通状态文件中存在该仓库、PR、head 和 round 的唯一实际 in-flight 条目，并且包括每个中间 `.qwen/tmp` 目录在内的完整规范化路径都位于 PR 克隆之外。完成或释放的注册不能授权新的调用。这把原轮次仍在 in-flight 时的重试与把其评论当作后续执行的重放区分开。
+
+然后由维护者而不是轮次在 PR 上发布评论。评论包含一个精确标记和人类可读的批准文字：
+
+```text
+<!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2} -->
+Approved host execution for this verify round.
+```
+
+VM 的 `mode` 为 `vm`。prepare 在创建产物目录前，通过经过认证的 `gh` 验证以下全部条件：
+
+- 永久链接符合现有允许形状，并指向本仓库和本 PR；
+- 指定编号的 issue comment 存在且属于该 PR；
+- 恰好一个标记可解析为 JSON，其 `mode`、`head` 和 `round` 分别等于所请求的执行方式、可信 `headRefOid` 和正整数轮次号；
+- 通过 collaborators permission endpoint 而不是自由文本 `by` 证明评论作者拥有仓库 `write`、`maintain` 或 `admin` 权限；
+- 标记与权限 API 调用成功，任何错误都 fail closed。
+
+记录的 `by` 取评论作者 login。上一轮的标记、碰巧引用某个 head 的普通评论、以及其他 PR 的批准都不能满足本契约。本地信任与评论互斥，调用方不能组合两份可能分歧的批准声明。
+
+## 记录与发布
+
+prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效时，把 `executionApproval` 对象加入 `--context-out` 原本就写出的同一份宿主 context 字节。对象包含 `mode`、`source`、`by`、`basis`、`reason`、可选 `attestation`、`head`、`round` 和认证所得权限。`source` 为 `local-trust` 或 `comment`；`basis` 对本地信任为 `own-pr` 或 `same-repository`，对评论为 `maintainer-comment`。本地决定没有 `approval` 永久链接；评论决定增加 `approval` 以及观测到的评论 id 和正文 sha256。声明的 `mode` 沿用现有词汇：`vm` 或 `waived`。
+
+产物中的 `boundary.json` 携带同一对象。现有检查器规则忽略声明中的额外字段，所以声明 schema 不分叉。prepare 打印的 context sha256 同时覆盖批准字节。
+
+`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源。
+
+容器与 CI lane 行为不变。缺少宿主记录的旧宿主或 VM 产物会被有意拒绝，不再呈现为已经预检批准的轮次。
+
+## Skill 与 watch 流程
+
+本地说明保留现有 register-ahead 交付规则：
+
+```text
+解析当前 head
+→ 每个新的评论批准 head/round 都注册；watch / re-verification 在批准等待前注册（R17-2）
+→ 选择 container / vm / host
+→ vm / host 选择显式本地信任，或注册并请求他人 fork 的批准评论
+→ 用匹配的 execution 与批准参数运行 prepare
+→ 只有相关边界/批准门禁通过后才执行 PR 代码
+```
+
+等待批准不移到注册之前：watch cursor 已经交付 head，等待中被杀也必须留下可恢复的 in-flight 标记。沿用 prepare 的现有 release/retry 规则。新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。不增加 watch-state schema 或 next-round 命令。
+
+无人值守 watch 不得编造宿主批准。它选择容器，或停下等待维护者，不能为未来未知 head 持久保存 `--trust-pr-head`。未带 `--execution` 的旧持久 watch prompt 保持容器默认值：既不会在 cursor 交付后被拒绝，也不会被提升为未经批准的宿主轮次。
+
+请求本地信任时说明：作者或仓库匹配不是自动豁免，标志信任的是当前完整 head。索要他人 fork 的批准时说明：评论记录不可信代码将在哪里运行；它位于 PR 可写产物树之外；不是代码评审或合并批准；并且在执行前而不是只在发布时检查。
+
+## 涉及文件
+
+- `scripts/verify-pr-prepare.mjs`：execution 参数、远端批准验证、context/声明写入和输出/用法说明。
+- `scripts/verify-pr-check.mjs`：宿主 context 批准对账及拒绝场景。
+- `scripts/tests/verify-pr-prepare.test.js`：fake-`gh` API 回复、参数与顺序覆盖、拒绝与成功见证。
+- `scripts/tests/verify-pr-check.test.js`：可信权威记录、篡改、陈旧 head、缺 context/digest、CI/容器回归覆盖。
+- `scripts/tests/verify-pr-model-proxy.test.js`：覆盖 skill 中全部 prepare/checker 调用的 trusted-path pin。
+- `scripts/tests/qwen-triage-workflow.test.js`：register-ahead、shell replay 与发布器兼容 pin；workflow 本身不变。
+- `.qwen/skills/verify-pr/SKILL.md`：本地、容器配方与 watch 调用顺序、批准说明、产物/检查器示例。
+- `docs/design/verify-pr-execution-preflight.md` 与 `docs/design/verify-pr-execution-preflight.zh-CN.md`：本设计。
+- `.qwen/e2e-tests/verify-pr-execution-preflight.md`：基线与本地 E2E 证据（git-ignored 工作产物）。
+
+## 设计决定与风险
+
+- **除向后兼容的容器调用外，显式选择执行方式。**无人值守 watch 退出本地信任。只有宿主/VM 必须选择新模式；省略参数保留旧容器行为，但不宣称容器 gate 已通过。
+- **批准随现有可信 context 保存。**第二个宿主文件、摘要参数和 containment 实现会重复已经审计的信任路径。容器与 CI 快照不含 `executionApproval`；共享坐标只增加 `isCrossRepository`。
+- **强制绑定 head、round 与真实注册。**只匹配 PR 会让旧批准被拿来复用。评论批准还要求 in-flight watch 标记，使完成后它成为历史，而不是可重复使用的宿主豁免。
+- **远端验证权限与本地信任资格。**直接查询仓库权限；本地信任还要求当前用户是 PR 作者或该 PR 不是 cross-repository。两个事实各自都不构成隐式豁免。
+- **发布仍是审计。**预检不替代 checker；副本对账抓住 PR 一侧替换声明的行为。
+- **本改动有意拒绝旧宿主/VM 产物，而不是拒绝旧容器调用。**新流程可以显式指定容器，旧流程继续工作；宿主与 VM 调用方必须提供新批准字段，评论批准还需可信注册。CI 自有记录不使用这份契约。
+- **预检不是 containment。**文档不得把它描述成后续命令确实运行在所选边界内的证明，也不得声称能防御绕过 prepare 的调用方。
+
+## 验证与验收标准
+
+- 单元测试与 CLI 测试证明参数拒绝早于产物创建，且拒绝不会写出新的权威批准快照。
+- fake-`gh` 见证覆盖本人 fork 与同仓 PR 的合法本地信任、评论支撑的合法宿主和 VM 批准、不合格他人 fork 的本地信任尝试、评论不存在、错误 PR、重复或畸形标记、错误 head 或 round、权限不足以及 API 失败。
+- 合法 prepare 产生相同的产物声明与宿主 context 批准；checker 接受匹配的副本。
+- 编辑或删除产物声明、替换批准、改动 source 或 round、或移动可信 head 后，发布失败。
+- 现有容器夹具测试与边界内门禁套件保持全绿，宿主 coordinate prepare 不增加 observed-marker 要求。
+- watch/re-verification 的注册仍在批准等待之前，等待中被杀会留下现有可恢复标记。新单次本地信任轮次明确为 round 1；评论批准的新轮次也要注册，in-flight 时允许重试，完成后拒绝重放。旧持久 prompt 保留容器默认值，而不是丢失已交付 head。只读批准文件产生受控 exit 3。
+- 每次本地 prepare 前移除陈旧宿主 context/digest 文件；宿主/VM checker 调用没有当前 digest 时 fail closed。
+- 实现后运行脚本夹具套件、格式化、lint、build、typecheck，以及规定的 bundle 和定向 E2E 探针。
+- 实现前用全局 `qwen` 0.28.3 记录缺少新选择/预检行为的基线；实现后用本地构建 CLI 与真实脚本验证，不发布评论，也不执行不可信 PR 电池。
+
+## 待决问题
+
+第一版没有待决问题。prepare 后撤回评论或权限，以及强制执行 confinement，是明确推迟的后续边界，不是被静默省略的实现要求。

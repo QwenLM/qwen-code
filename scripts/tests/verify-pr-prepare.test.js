@@ -13,6 +13,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -39,6 +40,9 @@ import {
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-prepare.mjs', import.meta.url),
+);
+const WATCH_STATE_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-watch-state.mjs', import.meta.url),
 );
 const OID = (char) => char.repeat(40);
 const REPO = 'QwenLM/qwen-code';
@@ -98,7 +102,7 @@ function makeRepo() {
  * records its arguments and answers with the review pages, failing the way
  * gh does when there are none.
  */
-function installFakeGh(snapshot, reviewPages) {
+function installFakeGh(snapshot, reviewPages, fixtures = {}) {
   const dir = makeTmpDir();
   const bin = join(dir, 'bin');
   mkdirSync(bin);
@@ -106,14 +110,33 @@ function installFakeGh(snapshot, reviewPages) {
   writeFileSync(snapshotPath, JSON.stringify(snapshot));
   const reviewPath = join(dir, 'review.json');
   if (reviewPages) writeFileSync(reviewPath, JSON.stringify(reviewPages));
+  const paths = {};
+  for (const key of ['user', 'permission', 'comment']) {
+    paths[key] = join(dir, `${key}.json`);
+    if (fixtures[key]) {
+      writeFileSync(paths[key], JSON.stringify(fixtures[key]));
+    }
+  }
   const gh = join(bin, 'gh');
+  const logger = join(dir, 'log-args.mjs');
+  writeFileSync(
+    logger,
+    "import { appendFileSync } from 'node:fs';\nappendFileSync(process.env.FAKE_GH_API_ARGS, JSON.stringify(process.argv.slice(2)) + '\\n');\n",
+  );
   writeFileSync(
     gh,
     [
       '#!/bin/sh',
       'if [ "$1" = api ]; then',
-      '  printf "%s\\n" "$@" > "$FAKE_GH_API_ARGS"',
-      '  [ -f "$FAKE_GH_REVIEW" ] && exec cat "$FAKE_GH_REVIEW"',
+      '  node "$FAKE_GH_LOG_ARGS" "$@"',
+      '  if [ "$2" = user ] && [ -f "$FAKE_GH_USER" ]; then exec cat "$FAKE_GH_USER"; fi',
+      '  if [ "$2" = graphql ] && [ -f "$FAKE_GH_REVIEW" ]; then exec cat "$FAKE_GH_REVIEW"; fi',
+      '  case "$2" in',
+      '    */issues/comments/*)',
+      '      [ -f "$FAKE_GH_COMMENT" ] && exec cat "$FAKE_GH_COMMENT" ;;',
+      '    */collaborators/*/permission)',
+      '      [ -f "$FAKE_GH_PERMISSION" ] && exec cat "$FAKE_GH_PERMISSION" ;;',
+      '  esac',
       '  echo "HTTP 502: Bad Gateway" >&2',
       '  exit 1',
       'fi',
@@ -127,8 +150,21 @@ function installFakeGh(snapshot, reviewPages) {
     PATH: `${bin}:${process.env.PATH ?? ''}`,
     FAKE_GH_SNAPSHOT: snapshotPath,
     FAKE_GH_REVIEW: reviewPath,
+    FAKE_GH_USER: paths.user,
+    FAKE_GH_PERMISSION: paths.permission,
+    FAKE_GH_COMMENT: paths.comment,
+    FAKE_GH_LOG_ARGS: logger,
     FAKE_GH_API_ARGS: join(dir, 'api-args'),
   };
+}
+
+function ghApiArgs(env) {
+  try {
+    return readFileSync(env.FAKE_GH_API_ARGS, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return '';
+    throw error;
+  }
 }
 
 /** Two pages of REVIEW_STATE_QUERY, as `gh api graphql --paginate --slurp` returns them. */
@@ -220,7 +256,15 @@ function snapshotFor({ head, base, title = 'test(scope): subject' }) {
 }
 
 function runPrepare(dir, args, env) {
-  return spawnSync(process.execPath, [SCRIPT, ...args], {
+  const selected =
+    args.includes('--require-isolation') ||
+    args.includes('--execution') ||
+    args.includes('--help') ||
+    args.includes('-h');
+  // Existing fixtures exercise the container coordinate path. New tests pass
+  // host/vm themselves or invoke the real parser for a missing selection.
+  const fullArgs = selected ? args : ['--execution', 'container', ...args];
+  return spawnSync(process.execPath, [SCRIPT, ...fullArgs], {
     cwd: dir,
     env,
     encoding: 'utf8',
@@ -625,12 +669,16 @@ describe('validateContext', () => {
 
 describe('parseArgs', () => {
   it('takes the PR number, --repo in both spellings, and --require-isolation', () => {
-    expect(parseArgs(['42', '--repo', REPO])).toMatchObject({
+    expect(
+      parseArgs(['42', '--repo', REPO, '--execution', 'container']),
+    ).toMatchObject({
       pr: 42,
       repo: REPO,
       requireIsolation: false,
     });
-    expect(parseArgs(['42', `--repo=${REPO}`])).toMatchObject({
+    expect(
+      parseArgs(['42', `--repo=${REPO}`, '--execution', 'container']),
+    ).toMatchObject({
       pr: 42,
       repo: REPO,
     });
@@ -655,16 +703,60 @@ describe('parseArgs', () => {
   });
 
   it('rejects a missing PR, a missing repo, and a stray argument', () => {
-    expect(parseArgs(['--repo', REPO]).error).toMatch(/PR number/);
-    expect(parseArgs(['42']).error).toMatch(/--repo/);
+    expect(
+      parseArgs(['--repo', REPO, '--execution', 'container']).error,
+    ).toMatch(/PR number/);
+    expect(parseArgs(['42', '--execution', 'container']).error).toMatch(
+      /--repo/,
+    );
     expect(parseArgs(['42', '--repo']).error).toMatch(/--repo/);
-    expect(parseArgs(['42', '--repo', REPO, 'extra']).error).toMatch(
-      /unexpected argument/,
-    );
+    expect(
+      parseArgs(['42', '--repo', REPO, '--execution', 'container', 'extra'])
+        .error,
+    ).toMatch(/unexpected argument/);
     // The removed escape hatch must not fall through as a PR.
-    expect(parseArgs(['42', '--repo', REPO, '--allow-host']).error).toMatch(
-      /unexpected argument/,
-    );
+    expect(
+      parseArgs([
+        '42',
+        '--repo',
+        REPO,
+        '--execution',
+        'container',
+        '--allow-host',
+      ]).error,
+    ).toMatch(/unexpected argument/);
+  });
+
+  it('defaults old container calls and validates the execution approval matrix', () => {
+    expect(parseArgs(['42', '--repo', REPO])).toMatchObject({
+      execution: 'container',
+    });
+    expect(
+      parseArgs(['42', '--repo', REPO, '--execution', 'other']).error,
+    ).toMatch(/--execution must be container \| vm \| host/);
+    expect(
+      parseArgs(['42', '--repo', REPO, '--execution', 'host']).error,
+    ).toMatch(/exactly one of --trust-pr-head and --approval/);
+    expect(
+      parseArgs([
+        '42',
+        '--repo',
+        REPO,
+        '--execution',
+        'container',
+        '--trust-pr-head',
+      ]).error,
+    ).toMatch(/container does not take approval options/);
+    expect(
+      parseArgs([
+        '42',
+        '--repo',
+        REPO,
+        '--require-isolation',
+        '--execution',
+        'container',
+      ]).error,
+    ).toMatch(/not --require-isolation/);
   });
 });
 
@@ -758,6 +850,415 @@ describe('reviewState', () => {
 
 // These cases drive the real CLI through a POSIX `gh` stand-in; a Windows
 // runner cannot express it, and the Linux lane owns that coverage.
+describe.skipIf(process.platform === 'win32')(
+  'execution approval preflight (CLI)',
+  () => {
+    const permalink =
+      'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001';
+    const marker = ({ mode = 'host', head, round = 2 }) =>
+      `<!-- verify-pr-boundary-approval: ${JSON.stringify({ mode, head, round })} -->\nApproved execution for this verify round.`;
+    const command = ({
+      execution = 'host',
+      trust = true,
+      approval = null,
+      head = null,
+      round = 2,
+    } = {}) => {
+      const hostDir = join(makeTmpDir(), 'host');
+      const stateRoot = trust ? null : makeTmpDir();
+      if (!trust) {
+        const started = spawnSync(
+          process.execPath,
+          [
+            WATCH_STATE_SCRIPT,
+            '42',
+            '--start',
+            '--head',
+            head,
+            '--round',
+            String(round),
+            '--repo',
+            REPO,
+            '--state-root',
+            stateRoot,
+          ],
+          { encoding: 'utf8', env: gitEnv },
+        );
+        expect(started.status).toBe(0);
+      }
+      return {
+        artifactArgs: [
+          '42',
+          '--repo',
+          REPO,
+          '--execution',
+          execution,
+          '--round',
+          String(round),
+          '--reason',
+          'fixture needs a host runtime',
+          '--context-out',
+          join(hostDir, 'pr.json'),
+          ...(execution === 'vm'
+            ? ['--attestation', 'nothing mounted, no host credentials']
+            : []),
+          ...(trust
+            ? ['--trust-pr-head']
+            : ['--approval', approval, '--state-root', stateRoot]),
+        ],
+        hostDir,
+        stateRoot,
+      };
+    };
+    const artifactsFrom = (result) =>
+      result.stdout.match(/artifacts {2}(\S+)/)?.[1];
+
+    it('accepts explicit local trust for an own fork and a same-repository PR', () => {
+      for (const fixture of [
+        { author: 'maintainer', cross: true, basis: 'own-pr' },
+        { author: 'colleague', cross: false, basis: 'same-repository' },
+      ]) {
+        const { dir, base, head } = makeRepo();
+        const snapshot = {
+          ...snapshotFor({ base, head }),
+          author: { login: fixture.author },
+          isCrossRepository: fixture.cross,
+        };
+        const env = installFakeGh(snapshot, reviewPages(), {
+          user: { login: 'maintainer' },
+          permission: { permission: 'maintain' },
+        });
+        const { artifactArgs } = command({ round: 1 });
+        const result = runPrepare(dir, artifactArgs, env);
+        expect(result.status).toBe(0);
+        const artifacts = artifactsFrom(result);
+        const declaration = JSON.parse(
+          readFileSync(join(artifacts, 'boundary.json'), 'utf8'),
+        );
+        expect(declaration).toMatchObject({
+          mode: 'waived',
+          source: 'local-trust',
+          by: 'maintainer',
+          basis: fixture.basis,
+          permission: 'maintain',
+          head,
+          round: 1,
+        });
+        expect(declaration).not.toHaveProperty('approval');
+        const context = JSON.parse(
+          readFileSync(artifactArgs[artifactArgs.indexOf('--context-out') + 1]),
+        );
+        expect(context.executionApproval).toEqual(declaration);
+        expect(result.stdout).toContain(
+          'run the host round only for this exact head',
+        );
+        expect(result.stdout).not.toContain('--require-isolation');
+        const calls = ghApiArgs(env);
+        expect(calls).toContain('"api","user"');
+        expect(calls).not.toContain('/issues/comments/');
+      }
+    });
+
+    it('refuses local trust for another fork before creating artifacts', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'someone-else' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permission: { permission: 'admin' },
+        },
+      );
+      const { artifactArgs } = command();
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(3);
+      expect(result.stderr).toMatch(/another fork needs --approval/);
+      expect(existsSync(join(dir, 'tmp'))).toBe(false);
+      const calls = ghApiArgs(env);
+      expect(calls).not.toContain('/collaborators/');
+    });
+
+    it('refuses local trust when the maintainer lacks target write permission', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permission: { permission: 'read' },
+        },
+      );
+      const { artifactArgs, hostDir } = command();
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(3);
+      expect(result.stderr).toMatch(/not admin \| maintain \| write/);
+      expect(existsSync(join(dir, 'tmp'))).toBe(false);
+      expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+    });
+
+    it('accepts a marked maintainer-comment approval for VM execution', () => {
+      const { dir, base, head } = makeRepo();
+      const body = marker({ mode: 'vm', head });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body,
+          user: { login: 'approver' },
+        },
+        permission: { permission: 'admin' },
+      });
+      const { artifactArgs } = command({
+        execution: 'vm',
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(0);
+      const declaration = JSON.parse(
+        readFileSync(join(artifactsFrom(result), 'boundary.json'), 'utf8'),
+      );
+      expect(declaration).toMatchObject({
+        mode: 'vm',
+        source: 'comment',
+        by: 'approver',
+        basis: 'maintainer-comment',
+        permission: 'admin',
+        approval: permalink,
+        comment: {
+          id: 900001,
+          bodySha256: createHash('sha256').update(body).digest('hex'),
+        },
+        attestation: 'nothing mounted, no host credentials',
+        head,
+        round: 2,
+      });
+      // The same in-flight head/round may retry prepare; only a completed
+      // cycle needs a different registered round.
+      const retry = runPrepare(dir, artifactArgs, env);
+      expect(retry.status).toBe(0);
+    });
+
+    it('refuses a comment approval replay after its registered round completes', () => {
+      const { dir, base, head } = makeRepo();
+      const body = marker({ head, round: 1 });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body,
+          user: { login: 'approver' },
+        },
+        permission: { permission: 'admin' },
+      });
+      const { artifactArgs, stateRoot } = command({
+        trust: false,
+        approval: permalink,
+        head,
+        round: 1,
+      });
+      expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
+      const completed = spawnSync(
+        process.execPath,
+        [
+          WATCH_STATE_SCRIPT,
+          '42',
+          '--complete',
+          '--head',
+          head,
+          '--round',
+          '1',
+          '--verdict',
+          'merge-ready',
+          '--repo',
+          REPO,
+          '--state-root',
+          stateRoot,
+        ],
+        { encoding: 'utf8', env: gitEnv },
+      );
+      expect(completed.status).toBe(0);
+      const before = readdirSync(join(dir, 'tmp'));
+      const replay = runPrepare(dir, artifactArgs, env);
+      expect(replay.status).toBe(3);
+      expect(replay.stderr).toMatch(/one in-flight registration/);
+      expect(readdirSync(join(dir, 'tmp'))).toEqual(before);
+    });
+
+    it('fails closed on wrong targets, markers, permissions and missing comments', () => {
+      const cases = [
+        {
+          name: 'another PR in the permalink',
+          approval:
+            'https://github.com/QwenLM/qwen-code/pull/43#issuecomment-900001',
+          expected: /--approval must be an issue-comment permalink on this PR/,
+        },
+        {
+          name: 'missing comment response',
+          comment: null,
+          expected: /approval comment lookup failed/,
+        },
+        {
+          name: 'stale marker head',
+          body: () => marker({ head: OID('0'), round: 2 }),
+          expected: /mode, head and round matching/,
+        },
+        {
+          name: 'wrong marker round',
+          body: (head) => marker({ head, round: 1 }),
+          expected: /mode, head and round matching/,
+        },
+        {
+          name: 'duplicate marker',
+          body: (head) => `${marker({ head })}\n${marker({ head })}`,
+          expected: /exactly one well-formed/,
+        },
+        {
+          name: 'read-only approver',
+          permission: 'read',
+          expected: /not admin \| maintain \| write/,
+        },
+      ];
+      for (const testCase of cases) {
+        const { dir, base, head } = makeRepo();
+        const body = testCase.body ? testCase.body(head) : marker({ head });
+        const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+          comment:
+            testCase.comment === null
+              ? undefined
+              : {
+                  id: 900001,
+                  issue_url:
+                    'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+                  body,
+                  user: { login: 'approver' },
+                },
+          permission: { permission: testCase.permission ?? 'admin' },
+        });
+        const { artifactArgs, hostDir } = command({
+          trust: false,
+          approval: testCase.approval ?? permalink,
+          head,
+        });
+        const result = runPrepare(dir, artifactArgs, env);
+        expect(result.status, testCase.name).toBe(3);
+        expect(result.stderr, testCase.name).toMatch(testCase.expected);
+        expect(existsSync(join(dir, 'tmp')), testCase.name).toBe(false);
+        expect(existsSync(join(hostDir, 'pr.json')), testCase.name).toBe(false);
+      }
+    });
+
+    it('refuses a state-root alias that redirects registration into the PR clone', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body: marker({ head }),
+          user: { login: 'approver' },
+        },
+        permission: { permission: 'admin' },
+      });
+      const { artifactArgs, stateRoot, hostDir } = command({
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      const cloneTmp = join(dir, '.qwen', 'tmp');
+      mkdirSync(cloneTmp, { recursive: true });
+      writeFileSync(
+        join(cloneTmp, 'verify-pr-watch-42.json'),
+        readFileSync(
+          join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+          'utf8',
+        ),
+      );
+      const alias = join(makeTmpDir(), 'alias-root');
+      mkdirSync(join(alias, '.qwen'), { recursive: true });
+      symlinkSync(cloneTmp, join(alias, '.qwen', 'tmp'), 'dir');
+      artifactArgs[artifactArgs.indexOf('--state-root') + 1] = alias;
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(3);
+      expect(result.stderr).toMatch(
+        /--state-root must be a trusted directory outside the PR clone/,
+      );
+      expect(existsSync(join(dir, 'tmp'))).toBe(false);
+      expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+    });
+
+    it.skipIf(process.getuid?.() === 0)(
+      'reports an unwritable approval through the controlled filesystem failure',
+      () => {
+        const { dir, base, head } = makeRepo();
+        const env = installFakeGh(
+          {
+            ...snapshotFor({ base, head }),
+            author: { login: 'maintainer' },
+            isCrossRepository: true,
+          },
+          reviewPages(),
+          {
+            user: { login: 'maintainer' },
+            permission: { permission: 'write' },
+          },
+        );
+        const clock = join(makeTmpDir(), 'freeze-clock.cjs');
+        // Artifact names use `new Date()`, not only Date.now(): freeze both
+        // forms so the retry deterministically hits the same boundary file.
+        writeFileSync(
+          clock,
+          'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+        );
+        const frozen = { ...env, NODE_OPTIONS: `--require=${clock}` };
+        const { artifactArgs } = command({ round: 1 });
+        const first = runPrepare(dir, artifactArgs, frozen);
+        expect(first.status).toBe(0);
+        const boundaryPath = join(artifactsFrom(first), 'boundary.json');
+        chmodSync(boundaryPath, 0o444);
+        try {
+          const second = runPrepare(dir, artifactArgs, frozen);
+          expect(second.status, second.stderr).toBe(3);
+          expect(second.stderr).toContain(boundaryPath);
+          expect(second.stderr).toContain(
+            'could not write the execution approval',
+          );
+          expect(second.stderr).not.toMatch(/\n\s+at /);
+        } finally {
+          chmodSync(boundaryPath, 0o600);
+        }
+      },
+    );
+
+    it('preserves the legacy container form without minting a host waiver', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages());
+      const contextOut = join(makeTmpDir(), 'pr.json');
+      const result = spawnSync(
+        process.execPath,
+        [SCRIPT, '42', '--repo', REPO, '--context-out', contextOut],
+        { cwd: dir, env, encoding: 'utf8' },
+      );
+      expect(result.status).toBe(0);
+      const context = JSON.parse(readFileSync(contextOut, 'utf8'));
+      expect(context.executionApproval).toBeUndefined();
+      expect(existsSync(join(artifactsFrom(result), 'boundary.json'))).toBe(
+        false,
+      );
+      expect(result.stdout).toContain('--require-isolation');
+      expect(result.stdout).toContain('execution  container');
+    });
+  },
+);
+
 describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // The gate now requires an OBSERVED filesystem marker (R11-1): a SANDBOX=
   // string alone is a declaration, not a boundary. The passing-gate cases
@@ -1018,25 +1519,24 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       `review     ${reviewPath} (2 of 3 threads unresolved, 1 change requests)`,
     );
-    const args = readFileSync(env.FAKE_GH_API_ARGS, 'utf8').split('\n');
-    expect(args.slice(0, 4)).toEqual([
+    const args = ghApiArgs(env)
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(args[0]).toEqual([
       'api',
       'graphql',
       '--paginate',
       '--slurp',
+      '-f',
+      'owner=QwenLM',
+      '-f',
+      'name=qwen-code',
+      '-F',
+      'number=42',
+      '-f',
+      `query=${REVIEW_STATE_QUERY}`,
     ]);
-    expect(args).toEqual(
-      expect.arrayContaining([
-        'owner=QwenLM',
-        'name=qwen-code',
-        'number=42',
-        `query=${REVIEW_STATE_QUERY}`,
-      ]),
-    );
-    // -F types the number for the query's Int!; -f keeps a name raw.
-    expect(args[args.indexOf('number=42') - 1]).toBe('-F');
-    expect(args[args.indexOf('owner=QwenLM') - 1]).toBe('-f');
-    expect(args[args.indexOf('name=qwen-code') - 1]).toBe('-f');
 
     // All threads arrive before the filter, comment bodies included: one
     // busy PR's pages measured 790 KB, close to spawnSync's 1 MB default.

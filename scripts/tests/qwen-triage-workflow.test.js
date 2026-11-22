@@ -6747,14 +6747,20 @@ describe('qwen-triage verify hardening round 2', () => {
       manualSlice.indexOf(
         'Register the round in the shared watch state **ahead of prepare**',
       ),
-    ).toBeLessThan(manualSlice.indexOf('Then run prepare; it creates'));
+    ).toBeLessThan(
+      manualSlice.indexOf(
+        'Run prepare with `--execution container | vm | host`',
+      ),
+    );
     // Deferred (round 10): the heading pin above is not enough — guard the
     // --start COMMAND's position too, so moving the command below prepare (while
     // the heading stays above) reds this per-section assertion. Presence guards
     // (round 11): if either placeholder spelling changes, indexOf returns -1 and
     // the ordering comparison would go vacuous — assert both are found first.
     const manualStartAt = manualSlice.indexOf('--start --head <H>');
-    const manualPrepareAt = manualSlice.indexOf('Then run prepare; it creates');
+    const manualPrepareAt = manualSlice.indexOf(
+      'Run prepare with `--execution container | vm | host`',
+    );
     expect(manualStartAt).toBeGreaterThan(-1);
     expect(manualPrepareAt).toBeGreaterThan(-1);
     expect(manualStartAt).toBeLessThan(manualPrepareAt);
@@ -6879,7 +6885,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // section qualifies that the watch-state registration precedes prepare.
     // Reverting the boundary sentence to the unqualified form reds these pins.
     expect(flat).toContain(
-      'Maintainer round on a workstation** — `/verify-pr <n>`, running the full step-1 prepare block',
+      'Maintainer round on a workstation** — `/verify-pr <n>`, first choose `--execution container | vm | host`, then run the full step-1 prepare block',
     );
     expect(flat).toContain(
       'Run the full step-1 prepare block on the host before any work inside the boundary — the watch-state registration precedes it (R17-2)',
@@ -7042,14 +7048,16 @@ describe('qwen-triage verify hardening round 2', () => {
     // R1-2: positional pin — registration precedes prepare in the watch prompt.
     expect(
       flat.indexOf('Register the round **first, ahead of prepare** (R17-2)'),
-    ).toBeLessThan(flat.indexOf('Then run prepare (trusted host metadata)'));
+    ).toBeLessThan(
+      flat.indexOf('Then run prepare with the selected execution'),
+    );
     // Deferred (round 10): guard the --start COMMAND's position too, so moving
     // the command below prepare (while the heading stays above) reds this.
     // Presence guards (round 11) keep the comparison from going vacuous if a
     // placeholder spelling changes (indexOf would return -1).
     const watchStartAt = promptSlice.indexOf('--start --head <headSha>');
     const watchPrepareAt = promptSlice.indexOf(
-      'Then run prepare (trusted host metadata)',
+      'Then run prepare with the selected execution',
     );
     expect(watchStartAt).toBeGreaterThan(-1);
     expect(watchPrepareAt).toBeGreaterThan(-1);
@@ -7247,22 +7255,23 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'an agent-forwarded shell carries `SSH_AUTH_SOCK` even under a scratch home',
     );
+    expect(flat).toContain('Prepare writes the resulting `executionApproval`');
+    expect(flat).toContain('`mode`, `source`, `basis`, `by`, `permission`');
     expect(flat).toContain(
-      '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
+      '--trust-pr-head` after the maintainer approves that whole current head for this round',
     );
-    // The maintainer is the sole author of the approval comment: the
-    // round never posts the comment it cites (N9-1).
-    expect(flat).toContain(
-      'if the maintainer approves, **they** record that approval as a PR comment (the round never authors the comment it cites)',
-    );
+    // The maintainer is the sole author of an other-fork approval comment;
+    // own and same-repository local trust deliberately needs no public URL.
+    expect(flat).toContain('**they**, never the round, post the PR comment');
+    expect(flat).toContain('verify-pr-boundary-approval:');
     expect(flat).not.toContain('or the round, under the local publish path');
-    // The coordinate check reads the host-held --context snapshot, never
-    // the PR-writable artifact context.json (R9-1).
+    // The trusted snapshot remains external to the PR-writable artifact
+    // context; its deep-equal record and digest back the waiver at publication.
     expect(flat).toContain(
-      'When the host-held snapshot passed as `--context` carries `repo` and the PR number',
+      'Publication requires `--context <host snapshot>` and a matching `--context-sha256`',
     );
     expect(flat).toContain(
-      "The round's own artifact-directory `context.json` never supplies these coordinates — it is PR-writable",
+      'An old waiver without this host record or digest is refused',
     );
     // The completion duty is a top-level paragraph, not folded into the
     // last exit-3 bullet by a two-space indent.
@@ -7279,10 +7288,12 @@ describe('qwen-triage verify hardening round 2', () => {
       'a self-chosen `container=<name>` string is a _declaration_, not an observed boundary',
     );
     expect(flat).toContain('"mode":"vm"');
-    expect(flat).toContain('explicitly approves host execution for this round');
-    expect(flat).toContain('The invocation itself is not that approval');
+    expect(flat).toContain('Neither fact alone is an automatic waiver');
     expect(flat).toContain(
-      'a waiver never carries over to the next round unasked',
+      'a changed head or requested new round is a fresh decision',
+    );
+    expect(flat).toContain(
+      'never let an unattended watch apply it to unknown future heads',
     );
     // The Java gap is named, not left as a silent host fallback.
     expect(flat).toContain('carries no JDK or Maven');
@@ -7731,7 +7742,7 @@ describe('qwen-triage verify hardening round 2', () => {
     const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
 
     expect(frontmatter['argument-hint']).toBe(
-      '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+      '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>] [--execution <container|vm|host>] [--trust-pr-head]',
     );
   });
 

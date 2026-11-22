@@ -1,7 +1,7 @@
 ---
 name: verify-pr
 description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", "有更新了，重新验证", "重新验证 PR <n>", "re-verify after update", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
-argument-hint: '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
+argument-hint: '<pr-number> [--publish] [--no-publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>] [--execution <container|vm|host>] [--trust-pr-head]'
 ---
 
 # PR Deep Verification
@@ -23,13 +23,16 @@ Two entry paths share the contract below.
   before running the checker, and the checker treats an absent declaration
   as a warning while `$QWEN_VERIFY_CONTEXT` is set — so the round's own
   pre-finish self-check never fails on a file only the later job writes.
-- **Maintainer round on a workstation** — `/verify-pr <n>`, running the full
-  step-1 prepare block (the trusted copy
-  `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
+- **Maintainer round on a workstation** — `/verify-pr <n>`, first choose
+  `--execution container | vm | host`, then run the full step-1 prepare block.
+  The container spelling is the trusted copy
+  `cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution container`
   redirected to `prepare.log`, plus the `sed` that captures the snapshot digest
-  into `pr.sha256`; the PR clone only as its cwd — see the container recipe
-  below). The preflight requires the repository explicitly; `origin` is not a
-  fallback.
+  into `pr.sha256`; VM/host adds its approval arguments from _Local
+  invocation_, and every VM/host publishes with the mandatory digest copied
+  from the same fresh host snapshot. The PR clone is only its cwd — see the
+  container recipe below. The preflight requires the repository explicitly;
+  `origin` is not a fallback.
   It writes the round's coordinates (`repo`, `pr`, `baseRefOid`, `headRefOid`)
   to `context.json` and refuses a tree that is not a clean checkout of the PR
   head — when it passes, the current tree is the head side of the A/B, so stay
@@ -199,10 +202,8 @@ observed boundary, and on its own the gate refuses it (exit 4) — setting it
 on a bare host cannot mint a `mode:"container"` claim, and a wrong value
 makes the artifact false. A VM carries no observed container marker, so it
 does **not** use the container path: after confirming nothing is mounted,
-the operator records `{"mode":"vm","by":"<maintainer>","approval":"<permalink
-to the maintainer's approval comment>","attestation":"<what was confirmed:
-nothing mounted, no host credentials>","reason":"<why a VM>"}` — the same
-maintainer approval the waiver requires, never the round's own claim. The
+the operator passes the `--attestation` text and the approval path below;
+prepare writes the validated declaration before PR code runs. The
 credential-free attestation (`QWEN_VERIFY_CREDENTIAL_FREE=1`) is the
 **operator's attestation**, never set by the round itself or left exported
 afterwards: unset it when the round ends. The VM path runs **no
@@ -225,27 +226,72 @@ requirement. The shapes:
 - Inside an observed container boundary that passed `--require-isolation`:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`
   beside the gate's `boundary-gate.json` (which records the observed marker).
-- On an attested VM (no observed container marker): only with the maintainer's
-  approval, like the waiver —
-  `{"mode":"vm","by":"<maintainer>","approval":"<permalink to the maintainer's approval comment>","attestation":"<what the operator confirmed>","reason":"<why a VM>"}`.
-- On the host: only after the maintainer **explicitly approves host execution
-  for this round** — ask once, in words; if the maintainer approves, **they**
-  record that approval as a PR comment (the round never authors the comment
-  it cites), and `approval` is that comment's permalink:
-  `{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer's approval comment>","reason":"<why this round may run outside a boundary>"}`.
-  The approval is a permalink a reader can open
-  (`https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>`), not free
-  text — a verbal "yes" in the session is not the record; the comment is.
-  When the host-held snapshot passed as `--context` carries `repo` and the
-  PR number, the checker also compares the permalink's owner/repo/number
-  against them: the approval must be a comment on this round's PR, not any
-  comment anywhere. The round's own artifact-directory `context.json` never
-  supplies these coordinates — it is PR-writable.
-  The invocation itself is not that approval, and a waiver never carries
-  over to the next round unasked. If the maintainer declines, use the sandboxed
-  lane. Measured case: two local rounds on PR #16866 ran the whole battery on
-  the host with no gate, no waiver, and no boundary line — the prose rule
-  alone did not stop them.
+- On an attested VM or a waived host: select `--execution vm` or
+  `--execution host` and give prepare exactly one approval path, plus
+  `--round <n>`, `--reason <text>` and `--context-out <fresh host snapshot>`.
+  VM also needs `--attestation '<nothing mounted, no host credentials>'`.
+  A fresh **local-trust** round without a marker uses round 1; each new
+  invocation includes the explicit trust flag. A comment approval must use
+  the trusted watch registration below, including for a fresh round. Prepare
+  refuses an invalid VM/host approval before creating artifacts. For
+  compatibility with already-installed watches, omitting `--execution`
+  defaults to `container`; it never means host/VM and never mints a
+  declaration without the in-boundary gate.
+- **Local trusted-head approval for the maintainer's own PR or a
+  same-repository collaboration PR:** pass the explicit `--trust-pr-head`
+  after the maintainer approves that whole current head for this round. The
+  command is their local approval; it does not need a public comment. Prepare
+  resolves `gh api user`, verifies that login has `admin | maintain | write`
+  on the target repository, and accepts only `author.login == that login` or
+  `isCrossRepository == false`. Neither fact alone is an automatic waiver.
+  The flag trusts collaborator commits on that head too, so a changed head or
+  requested new round is a fresh decision. Never add it because a PR title,
+  branch name or origin looks familiar, never infer it just from authorship,
+  and never let an unattended watch apply it to unknown future heads.
+- **Approval comment for any other fork:** first register an unused positive
+  round with `verify-pr-watch-state --start --head <40hex> --round <r> --repo
+<owner>/<repo> --state-root "<trusted-dir>"`, even on a fresh round. A
+  first local registration may use round 1; later executions need their own
+  allocated round, not the old round just because no marker is currently in
+  flight. Then ask once, in words. If the maintainer approves this exact
+  execution, **they**, never the round, post the PR comment. It carries
+  human-readable approval plus exactly one marker:
+
+  ```text
+  <!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2} -->
+  Approved host execution for this verify round.
+  ```
+
+  For a VM use `"mode":"vm"`. Pass its permalink and registration directory
+  with `--approval <url> --state-root "<trusted-dir>"`. The directory must be
+  absolute and outside the PR clone, and must contain the same in-flight
+  head/round written by the real watch helper. Prepare checks that
+  registration before reading the numbered comment; it derives `by` from
+  the comment author, checks their live `admin | maintain | write`
+  permission, and requires the marker's mode/head/round to match. An
+  in-flight retry may reuse its approval. After `--complete` or an actual
+  release, prepare refuses the same unregistered invocation before creating
+  new artifacts — copying or inventing a marker in the PR tree cannot prove
+  a fresh round. Ordinary prose containing a head, duplicate or malformed
+  markers, an approval for another PR or a previous registration, and a
+  synthetic/completed marker fail closed. Register completion with the
+  existing `--complete` form only after publication succeeds; use the
+  existing `--release` form after setup refusal.
+
+- Prepare writes the resulting `executionApproval` into the host-held
+  context and the same object to artifact `boundary.json`: `mode` is `vm` or
+  `waived`, `source` is `local-trust` or `comment`, and the object also names
+  `basis`, `by`, `permission`, `head`, `round`, `reason`, optional
+  `attestation`, and for a comment its permalink, id and body digest. The PR
+  artifact copy is only a copy, not self-certifying authority. Publication
+  requires `--context <host snapshot>` and a matching
+  `--context-sha256`, checks the object shapes and their deep equality, and
+  rechecks the head and local-trust eligibility against the trusted snapshot.
+  An old waiver without this host record or digest is refused rather than
+  silently accepting its permalink. If the maintainer declines, use the
+  sandboxed lane. Measured case: two local rounds on PR #16866 ran the whole
+  battery on the host with no gate, no waiver, and no boundary line — the
+  prose rule alone did not stop them.
 
 The standard Docker recipe below is `node:22-bookworm` and carries no JDK or
 Maven, so a Java-heavy _local_ round has no ready container in this recipe.
@@ -258,13 +304,22 @@ toolchain install succeeded. The alternative is a JDK-equipped
 credential-free boundary you build yourself; the recorded waiver is the
 last resort, never a silent host fallback.
 
+On watch and re-verification rounds, register the delivered head **before**
+waiting for an approval comment: the probe cursor already advanced, so the
+in-flight marker is the recovery if the session dies while waiting. Fresh
+local-trust rounds use round 1 without a marker; comment-backed fresh rounds
+also register so a completed approval cannot be replayed as a new execution.
+Then choose the execution and approval arguments above.
+
 Run the full step-1 prepare block on the host before any work inside the
 boundary — the watch-state registration precedes it (R17-2), but prepare itself
 stays on the host because resolving metadata needs `gh`, which the boundary
-excludes. It is the
-`cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>`
+excludes. For the container path it is the
+`cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution container`
 command redirected to `prepare.log`, plus the `sed` that captures the snapshot
-digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). It fetches the metadata snapshot, resolves and verifies
+digest into `pr.sha256` (step 7 binds the snapshot's bytes to it). VM/host
+substitutes its execution and approval arguments and always supplies
+`--context-out`; that host record is mandatory at publication. It fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
 to run — but if this round registered a head, the plain checkout is the remedy
@@ -281,9 +336,10 @@ skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
 creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
 `baseRefOid` and `headRefOid`, and reports the isolation signals it can see.
-It does not gate on them — resolving metadata
-needs `gh`, which the boundary excludes, so this path always runs on the host.
-The boundary check belongs inside: run the trusted copy of the preflight with
+It does not infer containment from those signals — resolving metadata needs
+`gh`, which the boundary excludes, so this path always runs on the host. Its
+execution-choice and host/VM approval checks are separate from observation.
+The container boundary check belongs inside: run the trusted copy of the preflight with
 `--require-isolation --artifact-dir <round-dir>` as the round's first command
 there — a pass writes the `boundary-gate.json` record the checker requires
 beside the declaration — and treat exit 4 as "this is not a boundary". The
@@ -370,10 +426,11 @@ authority to certify the round.
 
    ```bash
    mkdir -p ~/.cache/qwen-verify/pr<n>
-   # Clear last round's log/digest and gate on prepare's own exit status, so a
-   # failed cd/prepare cannot certify a stale snapshot (R5-3).
-   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256
-   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }
+   # Clear last round's log/digest/context and gate on prepare's own exit
+   # status, so a failed cd/prepare cannot certify stale approval or context
+   # bytes (R5-3).
+   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256 ~/.cache/qwen-verify/pr<n>/pr.json
+   cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution container --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }
    cat ~/.cache/qwen-verify/pr<n>/prepare.log
    # Hold the content digest host-side (outside the clone) so step 7 can bind
    # the snapshot's bytes; a path/link-count check alone cannot prove the host
@@ -738,7 +795,9 @@ Build the task in this order and stop at the first failure:
    The prompt is a **persisted snapshot** of that contract: a watch created
    before the register-ahead change (R17-2) keeps the old prepare-then-register
    order, and `--start --artifact-dir` is still accepted, so nothing forces the
-   upgrade. Re-creating it through the standard install does not work: step 3 is
+   upgrade. Their prepare has no `--execution`; its omission defaults to
+   container, so upgrading the trusted helpers must not reject it after
+   delivery. Defaulting never selects a host/VM waiver. Re-creating it through the standard install does not work: step 3 is
    blocked by the probe cursor as well as the claim, and `--release` clears only
    the claim — so such a watch keeps the old order until it is manually migrated
    (a residual tracked in #17371). Do not delete another session's live watch to
@@ -753,8 +812,12 @@ a round killed in the prepare window leaves a recoverable in-flight marker
 rather than a silently dropped head (the probe cursor already advanced past the
 delivered head). `<r>` is this round's number — pick the next integer and
 **repeat the same value in `--complete`**; the completion is matched by head and
-round. Then run prepare (trusted host metadata); it creates and prints the
-artifact directory `<dir>`, which you record at `--complete`. When prepare
+round. Before prepare, select `--execution container` for an unattended
+watch. Do not persist `--trust-pr-head` for unknown future heads or invent a
+fork approval: if the maintainer selects VM/host for this delivered head,
+stop for their explicit current decision, then resume with the approval path
+above. Then run prepare with the selected execution; it creates and prints
+the artifact directory `<dir>`, which you record at `--complete`. When prepare
 succeeds, compare the `head` line it printed (the trusted snapshot's
 `headRefOid`) with `<headSha>` before the battery: prepare checks the tree
 against the live PR head, not the registered one, so a force-push back to a
@@ -1028,9 +1091,11 @@ ambiguous rather than verify a guessed PR. Then, in order:
    round killed in the prepare window leaves a recoverable in-flight marker:
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`
    — no `--artifact-dir`, because prepare has not printed the directory yet.
-   `<r>` is this round's number; repeat the same value in `--complete`. Then run
-   prepare; it creates and prints the artifact directory `<dir>`, which you
-   record at `--complete`. When prepare succeeds, compare the `head` line it
+   `<r>` is this round's number; repeat the same value in `--complete`. Keep
+   registration ahead of any approval wait, then select the execution and
+   approval path above. Run prepare with `--execution container | vm | host`
+   and its matching arguments; it creates and prints the artifact directory
+   `<dir>`, which you record at `--complete`. When prepare succeeds, compare the `head` line it
    printed (the trusted snapshot's `headRefOid`) with `<H>` before the
    battery: prepare checks the tree against the live PR head, not the
    registered one, so a force-push back to a head the tree already sits at
@@ -2388,25 +2453,23 @@ workflow globs). It must contain:
   this file the claim is prose nothing verifies.
 - `boundary.json` — where the untrusted PR code ran:
   `{"mode":"container","detail":…}` once the isolation gate passes, backed by
-  the `boundary-gate.json` record that gate run wrote, or
-  `{"mode":"vm","by":…,"approval":…,"attestation":…,"reason":…}` for an
-  attested VM (no observed container marker) with the maintainer's approval,
-  or `{"mode":"waived","by":…,"approval":…,"reason":…}` for a host round the
-  maintainer explicitly approved, with a permalink to the approval comment
-  (see the local invocation contract). The checker refuses a round without
-  it. The one exception is the CI entry path (`$QWEN_VERIFY_CONTEXT` set),
-  where the inner round does not write the declaration itself, so an absent
-  file — or a container declaration whose gate record is absent — is only a
-  warning in the round's own self-check. Who writes it later depends on the
-  path: on the **CI lane** the publish job writes the declaration and its
-  `ci-lane` gate record before it trusts the verdict; on the **container
-  recipe** step 7's host block writes the container it built and runs the
-  checker from the host shell, where `$QWEN_VERIFY_CONTEXT` is not set — so
-  absence at that host check is a real error, not the CI warning, and a
-  container round whose step 7 did not run has no declaration and no host
-  check (a gap, not the warning). A waived host round writes its own waiver
-  before any PR code runs. On the CI and container paths the round never
-  depends on the agent remembering this.
+  its `boundary-gate.json`, or the `executionApproval` object prepare writes
+  for a validated VM/host round. The latter names `mode`, `source`, `basis`,
+  `by`, `permission`, `head`, `round`, `reason`, optional `attestation`, and
+  for comment approval its `approval` permalink and comment metadata. A local
+  trusted-head record has no approval URL; an other-fork comment record does.
+  The checker refuses a round without this file. The one exception is the CI
+  entry path (`$QWEN_VERIFY_CONTEXT` set), where the inner round does not
+  write the declaration itself, so an absent file — or a container
+  declaration whose gate record is absent — is only a warning in its
+  self-check. On the **CI lane** the publish job writes its own container and
+  `ci-lane` records before it trusts the verdict; on the **container recipe**
+  step 7 writes the host-owned container declaration. On **VM/host**, prepare
+  writes the object both into artifact `boundary.json` and into the host-held
+  context before PR code runs. Publication requires the context digest and
+  compares the two objects; modifying only the artifact copy cannot mint an
+  approval. On the CI and container paths the round never depends on the
+  agent remembering this.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_

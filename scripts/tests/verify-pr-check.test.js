@@ -28,6 +28,7 @@ import {
   checkBoundary,
   checkMutationCoverage,
   containerNonceErrors,
+  executionApprovalErrors,
   isFilesystemRoot,
 } from '../../scripts/verify-pr-check.mjs';
 
@@ -52,6 +53,39 @@ const GATE_RECORD = JSON.stringify({
 });
 const APPROVAL =
   'https://github.com/QwenLM/qwen-code/pull/17185#issuecomment-1234567890';
+
+function commentApproval(overrides = {}) {
+  return {
+    mode: 'waived',
+    source: 'comment',
+    by: 'maintainer',
+    basis: 'maintainer-comment',
+    permission: 'admin',
+    approval: APPROVAL,
+    comment: {
+      id: 1234567890,
+      bodySha256: 'a'.repeat(64),
+    },
+    head: HEAD,
+    round: 1,
+    reason: 'Java battery needs the host JDK',
+    ...overrides,
+  };
+}
+
+function localTrustApproval(overrides = {}) {
+  return {
+    mode: 'waived',
+    source: 'local-trust',
+    by: 'maintainer',
+    basis: 'own-pr',
+    permission: 'admin',
+    head: HEAD,
+    round: 1,
+    reason: 'why',
+    ...overrides,
+  };
+}
 
 function validFiles(overrides = {}) {
   return {
@@ -1421,17 +1455,32 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(foreign.stdout).toMatch(
       /approval permalink cites torvalds\/linux#1, not this round's QwenLM\/qwen-code#17185/,
     );
-    // The matching permalink passes end to end.
-    writeFileSync(
-      join(dir, 'boundary.json'),
-      JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval: APPROVAL,
-        reason: 'Java battery needs the host JDK',
-      }),
+    // The matching permalink passes only against prepare's host-held approval
+    // and its digest, not against the approval-shaped artifact alone.
+    const approval = commentApproval();
+    writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+    const trustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      headRefOid: HEAD,
+      executionApproval: approval,
+    });
+    writeFileSync(hostSnapshot, trustedText);
+    const matching = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        hostSnapshot,
+        '--context-sha256',
+        createHash('sha256').update(trustedText).digest('hex'),
+        dir,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      },
     );
-    const matching = withContext(hostSnapshot);
     expect(matching.status).toBe(0);
     expect(matching.stdout).toContain('ok: verdict=merge-ready');
   });
@@ -1473,10 +1522,9 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     );
   });
 
-  // The artifact directory is PR-writable: its own context.json must NOT
-  // supply the coordinates that judge its waiver. Without --context the
-  // check stays shape-only, exactly as the failure path documents.
-  it('does not take coordinates from the artifact context.json', () => {
+  // The artifact directory is PR-writable: its own context.json supplies
+  // neither the coordinates nor a substitute preflight approval.
+  it('refuses a waiver whose only approval is inside artifact context.json', () => {
     const dir = makeArtifactDir(
       validFiles({
         boundary: JSON.stringify({
@@ -1494,7 +1542,8 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
     );
     const result = run(dir);
-    expect(result.status).toBe(0);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/needs the host-held --context snapshot/);
     expect(result.stdout).not.toMatch(/approval permalink cites/);
   });
 });
@@ -1679,6 +1728,122 @@ describe('waiver approval coordinates', () => {
   });
 });
 
+describe('executionApproval host binding', () => {
+  const verified = {
+    contextProvided: true,
+    contextDigestVerified: true,
+  };
+  const snapshot = (executionApproval) => ({
+    repo: 'QwenLM/qwen-code',
+    number: 17185,
+    headRefOid: HEAD,
+    author: { login: 'maintainer' },
+    isCrossRepository: true,
+    executionApproval,
+  });
+
+  it('accepts matching comment and local-trust records including same-repository trust', () => {
+    const comment = commentApproval();
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(comment),
+        snapshot(comment),
+        verified,
+      ),
+    ).toEqual([]);
+    expect(checkBoundary(JSON.stringify(comment)).errors).toEqual([]);
+    for (const [cross, basis] of [
+      [true, 'own-pr'],
+      [false, 'same-repository'],
+    ]) {
+      const local = localTrustApproval({ basis });
+      expect(
+        executionApprovalErrors(
+          JSON.stringify(local),
+          { ...snapshot(local), isCrossRepository: cross },
+          verified,
+        ),
+      ).toEqual([]);
+      // Without the CLI's authority, this is only a shape check and has no
+      // comment URL to validate; executionApprovalErrors above is the gate.
+      expect(checkBoundary(JSON.stringify(local)).errors).toEqual([]);
+    }
+  });
+
+  it('requires a host context and a verified digest even for an old valid waiver', () => {
+    const legacy = {
+      mode: 'waived',
+      by: 'maintainer',
+      approval: APPROVAL,
+      reason: 'why',
+    };
+    expect(executionApprovalErrors(JSON.stringify(legacy), null)).toMatchObject(
+      [/host-held --context/],
+    );
+    expect(
+      executionApprovalErrors(JSON.stringify(legacy), snapshot(null), {
+        contextProvided: true,
+        contextDigestVerified: false,
+      }),
+    ).toMatchObject([/--context-sha256/]);
+    expect(
+      executionApprovalErrors(JSON.stringify(legacy), snapshot(null), verified),
+    ).toMatchObject([/no executionApproval object/]);
+  });
+
+  it('rejects declaration tampering and a moved head', () => {
+    const original = localTrustApproval();
+    const context = snapshot(original);
+    expect(
+      executionApprovalErrors(
+        JSON.stringify({ ...original, round: 2 }),
+        context,
+        verified,
+      ),
+    ).toMatchObject([/differs from the host-held executionApproval/]);
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(original),
+        { ...context, headRefOid: 'c'.repeat(40) },
+        verified,
+      ),
+    ).toMatchObject([/mode\/head does not match/]);
+  });
+
+  it('rejects local trust by another fork even when artifact and record agree', () => {
+    const local = localTrustApproval();
+    const forged = { ...snapshot(local), author: { login: 'someone-else' } };
+    expect(
+      executionApprovalErrors(JSON.stringify(local), forged, verified),
+    ).toMatchObject([/local-trust executionApproval does not match/]);
+  });
+
+  it('validates the comment record instead of only comparing JSON', () => {
+    for (const bad of [
+      commentApproval({
+        comment: { id: 0, bodySha256: 'a'.repeat(64) },
+      }),
+      commentApproval({ comment: { id: 1234567890, bodySha256: 'bad' } }),
+    ]) {
+      expect(
+        executionApprovalErrors(JSON.stringify(bad), snapshot(bad), verified),
+      ).toMatchObject([/comment executionApproval needs/]);
+    }
+    const malformed = localTrustApproval({ round: 0 });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(malformed),
+        snapshot(malformed),
+        verified,
+      ),
+    ).toMatchObject([/valid round and permission/]);
+  });
+
+  it('does not add host requirements to container declarations', () => {
+    expect(executionApprovalErrors(validFiles().boundary, null)).toEqual([]);
+  });
+});
+
 // The wholly-<…> arm catches any copied template, not only the skill's
 // named tokens.
 describe('generic placeholder arm', () => {
@@ -1791,26 +1956,35 @@ describe('round-10 witnesses', () => {
       join(dir, 'assertions.json'),
       '{"pass":1,"fail":0,"total":1}',
     );
-    writeFileSync(
-      join(dir, 'boundary.json'),
-      JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval:
-          'https://github.com/QwenLM/qwen-code/pull/999#issuecomment-123',
-        reason: 'why',
-      }),
-    );
+    const approval = commentApproval({
+      approval: 'https://github.com/QwenLM/qwen-code/pull/999#issuecomment-123',
+      comment: { id: 123, bodySha256: 'a'.repeat(64) },
+      reason: 'why',
+    });
+    writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
     writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
     const snap = join(root, 'snap.json');
-    writeFileSync(
-      snap,
-      JSON.stringify({ repo: 'QwenLM/qwen-code', headRefOid: HEAD }),
-    );
-    const res = spawnSync(process.execPath, [SCRIPT, '--context', snap, dir], {
-      encoding: 'utf8',
-      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    const trustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      headRefOid: HEAD,
+      executionApproval: approval,
     });
+    writeFileSync(snap, trustedText);
+    const res = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        snap,
+        '--context-sha256',
+        createHash('sha256').update(trustedText).digest('hex'),
+        dir,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      },
+    );
     // No number in the snapshot → shape-only, with the downgrade disclosed;
     // the directory name pr999 must NOT satisfy the comparison.
     expect(res.status).toBe(0);
@@ -2310,12 +2484,7 @@ describe('round-14 witnesses', () => {
     );
     writeFileSync(
       join(dir, 'boundary.json'),
-      JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval: APPROVAL,
-        reason: 'why',
-      }),
+      JSON.stringify(commentApproval({ reason: 'why' })),
     );
     writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
     const sibling = join(root, 'tmp', 'verify-context', 'pr7.json');
@@ -2359,19 +2528,28 @@ describe('round-14 witnesses', () => {
       expect(refused.stderr).toMatch(
         /must not point inside the PR-writable worktree/,
       );
-      // A host-held copy outside the named root is accepted (shape-only).
+      // A host-held copy outside the named root is accepted when its approval
+      // matches and the digest binds the bytes prepare wrote.
       const outside = join(root, '..', `host-snap-${Date.now()}.json`);
-      writeFileSync(
-        outside,
-        JSON.stringify({
-          repo: 'QwenLM/qwen-code',
-          pr: 17185,
-          headRefOid: HEAD,
-        }),
-      );
+      const trustedText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 17185,
+        headRefOid: HEAD,
+        executionApproval: commentApproval({ reason: 'why' }),
+      });
+      writeFileSync(outside, trustedText);
       const accepted = spawnSync(
         process.execPath,
-        [SCRIPT, '--context', outside, '--context-root', root, dir],
+        [
+          SCRIPT,
+          '--context',
+          outside,
+          '--context-root',
+          root,
+          '--context-sha256',
+          createHash('sha256').update(trustedText).digest('hex'),
+          dir,
+        ],
         { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
       );
       expect(accepted.status).toBe(0);

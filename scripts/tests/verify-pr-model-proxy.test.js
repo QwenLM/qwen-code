@@ -751,6 +751,18 @@ describe('local container recipe pins', () => {
     ].map((match) => match[1]);
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
+    // The coordinate calls are a closure too: every trusted-path invocation
+    // must select container explicitly rather than relying on a mode default.
+    const coordinateCalls = [
+      ...skill.matchAll(
+        /node <trusted-clone>\/scripts\/verify-pr-prepare\.mjs([^`\n]*)/g,
+      ),
+    ].map((match) => match[1]);
+    expect(coordinateCalls.length).toBeGreaterThanOrEqual(3);
+    for (const args of coordinateCalls) {
+      expect(args).toContain('--execution container');
+    }
+    expect(skill).not.toMatch(/--execution container[^\n]*--trust-pr-head/);
     expect(skill).not.toMatch(
       /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)/,
     );

@@ -21,14 +21,15 @@
  * reuse; it does not checkout a worktree, build, or execute PR code. The tree
  * check exists because the round runs the head side of its A/B in the current
  * tree: prepare refuses a HEAD other than the PR head or any uncommitted
- * change, and never stashes for the maintainer. It also cannot gate on
- * isolation: resolving the coordinates needs `gh`, and `gh` and the boundary
- * are mutually exclusive, so this path always runs on the host. The gate is
- * the separate `--require-isolation` mode, meant to run inside the boundary
- * before the round executes anything.
+ * change, and never stashes for the maintainer. It cannot infer containment
+ * from this host process: resolving the coordinates needs `gh`, and `gh` and
+ * the boundary are mutually exclusive. The caller explicitly selects an
+ * execution mode. A host or VM selection needs a preflight approval recorded
+ * in the host-held snapshot; a container still uses the separate
+ * `--require-isolation` mode inside the boundary before executing anything.
  *
  * Usage:
- *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+ *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> --execution container|vm|host [--trust-pr-head | --approval <permalink>]
  *   node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
  *
  * Options:
@@ -61,11 +62,21 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
+import { checkBoundary } from './verify-pr-check.mjs';
+import {
+  readState as readWatchState,
+  statePath as watchStatePath,
+} from './verify-pr-watch-state.mjs';
 
 const OID = /^[0-9a-f]{40}$/;
 const REPO = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/;
+const EXECUTION_MODES = ['container', 'vm', 'host'];
+const PERMISSIONS = ['admin', 'maintain', 'write'];
+const APPROVAL_PERMALINK =
+  /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)#issuecomment-(\d+)$/;
+const APPROVAL_PREFIX = '<!-- verify-pr-boundary-approval:';
 const FIELDS = [
   'number',
   'title',
@@ -74,10 +85,12 @@ const FIELDS = [
   'baseRefName',
   'baseRefOid',
   'headRefOid',
+  'isCrossRepository',
   'commits',
 ].join(',');
 
-const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
+const HELP = `Usage: node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> --execution container
+       node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo> --execution vm|host --round <n> --reason <text> --context-out <path> (--trust-pr-head | --approval <permalink> --state-root <trusted-dir>) [--attestation <text>]
        node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
 
 Resolves the coordinates a local /verify-pr round needs and writes the
@@ -95,9 +108,21 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
     no file and the round lists that review state as not covered
   - reports the isolation signals this process can observe
 
+The coordinate path defaults to --execution container for compatibility with
+old watch prompts; an omission never mints a host/VM approval. VM and host
+must be selected explicitly with --round, --reason, --context-out and one of:
+  --trust-pr-head   current maintainer trusts their own or same-repository PR
+  --approval <url>  maintainer's marked issue-comment approval for another fork
+The approval form also needs --state-root <absolute-trusted-dir> holding the
+same in-flight head and round. VM additionally requires --attestation.
+Approval verification runs before artifacts are created and writes
+executionApproval into the host context; publish checks require its sha256.
+
 The coordinate path runs on the host by construction: it needs gh, and gh and
-the boundary are mutually exclusive. Run --require-isolation inside the
-boundary, as the round's first command; exit 4 means this process is not
+the boundary are mutually exclusive. For container execution, run
+--require-isolation inside the container as the round's first command. VM and
+host never run that gate and have no boundary-gate.json.
+Exit 4 means this process is not
 isolated and must not execute PR code. A container marker alone does not pass:
 the CLI's own Docker/Podman launcher mounts ~/.config/gcloud and the ADC file
 and copies model API keys, so the check also requires the credential-free
@@ -348,6 +373,13 @@ export function parseArgs(argv) {
     requireIsolation: false,
     artifactDir: null,
     contextOut: null,
+    execution: null,
+    trustPrHead: false,
+    approval: null,
+    stateRoot: null,
+    round: null,
+    reason: null,
+    attestation: null,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -366,6 +398,35 @@ export function parseArgs(argv) {
       if (!options.contextOut) {
         return { error: '--context-out needs <host-snapshot-path>' };
       }
+    } else if (arg === '--execution') {
+      options.execution = argv[(index += 1)] ?? null;
+      if (!options.execution) {
+        return { error: '--execution needs container | vm | host' };
+      }
+    } else if (arg === '--trust-pr-head') {
+      options.trustPrHead = true;
+    } else if (arg === '--approval') {
+      options.approval = argv[(index += 1)] ?? null;
+      if (!options.approval) return { error: '--approval needs <permalink>' };
+    } else if (arg === '--state-root') {
+      options.stateRoot = argv[(index += 1)] ?? null;
+      if (!options.stateRoot || !isAbsolute(options.stateRoot)) {
+        return { error: '--state-root needs an absolute trusted directory' };
+      }
+    } else if (arg === '--round') {
+      const value = argv[(index += 1)] ?? '';
+      options.round = /^[1-9]\d*$/.test(value) ? Number(value) : null;
+      if (!Number.isSafeInteger(options.round)) {
+        return { error: '--round needs a positive integer' };
+      }
+    } else if (arg === '--reason') {
+      options.reason = argv[(index += 1)] ?? null;
+      if (!options.reason) return { error: '--reason needs non-empty text' };
+    } else if (arg === '--attestation') {
+      options.attestation = argv[(index += 1)] ?? null;
+      if (!options.attestation) {
+        return { error: '--attestation needs non-empty text' };
+      }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
       if (!options.repo) return { error: '--repo needs <owner>/<repo>' };
@@ -377,9 +438,72 @@ export function parseArgs(argv) {
       return { error: `unexpected argument: ${arg}` };
     }
   }
-  if (options.help || options.requireIsolation) return options;
+  if (options.help || options.requireIsolation) {
+    const coordinateOnly = [
+      options.execution,
+      options.approval,
+      options.round,
+      options.reason,
+      options.attestation,
+      options.contextOut,
+      options.stateRoot,
+    ].some((value) => value !== null);
+    if (options.requireIsolation && (coordinateOnly || options.trustPrHead)) {
+      return {
+        error:
+          '--execution and approval options apply only to coordinate prepare, not --require-isolation',
+      };
+    }
+    return options;
+  }
   if (options.artifactDir !== null) {
     return { error: '--artifact-dir only applies with --require-isolation' };
+  }
+  options.execution ??= 'container';
+  if (!EXECUTION_MODES.includes(options.execution)) {
+    return { error: '--execution must be container | vm | host' };
+  }
+  const approvalOptions =
+    options.trustPrHead ||
+    options.approval !== null ||
+    options.stateRoot !== null ||
+    options.round !== null ||
+    options.reason !== null ||
+    options.attestation !== null;
+  if (options.execution === 'container') {
+    if (approvalOptions) {
+      return {
+        error: '--execution container does not take approval options',
+      };
+    }
+  } else {
+    if (options.trustPrHead === (options.approval !== null)) {
+      return {
+        error:
+          '--execution vm | host needs exactly one of --trust-pr-head and --approval',
+      };
+    }
+    if (options.trustPrHead && options.stateRoot !== null) {
+      return { error: '--state-root applies only to --approval' };
+    }
+    if (options.approval !== null && options.stateRoot === null) {
+      return {
+        error:
+          '--approval needs --state-root with a matching in-flight head and round',
+      };
+    }
+    if (options.round === null || options.reason === null) {
+      return { error: '--execution vm | host needs --round and --reason' };
+    }
+    if (!options.contextOut) {
+      return { error: '--execution vm | host needs --context-out' };
+    }
+    if (options.execution === 'vm' && options.attestation === null) {
+      return { error: '--execution vm needs --attestation' };
+    }
+    if (options.execution === 'host' && options.attestation !== null) {
+      return { error: '--attestation applies only to --execution vm' };
+    }
   }
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
@@ -565,6 +689,250 @@ function fail(code, message) {
   return code;
 }
 
+function ghJson(args, label) {
+  const result = run('gh', args);
+  if (result.status !== 0) {
+    const detail =
+      (result.stderr || '').trim().split('\n')[0] ||
+      result.error?.message ||
+      `exit ${result.status}`;
+    return { error: `${label} failed: ${detail}` };
+  }
+  try {
+    return { value: JSON.parse(result.stdout) };
+  } catch {
+    return { error: `${label} returned output that is not JSON` };
+  }
+}
+
+function maintainerPermission(owner, name, login) {
+  if (typeof login !== 'string' || login === '') {
+    return { error: 'the GitHub response has no user login' };
+  }
+  const result = ghJson(
+    [
+      'api',
+      `repos/${owner}/${name}/collaborators/${encodeURIComponent(login)}/permission`,
+    ],
+    `permission lookup for ${login}`,
+  );
+  if (result.error) return result;
+  const permission = result.value?.permission;
+  if (!PERMISSIONS.includes(permission)) {
+    return {
+      error: `${login} has ${JSON.stringify(permission)} on ${owner}/${name}, not admin | maintain | write`,
+    };
+  }
+  return { permission };
+}
+
+function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
+  let stateRoot;
+  try {
+    stateRoot = realpathSync(options.stateRoot);
+    const realClone = realpathSync(cloneRoot);
+    if (stateRoot === realClone || stateRoot.startsWith(realClone + sep)) {
+      return {
+        error: '--state-root must be a trusted directory outside the PR clone',
+      };
+    }
+    const path = watchStatePath(stateRoot, snapshot.number);
+    // A trusted root can hold a nested .qwen/tmp symlink back into the PR
+    // clone; canonicalize the leaf's whole route before accepting the file.
+    const resolvedPath = realpathSync(path);
+    if (
+      resolvedPath === realClone ||
+      resolvedPath.startsWith(realClone + sep)
+    ) {
+      return {
+        error: '--state-root must be a trusted directory outside the PR clone',
+      };
+    }
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+      return {
+        error: `the watch registration must be a single-link regular file: ${path}`,
+      };
+    }
+  } catch (error) {
+    return {
+      error: `could not read the watch registration: ${error.message}; a comment approval needs an actual head/round registration, not unregistered repeated execution`,
+    };
+  }
+  let state;
+  try {
+    state = readWatchState(stateRoot, snapshot.number);
+  } catch (error) {
+    return { error: `could not read the watch registration: ${error.message}` };
+  }
+  const flights = Array.isArray(state?.inFlightHeads)
+    ? state.inFlightHeads
+    : [];
+  if (
+    state?.pr !== snapshot.number ||
+    typeof state?.repo !== 'string' ||
+    state.repo.toLowerCase() !== `${owner}/${name}`.toLowerCase() ||
+    flights.length !== 1 ||
+    flights[0]?.head !== snapshot.headRefOid ||
+    flights[0]?.round !== options.round
+  ) {
+    return {
+      error: `--approval needs one in-flight registration for ${owner}/${name}#${snapshot.number} at head ${snapshot.headRefOid}, round ${options.round}; register before waiting, then use the matching fresh round instead of reusing a completed approval`,
+    };
+  }
+  return { registered: true };
+}
+
+function commentApproval(options, snapshot, owner, name, cloneRoot) {
+  const match = APPROVAL_PERMALINK.exec(options.approval);
+  if (
+    !match ||
+    match[1].toLowerCase() !== owner.toLowerCase() ||
+    match[2].toLowerCase() !== name.toLowerCase() ||
+    match[3] !== String(snapshot.number)
+  ) {
+    return {
+      error: '--approval must be an issue-comment permalink on this PR',
+    };
+  }
+  const commentId = Number(match[4]);
+  if (!Number.isSafeInteger(commentId) || commentId <= 0) {
+    return { error: '--approval has no valid numeric issue-comment id' };
+  }
+  const registered = registeredRoundApproval(
+    options,
+    snapshot,
+    owner,
+    name,
+    cloneRoot,
+  );
+  if (registered.error) return registered;
+  const response = ghJson(
+    ['api', `repos/${owner}/${name}/issues/comments/${commentId}`],
+    'approval comment lookup',
+  );
+  if (response.error) return response;
+  const comment = response.value;
+  if (comment?.id !== commentId) {
+    return { error: 'the approval API returned a different issue-comment id' };
+  }
+  const issue =
+    /^https:\/\/api\.github\.com\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(
+      comment?.issue_url ?? '',
+    );
+  if (
+    !issue ||
+    issue[1].toLowerCase() !== owner.toLowerCase() ||
+    issue[2].toLowerCase() !== name.toLowerCase() ||
+    issue[3] !== String(snapshot.number)
+  ) {
+    return { error: 'the approval comment does not belong to this PR' };
+  }
+  const body = comment?.body;
+  const login = comment?.user?.login;
+  if (typeof body !== 'string' || typeof login !== 'string' || !login) {
+    return { error: 'the approval comment has no body or author login' };
+  }
+  const prefixCount = body.split(APPROVAL_PREFIX).length - 1;
+  const markers = [
+    ...body
+      .replace(/\r\n/g, '\n')
+      .matchAll(/<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->/g),
+  ];
+  if (prefixCount !== 1 || markers.length !== 1) {
+    return {
+      error:
+        'the approval comment needs exactly one well-formed verify-pr-boundary-approval marker',
+    };
+  }
+  let marker;
+  try {
+    marker = JSON.parse(markers[0][1]);
+  } catch {
+    return { error: 'the approval marker is not valid JSON' };
+  }
+  const markerKeys = Object.keys(marker ?? {}).sort();
+  if (
+    markerKeys.join(',') !== 'head,mode,round' ||
+    marker.mode !== options.execution ||
+    marker.head !== snapshot.headRefOid ||
+    marker.round !== options.round
+  ) {
+    return {
+      error:
+        'the approval marker must contain only mode, head and round matching this execution, trusted head and round',
+    };
+  }
+  const allowed = maintainerPermission(owner, name, login);
+  if (allowed.error) return allowed;
+  return {
+    approval: {
+      mode: options.execution === 'host' ? 'waived' : 'vm',
+      source: 'comment',
+      by: login,
+      basis: 'maintainer-comment',
+      permission: allowed.permission,
+      approval: options.approval,
+      comment: {
+        id: commentId,
+        bodySha256: createHash('sha256').update(body, 'utf8').digest('hex'),
+      },
+      head: snapshot.headRefOid,
+      round: options.round,
+      reason: options.reason,
+      ...(options.execution === 'vm'
+        ? { attestation: options.attestation }
+        : {}),
+    },
+  };
+}
+
+function localTrustApproval(options, snapshot, owner, name) {
+  const current = ghJson(['api', 'user'], 'current-user lookup');
+  if (current.error) return current;
+  const login = current.value?.login;
+  if (typeof login !== 'string' || !login) {
+    return { error: 'current-user lookup returned no login' };
+  }
+  const own = snapshot.author?.login === login;
+  const sameRepository = snapshot.isCrossRepository === false;
+  if (!own && !sameRepository) {
+    return {
+      error:
+        "--trust-pr-head is limited to the current user's own PR or a same-repository PR; another fork needs --approval",
+    };
+  }
+  const allowed = maintainerPermission(owner, name, login);
+  if (allowed.error) return allowed;
+  return {
+    approval: {
+      mode: options.execution === 'host' ? 'waived' : 'vm',
+      source: 'local-trust',
+      by: login,
+      basis: own ? 'own-pr' : 'same-repository',
+      permission: allowed.permission,
+      head: snapshot.headRefOid,
+      round: options.round,
+      reason: options.reason,
+      ...(options.execution === 'vm'
+        ? { attestation: options.attestation }
+        : {}),
+    },
+  };
+}
+
+function resolveExecutionApproval(options, snapshot, owner, name, cloneRoot) {
+  const result = options.trustPrHead
+    ? localTrustApproval(options, snapshot, owner, name)
+    : commentApproval(options, snapshot, owner, name, cloneRoot);
+  if (result.error) return result;
+  const { errors } = checkBoundary(JSON.stringify(result.approval), null, {
+    coordinates: { owner, repo: name, number: snapshot.number },
+  });
+  if (errors.length > 0) return { error: errors.join('; ') };
+  return result;
+}
+
 function main(argv) {
   const options = parseArgs(argv);
   if (options.error) {
@@ -701,6 +1069,21 @@ function main(argv) {
     );
   }
 
+  let executionApproval = null;
+  if (options.execution !== 'container') {
+    const approved = resolveExecutionApproval(
+      options,
+      snapshot,
+      owner,
+      name,
+      root,
+    );
+    if (approved.error) {
+      return fail(3, `execution approval: ${approved.error}`);
+    }
+    executionApproval = approved.approval;
+  }
+
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
@@ -763,7 +1146,15 @@ function main(argv) {
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
   // written, not to FIELDS.
-  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  const contextBytes = `${JSON.stringify(
+    {
+      ...snapshot,
+      repo: slug,
+      ...(executionApproval ? { executionApproval } : {}),
+    },
+    null,
+    2,
+  )}\n`;
   writeFileSync(contextPath, contextBytes);
   // Structural fix (R5-1): the authoritative snapshot also goes to a host
   // destination outside the clone (--context-out), so the trusted source the
@@ -840,6 +1231,36 @@ function main(argv) {
       headRefOid: context.head,
     })}\n`,
   );
+  if (executionApproval) {
+    const boundaryPath = join(artifacts, 'boundary.json');
+    try {
+      const st = lstatSync(boundaryPath);
+      if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the execution approval through a non-single-link file: ${boundaryPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the execution approval path ${boundaryPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      writeFileSync(
+        boundaryPath,
+        `${JSON.stringify(executionApproval, null, 2)}\n`,
+      );
+    } catch (error) {
+      return fail(
+        3,
+        `could not write the execution approval to ${boundaryPath}: ${error.message}`,
+      );
+    }
+  }
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach
@@ -858,6 +1279,7 @@ function main(argv) {
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,
     `  artifacts  ${artifacts}`,
+    `  execution  ${options.execution}${executionApproval ? ` (${executionApproval.source}, head ${executionApproval.head}, round ${executionApproval.round})` : ''}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,
   ]);
   if (isolation.seatbelt) {
@@ -866,29 +1288,47 @@ function main(argv) {
       '             not a boundary)',
     ]);
   }
-  report([
-    '',
-    `Next: build the round in ${artifacts}. This preflight ran on the host,`,
-    'because resolving the coordinates needs `gh` and `gh` is mutually',
-    'exclusive with the boundary. Before executing PR code, run inside the',
-    "boundary — the container recipe's spelling (step 5), with the clone",
-    'mounted at /work:',
-    '',
-    `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
-    '',
-    'The path is the in-container one: the gate runs from the read-only',
-    "/trusted-scripts mount, never the PR head's own copy of the script,",
-    'and the record lands in the mounted artifact directory so it survives',
-    'the container. A VM boundary takes the same trusted copy but runs',
-    'NO --require-isolation gate (a VM carries no observed container marker):',
-    'there is no in-boundary gate command and no boundary-gate.json for a VM.',
-    'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
-    'reason, attestation (what the operator confirmed: nothing mounted,',
-    "no host credentials), and approval (a permalink to the maintainer's",
-    'approval comment). The container gate writes boundary-gate.json into',
-    'the artifact directory; the checker requires that record alongside',
-    'the container declaration.',
-  ]);
+  if (options.execution === 'container') {
+    report([
+      '',
+      `Next: build the round in ${artifacts}. This preflight ran on the host,`,
+      'because resolving the coordinates needs `gh` and `gh` is mutually',
+      'exclusive with the boundary. Before executing PR code, run inside the',
+      "boundary — the container recipe's spelling (step 5), with the clone",
+      'mounted at /work:',
+      '',
+      `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
+      '',
+      'The path is the in-container one: the gate runs from the read-only',
+      "/trusted-scripts mount, never the PR head's own copy of the script,",
+      'and the record lands in the mounted artifact directory so it survives',
+      'the container. A VM boundary takes the same trusted copy but runs',
+      'NO --require-isolation gate (a VM carries no observed container marker):',
+      'there is no in-boundary gate command and no boundary-gate.json for a VM.',
+      'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+      'reason, attestation (what the operator confirmed: nothing mounted,',
+      'no host credentials), and approval using the local-trust or',
+      'maintainer-comment path above. The container gate writes',
+      'boundary-gate.json into the artifact directory; the checker requires',
+      'that record alongside the container declaration.',
+    ]);
+  } else if (options.execution === 'vm') {
+    report([
+      '',
+      `Next: run the round for this exact head in the attested VM. The`,
+      `${executionApproval.source} approval is recorded for round ${executionApproval.round}.`,
+      'A VM runs NO --require-isolation gate and has no boundary-gate.json;',
+      'its validated executionApproval is already in boundary.json.',
+    ]);
+  } else {
+    report([
+      '',
+      `Next: run the host round only for this exact head and round ${executionApproval.round}.`,
+      `The explicit ${executionApproval.source} decision was validated before artifacts`,
+      'were created. Keep that approval only for this round, and disclose the',
+      'host waiver in the report; this preflight is not an execution sandbox.',
+    ]);
+  }
   return 0;
 }
 
