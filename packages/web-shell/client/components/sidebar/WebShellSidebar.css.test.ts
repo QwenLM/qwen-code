@@ -175,6 +175,33 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
   });
 
+  it('keeps the running and active-work status dot on the success token', () => {
+    let baseColor: string | undefined;
+    let runningColor: string | undefined;
+    let baseOrder = -1;
+    let runningOrder = -1;
+    let order = 0;
+
+    parseOnce().walkRules((rule) => {
+      if (rule.parent?.type !== 'root') return;
+      if (rule.selector === '.sessionStatusDot') {
+        rule.walkDecls('color', (decl) => {
+          baseColor = decl.value;
+          baseOrder = order++;
+        });
+      } else if (rule.selector === '.sessionStatusDotRunning') {
+        rule.walkDecls('color', (decl) => {
+          runningColor = decl.value;
+          runningOrder = order++;
+        });
+      }
+    });
+
+    expect(baseColor).toMatch(/^var\(\s*--agent-blue-500(?:\s*,|\s*\))/);
+    expect(runningColor).toMatch(/^var\(\s*--success-color(?:\s*,|\s*\))/);
+    expect(runningOrder).toBeGreaterThan(baseOrder);
+  });
+
   it('hides the trailing markers whenever the overlay is revealed', () => {
     for (const marker of [
       'sessionGitIcon',

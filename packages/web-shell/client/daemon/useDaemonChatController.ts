@@ -26,6 +26,7 @@ import {
   useDaemonPendingPermissions,
   useDaemonPromptSettled,
   useDaemonTranscriptBlocks,
+  useDaemonTranscriptHistory,
 } from './session/DaemonSessionProvider.js';
 import {
   createDaemonChatController,
@@ -41,6 +42,10 @@ import {
 interface LiveFacts {
   messages: SessionChatController['messages'];
   transcriptState: SessionChatController['transcriptState'];
+  hasOlderHistory: boolean;
+  loadingOlderHistory: boolean;
+  historyCapacityReached: boolean;
+  historyPaginationError: boolean;
   pendingApprovals: readonly PendingApproval[];
   pendingQuestions: readonly PendingQuestion[];
   statusFacts: ChatStatusFacts;
@@ -84,6 +89,7 @@ export function useDaemonChatController(): SessionChatController {
   const actions = useDaemonActions();
   const blocks = useDaemonTranscriptBlocks();
   const pendingPermissions = useDaemonPendingPermissions();
+  const transcriptHistory = useDaemonTranscriptHistory();
   const messages = useMessagesFromBlocks(t, blocks);
 
   const sessionId = connection.sessionId;
@@ -142,6 +148,10 @@ export function useDaemonChatController(): SessionChatController {
   const factsRef = useRef<LiveFacts>({
     messages,
     transcriptState: 'loading',
+    hasOlderHistory: false,
+    loadingOlderHistory: false,
+    historyCapacityReached: false,
+    historyPaginationError: false,
     pendingApprovals,
     pendingQuestions,
     statusFacts: { queueLength: 0, goalActive: false },
@@ -158,6 +168,10 @@ export function useDaemonChatController(): SessionChatController {
       : connection.loadingTranscript
         ? 'loading'
         : 'ready',
+    hasOlderHistory: transcriptHistory.hasMore,
+    loadingOlderHistory: transcriptHistory.loading,
+    historyCapacityReached: transcriptHistory.capacityReached,
+    historyPaginationError: transcriptHistory.paginationError,
     pendingApprovals,
     pendingQuestions,
     // Queue length and goal activity are surfaced by the ChatSurface increment;
@@ -178,6 +192,9 @@ export function useDaemonChatController(): SessionChatController {
   const pendingPermissionsRef = useRef(pendingPermissions);
   pendingPermissionsRef.current = pendingPermissions;
 
+  const transcriptHistoryRef = useRef(transcriptHistory);
+  transcriptHistoryRef.current = transcriptHistory;
+
   const promptListenerRef = useRef<
     ((e: DaemonPromptSettlement) => void) | undefined
   >(undefined);
@@ -189,6 +206,11 @@ export function useDaemonChatController(): SessionChatController {
   >(undefined);
   const answeredRef = useRef<Set<string>>(new Set());
   const prevPendingRef = useRef<Set<string>>(new Set());
+  // Tracks admitted prompts per durable session across controller rebuilds
+  // (e.g. s1 -> s2 -> s1) so a re-created controller for s1 still knows its
+  // active FIFO turn id until a terminal settlement removes it.
+  const livePromptsBySessionRef = useRef<Map<string, string[]>>(new Map());
+  const pendingSubmitSettledRef = useRef<Set<Set<string>>>(new Set());
 
   const controllerRef = useRef<{
     sessionId: string | undefined;
@@ -198,10 +220,11 @@ export function useDaemonChatController(): SessionChatController {
   if (!controllerRef.current || controllerRef.current.sessionId !== sessionId) {
     answeredRef.current = new Set();
     prevPendingRef.current = new Set();
+    const boundSessionId = sessionId ?? '';
     controllerRef.current = {
       sessionId,
       controller: createDaemonChatController({
-        sessionId: sessionId ?? '',
+        sessionId: boundSessionId,
         storageKey:
           getComposerDraftStorageKey(sessionId, connection.workspaceCwd) ?? '',
         get messages() {
@@ -209,6 +232,18 @@ export function useDaemonChatController(): SessionChatController {
         },
         get transcriptState() {
           return factsRef.current.transcriptState;
+        },
+        get hasOlderHistory() {
+          return factsRef.current.hasOlderHistory;
+        },
+        get loadingOlderHistory() {
+          return factsRef.current.loadingOlderHistory;
+        },
+        get historyCapacityReached() {
+          return factsRef.current.historyCapacityReached;
+        },
+        get historyPaginationError() {
+          return factsRef.current.historyPaginationError;
         },
         get pendingApprovals() {
           return factsRef.current.pendingApprovals;
@@ -225,8 +260,18 @@ export function useDaemonChatController(): SessionChatController {
         get settledPhase() {
           return factsRef.current.settledPhase;
         },
+        // History pagination is a provider capability, not an intent: read the
+        // latest loader per call and forward options (including { force: true }
+        // for pagination-error retries) so a session-stable controller never
+        // pins a stale history handle or silently drops a retry.
+        loadOlder: (options) => transcriptHistoryRef.current.loadMore(options),
         liveApprovalRequestIds: pendingApprovals.map((approval) => approval.id),
+        livePromptIds: boundSessionId
+          ? livePromptsBySessionRef.current.get(boundSessionId)
+          : undefined,
         async submitPrompt(input, onAdmitted) {
+          const settledDuringSubmit = new Set<string>();
+          pendingSubmitSettledRef.current.add(settledDuringSubmit);
           try {
             // submitPrompt is non-blocking and resolves the prompt id; it does
             // not invoke an onAdmitted option (only sendPrompt does), so bind
@@ -240,10 +285,26 @@ export function useDaemonChatController(): SessionChatController {
                 ? { inputAnnotations: [...input.metadata.inputAnnotations] }
                 : {}),
             });
+            if (
+              boundSessionId !== '' &&
+              accepted.promptId &&
+              !settledDuringSubmit.has(accepted.promptId)
+            ) {
+              let queue = livePromptsBySessionRef.current.get(boundSessionId);
+              if (!queue) {
+                queue = [];
+                livePromptsBySessionRef.current.set(boundSessionId, queue);
+              }
+              if (!queue.includes(accepted.promptId)) {
+                queue.push(accepted.promptId);
+              }
+            }
             onAdmitted(accepted.promptId);
             return 'accepted';
           } catch {
             return 'unknown';
+          } finally {
+            pendingSubmitSettledRef.current.delete(settledDuringSubmit);
           }
         },
         async cancelPrompt() {
@@ -359,10 +420,31 @@ export function useDaemonChatController(): SessionChatController {
 
   useDaemonPromptSettled(
     useCallback((event: DaemonPromptSettledEvent) => {
-      promptListenerRef.current?.({
-        promptId: event.promptId,
-        outcome: event.outcome,
-      });
+      for (const settled of pendingSubmitSettledRef.current) {
+        settled.add(event.promptId);
+      }
+      // Remove the settled prompt from its owning session's live queue
+      // (matching event.sessionId when present, or scanning all queues when a
+      // test fixture omits event.sessionId).
+      const targetSessions = event.sessionId
+        ? [event.sessionId]
+        : [...livePromptsBySessionRef.current.keys()];
+      for (const sid of targetSessions) {
+        const queue = livePromptsBySessionRef.current.get(sid);
+        if (!queue) continue;
+        const index = queue.indexOf(event.promptId);
+        if (index !== -1) queue.splice(index, 1);
+        if (queue.length === 0) livePromptsBySessionRef.current.delete(sid);
+      }
+      if (
+        !event.sessionId ||
+        event.sessionId === controllerRef.current?.sessionId
+      ) {
+        promptListenerRef.current?.({
+          promptId: event.promptId,
+          outcome: event.outcome,
+        });
+      }
     }, []),
   );
 

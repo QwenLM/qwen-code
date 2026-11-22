@@ -418,7 +418,7 @@ class SshRuntimeInteropTest {
                             "A".repeat(43), "http://127.0.0.1:" + node.publicationPort() + "/", publication)));
                 } else {
                     await(http.installPublisherV3(binding.getLease(), session.getSession(), Map.of("url", "http://127.0.0.1:"
-                            + node.publicationPort() + "/internal/hosted-shell-publisher/v1", "token", "A".repeat(43))));
+                            + node.publicationPort() + "/internal/hosted-shell-publisher/v1", "token", "A".repeat(43)), null));
                 }
                 Map<String, Object> capture = Map.of("tenantId", "tenant", "sessionId", "harness", "turnId", "prompt-no-start",
                         "executionCallId", prepared.getExecutionCallId(), "bindingGeneration", Long.toString(binding.getGeneration()),
