@@ -134,6 +134,9 @@ export function createExtensionGitClient(
     // extension-derived arguments or config through a client created here.
     allowGeneratedConfigKeyFalsePositives(unsafe, credentialConfigKey);
   }
+  const environment = restrictEnvironment
+    ? restrictedChildEnvironment(authentication)
+    : undefined;
   const git = simpleGit(baseDir, {
     ...(signal ? { abort: signal } : {}),
     ...(hasNetworkConfig ? { config: networkConfig } : {}),
@@ -141,22 +144,27 @@ export function createExtensionGitClient(
     // simple-git v4 throws when a task env names a guarded variable without
     // an explicit opt-in. The restricted environment below sets exactly these
     // on purpose (hermetic config, no interactive prompt, optional inline
-    // credential), so name them here.
-    ...(restrictEnvironment
+    // credential), so derive the allowance from it rather than restating it.
+    ...(environment
       ? {
-          allowEnvironment: [
-            'GIT_CONFIG_NOSYSTEM',
-            'GIT_CONFIG_GLOBAL',
-            'GIT_TERMINAL_PROMPT',
-            ...(authentication
-              ? ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']
-              : []),
-          ],
+          allowEnvironment: Object.keys(environment).filter((key) =>
+            /^git_/i.test(key),
+          ),
         }
       : {}),
   });
-  if (!restrictEnvironment) return git;
+  if (environment === undefined) return git;
+  return git.env(environment);
+}
 
+/**
+ * The restricted child environment. Its key set doubles as the client's
+ * `allowEnvironment`, so adding a guarded key here cannot drift from the
+ * opt-in list.
+ */
+function restrictedChildEnvironment(
+  authentication: ExtensionGitClientOptions['authentication'],
+): Record<string, string> {
   const environment: Record<string, string> = {
     GIT_CONFIG_NOSYSTEM: '1',
     // The literal '/dev/null' on every platform, NOT os.devNull: Git for
@@ -186,14 +194,14 @@ export function createExtensionGitClient(
     const value = process.env[key];
     if (value !== undefined) environment[key] = value;
   }
-  if (authentication && credentialConfigKey) {
+  if (authentication) {
     const value = Buffer.from(
       `${authentication.credential.username}:${authentication.credential.password}`,
       'utf8',
     ).toString('base64');
     environment['GIT_CONFIG_COUNT'] = '1';
-    environment['GIT_CONFIG_KEY_0'] = credentialConfigKey;
+    environment['GIT_CONFIG_KEY_0'] = `http.${authentication.source}.extraHeader`;
     environment['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${value}`;
   }
-  return git.env(environment);
+  return environment;
 }

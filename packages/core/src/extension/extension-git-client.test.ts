@@ -275,4 +275,44 @@ describe('createExtensionGitClient', () => {
       `Authorization: Basic ${Buffer.from('user:token', 'utf8').toString('base64')}`,
     );
   });
+
+  it('allowlists every guarded key the restricted environment sets', () => {
+    // v4 throws when the task env names a guarded key the client did not opt
+    // into, so a key added to the environment without reaching the allow list
+    // fails every credentialed or public install before git spawns.
+    const allowlists: string[][] = [];
+    const environments: Array<Record<string, string>> = [];
+    const fakeGit = {
+      env: (environment: Record<string, string>) => {
+        environments.push(environment);
+        return fakeGit;
+      },
+    } as unknown as SimpleGit;
+    const factory = ((_baseDir: string, options?: SimpleGitOptions) => {
+      allowlists.push([...(options?.allowEnvironment ?? [])]);
+      return fakeGit;
+    }) as unknown as SimpleGitFactory;
+
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+    });
+    createExtensionGitClient(factory, {
+      baseDir: tempDir,
+      networkPolicy: 'public',
+      authentication: {
+        source: 'https://git.example.com/owner/repo.git',
+        credential: { username: 'user', password: 'token' },
+      },
+    });
+
+    expect(environments).toHaveLength(2);
+    for (const [index, environment] of environments.entries()) {
+      const guarded = Object.keys(environment).filter((key) =>
+        key.toUpperCase().startsWith('GIT_'),
+      );
+      expect(guarded.length).toBeGreaterThan(0);
+      expect(allowlists[index]).toEqual(expect.arrayContaining(guarded));
+    }
+  });
 });

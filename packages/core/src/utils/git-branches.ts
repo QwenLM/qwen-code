@@ -82,10 +82,18 @@ const GIT_ENV_VARS_TO_CLEAR = [
 const NORMALIZED_GIT_ENV_VARS_TO_CLEAR = new Set(
   GIT_ENV_VARS_TO_CLEAR.map((key) => key.toLowerCase()),
 );
-const REMOTE_GIT_TRANSPORT_KEYS = new Set(
-  ['GIT_SSH_COMMAND', 'GIT_SSH', 'GIT_ASKPASS', 'SSH_ASKPASS'].map((key) =>
-    key.toLowerCase(),
-  ),
+// The ambient transport credentials `gitRemoteEnv()` restores, and the ones
+// the simple-git loader allowlists: v4's guard deletes every other ambient
+// guarded key, so an operator's SSH identity would otherwise vanish for the
+// clients that never set `.env()`.
+export const REMOTE_GIT_TRANSPORT_KEYS = [
+  'GIT_SSH_COMMAND',
+  'GIT_SSH',
+  'GIT_ASKPASS',
+  'SSH_ASKPASS',
+] as const;
+const NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS = new Set(
+  REMOTE_GIT_TRANSPORT_KEYS.map((key) => key.toLowerCase()),
 );
 const GIT_METADATA_KEYS = new Set(
   [
@@ -152,7 +160,7 @@ export function gitRemoteEnv(
   const source = base ?? process.env;
   const env = gitEnv(source);
   for (const [key, value] of Object.entries(source)) {
-    if (REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
+    if (NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
   }
   return env;
 }

@@ -10,6 +10,7 @@ import type {
   SimpleGitOptions,
 } from 'simple-git';
 import { NO_EXEC_CONFIG_SETTINGS } from './gitUtils.js';
+import { REMOTE_GIT_TRANSPORT_KEYS } from './git-branches.js';
 
 export type SimpleGitModule = {
   CheckRepoActions: typeof CheckRepoActions;
@@ -31,6 +32,16 @@ export const GIT_ENV_RESTORED_KEYS = [
   'GIT_SSL_CAINFO',
   'GIT_SSL_CAPATH',
   'GIT_ALLOW_PROTOCOL',
+] as const;
+
+/**
+ * Every guarded name this loader opts its clients into: the set `gitEnv()`
+ * restores for `.env()` clients, plus the ambient transport credentials a
+ * client that inherits `process.env` would otherwise lose to the v4 guard.
+ */
+export const LOADER_ALLOWED_ENVIRONMENT_KEYS = [
+  ...GIT_ENV_RESTORED_KEYS,
+  ...REMOTE_GIT_TRANSPORT_KEYS,
 ] as const;
 
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
@@ -75,8 +86,12 @@ function guardFsmonitor(factory: SimpleGitFactory): SimpleGitFactory {
       ...options,
       config: [...(options?.config ?? []), ...NO_EXEC_CONFIG_SETTINGS],
       unsafe: { ...options?.unsafe, allowUnsafeFsMonitor: true },
+      // v4 deletes every guarded key the client did not name, so a client
+      // that never applies `.env()` loses the operator's SSH/askpass
+      // identity. Naming a key only lets one already in the child env
+      // survive, so the `.env(gitEnv())` clients keep their scrub.
       allowEnvironment: [
-        ...GIT_ENV_RESTORED_KEYS,
+        ...LOADER_ALLOWED_ENVIRONMENT_KEYS,
         ...(options?.allowEnvironment ?? []),
       ],
     };

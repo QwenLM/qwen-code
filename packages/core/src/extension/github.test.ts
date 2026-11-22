@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { GIT_ENV_RESTORED_KEYS } from '../utils/load-simple-git.js';
+import { LOADER_ALLOWED_ENVIRONMENT_KEYS } from '../utils/load-simple-git.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
@@ -288,7 +288,7 @@ describe('git extension helpers', () => {
     // simple-git v4 throws on guarded env keys unless the client names them;
     // the loader unions in the keys gitEnv() restores.
     allowEnvironment: [
-      ...GIT_ENV_RESTORED_KEYS,
+      ...LOADER_ALLOWED_ENVIRONMENT_KEYS,
       'GIT_CONFIG_NOSYSTEM',
       'GIT_CONFIG_GLOBAL',
       'GIT_TERMINAL_PROMPT',
@@ -357,7 +357,7 @@ describe('git extension helpers', () => {
         abort: controller.signal,
         config: ['core.fsmonitor=', 'log.showSignature=false'],
         unsafe: { allowUnsafeFsMonitor: true },
-        allowEnvironment: GIT_ENV_RESTORED_KEYS,
+        allowEnvironment: LOADER_ALLOWED_ENVIRONMENT_KEYS,
       });
       expect(mockGit.clone).toHaveBeenCalledWith(myRepo, './', cloneArgs(true));
       expect(mockGit.getRemotes).toHaveBeenCalledWith(true);
