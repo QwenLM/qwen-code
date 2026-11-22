@@ -5672,6 +5672,15 @@ export function WebShellSidebar({
               label={label}
               time={time}
               completedUnread={completedUnread}
+              // The starting spinner outranks the run dots, not the
+              // actionable approval/question cues.
+              statusLabel={
+                liveStarting &&
+                !session.isWaitingForPermission &&
+                !session.isWaitingForUserQuestion
+                  ? t('live.state.starting')
+                  : undefined
+              }
             >
               {row}
             </SessionDetailsTooltip>
@@ -6161,7 +6170,10 @@ export function WebShellSidebar({
               !completedUnread &&
               !backgroundRunning ? (
               <span
-                className={styles.sessionStatusDot}
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />

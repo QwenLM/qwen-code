@@ -5382,6 +5382,13 @@ describe('WebShellSidebar session source switch', () => {
     expect(Boolean(row?.querySelector(scenario.selector))).toBe(
       scenario.activeWorkState === 'active',
     );
+    if (scenario.activeWorkState === 'active') {
+      expect(
+        row
+          ?.querySelector(scenario.selector)
+          ?.classList.contains(sidebarStyles.sessionStatusDotRunning),
+      ).toBe(true);
+    }
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
@@ -6906,6 +6913,175 @@ describe('WebShellSidebar Live group', () => {
       container.querySelector('[data-live-starting-session]'),
     ).not.toBeNull();
   });
+  it('shows the starting cue in the hover details until presence clears', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Preparing voice chat',
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, undefined);
+    });
+    const settled = document.querySelector('[role="dialog"]')?.textContent;
+    expect(settled).toContain('Idle');
+    expect(settled).not.toContain('Preparing voice chat');
+  });
+  it('names hidden background work while the voice row is starting', async () => {
+    const liveWorkspace: DaemonWorkspaceCapability = {
+      id: 'live',
+      cwd: '/tmp/live',
+      primary: false,
+      trusted: true,
+      kind: 'live',
+    };
+    useWorkspaceSessionCatalog(async (cwd) =>
+      cwd === liveWorkspace.cwd
+        ? [
+            {
+              sessionId: 'voice-session',
+              workspaceCwd: liveWorkspace.cwd,
+              displayName: 'Voice chat',
+              sourceType: 'qwen-live',
+              sourceId: 'realtime_voice:voice-call',
+              hasRunningBackgroundTasks: true,
+            },
+          ]
+        : [],
+    );
+    act(() => {
+      setLivePresence(workspace.client as unknown as DaemonClient, {
+        state: 'starting',
+        callId: 'voice-call',
+        coordinator: {
+          workspaceCwd: liveWorkspace.cwd,
+          sessionId: 'voice-session',
+        },
+      });
+    });
+    renderSidebar({
+      showLive: true,
+      workspaces: [...capabilities.workspaces, liveWorkspace],
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const voiceRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((row) => row.textContent?.includes('Voice chat'));
+    expect(voiceRow).toBeDefined();
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).toBeNull();
+    await act(async () => {
+      voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    const details = document.querySelector('[role="dialog"]')?.textContent;
+    expect(details).toContain('Preparing voice chat');
+    expect(details).toContain('Background tasks running');
+  });
+  it.each([
+    ['isWaitingForPermission', 'Needs approval'],
+    ['isWaitingForUserQuestion', 'User input needed'],
+  ] as const)(
+    'keeps %s ahead of the starting cue in the hover details',
+    async (flag, expected) => {
+      const liveWorkspace: DaemonWorkspaceCapability = {
+        id: 'live',
+        cwd: '/tmp/live',
+        primary: false,
+        trusted: true,
+        kind: 'live',
+      };
+      const voiceSession: DaemonSessionSummary = {
+        sessionId: 'voice-session',
+        workspaceCwd: liveWorkspace.cwd,
+        displayName: 'Voice chat',
+        sourceType: 'qwen-live',
+        sourceId: 'realtime_voice:voice-call',
+        ...(flag === 'isWaitingForPermission'
+          ? { isWaitingForPermission: true }
+          : { isWaitingForUserQuestion: true }),
+      };
+      useWorkspaceSessionCatalog(async (cwd) =>
+        cwd === liveWorkspace.cwd ? [voiceSession] : [],
+      );
+      act(() => {
+        setLivePresence(workspace.client as unknown as DaemonClient, {
+          state: 'starting',
+          callId: 'voice-call',
+          coordinator: {
+            workspaceCwd: liveWorkspace.cwd,
+            sessionId: 'voice-session',
+          },
+        });
+      });
+      renderSidebar({
+        showLive: true,
+        workspaces: [...capabilities.workspaces, liveWorkspace],
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const voiceRow = Array.from(
+        container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+      ).find((row) => row.textContent?.includes('Voice chat'));
+      expect(voiceRow).toBeDefined();
+      await act(async () => {
+        voiceRow!.dispatchEvent(new Event('pointerover', { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 350));
+      });
+      const details = document.querySelector('[role="dialog"]')?.textContent;
+      expect(details).toContain(expected);
+      expect(details).not.toContain('Preparing voice chat');
+    },
+  );
   it('hides Live sessions by default', async () => {
     const liveWorkspace: DaemonWorkspaceCapability = {
       id: 'live',
