@@ -1,30 +1,115 @@
-import { mkdtempSync, readFileSync } from 'node:fs';
+import {
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  unlink,
+} from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { execFile, spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION,
   EXPORT_TRANSCRIPT_RENDERER_VERSION,
 } from '@qwen-code/web-templates';
 import type { ExportSessionData } from '../types.js';
-import { createExportTranscriptDocumentV1 } from '../export-transcript-document.js';
+import * as exportTranscriptDocument from '../export-transcript-document.js';
 import {
   injectDocumentIntoHtmlTemplate,
   renderExportTranscriptDocumentToHtml,
   toHtml,
 } from './html.js';
 
-const repoRoot = join(process.cwd(), '../..');
+const { createExportTranscriptDocumentV1, createExportTranscriptDocumentV2 } =
+  exportTranscriptDocument;
+
+interface CommandResult {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  error?: Error;
+}
+
+interface IsolatedWebTemplatesModule {
+  EXPORT_TRANSCRIPT_HTML_TEMPLATE: string;
+  EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION: 1 | 2;
+  EXPORT_TRANSCRIPT_RENDERER_LIMITS: {
+    readonly maxBlocks: number;
+    readonly maxEnvelopeBytes: number;
+  };
+  EXPORT_TRANSCRIPT_RENDERER_VERSION: string;
+}
+
+interface RendererInfo {
+  identity: string;
+  rendererIntegrity: string;
+  cssIntegrity: string;
+}
+
+const repoRoot = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../../../../..',
+);
+const sourceTemplatesDir = join(repoRoot, 'packages/web-templates');
 const execFileAsync = promisify(execFile);
 let isolatedRoot: string | undefined;
 let templatesDir: string;
 let isolatedBuildReady = false;
+let defaultRenderer: RendererInfo;
 
-function commandSucceeded(result: ReturnType<typeof spawnSync>, label: string) {
+// Keep every subprocess async so long builds never block the Vitest worker
+// event loop past birpc's 60s onTaskUpdate timeout.
+async function runCommand(
+  command: string,
+  args: readonly string[],
+  options: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    timeout?: number;
+    shell?: boolean;
+  },
+): Promise<CommandResult> {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, [...args], {
+      cwd: options.cwd,
+      env: options.env,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: options.timeout,
+      shell: options.shell,
+    });
+    return { status: 0, signal: null, stdout, stderr };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException & {
+      code?: number | string;
+      signal?: NodeJS.Signals | null;
+      stdout?: string | Buffer;
+      stderr?: string | Buffer;
+    };
+    return {
+      status: typeof err.code === 'number' ? err.code : null,
+      signal: err.signal ?? null,
+      stdout:
+        typeof err.stdout === 'string'
+          ? err.stdout
+          : (err.stdout?.toString('utf8') ?? ''),
+      stderr:
+        typeof err.stderr === 'string'
+          ? err.stderr
+          : (err.stderr?.toString('utf8') ?? ''),
+      error: typeof err.code === 'number' ? undefined : err,
+    };
+  }
+}
+
+function commandSucceeded(result: CommandResult, label: string) {
   if (result.error || result.status !== 0 || result.signal) {
     throw new Error(
       `${label}: status=${result.status} signal=${result.signal} error=${result.error?.message ?? 'none'}\n${result.stderr}\n${result.stdout}`,
@@ -33,124 +118,153 @@ function commandSucceeded(result: ReturnType<typeof spawnSync>, label: string) {
 }
 
 function buildTemplates(templatesDirectory: string, env: NodeJS.ProcessEnv) {
-  return spawnSync('npm', ['run', 'build', '--prefix', templatesDirectory], {
+  return runCommand('npm', ['run', 'build'], {
     cwd: templatesDirectory,
     env,
-    encoding: 'utf8',
     timeout: 90_000,
     shell: process.platform === 'win32',
   });
 }
 
-async function buildWorkspace(workspaceRoot: string, env: NodeJS.ProcessEnv) {
+async function unlinkIfExists(targetPath: string) {
   try {
-    const result = await execFileAsync('npm', ['run', 'build'], {
-      cwd: workspaceRoot,
-      env,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      timeout: 600_000,
-      shell: process.platform === 'win32',
-    });
-    for (const line of result.stdout.split('\n')) {
-      if (line.includes('Document export renderer JS is')) console.log(line);
-    }
-    return result;
+    await unlink(targetPath);
   } catch (error) {
-    if (error instanceof Error && 'stdout' in error && 'stderr' in error) {
-      console.error(error.stdout);
-      console.error(error.stderr);
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
     }
-    throw error;
   }
 }
 
-function cleanupWorkspace() {
+async function cleanupWorkspace() {
   if (isolatedRoot === undefined) return;
-  commandSucceeded(
-    spawnSync('git', ['worktree', 'remove', '--force', isolatedRoot], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-    }),
-    'remove isolated workspace',
-  );
+  const rootToRemove = isolatedRoot;
   isolatedRoot = undefined;
   isolatedBuildReady = false;
+  // Detach directory junctions/symlinks explicitly before recursive removal.
+  await unlinkIfExists(
+    join(rootToRemove, 'packages/web-templates/node_modules'),
+  );
+  await unlinkIfExists(join(rootToRemove, 'node_modules'));
+  await rm(rootToRemove, { recursive: true, force: true });
 }
 
-function assetIntegrity(extension: 'js' | 'css'): string {
-  const contents = readFileSync(
+async function assetIntegrity(
+  templatesDirectory: string,
+  extension: 'js' | 'css',
+): Promise<string> {
+  const contents = await readFile(
     join(
-      templatesDir,
+      templatesDirectory,
       `src/export-html/dist/export-transcript-document.${extension}`,
     ),
   );
   return `sha384-${createHash('sha384').update(contents).digest('base64')}`;
 }
 
-function buildAndExport(
-  templatesDir: string,
+async function loadIsolatedWebTemplates(
+  templatesDirectory: string,
   env: NodeJS.ProcessEnv,
-): { template: string; html: string; schemaCeilingRejection: string } {
-  const build = buildTemplates(templatesDir, env);
-  commandSucceeded(build, 'build isolated web-templates');
-  const moduleUrl = pathToFileURL(
-    join(
-      isolatedRoot!,
-      'packages/cli/dist/src/ui/utils/export/formatters/html.js',
-    ),
+): Promise<IsolatedWebTemplatesModule> {
+  const rendererUrl = pathToFileURL(
+    join(templatesDirectory, 'dist/index.js'),
   ).href;
-  const factoryUrl = pathToFileURL(
-    join(
-      isolatedRoot!,
-      'packages/cli/dist/src/ui/utils/export/export-transcript-document.js',
-    ),
-  ).href;
-  const rendererUrl = pathToFileURL(join(templatesDir, 'dist/index.js')).href;
-  const output = spawnSync(
+  // Load the freshly compiled ESM entry in a child process so Node's module
+  // cache cannot retain an earlier build of generated/exportTranscriptDocumentTemplate.js.
+  const output = await runCommand(
     process.execPath,
     [
       '--input-type=module',
       '--eval',
-      `import { toHtml, renderExportTranscriptDocumentToHtml } from ${JSON.stringify(moduleUrl)};
-import { createExportTranscriptDocumentV2 } from ${JSON.stringify(factoryUrl)};
-import { EXPORT_TRANSCRIPT_RENDERER_VERSION } from ${JSON.stringify(rendererUrl)};
-const sessionData = ${JSON.stringify(sessionData)};
-const records = ${JSON.stringify(records)};
-const html = toHtml(sessionData, records);
-let schemaCeilingRejection = '';
-try {
-  renderExportTranscriptDocumentToHtml(createExportTranscriptDocumentV2(
-    records,
-    sessionData,
-    {
-      rendererVersion: EXPORT_TRANSCRIPT_RENDERER_VERSION,
-      exportedAt: sessionData.metadata?.exportTime,
-    },
-  ));
-} catch (error) {
-  if (error instanceof Error) schemaCeilingRejection = error.message;
-  else throw error;
-}
-process.stdout.write(JSON.stringify({ html, schemaCeilingRejection }));`,
+      `import {
+  EXPORT_TRANSCRIPT_HTML_TEMPLATE,
+  EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION,
+  EXPORT_TRANSCRIPT_RENDERER_LIMITS,
+  EXPORT_TRANSCRIPT_RENDERER_VERSION,
+} from ${JSON.stringify(rendererUrl)};
+process.stdout.write(JSON.stringify({
+  EXPORT_TRANSCRIPT_HTML_TEMPLATE,
+  EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION,
+  EXPORT_TRANSCRIPT_RENDERER_LIMITS,
+  EXPORT_TRANSCRIPT_RENDERER_VERSION,
+}));`,
     ],
-    { cwd: process.cwd(), env, encoding: 'utf8', timeout: 30_000 },
+    { cwd: process.cwd(), env, timeout: 30_000 },
   );
-  commandSucceeded(output, 'run compiled HTML writer');
-  const template = readFileSync(
-    `${templatesDir}/src/generated/exportTranscriptDocumentTemplate.ts`,
-    'utf8',
-  );
-  const { html, schemaCeilingRejection } = JSON.parse(output.stdout) as {
-    html: string;
-    schemaCeilingRejection: string;
-  };
-  return { template, html, schemaCeilingRejection };
+  commandSucceeded(output, 'load compiled web-templates module');
+  return JSON.parse(output.stdout) as IsolatedWebTemplatesModule;
 }
 
-function readRendererInfo(templatesDir: string) {
-  const source = readFileSync(
-    join(templatesDir, 'dist/generated/exportTranscriptDocumentTemplate.js'),
+async function buildAndExport(
+  templatesDirectory: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{
+  buildStdout: string;
+  template: string;
+  html: string;
+  schemaCeilingRejection: string;
+}> {
+  const build = await buildTemplates(templatesDirectory, env);
+  commandSucceeded(build, 'build isolated web-templates');
+  const isolatedTemplates = await loadIsolatedWebTemplates(
+    templatesDirectory,
+    env,
+  );
+
+  vi.resetModules();
+  vi.doMock('@qwen-code/web-templates', () => isolatedTemplates);
+  // Keep the already-loaded document builder module so vi.resetModules() does
+  // not re-evaluate @qwen-code/qwen-code-core on every build case.
+  vi.doMock('../export-transcript-document.js', () => exportTranscriptDocument);
+  let html: string;
+  let schemaCeilingRejection = '';
+  try {
+    const {
+      toHtml: isolatedToHtml,
+      renderExportTranscriptDocumentToHtml: isolatedRender,
+    } = await import('./html.js');
+    html = isolatedToHtml(sessionData, records);
+    try {
+      isolatedRender(
+        createExportTranscriptDocumentV2(records, sessionData, {
+          rendererVersion: isolatedTemplates.EXPORT_TRANSCRIPT_RENDERER_VERSION,
+          exportedAt:
+            sessionData.metadata?.exportTime ?? '2026-08-16T01:00:00.000Z',
+        }),
+      );
+    } catch (error) {
+      if (error instanceof Error) schemaCeilingRejection = error.message;
+      else throw error;
+    }
+  } finally {
+    vi.doUnmock('../export-transcript-document.js');
+    vi.doUnmock('@qwen-code/web-templates');
+    vi.resetModules();
+  }
+
+  const template = await readFile(
+    join(
+      templatesDirectory,
+      'src/generated/exportTranscriptDocumentTemplate.ts',
+    ),
+    'utf8',
+  );
+  return {
+    buildStdout: build.stdout,
+    template,
+    html,
+    schemaCeilingRejection,
+  };
+}
+
+async function readRendererInfo(
+  templatesDirectory: string,
+): Promise<RendererInfo> {
+  const source = await readFile(
+    join(
+      templatesDirectory,
+      'dist/generated/exportTranscriptDocumentTemplate.js',
+    ),
     'utf8',
   );
   const identity = source.match(
@@ -162,84 +276,86 @@ function readRendererInfo(templatesDir: string) {
   );
   return {
     identity,
-    rendererIntegrity: assetIntegrity('js'),
-    cssIntegrity: assetIntegrity('css'),
+    rendererIntegrity: await assetIntegrity(templatesDirectory, 'js'),
+    cssIntegrity: await assetIntegrity(templatesDirectory, 'css'),
   };
 }
 
 beforeAll(async () => {
-  isolatedRoot = mkdtempSync(join(tmpdir(), 'qwen-export-html-'));
+  // Isolate only packages/web-templates against the prebuilt workspace
+  // node_modules instead of creating a full git worktree + reinstall + full
+  // monorepo build inside a unit test.
+  isolatedRoot = await mkdtemp(join(tmpdir(), 'qwen-export-html-'));
   templatesDir = join(isolatedRoot, 'packages/web-templates');
   try {
-    commandSucceeded(
-      spawnSync('git', ['worktree', 'add', '--detach', isolatedRoot, 'HEAD'], {
-        cwd: repoRoot,
-        encoding: 'utf8',
+    await mkdir(join(isolatedRoot, 'packages'), { recursive: true });
+    await Promise.all([
+      cp(join(repoRoot, 'package.json'), join(isolatedRoot, 'package.json')),
+      cp(join(repoRoot, 'tsconfig.json'), join(isolatedRoot, 'tsconfig.json')),
+      symlink(
+        join(repoRoot, 'node_modules'),
+        join(isolatedRoot, 'node_modules'),
+        'junction',
+      ),
+      cp(sourceTemplatesDir, templatesDir, {
+        recursive: true,
+        filter: (src) => {
+          const rel = relative(sourceTemplatesDir, src).replaceAll('\\', '/');
+          return (
+            rel !== 'node_modules' &&
+            !rel.startsWith('node_modules/') &&
+            rel !== 'dist' &&
+            !rel.startsWith('dist/') &&
+            rel !== 'src/generated' &&
+            !rel.startsWith('src/generated/') &&
+            rel !== 'src/export-html/dist' &&
+            !rel.startsWith('src/export-html/dist/') &&
+            rel !== 'src/insight/dist' &&
+            !rel.startsWith('src/insight/dist/')
+          );
+        },
       }),
-      'create isolated workspace',
+    ]);
+    await symlink(
+      join(sourceTemplatesDir, 'node_modules'),
+      join(templatesDir, 'node_modules'),
+      'junction',
     );
-    const patch = spawnSync(
-      'git',
-      [
-        'diff',
-        '--binary',
-        'HEAD',
-        '--',
-        'packages/cli',
-        'packages/web-shell',
-        'packages/web-templates',
-        'integration-tests',
-      ],
-      { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
+    const initialBuild = await buildTemplates(
+      templatesDir,
+      createBuilderEnvironment(),
     );
-    commandSucceeded(patch, 'read working-tree changes');
-    if (patch.stdout !== '') {
-      commandSucceeded(
-        spawnSync(
-          'git',
-          ['-C', isolatedRoot, 'apply', '--whitespace=nowarn', '-'],
-          {
-            cwd: isolatedRoot,
-            encoding: 'utf8',
-            input: patch.stdout,
-          },
-        ),
-        'apply working-tree changes to isolated workspace',
-      );
-    }
-    commandSucceeded(
-      spawnSync(process.execPath, ['scripts/setup-worktree.js'], {
-        cwd: isolatedRoot,
-        env: createBuilderEnvironment(),
-        encoding: 'utf8',
-        timeout: 180_000,
-      }),
-      'install isolated workspace dependencies',
-    );
-    await buildWorkspace(isolatedRoot, {
-      ...createBuilderEnvironment(),
-      NODE_ENV: 'production',
-    });
+    commandSucceeded(initialBuild, 'build isolated default renderer');
+    defaultRenderer = await readRendererInfo(templatesDir);
     isolatedBuildReady = true;
   } catch (error) {
     try {
-      if (isolatedRoot) cleanupWorkspace();
+      await cleanupWorkspace();
     } catch (cleanupError) {
       console.error('Unable to remove isolated workspace', cleanupError);
     }
     throw error;
   }
-}, 900_000);
+}, 120_000);
 
-function snapshotRendererAssets(templatesDir: string) {
+async function snapshotRendererAssets(templatesDirectory: string) {
   const paths = [
-    join(templatesDir, 'src/generated/exportTranscriptDocumentTemplate.ts'),
-    join(templatesDir, 'src/export-html/dist/export-transcript-document.js'),
-    join(templatesDir, 'src/export-html/dist/export-transcript-document.css'),
+    join(
+      templatesDirectory,
+      'src/generated/exportTranscriptDocumentTemplate.ts',
+    ),
+    join(
+      templatesDirectory,
+      'src/export-html/dist/export-transcript-document.js',
+    ),
+    join(
+      templatesDirectory,
+      'src/export-html/dist/export-transcript-document.css',
+    ),
   ];
   return {
     paths,
-    contents: paths.map((path) => readFileSync(path, 'utf8')),
+    contents: await Promise.all(paths.map((path) => readFile(path, 'utf8'))),
   };
 }
 
@@ -291,15 +407,15 @@ function createBuilderEnvironment() {
   return env;
 }
 
-afterAll(() => {
+afterAll(async () => {
   if (isolatedRoot === undefined) return;
   try {
     if (isolatedBuildReady) {
       commandSucceeded(
-        buildTemplates(templatesDir, createBuilderEnvironment()),
+        await buildTemplates(templatesDir, createBuilderEnvironment()),
         'restore isolated default renderer',
       );
-      const template = readFileSync(
+      const template = await readFile(
         join(templatesDir, 'src/generated/exportTranscriptDocumentTemplate.ts'),
         'utf8',
       );
@@ -308,25 +424,27 @@ afterAll(() => {
       );
       expect(template).toContain(
         `EXPORT_TRANSCRIPT_RENDERER_VERSION = ${JSON.stringify(
-          readRendererInfo(templatesDir).identity,
+          (await readRendererInfo(templatesDir)).identity,
         )};`,
       );
       for (const extension of ['js', 'css']) {
         expect(
-          readFileSync(
-            join(
-              templatesDir,
-              `src/export-html/dist/export-transcript-document.${extension}`,
-            ),
-            'utf8',
+          (
+            await readFile(
+              join(
+                templatesDir,
+                `src/export-html/dist/export-transcript-document.${extension}`,
+              ),
+              'utf8',
+            )
           ).length,
         ).toBeGreaterThan(0);
       }
     }
   } finally {
-    cleanupWorkspace();
+    await cleanupWorkspace();
   }
-});
+}, 120_000);
 
 describe('HTML export formatter', () => {
   it.each([
@@ -343,26 +461,12 @@ describe('HTML export formatter', () => {
   ])(
     'emits schema $schemaMaxVersion when delegated=$delegated and override=$schemaOverride',
     { timeout: 90_000 },
-    ({ delegated, schemaMaxVersion, schemaOverride, delegatedIdentity }) => {
-      const initialBuild = buildTemplates(
-        templatesDir,
-        createBuilderEnvironment(),
-      );
-      commandSucceeded(initialBuild, 'build isolated default renderer');
-      const localRenderer = readRendererInfo(templatesDir);
-      if (!delegated) {
-        const measured = initialBuild.stdout.match(
-          /Document export renderer JS is (\d+) bytes/,
-        );
-        const rendererJs = join(
-          templatesDir,
-          'src/export-html/dist/export-transcript-document.js',
-        );
-        expect(Number(measured?.[1])).toBe(readFileSync(rendererJs).byteLength);
-        expect(localRenderer.identity.length).not.toBe(
-          '__QWEN_RENDERER_BUILD_ID__'.length,
-        );
-      }
+    async ({
+      delegated,
+      schemaMaxVersion,
+      schemaOverride,
+      delegatedIdentity,
+    }) => {
       const {
         identity: baseIdentity,
         rendererIntegrity,
@@ -375,7 +479,7 @@ describe('HTML export formatter', () => {
             cssIntegrity:
               'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
           }
-        : localRenderer;
+        : defaultRenderer;
       const identity = delegatedIdentity ?? baseIdentity;
       if (delegated && schemaMaxVersion === 2) {
         expect(identity).not.toBe('0.28.3+88485ce86a090982');
@@ -391,10 +495,24 @@ describe('HTML export formatter', () => {
       if (schemaOverride !== undefined) {
         env['QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION'] = schemaOverride;
       }
-      const { template, html, schemaCeilingRejection } = buildAndExport(
-        templatesDir,
-        env,
-      );
+      const { buildStdout, template, html, schemaCeilingRejection } =
+        await buildAndExport(templatesDir, env);
+      if (!delegated) {
+        const localRenderer = await readRendererInfo(templatesDir);
+        const measured = buildStdout.match(
+          /Document export renderer JS is (\d+) bytes/,
+        );
+        const rendererJs = join(
+          templatesDir,
+          'src/export-html/dist/export-transcript-document.js',
+        );
+        expect(Number(measured?.[1])).toBe(
+          (await readFile(rendererJs)).byteLength,
+        );
+        expect(localRenderer.identity.length).not.toBe(
+          '__QWEN_RENDERER_BUILD_ID__'.length,
+        );
+      }
       expect(template).toContain(
         `EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION: 1 | 2 = ${schemaMaxVersion};`,
       );
@@ -445,8 +563,8 @@ describe('HTML export formatter', () => {
     },
   ])(
     'rejects schema $schema while delegated=$delegated',
-    ({ schema, delegated, message }) => {
-      const snapshot = snapshotRendererAssets(templatesDir);
+    async ({ schema, delegated, message }) => {
+      const snapshot = await snapshotRendererAssets(templatesDir);
       const env = createBuilderEnvironment();
       if (delegated) {
         Object.assign(env, {
@@ -458,17 +576,17 @@ describe('HTML export formatter', () => {
         });
       }
       env['QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION'] = schema;
-      const result = spawnSync(process.execPath, ['build.mjs'], {
+      const result = await runCommand(process.execPath, ['build.mjs'], {
         cwd: templatesDir,
         env,
-        encoding: 'utf8',
         timeout: 60_000,
       });
+      expect(result.error).toBeUndefined();
       expect(result.status).not.toBe(0);
       expect(result.stderr).toContain(message);
-      expect(snapshot.paths.map((path) => readFileSync(path, 'utf8'))).toEqual(
-        snapshot.contents,
-      );
+      expect(
+        await Promise.all(snapshot.paths.map((path) => readFile(path, 'utf8'))),
+      ).toEqual(snapshot.contents);
     },
   );
 

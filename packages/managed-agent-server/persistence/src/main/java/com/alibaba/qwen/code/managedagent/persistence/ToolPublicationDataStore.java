@@ -42,7 +42,6 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.ossScope;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.require;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.text;
 
@@ -1088,7 +1087,7 @@ public final class ToolPublicationDataStore {
                     "Finished root changed");
             String resourceId = "result-" + hash(scope + ":" + publicationId + ":admission").substring(0, 32);
             String objectKey = bytes.length <= 64 * 1024 ? null
-                    : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/admission";
+                    : ToolPublicationObjectKeys.forSlot(key, publicationId, "admission");
             List<Stored> stored = stored(scope, publicationId, "admission");
             if (stored.isEmpty()) {
                 long used = ((Number) publication.get("admission_used_bytes")).longValue();
@@ -1224,7 +1223,7 @@ public final class ToolPublicationDataStore {
                 "Publication cannot finish");
         String resourceId = "result-" + hash(scope + ":" + publicationId + ":terminal").substring(0, 32);
         String objectKey = length <= 64 * 1024 ? null
-                : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/terminal";
+                : ToolPublicationObjectKeys.forSlot(key, publicationId, "terminal");
         String requestDigest = requestDigest("terminal", length, digest);
         List<Operation> prior = operation(scope, publicationId, operationId, true);
         if (!prior.isEmpty()) {
@@ -1715,7 +1714,7 @@ public final class ToolPublicationDataStore {
                 "managed_tool_publication_busy", "Publication is busy");
         String resourceId = kind == null ? null : "result-" + hash(scope + ":" + publicationId + ":" + slot).substring(0, 32);
         String objectKey = (kind != null && length <= 64 * 1024) ? null
-                : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/" + slot;
+                : ToolPublicationObjectKeys.forSlot(key, publicationId, slot);
         if (saved.isEmpty()) {
             String category = category(slot);
             long allocated = jdbc.queryForObject("SELECT " + category + "_bytes FROM ma_output_capture"
