@@ -212,6 +212,85 @@ describe('cleanupStaleAgentWorktrees', () => {
     );
   });
 
+  it('still reaps a stale worktree whose only content is a pristine .worktreeinclude copy', async () => {
+    // The source carries `.worktreeinclude` naming `.env`; the creation copies
+    // the ignored file into the new checkout. That copy is the feature's own
+    // and must not pin the worktree forever (R12-1).
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      'secret.env\n.env\nnode_modules/\n',
+    );
+    await fs.writeFile(path.join(repoRoot, '.worktreeinclude'), '.env\n');
+    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=src\n');
+    execFileSync('git', ['add', '.gitignore', '.worktreeinclude'], {
+      cwd: repoRoot,
+    });
+    execFileSync('git', ['commit', '-q', '-m', 'include .env', '--no-verify'], {
+      cwd: repoRoot,
+    });
+
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, '.env'), 'TOKEN=src\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(1);
+    await expect(fs.access(wtPath)).rejects.toThrow();
+  });
+
+  it('preserves a stale worktree whose .worktreeinclude copy was edited', async () => {
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      'secret.env\n.env\nnode_modules/\n',
+    );
+    await fs.writeFile(path.join(repoRoot, '.worktreeinclude'), '.env\n');
+    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=src\n');
+    execFileSync('git', ['add', '.gitignore', '.worktreeinclude'], {
+      cwd: repoRoot,
+    });
+    execFileSync('git', ['commit', '-q', '-m', 'include .env', '--no-verify'], {
+      cwd: repoRoot,
+    });
+
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    // The session changed the copy, so it is real work, not a pristine overlay.
+    await fs.writeFile(path.join(wtPath, '.env'), 'TOKEN=edited-in-worktree\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(fs.access(path.join(wtPath, '.env'))).resolves.toBeUndefined();
+  });
+
+  it('preserves a stale worktree holding a .worktreeinclude copy plus real work', async () => {
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      'secret.env\n.env\nnode_modules/\n',
+    );
+    await fs.writeFile(path.join(repoRoot, '.worktreeinclude'), '.env\n');
+    await fs.writeFile(path.join(repoRoot, '.env'), 'TOKEN=src\n');
+    execFileSync('git', ['add', '.gitignore', '.worktreeinclude'], {
+      cwd: repoRoot,
+    });
+    execFileSync('git', ['commit', '-q', '-m', 'include .env', '--no-verify'], {
+      cwd: repoRoot,
+    });
+
+    const wtPath = await createAgentWorktree('agent-aabbccd');
+    await fs.writeFile(path.join(wtPath, '.env'), 'TOKEN=src\n');
+    await fs.writeFile(path.join(wtPath, 'notes.md'), 'agent work\n');
+    await agePastCutoff(wtPath);
+
+    const removed = await cleanupStaleAgentWorktrees(repoRoot);
+
+    expect(removed).toBe(0);
+    await expect(
+      fs.access(path.join(wtPath, 'notes.md')),
+    ).resolves.toBeUndefined();
+  });
+
   it('still sweeps a clean, commit-free ephemeral worktree past the cutoff', async () => {
     const wtPath = await createAgentWorktree('agent-1234567');
     await agePastCutoff(wtPath);

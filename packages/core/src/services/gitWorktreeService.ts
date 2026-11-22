@@ -2030,6 +2030,23 @@ interface SessionConfigFile {
 }
 
 /**
+ * The gitignored paths a checkout's own `.worktreeinclude` selects, resolved
+ * from that checkout. The startup sweep cannot see the include list the
+ * creation copied from, so it re-derives it from the repository root before
+ * handing the identities to the shared has-work predicate. Empty on any
+ * failure: an unresolvable list waives nothing and preserves the checkout.
+ */
+export async function resolveWorktreeIncludePathsInCheckout(
+  repoRoot: string,
+): Promise<string[]> {
+  try {
+    return await GitWorktreeService.resolveIncludePathsForCheckout(repoRoot);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Service for managing git worktrees.
  *
  * Git worktrees allow multiple working directories to share a single repository,
@@ -5131,6 +5148,14 @@ export class GitWorktreeService {
    * budget (`maxCarriedBytes`) is trimmed to the prefix that fits, so the
    * worktree keeps the entries it can record instead of losing them all.
    */
+  static async resolveIncludePathsForCheckout(
+    repoRoot: string,
+  ): Promise<string[]> {
+    return (
+      await new GitWorktreeService(repoRoot).resolveWorktreeIncludePaths()
+    ).paths;
+  }
+
   private async resolveWorktreeIncludePaths(
     sourceRoot = this.sourceRepoPath,
     maxCarriedBytes?: number,

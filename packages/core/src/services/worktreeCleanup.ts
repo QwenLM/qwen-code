@@ -8,7 +8,10 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   AGENT_WORKTREE_SLUG_PATTERN,
+  type CarriedEntry,
   GitWorktreeService,
+  computeCarriedIdentities,
+  resolveWorktreeIncludePathsInCheckout,
   worktreeBranchForSlug,
   worktreeHasWork,
 } from './gitWorktreeService.js';
@@ -52,6 +55,41 @@ function isEphemeralSlug(slug: string): boolean {
 }
 
 /**
+ * Content identities for the repository's `.worktreeinclude` paths as the
+ * source checkout holds them, for the shared has-work predicate.
+ *
+ * A creation copies those gitignored paths into the new worktree (`.env` and
+ * the like) but leaves the source untouched, so on disk a pristine copy is
+ * indistinguishable from the user's own untracked file. Without these
+ * identities every such copy reads as work and preserves the checkout forever
+ * (#12758's fail-closed rule turned into a leak). Deriving them from the
+ * SOURCE keeps the shared predicate's rule: a path is waived only while the
+ * worktree's copy still matches what the source holds, so an edited, staged,
+ * or deleted copy inside the worktree reads as work. Only the repository root
+ * is used; a worktree holding a copy from some other checkout, or a source
+ * that has since moved on, conservatively stays as work.
+ *
+ * Empty on every failure (no `.worktreeinclude`, unreadable source), which
+ * waives nothing and preserves the checkout.
+ */
+async function resolveIncludeCarriedEntries(
+  projectRoot: string,
+): Promise<CarriedEntry[] | undefined> {
+  try {
+    const paths = await resolveWorktreeIncludePathsInCheckout(projectRoot);
+    if (paths.length === 0) return undefined;
+    const entries = await computeCarriedIdentities(projectRoot, paths);
+    const present = entries.filter((e) => e.hash !== null);
+    return present.length > 0 ? present : undefined;
+  } catch (error) {
+    debugLogger.debug(
+      `cleanupStaleAgentWorktrees: cannot resolve .worktreeinclude copies: ${error}`,
+    );
+    return undefined;
+  }
+}
+
+/**
  * Removes stale ephemeral worktrees under `<projectRoot>/.qwen/worktrees/`.
  *
  * Safety guarantees (fail-closed):
@@ -76,6 +114,7 @@ export async function cleanupStaleAgentWorktrees(
 
   const service = new GitWorktreeService(projectRoot);
   const worktreesDir = service.getUserWorktreesDir();
+  const includeEntries = await resolveIncludeCarriedEntries(projectRoot);
 
   // Fast bail-out for the common case (user has never used worktrees):
   // skip the dynamic readdir entirely instead of relying on the catch
@@ -125,10 +164,10 @@ export async function cleanupStaleAgentWorktrees(
     if (mtimeMs >= cutoffDate) continue;
 
     // Fail-closed: any sign of in-progress work or unmerged commits → keep.
-    // Run both checks concurrently — neither depends on the other and each
+    // Run the probes concurrently — neither depends on the other and each
     // spawns its own git invocation.
     const [dirty, unmerged] = await Promise.all([
-      worktreeHasWork(worktreePath),
+      worktreeHasWork(worktreePath, includeEntries),
       service.hasUnmergedWorktreeCommits(entry.name),
     ]);
     if (dirty || unmerged) {
