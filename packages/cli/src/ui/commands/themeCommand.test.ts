@@ -15,6 +15,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import { LoadedSettings, SettingScope } from '../../config/settings.js';
 import type { Settings, SettingsFile } from '../../config/settings.js';
 import { themeManager } from '../themes/theme-manager.js';
+import { applyThemeSetting } from '../themes/theme-selection.js';
 
 describe('themeCommand', () => {
   let mockContext: CommandContext;
@@ -261,7 +262,11 @@ describe('themeCommand', () => {
         'Team Theme',
         makeSettings({
           workspace: {
-            ui: { customThemes: { 'Team Theme': { type: 'custom' } } },
+            ui: {
+              customThemes: {
+                'Team Theme': { name: 'Team Theme', type: 'custom' },
+              },
+            },
           },
         }),
       );
@@ -282,7 +287,11 @@ describe('themeCommand', () => {
         'Team Theme',
         makeSettings({
           workspace: {
-            ui: { customThemes: { 'Team Theme': { type: 'custom' } } },
+            ui: {
+              customThemes: {
+                'Team Theme': { name: 'Team Theme', type: 'custom' },
+              },
+            },
           },
           isTrusted: false,
         }),
@@ -297,7 +306,9 @@ describe('themeCommand', () => {
         'dracula',
         makeSettings({
           user: {
-            ui: { customThemes: { dracula: { type: 'custom' } } },
+            ui: {
+              customThemes: { dracula: { name: 'dracula', type: 'custom' } },
+            },
           },
         }),
       );
@@ -345,7 +356,9 @@ describe('themeCommand', () => {
       const { result, setValue } = run(
         'Brand',
         makeSettings({
-          system: { ui: { customThemes: { Brand: { type: 'custom' } } } },
+          system: {
+            ui: { customThemes: { Brand: { name: 'Brand', type: 'custom' } } },
+          },
         }),
       );
 
@@ -361,7 +374,13 @@ describe('themeCommand', () => {
       const { result, setValue, settings } = run(
         'night.json',
         makeSettings({
-          user: { ui: { customThemes: { 'night.json': { type: 'custom' } } } },
+          user: {
+            ui: {
+              customThemes: {
+                'night.json': { name: 'night.json', type: 'custom' },
+              },
+            },
+          },
         }),
       );
 
@@ -385,6 +404,64 @@ describe('themeCommand', () => {
 
       expect(result).toMatchObject({ messageType: 'error' });
       expect(themeManager.getActiveTheme().name).toBe('Shown Name');
+    });
+
+    describe('applyThemeSetting', () => {
+      it('keeps a pick that a broken theme in another scope overrides', () => {
+        const settings = makeSettings({
+          workspace: { ui: { theme: 'NotATheme' } },
+        });
+
+        const outcome = applyThemeSetting(
+          settings,
+          SettingScope.User,
+          'Qwen Light',
+        );
+
+        expect(outcome).toMatchObject({
+          effective: 'NotATheme',
+          applied: false,
+        });
+        expect(settings.user.settings.ui?.theme).toBe('Qwen Light');
+      });
+
+      it('removes a failed write again so the lower scope theme shows through', () => {
+        vi.spyOn(themeManager, 'setActiveTheme').mockImplementation(
+          (name) => name !== 'Qwen Light',
+        );
+        const settings = makeSettings({
+          user: { ui: { theme: 'Dracula' } },
+          workspace: { ui: { customThemes: {} } },
+        });
+
+        const outcome = applyThemeSetting(
+          settings,
+          SettingScope.Workspace,
+          'Qwen Light',
+        );
+
+        expect(outcome.applied).toBe(false);
+        expect(settings.merged.ui?.theme).toBe('Dracula');
+        expect(settings.workspace.settings.ui).not.toHaveProperty('theme');
+      });
+
+      it('saves to user settings when asked for an untrusted workspace', () => {
+        const settings = makeSettings({ isTrusted: false });
+
+        const outcome = applyThemeSetting(
+          settings,
+          SettingScope.Workspace,
+          'ANSI',
+        );
+
+        expect(outcome).toEqual({
+          effective: 'ANSI',
+          applied: true,
+          scope: SettingScope.User,
+        });
+        expect(settings.user.settings.ui?.theme).toBe('ANSI');
+        expect(settings.workspace.settings.ui?.theme).toBeUndefined();
+      });
     });
 
     it('still refuses when NO_COLOR is set', () => {

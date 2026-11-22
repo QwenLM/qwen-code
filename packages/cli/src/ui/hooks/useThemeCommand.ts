@@ -119,9 +119,10 @@ export const useThemeCommand = (
           scope,
           themeName,
         );
-        if (!applied) {
+        // Not applied, or saved but overridden by another settings scope.
+        if (!applied || effective !== themeName) {
           setThemeError(
-            t('Theme "{{themeName}}" not found.', { themeName: effective }),
+            t('Theme "{{themeName}}" could not be applied.', { themeName }),
           );
           keepOpen = true;
           return;

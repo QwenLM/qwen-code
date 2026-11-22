@@ -6,6 +6,7 @@
 
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { deleteNestedPropertySafe } from '../../config/settingsUtils.js';
 import { validateCustomTheme } from './theme.js';
 import { AUTO_THEME_NAME, themeManager } from './theme-manager.js';
 
@@ -15,26 +16,55 @@ import { AUTO_THEME_NAME, themeManager } from './theme-manager.js';
  * (Ink and OpenTUI) and `/theme <name>`, so all of them apply a theme the
  * same way.
  *
- * If the theme in effect can't be activated, the previous value in `scope`
- * is put back and the previous theme re-activated, so settings never keep a
- * name that was reported as failed.
+ * An untrusted workspace is left out of the merged settings, so a Workspace
+ * write there would never take effect; it goes to User settings instead,
+ * like the model picker does.
  *
- * Returns the theme name in effect and whether it could be activated.
+ * If the new value is the one in effect and can't be activated, the scope's
+ * previous value is put back (or the key removed again if the scope had
+ * none). A write that another scope overrides is kept as is.
+ *
+ * Returns the theme in effect, whether it could be activated, and the scope
+ * that was written. The selection took effect only when `applied` is true
+ * and `effective` equals `themeName`.
  */
 export function applyThemeSetting(
   settings: LoadedSettings,
   scope: SettingScope,
   themeName: string,
-): { effective: string; applied: boolean } {
-  const previous = settings.forScope(scope).settings.ui?.theme;
-  settings.setValue(scope, 'ui.theme', themeName);
+): { effective: string; applied: boolean; scope: SettingScope } {
+  const target =
+    scope === SettingScope.Workspace && !settings.isTrusted
+      ? SettingScope.User
+      : scope;
+  const previous = settings.forScope(target).settings.ui?.theme;
+  writeThemeSetting(settings, target, themeName);
   const effective = activateMergedTheme(settings);
-  const applied = effective.applied;
-  if (!applied) {
-    settings.setValue(scope, 'ui.theme', previous);
+  if (!effective.applied && effective.name === themeName) {
+    writeThemeSetting(settings, target, previous);
     activateMergedTheme(settings);
   }
-  return { effective: effective.name, applied };
+  return {
+    effective: effective.name,
+    applied: effective.applied,
+    scope: target,
+  };
+}
+
+function writeThemeSetting(
+  settings: LoadedSettings,
+  scope: SettingScope,
+  value: string | undefined,
+): void {
+  settings.setValue(scope, 'ui.theme', value);
+  if (value !== undefined) return;
+  // setValue leaves an own `theme: undefined` key behind, which the merge
+  // copies over a lower scope's theme. Drop it so that theme shows through.
+  const file = settings.forScope(scope);
+  for (const target of [file.settings, file.originalSettings]) {
+    deleteNestedPropertySafe(target as Record<string, unknown>, 'ui.theme');
+  }
+  settings.recomputeMerged();
 }
 
 function activateMergedTheme(settings: LoadedSettings): {
