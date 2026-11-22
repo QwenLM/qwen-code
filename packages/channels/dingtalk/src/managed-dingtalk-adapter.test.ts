@@ -900,8 +900,10 @@ describe('managed DingTalk adapter outbox', () => {
     // The delivered prefix keeps its own per-ordinal receipt; this transient
     // failure settles the delivery unknown with no ordinal, so the tail stays
     // re-drivable instead of the whole reply being recorded as never sent. A
-    // definitive failure on the same segment settles rejected instead — the
-    // class, not the position, decides the outcome.
+    // failure the deps leave definitive settles rejected instead — the class,
+    // not the segment's position, decides the outcome; a definitive refusal
+    // after one of that segment's chunks already landed is reclassified
+    // unknown (R10-2).
     expect(
       plane.receipts.map(
         (entry) =>
