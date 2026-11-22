@@ -121,7 +121,7 @@ final class JournalResourceWrites {
         fencing.checkLifecycleWriter(tenantId, sessionId, authority);
         JournalStoreRows.validateStableId(request.writerId(), "writerId");
         JournalStoreRows.validateCounter(request.writerGeneration(), "writerGeneration", 1);
-        JournalStoreRows.validateStableId(request.resourceId(), "resourceId");
+        JournalStoreRows.validateStableId(request.resourceId(), "resourceId", 256);
         if (ManagedNativeJournalSnapshots.isSnapshotId(request.resourceId())) {
             throw JournalStoreRows.invalid("Native snapshot resources require fenced snapshot publication.");
         }

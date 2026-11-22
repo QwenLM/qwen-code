@@ -1655,6 +1655,17 @@ public final class ManagedExtensionRecords {
     }
 
     /**
+     * An id bounded by its column's VARCHAR width. MySQL counts code points
+     * and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     */
+    public static String id(JsonNode node, String label, int maxChars) {
+        String value = id(node, label);
+        require(value.length() <= maxChars,
+                () -> label + " exceeds " + maxChars + " characters");
+        return value;
+    }
+
+    /**
      * A bounded free-text field, the same rule boundedString applies in
      * packages/core: a non-empty string of at most MAX_TEXT_BYTES UTF-8
      * bytes with no control content (an ANSI escape holds one). An

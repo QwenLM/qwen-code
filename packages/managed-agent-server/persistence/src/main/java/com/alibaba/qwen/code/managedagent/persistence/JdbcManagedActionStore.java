@@ -359,8 +359,8 @@ public class JdbcManagedActionStore
 
     private void replaceActionReferences(String tenantId, String workspaceId, String sessionId,
             String actionId, long revision, JsonNode optionsRef, JsonNode options, JsonNode decisionRef) {
-        String ownerRef = ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
-                tenantId, sessionId, "ACTION", actionId);
+        String ownerRef = JdbcManagedExtensionRecordStore.sessionRecordOwnerRef(
+                sessionId, "action", actionId);
         List<JsonNode> refs = new ArrayList<>(List.of(optionsRef));
         if (options.has("inputRef")) {
             refs.add(options.get("inputRef"));

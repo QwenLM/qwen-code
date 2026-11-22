@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ChildWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -86,6 +87,7 @@ public class JdbcChildWorkspaceStore
         if (!WORKTREE.equals(workspaceMode) && !SNAPSHOT.equals(workspaceMode)) {
             throw new IllegalArgumentException("Unknown child Workspace mode " + workspaceMode);
         }
+        BrokerValues.requireChildRunId(childRunId, "childRunId");
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             var storages = jdbc.queryForList("SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ? FOR UPDATE",

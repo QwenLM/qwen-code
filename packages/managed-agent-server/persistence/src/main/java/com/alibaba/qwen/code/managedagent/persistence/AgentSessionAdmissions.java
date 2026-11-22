@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.ResolvedBinding;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.springframework.dao.DuplicateKeyException;
@@ -357,6 +358,7 @@ final class AgentSessionAdmissions {
             String requestDigest, String title, List<Map<String, Object>> input,
             String payloadDigest, StoreModels.SessionLineage lineage,
             String childCwdRelative, com.fasterxml.jackson.databind.JsonNode snapshot) {
+        BrokerValues.requireChildRunId(lineage.parentChildRunId(), "parentChildRunId");
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         List<WorkspaceCommand> existing = findWorkspaceCommand(tenantId,
                 ChildSessionCreation.childActorOf(parentSessionId), idempotencyKey);

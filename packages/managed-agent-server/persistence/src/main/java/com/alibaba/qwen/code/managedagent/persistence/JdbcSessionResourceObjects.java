@@ -115,7 +115,7 @@ public class JdbcSessionResourceObjects {
     @Transactional
     public Allocation allocate(String tenantId, String sessionId, AllocateRequest request) {
         ManagedAgentSettings.SessionResources config = config();
-        JournalStoreRows.validateStableId(request.resourceId(), "resourceId");
+        JournalStoreRows.validateStableId(request.resourceId(), "resourceId", 256);
         JournalStoreRows.validateStableId(request.kind(), "resource kind");
         JournalStoreRows.validateDigest(request.digest(), "resource digest", false);
         if (request.schemaVersion() < 1 || request.byteLength() < 0) {

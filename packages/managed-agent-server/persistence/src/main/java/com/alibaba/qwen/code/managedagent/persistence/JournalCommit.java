@@ -313,9 +313,9 @@ final class JournalCommit {
 
     static ValidatedCommit validateCommit(
             CommitTransactionRequest request) {
-        JournalStoreRows.validateStableId(request.transactionId(), "transactionId");
+        JournalStoreRows.validateStableId(request.transactionId(), "transactionId", 128);
         JournalStoreRows.validateText(request.operation(), "operation", JournalStoreRows.MAX_TEXT_BYTES);
-        JournalStoreRows.validateStableId(request.commandId(), "commandId");
+        JournalStoreRows.validateStableId(request.commandId(), "commandId", 128);
         JournalStoreRows.validateDigest(request.contentDigest(), "contentDigest", false);
         JournalStoreRows.validateDigest(request.eventsDigest(), "eventsDigest", true);
         JournalStoreRows.validateDigest(request.previousCommitDigest(),
@@ -386,7 +386,7 @@ final class JournalCommit {
             if (resource == null) {
                 throw JournalStoreRows.invalid("resources must not contain null entries.");
             }
-            JournalStoreRows.validateStableId(resource.resourceId(), "resourceId");
+            JournalStoreRows.validateStableId(resource.resourceId(), "resourceId", 256);
             JournalStoreRows.validateStableId(resource.kind(), "resource kind");
             if (ManagedNativeJournalSnapshots.isSnapshotKind(resource.kind())
                     || ManagedNativeJournalSnapshots.isSnapshotId(resource.resourceId())) {

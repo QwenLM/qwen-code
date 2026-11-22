@@ -464,6 +464,17 @@ final class JournalStoreRows {
         }
     }
 
+    /**
+     * A stable id bounded by its column's VARCHAR width. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     */
+    static void validateStableId(String value, String label, int maxChars) {
+        validateStableId(value, label);
+        if (value.length() > maxChars) {
+            throw invalid(label + " exceeds " + maxChars + " characters.");
+        }
+    }
+
     static void validateText(String value, String label,
             int maxBytes) {
         if (!isValidText(value, maxBytes)) {

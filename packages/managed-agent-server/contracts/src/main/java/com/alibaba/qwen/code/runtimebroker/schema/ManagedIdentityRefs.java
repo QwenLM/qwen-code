@@ -33,8 +33,11 @@ public final class ManagedIdentityRefs {
     public static final int RUNTIME_REQUEST_REF_BYTES = 3000;
     /** Runtime placement scope identity (tenant, Workspace, generation, cwd, capabilities). */
     public static final int RUNTIME_SCOPE_REF_BYTES = 2048;
-    /** Actor-private side query scope (tenant, Session, actor). */
-    public static final int ACTOR_SCOPE_REF_BYTES = 256;
+    /**
+     * Actor-private side query scope (tenant, Session, actor). A 36-code-point
+     * non-ASCII actor percent-encodes to roughly 521 bytes, so 256 overflowed.
+     */
+    public static final int ACTOR_SCOPE_REF_BYTES = 550;
 
     private ManagedIdentityRefs() {}
 

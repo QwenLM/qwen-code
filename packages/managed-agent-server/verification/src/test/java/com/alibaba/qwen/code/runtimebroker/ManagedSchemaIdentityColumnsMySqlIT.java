@@ -18,16 +18,18 @@ class ManagedSchemaIdentityColumnsMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             List<String> violations = new ArrayList<>();
+            int inspected = 0;
             try (var connection = database.source().getConnection();
                     var query = connection.prepareStatement(
                             "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,"
                                     + " COLLATION_NAME FROM information_schema.COLUMNS"
-                                    + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE 'ma\\_%'"
-                                    + " AND (COLUMN_NAME = 'tenant_id' OR COLUMN_NAME LIKE '%session\\_id')"
+                                    + " WHERE TABLE_SCHEMA = ? AND TABLE_NAME LIKE 'ma!_%' ESCAPE '!'"
+                                    + " AND (COLUMN_NAME = 'tenant_id' OR COLUMN_NAME LIKE '%session!_id' ESCAPE '!')"
                                     + " ORDER BY TABLE_NAME, COLUMN_NAME")) {
                 query.setString(1, connection.getCatalog());
                 try (var rows = query.executeQuery()) {
                     while (rows.next()) {
+                        inspected++;
                         String table = rows.getString("TABLE_NAME");
                         String column = rows.getString("COLUMN_NAME");
                         String type = rows.getString("DATA_TYPE");
@@ -44,6 +46,7 @@ class ManagedSchemaIdentityColumnsMySqlIT {
                     }
                 }
             }
+            assertTrue(inspected > 0, "no identity columns inspected");
             assertTrue(violations.isEmpty(), () -> "identity column drift: " + violations);
         }
     }
@@ -53,6 +56,7 @@ class ManagedSchemaIdentityColumnsMySqlIT {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
             List<String> violations = new ArrayList<>();
+            int inspected = 0;
             try (var connection = database.source().getConnection();
                     var query = connection.prepareStatement(
                             "SELECT s.TABLE_NAME, s.INDEX_NAME, s.SEQ_IN_INDEX, s.COLUMN_NAME,"
@@ -63,13 +67,14 @@ class ManagedSchemaIdentityColumnsMySqlIT {
                                     + " ON c.TABLE_SCHEMA = s.TABLE_SCHEMA"
                                     + " AND c.TABLE_NAME = s.TABLE_NAME"
                                     + " AND c.COLUMN_NAME = s.COLUMN_NAME"
-                                    + " WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME LIKE 'ma\\_%'"
+                                    + " WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME LIKE 'ma!_%' ESCAPE '!'"
                                     + " ORDER BY s.TABLE_NAME, s.INDEX_NAME, s.SEQ_IN_INDEX")) {
                 query.setString(1, connection.getCatalog());
                 String currentKey = null;
                 long bytes = 0;
                 try (var rows = query.executeQuery()) {
                     while (rows.next()) {
+                        inspected++;
                         String key = rows.getString("TABLE_NAME") + "." + rows.getString("INDEX_NAME");
                         if (!key.equals(currentKey)) {
                             checkBudget(violations, currentKey, bytes);
@@ -86,6 +91,7 @@ class ManagedSchemaIdentityColumnsMySqlIT {
                 }
                 checkBudget(violations, currentKey, bytes);
             }
+            assertTrue(inspected > 0, "no index columns inspected");
             assertTrue(violations.isEmpty(), () -> "index key budget drift: " + violations);
         }
     }

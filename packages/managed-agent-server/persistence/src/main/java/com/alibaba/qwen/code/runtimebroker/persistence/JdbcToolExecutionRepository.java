@@ -184,8 +184,16 @@ public final class JdbcToolExecutionRepository
 
     @Override
     public ToolExecutionRecord findByIdempotencyKey(String idempotencyKey) {
-        String key = BrokerValues.requireIdempotencyKey(idempotencyKey,
-                "idempotencyKey");
+        String key;
+        try {
+            key = BrokerValues.requireIdempotencyKey(idempotencyKey,
+                    "idempotencyKey");
+        } catch (IllegalArgumentException malformed) {
+            // A malformed key can never equal a stored well-formed key; treat
+            // the lookup as a miss so admission emits the coded refusal instead
+            // of a raw IllegalArgumentException escaping the error channel.
+            return null;
+        }
         return JdbcRepositorySupport.read(dataSource,
                 connection -> selectByIdempotencyKey(connection, key));
     }

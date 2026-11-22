@@ -29,6 +29,7 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.TextNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
@@ -1226,6 +1227,11 @@ public class JdbcManagedExtensionRecordStore
             }
         }
         String recordId = body.recordId().apply(record);
+        try {
+            ManagedExtensionRecords.id(TextNode.valueOf(recordId), "recordId", 256);
+        } catch (InvalidRecordException error) {
+            throw rejected(error.getMessage());
+        }
         String recordKey = ManagedExtensionProjection.recordKey(sessionId,
                 domain, recordId);
         String ownerRef = sessionRecordOwnerRef(sessionId, domain, recordId);
