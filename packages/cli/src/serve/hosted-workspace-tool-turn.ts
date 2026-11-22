@@ -10561,7 +10561,6 @@ export class HostedWorkspaceToolTurn {
       ? {
           promptId: this.promptId,
           options,
-          waiters: approval.waiters,
           settings: approval.settings,
           livePoll: liveApproval && approval.readSettings !== undefined,
           globProfile: this.globProfile,
@@ -10585,7 +10584,7 @@ export class HostedWorkspaceToolTurn {
               this.acquired = false;
             },
             registerFreeze: (freeze) => {
-              if (parkRegistration && freeze) parkRegistration.freeze = freeze;
+              if (parkRegistration) parkRegistration.freeze = freeze;
             },
           });
         } catch (cause) {

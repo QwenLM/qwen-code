@@ -8,13 +8,11 @@ import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/m
 import type {
   HostedActionOptions,
   HostedApprovalSettings,
-  HostedApprovalWaiters,
 } from './hosted-tool-approval.js';
 
 export interface HostedActionParkRegistration {
   readonly promptId: string;
   readonly options: HostedActionOptions;
-  readonly waiters: HostedApprovalWaiters;
   readonly settings: HostedApprovalSettings;
   readonly livePoll: boolean;
   readonly globProfile: boolean;

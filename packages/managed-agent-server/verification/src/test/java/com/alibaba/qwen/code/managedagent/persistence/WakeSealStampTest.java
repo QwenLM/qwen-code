@@ -20,6 +20,7 @@ import javax.sql.DataSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -146,6 +147,18 @@ class WakeSealStampTest {
                         refused -> assertThat(refused.getCode()).isEqualTo("invalid_managed_session_store_request"));
         assertThat(head().get("state")).isEqualTo("ACTIVE");
         assertThat(head().get("wake_seal_parked_prompt_id")).isNull();
+    }
+
+    // The certificate feeds the park guard's prompt match and ma_turn.retry_after.
+    @Test
+    void aParkCertificateNeedsAPromptAndNonNegativeCounters() {
+        for (ParkedTurn parked : List.of(new ParkedTurn("", 1234, 7L),
+                new ParkedTurn("prompt-1", -1, 7L), new ParkedTurn("prompt-1", 1234, -1L))) {
+            assertThatThrownBy(() -> seal(new WakeStamp(1, false, 0, parked)))
+                    .isInstanceOfSatisfying(ManagedAgentException.class,
+                            refused -> assertThat(refused.getCode()).isEqualTo("invalid_managed_session_store_request"));
+            assertThat(head().get("state")).isEqualTo("ACTIVE");
+        }
     }
 
     @Test

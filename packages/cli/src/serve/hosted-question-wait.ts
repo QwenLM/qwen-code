@@ -143,7 +143,7 @@ export async function waitForHostedQuestion(options: {
   expiresAt: number;
   signal: AbortSignal;
   released?: () => void;
-  registerFreeze?: (freeze?: () => boolean) => void;
+  registerFreeze?: (freeze: () => boolean) => void;
 }): Promise<void> {
   const { session, broker, waiters, requestId, expiresAt, signal } = options;
   const claim = broker.mountClaim();
@@ -191,7 +191,6 @@ export async function waitForHostedQuestion(options: {
     stop.abort();
     options.brokerOptions.mountHandbacks?.delete(finish);
     signal.removeEventListener('abort', finish);
-    options.registerFreeze?.(undefined);
     return true;
   };
   options.registerFreeze?.(park);
@@ -235,7 +234,6 @@ export async function waitForHostedQuestion(options: {
     if (stop.signal.aborted && !signal.aborted)
       throw new Error('Question wait stopped with its Runtime still owed.');
   } finally {
-    options.registerFreeze?.(undefined);
     finish();
     signal.removeEventListener('abort', finish);
     options.brokerOptions.mountHandbacks?.delete(finish);

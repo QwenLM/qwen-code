@@ -47309,6 +47309,7 @@ describe('idle suspension', () => {
   async function promptApproval(
     server: Server,
     prompt: unknown[] = [{ type: 'text', text: 'write notes' }],
+    deadlineMs?: number,
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
@@ -47327,6 +47328,7 @@ describe('idle suspension', () => {
         prompt,
         promptId: PROMPT_ID,
         payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        ...(deadlineMs === undefined ? {} : { deadlineMs }),
       })
       .expect(202);
     return clientId;
@@ -47375,21 +47377,13 @@ describe('idle suspension', () => {
     mockApprovalTurn();
     try {
       const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const clientId = await promptApproval(server);
+      // The Turn deadline lands before the 60s approval expiry.
+      const clientId = await promptApproval(server, undefined, 30_000);
       await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
         timeout: 5000,
       });
       expect(state.model).toHaveBeenCalled();
       expect(park).toHaveBeenCalledOnce();
-      expect(state.wakeStamps[0]).toEqual({
-        pending: false,
-        dueAt: 0,
-        parkedTurn: {
-          promptId: PROMPT_ID,
-          wakeAt: expect.any(Number),
-          approvalRevision: 0,
-        },
-      });
       await vi.waitFor(
         async () => {
           expect((await statusOf(server, clientId)).status).toBe(404);
@@ -47404,6 +47398,21 @@ describe('idle suspension', () => {
           tenantId: 'tenant',
           workspaceId: 'workspace',
           sessionId: SESSION_ID,
+        },
+      });
+      const deadline = journal.events.find(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['turnId'] === PROMPT_ID,
+      )!.payload['deadline'];
+      expect(deadline).toEqual(expect.any(Number));
+      expect(state.wakeStamps[0]).toEqual({
+        pending: false,
+        dueAt: 0,
+        parkedTurn: {
+          promptId: PROMPT_ID,
+          wakeAt: deadline,
+          approvalRevision: 0,
         },
       });
       const requestId = journal.events.findLast(

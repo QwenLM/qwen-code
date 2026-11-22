@@ -689,10 +689,23 @@ class ManagedTurnCommandOperationTest {
         assertThat(claimed.orElseThrow().errorCode()).isNull();
     }
 
+    @Test
+    void aClaimKeepsEveryOtherErrorCode() {
+        Admission turn = submit("other-code", "digest-other-code");
+        jdbc.update("UPDATE ma_turn SET error_code = ? WHERE turn_id = ?",
+                TurnExecutionStore.HARNESS_RECOVERY_BLOCKED, turn.turnId());
+
+        var claimed = store.claimTurn(TENANT, sessionId, turn.turnId(), OWNER, Duration.ofMinutes(1));
+
+        assertThat(claimed.orElseThrow().errorCode()).isEqualTo(TurnExecutionStore.HARNESS_RECOVERY_BLOCKED);
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"certificate", "prompt", "approval", "action", "decision", "lease", "cancelling"})
+    @ValueSource(strings = {"certificate", "prompt", "approval", "action", "decision", "lease", "cancelling",
+        "owner", "expired", "head", "phase", "until", "missing", "revision"})
     void anActionParkRefusesEveryBrokenPrecondition(String broken) {
         Admission turn = actionParkableTurn();
+        String owner = OWNER;
         switch (broken) {
             case "certificate" -> jdbc.update("UPDATE ma_session_head SET wake_seal_revision = NULL");
             case "prompt" -> jdbc.update("UPDATE ma_session_head SET wake_seal_parked_prompt_id = 'other'");
@@ -700,10 +713,20 @@ class ManagedTurnCommandOperationTest {
             case "action" -> jdbc.update("UPDATE ma_session_record SET state = 'decided'");
             case "decision" -> openActionResponse();
             case "lease" -> store.releaseTurnLease(TENANT, sessionId, turn.turnId(), OWNER);
-            default -> jdbc.update("UPDATE ma_turn SET status = 'CANCELLING' WHERE turn_id = ?", turn.turnId());
+            case "cancelling" -> jdbc.update("UPDATE ma_turn SET status = 'CANCELLING' WHERE turn_id = ?",
+                    turn.turnId());
+            case "owner" -> owner = "another-owner";
+            case "expired" -> jdbc.update("UPDATE ma_turn SET dispatch_lease_until = ? WHERE turn_id = ?",
+                    now.get() - 1, turn.turnId());
+            case "head" -> jdbc.update("UPDATE ma_session_head SET state = 'ACTIVE'");
+            case "phase" -> jdbc.update("UPDATE ma_session_head SET activation_phase = 'active'");
+            case "until" -> jdbc.update("UPDATE ma_session_head SET wake_seal_parked_until = NULL");
+            case "missing" -> jdbc.update("DELETE FROM ma_session_head WHERE session_id = ?", sessionId);
+            case "revision" -> jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 2");
+            default -> throw new IllegalArgumentException(broken);
         }
 
-        assertThat(store.parkTurnForAction(TENANT, sessionId, turn.turnId(), OWNER)).isFalse();
+        assertThat(store.parkTurnForAction(TENANT, sessionId, turn.turnId(), owner)).isFalse();
         assertThat(store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow().errorCode())
                 .isNotEqualTo(TurnExecutionStore.HARNESS_ACTION_PARKED);
     }

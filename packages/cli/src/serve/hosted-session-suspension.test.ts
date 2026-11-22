@@ -209,6 +209,7 @@ describe('suspension attempt driver', () => {
     const { suspension, deps, calls } = harness({
       beforeTeardown: () => {
         calls.push('beforeTeardown');
+        return true;
       },
     });
     const outcome = await runSuspensionAttempt(suspension, deps);
@@ -225,11 +226,25 @@ describe('suspension attempt driver', () => {
     const { suspension, deps, calls } = harness({
       beforeTeardown: () => {
         calls.push('beforeTeardown');
-        throw new Error('not parkable');
+        return false;
+      },
+    });
+    const outcome = await runSuspensionAttempt(suspension, deps);
+    expect(outcome).toBe('reverted');
+    expect(suspension.gate).toBe('open');
+    expect(suspension.teardownStarted).toBe(false);
+    expect(calls).toEqual(['markClosing:0', 'beforeTeardown', 'rearm']);
+  });
+
+  it('reverts and rethrows when the reversible hook fails', async () => {
+    const { suspension, deps, calls } = harness({
+      beforeTeardown: () => {
+        calls.push('beforeTeardown');
+        throw new Error('hook failed');
       },
     });
     await expect(runSuspensionAttempt(suspension, deps)).rejects.toThrow(
-      'not parkable',
+      'hook failed',
     );
     expect(suspension.gate).toBe('open');
     expect(suspension.teardownStarted).toBe(false);

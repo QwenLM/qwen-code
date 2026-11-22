@@ -36,6 +36,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.slf4j.LoggerFactory;
 
@@ -3774,7 +3775,11 @@ class HarnessCoordinatorTest {
             coordinator.close();
         }
 
-        verify(store).parkTurnForAction(eq("tenant"), eq("session"), eq("turn"), anyString());
+        // The park presents the lease this drive claimed, never the stale row's owner.
+        ArgumentCaptor<String> owner = ArgumentCaptor.forClass(String.class);
+        verify(store).claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                owner.capture(), any(Duration.class));
+        verify(store).parkTurnForAction("tenant", "session", "turn", owner.getValue());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyBoolean());
         verify(store, never()).failTurn(anyString(), anyString(), anyString(),

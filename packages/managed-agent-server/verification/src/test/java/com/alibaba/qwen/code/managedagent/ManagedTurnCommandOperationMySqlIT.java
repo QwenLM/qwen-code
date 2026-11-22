@@ -191,7 +191,8 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
                         "digest-cancel-" + raceId, turn));
             });
 
-            assertThat(parked.orTimeout(30, TimeUnit.SECONDS).join()).isNotNull();
+            // Either side may win; convergence is the post-state below.
+            parked.orTimeout(30, TimeUnit.SECONDS).join();
             cancelled.orTimeout(30, TimeUnit.SECONDS).join();
             var current = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
             assertThat(current.status()).isEqualTo("CANCELLING");

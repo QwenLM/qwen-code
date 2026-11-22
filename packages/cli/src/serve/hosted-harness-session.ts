@@ -5099,12 +5099,10 @@ export function registerHostedHarnessSessionRoutes(
 
   const actionParkCandidate = async (
     session: HostedSession,
-    backgroundCertified: boolean,
   ): Promise<ActionParkCandidate | undefined> => {
     const registration = hostedActionParkRegistration(session.managed);
     if (
       !registration ||
-      backgroundCertified ||
       session.active?.promptId !== registration.promptId ||
       session.recoveredTurn !== undefined ||
       session.definition?.['lineage'] !== undefined ||
@@ -5283,9 +5281,9 @@ export function registerHostedHarnessSessionRoutes(
       pendingInputs: async () => {
         // Derived inside the attempt so a failed read reverts and rearms;
         // the pass under the gate re-reads the approval selection (§4.1).
-        if (!marked) actionPark = await actionParkCandidate(session, false);
+        if (!marked) actionPark = await actionParkCandidate(session);
         else if (actionPark) {
-          const current = await actionParkCandidate(session, false);
+          const current = await actionParkCandidate(session);
           if (current?.registration !== actionPark.registration) return true;
           actionPark = current;
         }
@@ -5343,15 +5341,17 @@ export function registerHostedHarnessSessionRoutes(
         suspensionLiveWork(session, backgroundCertified, actionPark),
       beforeTeardown: () => {
         const park = actionPark;
-        if (!park) return;
+        if (!park) return true;
+        // A poll or resolution in flight refuses the freeze; the attempt
+        // reverts and the next idle period tries again.
         if (
-          backgroundCertified ||
           hostedActionParkRegistration(session.managed) !== park.registration ||
           !park.registration.freeze()
         )
-          throw new Error('The Action wait is no longer parkable.');
+          return false;
         if (session.deadlineTimer) clearTimeout(session.deadlineTimer);
         session.deadlineTimer = undefined;
+        return true;
       },
       teardown: async () => {
         try {
