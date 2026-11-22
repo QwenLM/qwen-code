@@ -4089,6 +4089,10 @@ esac`,
             dump.every((name) => !name.includes('=')),
             `probe dump is not names-only: ${mode}`,
           ).toBe(true);
+          // The stub's own redirect target: an empty dump cannot contain it.
+          expect(dump, `probe dump is empty: ${mode}`).toContain(
+            'STAMP_PROBE_OUT',
+          );
           const leaked = dump.filter((key) => SESSION_STAMPS.includes(key));
           expect(leaked, `child env carries session stamps: ${mode}`).toEqual(
             [],
