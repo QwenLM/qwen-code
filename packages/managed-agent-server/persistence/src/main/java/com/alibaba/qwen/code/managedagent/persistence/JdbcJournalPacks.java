@@ -198,7 +198,7 @@ public class JdbcJournalPacks {
             String tenant, String workspace, String session, long from, long through, Built built) {
         byte[] objectBytes = built.objectBytes();
         String packId = "pack-" + UUID.randomUUID();
-        String objectKey = config.getOssKeyPrefix() + "packs/" + scope + "/" + packId;
+        String objectKey = config.getOssKeyPrefix() + "packs/" + tenant + "/" + session + "/" + packId;
         long now = System.currentTimeMillis();
         String objectSha = JournalStoreRows.sha256(objectBytes);
         // S1: the BUILDING catalog row commits on its own before the object PUT, so a

@@ -1414,6 +1414,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'chat.promptNotConfirmed': 'Prompt not confirmed',
+  'chat.promptNotAdmitted': 'Prompt not accepted',
+  'chat.failedToSend': 'Failed to send message',
+  'chat.approvalNotAccepted': 'Approval was not accepted',
+  'chat.acknowledgeUnknown': 'I have checked the session',
+  'chat.stopNotConfirmed': 'Stop request not confirmed',
   'askUser.shortcuts.previous': '← previous',
   'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
   'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
@@ -5432,6 +5438,10 @@ export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
 
 export const RESTART_RECOVERY_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
   key.startsWith('restartRecovery.'),
+);
+
+export const CHAT_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('chat.'),
 );
 
 const catalogs = new Map(eagerCatalogs);
