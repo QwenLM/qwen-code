@@ -52,7 +52,7 @@ without `boundary.json`); this design removes the reason for it.
   (`QWEN_VERIFY_CREDENTIAL_FREE=1`, no credential signals). An explicitly
   gate-less seed instead records `gate: null` and concrete operator or
   measured-launcher boundary facts, which are not themselves proof of the
-  boundary. Both seed paths require step 4's host/VM execution approval
+  boundary. Both seed paths require step 3's host/VM execution approval
   before any PR plugin or seed execution.
 - Runtime parity with ONE lane cell — the Linux Java 21 leg (Temurin 21,
   Maven 3.9.11). The lane runs the same job across five JDK/OS cells (Java
@@ -109,11 +109,52 @@ claim to mirror the gate's full trigger:
    declaration. The offline battery here uses prepare's `waived` declaration,
    so it neither echoes a container nonce nor mints another gate record for
    publication. If the battery cannot run in the gate container, use the
-   pre-seed host approval in step 4 **before** any seed, model turn or battery
+   pre-seed host approval in step 3 **before** any seed, model turn or battery
    executes PR code; do not seed first and seek authorization afterward. A
    gate-container attestation is not a substitute for the battery's recorded
    boundary (R3-6).
-2. **Offline Maven repository, seeded inside a boundary.** No host step runs
+2. **Trusted scripts, PR clone, model proxy.** Same layout as the JS recipe:
+   scripts come from the trusted clone, the round runs in a standalone PR
+   clone, and any model-driven step goes through the host-side
+   `verify-pr-model-proxy.mjs` relay. The offline battery container cannot
+   reach that proxy, so the round's own model turns run in a separate
+   proxy-connected container (the JS recipe's shape) or not at all; the
+   battery itself needs no model access. The containers are driven by an
+   **operator-owned host relay**: the host runs `docker exec` into the
+   battery container on the round's behalf and returns the output. The
+   relay's contract is fixed on the operator side, never taken from a
+   request: the container name and all flags come from the relay's own
+   configuration; the command is passed as an argv array with no shell
+   between it and `docker exec`; requests naming another container or
+   carrying `--privileged`, `--pid`, `--net`, `--volume`, or `--user` are
+   refused; the listener binds to the bridge/loopback address with a
+   per-round token. (Alternatively the operator types the `docker exec`
+   lines directly, which keeps the socket on the trusted side.) The
+   round never receives the Docker socket — that would hand untrusted PR
+   code host-root while `--require-isolation` still exits 0 (the gate
+   inspects environment and credential signals, not sockets).
+3. **Pre-seed execution approval.** Before step 4 runs any PR-authored
+   plugin, extension or seed, authorize the execution that the independent
+   offline battery can actually record. In the PR clone run the trusted
+   prepare with the full current coordinates, for example:
+
+   ```text
+   node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r> --reason <text> --context-out <host snapshot> (--trust-pr-head | --approval <url> --state-root "<trusted-dir>")
+   ```
+
+   `<r>` is this round's positive number. Keep an existing in-flight
+   registration when changing from container to host; do not release it merely
+   to prepare again. Local trust uses `--trust-pr-head` without a state root.
+   Another fork instead registers the current head/round first and uses a
+   maintainer comment whose marker carries that current registration's nonce;
+   prepare revalidates that registration under the watch-state lock. Its
+   `--approval` and `--state-root` therefore travel together, and the eventual
+   `--complete` (or a genuinely abandoned round's `--release`) uses the same
+   trusted root and repeats that exact start's nonce as
+   `--registration-nonce <nonce>`. A seed gate is not authorization to run the independent
+   battery. If approval fails, no PR plugin, seed or battery may run.
+
+4. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
    lifecycle, so any plugin execution the PR binds to `compile` or `test`
    would run on the maintainer's machine — the strip list below covers
@@ -178,7 +219,7 @@ claim to mirror the gate's full trigger:
    marker or launcher measurement, and mirror enforcement — it is not proof of
    the container boundary, and the optional gate is not a license to claim
    credential-free unconditionally. Either form documents the seed container
-   only; publication uses step 4's prepare-authored `waived` declaration and
+   only; publication uses step 3's prepare-authored `waived` declaration and
    does not ask the independent offline battery for a container nonce or gate
    record. The head
    seed installs the head's SDK jar, the base seed the base's, each built
@@ -231,51 +272,10 @@ claim to mirror the gate's full trigger:
    writing round invalidates the reuse key, so the shared seed never holds
    a mutant jar. Offline resolution keeps the credential-free boundary
    intact: no network means no exfiltration path and no mirror auth inside.
-3. **Trusted scripts, PR clone, model proxy.** Same layout as the JS recipe:
-   scripts come from the trusted clone, the round runs in a standalone PR
-   clone, and any model-driven step goes through the host-side
-   `verify-pr-model-proxy.mjs` relay. The offline battery container cannot
-   reach that proxy, so the round's own model turns run in a separate
-   proxy-connected container (the JS recipe's shape) or not at all; the
-   battery itself needs no model access. The containers are driven by an
-   **operator-owned host relay**: the host runs `docker exec` into the
-   battery container on the round's behalf and returns the output. The
-   relay's contract is fixed on the operator side, never taken from a
-   request: the container name and all flags come from the relay's own
-   configuration; the command is passed as an argv array with no shell
-   between it and `docker exec`; requests naming another container or
-   carrying `--privileged`, `--pid`, `--net`, `--volume`, or `--user` are
-   refused; the listener binds to the bridge/loopback address with a
-   per-round token. (Alternatively the operator types the `docker exec`
-   lines directly, which keeps the socket on the trusted side.) The
-   round never receives the Docker socket — that would hand untrusted PR
-   code host-root while `--require-isolation` still exits 0 (the gate
-   inspects environment and credential signals, not sockets).
-4. **Pre-seed execution approval.** Before step 2 runs any PR-authored
-   plugin, extension or seed, authorize the execution that the independent
-   offline battery can actually record. In the PR clone run the trusted
-   prepare with the full current coordinates, for example:
-
-   ```text
-   node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r> --reason <text> --context-out <host snapshot> (--trust-pr-head | --approval <url> --state-root "<trusted-dir>")
-   ```
-
-   `<r>` is this round's positive number. Keep an existing in-flight
-   registration when changing from container to host; do not release it merely
-   to prepare again. Local trust uses `--trust-pr-head` without a state root.
-   Another fork instead registers the current head/round first and uses a
-   maintainer comment whose marker carries that current registration's nonce;
-   prepare revalidates that registration under the watch-state lock. Its
-   `--approval` and `--state-root` therefore travel together, and the eventual
-   `--complete` (or a genuinely abandoned round's `--release`) uses the same
-   trusted root and repeats that exact start's nonce as
-   `--registration-nonce <nonce>`. A seed gate is not authorization to run the independent
-   battery. If approval fails, no PR plugin, seed or battery may run.
-
 5. **Declaration.** The optional seed gate run
    (`--require-isolation --artifact-dir <round-dir>`) can write a
    `boundary-gate.json` provenance record in the seed container, but prepare
-   writes `boundary.json` in step 4. The offline battery cannot read the seed
+   writes `boundary.json` in step 3. The offline battery cannot read the seed
    container's `$HOME/.qwen-verify-nonce`, so this recipe keeps prepare's
    `waived` executionApproval; it does not declare `mode:"container"`, require
    a battery `container-nonce:` line, or require a battery gate record for
@@ -333,7 +333,7 @@ claim to mirror the gate's full trigger:
 
 - The container sees no host credentials; the shared seeded repository is
   dependency jars only, mounted read-only — a writing row uses its own copy
-  (see step 2), so the shared seed never holds a round-installed artifact.
+  (see step 4), so the shared seed never holds a round-installed artifact.
 - When the optional seed gate is chosen, `--require-isolation` must exit 0
   inside; a container marker alone does not pass (existing rule). An
   explicitly gate-less seed instead records `gate: null` and the operator's
@@ -393,7 +393,7 @@ claim to mirror the gate's full trigger:
 
 ## Validation plan
 
-- One live Java-heavy round (a `managed-agent-server` PR) runs step 4's
+- One live Java-heavy round (a `managed-agent-server` PR) runs step 3's
   prepare successfully before its first seed, then compile + battery + at
   least one mutation inside the recipe. `boundary.json` retains prepare's
   `waived` executionApproval, which matches the host-held context. Any seed

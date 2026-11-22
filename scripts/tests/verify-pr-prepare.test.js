@@ -2244,6 +2244,61 @@ describe.skipIf(process.platform === 'win32')(
       expect(artifactsFrom(second)).toBe(artifactsFrom(first));
     });
 
+    it('drops stale host approval on a same-second container retry and refuses a boundary symlink', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permissions: { maintainer: { permission: 'write' } },
+        },
+      );
+      const clock = join(makeTmpDir(), 'freeze-clock-host-container.cjs');
+      writeFileSync(
+        clock,
+        'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+      );
+      const frozen = { ...env, NODE_OPTIONS: `--require=${clock}` };
+      const { artifactArgs } = command({ round: 1 });
+      const host = runPrepare(dir, artifactArgs, frozen);
+      expect(host.status, host.stderr).toBe(0);
+      const boundaryPath = join(artifactsFrom(host), 'boundary.json');
+      expect(existsSync(boundaryPath)).toBe(true);
+
+      const contextOut = join(makeTmpDir(), 'container-context.json');
+      const containerArgs = [
+        '42',
+        '--repo',
+        REPO,
+        '--execution',
+        'container',
+        '--context-out',
+        contextOut,
+      ];
+      const container = runPrepare(dir, containerArgs, frozen);
+      expect(container.status, container.stderr).toBe(0);
+      expect(artifactsFrom(container)).toBe(artifactsFrom(host));
+      expect(existsSync(boundaryPath)).toBe(false);
+      expect(
+        JSON.parse(readFileSync(contextOut, 'utf8')).executionApproval,
+      ).toBeUndefined();
+
+      const target = join(makeTmpDir(), 'outside.json');
+      writeFileSync(target, 'do not replace\n');
+      symlinkSync(target, boundaryPath);
+      const rejected = runPrepare(dir, containerArgs, frozen);
+      expect(rejected.status, rejected.stderr).toBe(3);
+      expect(rejected.stderr).toMatch(
+        /execution approval through a non-single-link file/,
+      );
+      expect(readFileSync(target, 'utf8')).toBe('do not replace\n');
+    });
+
     it.each([
       { name: 'local-trust', trust: true },
       { name: 'comment', trust: false },

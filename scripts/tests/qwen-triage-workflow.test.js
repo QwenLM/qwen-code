@@ -7540,10 +7540,21 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(verifySkill).toContain(
       'grep -Eq \'^[0-9a-f]{64}$\' ~/.cache/qwen-verify/pr<n>/pr.sha256 || { echo "prepare printed no valid context-sha256; see prepare.log" >&2; exit 1; }',
     );
-    // R5-3: clear last round's log/digest and gate on prepare's own exit status,
-    // so a failed cd/prepare cannot certify a stale snapshot.
-    expect(verifySkill).toContain(
-      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256',
+    // R5-3: clear only the transient log. The production writer preserves the
+    // previous context/digest authority pair when prepare fails, and this block
+    // exits before digest capture or a checker can use it for the failed round.
+    const prepareCleanup = verifySkill.match(
+      /^\s*rm -f .*prepare\.log.*$/m,
+    )?.[0];
+    expect(prepareCleanup?.trim()).toBe(
+      'rm -f ~/.cache/qwen-verify/pr<n>/prepare.log',
+    );
+    expect(prepareCleanup).not.toMatch(/pr\.sha256|pr\.json/);
+    expect(flat).toContain(
+      'transactional writer preserves the previous pr.json/pr.sha256 authority',
+    );
+    expect(flat).toContain(
+      'because this block exits before refreshing the digest or running a checker.',
     );
     expect(verifySkill).toContain(
       '|| { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }',

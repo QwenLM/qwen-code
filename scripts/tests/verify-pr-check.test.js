@@ -1858,12 +1858,15 @@ describe('executionApproval host binding', () => {
       [false, 'same-repository'],
     ]) {
       const local = localTrustApproval({ basis });
+      const context = {
+        ...snapshot(local),
+        isCrossRepository: cross,
+        ...(basis === 'same-repository'
+          ? { author: { login: 'colleague' } }
+          : {}),
+      };
       expect(
-        executionApprovalErrors(
-          JSON.stringify(local),
-          { ...snapshot(local), isCrossRepository: cross },
-          verified,
-        ),
+        executionApprovalErrors(JSON.stringify(local), context, verified),
       ).toEqual([]);
       // Without the CLI's authority, this is only a shape check and has no
       // comment URL to validate; executionApprovalErrors above is the gate.

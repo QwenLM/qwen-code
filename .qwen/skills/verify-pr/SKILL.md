@@ -457,10 +457,11 @@ authority to certify the round.
 
    ```bash
    mkdir -p ~/.cache/qwen-verify/pr<n>
-   # Clear last round's log/digest/context and gate on prepare's own exit
-   # status, so a failed cd/prepare cannot certify stale approval or context
-   # bytes (R5-3).
-   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log ~/.cache/qwen-verify/pr<n>/pr.sha256 ~/.cache/qwen-verify/pr<n>/pr.json
+   # Clear only the transient log and gate on prepare's own exit status. Its
+   # transactional writer preserves the previous pr.json/pr.sha256 authority
+   # pair on failure; those stale files cannot certify the failed invocation
+   # because this block exits before refreshing the digest or running a checker.
+   rm -f ~/.cache/qwen-verify/pr<n>/prepare.log
    cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution container --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }
    cat ~/.cache/qwen-verify/pr<n>/prepare.log
    # Hold the content digest host-side (outside the clone) so step 7 can bind

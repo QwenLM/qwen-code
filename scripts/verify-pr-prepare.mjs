@@ -1354,22 +1354,20 @@ function main(argv) {
     }
     const artifactContextPath = join(artifacts, 'context.json');
     const boundaryPath = join(artifacts, 'boundary.json');
-    if (executionApproval) {
-      try {
-        const st = lstatSync(boundaryPath);
-        if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
-          return fail(
-            3,
-            `refusing to write the execution approval through a non-single-link file: ${boundaryPath}`,
-          );
-        }
-      } catch (error) {
-        if (error.code !== 'ENOENT') {
-          return fail(
-            3,
-            `could not inspect the execution approval path ${boundaryPath}: ${error.message}`,
-          );
-        }
+    try {
+      const st = lstatSync(boundaryPath);
+      if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the execution approval through a non-single-link file: ${boundaryPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the execution approval path ${boundaryPath}: ${error.message}`,
+        );
       }
     }
     const planned = [
@@ -1384,15 +1382,15 @@ function main(argv) {
           headRefOid: context.head,
         })}\n`,
       },
-      ...(executionApproval
-        ? [
-            {
-              path: boundaryPath,
-              label: 'execution approval',
-              next: `${JSON.stringify(executionApproval, null, 2)}\n`,
-            },
-          ]
-        : []),
+      // A same-directory container retry must not retain an earlier host/VM
+      // approval. Deleting it stays in this rollback group on later failure.
+      {
+        path: boundaryPath,
+        label: 'execution approval',
+        next: executionApproval
+          ? `${JSON.stringify(executionApproval, null, 2)}\n`
+          : null,
+      },
       {
         path: reviewPath,
         label: 'review snapshot',

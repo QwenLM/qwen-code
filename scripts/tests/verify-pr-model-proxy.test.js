@@ -726,7 +726,10 @@ describe('local container recipe pins', () => {
     'utf8',
   );
 
-  it('runs every round script from the trusted checkout', () => {
+  it('runs every round script from the trusted checkout', async () => {
+    const { parseShellCommand } = await import(
+      '@qwen-code/qwen-code-core/utils/shellAstParser.js'
+    );
     expect(skill).toContain(
       'cd <pr-clone> && node <trusted-clone>/scripts/verify-pr-prepare.mjs',
     );
@@ -887,13 +890,9 @@ describe('local container recipe pins', () => {
       } else if (kind === 'credential-scan' && text.endsWith('|| exit 1')) {
         text = text.slice(0, -'|| exit 1'.length);
       }
-      if (quotedGate) {
-        if (kind !== 'watch-gate' || !text.trimEnd().endsWith('"')) {
-          return false;
-        }
-        text = text.trimEnd().slice(0, -1);
-      }
       text = text.trim();
+      const cliGate = kind === 'watch-gate' && text.includes(' --cli ');
+      if (quotedGate !== cliGate) return false;
       if (kind !== 'check' && text.includes('$(cat ')) return false;
       text = text
         .replace(
@@ -949,129 +948,375 @@ describe('local container recipe pins', () => {
     const trustedPath = (path) =>
       !path.split('/').includes('..') &&
       !path.includes('\\') &&
-      ([
+      !/[*?[\]{}]/.test(path) &&
+      [
         `${script.slice(0, script.lastIndexOf('/') + 1)}`,
         '<clone>/scripts/',
         '/trusted-scripts/',
-        'scripts/',
-      ].some((prefix) => path.startsWith(prefix)) ||
-        /^verify-pr-[a-z-]+\.mjs$/.test(path));
-    const onlyDocumentedPrepareCalls = (document) => {
-      const source = document.replace(/\\\r?\n\s*/g, ' ');
-      const paths = [
-        ...source.matchAll(
-          /([^\s"'`]*verify-pr-[a-z-]+\.mjs)(?![A-Za-z0-9_-])/g,
-        ),
-      ];
-      if (paths.some((match) => !trustedPath(match[1]))) return false;
-      const interpreted = [
-        ...source.matchAll(
-          /(?:^|[\n;|`]|&&)\s*([^\s"'`|;&]+)\s+["']?[^\s"'`]*verify-pr-[a-z-]+\.mjs(?![A-Za-z0-9_-])/g,
-        ),
-      ];
-      if (interpreted.some((match) => match[1] !== 'node')) return false;
-      const entryPoints = [
-        ...source.matchAll(
-          /node\s+["']?[^\s"'`]*verify-pr-[a-z-]+\.mjs(?![A-Za-z0-9_-])/g,
-        ),
-      ];
-      const calls = [
-        ...source.matchAll(
-          /node\s+(["']?)([^\s"'`]*verify-pr-([a-z-]+)\.mjs)(?![A-Za-z0-9_-])\1([^\n]*)/g,
-        ),
-      ];
-      if (calls.length !== entryPoints.length) return false;
-      const invocationPaths = new Set(
-        calls.map((match) => match.index + match[0].indexOf(match[2])),
+      ].some((prefix) => path.startsWith(prefix)) &&
+      /^(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/)verify-pr-[a-z-]+\.mjs$/.test(
+        path,
       );
-      const bareReference = (match) => {
-        if (invocationPaths.has(match.index)) return true;
-        if (["'", '"'].includes(source[match.index - 1])) return false;
-        const opening = source.lastIndexOf('`', match.index - 1);
-        const closing = source.indexOf('`', match.index + match[1].length);
-        const inline = source.slice(opening + 1, closing).trim();
-        if (opening >= 0 && closing >= 0 && inline === match[1]) {
-          // Citation delimiters must not continue a shell or JavaScript expression.
-          const lineStart = source.lastIndexOf('\n', opening - 1) + 1;
-          const beforeInline = source.slice(lineStart, opening);
-          const prior = source.slice(0, opening).trimEnd().at(-1);
-          if (
-            beforeInline.trim() !== '' ||
-            ['(', '[', '{', '/', '"', "'", '&', '|', ';', '<', '>'].includes(
-              prior,
-            ) ||
-            /[|&;<>]+\s*(?:#[^\n]*\s*)*$/.test(source.slice(0, opening))
-          ) {
-            return false;
-          }
-          const following = source.slice(closing + 1).trimStart();
-          if (
-            /^[)\]}]/.test(following) ||
-            following.startsWith('/') ||
-            /^\.[A-Za-z_$]/.test(following)
-          ) {
-            return false;
-          }
-          const lineEnd = source.indexOf('\n', closing + 1);
-          const trailing = source
-            .slice(closing + 1, lineEnd < 0 ? source.length : lineEnd)
-            .trim();
-          return !/[;|&$<>]/.test(trailing);
-        }
-        const lineStart = source.lastIndexOf('\n', match.index) + 1;
-        const prefix = source
-          .slice(lineStart, match.index)
-          .replace(/^[[\s('"]+/, '');
-        const nextNewline = source.indexOf('\n', match.index + match[1].length);
-        const suffix = source
-          .slice(
-            match.index + match[1].length,
-            nextNewline < 0 ? source.length : nextNewline,
+    const onlyDocumentedPrepareCalls = async (document) => {
+      // This is a bounded grammar for this recipe's executable examples, not
+      // a shell sandbox. Unknown executable shapes and every parse error fail.
+      const fragments = [];
+      const helperToken = (text) => /verify-pr(?:-|\\)/.test(text);
+      const dynamicImport = (text) => /\bnode\s[\s\S]*\bimport\s*\(/.test(text);
+      const fencedRanges = [];
+      const fence =
+        /^([ \t]*)```(bash|sh|shell|text)[^\n]*\n([\s\S]*?)^\1```[^\n]*$/gm;
+      for (const match of document.matchAll(fence)) {
+        fencedRanges.push([match.index, match.index + match[0].length]);
+        const body = match[3]
+          .split('\n')
+          .map((line) =>
+            line.startsWith(match[1]) ? line.slice(match[1].length) : line,
           )
-          .replace(/[\s'")\],.:]+$/, '');
-        return prefix === '' && suffix === '';
-      };
-      const prefixes = new Set([
-        '',
-        '`',
-        '`gate: "',
-        '(',
-        '(`',
-        'cd <pr-clone> &&',
-        '`cd <pr-clone> &&',
-        '(cd <pr-clone> &&',
-        '(`cd <pr-clone> &&',
-        'REVIEW_OPENAI_BASE_URL=<upstream-url>',
-      ]);
-      return (
-        calls.every((match) => {
-          const lineStart = source.lastIndexOf('\n', match.index) + 1;
-          const prefix = source.slice(lineStart, match.index).trim();
-          if (!prefixes.has(prefix) || !trustedPath(match[2])) return false;
-          return validHelperArguments(
-            match[3],
-            match[4],
-            prefix === '`gate: "',
+          .join('\n');
+        const executableText =
+          match[2] !== 'text' ||
+          /^\s*(?:node\s|cd\s|scripts\/|verify-pr-|NODE_OPTIONS\s*=|alias\s+node|function\s+node)/m.test(
+            body,
           );
-        }) &&
-        paths.every(bareReference) &&
+        const relevant = (text) =>
+          helperToken(text) ||
+          dynamicImport(text) ||
+          /NODE_OPTIONS|alias\s+node|function\s+node|node\s*\(\s*\)/.test(text);
+        if (executableText && relevant(body)) {
+          if (/bash\s+-[a-z]*c|<<-?\s*['"]?[A-Za-z_]/.test(body)) {
+            fragments.push({ source: body, quotedGate: false });
+          } else {
+            const logicalLines = [];
+            let current = '';
+            for (const line of body.split('\n')) {
+              current += `${current ? '\n' : ''}${line}`;
+              if (/\\[ \t]*$/.test(line)) continue;
+              logicalLines.push(current);
+              current = '';
+            }
+            if (current) logicalLines.push(current);
+            for (const command of logicalLines) {
+              if (relevant(command)) {
+                fragments.push({ source: command, quotedGate: false });
+              }
+            }
+          }
+        }
+      }
+      const inFences = (index) =>
+        fencedRanges.some(([start, end]) => index >= start && index < end);
+      const citation = (match) => {
+        const content = match[2].trim();
+        if (
+          !content.endsWith('.mjs') &&
+          /^[A-Za-z0-9_.~/<>:-]+$/.test(content) &&
+          /\.[A-Za-z0-9]+$/.test(content)
+        ) {
+          return true;
+        }
+        if (
+          !/^['"]?(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs['"]?$/.test(
+            content,
+          )
+        ) {
+          return false;
+        }
+        const opening = match.index;
+        const closing = opening + match[0].length;
+        const before = document.slice(0, opening);
+        const prior = before.trimEnd().at(-1);
+        if (
+          ['(', '[', '{', '/', '"', "'", '&', '|', ';', '<', '>', '$'].includes(
+            prior,
+          ) ||
+          /[|&;<>]+\s*(?:#[^\n]*\s*)*$/.test(before)
+        ) {
+          return false;
+        }
+        const following = document.slice(closing).trimStart();
+        if (
+          /^[)\]}]/.test(following) ||
+          following.startsWith('/') ||
+          /^\.[A-Za-z_$]/.test(following)
+        ) {
+          return false;
+        }
+        const lineEnd = document.indexOf('\n', closing);
+        const trailing = document
+          .slice(closing, lineEnd < 0 ? document.length : lineEnd)
+          .trim();
+        return !/[;|&$<>]/.test(trailing);
+      };
+      const spans = [...document.matchAll(/(`+)([\s\S]*?)\1/g)];
+      const inCodeSpan = (index) =>
+        spans.some(
+          (match) =>
+            index >= match.index && index < match.index + match[0].length,
+        );
+      for (const match of spans) {
+        if (
+          inFences(match.index) ||
+          (!helperToken(match[2]) && !dynamicImport(match[2]))
+        ) {
+          continue;
+        }
+        if (citation(match)) continue;
+        let source = match[2].trim();
+        let quotedGate = false;
+        if (source.startsWith('gate:')) {
+          const gate = source.match(/^gate:\s*"([\s\S]+)"$/);
+          if (!gate) return false;
+          source = gate[1];
+          quotedGate = true;
+        }
+        fragments.push({ source, quotedGate });
+      }
+      let lineStart = 0;
+      const rawLines = document.split('\n');
+      for (const [lineIndex, line] of rawLines.entries()) {
+        const inFence = inFences(lineStart);
+        const trimmed = line.trim();
+        const plainCitation =
+          /^[('"]*(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs[\s'")\],.:]*$/.test(
+            trimmed,
+          );
+        const followsNode =
+          lineIndex > 0 && /^node\s/.test(rawLines[lineIndex - 1].trim());
+        if (
+          !inFence &&
+          !inCodeSpan(lineStart) &&
+          (helperToken(line) || dynamicImport(line)) &&
+          (!plainCitation || followsNode)
+        ) {
+          const executable =
+            /^(?:node\s|cd\s|touch\s|sudo\s|env\s|[A-Za-z_][A-Za-z0-9_]*=\S+\s+node\s|ba?sh\s|["']?\/\S+\s|scripts\/\S*(?:\s|$)|verify-pr-\S*(?:\s|$))/.test(
+              trimmed,
+            );
+          if (executable) {
+            fragments.push({ source: line, quotedGate: false });
+          } else if (followsNode) {
+            let end = lineIndex + 1;
+            while (end < rawLines.length && rawLines[end].trim() !== '') {
+              end += 1;
+            }
+            fragments.push({
+              source: rawLines.slice(lineIndex - 1, end).join('\n'),
+              quotedGate: false,
+            });
+          }
+        }
+        if (
+          !inFence &&
+          !inCodeSpan(lineStart) &&
+          /NODE_OPTIONS\s*=|alias\s+node|function\s+node|node\s*\(\s*\)/.test(
+            line,
+          )
+        ) {
+          fragments.push({ source: line, quotedGate: false });
+        }
+        lineStart += line.length + 1;
+      }
+
+      const calls = [];
+      const staticText = (node, source) => {
+        const raw = source.slice(node.startIndex, node.endIndex);
+        if (node.type === 'word') return raw;
+        if (node.type === 'raw_string') return raw.slice(1, -1);
+        if (
+          node.type === 'string' &&
+          node.namedChildren.every((child) => child.type === 'string_content')
+        ) {
+          return raw.slice(1, -1);
+        }
+        if (node.type === 'command_name' && node.namedChildCount === 1) {
+          return staticText(node.namedChild(0), source);
+        }
+        return null;
+      };
+      const argumentNodes = (command) => {
+        const result = [];
+        for (let index = 0; index < command.childCount; index += 1) {
+          if (command.fieldNameForChild(index) === 'argument') {
+            result.push(command.child(index));
+          }
+        }
+        return result;
+      };
+      const walk = (node, visit) => {
+        visit(node);
+        for (const child of node.namedChildren) walk(child, visit);
+      };
+      const inspect = async ({ source: rawSource, quotedGate }) => {
+        const source = rawSource.replace(/\\\r?\n[ \t]*/g, (continuation) =>
+          ' '.repeat(continuation.length),
+        );
+        const parsed = source.replace(/<[^<>\r\n]+>/g, (placeholder) =>
+          'P'.repeat(placeholder.length),
+        );
+        let tree;
+        try {
+          tree = await parseShellCommand(parsed);
+        } catch {
+          return false;
+        }
+        try {
+          if (tree.rootNode.hasError) return false;
+          let valid = true;
+          const nested = [];
+          walk(tree.rootNode, (node) => {
+            if (!valid) return;
+            if (node.type === 'function_definition') {
+              const name = node.childForFieldName('name')?.text;
+              if (name === 'node') valid = false;
+              return;
+            }
+            if (node.type === 'variable_assignment') {
+              if (node.childForFieldName('name')?.text === 'NODE_OPTIONS') {
+                valid = false;
+              }
+              return;
+            }
+            if (node.type !== 'command') return;
+            const nameNode = node.childForFieldName('name');
+            const name = nameNode ? staticText(nameNode, source) : null;
+            const args = argumentNodes(node);
+            if (name === 'alias') {
+              if (
+                args.some((arg) =>
+                  /^node(?:=|$)/.test(staticText(arg, source) ?? ''),
+                )
+              ) {
+                valid = false;
+              }
+              return;
+            }
+            if (name === 'node') {
+              const modulePath = args[0] ? staticText(args[0], source) : null;
+              if (!modulePath || !helperToken(modulePath)) {
+                if (helperToken(node.text) || dynamicImport(node.text)) {
+                  valid = false;
+                }
+                return;
+              }
+              const family = modulePath.match(
+                /\/verify-pr-([a-z-]+)\.mjs$/,
+              )?.[1];
+              if (
+                !family ||
+                !modulePath.endsWith(`verify-pr-${family}.mjs`) ||
+                !trustedPath(modulePath)
+              ) {
+                valid = false;
+                return;
+              }
+              let statement = node;
+              while (
+                statement.parent &&
+                [
+                  'list',
+                  'redirected_statement',
+                  'pipeline',
+                  'negated_command',
+                ].includes(statement.parent.type)
+              ) {
+                statement = statement.parent;
+              }
+              const lineStart =
+                source.lastIndexOf('\n', nameNode.startIndex) + 1;
+              const prefix = source
+                .slice(lineStart, nameNode.startIndex)
+                .trim();
+              if (
+                ![
+                  '',
+                  '(',
+                  '(cd <pr-clone> &&',
+                  'cd <pr-clone> &&',
+                  'REVIEW_OPENAI_BASE_URL=<upstream-url>',
+                ].includes(prefix)
+              ) {
+                valid = false;
+                return;
+              }
+              const lineEnd = source.indexOf('\n', statement.endIndex);
+              const trailing = source
+                .slice(
+                  statement.endIndex,
+                  lineEnd < 0 ? source.length : lineEnd,
+                )
+                .trim();
+              const background = family === 'model-proxy' && trailing === '&';
+              if (!background && !/^[;)\]}]*$/.test(trailing)) {
+                valid = false;
+                return;
+              }
+              const argumentEnd = background
+                ? source.indexOf('&', statement.endIndex) + 1
+                : statement.endIndex;
+              const rawArguments = source.slice(args[0].endIndex, argumentEnd);
+              if (!validHelperArguments(family, rawArguments, quotedGate)) {
+                valid = false;
+                return;
+              }
+              calls.push(family);
+              return;
+            }
+            const shellIndex = args.findIndex(
+              (arg) => staticText(arg, source) === '-lc',
+            );
+            args.forEach((arg, index) => {
+              const raw = source.slice(arg.startIndex, arg.endIndex);
+              if (!helperToken(raw)) return;
+              if (
+                ['bash', 'sh', 'docker'].includes(name) &&
+                shellIndex >= 0 &&
+                index > shellIndex &&
+                ['raw_string', 'string'].includes(arg.type)
+              ) {
+                const script = staticText(arg, source);
+                if (script) nested.push(script);
+              } else {
+                valid = false;
+              }
+            });
+            if (
+              nameNode &&
+              helperToken(source.slice(nameNode.startIndex, nameNode.endIndex))
+            ) {
+              valid = false;
+            }
+          });
+          if (!valid) return false;
+          for (const source of nested) {
+            if (!(await inspect({ source, quotedGate: false }))) return false;
+          }
+          return true;
+        } finally {
+          tree.delete();
+        }
+      };
+      for (const fragment of fragments) {
+        if (!(await inspect(fragment))) return false;
+      }
+      return (
         calls.length === 24 &&
-        calls.filter((match) => match[3] === 'prepare').length === 4 &&
-        calls.filter((match) => match[3] === 'check').length === 3 &&
-        calls.filter((match) => match[3] === 'watch-state').length === 12 &&
-        calls.filter((match) => match[3] === 'watch-gate').length === 3 &&
-        calls.filter((match) => match[3] === 'model-proxy').length === 1 &&
-        calls.filter((match) => match[3] === 'credential-scan').length === 1
+        calls.filter((family) => family === 'prepare').length === 4 &&
+        calls.filter((family) => family === 'check').length === 3 &&
+        calls.filter((family) => family === 'watch-state').length === 12 &&
+        calls.filter((family) => family === 'watch-gate').length === 3 &&
+        calls.filter((family) => family === 'model-proxy').length === 1 &&
+        calls.filter((family) => family === 'credential-scan').length === 1
       );
     };
-    expect(onlyDocumentedPrepareCalls(skill)).toBe(true);
+    expect(await onlyDocumentedPrepareCalls(skill)).toBe(true);
     for (const valid of [
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
       '<n> --repo <owner>/<repo> --execution vm --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json --attestation no-host-mounts',
       '<n> --repo <owner>/<repo> --execution host --approval https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001 --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
     ]) {
       expect(
-        onlyDocumentedPrepareCalls(skill.replace(basic.trim(), valid)),
+        await onlyDocumentedPrepareCalls(skill.replace(basic.trim(), valid)),
       ).toBe(true);
     }
     for (const hostile of [
@@ -1088,7 +1333,8 @@ describe('local container recipe pins', () => {
       '<n> --repo <owner>/<repo> --execution=host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
     ]) {
       expect(
-        onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
+        await onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
+        hostile,
       ).toBe(false);
     }
     const injected =
@@ -1099,11 +1345,11 @@ describe('local container recipe pins', () => {
     );
     for (const hostile of [injected, backtickInjected]) {
       expect(
-        onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
+        await onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
       ).toBe(false);
     }
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace(
           basic.trim(),
           '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 0 --reason why --context-out /tmp/pr.json',
@@ -1111,7 +1357,7 @@ describe('local container recipe pins', () => {
       ),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(skill.replace('--repo ', '--repo=')),
+      await onlyDocumentedPrepareCalls(skill.replace('--repo ', '--repo=')),
     ).toBe(true);
     const invocation = `node ${script}`;
     const unsafeHost =
@@ -1129,12 +1375,12 @@ describe('local container recipe pins', () => {
     ]) {
       const changed = skill.replace(invocation, replacement);
       expect(
-        onlyDocumentedPrepareCalls(changed.replace(basic.trim(), tail)),
+        await onlyDocumentedPrepareCalls(changed.replace(basic.trim(), tail)),
       ).toBe(valid);
     }
     for (const hostileValue of ['<(/tmp/evil)', '/tmp/x>/tmp/hijacked']) {
       expect(
-        onlyDocumentedPrepareCalls(
+        await onlyDocumentedPrepareCalls(
           skill.replace(
             '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
             `--context-out ${hostileValue}`,
@@ -1144,12 +1390,12 @@ describe('local container recipe pins', () => {
       ).toBe(false);
     }
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         `${skill}\nsudo -n true; node /tmp/payload/verify-pr-prepare.mjs ${basic.trim()}`,
       ),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace(
           invocation,
           `${script.slice(0, script.lastIndexOf('/') + 1)}../verify-pr-prepare.mjs`,
@@ -1157,7 +1403,7 @@ describe('local container recipe pins', () => {
       ),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace(logged, `${logged} > /tmp/after`),
       ),
     ).toBe(false);
@@ -1199,14 +1445,14 @@ describe('local container recipe pins', () => {
     for (const [family, call] of helperCalls) {
       expect(skill, family).toContain(call);
       expect(
-        onlyDocumentedPrepareCalls(
+        await onlyDocumentedPrepareCalls(
           skill.replace(call, `${call} ; touch /tmp/should-not-write`),
         ),
         family,
       ).toBe(false);
     }
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace(
           '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
           '--context-out "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)"',
@@ -1217,7 +1463,7 @@ describe('local container recipe pins', () => {
       '> ~/.cache/qwen-verify/pr<n>/proxy.json 2> ~/.cache/qwen-verify/pr<n>/proxy.err &';
     expect(skill, 'model-proxy').toContain(proxyLogging);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace(
           proxyLogging,
           `${proxyLogging} ; touch /tmp/should-not-write`,
@@ -1226,7 +1472,7 @@ describe('local container recipe pins', () => {
       'model-proxy',
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace(
           '"$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)"',
           '"$(cat /tmp/evil)"',
@@ -1234,20 +1480,20 @@ describe('local container recipe pins', () => {
       ),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         `${skill}\nnode <trusted-clone>/scripts/verify-pr-unknown.mjs <n> --start`,
       ),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(skill.replace('gate: "node ', 'node ')),
+      await onlyDocumentedPrepareCalls(skill.replace('gate: "node ', 'node ')),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         skill.replace('--cli <absolute qwen>"', '--cli <absolute qwen>'),
       ),
     ).toBe(false);
     expect(
-      onlyDocumentedPrepareCalls(
+      await onlyDocumentedPrepareCalls(
         `${skill}\n\`verify-pr-watch-state.mjs\`; touch /tmp/should-not-write`,
       ),
     ).toBe(false);
@@ -1287,16 +1533,93 @@ describe('local container recipe pins', () => {
           .replace(').then', '\n).then'),
       ],
     ]) {
-      expect(onlyDocumentedPrepareCalls(`${skill}\n${hostile}`), label).toBe(
-        false,
-      );
+      expect(
+        await onlyDocumentedPrepareCalls(`${skill}\n${hostile}`),
+        label,
+      ).toBe(false);
     }
+    const structuralHostiles = [
+      [
+        'concatenated dynamic import',
+        "node -e 'import(`/trusted-scripts/verify-pr-watch`+`-state.mjs`).then(()=>{})'",
+      ],
+      [
+        'fully split dynamic import',
+        "node -e 'import(`/trusted-scripts/`+`verify`+`-pr-watch-state.mjs`).then(()=>{})'",
+      ],
+      [
+        'multiline command substitution',
+        'printf "%s" `printf "" &&\n/trusted-scripts/verify-pr-watch-state.mjs`',
+      ],
+      [
+        'bare helper after cd',
+        'cd <pr-clone> && verify-pr-watch-gate.mjs <n> --check --claim',
+      ],
+      [
+        'cwd-relative helper after cd',
+        'cd <pr-clone> && scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+      ],
+      [
+        'node function form shadow',
+        'node() { :; }; node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+      ],
+      [
+        'node function keyword shadow',
+        'function node { :; }; node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+      ],
+      [
+        'node alias shadow',
+        "alias node='node --require=<pr-clone>/payload.cjs'; node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim",
+      ],
+      [
+        'inherited node options',
+        'NODE_OPTIONS=--require=<pr-clone>/payload.cjs node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+      ],
+      [
+        'escaped helper filename',
+        String.raw`node /trusted-scripts/verify-pr\-watch-gate.mjs <n> --check --claim`,
+      ],
+      [
+        'glob helper filename',
+        'node /trusted-scripts/verify-pr-*.mjs <n> --check --claim',
+      ],
+      [
+        'invalid parse with complete census',
+        'node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim "unterminated',
+      ],
+    ];
+    for (const [label, hostile] of structuralHostiles) {
+      expect(
+        await onlyDocumentedPrepareCalls(`${skill}\n${hostile}`),
+        label,
+      ).toBe(false);
+    }
+    const heredoc = [
+      "cat <<'TEXT'",
+      'node /trusted-scripts/verify-pr-watch-state.mjs <n> --release',
+      'TEXT',
+    ].join('\n');
     expect(
-      onlyDocumentedPrepareCalls(`${skill}\n\`verify-pr-check.mjs\`.`),
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`\`\`bash\n${heredoc}\n\`\`\``,
+      ),
+      'here-doc body is not executable',
+    ).toBe(true);
+    const genuineGate =
+      'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release';
+    expect(
+      await onlyDocumentedPrepareCalls(skill.replace(genuineGate, heredoc)),
+      'a here-doc citation cannot replace a genuine invocation',
+    ).toBe(false);
+    expect(
+      await onlyDocumentedPrepareCalls(`${skill}\nverify-pr-check.mjs`),
+    ).toBe(true);
+    expect(
+      await onlyDocumentedPrepareCalls(`${skill}\n\`verify-pr-check.mjs\`.`),
     ).toBe(true);
     for (const interpreter of ['/bin/sh', '"/bin/sh"', "'/bin/sh'"]) {
       expect(
-        onlyDocumentedPrepareCalls(
+        await onlyDocumentedPrepareCalls(
           `${skill}\n${interpreter} <clone>/scripts/verify-pr-watch-gate.mjs <n> --check --claim`,
         ),
         interpreter,
@@ -1496,8 +1819,35 @@ describe('local container recipe pins', () => {
       "`boundary.json` retains prepare's `waived` executionApproval",
     );
     expect(english).not.toContain('`boundary.json` records container mode');
-    expect(english).toContain('4. **Pre-seed execution approval.**');
-    expect(english).toContain('5. **Declaration.**');
+    for (const [document, titles] of [
+      [
+        english,
+        [
+          '1. **Image.**',
+          '2. **Trusted scripts, PR clone, model proxy.**',
+          '3. **Pre-seed execution approval.**',
+          '4. **Offline Maven repository, seeded inside a boundary.**',
+          '5. **Declaration.**',
+        ],
+      ],
+      [
+        chinese,
+        [
+          '1. **镜像。**',
+          '2. **可信脚本、PR 克隆、模型代理。**',
+          '3. **预置前执行批准。**',
+          '4. **离线 Maven 仓库，在边界内预置。**',
+          '5. **声明。**',
+        ],
+      ],
+    ]) {
+      let previous = -1;
+      for (const title of titles) {
+        const position = document.indexOf(title);
+        expect(position, title).toBeGreaterThan(previous);
+        previous = position;
+      }
+    }
     expect(english).toContain(
       'verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r>',
     );
@@ -1512,8 +1862,6 @@ describe('local container recipe pins', () => {
       '`boundary.json` 保留 prepare 生成、与宿主 context 一致的 `waived` executionApproval',
     );
     expect(chinese).not.toContain('`boundary.json` 记录 container 模式');
-    expect(chinese).toContain('4. **预置前执行批准。**');
-    expect(chinese).toContain('5. **声明。**');
     expect(chinese).toContain(
       'verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r>',
     );
