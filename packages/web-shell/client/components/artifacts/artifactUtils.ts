@@ -770,6 +770,7 @@ export interface ArtifactLibrarySessionJumpDeps {
   setPendingJumpArtifactOpen: (
     request: PendingArtifactJumpOpenRequest | undefined,
   ) => void;
+  isCurrent?: () => boolean;
   loadSidebarSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -783,7 +784,8 @@ export interface ArtifactLibrarySessionJumpDeps {
  * pending artifact open is armed only AFTER unarchive resolves and immediately
  * before `loadSidebarSession`, so `resolvePendingArtifactJumpOpen` does not
  * cancel the request while the shell is still parked on the old session during
- * the awaited unarchive RPC.
+ * the awaited unarchive RPC. `isCurrent()` is checked after the awaited
+ * unarchive so a navigation started meanwhile is never overridden.
  */
 export async function runArtifactLibrarySessionJump(
   deps: ArtifactLibrarySessionJumpDeps,
@@ -799,6 +801,7 @@ export async function runArtifactLibrarySessionJump(
     unarchiveWorkspaceSessions,
     getPendingJumpArtifactOpen,
     setPendingJumpArtifactOpen,
+    isCurrent,
     loadSidebarSession,
     reportError,
   } = deps;
@@ -816,12 +819,14 @@ export async function runArtifactLibrarySessionJump(
       } else {
         await unarchivePrimarySession(sessionId);
       }
+      if (isCurrent && !isCurrent()) return;
     }
     if (artifactId) {
       setPendingJumpArtifactOpen({ sessionId, artifactId });
     }
     await loadSidebarSession(sessionId, targetCwd);
   } catch (error) {
+    if (isCurrent && !isCurrent()) return;
     const current = getPendingJumpArtifactOpen();
     if (
       current?.sessionId === sessionId &&

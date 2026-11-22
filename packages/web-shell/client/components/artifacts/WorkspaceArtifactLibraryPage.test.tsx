@@ -409,6 +409,74 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       'sess-already',
       '/work/secondary',
     );
+
+    // R2-2: user navigates to another session while unarchive is in flight ->
+    // isCurrent() flips false -> neither arms pending open nor loads old target.
+    let stalePending: PendingArtifactJumpOpenRequest | undefined;
+    let resolveStaleUnarchive!: () => void;
+    let jumpStillCurrent = true;
+    const loadStale = vi.fn();
+    const stalePromise = runArtifactLibrarySessionJump({
+      sessionId: 'sess-stale-a',
+      archiveState: 'archived',
+      artifactId: 'art-stale-a',
+      targetCwd: '/work/proj',
+      primaryCwd: '/work/proj',
+      showChat: vi.fn(),
+      unarchivePrimarySession: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveStaleUnarchive = resolve;
+          }),
+      ),
+      unarchiveWorkspaceSessions: vi.fn(),
+      getPendingJumpArtifactOpen: () => stalePending,
+      setPendingJumpArtifactOpen: (req) => {
+        stalePending = req;
+      },
+      isCurrent: () => jumpStillCurrent,
+      loadSidebarSession: loadStale,
+      reportError: vi.fn(),
+    });
+    // Simulate user clicking session B in the sidebar before unarchive finishes
+    jumpStillCurrent = false;
+    resolveStaleUnarchive();
+    await stalePromise;
+    expect(loadStale).not.toHaveBeenCalled();
+    expect(stalePending).toBeUndefined();
+
+    // R2-3: cross-workspace unarchive returning errors[] throws before arming
+    // or loading and reports the error.
+    let errPending: PendingArtifactJumpOpenRequest | undefined;
+    const loadOnErr = vi.fn();
+    const reportOnErr = vi.fn();
+    await runArtifactLibrarySessionJump({
+      sessionId: 'sess-archiving',
+      archiveState: 'archived',
+      artifactId: 'art-archiving',
+      targetCwd: '/work/secondary',
+      primaryCwd: '/work/primary',
+      showChat: vi.fn(),
+      unarchivePrimarySession: vi.fn(),
+      unarchiveWorkspaceSessions: vi.fn().mockResolvedValue({
+        unarchived: [],
+        alreadyActive: [],
+        notFound: [],
+        errors: [{ sessionId: 'sess-archiving', error: 'session_archiving' }],
+      }),
+      getPendingJumpArtifactOpen: () => errPending,
+      setPendingJumpArtifactOpen: (req) => {
+        errPending = req;
+      },
+      loadSidebarSession: loadOnErr,
+      reportError: reportOnErr,
+    });
+    expect(loadOnErr).not.toHaveBeenCalled();
+    expect(errPending).toBeUndefined();
+    expect(reportOnErr).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'session_archiving' }),
+      'Failed to open session',
+    );
   });
 
   it('renders rows with displayName fallback and archive badges, previews workspace-file and metadata-only managed artifacts without loading a session, filters client-side and resets filter on workspace change, and bounds rendered rows with Show more', async () => {
@@ -694,7 +762,18 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     });
     await flush();
 
-    // Passive auto-selection of 'snap-race' must NOT jump the user out of the library
+    // R2-5: Passive auto-selection must skip the cold jump row ('snap-cold-active')
+    // and select the next openable row ('snap-race'), without jumping out of the library.
+    expect(mocks.readSessionArtifactContent).toHaveBeenLastCalledWith(
+      'sess-live',
+      'snap-race',
+      expect.any(Object),
+    );
+    expect(mocks.readSessionArtifactContent).not.toHaveBeenCalledWith(
+      'sess-cold-active',
+      expect.anything(),
+      expect.anything(),
+    );
     expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
 
     const rows = container.querySelectorAll(
@@ -798,10 +877,16 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     );
     expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
 
-    // Clear live state -> subscribeLiveSessions fires -> clicking the row now jumps
+    // Clear live state -> subscribeLiveSessions fires -> re-render drops the
+    // now-cold auto-selected inline detail pane before any click (R1-16)
     await act(async () => {
       store.applyLiveState('/work/proj', []);
     });
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-detail"]',
+      ),
+    ).toBeNull();
     const rowBtn = container
       .querySelector('[data-testid="workspace-artifact-library-row"]')
       ?.querySelector('button') as HTMLButtonElement;

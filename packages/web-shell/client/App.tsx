@@ -18587,6 +18587,10 @@ export function App({
     }
   }, [createNewSession, onSessionIdChange]);
 
+  const artifactLibraryJumpGenRef = useRef(0);
+  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
+    undefined,
+  );
   const loadSidebarSession = useCallback(
     async (
       sessionId: string,
@@ -18594,6 +18598,9 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      if (artifactLibraryJumpDispatchingRef.current !== sessionId) {
+        artifactLibraryJumpGenRef.current += 1;
+      }
       if (
         pendingJumpArtifactOpenRef.current &&
         pendingJumpArtifactOpenRef.current.sessionId !== sessionId
@@ -18686,6 +18693,7 @@ export function App({
       archiveState: 'active' | 'archived',
       artifactId?: string,
     ) => {
+      const jumpGen = ++artifactLibraryJumpGenRef.current;
       const targetCwd =
         resolveWorkspaceMaintenanceTargetCwd() ??
         workspace.capabilities?.workspaceCwd;
@@ -18701,7 +18709,15 @@ export function App({
           workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
         getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
         setPendingJumpArtifactOpen,
-        loadSidebarSession: (id, cwd) => loadSidebarSession(id, cwd),
+        isCurrent: () => artifactLibraryJumpGenRef.current === jumpGen,
+        loadSidebarSession: (id, cwd) => {
+          artifactLibraryJumpDispatchingRef.current = id;
+          try {
+            return loadSidebarSession(id, cwd);
+          } finally {
+            artifactLibraryJumpDispatchingRef.current = undefined;
+          }
+        },
         reportError,
       });
     },
