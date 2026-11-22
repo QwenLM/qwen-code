@@ -641,6 +641,13 @@ export function readOnlyManagedSessionSnapshot(value: unknown) {
       throw corrupt('snapshot resource is missing.');
     }
     if (resourceRevisions.get(ref.resourceId)![0] > revision) {
+      // A pre-fix config_install edge may name a child that a later
+      // transaction committed. Ignore the stale edge; the child's own
+      // reference still registers it.
+      if (LEGACY_EXTENSION_CLOSURE_KINDS.has(ref.kind)) {
+        requireSameRef(stored.ref, ref);
+        continue;
+      }
       throw corrupt('snapshot dependency was not committed at its use.');
     }
     requireSameRef(stored.ref, ref);
@@ -809,12 +816,17 @@ const EXTENSION_RECORD_KINDS = new Set(
 );
 
 // Resources a pre-closure-edge snapshot may name without having staged them:
-// a bundle's contributions child and the contributions manifest's parts. The
-// inspection, native-page and commit walks degrade an absent one instead of
-// condemning the snapshot. One constant so the walks cannot drift (R7-1).
+// extension contribution children, plus the children a pre-fix config_install
+// record named. The inspection, native-page and commit walks degrade an absent
+// or later-committed one instead of condemning the snapshot. One constant so
+// the walks cannot drift (R7-1).
 const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
   'managed-extension-contributions',
   'managed-extension-contributions-part',
+  'managed-extension-config-bundle',
+  'managed-extension-root',
+  'managed-extension-stage-ack',
+  'managed-extension-enable-ack',
 ]);
 
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
@@ -3951,6 +3963,7 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-config_install' ||
     ref.kind === 'managed-extension-config-bundle' ||
     ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
@@ -3958,6 +3971,12 @@ export function collectNestedResourceRefs(
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
   ) {
+    // A config_install record names its own bundle, root snapshot and the
+    // stage/enable acknowledgements (managed-session-resource-references.ts),
+    // and its predecessor through previousRecordRef. The commit closes over
+    // the record's own edges but not the predecessor chain — re-closing it
+    // would grow linearly with the session's config history (R1-2), and a
+    // pre-fix predecessor's children were never persisted (R1-1).
     const record = parseManagedSessionRecordJson(
       bytes.toString('utf8'),
       MANAGED_SESSION_LIMITS.maxEventBytes,
@@ -3966,6 +3985,16 @@ export function collectNestedResourceRefs(
       return collectRefs([(record as { messagesRef?: unknown }).messagesRef]);
     if (ref.kind === 'managed-hook-message-chunks')
       return collectRefs((record as { parts: unknown[] }).parts);
+    if (ref.kind === 'managed-config_install') {
+      // Exclude previousRecordRef: it belongs to the predecessor's own
+      // transaction. Re-closing the chain would grow linearly (R1-2); pre-fix
+      // records can also name children that were never uploaded (R1-1).
+      const { previousRecordRef: _, ...ownEdges } = asRecord(
+        record,
+        'config install record',
+      );
+      return collectRefs([ownEdges]);
+    }
     return collectRefs([record]);
   }
   // A result manifest names its page envelopes: they are Session resources
@@ -4005,6 +4034,7 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-config_install',
       'managed-extension-config-bundle',
       'managed-extension-contributions',
       'managed-definition',

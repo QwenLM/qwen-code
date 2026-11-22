@@ -14,7 +14,7 @@
  * `system/ui_telemetry` chat record `logUserFeedback` appends to the
  * session JSONL.
  */
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DaemonClient } from '@qwen-code/sdk';
@@ -99,8 +99,16 @@ async function startRig(opts: {
     'Content-Type': 'application/json',
   };
 
-  const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, workspaceDir, () =>
-    new Storage(workspaceDir).getProjectDir(),
+  // The daemon canonicalizes the workspace by realpath (macOS `/var` →
+  // `/private/var`), so the session JSONL lands under the realpath'd project
+  // hash. Mirror that here, or the polls below read a directory nothing
+  // writes and never observe the record (same seam as the harness's
+  // mcpApprovals keying).
+  const canonicalWorkspaceDir = realpathSync(workspaceDir);
+  const projectDir = Storage.runWithRuntimeBaseDir(
+    qwenHome,
+    canonicalWorkspaceDir,
+    () => new Storage(canonicalWorkspaceDir).getProjectDir(),
   );
   const feedbackRecords = (sessionId: string): FeedbackRecord[] => {
     let raw: string;
