@@ -6,7 +6,10 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ManagedSessionEvent } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
-import { monitorNotificationText } from './hosted-monitor-notification.js';
+import {
+  boundMonitorObservationLines,
+  monitorNotificationText,
+} from './hosted-monitor-notification.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 
 describe('monitor task-notification envelope', () => {
@@ -57,6 +60,50 @@ describe('monitor task-notification envelope', () => {
     expect(text).toContain('...[truncated]');
     expect(text).not.toContain('x'.repeat(2_000) + 'x');
     expect(text).toContain('\nshort</result>');
+  });
+
+  it('keeps an already bounded observation window unchanged', () => {
+    const lines = ['first', '第二行', 'third'];
+    expect(boundMonitorObservationLines(lines)).toEqual(lines);
+    expect(boundMonitorObservationLines([])).toEqual([]);
+  });
+
+  it('accepts exactly 1000 lines without adding a marker', () => {
+    const lines = Array.from({ length: 1_000 }, (_, index) => `row-${index}`);
+    expect(boundMonitorObservationLines(lines)).toEqual(lines);
+  });
+
+  it('accepts exactly 64 KiB of line text without adding a marker', () => {
+    const lines = ['x'.repeat(64 * 1024)];
+    expect(boundMonitorObservationLines(lines)).toEqual(lines);
+  });
+
+  it('counts the omission marker within the 1000-line window budget', () => {
+    const lines = Array.from({ length: 1_001 }, (_, index) => `row-${index}`);
+    const bounded = boundMonitorObservationLines(lines);
+    expect(bounded).toHaveLength(1_000);
+    expect(bounded.slice(0, -1)).toEqual(lines.slice(0, 999));
+    expect(bounded.at(-1)).toBe('... 2 more lines omitted');
+  });
+
+  it('bounds UTF-8 bytes without slicing a multibyte character', () => {
+    const lines = Array.from({ length: 300 }, () => '界'.repeat(1_000));
+    const bounded = boundMonitorObservationLines(lines);
+    const marker = bounded.at(-1)!;
+    const retained = bounded.slice(0, -1);
+    expect(Buffer.byteLength(bounded.join('\n'), 'utf8')).toBeLessThanOrEqual(
+      64 * 1024,
+    );
+    expect(retained).toEqual(lines.slice(0, retained.length));
+    expect(marker).toBe(
+      `... ${lines.length - retained.length} more lines omitted`,
+    );
+    expect(marker).not.toContain('界');
+  });
+
+  it('omits an individually over-budget line instead of slicing it', () => {
+    const bounded = boundMonitorObservationLines(['x'.repeat(70_000), 'next']);
+    expect(bounded).toEqual(['... 2 more lines omitted']);
   });
 });
 

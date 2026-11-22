@@ -14,6 +14,7 @@ import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
+import { monitorNotificationText } from './hosted-monitor-notification.js';
 import {
   HostedMonitorLoop,
   type MonitorLoopClock,
@@ -449,6 +450,94 @@ describe('HostedMonitorLoop', () => {
         '</task-notification>',
       ].join('\n'),
     });
+    await closeLoop(rig);
+  });
+
+  it('bounds one debounce observation and shares it with the notification', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({ maxEvents: 2 }));
+    const lines = Array.from({ length: 1_005 }, (_, index) => `row-${index}`);
+    for (const line of lines) rig.executor.onLine?.(line);
+    await rig.clock.advance(1_000);
+
+    const body = committed(rig.authority);
+    expect(body).toMatchObject({ observationSequence: 1, notifiedThrough: 1 });
+    const observation = JSON.parse(
+      (await harness.store.read(body.lastObservationRef!)).toString(),
+    ) as { lines: string[] };
+    expect(observation.lines).toHaveLength(1_000);
+    expect(observation.lines.slice(0, -1)).toEqual(lines.slice(0, 999));
+    expect(observation.lines.at(-1)).toBe('... 6 more lines omitted');
+    expect(
+      Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
+    ).toBeLessThanOrEqual(64 * 1024);
+
+    const events = rig.authority.readEvents().slice(-3);
+    expect(events.map((event) => event.kind)).toEqual([
+      'domain.committed',
+      'input.accepted',
+      'wake.requested',
+    ]);
+    const notification = JSON.parse(
+      (
+        await harness.store.read(events[1].payload['contentRef'] as never)
+      ).toString(),
+    ) as { text: string };
+    expect(notification.text).toBe(
+      monitorNotificationText({
+        monitorId: 'monitor-1',
+        toolUseId: 'call-monitor-1',
+        description: 'tail -f build.log',
+        eventCount: 1,
+        lines: observation.lines,
+      }),
+    );
+    await closeLoop(rig);
+  });
+
+  it('bounds the final observation flushed by the watch exit', async () => {
+    const harness = await createHarness();
+    const rig = await openLoop(harness);
+    await rig.loop.start(params({ maxEvents: 2 }));
+    const lines = Array.from({ length: 1_005 }, () => '界'.repeat(40));
+    for (const line of lines) rig.executor.onLine?.(line);
+    await rig.executor.exitNaturally();
+    await rig.loop.done;
+
+    const body = committed(rig.authority);
+    expect(body).toMatchObject({ observationSequence: 1, notifiedThrough: 1 });
+    const observation = JSON.parse(
+      (await harness.store.read(body.lastObservationRef!)).toString(),
+    ) as { lines: string[] };
+    expect(observation.lines.length).toBeLessThanOrEqual(1_000);
+    expect(
+      Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
+    ).toBeLessThanOrEqual(64 * 1024);
+    const retained = observation.lines.slice(0, -1);
+    expect(retained).toEqual(lines.slice(0, retained.length));
+    expect(observation.lines.at(-1)).toBe(
+      `... ${lines.length - retained.length} more lines omitted`,
+    );
+
+    const inputEvent = rig.authority
+      .readEvents()
+      .filter((event) => event.kind === 'input.accepted')
+      .at(-1)!;
+    const notification = JSON.parse(
+      (
+        await harness.store.read(inputEvent.payload['contentRef'] as never)
+      ).toString(),
+    ) as { text: string };
+    expect(notification.text).toBe(
+      monitorNotificationText({
+        monitorId: 'monitor-1',
+        toolUseId: 'call-monitor-1',
+        description: 'tail -f build.log',
+        eventCount: 1,
+        lines: observation.lines,
+      }),
+    );
     await closeLoop(rig);
   });
 

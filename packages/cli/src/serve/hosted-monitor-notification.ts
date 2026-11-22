@@ -27,6 +27,45 @@ function truncateEventLine(line: string): string {
     : line;
 }
 
+const OBSERVATION_WINDOW_MAX_LINES = 1000;
+const OBSERVATION_WINDOW_MAX_BYTES = 64 * 1024;
+
+export function boundMonitorObservationLines(
+  lines: readonly string[],
+): string[] {
+  const textBytes = lines.reduce(
+    (total, line) => total + Buffer.byteLength(line, 'utf8') + 1,
+    lines.length > 0 ? -1 : 0,
+  );
+  if (
+    lines.length <= OBSERVATION_WINDOW_MAX_LINES &&
+    textBytes <= OBSERVATION_WINDOW_MAX_BYTES
+  ) {
+    return [...lines];
+  }
+
+  const retained: string[] = [];
+  let retainedBytes = 0;
+  for (const line of lines) {
+    if (retained.length >= OBSERVATION_WINDOW_MAX_LINES - 1) break;
+    const omitted = lines.length - retained.length - 1;
+    const markerBytes = Buffer.byteLength(
+      `... ${omitted} more lines omitted`,
+      'utf8',
+    );
+    const nextBytes =
+      retainedBytes +
+      (retained.length > 0 ? 1 : 0) +
+      Buffer.byteLength(line, 'utf8');
+    if (nextBytes + 1 + markerBytes > OBSERVATION_WINDOW_MAX_BYTES) break;
+    retained.push(line);
+    retainedBytes = nextBytes;
+  }
+
+  const omitted = lines.length - retained.length;
+  return [...retained, `... ${omitted} more lines omitted`];
+}
+
 /** The text of one due monitor observation, wrapped for its matching turn. */
 export function monitorNotificationText(params: {
   readonly monitorId: string;
