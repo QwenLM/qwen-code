@@ -6081,7 +6081,10 @@ export function WebShellSidebar({
               !completedUnread &&
               !backgroundRunning ? (
               <span
-                className={styles.sessionStatusDot}
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
