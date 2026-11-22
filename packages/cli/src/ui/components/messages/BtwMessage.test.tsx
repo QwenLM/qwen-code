@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
+import { Box } from 'ink';
 import { act } from '@testing-library/react';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
@@ -39,6 +40,16 @@ const PAGE_DOWN = '\x1b[6~';
 
 const longAnswer = (lines: number) =>
   Array.from({ length: lines }, (_, i) => `line-${i}`).join('\n');
+
+/** Rows between the question line and the `Answering...` status line: the
+ *  pending margin blank plus the answer's rendered rows. (The status `+` and
+ *  `Answering...` are separate Text nodes, so anchor on `Answering...`.) */
+const pendingAnswerRows = (frame: string): number => {
+  const lines = frame.split('\n');
+  const start = lines.findIndex((line) => line.includes('/btw'));
+  const end = lines.findIndex((line) => line.includes('Answering...'));
+  return end - start - 1;
+};
 
 describe('BtwMessage', () => {
   it('is wrapped in React.memo to avoid unnecessary layout rerenders', () => {
@@ -320,20 +331,154 @@ describe('BtwMessage', () => {
     const wideAnswer = (lines: number) =>
       Array.from(
         { length: lines },
-        (_, i) => `line-${i}${'x'.repeat(120)}`,
+        (_, i) => `line-${i}${'x'.repeat(108)}`,
       ).join('\n');
     const { lastFrame } = renderWithProviders(
-      <BtwMessage
-        btw={{ question: 'q', answer: wideAnswer(30), isPending: true }}
-        containerWidth={60}
-        maxAnswerRows={5}
-      />,
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer: wideAnswer(30), isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
     );
 
     const output = lastFrame() ?? '';
-    // Each line is 127 columns wide and wraps to 3 rows at content width
-    // 56, so only the last line fits in the 5-row budget.
+    // Each line is 115 columns wide and wraps to 3 rows at content width
+    // 56 (2 at the 60-column base width), so only the last line fits in the
+    // 5-row budget — charging at the base width would wrongly fit two.
     expect(output).toContain('line-29');
     expect(output).not.toContain('line-28');
+    expect(pendingAnswerRows(output)).toBe(4);
+  });
+
+  it('charges wide characters at their display width when tailing', () => {
+    const wideAnswer = (lines: number) =>
+      Array.from(
+        { length: lines },
+        (_, i) => `line-${i}${'汉'.repeat(36)}`,
+      ).join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer: wideAnswer(30), isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // Each line is 79 display columns (7 + 36 wide chars) but only 43
+    // characters, so it wraps to 2 rows at content width 56 — measuring by
+    // string length would charge 1 row and wrongly fit five lines.
+    expect(output).toContain('line-29');
+    expect(output).toContain('line-28');
+    expect(output).not.toContain('line-27');
+    expect(pendingAnswerRows(output)).toBe(5);
+  });
+
+  it('keeps a trailing-newline answer visible while streaming', () => {
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{
+            question: 'q',
+            answer: `${'x'.repeat(300)}\n`,
+            isPending: true,
+          }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The trailing newline must not blank the answer: the 300-column line
+    // wraps to 6 rows and, as the only unit, is kept whole.
+    expect(output).toContain('x'.repeat(50));
+    expect(output).toContain('Answering...');
+  });
+
+  it('never cuts a streaming answer inside a fenced code block', () => {
+    const answer = `Here is the fix:\n\`\`\`ts\n${'x'.repeat(800)}\n\`\`\`\nDone.`;
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={15}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The 800-column code line costs the whole budget on its own, so the cut
+    // falls inside the block: the start moves back to the opening fence and
+    // the block renders whole instead of orphaning its closing fence (which
+    // the renderer would read as an opener and swallow `Done.` as code).
+    expect(output).toContain('Done.');
+    expect(output).not.toContain('Here is the fix:');
+    // `Done.` must render as plain prose after the block, not as the code
+    // block's first line carrying a line-number gutter. (The ink Text mock
+    // prefixes each Text node with its color in brackets, so strip those
+    // before checking the gutter.)
+    const doneLine =
+      output.split('\n').find((line) => line.includes('Done.')) ?? '';
+    expect(doneLine.replace(/\[[^\]]*\]/g, '')).not.toMatch(/\d+ Done\./);
+  });
+
+  it('drops a trailing table as one unit instead of keeping raw rows', () => {
+    const answer = [
+      '| Name | Value |',
+      '| --- | --- |',
+      '| alpha | 1 |',
+      '| beta | 2 |',
+      '| gamma | 3 |',
+      'Done.',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The table renders 11 rows (4 content + 2 separators + 5 chrome), so
+    // it cannot fit after `Done.` — the tail keeps only `Done.` instead of
+    // the table's last rows as raw pipe text.
+    expect(output).toContain('Done.');
+    expect(output).not.toContain('alpha');
+    expect(output).not.toContain('gamma');
+  });
+
+  it('keeps a table that fits the budget whole', () => {
+    const answer = [
+      '| Name | Value |',
+      '| --- | --- |',
+      '| alpha | 1 |',
+      '| beta | 2 |',
+      '| gamma | 3 |',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={12}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The table costs 11 rows and fits the 12-row budget, so it renders as
+    // a table instead of being cut mid-table.
+    expect(output).toContain('alpha');
+    expect(output).toContain('gamma');
+    expect(output).not.toContain('| alpha |');
   });
 });

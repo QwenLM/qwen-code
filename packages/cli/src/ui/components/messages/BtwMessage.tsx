@@ -10,7 +10,14 @@ import type { BtwProps } from '../../types.js';
 import { Colors } from '../../colors.js';
 import { t } from '../../../i18n/index.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { getCachedStringWidth } from '../../utils/textUtils.js';
+import {
+  CODE_FENCE_RE,
+  MATH_FENCE_RE,
+  estimateTableRows,
+  estimateWrappedRows,
+  isClosingCodeFence,
+  isTableStart,
+} from '../../utils/pending-rendered-height.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { ScrollableList } from '../shared/ScrollableList.js';
 
@@ -43,23 +50,141 @@ function normalizeCodeFences(text: string): string {
   return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
 }
 
+type TailBlockKind = 'code' | 'math' | 'table';
+
+// MarkdownDisplay renders a code line inside a 1-column prefix padding plus
+// a line-number gutter (padWidth + 1, line numbers on by default), so a code
+// line wraps at a narrower width than a plain line. The gutter pads to the
+// widest number in the block; the block's own line count bounds it from
+// above once the tail cuts the block, so the charge stays conservative.
+function codeLineWidth(blockLines: number, width: number): number {
+  const gutterWidth = String(Math.max(1, blockLines)).length + 1;
+  return Math.max(1, width - 1 - gutterWidth);
+}
+
 /** Keeps a streaming answer inside the viewport by showing its last lines.
- *  Counts wrapped rows, not source lines: a line wider than the content
- *  width renders as several rows. Always keeps at least the last line. */
+ *  Charges what the renderer charges, not source lines: a plain line costs
+ *  its wrapped rows, a table costs its rendered height (estimateTableRows),
+ *  and a code line wraps at the narrower code width. A table is kept or
+ *  dropped as one unit, and the cut never lands inside a fenced code block,
+ *  a display-math block, or a table — it moves back to the block's opening
+ *  line instead of emitting an orphan delimiter. Always keeps at least the
+ *  last block, so a single over-budget block still renders. */
 function streamingTail(text: string, rows: number, width: number): string {
-  const lines = text.split('\n');
+  // A trailing newline would split into a phantom empty line that eats one
+  // row of budget and, worse, is exempt from the budget check as the last
+  // line — the walk would start on it and break on the real content, blanking
+  // the answer until the next token. Trim what the renderer trims first.
+  const lines = text.trimEnd().split('\n');
+  // Forward pass: mark every line's block, so the backward walk can charge a
+  // table as one unit and never cut a block in half.
+  const blockKind: Array<TailBlockKind | null> = new Array(lines.length).fill(
+    null,
+  );
+  const blockStart: number[] = new Array(lines.length).fill(-1);
+  const codeWidth: number[] = new Array(lines.length).fill(width);
+  let fence = '';
+  let fenceStart = -1;
+  let mathStart = -1;
+  for (let i = 0; i < lines.length; ) {
+    const line = lines[i]!;
+    if (fence) {
+      blockKind[i] = 'code';
+      blockStart[i] = fenceStart;
+      if (isClosingCodeFence(CODE_FENCE_RE.exec(line), fence)) {
+        const w = codeLineWidth(i - fenceStart - 1, width);
+        for (let k = fenceStart + 1; k < i; k++) codeWidth[k] = w;
+        fence = '';
+        fenceStart = -1;
+      }
+      i++;
+      continue;
+    }
+    if (mathStart >= 0) {
+      blockKind[i] = 'math';
+      blockStart[i] = mathStart;
+      if (MATH_FENCE_RE.test(line)) mathStart = -1;
+      i++;
+      continue;
+    }
+    const fenceMatch = CODE_FENCE_RE.exec(line);
+    if (fenceMatch) {
+      fence = fenceMatch[1]!;
+      fenceStart = i;
+      blockKind[i] = 'code';
+      blockStart[i] = i;
+      i++;
+      continue;
+    }
+    if (MATH_FENCE_RE.test(line)) {
+      mathStart = i;
+      blockKind[i] = 'math';
+      blockStart[i] = i;
+      i++;
+      continue;
+    }
+    if (isTableStart(lines, i)) {
+      const { endIndex: j } = estimateTableRows(
+        lines,
+        i,
+        width,
+        Number.MAX_SAFE_INTEGER,
+      );
+      for (let k = i; k < j; k++) {
+        blockKind[k] = 'table';
+        blockStart[k] = i;
+      }
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  if (fence) {
+    // Unclosed block at the streaming frontier: charge its lines at the
+    // width the renderer will use for the block as it stands.
+    const w = codeLineWidth(lines.length - fenceStart - 1, width);
+    for (let k = fenceStart + 1; k < lines.length; k++) codeWidth[k] = w;
+  }
+
   let used = 0;
-  let start = lines.length - 1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const height = Math.max(
-      1,
-      Math.ceil(getCachedStringWidth(lines[i]!) / Math.max(1, width)),
-    );
-    if (i < lines.length - 1 && used + height > rows) {
+  let start = lines.length;
+  for (let i = lines.length - 1; i >= 0; ) {
+    let cost: number;
+    let unitStart: number;
+    if (blockKind[i] === 'table') {
+      const tableStart = blockStart[i]!;
+      cost = estimateTableRows(
+        lines,
+        tableStart,
+        width,
+        Number.MAX_SAFE_INTEGER,
+      ).rows;
+      unitStart = tableStart;
+    } else if (blockKind[i] === 'code') {
+      cost = estimateWrappedRows(lines[i]!, codeWidth[i]!);
+      unitStart = i;
+    } else {
+      cost = estimateWrappedRows(lines[i]!, width);
+      unitStart = i;
+    }
+    // The last unit is always kept, so a single over-budget block still
+    // renders instead of blanking the answer.
+    if (start < lines.length && used + cost > rows) {
       break;
     }
-    used += height;
-    start = i;
+    used += cost;
+    start = unitStart;
+    i = unitStart - 1;
+  }
+  // A cut inside a fenced code or display-math block would orphan its closing
+  // delimiter — the renderer reads it as an opener and the rest renders as
+  // code/math. Pull the start back to the block's opening line so the block
+  // renders whole (over budget by at most that block).
+  if (start > 0 && start < lines.length) {
+    const kind = blockKind[start];
+    if ((kind === 'code' || kind === 'math') && blockStart[start]! < start) {
+      start = blockStart[start]!;
+    }
   }
   return lines.slice(start).join('\n');
 }
@@ -148,11 +273,17 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
         <Box flexDirection="column" marginTop={1}>
           {btw.answer ? (
             <MarkdownDisplay
-              text={normalizeCodeFences(
+              // Normalize first: streamingTail's block scan must see the
+              // fences on their own lines, exactly as the renderer will.
+              text={
                 maxAnswerRows === undefined
-                  ? btw.answer
-                  : streamingTail(btw.answer, maxAnswerRows, contentWidth),
-              )}
+                  ? normalizeCodeFences(btw.answer)
+                  : streamingTail(
+                      normalizeCodeFences(btw.answer),
+                      maxAnswerRows,
+                      contentWidth,
+                    )
+              }
               isPending={true}
               contentWidth={contentWidth}
             />
