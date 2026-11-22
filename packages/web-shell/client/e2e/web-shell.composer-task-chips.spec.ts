@@ -236,6 +236,111 @@ test('clicking an expanded multi-task chip again collapses its list', async ({
   await expect(list).toHaveCount(0);
   await expect(chip).toHaveAttribute('aria-expanded', 'false');
   await expect(chip).toBeFocused();
+
+  // Pressing a non-focusable part of the list must not leave an expanded
+  // list with keyboard focus outside its handling container.
+  await chip.click();
+  await expect(page.getByTestId('composer-task-open').first()).toBeFocused();
+  await list.locator('div').first().click();
+  await expect(list).toBeVisible();
+  await expect(page.getByTestId('composer-task-open').first()).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(list).toHaveCount(0);
+  await expect(chip).toBeFocused();
+});
+
+test('a task refresh during pointer press does not undo the chip collapse', async ({
+  page,
+}, testInfo) => {
+  const tasks = [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ];
+  const { daemon, scenario } = await openSession(page, testInfo, tasks);
+  await page.route(`**/session/${scenario.sessionId}/tasks`, async (route) => {
+    await route.fulfill({
+      json: {
+        v: 1,
+        sessionId: scenario.sessionId,
+        now: Date.now(),
+        tasks: tasks.map((task) => ({
+          ...task,
+          runtimeMs: task.runtimeMs + 3000,
+        })),
+      },
+    });
+  });
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+  await chip.click();
+  await expect(list).toBeVisible();
+  const box = (await chip.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+
+  await daemon.sendEvent(
+    toolCallEvent('workflow-refresh-tool', 'workflow', {
+      name: 'Keep the task list active',
+    }),
+  );
+  const refreshed = page.waitForResponse(
+    (response) =>
+      response.url().includes(`/session/${scenario.sessionId}/tasks`) &&
+      response.request().method() === 'GET',
+    { timeout: 6000 },
+  );
+  await refreshed;
+  await page.mouse.up();
+
+  await expect(list).toHaveCount(0);
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('keyboard focus leaving during a pointer press closes the task list', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+  await chip.click();
+  await expect(page.getByTestId('composer-task-open').first()).toBeFocused();
+
+  const titleBox = (await list.locator('div').first().boundingBox())!;
+  await page.mouse.move(
+    titleBox.x + titleBox.width / 2,
+    titleBox.y + titleBox.height / 2,
+  );
+  await page.mouse.down();
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  for (let index = 0; index < 20; index += 1) {
+    await page.keyboard.press('Tab');
+    if (
+      await editor.evaluate((element) => element === document.activeElement)
+    ) {
+      break;
+    }
+  }
+  await expect(editor).toBeFocused();
+  await expect(list).toHaveCount(0);
+  await page.mouse.up();
+  await expect(list).toHaveCount(0);
 });
 
 test('clicking an expanded single-task shell chip again collapses its detail panel', async ({

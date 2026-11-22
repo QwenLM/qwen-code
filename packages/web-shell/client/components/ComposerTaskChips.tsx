@@ -200,9 +200,11 @@ export const ComposerTaskChips = forwardRef<
     else onReturnToInput?.();
   }, [groups, openKind, onReturnToInput]);
 
+  const listOpen = Boolean(openGroup);
+
   // The list closes on a click anywhere outside the chip row.
   useEffect(() => {
-    if (!openGroup) return;
+    if (!listOpen) return;
     const closeOnOutsidePointerDown = (event: PointerEvent) => {
       if (rootRef.current && event.composedPath().includes(rootRef.current)) {
         return;
@@ -214,9 +216,15 @@ export const ComposerTaskChips = forwardRef<
     const clearInsidePointerDown = () => {
       pointerDownInsideRef.current = false;
     };
+    const closeOnWindowBlur = () => {
+      pointerDownInsideRef.current = false;
+      focusedElementRef.current = null;
+      setOpenKind(null);
+    };
     document.addEventListener('pointerdown', closeOnOutsidePointerDown);
     document.addEventListener('pointerup', clearInsidePointerDown, true);
     document.addEventListener('pointercancel', clearInsidePointerDown, true);
+    window.addEventListener('blur', closeOnWindowBlur);
     return () => {
       pointerDownInsideRef.current = false;
       document.removeEventListener('pointerdown', closeOnOutsidePointerDown);
@@ -226,8 +234,9 @@ export const ComposerTaskChips = forwardRef<
         clearInsidePointerDown,
         true,
       );
+      window.removeEventListener('blur', closeOnWindowBlur);
     };
-  }, [openGroup]);
+  }, [listOpen]);
 
   if (groups.length === 0) return null;
 
@@ -357,6 +366,14 @@ export const ComposerTaskChips = forwardRef<
       onPointerDown={() => {
         if (openGroup) pointerDownInsideRef.current = true;
       }}
+      onMouseDown={(event) => {
+        if (
+          openGroup &&
+          !(event.target instanceof Element && event.target.closest('button'))
+        ) {
+          event.preventDefault();
+        }
+      }}
       onFocus={(event) => {
         focusedElementRef.current = {
           element: event.target,
@@ -364,8 +381,15 @@ export const ComposerTaskChips = forwardRef<
         };
       }}
       onBlur={(event) => {
+        const rootNode = event.currentTarget.getRootNode();
+        const activeElement =
+          rootNode instanceof ShadowRoot
+            ? rootNode.activeElement
+            : document.activeElement;
         if (
-          pointerDownInsideRef.current ||
+          (pointerDownInsideRef.current &&
+            activeElement !== null &&
+            event.currentTarget.contains(activeElement)) ||
           (event.relatedTarget instanceof Node &&
             event.currentTarget.contains(event.relatedTarget))
         ) {

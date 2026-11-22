@@ -19605,12 +19605,17 @@ export function App({
           return tasksDialogMessage !== null;
         case 'shell':
           return (
-            artifactPanelOpen && activeArtifactPanelTabId === `shell:${task.id}`
+            artifactPanelOpen &&
+            (activeArtifactPanelTabId === `shell:${task.id}` ||
+              activeArtifactPanelTabId ===
+                `background:${connection.sessionId}:${task.id}`)
           );
         case 'monitor':
           return (
             artifactPanelOpen &&
-            activeArtifactPanelTabId === `monitor:${task.id}`
+            (activeArtifactPanelTabId === `monitor:${task.id}` ||
+              activeArtifactPanelTabId ===
+                `background:${connection.sessionId}:${task.id}`)
           );
         case 'session':
           return (
@@ -19623,9 +19628,23 @@ export function App({
             ? `subagent:${connection.sessionId}:${task.toolUseId}`
             : null;
           const byTaskId = `subagent:${connection.sessionId}:${task.id}`;
+          const backgroundActive =
+            (activeArtifactPanelTabId ===
+              `background:${connection.sessionId}:${task.id}` ||
+              (byToolUseId !== null &&
+                activeArtifactPanelTabId ===
+                  `background:${connection.sessionId}:${task.toolUseId}`)) &&
+            artifactPanelTabs.some(
+              (tab) =>
+                (tab.kind === 'subagent' ||
+                  (tab.kind === 'pending' && tab.targetKind === 'subagent')) &&
+                tab.id === activeArtifactPanelTabId,
+            );
           return (
             activeArtifactPanelTabId === byTaskId ||
-            (byToolUseId !== null && activeArtifactPanelTabId === byToolUseId)
+            (byToolUseId !== null &&
+              activeArtifactPanelTabId === byToolUseId) ||
+            backgroundActive
           );
         }
       }
@@ -19633,6 +19652,7 @@ export function App({
     [
       activeArtifactPanelTabId,
       artifactPanelOpen,
+      artifactPanelTabs,
       connection.sessionId,
       tasksDialogMessage,
     ],
@@ -19645,9 +19665,11 @@ export function App({
           closeTasksPanel();
           return;
         }
+        closeTasksPanel();
         locateWorkflowTask(task);
         return;
       }
+      closeTasksPanel();
       if (isComposerTaskOpen(task)) {
         closeArtifactPanel();
         return;

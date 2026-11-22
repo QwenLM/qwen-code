@@ -800,6 +800,12 @@ describe('ComposerTaskChips', () => {
 
     act(() => {
       title.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      const mousedown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      title.dispatchEvent(mousedown);
+      expect(mousedown.defaultPrevented).toBe(true);
       firstRow.dispatchEvent(
         new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
       );
@@ -811,6 +817,90 @@ describe('ComposerTaskChips', () => {
     act(() => {
       outsideInput.dispatchEvent(new Event('pointerdown', { bubbles: true }));
     });
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+  });
+
+  it('keeps an inside pointer gesture protected when running tasks refresh between down and click', () => {
+    render([workflow('wf-1'), workflow('wf-2', 'paused')]);
+    const chip = chips()[0];
+
+    act(() => chip.click());
+    const firstRow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )!;
+    expect(document.activeElement).toBe(firstRow);
+
+    act(() => {
+      chip.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      const mousedown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      chip.dispatchEvent(mousedown);
+      expect(mousedown.defaultPrevented).toBe(true);
+    });
+    // A periodic tasks snapshot replaces all task objects and the open group
+    // identity while the pointer is down (the real poll cadence is 3000ms).
+    render([workflow('wf-1'), workflow('wf-2', 'paused')]);
+
+    act(() => {
+      firstRow.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).not.toBeNull();
+    act(() => {
+      chip.dispatchEvent(new Event('pointerup', { bubbles: true }));
+      chip.click();
+    });
+
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('closes when keyboard focus leaves while an inside pointer is held', () => {
+    render([workflow('wf-1'), workflow('wf-2', 'paused')]);
+    const chip = chips()[0];
+
+    act(() => chip.click());
+    const firstRow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )!;
+    act(() => {
+      firstRow.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+    act(() => {
+      outsideInput.focus();
+    });
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+
+    act(() => {
+      document.dispatchEvent(new Event('pointerup', { bubbles: true }));
+    });
+    expect(document.activeElement).toBe(outsideInput);
+  });
+
+  it('closes on window blur even while an inside pointer is held', () => {
+    render([workflow('wf-1'), workflow('wf-2', 'paused')]);
+    const chip = chips()[0];
+
+    act(() => chip.click());
+    const firstRow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-open"]',
+    )!;
+    act(() => {
+      firstRow.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      window.dispatchEvent(new Event('blur'));
+    });
+
     expect(
       container.querySelector('[data-testid="composer-task-list"]'),
     ).toBeNull();
