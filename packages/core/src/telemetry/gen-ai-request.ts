@@ -128,6 +128,7 @@ export function extractOpenAiRequestAttributes(request: object): Attributes {
     ownValue(record, 'temperature'),
   );
   assignNumber(attributes, 'gen_ai.request.top_p', ownValue(record, 'top_p'));
+  assignNumber(attributes, 'gen_ai.request.top_k', ownValue(record, 'top_k'));
   assignNumber(
     attributes,
     'gen_ai.request.frequency_penalty',
@@ -160,6 +161,7 @@ export function extractAnthropicRequestAttributes(request: object): Attributes {
     ownValue(record, 'temperature'),
   );
   assignNumber(attributes, 'gen_ai.request.top_p', ownValue(record, 'top_p'));
+  assignNumber(attributes, 'gen_ai.request.top_k', ownValue(record, 'top_k'));
   assignStopSequences(attributes, ownValue(record, 'stop_sequences'), false);
   return attributes;
 }
@@ -188,6 +190,11 @@ export function extractLlmRequestAttributes(request: object): Attributes {
     attributes,
     'gen_ai.request.top_p',
     ownValue(configRecord, 'topP'),
+  );
+  assignNumber(
+    attributes,
+    'gen_ai.request.top_k',
+    ownValue(configRecord, 'topK'),
   );
   assignNumber(
     attributes,
