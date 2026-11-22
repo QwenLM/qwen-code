@@ -13375,7 +13375,12 @@ export function App({
       throw new DOMException('The composer is closed', 'AbortError');
     const sourceVersion = composerSourceVersionRef.current;
     const existing = connectionRef.current.sessionId;
-    const allocation = await ensureSessionForPrompt(undefined, undefined, false);
+    const editor = editorRef.current;
+    if (!editor) throw new Error('The composer is not ready');
+    const allocation = await editor.retainDraftDuringSessionCreation(
+      (onSessionAllocated) =>
+        ensureSessionForPrompt(onSessionAllocated, undefined, false),
+    );
     const sessionId = allocation?.sessionId ?? existing;
     if (
       !appMountedRef.current ||
