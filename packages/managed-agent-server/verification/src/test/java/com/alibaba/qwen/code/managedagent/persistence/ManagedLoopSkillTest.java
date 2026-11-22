@@ -232,6 +232,20 @@ class ManagedLoopSkillTest {
     }
 
     @Test
+    void mergeIntoDoesNotDoubleAppendCallerSkillsAlreadyCarriedByTheExternalPin() {
+        // External creationPin carries the caller skills into the pin, so merged
+        // already holds them. Appending callerSkills again duplicates every name
+        // and the catalog validation refuses the whole creation.
+        var callerSkill = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
+        var merged = new ArrayList<>(List.of(callerSkill));
+        var injected = ManagedLoopSkill.mergeInto(merged, List.of(callerSkill),
+                WorkspaceToolProfiles.EXTERNAL_FILES, true, List.of());
+        assertThat(injected).isNull();
+        assertThat(merged).containsExactly(callerSkill);
+        assertThat(AgentDefinitionExtensions.sessionSkills(merged)).hasSize(1);
+    }
+
+    @Test
     void mergeIntoCarriesTheBundledCallerLoopInvocationFlagsOntoTheVariant() throws Exception {
         var callerLoop = new java.util.LinkedHashMap<String, Object>(bundledCallerLoop());
         callerLoop.put("model_invocable", false);
