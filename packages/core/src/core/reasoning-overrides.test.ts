@@ -340,6 +340,33 @@ describe('reasoning declarations', () => {
     );
   });
 
+  it('accepts xhigh but rejects max in an explicit gemini profile declaration', () => {
+    const geminiRoute = {
+      ...route,
+      authType: AuthType.USE_GEMINI,
+      model: 'company-gemini-alias',
+    };
+    expect(
+      validateReasoningCapabilities(geminiRoute, {
+        profile: 'gemini',
+        efforts: ['low', 'medium', 'high', 'xhigh'],
+        defaultEffort: 'high',
+      }),
+    ).toMatchObject({
+      profile: 'gemini',
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    });
+    expect(() =>
+      validateReasoningCapabilities(geminiRoute, {
+        profile: 'gemini',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      }),
+    ).toThrow('capabilities.reasoning');
+  });
+
   it('clamps an inherited default when replacing the tier set', () => {
     expect(
       resolveReasoningCapabilities(

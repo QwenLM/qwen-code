@@ -32,6 +32,7 @@ import {
   getEffectiveReasoning,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
+import { supportsGeminiXhigh } from '../gemini-reasoning.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
 import {
   expandDynamicHeaders,
@@ -395,9 +396,14 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     if (reasoning) {
-      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
-      // is no xhigh/max, so the extra-strong tiers are capped at HIGH. An unset
-      // effort stays UNSPECIFIED so the model picks its own default.
+      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH, plus
+      // XHIGH for models that support it (Gemini 4 Neon / Hydrogen, or routes
+      // explicitly declaring xhigh). Unsupported stronger tiers clamp to the
+      // model's ceiling; an unset effort stays UNSPECIFIED so the model picks
+      // its own default.
+      const allowsXhigh = resolved
+        ? !resolved.toggleOnly && resolved.efforts.includes('xhigh')
+        : supportsGeminiXhigh(model || generation?.model);
       let thinkingLevel: ThinkingLevel;
       switch (reasoning.effort) {
         case 'low':
@@ -410,18 +416,29 @@ export class LlmContentGenerator implements ContentGenerator {
           thinkingLevel = 'HIGH' as ThinkingLevel;
           break;
         case 'xhigh':
-        case 'max':
-          // Gemini has no tier above HIGH; log the clamp once (mirroring the
-          // Anthropic generator's one-time clamp warning) so a /effort xhigh|max
-          // that silently runs at HIGH leaves a trace in debug logs.
+          if (allowsXhigh) {
+            thinkingLevel = 'XHIGH' as ThinkingLevel;
+          } else {
+            if (!this.effortClampWarned) {
+              debugLogger.warn(
+                `reasoning.effort='xhigh' is not supported by Gemini; clamping to 'HIGH'.`,
+              );
+              this.effortClampWarned = true;
+            }
+            thinkingLevel = 'HIGH' as ThinkingLevel;
+          }
+          break;
+        case 'max': {
+          const fallback = allowsXhigh ? 'XHIGH' : 'HIGH';
           if (!this.effortClampWarned) {
             debugLogger.warn(
-              `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to 'HIGH'.`,
+              `reasoning.effort='max' is not supported by Gemini; clamping to '${fallback}'.`,
             );
             this.effortClampWarned = true;
           }
-          thinkingLevel = 'HIGH' as ThinkingLevel;
+          thinkingLevel = fallback as ThinkingLevel;
           break;
+        }
         case undefined:
           // No effort set — let the model pick its own default.
           thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
