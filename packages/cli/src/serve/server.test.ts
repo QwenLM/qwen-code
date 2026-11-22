@@ -4879,6 +4879,7 @@ describe('createServeApp', () => {
       '/scheduled-tasks',
       '/pr-watches',
       '/goals',
+      '/artifacts',
       '/settings',
     ])(
       'serves page document %s without bypassing API authentication',

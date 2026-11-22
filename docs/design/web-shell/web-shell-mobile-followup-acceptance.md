@@ -2,7 +2,7 @@
 
 [English](web-shell-mobile-followup-acceptance.md) | [简体中文](web-shell-mobile-followup-acceptance.zh-CN.md)
 
-Status: implemented on `feat/web-shell-mobile-followup-acceptance` (PR #17918), revised through successive review rounds on 2026-11-20–22 (Tab key → action-word key → single chip bar → caret/slash key row → 240px wrap fix → grapheme/visual-line caret with held column and scroll reveal → bounded mirror measurement, wrap-end grapheme clamp, vertical-only column write, expanded-dialog surface, dismiss without focus).
+Status: implemented and merged into `main` through PR #17918 (merge commit `f89c4b4d0704e4dd7691e2ce59b0cf3af91785da`), revised through successive review rounds on 2026-11-20–22 (Tab key → action-word key → single chip bar → caret/slash key row → 240px wrap fix → grapheme/visual-line caret with held column and scroll reveal → bounded mirror measurement, wrap-end grapheme clamp, vertical-only column write, expanded-dialog surface, dismiss without focus).
 
 ## Problem
 
