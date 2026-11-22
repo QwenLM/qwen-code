@@ -187,15 +187,18 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_560;
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
 //
-// Merge measurement (2026-11-22, PR #18028): merging main 8e7d1e37c9 — which
-// carries the ChatSurface chat-column i18n (#17952) — into this branch measures
-// 2,151,847 renderer JS bytes on a frozen-install detached worktree (Node
-// v26.12.1, web-shell transcript lib rebuilt first), exactly matching CI run
-// 44965176587's merge-ref measurement that turned the tui-parity Build cli
-// step red against the previous 2,151,577 ceiling. This PR's diff touches no
-// web-shell/web-templates source, so the growth is entirely main's i18n; the
-// budget is reset to measurement + 713 / + 1,713 per house precedent instead
-// of taking either side's stale cap.
+// The ChatSurface chat column (#17952) then grows the transcript dictionary
+// past that ceiling: the Build lane measures 2,151,214 bytes on main
+// 3911b60fc4 (run 44953143515, green) against 2,151,847 on 580108434f
+// (run 44963775498), +633, with CSS unchanged at 2,427,365; the three
+// subsequent main runs measure the same 2,151,847. The cause is six chat.*
+// keys in the two catalogs the document entry inlines (EN and ZH-CN; zh-TW
+// and RU are transcript-stubbed), the CHAT_MESSAGE_KEYS parity export, and
+// the transcript-reachable pendingPermissionRevision helper. The ChatSurface
+// component graph is not wired into any column and useDaemonChatController
+// has no importer, so no component code reaches the document entry; the
+// forbidden-input guard passes and the third-party input mix is unchanged.
+// Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
 const MAX_DOCUMENT_RUNTIME_BYTES = 2_153_560;
 
 // Modules that must not be reachable from the document entry, checked against
