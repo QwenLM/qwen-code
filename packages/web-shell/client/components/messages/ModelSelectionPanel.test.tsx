@@ -11,6 +11,14 @@ import {
 import { I18nProvider } from '../../i18n';
 import type { DaemonAuthProviderDescriptor } from '@qwen-code/web-shell/daemon-react-sdk';
 
+const { mockUseOptionalDaemonWorkspace } = vi.hoisted(() => ({
+  mockUseOptionalDaemonWorkspace: vi.fn(),
+}));
+
+vi.mock('../../daemon/workspace/DaemonWorkspaceProvider', () => ({
+  useOptionalDaemonWorkspace: () => mockUseOptionalDaemonWorkspace(),
+}));
+
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 describe('ModelSelectionPanel unit tests', () => {
@@ -31,6 +39,12 @@ describe('ModelSelectionPanel unit tests', () => {
 
   describe('formatContextTokens', () => {
     it('formats token count into readable format', () => {
+      expect(formatContextTokens(32000)).toBe('32k');
+      expect(formatContextTokens(64000)).toBe('64k');
+      expect(formatContextTokens(128000)).toBe('128k');
+      expect(formatContextTokens(200000)).toBe('200k');
+      expect(formatContextTokens(256000)).toBe('256k');
+      expect(formatContextTokens(512000)).toBe('512k');
       expect(formatContextTokens(262144)).toBe('256k');
       expect(formatContextTokens(131072)).toBe('128k');
       expect(formatContextTokens(32768)).toBe('32k');
@@ -71,6 +85,7 @@ describe('ModelSelectionPanel unit tests', () => {
 
     beforeEach(() => {
       resetDeepinfraCacheForTest();
+      mockUseOptionalDaemonWorkspace.mockReturnValue(undefined);
       container = document.createElement('div');
       document.body.appendChild(container);
       root = createRoot(container);
@@ -705,7 +720,7 @@ describe('ModelSelectionPanel unit tests', () => {
       fetchSpy.mockRestore();
     });
 
-    it('routes daemon proxy fetch to daemonBaseUrl when provided', async () => {
+    it('routes daemon proxy fetch to daemonBaseUrl and uses workspace token when provided (R1-15)', async () => {
       const deepinfraProvider: DaemonAuthProviderDescriptor = {
         id: 'deepinfra',
         label: 'DeepInfra',
@@ -726,12 +741,16 @@ describe('ModelSelectionPanel unit tests', () => {
         ],
       } as Response);
 
+      mockUseOptionalDaemonWorkspace.mockReturnValue({
+        baseUrl: 'https://fanout.example.org:9443',
+        token: 'fanout-secret-token-xyz',
+      });
+
       await act(async () => {
         root.render(
           <I18nProvider language="en">
             <ModelSelectionPanel
               provider={deepinfraProvider}
-              daemonBaseUrl="https://daemon.example.org:9000"
               value=""
               onChange={vi.fn()}
             />
@@ -740,15 +759,19 @@ describe('ModelSelectionPanel unit tests', () => {
       });
 
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://daemon.example.org:9000/workspace/auth/deepinfra-models',
-        expect.any(Object),
+        'https://fanout.example.org:9443/workspace/auth/deepinfra-models',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: 'Bearer fanout-secret-token-xyz',
+          }),
+        }),
       );
       expect(container.textContent).toContain('daemon-model');
 
       fetchSpy.mockRestore();
     });
 
-    it('shows error state with retry button when upstream fetch fails', async () => {
+    it('shows error state with retry button when upstream fetch fails (R1-37)', async () => {
       const deepinfraProvider: DaemonAuthProviderDescriptor = {
         id: 'deepinfra',
         label: 'DeepInfra',
@@ -756,6 +779,15 @@ describe('ModelSelectionPanel unit tests', () => {
         protocol: 'openai',
         baseUrl: 'https://api.deepinfra.com/v1/openai',
         steps: ['models'],
+        models: [
+          { id: 'deepseek-ai/DeepSeek-V3', contextWindowSize: 163840 },
+          { id: 'deepseek-ai/DeepSeek-R1-0528', contextWindowSize: 163840 },
+          {
+            id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+            contextWindowSize: 131072,
+          },
+          { id: 'Qwen/Qwen2.5-72B-Instruct', contextWindowSize: 32768 },
+        ],
       };
 
       let attempt = 0;
@@ -791,6 +823,8 @@ describe('ModelSelectionPanel unit tests', () => {
       });
 
       expect(container.textContent).toContain('Failed to load models catalog');
+      // Even with 4 fallback models visible, the error notice and retry button are shown
+      expect(container.textContent).toContain('deepseek-ai/DeepSeek-V3');
       const retryBtn = container.querySelector(
         '[class*="retryButton"]',
       ) as HTMLButtonElement | null;
@@ -885,6 +919,7 @@ describe('ModelSelectionPanel unit tests', () => {
           model_name: 'expired-discount-model',
           type: 'text-generation',
           max_tokens: 32768,
+          tags: ['discount'],
           pricing: {
             discount: 0.5,
             discount_ends_at: pastDate,
@@ -922,7 +957,7 @@ describe('ModelSelectionPanel unit tests', () => {
         'Discounted (37.5% off)',
       );
 
-      // Expired model does NOT have discount icon
+      // Expired model does NOT have discount icon despite tags: ['discount']
       const expiredRow = Array.from(
         container.querySelectorAll('tbody tr'),
       ).find((r) => r.textContent?.includes('expired-discount-model'));
@@ -930,6 +965,17 @@ describe('ModelSelectionPanel unit tests', () => {
       expect(
         expiredRow?.querySelector('svg[aria-label="Discount available"]'),
       ).toBeNull();
+
+      // Filter by discount: only active-discount-model should remain visible
+      const discountBtn = Array.from(container.querySelectorAll('button')).find(
+        (b) => b.textContent?.includes('Discount'),
+      )!;
+      await act(async () => {
+        discountBtn.click();
+      });
+      const filteredRows = container.querySelectorAll('tbody tr');
+      expect(filteredRows.length).toBe(1);
+      expect(filteredRows[0]?.textContent).toContain('active-discount-model');
 
       fetchSpy.mockRestore();
     });
