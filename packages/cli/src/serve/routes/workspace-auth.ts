@@ -156,9 +156,10 @@ async function fetchDeepInfraModelsFromUpstream(): Promise<unknown[]> {
   inFlightDeepInfraFetch = (async () => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
+    let dispatcher: { close?: () => Promise<void> } | undefined;
     try {
       const { fetch: undiciFetch, EnvHttpProxyAgent } = await loadUndici();
-      const dispatcher = new EnvHttpProxyAgent();
+      dispatcher = new EnvHttpProxyAgent();
       const response = await undiciFetch(
         'https://api.deepinfra.com/models/list',
         {
@@ -206,6 +207,9 @@ async function fetchDeepInfraModelsFromUpstream(): Promise<unknown[]> {
       return filtered;
     } finally {
       clearTimeout(timer);
+      if (dispatcher && typeof dispatcher.close === 'function') {
+        void dispatcher.close();
+      }
       inFlightDeepInfraFetch = null;
     }
   })();
