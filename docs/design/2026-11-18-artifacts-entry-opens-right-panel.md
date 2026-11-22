@@ -2,9 +2,11 @@
 
 [English](2026-11-18-artifacts-entry-opens-right-panel.md) | [简体中文](2026-11-18-artifacts-entry-opens-right-panel.zh-CN.md)
 
-Status: implemented. Local verification: web-shell typecheck, client vite build,
-focused unit/DOM tests, and headless-browser E2E against a live daemon all
-pass; the full root build and `npm run bundle` remain unverified.
+Status: implemented. Recorded verification: the web-shell package typecheck,
+client Vite build, focused unit/DOM tests, and headless-browser E2E against a
+live daemon all pass. The full root `npm run build` is recorded as passing in
+merged #17689 but was not rerun for this hardening PR; `npm run bundle` remains
+unverified.
 
 ## Problem statement
 

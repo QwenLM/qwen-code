@@ -95,6 +95,7 @@ import type {
   ChatHeaderRenderInfo,
   WebShellComposerToolbarRenderInfo,
 } from './customization';
+import { getTranslator } from './i18n';
 import { createContextUsageMessageData } from './components/messages/ContextUsageMessage';
 import { createStatsMessageData } from './components/messages/StatsMessage';
 import { serializeStatusMessage } from './components/messages/StatusMessage';
@@ -4857,6 +4858,7 @@ describe('task activity key', () => {
   });
 
   it('exposes the artifact count and opener to a custom chat header', async () => {
+    const t = getTranslator('en');
     mockConnection.capabilities = {
       ...mockConnection.capabilities,
       features: ['session_artifacts'],
@@ -4942,8 +4944,7 @@ describe('task activity key', () => {
       const tab = entry?.tabs?.find((item) => item.kind === 'artifacts');
       expect(tab).toBeDefined();
       expect(tab!.id).toBe('artifacts:session-1');
-      expect(typeof tab!.title).toBe('string');
-      expect(tab!.title).not.toBe('');
+      expect(tab!.title).toBe(t('environment.artifacts'));
       expect(tab!.sessionId).toBe('session-1');
       expect(entry!.activeTabId).toBe('artifacts:session-1');
     });
