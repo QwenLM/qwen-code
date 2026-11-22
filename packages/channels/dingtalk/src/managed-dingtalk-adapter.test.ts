@@ -880,7 +880,7 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it("a failure on a later segment settles the delivery unknown, keeping the prefix's per-ordinal receipts (R12)", async () => {
+  it("a transient failure on a later segment settles the delivery unknown, keeping the prefix's per-ordinal receipts (R12)", async () => {
     const hooks: { beforeSend?: () => void } = {};
     const { adapter, plane, fake } = await connectedAdapter(tempCwd(), hooks);
     // beforeSend runs after the send is recorded and before the failure check,
@@ -897,9 +897,11 @@ describe('managed DingTalk adapter outbox', () => {
       'segment 0',
       'segment 1',
     ]);
-    // The delivered prefix keeps its own per-ordinal receipt; the failure
-    // settles the delivery unknown with no ordinal, so the tail stays
-    // re-drivable instead of the whole reply being recorded as never sent.
+    // The delivered prefix keeps its own per-ordinal receipt; this transient
+    // failure settles the delivery unknown with no ordinal, so the tail stays
+    // re-drivable instead of the whole reply being recorded as never sent. A
+    // definitive failure on the same segment settles rejected instead — the
+    // class, not the position, decides the outcome.
     expect(
       plane.receipts.map(
         (entry) =>
