@@ -2201,7 +2201,10 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
         jobDevice: '29',
         danglingRootSymlink: true,
       },
-    ].filter(({ readOnly }) => !readOnly || process.getuid?.() !== 0),
+    ].filter(
+      ({ readOnly }) =>
+        !readOnly || (process.getuid?.() !== 0 && process.platform === 'linux'),
+    ),
   )(
     'cold-starts safely after $scenario',
     ({
