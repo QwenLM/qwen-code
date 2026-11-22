@@ -9221,23 +9221,32 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
-  it('translateEvent: stream_error + client_evicted → _qwen/notify with kind', async () => {
+  it('translateEvent: session notifications retain kind and owning session', async () => {
     const connId = await initialize();
     await newSession(connId);
     const sess = await openStream(connId, 'sess-1');
-    const got = takeFrames(sess, 2);
+    const got = takeFrames(sess, 3);
     await new Promise((r) => setTimeout(r, 50));
     const q = bridge.queues.get('sess-1');
     q?.push({ type: 'stream_error', data: { error: 'boom' } });
     q?.push({ type: 'client_evicted', data: { reason: 'slow' } });
+    q?.push({
+      type: 'permission_resolved',
+      data: { requestId: 'settled', outcome: 'allow' },
+    });
     const frames = (await got) as Array<{
       method: string;
-      params: { kind: string };
+      params: { kind: string; sessionId: string };
     }>;
     expect(frames.every((f) => f.method === '_qwen/notify')).toBe(true);
+    expect(frames.every((f) => f.params.sessionId === 'sess-1')).toBe(true);
     const kinds = frames.map((f) => f.params.kind);
     expect(kinds).toEqual(
-      expect.arrayContaining(['stream_error', 'client_evicted']),
+      expect.arrayContaining([
+        'stream_error',
+        'client_evicted',
+        'permission_resolved',
+      ]),
     );
     // (takeFrames already locked + aborted `sess`; afterEach force-closes.)
   });

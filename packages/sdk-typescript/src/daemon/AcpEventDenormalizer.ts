@@ -82,11 +82,7 @@ export function denormalizeAcpNotification(
     // legacy format, use params.data or fall back to params itself.
     let data: unknown;
     if (rawUpdate) {
-      const d: Record<string, unknown> = { ...rawUpdate };
-      if (typeof params['sessionId'] === 'string') {
-        d['sessionId'] = params['sessionId'];
-      }
-      data = d;
+      data = withEnvelopeSessionId(rawUpdate, params);
     } else {
       data = withEnvelopeSessionId(params['data'] ?? params, params);
     }

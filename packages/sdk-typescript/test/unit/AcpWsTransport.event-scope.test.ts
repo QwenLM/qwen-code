@@ -47,6 +47,80 @@ describe('ACP notification envelope session scope', () => {
   it.each([
     [
       'session/update',
+      { type: 'session_update', data: { text: 'own session' } },
+    ],
+    ['_qwen/notify', { type: 'model_switched', data: { modelId: 'own' } }],
+    ['_qwen/notify', { kind: 'model_switched', data: { modelId: 'own' } }],
+    [
+      'session/update',
+      { update: { sessionUpdate: 'agent_message_chunk', text: 'own' } },
+    ],
+  ])(
+    'delivers %s envelopes to their owning session',
+    async (method, payload) => {
+      vi.stubGlobal('WebSocket', FakeWebSocket);
+      const transport = new AcpWsTransport('ws://daemon/acp');
+      const abort = new AbortController();
+      const iterator = transport.subscribeEvents('target', {
+        signal: abort.signal,
+      });
+      const next = iterator.next();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        FakeWebSocket.latest.receive({
+          jsonrpc: '2.0',
+          method,
+          params: { ...payload, sessionId: 'target' },
+        });
+        FakeWebSocket.latest.receive({
+          jsonrpc: '2.0',
+          method: 'workspace_changed',
+          params: { marker: 'after-own-event' },
+        });
+        expect((await next).value).toMatchObject({
+          data: { sessionId: 'target' },
+        });
+      } finally {
+        abort.abort();
+        await iterator.return(undefined);
+        transport.dispose();
+      }
+    },
+  );
+
+  it('continues delivering workspace notifications to every subscribed session', async () => {
+    vi.stubGlobal('WebSocket', FakeWebSocket);
+    const transport = new AcpWsTransport('ws://daemon/acp');
+    const abort = new AbortController();
+    const iterators = ['first', 'second'].map((sessionId) =>
+      transport.subscribeEvents(sessionId, { signal: abort.signal }),
+    );
+    const pending = iterators.map((iterator) => iterator.next());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    try {
+      FakeWebSocket.latest.receive({
+        jsonrpc: '2.0',
+        method: 'workspace_changed',
+        params: { marker: 'workspace' },
+      });
+      for (const message of await Promise.all(pending)) {
+        expect(message.value).toMatchObject({
+          type: 'workspace_changed',
+          data: { marker: 'workspace' },
+        });
+      }
+    } finally {
+      abort.abort();
+      await Promise.all(
+        iterators.map((iterator) => iterator.return(undefined)),
+      );
+      transport.dispose();
+    }
+  });
+
+  it.each([
+    [
+      'session/update',
       { type: 'session_update', data: { text: 'other session' } },
     ],
     ['_qwen/notify', { type: 'model_switched', data: { modelId: 'other' } }],

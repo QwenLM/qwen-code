@@ -6058,6 +6058,7 @@ export class AcpDispatcher {
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
+            sessionId,
             kind: 'stream_error',
             error: errMsg(err),
           }),
@@ -6243,6 +6244,7 @@ export class AcpDispatcher {
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
+            sessionId,
             kind: event.type,
             data: event.data,
           }),
@@ -6257,6 +6259,7 @@ export class AcpDispatcher {
             // Spread first so a stray `kind` in event.data can't shadow the
             // discriminator the client's error handler keys on.
             ...(event.data as object),
+            sessionId,
             kind: 'stream_error',
           }),
           // Pass the bus cursor through if present; a synthetic terminal frame
@@ -6266,14 +6269,24 @@ export class AcpDispatcher {
         return;
       }
       default: {
-        // client_evicted / slow_client_warning / state_resync_required /
-        // model_switched / approval_mode_changed / … → opaque qwen notify.
+        // Session buses also carry workspace broadcasts. Only stamp event
+        // kinds whose producer is session-scoped; e.g. persisted approval
+        // mode changes may fan out and must retain their original scope.
+        const sessionScoped = [
+          'client_evicted',
+          'slow_client_warning',
+          'state_resync_required',
+          'replay_complete',
+          'model_switched',
+          'model_switch_failed',
+        ].includes(event.type);
         // `event.id` is undefined for the synthetic control frames (no SSE
         // `id:` line, so they don't burn a slot in the resume sequence) and
         // set for ring-backed daemon events.
         conn.sendSession(
           sessionId,
           notification(`${QWEN_METHOD_NS}notify`, {
+            ...(sessionScoped ? { sessionId } : {}),
             kind: event.type,
             data: event.data,
           }),
