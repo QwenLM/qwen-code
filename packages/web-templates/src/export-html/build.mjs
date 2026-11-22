@@ -74,9 +74,10 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // must not replace this measured shared-tree baseline with an older estimate.
 // The expansion-preserving normalization adds 42 bytes to that merged build.
 // The schema-version narrowing capture adds a further 8 bytes.
+// Model selection panel i18n keys add 2,327 bytes.
 // Including the merged ChatSurface inputs, local builds and the CI merge tree
-// both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
+// both measure 2,157,350 injected JS bytes, with 2,428,500 bytes of CSS.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_157_350;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
