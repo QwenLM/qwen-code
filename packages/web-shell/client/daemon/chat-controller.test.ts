@@ -944,35 +944,48 @@ describe('daemon controller: in-flight and racing correlation', () => {
   });
 
   it('projects live history pagination facts from deps', () => {
-    let hasOlderHistory = false;
-    let loadingOlderHistory = false;
-    let historyCapacityReached = false;
-    let historyPaginationError = false;
+    const flags = {
+      hasOlderHistory: false,
+      loadingOlderHistory: false,
+      historyCapacityReached: false,
+      historyPaginationError: false,
+    };
     const h = harness({
       get hasOlderHistory() {
-        return hasOlderHistory;
+        return flags.hasOlderHistory;
       },
       get loadingOlderHistory() {
-        return loadingOlderHistory;
+        return flags.loadingOlderHistory;
       },
       get historyCapacityReached() {
-        return historyCapacityReached;
+        return flags.historyCapacityReached;
       },
       get historyPaginationError() {
-        return historyPaginationError;
+        return flags.historyPaginationError;
       },
     });
-    expect(h.controller.hasOlderHistory).toBe(false);
-    expect(h.controller.loadingOlderHistory).toBe(false);
-    expect(h.controller.historyCapacityReached).toBe(false);
-    expect(h.controller.historyPaginationError).toBe(false);
-    hasOlderHistory = true;
-    loadingOlderHistory = true;
-    historyCapacityReached = true;
-    historyPaginationError = true;
-    expect(h.controller.hasOlderHistory).toBe(true);
-    expect(h.controller.loadingOlderHistory).toBe(true);
-    expect(h.controller.historyCapacityReached).toBe(true);
-    expect(h.controller.historyPaginationError).toBe(true);
+    expect([
+      h.controller.hasOlderHistory,
+      h.controller.loadingOlderHistory,
+      h.controller.historyCapacityReached,
+      h.controller.historyPaginationError,
+    ]).toEqual([false, false, false, false]);
+    const keys = [
+      'hasOlderHistory',
+      'loadingOlderHistory',
+      'historyCapacityReached',
+      'historyPaginationError',
+    ] as const;
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = 0; j < keys.length; j++) {
+        flags[keys[j]] = i === j;
+      }
+      expect([
+        h.controller.hasOlderHistory,
+        h.controller.loadingOlderHistory,
+        h.controller.historyCapacityReached,
+        h.controller.historyPaginationError,
+      ]).toEqual(keys.map((_, j) => i === j));
+    }
   });
 });

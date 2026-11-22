@@ -778,33 +778,61 @@ describe('ChatSurface', () => {
   });
 
   it('defaults history pagination facts to the controller while letting page props override them', () => {
-    const controller = fakeController({
+    // Light one controller pagination fact at a time so every per-field
+    // fallback is distinguished from its siblings (kills cross-wiring).
+    const keys = [
+      'hasOlderHistory',
+      'loadingOlderHistory',
+      'historyCapacityReached',
+      'historyPaginationError',
+    ] as const;
+    for (let i = 0; i < keys.length; i++) {
+      const controller = fakeController({
+        hasOlderHistory: i === 0,
+        loadingOlderHistory: i === 1,
+        historyCapacityReached: i === 2,
+        historyPaginationError: i === 3,
+      });
+      mountReact(<ChatSurface controller={controller} />);
+      expect([
+        captured.transcript?.hasOlderHistory,
+        captured.transcript?.loadingOlderHistory,
+        captured.transcript?.historyCapacityReached,
+        captured.transcript?.historyPaginationError,
+      ]).toEqual(keys.map((_, j) => i === j));
+      cleanupReact();
+    }
+    // Explicit false page props must override true controller facts (pins ??
+    // against || on all four pagination flags).
+    const allTrue = fakeController({
       hasOlderHistory: true,
       loadingOlderHistory: true,
       historyCapacityReached: true,
       historyPaginationError: true,
     });
-    const container = mountReact(<ChatSurface controller={controller} />);
-    expect(captured.transcript?.hasOlderHistory).toBe(true);
-    expect(captured.transcript?.loadingOlderHistory).toBe(true);
-    expect(captured.transcript?.historyCapacityReached).toBe(true);
-    expect(captured.transcript?.historyPaginationError).toBe(true);
-    // Explicit false page props must override true controller facts (pins ??
-    // against || on all four pagination flags).
+    const container = mountReact(<ChatSurface controller={allTrue} />);
+    expect([
+      captured.transcript?.hasOlderHistory,
+      captured.transcript?.loadingOlderHistory,
+      captured.transcript?.historyCapacityReached,
+      captured.transcript?.historyPaginationError,
+    ]).toEqual([true, true, true, true]);
     rerenderReact(
       container,
       <ChatSurface
-        controller={controller}
+        controller={allTrue}
         hasOlderHistory={false}
         loadingOlderHistory={false}
         historyCapacityReached={false}
         historyPaginationError={false}
       />,
     );
-    expect(captured.transcript?.hasOlderHistory).toBe(false);
-    expect(captured.transcript?.loadingOlderHistory).toBe(false);
-    expect(captured.transcript?.historyCapacityReached).toBe(false);
-    expect(captured.transcript?.historyPaginationError).toBe(false);
+    expect([
+      captured.transcript?.hasOlderHistory,
+      captured.transcript?.loadingOlderHistory,
+      captured.transcript?.historyCapacityReached,
+      captured.transcript?.historyPaginationError,
+    ]).toEqual([false, false, false, false]);
   });
 
   it('forwards the composer draft scope for a new chat', () => {
@@ -1325,6 +1353,40 @@ describe('ChatSurface', () => {
       resolveUnallocCancel?.({ admission: 'unknown' });
     });
     expect(onError).not.toHaveBeenCalled();
+    // An unallocated '' chat that stays active (no switch) must still report
+    // both an unconfirmed cancel and a rejected cancel transport (R1-2).
+    const activeUnallocUnknown = fakeController({
+      sessionId: '',
+      cancel: vi.fn(async () => ({
+        admission: 'unknown',
+        target: { sessionId: '' },
+      })),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={activeUnallocUnknown} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
+    onError.mockClear();
+    const activeUnallocThrow = fakeController({
+      sessionId: '',
+      cancel: vi.fn(async () => {
+        throw new Error('stop transport error');
+      }),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={activeUnallocThrow} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('localized:chat.stopNotConfirmed');
   });
 
   it('preserves a parked in-flight latch when the switch render is discarded before commit (R1-4)', async () => {

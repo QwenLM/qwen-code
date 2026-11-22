@@ -186,25 +186,41 @@ describe('useDaemonChatController', () => {
   it('projects reactive transcript history pagination facts through the session-stable controller', () => {
     mountReact(<Probe />);
     const initialController = controller!;
-    expect(initialController.hasOlderHistory).toBe(false);
-    expect(initialController.loadingOlderHistory).toBe(false);
-    expect(initialController.historyCapacityReached).toBe(false);
-    expect(initialController.historyPaginationError).toBe(false);
+    expect([
+      initialController.hasOlderHistory,
+      initialController.loadingOlderHistory,
+      initialController.historyCapacityReached,
+      initialController.historyPaginationError,
+    ]).toEqual([false, false, false, false]);
     const originalHistory = harness.history;
-    harness.history = {
-      ...originalHistory,
-      hasMore: true,
-      loading: true,
-      capacityReached: true,
-      paginationError: true,
-    };
+    const cases: Array<{
+      wire: 'hasMore' | 'loading' | 'capacityReached' | 'paginationError';
+      expected: [boolean, boolean, boolean, boolean];
+    }> = [
+      { wire: 'hasMore', expected: [true, false, false, false] },
+      { wire: 'loading', expected: [false, true, false, false] },
+      { wire: 'capacityReached', expected: [false, false, true, false] },
+      { wire: 'paginationError', expected: [false, false, false, true] },
+    ];
     try {
-      forceRerender!();
-      expect(controller).toBe(initialController);
-      expect(controller!.hasOlderHistory).toBe(true);
-      expect(controller!.loadingOlderHistory).toBe(true);
-      expect(controller!.historyCapacityReached).toBe(true);
-      expect(controller!.historyPaginationError).toBe(true);
+      for (const { wire, expected } of cases) {
+        harness.history = {
+          ...originalHistory,
+          hasMore: false,
+          loading: false,
+          capacityReached: false,
+          paginationError: false,
+          [wire]: true,
+        };
+        forceRerender!();
+        expect(controller).toBe(initialController);
+        expect([
+          controller!.hasOlderHistory,
+          controller!.loadingOlderHistory,
+          controller!.historyCapacityReached,
+          controller!.historyPaginationError,
+        ]).toEqual(expected);
+      }
     } finally {
       harness.history = originalHistory;
     }
