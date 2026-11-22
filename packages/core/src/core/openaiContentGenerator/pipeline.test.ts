@@ -58,6 +58,7 @@ import {
   resolveBaseUrl,
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
+import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
 import { retryContext } from '../../utils/retryContext.js';
 
@@ -2597,6 +2598,40 @@ describe('ContentGenerationPipeline', () => {
         reasoning_effort: 'low',
       });
     });
+
+    it.each(
+      (['samplingParams', 'extra_body'] as const).flatMap((source) =>
+        [undefined, true].map(
+          (thinkingMandatory) => [source, thinkingMandatory] as const,
+        ),
+      ),
+    )(
+      'keeps inferred DeepSeek thinking beside an OpenRouter %s effort when mandatory=%s',
+      async (source, thinkingMandatory) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            thinkingMandatory,
+            ...(source === 'extra_body'
+              ? { samplingParams: { reasoning_effort: 'high' } }
+              : {}),
+            [source]: { reasoning_effort: 'low' },
+          },
+          'deepseek-v4.1-flash',
+        );
+        const disableField = getBuiltinDeepSeekReasoning(
+          mockContentGeneratorConfig,
+        )?.disableField;
+        expect(disableField).toBe('enable_thinking');
+        expect(wire[disableField!]).toBe(true);
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
 
     it.each(
       (['samplingParams', 'extra_body'] as const).flatMap((source) =>

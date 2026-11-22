@@ -84,6 +84,7 @@ import {
 } from './provider/utils.js';
 import {
   getEffectiveReasoning,
+  hasOpenRouterReasoningEffortOverride,
   resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
@@ -1436,11 +1437,22 @@ export class ContentGenerationPipeline {
       reasoningCapabilities,
     );
     // An inferred nested default must not compete with an explicit flat tier.
+    // Undeclared DeepSeek still needs the default to emit its non-effort field;
+    // its profile flattener removes the temporary nested object.
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
       effectiveReasoning &&
-      !this.hasExplicitOpenRouterEffort(context.model) &&
+      (!this.hasExplicitOpenRouterEffort(context.model) ||
+        (resolveReasoningDeclaration(
+          this.config.cliConfig,
+          this.contentGeneratorConfig,
+          context.model,
+        ) === undefined &&
+          getBuiltinDeepSeekReasoning({
+            ...this.contentGeneratorConfig,
+            model: context.model,
+          }) !== undefined)) &&
       request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
@@ -2034,24 +2046,10 @@ export class ContentGenerationPipeline {
   }
 
   private hasExplicitOpenRouterEffort(model?: string): boolean {
-    const flatEffort = {
-      ...this.contentGeneratorConfig.samplingParams,
-      ...this.contentGeneratorConfig.extra_body,
-    }['reasoning_effort'];
-    const declaration = resolveReasoningDeclaration(
+    return hasOpenRouterReasoningEffortOverride(
       this.config.cliConfig,
       this.contentGeneratorConfig,
       model || this.contentGeneratorConfig.model,
-    );
-    const hasDeclaredProfile =
-      typeof declaration === 'object' &&
-      declaration !== null &&
-      'profile' in declaration &&
-      declaration.profile !== undefined;
-    return (
-      isOpenRouterHostname(this.contentGeneratorConfig) &&
-      !hasDeclaredProfile &&
-      !isReasoningEffortPlaceholder(flatEffort)
     );
   }
 

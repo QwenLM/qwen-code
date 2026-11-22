@@ -29,6 +29,7 @@ import {
 import {
   clampReasoningEffort,
   getGptReasoningCapabilities,
+  isReasoningEffortPlaceholder,
   parseModelReasoningCapabilities,
   REASONING_EFFORT_TIERS,
   type ReasoningEffort,
@@ -397,6 +398,28 @@ export function resolveReasoningDeclaration(
         generation.baseUrl,
       )?.capabilities?.reasoning
     : undefined;
+}
+
+export function hasOpenRouterReasoningEffortOverride(
+  config: Pick<Config, 'getResolvedModelConfig'> | undefined,
+  generation: ContentGeneratorConfig,
+  model = generation.model,
+): boolean {
+  const flatEffort = {
+    ...generation.samplingParams,
+    ...generation.extra_body,
+  }['reasoning_effort'];
+  const declaration = resolveReasoningDeclaration(config, generation, model);
+  const hasDeclaredProfile =
+    typeof declaration === 'object' &&
+    declaration !== null &&
+    'profile' in declaration &&
+    declaration.profile !== undefined;
+  return (
+    isOpenRouterHostname(generation) &&
+    !hasDeclaredProfile &&
+    !isReasoningEffortPlaceholder(flatEffort)
+  );
 }
 
 export function resolveReasoningForModel(
