@@ -7351,7 +7351,7 @@ class QwenAgent implements Agent {
             if (
               !confirmed ||
               (tierSelected &&
-                getGptReasoningOverrideState(generation, modelReasoning)
+                getGptReasoningOverrideState(generation, modelReasoning, config)
                   ?.blocksTierChange)
             ) {
               throw RequestError.invalidParams(
@@ -18572,6 +18572,7 @@ class QwenAgent implements Agent {
     const gptOverride = getGptReasoningOverrideState(
       generation,
       modelReasoning,
+      config,
     );
     if (
       modelReasoning?.profile &&
@@ -18585,6 +18586,7 @@ class QwenAgent implements Agent {
         ? getGptReasoningOverrideState(
             { ...generation, reasoning: undefined },
             modelReasoning,
+            config,
           )
         : gptOverride;
     const mandatoryUsesDefaultEffort =
