@@ -1978,6 +1978,32 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it("keeps a thought from a missing parent apart from the model's thought", () => {
+    const parentToolCallId = 'missing-call';
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('own', 'thought', 'Model thought', 1),
+      textBlock('nested', 'thought', 'Subagent', 2, false, {
+        parentToolCallId,
+      }),
+      textBlock('nested-continuation', 'thought', ' thought', 3, false, {
+        parentToolCallId,
+      }),
+      textBlock('answer', 'assistant', 'Model reply', 4),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'own', role: 'thinking', content: 'Model thought' },
+      {
+        id: 'nested',
+        role: 'thinking',
+        content: 'Subagent thought',
+        parentToolCallId,
+      },
+      { id: 'answer', role: 'assistant', content: 'Model reply' },
+    ]);
+    expect(messages[0]).not.toHaveProperty('parentToolCallId');
+  });
+
   it('keeps the parent on assistant text split around an insight', () => {
     const parentToolCallId = 'missing-call';
     const messages = transcriptBlocksToDaemonMessages([

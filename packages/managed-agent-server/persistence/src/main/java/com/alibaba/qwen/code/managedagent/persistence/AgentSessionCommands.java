@@ -75,7 +75,7 @@ final class AgentSessionCommands {
         // installation and physical fencing, and nothing later in this
         // transaction takes the guard. The Session lock comes first, so this
         // transaction's snapshot is taken after it.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -170,7 +170,7 @@ final class AgentSessionCommands {
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -257,7 +257,7 @@ final class AgentSessionCommands {
         // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
         // operation range is locked. The Session lock comes first, so the replay probe's snapshot
         // follows it; a racing Session reusing the key loses on the receipt's unique key.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
             requireRenameReplayOwner(session, previous.get(), actorId);
@@ -291,7 +291,7 @@ final class AgentSessionCommands {
         // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
         // of different keys would deadlock inserting into that gap. A racing Session reusing the
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -368,7 +368,7 @@ final class AgentSessionCommands {
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -438,7 +438,6 @@ final class AgentSessionCommands {
 
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED',"
@@ -469,15 +468,14 @@ final class AgentSessionCommands {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
                 scope, target, operationId);
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                "INSERT INTO ma_operation (operation_key, scope_key,"
                     + " target_kind, target_key, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_key, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, available_at, gmt_create,"
-                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " gmt_modified) VALUES (?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
                 operationKey,
-                scope,
                 scope,
                 target,
                 turnId,
@@ -751,7 +749,7 @@ final class AgentSessionCommands {
 
     // Automation-verb session boot-id bind (#14548); fill only when still empty.
     void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (harnessBootId.equals(session.harnessBootId())) {
             return;
         }

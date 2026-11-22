@@ -257,7 +257,9 @@ final class RuntimeBindingRegistry {
     static final class SessionContext {
         // One guard for the state below and every context.lock() region at
         // the callers. Like them it must not pin a virtual-thread carrier
-        // when a repository call inside the guard blocks (JDK 21).
+        // when a repository call inside the guard blocks (JDK 21). Getters
+        // are called only inside a caller's lock() region; the writers also
+        // run from completion callbacks, so they take the guard themselves.
         private final ReentrantLock guard = new ReentrantLock();
         private final RuntimeSession session;
         private final RuntimeBindingRecord binding;
@@ -303,12 +305,7 @@ final class RuntimeBindingRegistry {
         }
 
         Set<String> backgroundProcesses() {
-            lock();
-            try {
-                return backgroundProcesses;
-            } finally {
-                unlock();
-            }
+            return backgroundProcesses;
         }
 
         void beginControl() {
@@ -330,12 +327,7 @@ final class RuntimeBindingRegistry {
         }
 
         String mountClaim() {
-            lock();
-            try {
-                return mountClaim;
-            } finally {
-                unlock();
-            }
+            return mountClaim;
         }
 
         void mountClaim(String next) {
@@ -348,21 +340,11 @@ final class RuntimeBindingRegistry {
         }
 
         boolean hasActiveControl() {
-            lock();
-            try {
-                return activeControls > 0;
-            } finally {
-                unlock();
-            }
+            return activeControls > 0;
         }
 
         CompletableFuture<Boolean> release() {
-            lock();
-            try {
-                return release;
-            } finally {
-                unlock();
-            }
+            return release;
         }
 
         void release(CompletableFuture<Boolean> next) {
@@ -375,12 +357,7 @@ final class RuntimeBindingRegistry {
         }
 
         CompletableFuture<Boolean> releaseAttempt() {
-            lock();
-            try {
-                return releaseAttempt;
-            } finally {
-                unlock();
-            }
+            return releaseAttempt;
         }
 
         void releaseAttempt(CompletableFuture<Boolean> next) {

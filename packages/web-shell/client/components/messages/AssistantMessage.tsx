@@ -16,6 +16,8 @@ import {
 } from 'lucide-react';
 import { Markdown } from './Markdown';
 import { SelectionCopyMenu } from './SelectionCopyMenu';
+import { ThinkingBody, useThinkingBodyRewrite } from './ThinkingBody';
+import { getShadowAwareActiveElement, isFocusUnclaimed } from '../../utils/dom';
 import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
@@ -435,6 +437,8 @@ interface ThinkingMessageProps {
   content: string;
   author?: DaemonMessageAuthor;
   isStreaming?: boolean;
+  /** A subagent's thought, drawn outside its tool card. */
+  fromSubagent?: boolean;
   timestamp?: number;
   isLocateFlashing?: boolean;
   generateContent?: SessionContentGenerator;
@@ -482,6 +486,7 @@ interface ThinkingSummaryHeaderProps {
    */
   translateContent?: string;
   showTranslateButton: boolean;
+  hideTranslateWhenClosed: boolean;
   generateContent?: SessionContentGenerator;
   onToggle: () => void;
 }
@@ -499,10 +504,12 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
   authorName,
   translateContent,
   showTranslateButton,
+  hideTranslateWhenClosed,
   generateContent,
   onToggle,
 }: ThinkingSummaryHeaderProps) {
   const { t } = useI18n();
+  const summaryRef = useRef<HTMLButtonElement>(null);
   return (
     <div
       className={`${styles.thinkingHeader}${
@@ -518,6 +525,7 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
       }}
     >
       <button
+        ref={summaryRef}
         type="button"
         disabled={documentMode}
         tabIndex={documentMode ? -1 : undefined}
@@ -554,6 +562,8 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
             content={translateContent}
             generateContent={generateContent}
             className={styles.translateButton}
+            hideWhenClosed={hideTranslateWhenClosed}
+            fallbackFocusRef={summaryRef}
           />
         )}
       <span
@@ -572,6 +582,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   content,
   author,
   isStreaming,
+  fromSubagent,
   timestamp,
   isLocateFlashing = false,
   generateContent,
@@ -581,6 +592,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   const documentMode = transcriptRenderMode === 'document';
   const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const [rewritten, onRewrittenChange] = useThinkingBodyRewrite(content);
   const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
@@ -657,6 +669,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                 !thinkingActive &&
                 generateContent !== undefined
               }
+              hideTranslateWhenClosed={!fromSubagent && rewritten}
               generateContent={generateContent}
               onToggle={handleToggle}
             />
@@ -664,10 +677,11 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               <div className={styles.thinkingExpandedClip}>
                 <div className={styles.thinkingExpandedInner}>
                   <div className={styles.thinkingExpandedWrap}>
-                    <Markdown
+                    <ThinkingBody
                       content={content}
-                      source="thinking"
                       isStreaming={isStreaming}
+                      fromSubagent={fromSubagent}
+                      onRewrittenChange={onRewrittenChange}
                     />
                   </div>
                 </div>
@@ -685,6 +699,8 @@ interface ThinkingTranslateButtonProps {
   generateContent?: SessionContentGenerator;
   className?: string;
   mode?: 'translate' | 'explain-shell';
+  hideWhenClosed?: boolean;
+  fallbackFocusRef?: RefObject<HTMLButtonElement | null>;
 }
 
 export function ThinkingTranslateButton({
@@ -692,6 +708,8 @@ export function ThinkingTranslateButton({
   generateContent,
   className,
   mode = 'translate',
+  hideWhenClosed,
+  fallbackFocusRef,
 }: ThinkingTranslateButtonProps) {
   const { language, t } = useI18n();
   const [translationOpen, setTranslationOpen] = useState(false);
@@ -700,6 +718,22 @@ export function ThinkingTranslateButton({
   const [translationThinking, setTranslationThinking] = useState(false);
   const [translationError, setTranslationError] = useState(false);
   const translationAbortRef = useRef<AbortController | undefined>(undefined);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const setTriggerRef = useCallback(
+    (node: HTMLButtonElement | null) => {
+      const previous = triggerRef.current;
+      // A rewrite can remove the focused trigger after its popover has closed.
+      if (
+        !node &&
+        previous &&
+        getShadowAwareActiveElement(previous) === previous
+      ) {
+        fallbackFocusRef?.current?.focus({ preventScroll: true });
+      }
+      triggerRef.current = node;
+    },
+    [fallbackFocusRef],
+  );
 
   useEffect(
     () => () => {
@@ -797,10 +831,18 @@ export function ThinkingTranslateButton({
     setTranslationOpen(false);
   }, []);
 
+  const hidden = hideWhenClosed && !translationOpen;
+  useEffect(() => {
+    if (hidden && translationAbortRef.current) handleCancelOrCloseTranslation();
+  }, [hidden, handleCancelOrCloseTranslation]);
+
+  if (hidden) return null;
+
   return (
     <Popover open={translationOpen} onOpenChange={handleTranslationOpenChange}>
       <PopoverTrigger asChild>
         <button
+          ref={setTriggerRef}
           type="button"
           className={className}
           title={t(
@@ -823,6 +865,17 @@ export function ThinkingTranslateButton({
       </PopoverTrigger>
       <PopoverContent
         align="start"
+        onCloseAutoFocus={(event) => {
+          const fallback = fallbackFocusRef?.current;
+          if (
+            hideWhenClosed &&
+            fallback &&
+            isFocusUnclaimed(fallback.getRootNode())
+          ) {
+            event.preventDefault();
+            fallback.focus({ preventScroll: true });
+          }
+        }}
         // A width utility lets tailwind-merge drop PopoverContent's default w-72;
         // a CSS-module width ties on specificity and loses when utilities load later.
         className={`${styles.translationPopover} w-[min(480px,calc(100vw-32px))]`}

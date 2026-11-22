@@ -1051,20 +1051,25 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
-        const parentSubAgent = textBlock.parentToolCallId
-          ? toolsByCallId.get(textBlock.parentToolCallId)
+        const { parentToolCallId } = textBlock;
+        const parentSubAgent = parentToolCallId
+          ? toolsByCallId.get(parentToolCallId)
           : undefined;
         if (parentSubAgent) {
           appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
-        const target =
+        const previousThinking =
           currentThinkingIdx !== null
             ? messages[currentThinkingIdx]
             : undefined;
+        const target =
+          previousThinking?.role === 'thinking' &&
+          previousThinking.parentToolCallId === parentToolCallId
+            ? previousThinking
+            : undefined;
         if (
           target &&
-          target.role === 'thinking' &&
           !needsNewContentMessage &&
           textBlock.segmentId === undefined
         ) {
@@ -1080,6 +1085,7 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'thinking',
             content: textBlock.text,
+            ...(parentToolCallId ? { parentToolCallId } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],

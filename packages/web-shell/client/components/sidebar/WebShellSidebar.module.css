@@ -1425,6 +1425,7 @@ button.livePendingSession:hover {
     :has(
       .sessionLoading,
       .sessionAttention,
+      .sessionContinuation,
       .sessionGitIcon,
       .sessionSourceIcon
     )
@@ -1450,6 +1451,20 @@ button.livePendingSession:hover {
 .sessionAttentionUserInput {
   background: color-mix(in srgb, var(--agent-blue-500) 10%, transparent);
   color: color-mix(in srgb, var(--agent-blue-500) 95%, var(--foreground));
+}
+
+.sessionContinuation {
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warning-color) 12%, transparent);
+  color: color-mix(in srgb, var(--warning-color) 95%, var(--foreground));
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
 }
 
 .sessionGitIcon {
@@ -1520,6 +1535,8 @@ button.livePendingSession:hover {
     .sessionMetaSlot:has([data-state='open']) .sessionLoading,
     .sessionMetaSlot:has(.sessionActions:focus-within) .sessionAttention,
     .sessionMetaSlot:has([data-state='open']) .sessionAttention,
+    .sessionMetaSlot:has(.sessionActions:focus-within) .sessionContinuation,
+    .sessionMetaSlot:has([data-state='open']) .sessionContinuation,
     .sessionMetaSlot:has(.sessionActions:focus-within) .sessionSourceIcon,
     .sessionMetaSlot:has([data-state='open']) .sessionSourceIcon {
       opacity: 0;
@@ -1547,12 +1564,14 @@ button.livePendingSession:hover {
 
   .sessionRow:hover:not(.runningSession) .sessionGitIcon,
   .sessionRow:hover:not(.runningSession) .sessionAttention,
+  .sessionRow:hover:not(.runningSession) .sessionContinuation,
   /* A background-only row is not .runningSession, so a row hover reveals the
      actions over the busy marker; hide it like the other markers. */
   .sessionRow:hover:not(.runningSession) .sessionLoading,
   .sessionMetaSlot:hover .sessionGitIcon,
   .sessionMetaSlot:hover .sessionLoading,
-  .sessionMetaSlot:hover .sessionAttention {
+  .sessionMetaSlot:hover .sessionAttention,
+  .sessionMetaSlot:hover .sessionContinuation {
     opacity: 0;
   }
 

@@ -90,12 +90,10 @@ class ManagedNativeJournalSnapshotsTest {
         try (var holder = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             var hold = holder.submit(() -> tx.executeWithoutResult(status -> {
                 JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, TENANT);
-                String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract
-                        .sha256(TENANT.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?,"
-                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_key = tenant_key", key, TENANT);
+                jdbc.update("INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES (?,"
+                        + " 'output_publication') ON DUPLICATE KEY UPDATE tenant_id = tenant_id", TENANT);
                 jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication'"
-                        + " AND tenant_key = ? FOR UPDATE", key);
+                        + " AND tenant_id = ? FOR UPDATE", TENANT);
                 held.countDown();
                 try {
                     release.await(30, java.util.concurrent.TimeUnit.SECONDS);
@@ -174,10 +172,10 @@ class ManagedNativeJournalSnapshotsTest {
         String id = "managed-native-journal-snapshot:"
                 + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "collision");
         byte[] bytes = "ordinary".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id,"
                 + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                + " VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
-                ManagedSessionStore.resourceKey(scope, id), scope, TENANT, WORKSPACE, SESSION, id, "managed-input",
+                + " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 1)",
+                ManagedSessionStore.resourceKey(scope, id), TENANT, WORKSPACE, SESSION, id, "managed-input",
                 bytes.length, org.apache.commons.codec.digest.DigestUtils.sha256Hex(bytes), bytes);
         assertThatThrownBy(() -> snapshots.publish(TENANT, SESSION, TOKEN, request("collision")))
                 .isInstanceOf(ManagedAgentException.class);

@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_203_700;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_205_800;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -222,7 +222,29 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_203_700;
 // tracks, not new inputs. Re-track against the lane figure: the warning sits
 // 992 above it and the ceiling 1,992 above it, leaving 1,921 above this tree's
 // expected 2,202,779.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_204_700;
+//
+// The ChatSurface chat column (#17952) then grows the transcript dictionary
+// past that ceiling: the Build lane measures 2,151,214 bytes on main
+// 3911b60fc4 (run 44953143515, green) against 2,151,847 on 580108434f
+// (run 44963775498), +633, with CSS unchanged at 2,427,365; the three
+// subsequent main runs measure the same 2,151,847. The cause is six chat.*
+// keys in the two catalogs the document entry inlines (EN and ZH-CN; zh-TW
+// and RU are transcript-stubbed), the CHAT_MESSAGE_KEYS parity export, and
+// the transcript-reachable pendingPermissionRevision helper. The ChatSurface
+// component graph is not wired into any column and useDaemonChatController
+// has no importer, so no component code reaches the document entry; the
+// forbidden-input guard passes and the third-party input mix is unchanged.
+// Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
+//
+// Merging main 39f15664e3 (the ChatSurface copy above, the ThinkingBody
+// transcript stub and the continuation-badge sidebar labels) measures
+// 2,203,610 JS bytes on Node 22.23.2 with the workflow's installed
+// dependencies, with 2,440,868 bytes of separate CSS; the forbidden-input
+// guard passes. Applying the ~1,162-byte install spread measured above puts
+// the lane near 2,204,772, 72 above the previous ceiling, so re-track against
+// that expected lane figure: the warning sits 1,028 above it and the ceiling
+// 2,028 above it, leaving 2,190 and 3,190 above this local measurement.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_206_800;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

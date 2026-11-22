@@ -250,9 +250,9 @@ import {
   formatDenialStateLog,
   recordAllow,
   recordFallbackApprove,
-  shouldClassifyAllShellForAutoMode,
+  confirmAutomaticReviewOnAllow,
   finalizeToolResponses,
-  shouldForceAutoModeReviewForAllow,
+  shouldRequireAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
@@ -4484,6 +4484,7 @@ export class Session implements SessionContext {
                 workspace: req.workspace,
                 workspaceGeneration: req.workspaceGeneration,
                 ...(req.requiresYolo ? { requiresYolo: true } : {}),
+                ...(req.requiresAutoMode ? { requiresAutoMode: true } : {}),
               }
             : {}),
           ...(req.sessionId ? { sessionId: req.sessionId } : {}),
@@ -4523,18 +4524,29 @@ export class Session implements SessionContext {
           SERVE_CONTROL_EXT_METHODS.resolveSubSessionWorkspace,
           { workspace },
         );
-        const { workspaceId, workspaceCwd, workspaceGeneration } = resp;
+        const {
+          workspaceId,
+          workspaceCwd,
+          workspaceGeneration,
+          sameWorkspace,
+        } = resp;
         if (
           typeof workspaceId !== 'string' ||
           !workspaceId ||
           typeof workspaceCwd !== 'string' ||
           !workspaceCwd ||
           typeof workspaceGeneration !== 'string' ||
-          !workspaceGeneration
+          !workspaceGeneration ||
+          typeof sameWorkspace !== 'boolean'
         ) {
           throw new Error('create_sub_session: invalid workspace binding');
         }
-        return { workspaceId, workspaceCwd, workspaceGeneration };
+        return {
+          workspaceId,
+          workspaceCwd,
+          workspaceGeneration,
+          sameWorkspace,
+        };
       },
     );
   }
@@ -18625,8 +18637,12 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(policyToolName, this.config));
+            shouldRequireAutoModeReviewForAllow(
+              invocation,
+              pmCtx,
+              policyToolName,
+              this.config,
+            );
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -18811,9 +18827,36 @@ export class Session implements SessionContext {
             if ('cancelled' in classified) return classified.cancelled;
             const { outcome, denialState } = classified;
             switch (outcome.kind) {
-              case 'approved':
+              case 'approved': {
+                const automaticApproval = await confirmAutomaticReviewOnAllow(
+                  this.config,
+                  invocation,
+                  activeToolAbortSignal,
+                );
+                if (
+                  automaticApproval === 'mode-changed' ||
+                  automaticApproval === 'requires-human'
+                ) {
+                  return earlyErrorResponse(
+                    new Error(
+                      automaticApproval === 'mode-changed'
+                        ? 'Approval mode changed before confirmation. Please retry.'
+                        : 'This tool call requires one-time human approval under the current permission rules. Please retry.',
+                    ),
+                    toolName,
+                    {
+                      status: 'error',
+                      errorType: ToolErrorType.EXECUTION_DENIED,
+                      executionStatus: 'not_started',
+                    },
+                  );
+                }
+                if (automaticApproval === 'cancelled') {
+                  return cancelBeforeExecutionIfAborted(toolName)!;
+                }
                 autoModeAllowed = true;
                 break;
+              }
               case 'blocked':
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
@@ -19079,6 +19122,7 @@ export class Session implements SessionContext {
                     }
                     recordAutoModeFallbackResolution(approval.outcome);
                   } else {
+                    let confirmationApprovalMode = approvalMode;
                     if (hookResult.updatedInput) {
                       // The replacement is checked like the input before it:
                       // its gates, schema and permission rules. This hook's
@@ -19196,28 +19240,32 @@ export class Session implements SessionContext {
                         string,
                         unknown
                       >;
+                      const replacementApprovalMode =
+                        this.config.getApprovalMode();
+                      confirmationApprovalMode = replacementApprovalMode;
                       const replacementAllowed =
                         replacementFlow.finalPermission === 'allow' &&
                         !(
-                          approvalMode === ApprovalMode.AUTO &&
-                          (shouldForceAutoModeReviewForAllow(
+                          replacementApprovalMode === ApprovalMode.AUTO &&
+                          shouldRequireAutoModeReviewForAllow(
+                            replacement,
                             replacementFlow.pmCtx,
-                            this.config.getCwd(),
-                          ) ||
-                            shouldClassifyAllShellForAutoMode(
-                              policyToolName,
-                              this.config,
-                            ))
+                            policyToolName,
+                            this.config,
+                          )
                         );
                       if (
                         replacementAllowed &&
-                        approvalMode === ApprovalMode.AUTO
+                        replacementApprovalMode === ApprovalMode.AUTO
                       ) {
                         recordAutoModeAllow(replacementParams);
                         updateAutoModeFallback();
                       } else if (
                         !replacementAllowed &&
-                        shouldRunAutoModeForCall(approvalMode, policyToolName)
+                        shouldRunAutoModeForCall(
+                          replacementApprovalMode,
+                          policyToolName,
+                        )
                       ) {
                         const classified = await classifyForAutoMode(
                           replacementParams,
@@ -19253,9 +19301,41 @@ export class Session implements SessionContext {
                       }
                       hookHandled = false;
                     } else {
-                      await confirmationDetails.onConfirm(
-                        ToolConfirmationOutcome.ProceedOnce,
-                      );
+                      if (
+                        invocation.requiresUserInteraction?.() === true ||
+                        (invocation.requiresAutoReviewOnAllow?.() === true &&
+                          this.config.getApprovalMode() !==
+                            confirmationApprovalMode &&
+                          !(
+                            confirmationApprovalMode === ApprovalMode.AUTO &&
+                            this.config.getApprovalMode() === ApprovalMode.YOLO
+                          ))
+                      ) {
+                        return earlyErrorResponse(
+                          new Error(
+                            invocation.requiresUserInteraction?.()
+                              ? 'This tool call requires one-time human approval under the current permission rules. Please retry.'
+                              : 'Approval mode changed before confirmation. Please retry.',
+                          ),
+                          toolName,
+                          {
+                            status: 'error',
+                            errorType: ToolErrorType.EXECUTION_DENIED,
+                            executionStatus: 'not_started',
+                          },
+                        );
+                      }
+                      // Automatic callbacks are provided by the resolved
+                      // destination-specific confirmation object.
+                      if (confirmationDetails.onAutoConfirm) {
+                        await confirmationDetails.onAutoConfirm(
+                          this.config.getApprovalMode(),
+                        );
+                      } else {
+                        await confirmationDetails.onConfirm(
+                          ToolConfirmationOutcome.ProceedOnce,
+                        );
+                      }
                       const hookConfirmationCancellation =
                         cancelBeforeExecutionIfAborted(toolName);
                       if (hookConfirmationCancellation) {
@@ -19347,7 +19427,7 @@ export class Session implements SessionContext {
 
               const permissionOptions = toPermissionOptions(
                 confirmationDetails,
-                pmForcedAsk,
+                pmForcedAsk || requiresUserInteraction,
                 this.requiresManagedConversationBinding
                   ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
                   : undefined,
