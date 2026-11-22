@@ -41,6 +41,7 @@ import { isVoiceModelId } from '../../voice/voiceModels';
 import { Switch } from '../ui/switch';
 import styles from './AuthMessage.module.css';
 import { QwenSubscriptionEntry } from './QwenSubscriptionEntry';
+import { ModelSelectionPanel } from './ModelSelectionPanel';
 
 const TOS_PRIVACY_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
@@ -390,7 +391,7 @@ export function AuthMessage({
         setBaseUrl(defaultBaseUrl(nextProtocol, nextWireApi));
       }
       setApiKey('');
-      setModels(modelIds(nextProvider));
+      setModels(nextProvider.id === 'deepinfra' ? '' : modelIds(nextProvider));
       setThinking(false);
       setModality(false);
       setModalityImage(true);
@@ -966,32 +967,17 @@ export function AuthMessage({
     if (currentStep === 'models') {
       const defaultIds = modelIds(provider);
       return (
-        <>
-          {defaultIds && (
-            <div className={styles.muted}>
-              {t('auth.modelsPrompt', { modelIds: defaultIds })}
-            </div>
-          )}
-          <input
-            className={styles.input}
-            value={models}
-            aria-label={t('auth.step.models')}
-            disabled={saving}
-            placeholder={defaultIds || t('auth.modelsPlaceholder')}
-            onChange={(event) => {
-              setModels(event.target.value);
-              setError(null);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                event.stopPropagation();
-                goNext();
-              }
-            }}
-            autoFocus
-          />
-        </>
+        <ModelSelectionPanel
+          provider={provider}
+          value={models}
+          onChange={(newModels) => {
+            setModels(newModels);
+            setError(null);
+          }}
+          disabled={saving}
+          onEnterPress={goNext}
+          defaultModelIds={defaultIds}
+        />
       );
     }
     return (
