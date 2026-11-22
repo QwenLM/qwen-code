@@ -4083,9 +4083,13 @@ esac`,
             existsSync(probe),
             `the stub never ran: ${mode} (status=${result.status} signal=${result.signal} error=${result.error?.code})\n${result.stderr ?? ''}`,
           ).toBe(true);
-          const leaked = readFileSync(probe, 'utf8')
-            .split('\n')
-            .filter((key) => SESSION_STAMPS.includes(key));
+          const dump = readFileSync(probe, 'utf8').split('\n').filter(Boolean);
+          // A full-env dump matches no bare stamp name, so pin the shape too.
+          expect(
+            dump.every((name) => !name.includes('=')),
+            `probe dump is not names-only: ${mode}`,
+          ).toBe(true);
+          const leaked = dump.filter((key) => SESSION_STAMPS.includes(key));
           expect(leaked, `child env carries session stamps: ${mode}`).toEqual(
             [],
           );
