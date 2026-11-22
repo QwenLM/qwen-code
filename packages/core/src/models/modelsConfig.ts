@@ -38,6 +38,7 @@ import {
   CREDENTIAL_FIELDS,
   PROVIDER_SOURCED_FIELDS,
 } from './constants.js';
+import { isDeepInfraModel } from './modelConfigResolver.js';
 
 export {
   MODEL_GENERATION_CONFIG_FIELDS,
@@ -1010,10 +1011,103 @@ export class ModelsConfig {
 
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
+    const isTargetDeepInfra = isDeepInfraModel({
+      id: model.id,
+      baseUrl: model.baseUrl,
+      envKey: model.envKey,
+    });
+
+    // Resolve service_tier first so timeout resolution can inspect the effective tier
+    if (gc.service_tier !== undefined) {
+      this._generationConfig.service_tier = gc.service_tier;
+      this.generationConfigSources['service_tier'] = {
+        kind: 'modelProviders',
+        authType: model.authType,
+        modelId: model.id,
+        detail: 'generationConfig.service_tier',
+      };
+    } else {
+      const existingSource = this.generationConfigSources['service_tier'];
+      let retain = false;
+      if (existingSource) {
+        if (
+          existingSource.kind === 'cli' ||
+          existingSource.kind === 'settings'
+        ) {
+          retain = true;
+        } else if (existingSource.kind === 'env') {
+          if (existingSource.envKey === 'OPENAI_SERVICE_TIER') {
+            retain = true;
+          } else if (
+            existingSource.envKey === 'DEEPINFRA_SERVICE_TIER' &&
+            isTargetDeepInfra
+          ) {
+            retain = true;
+          }
+        }
+      }
+
+      if (!retain) {
+        if (isTargetDeepInfra && process.env['DEEPINFRA_SERVICE_TIER']) {
+          this._generationConfig.service_tier =
+            process.env['DEEPINFRA_SERVICE_TIER'];
+          this.generationConfigSources['service_tier'] = {
+            kind: 'env',
+            envKey: 'DEEPINFRA_SERVICE_TIER',
+            detail: 'DEEPINFRA_SERVICE_TIER',
+          };
+        } else if (process.env['OPENAI_SERVICE_TIER']) {
+          this._generationConfig.service_tier =
+            process.env['OPENAI_SERVICE_TIER'];
+          this.generationConfigSources['service_tier'] = {
+            kind: 'env',
+            envKey: 'OPENAI_SERVICE_TIER',
+            detail: 'OPENAI_SERVICE_TIER',
+          };
+        } else {
+          this._generationConfig.service_tier = undefined;
+          delete this.generationConfigSources['service_tier'];
+        }
+      }
+    }
+
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
-      if (field === 'service_tier' && gc.service_tier === undefined) {
-        // Do not wipe an already-resolved service_tier (e.g. from CLI or env)
-        // when the model has no explicit service_tier override.
+      if (field === 'service_tier') {
+        continue;
+      }
+      if (field === 'timeout') {
+        if (gc.timeout !== undefined) {
+          this._generationConfig.timeout = gc.timeout;
+          this.generationConfigSources['timeout'] = {
+            kind: 'modelProviders',
+            authType: model.authType,
+            modelId: model.id,
+            detail: 'generationConfig.timeout',
+          };
+        } else {
+          const existingSource = this.generationConfigSources['timeout'];
+          const isUserConfigured =
+            existingSource?.kind === 'cli' ||
+            existingSource?.kind === 'settings' ||
+            (existingSource?.kind === 'env' &&
+              existingSource.envKey === 'QWEN_CODE_API_TIMEOUT_MS');
+
+          if (isUserConfigured) {
+            // Retain explicit user configuration
+          } else if (
+            isTargetDeepInfra &&
+            this._generationConfig.service_tier === 'flex'
+          ) {
+            this._generationConfig.timeout = 600000;
+            this.generationConfigSources['timeout'] = {
+              kind: 'default',
+              detail: 'DeepInfra flex queue default (10m)',
+            };
+          } else {
+            this._generationConfig.timeout = undefined;
+            delete this.generationConfigSources['timeout'];
+          }
+        }
         continue;
       }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
