@@ -54,6 +54,11 @@
 - **动作点，而非仪表盘。** 侧栏头部是被管辖操作所在；那里的条把意外 503 变成可见、有解释的暂停。原始指标在 status 对话框已有归宿。
 - **轮询加拒绝，而非仅轮询。** 5 秒轮询可能落后闸门至多一个间隔加闸门自身去抖；被动拒绝让第一次失败点击立即有解释，其 TTL 与 daemon 的重试提示一致，使 UI 在没有轮询确认时不会暂停得比 daemon 建议的更久。
 - **仅轮询也不够。** 没有它状态只在失败点击后出现，而那正是本切片要消除的意外。
+- **复用先于拒绝。** `resolveSessionForWorkspace` 的暂停守卫位于两条复用分支（连接会话所有权、目录最新会话）之下、分配之上：GitDialog 提交/PR 生成不分配会话，过载时须继续工作；仅 forceCreate/分配被拒。
+- **轮询裁决的新鲜度界。** `useDaemonResource` 在轮询失败时保留旧 payload，故 `pollOverloaded` 额外要求 `error === undefined`；status 不可达期间仅带过期的拒绝提示可暂停 UI。
+- **挂载请求记账与隐藏标签页门。** autoLoad/挂载请求与 interval 轮询共用同一在途记账；资源仅在标签页可见时 enabled（visibilitychange 监听在回到前台时重新启用并重拉），后台或饱和 daemon 的标签页不堆叠 summary 请求。
+- **一处 managed 豁免，四处守卫。** createNewSession、sendPrompt、ensureSessionForPrompt、resolveSessionForWorkspace 均带 `!managedModeRef.current`，与侧栏 prop 豁免一致；managed 首页不创建 daemon 会话。
+- **显式拒绝契约。** sendPrompt 暂停拒绝返回 false；composer submit 与设置语言同步遵从（保留草稿/不报假成功），fire-and-forget 调用点不受影响。
 - **派生 OR，不做合并机器。** 两个生命周期不同的来源（渲染派生 vs 带过期状态）在一个表达式里组合；存储合并裁决需要在每次轮询与每次过期时对账。
 - **加性 SDK 字段。** 旧 daemon 省略 `loadAdmission`；可选字段保持客户端对它们与 opt-out flag（`enabled: false` 永不暂停）的兼容。
 
