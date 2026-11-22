@@ -72,7 +72,7 @@ interface BufferedResource {
  */
 export class WorkerDeliveryResourceStore {
   private readonly byId = new Map<string, BufferedResource>();
-  private readonly ordered: BufferedResource[] = [];
+  private ordered: BufferedResource[] = [];
   private nextIndex = 0;
 
   async publish(
@@ -133,6 +133,25 @@ export class WorkerDeliveryResourceStore {
   get watermark(): number {
     return this.nextIndex - 1;
   }
+
+  /** Drops everything at or before the marker, whose bytes an enqueued
+   * entry already carries, except the newest manifest: the capture reads
+   * its final revision back after delivering it. */
+  release(marker: number): void {
+    const manifest = this.ordered.findLast(
+      (entry) =>
+        entry.index <= marker &&
+        entry.ref.kind === MANAGED_TOOL_RESULT_KINDS.manifest,
+    );
+    for (const entry of this.ordered) {
+      if (entry.index <= marker && entry !== manifest) {
+        this.byId.delete(entry.ref.resourceId);
+      }
+    }
+    this.ordered = this.ordered.filter(
+      (entry) => entry.index > marker || entry === manifest,
+    );
+  }
 }
 
 function entryBytes(entry: ManagedDeliveryEntry): number {
@@ -186,6 +205,8 @@ export class BackgroundDeliveryRun {
       }
     | undefined;
   private closed = false;
+  /** Called once a consumer acknowledged the terminal entry. */
+  onDrained?: () => void;
 
   constructor(
     readonly executionCallId: string,
@@ -494,6 +515,7 @@ export class BackgroundDeliveryRun {
       this.onBackpressure?.(false);
       for (const waiter of this.roomWaiters.splice(0)) waiter();
     }
+    if (this.terminalEmitted && this.outbox.length === 0) this.onDrained?.();
   }
 
   private acknowledge(appliedThrough: number): void {
@@ -751,6 +773,7 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
     ) as { revision: number };
     if (await this.run.enqueueOutput(ref, manifest.revision, resources)) {
       this.lastResourceMarker = marker;
+      this.resources.release(marker);
     } else {
       // A dropped revision means the stop found the outbox full: freeze
       // the capture so the buffered tail is dropped and the final revision
@@ -858,6 +881,7 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
           )
       : [];
     this.lastResourceMarker = this.resources.watermark;
+    this.resources.release(this.lastResourceMarker);
     this.run.enqueueTerminal(
       envelope,
       evidence,
@@ -999,6 +1023,7 @@ export class WorkerMonitorPolicy {
       )
     ) {
       this.lastResourceMarker = marker;
+      this.resources.release(marker);
     }
     this.onNotification?.();
     this.armIdle();

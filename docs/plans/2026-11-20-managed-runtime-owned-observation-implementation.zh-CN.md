@@ -176,7 +176,7 @@ Phase 3b server jar 在真实 daemon 拓扑里端到端启动。配方（全部�
 
 ### 评审修复（#17953）
 
-PR 评审在开关打开的通路上发现十处缺陷。每处修复都带一个在修复前代码上会失败的回归测试。
+PR 评审在开关打开的通路上发现十三处缺陷：十处会让投递卡死或丢失，三处关于资源与规模。每处修复都带一个在修复前代码上会失败的回归测试。
 
 - **暂存丢掉 null 字段。** Broker 序列化暂存条目时未带 `WriteNulls`，terminal 的 `exitSignal: null` 被丢掉，之后每次唤醒加载都解析失败。暂存现在写出 null。
 - **Monitor 通知无法暂存。** 暂存白名单列了一个无人产生的类型，漏了 `managed-input` 与 `managed-admission`。
@@ -188,8 +188,11 @@ PR 评审在开关打开的通路上发现十处缺陷。每处修复都带一�
 - **暂存确认会裁掉 Harness 尚未应用的条目。** 已安装 publisher 时（attached，或推送失败后 held），worker 忽略 `ackThrough`；只有无 Harness 持有的 run 才按暂存确认裁剪。否则重新挂接排空期间暂存的条目会丢失，暂存后的重试也会因序号不连续被拒。
 - **推送批次按实际发送的大小计算**，包括请求外层与条目间分隔符。
 - **观测条目夹带了采集输出。** Monitor 策略现在发布到自己的资源 store，观测只携带它自己的通知。
+- **worker 从不释放 run。** 一个 run 在某个消费方确认了它的 terminal 条目、且它的退出路径已取走回执后，即从注册表移除，注册响应的 `observedRuns` 只列仍在进行中的 run。每个资源 store 也会丢掉已由入队条目携带的字节，只保留最新的 manifest，因为采集在 finalize 时还要读回它。没有这一步，开放页增长会让一个长时间运行的 run 在 worker 里攒下数 GB。
+- **无法使用租约的副本会把能用的副本锁在外面。** Broker 现在先用本副本的 provisioner 检查 binding 的租约，再去拿拉取 claim，用不了这个 binding 的副本绝不会持有它的 claim。
+- **被唤醒的 Session 无法再次挂起。** 重新加载现在会重建 dispatch 时记录的信息：重新注册报告了观测归属时，该 worker 报告仍持有的每个未结算 run 的 binding 都加入 lane 的 `observationBindings`，run 仍在运行时挂起证书也能通过。
 
-验证：`RuntimeStageStoreTest` 6/6 且 Checkstyle 通过；core `local-shell-stream-capture` 15/15 及等价性 2/2；cli `managed-background-delivery` 14/14、其进程测试、两套 Shell publisher 测试与 `managed-runtime-tool-executor`。MySQL 8.4 暂存 IT 交由 CI。
+验证：`RuntimeStageStoreTest` 6/6、`RuntimeObservationPullerTest` 2/2 且 Checkstyle 通过；core `local-shell-stream-capture` 15/15 及等价性 2/2；cli `managed-background-delivery` 15/15、其进程测试、两套 Shell publisher 测试、`hosted-turn-cleanup`、`managed-runtime-container`、`managed-context-worker` 与 `managed-runtime-tool-executor`。MySQL 8.4 暂存 IT 交由 CI。
 
 ### 剩余故障用例
 

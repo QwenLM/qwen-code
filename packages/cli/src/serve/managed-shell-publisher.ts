@@ -418,6 +418,7 @@ export class ManagedShellPublisherRegistry
       sessionId: string;
       run: BackgroundDeliveryRun;
       sink: WorkerBackgroundCaptureSink;
+      accepted: boolean;
     }
   >();
 
@@ -814,11 +815,31 @@ export class ManagedShellPublisherRegistry
       sessionId: reference.sessionId,
       run,
       sink,
+      accepted: false,
     });
+    run.onDrained = () => this.retire(capture.executionCallId);
     const descriptor = this.sessions.get(reference.sessionId);
     const generation = this.sessionGenerations.get(reference.sessionId) ?? 0;
     if (descriptor && generation > 0) run.attach(descriptor, generation);
     return { identity, sink };
+  }
+
+  /**
+   * A finished run leaves once a consumer acknowledged its terminal entry
+   * and its exit took the receipt, so neither the worker heap nor the
+   * `observedRuns` a registration reports grows with past runs.
+   */
+  private retire(executionCallId: string): void {
+    const workerRun = this.workerRuns.get(executionCallId);
+    if (
+      !workerRun?.accepted ||
+      !workerRun.run.isClosedOrTerminal ||
+      workerRun.run.pendingCount > 0
+    ) {
+      return;
+    }
+    this.workerRuns.delete(executionCallId);
+    void workerRun.sink.close();
   }
 
   async accept(
@@ -828,6 +849,8 @@ export class ManagedShellPublisherRegistry
     const workerRun = this.workerRuns.get(identity.executionCallId);
     if (workerRun) {
       const receipt = await workerRun.run.terminalAcknowledgement();
+      workerRun.accepted = true;
+      this.retire(identity.executionCallId);
       return {
         ...receipt,
         manifest: receipt.manifest ?? envelope.capture?.manifest ?? null,

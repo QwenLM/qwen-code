@@ -407,15 +407,17 @@ final class RuntimeObservationCoordinator {
         for (Map.Entry<String, List<PullableRun>> group : byBinding.entrySet()) {
             String key = group.getKey();
             PullableRun sample = group.getValue().getFirst();
-            PullerClaim claim = ensureBindingClaim(key, sample.bindingId(), sample.runtimeGeneration());
-            if (claim == null) {
-                continue;
-            }
+            // Usability is local to this replica: claim only a binding whose
+            // lease it can use, or it locks out the replica that can.
             RuntimeBindingRecord binding = bindingRepository.findById(sample.bindingId());
             if (binding == null || binding.getGeneration() != sample.runtimeGeneration()
                     || binding.getState() != RuntimeBindingRecord.State.READY
                     || binding.getLease() == null
                     || !provisioner.isUsable(binding.getLease())) {
+                continue;
+            }
+            PullerClaim claim = ensureBindingClaim(key, sample.bindingId(), sample.runtimeGeneration());
+            if (claim == null) {
                 continue;
             }
             for (PullableRun run : group.getValue()) {

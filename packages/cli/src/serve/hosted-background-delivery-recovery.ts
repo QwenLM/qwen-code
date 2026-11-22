@@ -28,6 +28,7 @@ export interface BackgroundDeliveryRecoveryLane {
   readonly resources: DurableToolResultResourceStore;
   readonly assertWritable: () => Promise<void>;
   monitorWakeKick?: () => void;
+  observationBindings?: Set<string>;
 }
 
 export interface BackgroundDeliveryRecoveryInput {
@@ -49,6 +50,10 @@ interface KnownBackgroundRun {
   readonly domain: 'child_run' | 'monitor_run';
   readonly outputRef: ManagedSessionDurableRef | null;
   readonly settled: boolean;
+  readonly runtime: {
+    readonly runtimeBindingId: string;
+    readonly generation: string;
+  } | null;
 }
 
 function collectKnownRuns(managed: ManagedSession): KnownBackgroundRun[] {
@@ -63,6 +68,7 @@ function collectKnownRuns(managed: ManagedSession): KnownBackgroundRun[] {
       settled: ['settled', 'not_started_proven'].includes(
         parsed.run.execution ?? '',
       ),
+      runtime: parsed.run.runtime,
     });
   }
   for (const entry of managed.authority.extensionRecordsInDomain(
@@ -77,6 +83,7 @@ function collectKnownRuns(managed: ManagedSession): KnownBackgroundRun[] {
       settled: ['settled', 'not_started_proven'].includes(
         parsed.run.execution ?? '',
       ),
+      runtime: parsed.run.runtime,
     });
   }
   return runs;
@@ -222,6 +229,21 @@ export async function reattachAndDrainBackgroundDeliveries(
           try {
             await broker.registerPublisher(descriptor, writer.writerGeneration);
             Object.assign(observedRuns, broker.observedRuns);
+            // What dispatch records for a new run: only a worker that owns
+            // the observation and still holds the run can answer its pull.
+            if (broker.observationOwned) {
+              for (const run of knownRuns) {
+                if (
+                  !run.settled &&
+                  run.runtime &&
+                  Object.hasOwn(broker.observedRuns, run.executionCallId)
+                ) {
+                  (input.lane.observationBindings ??= new Set()).add(
+                    `${run.runtime.runtimeBindingId}@${run.runtime.generation}`,
+                  );
+                }
+              }
+            }
           } catch (cause) {
             if (!isIgnorableReattachRejection(cause)) {
               throw cause;

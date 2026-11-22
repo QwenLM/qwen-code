@@ -176,7 +176,7 @@ The full E2E harness (a new MySQL IT modeled on `HostedHarnessMySqlIT` + `manage
 
 ### Review fixes (#17953)
 
-The PR review found ten defects on the enabled path. Each fix has a regression test that fails on the pre-fix code.
+The PR review found thirteen defects on the enabled path: ten that wedge or lose deliveries and three of resources and scale. Each fix has a regression test that fails on the pre-fix code.
 
 - **Staging dropped null fields.** The Broker serialized staged entries without `WriteNulls`, so a terminal's `exitSignal: null` vanished and every later wake load failed to parse the entry. Staging now writes nulls.
 - **Monitor notifications could not stage.** The staging allowlist named a kind nothing produces and omitted `managed-input` and `managed-admission`.
@@ -188,8 +188,11 @@ The PR review found ten defects on the enabled path. Each fix has a regression t
 - **Staging acknowledgements trimmed entries a Harness still owed.** While a publisher is installed (attached, or held after a failed push), the worker ignores `ackThrough`; only a run no Harness holds trims on staging. Otherwise entries staged during a re-attach drain were lost, and a retry after staging was refused as non-contiguous.
 - **Push batches are sized as sent**, request wrapper and separators included.
 - **Observation entries carried the capture's output.** The Monitor policy now publishes into its own resource store, so an observation carries only its notification.
+- **The worker never forgot a run.** A run now leaves the registry once a consumer acknowledged its terminal entry and its exit took the receipt, so a registration's `observedRuns` lists only runs still in flight. Each resource store also drops the bytes of everything an enqueued entry already carries, except the newest manifest, which the capture reads back at finalize. Without this, growing the open page would have let one long run keep gigabytes in the worker.
+- **A replica that could not use a lease locked out one that could.** The Broker now checks the binding's lease with its own provisioner before claiming the puller, so a replica that cannot pull a binding never holds its claim.
+- **A woken Session could not suspend again.** A reload now re-derives what dispatch records: when a re-registration reports observation ownership, the binding of every unsettled run that worker reports holding joins the lane's `observationBindings`, so the suspension certificate can pass while the run is still live.
 
-Verification: `RuntimeStageStoreTest` 6/6 with Checkstyle; core `local-shell-stream-capture` 15/15 plus equivalence 2/2; cli `managed-background-delivery` 14/14, its process test, both Shell publisher suites and `managed-runtime-tool-executor`. The MySQL 8.4 staging ITs run in CI.
+Verification: `RuntimeStageStoreTest` 6/6 and `RuntimeObservationPullerTest` 2/2 with Checkstyle; core `local-shell-stream-capture` 15/15 plus equivalence 2/2; cli `managed-background-delivery` 15/15, its process test, both Shell publisher suites, `hosted-turn-cleanup`, `managed-runtime-container`, `managed-context-worker` and `managed-runtime-tool-executor`. The MySQL 8.4 staging ITs run in CI.
 
 ### Remaining fault cases
 

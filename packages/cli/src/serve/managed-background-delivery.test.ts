@@ -303,19 +303,49 @@ it('re-delivering an applied batch is idempotent', async () => {
     executionMethod: 'child_process',
   });
   const envelope = await prepared.sink.finalize('success', []);
-  await r.registry.accept(prepared.identity, envelope);
-  const settled = r.orchestrator.record(r.executionCallId)!;
-  expect(settled.run.state).toBe('settled');
-  // A second prepare of the same execution returns the same sink; re-finalize
-  // is a no-op and the record stays settled at the same revision.
+  // Until the run retires, a second prepare of the same execution returns
+  // the same sink and a re-finalize enqueues nothing new.
   const again = await r.registry.prepare(
     r.request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
   );
-  const envelope2 = await again.sink.finalize('success', []);
-  await r.registry.accept(again.identity, envelope2);
-  const after = r.orchestrator.record(r.executionCallId)!;
-  expect(after.run.state).toBe('settled');
-  expect(after.outputRef).toEqual(settled.outputRef);
+  expect(again.sink).toBe(prepared.sink);
+  expect(await again.sink.finalize('success', [])).toEqual(envelope);
+  await r.registry.accept(prepared.identity, envelope);
+  const settled = r.orchestrator.record(r.executionCallId)!;
+  expect(settled.run.state).toBe('settled');
+  expect(settled.exitCode).toBe(0);
+});
+
+it('retires a finished run so a later registration no longer reports it', async () => {
+  const r = await rig();
+  const observed = async (writerGeneration: number) =>
+    (
+      (await (await r.install(writerGeneration)).json()) as {
+        observedRuns: Record<string, number>;
+      }
+    ).observedRuns;
+  const prepared = await r.registry.prepare(
+    r.request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  prepared.sink.setStarted(7);
+  await prepared.sink.write('stdout', Buffer.from('done\n'));
+  expect(Object.keys(await observed(2))).toEqual([r.executionCallId]);
+  await prepared.sink.finish('stdout', true);
+  await prepared.sink.finish('stderr', true);
+  prepared.sink.setProcessResult({
+    exitCode: 0,
+    signal: null,
+    rawOutput: Buffer.from('done\n'),
+    output: 'done\n',
+    error: null,
+    aborted: false,
+    pid: 7,
+    executionMethod: 'child_process',
+  });
+  const envelope = await prepared.sink.finalize('success', []);
+  await r.registry.accept(prepared.identity, envelope);
+  expect(r.orchestrator.record(r.executionCallId)!.run.state).toBe('settled');
+  expect(await observed(3)).toEqual({});
 });
 
 it('refuses a publisher registration from an older writer generation', async () => {
@@ -810,10 +840,24 @@ it('re-attaches before draining staged deliveries without gaps or duplicate comm
   await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
   const brokerPort = (server.address() as { port: number }).port;
 
+  // A second unsettled run whose binding's worker never prepared it: the
+  // reload must not certify its binding as worker-owned.
+  await r.orchestrator.admit({
+    shellId: 'execution-other',
+    ownerScopeId: r.key.sessionId,
+    executionCallId: 'execution-other',
+    args: { command: 'sleep 60', is_background: true },
+  });
+  await r.orchestrator.dispatchStarted('execution-other', {
+    runtimeBindingId: 'binding-b',
+    generation: '4',
+  });
+
   const lane: {
     publisher?: HostedShellPublisher;
     readonly resources: DurableToolResultResourceStore;
     readonly assertWritable: () => Promise<void>;
+    observationBindings?: Set<string>;
   } = {
     resources: r.resources,
     assertWritable: async () => {},
@@ -833,6 +877,9 @@ it('re-attaches before draining staged deliveries without gaps or duplicate comm
     monitors: r.monitors,
   });
   publisher = lane.publisher;
+  // The reload re-derives the observation ownership that dispatch records,
+  // so the Session can suspend again with the run still live.
+  expect(lane.observationBindings).toEqual(new Set(['binding-a@1']));
 
   const envelope = await envelopePromise;
   const receipt = await r.registry.accept(prepared.identity, envelope);
@@ -1030,6 +1077,11 @@ it('keeps a background stream healthy across more idle partial flushes than the 
       stdout.body as { readonly pages: ReadonlyArray<{ segmentCount: number }> }
     ).pages.map((page) => page.segmentCount),
   ).toEqual([70]);
+  // Every revision rides an enqueued entry, so the worker keeps only the
+  // final manifest the capture reads back.
+  expect(
+    sink.resources.since(-1).map((resource) => resource.ref.resourceId),
+  ).toEqual([envelope.capture!.manifest!.resourceId]);
 });
 
 it('keeps capture output out of monitor observation entries', async () => {
