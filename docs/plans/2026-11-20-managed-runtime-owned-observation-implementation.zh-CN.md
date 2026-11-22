@@ -122,7 +122,19 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 - **M4 applier drain 成本（§7 项 3）。** 经真实 authority 提交观测 revision 加通知 input：**1 条 30 ms、100 条 31 ms/条、10,000 条 48 ms/条**（共 476 s，随 journal 增长而退化）。提交 10,000 条观测的 drain-only wake 约 8 分钟静默加载工作；backstop 的扫描上限为突发节流（§8）。
 - **M5 总输出上限（§11 Q3 发现，已证实）。** worker lane 恰好准入 **8 MiB**（64 页 × 1 段 × 128 KiB），随后 `size_limit` break、信封降级为 `unavailable`，最后持久 revision（64）存续。前台 lane 的 512 段页可达 ~32 GiB。
 
-**据此证据定下的常量：** `RUN_OUTBOX_BYTES` 8 MiB（约为最大可能条目 ~506 KB 的 16×，terminal 闭包有余量）、`BACKGROUND_SEGMENT_BYTES` 128 KiB，每段一个 revision、增长一个最多 `BACKGROUND_SEGMENTS_PER_PAGE` 256 段的开放页（每个条目与最坏 terminal 闭包都合请求上限；见「评审修复」）、`PARTIAL_FLUSH_MS` 250（空闲 flush 开销相对 30 ms/条的提交成本可忽略）。**每流上限为 16,384 段（满段合计 2 GiB）：** 每页打包更多段会把双流被丢尾闭包推到 ~700 KB，而增长开放页让每个条目每流仍只带一个段，因此上限的抬高无需改动协议上限。再往上抬仍需协同改动 `maxPagesPerStream`/`maxManifestBytes`/请求上限——属 maintainer 设计决策（§11 Q3 携此证据保持开放）。Java 侧 pull 等待、staged-bytes 水位线、硬上限以及 wake→load 延迟，需下方 Broker + MySQL + daemon 度量。
+**据此证据定下的常量：** `RUN_OUTBOX_BYTES` 8 MiB（约为最大可能条目 ~506 KB 的 16×，terminal 闭包有余量）、`BACKGROUND_SEGMENT_BYTES` 128 KiB，每段一个 revision、增长一个最多 `BACKGROUND_SEGMENTS_PER_PAGE` 256 段的开放页（每个条目与最坏 terminal 闭包都合请求上限；见「评审修复」）、`PARTIAL_FLUSH_MS` 250（空闲 flush 开销相对 30 ms/条的提交成本可忽略）。**每流上限为 16,384 段（满段合计 2 GiB）：** 每页打包更多段会把双流被丢尾闭包推到 ~700 KB，而增长开放页让每个条目每流仍只带一个段，因此上限的抬高无需改动协议上限。再往上抬仍需协同改动 `maxPagesPerStream`/`maxManifestBytes`/请求上限——属 maintainer 设计决策（§11 Q3 携此证据保持开放）。Java 侧 pull 等待、staged-bytes 水位线、硬上限以及 wake→load 延迟，由下方 Broker/daemon 半定案。
+
+### §7 度量 — Broker/daemon 半（已落地）
+
+在真实 mingrong daemon 上度量（Linux、H2 fixture、单 Broker、当前树 jar `8e868dd9…` / CLI 0.28.3），三种脚本化工作量：**Q** 安静（`sleep 60/90`，无输出）、**L** 喧闹（`timeout 60 yes …`，饱和生产者）、**B** 突发（5 session × `sleep 30/45` 同时退出）。脚本在主机上（`measure-broker.sh`、`measure-q2b2.sh`、`drive-multi.mjs`）；时序取自 DB 快照列（`ma_runtime_stage.gmt_create/staged_bytes`、`ma_tool_execution.settled_at`）、harness debug 路由日志（`durationMs`）、`server.log` wake-attach 行、worker 端口回环 tcpdump、`/proc/<pid>/stat` CPU jiffies。model stub 请求日志全程作零模型 turn oracle。
+
+- **MB1 空闲 pull 成本（§7 项 1）。** 单个挂起的安静 binding：**45s 内 15 次 long-poll**（≈3s 周期 = `pullWaitMs` 2000 持有 + ~1s scan/cooldown），响应全 `held`，每 binding 一个在途请求（按请求建连，非持久 socket），单 puller claim。窗口内 CPU：**Broker java ≈2.0% 单核**（91 jiffies/45s，含 1s puller scan + 2s wake scan + retention 基线）、**worker ≈0.1%**（5 jiffies）。舰队成本线性扩展：每个持活跃后台工作的 binding 一个 claim、约 20 pull/分钟。
+- **MB2 退出→结算时延（§7 项 1）。** 后台退出 → `:process` 行 `settled_at`：**≈1–4s**（pull 驱动：terminal 在下一次 pull 暂存并结算该行），三个安静运行一致。退出 → journal 结算再加 wake scan（≤2s）与静默加载：**安静 ≈3–6s**（314/303ms load）；300 观测运行由 11.2s load 主导（退出→结算 ≈13–24s）。观测→wake→turn-start：wake scan 在 wake-worthy 暂存后 ≤2s 内 attach，静默加载随即开始——加载*即* turn，不发模型请求。
+- **MB3 挂起期间喧闹输出（§7 项 2）。** staging 长到 **16 MiB 硬上限后平台：114 行 / 16.9 MB**（~148 KB/行；按设计一个批次可越限一次）。持续 staging 吞吐 ≈400 KB/s，生产者被管道背压暂停（`yes` 进程顶住 8 MiB outbox 停摆，worker 半 M3）。4 MiB 水位线在 ~70s 内唤醒 session **4 次**（静默加载 6.3/7.6/9.7/9.6s，间隔 ~15–18s）；head 循环 ACTIVE——_喧闹 Shell 从不真正挂起_（§8）得证。Broker java 在 132s 喧闹窗口 ≈**39% 单核**（5148 jiffies）。事后全部 drain 至 0 staged 行；进程结算 `success`；零模型 turn。（喧闹下 worker CPU 未采到——脚本取了 stale worker pid；Broker 数字是承重的那个。）
+- **MB4 drain 成本与突发（§7 项 3）。** 静默加载时长：**1 观测 ≈ 250–314ms**（五个突发 load 247–275ms；两个安静 drain 303/314ms）；**~300 观测 = 11.178s**（~37ms/obs）；喧闹批次 6.3–9.7s，随 journal 增长退化，与 worker 半 M4 预测一致（31→48ms/obs）。**5 个同时退出的突发：** 2s wake scan（limit 8）把五个静默加载**以 2.3–4.3s 间隔铺在 ~13s 内**——无惊群；共 10 个模型请求（5 session × 2），drain 期间为零。
+- **常量定案（§11 Q1）。** 保持 `pullWaitMs` **2000**（空闲 ≈2% 核/binding，退出→结算 ≤~4s）、staged-bytes 水位线 **4 MiB**（喧闹 ~15s 一醒，staging 有界）、硬上限 **16 MiB**（喧闹 ~40s 触顶；capture 经 size_limit 修复优雅降级，保留 terminal 槽仍交付退出证明）、puller scan **1s** / wake scan **2s** limit **8**（突发 paced 干净）。抬水位线是以静默加载频率换 staged 字节驻留；16 MiB 上限是使永不醒的喧闹 session 有界的兜底。
+
+注意：单 binding/单 Broker 的 H2 fixture——MySQL 车道确认与舰队规模（多 binding、副本 puller claim）留 CI/hosted 车道；上述喧闹 worker-CPU 缺口；首次安静尝试误 grep pull 路由（`observations/pull` 而非 `observation-pull`），已复测（Q2）。
 
 ### Daemon 启动见证（已落地）
 
@@ -180,7 +192,7 @@ Phase 3b server jar 在真实 daemon 拓扑里端到端启动。配方（全部�
   - **全周期（session `bac61b93-c072-477b-9aa8-551650489934`，jar `c7f5fcda…`）。** TOOL STATUS completed；后台 pid 在 `…/qwen-bg/qwen-bg-f5b24541-…`；worker OBS=1；stub 恰服务 2 请求。session 在后台运行时 seal 为 SEALED/READY 且 `wake_seal_background=1`；`ma_runtime_stage` 跨挂起累积 6→59+ 行；后台存活**满 300s** 自然退出；terminal 暂存（61 行）、`wake_seal_background` 清零、`is_wake_pending` 置位；`WakeRecovery` 于 03:54:25 UTC（退出后数秒）记录 `wake recovery attached`；drain-only load 应用全部 staged entry（staged → **0**）、结算两条 execution 行（`SETTLED/success`，main + `:process`）、journal 推进至 revision 88、head 回 **ACTIVE/READY**——stub 请求数**恒 2**：drain 无模型 turn。八项循环断言在真实 daemon 全部成立。
   - **验证。** `RuntimeStageStoreTest` 5/5（含新 null 保留回归）、`RuntimeObservationPullerTest` 1/1、`JournalStoreRowsPublishedResourceTest` 3/3、`ManagedSessionStoreIntegrationTest` 16/16；两处代码修复均无修复红/有修复绿；CI 同款双 execution Checkstyle 干净。MySQL 聚焦 IT 与完整套件留 CI（模块本地验证预算）。
 
-完整 E2E harness（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT，或上述脚本化真实 daemon 驱动）必须在 Linux 跑；脚本化驱动已见证完整循环，含原始 size_limit 崩溃工作量。剩余：Java 修复的 MySQL 车道确认、§7 Broker/daemon 度量半。
+完整 E2E harness（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT，或上述脚本化真实 daemon 驱动）必须在 Linux 跑；脚本化驱动已见证完整循环，含原始 size_limit 崩溃工作量，§7 Broker/daemon 度量半已落地。剩余：Java 修复的 MySQL 车道确认、舰队规模/复本度量。
 
 ### 评审修复（#17953）
 
@@ -205,8 +217,8 @@ PR 评审在开关打开的通路上发现十三处缺陷：十处会让投递�
 ### 剩余故障用例
 
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖，并已在真实 MySQL 8.4 上见证（见上）；各自仍需 daemon 级 E2E。
-- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。**已在 Linux 端到端见证**（见上全周期见证）：后台 Shell 进委派 cgroup、认证挂起带 `backgroundHeld`、跨挂起 staging 累积、后台 300s 存活、自然退出、terminal 暂存、drain-only 唤醒结算零模型 turn。沿途发现并闭合五个缺陷：PUBLISHED tool-result commit 门、缺 `wake-dispatch.enabled` fixture flag、幻影 segment kind、fastjson2 丢 null 的 entry 重序列化、size_limit worker 崩溃（评审修复 `d7e6d357e2`，已在原始崩溃工作量下复验）。开放：MySQL 车道确认、§7 度量半。Linux-only（durable local-process provisioner），故 CI hosted 车道或 Linux 主机。
-- **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
+- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。**已在 Linux 端到端见证**（见上全周期见证）：后台 Shell 进委派 cgroup、认证挂起带 `backgroundHeld`、跨挂起 staging 累积、后台 300s 存活、自然退出、terminal 暂存、drain-only 唤醒结算零模型 turn。沿途发现并闭合五个缺陷：PUBLISHED tool-result commit 门、缺 `wake-dispatch.enabled` fixture flag、幻影 segment kind、fastjson2 丢 null 的 entry 重序列化、size_limit worker 崩溃（评审修复 `d7e6d357e2`，已在原始崩溃工作量下复验）。开放：MySQL 车道确认、舰队规模/复本度量。Linux-only（durable local-process provisioner），故 CI hosted 车道或 Linux 主机。
+- **§7 度量 — Broker/daemon 半（已落地）** — 已在真实 daemon 度量（见上 Broker/daemon 半节）：空闲 pull ≈2% 核/binding（3s long-poll 周期）、退出→结算 ≈1–4s、喧闹 staging 在 16 MiB 上限平台化（4 MiB 水位线 ~15s 一醒）、静默加载 250ms（1 obs）→ 11.2s（~300 obs）、5 退出突发被 wake scan 以 2.3–4.3s 间隔 paced。常量保持：`pullWaitMs` 2000、水位线 4 MiB、硬上限 16 MiB（§11 Q1 定案）。剩余：MySQL 车道确认、舰队规模/复本度量（CI/hosted 车道）。
 
 ## 验证命令
 
