@@ -62,7 +62,7 @@ public class ManagedAgentTraceService {
             item.set("settledAt", json.valueToTree(projection.settledAt()));
             Optional<TaskTarget> target;
             try {
-                target = records.findTaskTarget(tenant, sessionId, task.taskId());
+                target = records.findTaskTargetByRecord(tenant, sessionId, task.domain(), task.recordId());
             } catch (ManagedAgentException error) {
                 if (error.getStatus() != 409) {
                     throw error;

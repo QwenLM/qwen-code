@@ -1402,8 +1402,6 @@ CREATE INDEX idx_ma_occurrence_run ON ma_schedule_occurrence (tenant_id, run_id)
 
 CREATE INDEX idx_ma_work_pending ON ma_operation_work (operation_ref, work_kind, session_id, state, target_id);
 
-CREATE INDEX idx_ma_operation_target_raw ON ma_operation (operation_kind, target_id, target_revision, state);
-
 CREATE INDEX idx_ma_operation_raw_id ON ma_operation (operation_kind, operation_id);
 
 CREATE INDEX idx_ma_channel_delivery_page ON ma_delivery (delivery_kind, source_scope_id, gmt_create, delivery_id);
@@ -1419,8 +1417,6 @@ CREATE INDEX idx_ma_operation_state_due ON ma_operation (operation_kind, state, 
 CREATE INDEX idx_ma_operation_scope_id ON ma_operation (scope_kind, scope_id, operation_kind, operation_id);
 
 CREATE INDEX idx_ma_operation_session_state ON ma_operation (tenant_id, session_id, operation_kind, state);
-
-CREATE INDEX idx_ma_resource_scope_page ON ma_resource (tenant_id, session_id, resource_id);
 
 CREATE UNIQUE INDEX uk_ma_delivery_reconciliation ON ma_delivery (reconcile_operation_id);
 

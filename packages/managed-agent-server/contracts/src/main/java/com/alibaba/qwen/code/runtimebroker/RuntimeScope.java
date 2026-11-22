@@ -44,6 +44,11 @@ public final class RuntimeScope {
                     "isolationClass must be workspace or session");
         }
         this.isolationClass = isolationClass;
+        // The canonical scope reference percent-encodes these components, so a
+        // tuple the character validators admit can still overflow the column
+        // budget. Refuse it here at admission rather than at a repository
+        // INSERT or replay path.
+        RuntimeRequestKeys.scopeKey(this);
     }
 
     public String getTenantId() {

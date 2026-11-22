@@ -316,6 +316,10 @@ final class JournalCommit {
         JournalStoreRows.validateStableId(request.transactionId(), "transactionId", 128);
         JournalStoreRows.validateText(request.operation(), "operation", JournalStoreRows.MAX_TEXT_BYTES);
         JournalStoreRows.validateStableId(request.commandId(), "commandId", 128);
+        // Encode the command reference at admission, before any lock or INSERT,
+        // so an over-budget operation/commandId is a named 400 here rather than
+        // a raw overflow on the commit or replay path.
+        JournalStoreRows.commandKeyHash(request.operation(), request.commandId());
         JournalStoreRows.validateDigest(request.contentDigest(), "contentDigest", false);
         JournalStoreRows.validateDigest(request.eventsDigest(), "eventsDigest", true);
         JournalStoreRows.validateDigest(request.previousCommitDigest(),

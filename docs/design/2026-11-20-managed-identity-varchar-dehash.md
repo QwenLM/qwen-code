@@ -564,14 +564,28 @@ Completed and verified:
 - H2 schema/catalog/projection, core business/session/retention/side-query/
   client-files/channel/workspace/SSH stores, and the failing Runtime Broker
   regression suites;
-- both Checkstyle executions.
+- both Checkstyle executions;
+- the canonical readable reference layer (`operation_ref`/`scope_ref`/`owner_ref`,
+  `request_id`/`scope_id`) replacing the identity-hash key columns, and the
+  cross-table SQL/lock-order migration;
+- admission-time canonical-reference budget validation (RuntimeScope and
+  RuntimeProvisionRequest construction, journal command and owner refs), so an
+  over-budget tuple is a named 4xx at the boundary rather than a raw INSERT or
+  replay error;
+- column-bounded Harness/Runtime Session admission (`VARCHAR(64)`/`VARCHAR(128)`);
+- Tier B identity columns `resource_id`/`record_id`/`child_run_id`/
+  `execution_call_id` `VARCHAR(256)`;
+- the duplicate-index cleanup (dropped `idx_ma_operation_target_raw` and
+  `idx_ma_resource_scope_page`) and the resource-GC page index path;
+- the retention-registration marker row decode and the byte-bounded recovery
+  work-key guard.
 
-Remaining: removal of the other identity hashes, canonical-reference columns
-and cross-table SQL/lock-order migration, complete MySQL 8.4
-type/collation/index-width gates, the full H2 suite (did not finish within the
-10-minute local budget), SQL performance benchmarks, and TypeScript consumer
-synchronization. Continue as an atomic cluster; do not describe this checkpoint
-as complete de-hashing.
+Remaining: complete MySQL 8.4 type/collation/index-width gates and
+race/performance evidence (no local MySQL; pending CI), the full H2 suite (did
+not finish within the 10-minute local budget), SQL performance benchmarks, and
+TypeScript consumer synchronization. Canonical `*_ref`, `record_resource_id`
+and `ma_runtime_stage.execution_call_id` stay `VARBINARY` by design, not as
+outstanding conversions.
 
 ## 2026-11-22 final policy (supersedes the earlier NO PAD proposal)
 
@@ -625,11 +639,13 @@ equality" proposal above, and the interim decision to keep actor columns at
 
 ### Still outstanding
 
-- Tier B (resource_id/record_id/item_id/execution_call_id/delivery_id/segment_id/
-  idempotency_key/external platform IDs/PR owner-repo/isolation_key) needs
-  admission/index design.
-- Other wenshao blockers: record_id 1024B prefix, Action owner_ref retirement
-  leak, Hook width/PAD SPACE, N7 `lockPlacementDomain` deadlock, N9 schema gate
-  matching zero rows.
+- Tier B core identities (`resource_id`/`record_id`/`child_run_id`/
+  `execution_call_id`) shipped `VARCHAR(256)`; residual Tier B/C identities and
+  their admission/index design remain.
+- The earlier wenshao blockers are resolved: the record_id 1024B prefix
+  (dropped), the Action owner_ref retirement leak (shared three-component owner
+  ref), Hook width (128-char admission) and PAD SPACE (uniform trailing-space
+  rejection), and the N9 schema gate zero-row match. N7 `lockPlacementDomain`
+  lock ordering is implemented; its MySQL deadlock/race evidence is pending CI.
 - Semantic merge conflict with #18048; full H2 and MySQL 8.4 gates/races/
   performance pending CI.

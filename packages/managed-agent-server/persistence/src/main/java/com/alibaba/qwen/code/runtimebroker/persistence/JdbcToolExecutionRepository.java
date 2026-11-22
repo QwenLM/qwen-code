@@ -730,7 +730,7 @@ public final class JdbcToolExecutionRepository
 
     @Override
     public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
-        String id = BrokerValues.requireId(runtimeSessionId,
+        String id = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         return JdbcRepositorySupport.read(dataSource, connection -> {
             String sql = "SELECT runtime_session_id "

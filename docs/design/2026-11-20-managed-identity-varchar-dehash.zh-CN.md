@@ -454,12 +454,23 @@ component := "-" | <utf8-byte-length>:<escaped-payload>
 - 子 Session 合成 actor 有界派生（`ChildActorId`）与相关回归修复；
 - H2 schema/catalog/projection、核心 business/session/retention/side-query/
   client-files/channel/workspace/SSH store、Runtime Broker 失败回归套件；
-- 两个 Checkstyle execution。
+- 两个 Checkstyle execution；
+- 规范化可读引用层（`operation_ref`/`scope_ref`/`owner_ref`、`request_id`/`scope_id`）
+  取代身份哈希键列，以及跨表 SQL/锁序迁移；
+- 准入处的规范化引用预算校验（RuntimeScope 与 RuntimeProvisionRequest 构造、
+  journal command 与 owner 引用），超预算元组在边界即为具名 4xx，而非 INSERT/重放
+  处的原始错误；
+- 按列宽约束的 Harness/Runtime Session 准入（`VARCHAR(64)`/`VARCHAR(128)`）；
+- Tier B 身份列 `resource_id`/`record_id`/`child_run_id`/`execution_call_id`
+  `VARCHAR(256)`；
+- 重复索引清理（删除 `idx_ma_operation_target_raw` 与 `idx_ma_resource_scope_page`）
+  及 resource-GC 分页索引路径；
+- retention 登记标记的行解码与按字节约束的 recovery work-key 守卫。
 
-未完成：剩余身份哈希删除、canonical reference 列与跨表 SQL/锁序迁移、完整
-MySQL 8.4 类型/collation/索引宽度门、完整 H2 套件（本地 10 分钟预算内未跑完）、
-SQL 性能基准与 TypeScript 消费者同步。后续必须继续按原子簇实施，不得把当前
-检查点宣称为完整去哈希完成。
+未完成：完整 MySQL 8.4 类型/collation/索引宽度门与竞态/性能证据（本地无 MySQL，
+pending CI）、完整 H2 套件（本地 10 分钟预算内未跑完）、SQL 性能基准与 TypeScript
+消费者同步。canonical `*_ref`、`record_resource_id` 与
+`ma_runtime_stage.execution_call_id` 按设计保留 `VARBINARY`，并非待转换项。
 
 ## 2026-11-22 最终策略（取代早期 NO PAD 提案）
 
@@ -501,8 +512,10 @@ SQL 性能基准与 TypeScript 消费者同步。后续必须继续按原子簇�
 
 ### 仍未完成
 
-- Tier B（resource_id/record_id/item_id/execution_call_id/delivery_id/segment_id/
-  idempotency_key/外部平台 ID/PR owner-repo/isolation_key）需准入/索引设计。
-- wenshao 其余阻塞：record_id 1024B prefix、Action owner_ref 退役泄漏、Hook 列宽/PAD SPACE、
-  N7 `lockPlacementDomain` 死锁、N9 schema gate 空匹配。
+- Tier B 核心身份（`resource_id`/`record_id`/`child_run_id`/`execution_call_id`）
+  已落地 `VARCHAR(256)`；其余 Tier B/C 身份及其准入/索引设计仍待完成。
+- 早期 wenshao 阻塞已解决：record_id 1024B prefix（已删除）、Action owner_ref
+  退役泄漏（共享三元组 owner 引用）、Hook 列宽（128 字符准入）与 PAD SPACE
+  （统一拒绝尾随空格）、N9 schema gate 空匹配。N7 `lockPlacementDomain` 锁序已实现，
+  其 MySQL 死锁/竞态证据 pending CI。
 - 与 #18048 语义合并冲突；完整 H2、MySQL 8.4 门/竞态/性能 pending CI。

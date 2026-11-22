@@ -1670,8 +1670,11 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         initSession();
         JsonNode original = commitNativeMedia(session);
         commitNativeMedia("media-other");
+        // Protection is session-scoped: the RECOVERY ref under "media-other"
+        // keeps that Session's copy but cannot protect the retiring Session's
+        // identical bytes, so the retiring Session is collected in full.
         long expectedBytes = jdbc.queryForObject("SELECT SUM(byte_length) FROM ma_resource WHERE"
-                + " tenant_id = ? AND session_id = ?", Long.class, tenant, session) - mediaBytes(original).length;
+                + " tenant_id = ? AND session_id = ?", Long.class, tenant, session);
         jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
                         + " owner_revision, tenant_id, workspace_id, session_id,"
                         + " resource_id, gmt_create) VALUES ('RECOVERY', ?, 1, ?,"
@@ -1684,8 +1687,12 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         collectMedia();
         assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ?"
                 + " AND session_id = 'media-other' AND resource_id = 'media-outcome'", byte[].class, tenant)).isEqualTo(mediaBytes(original));
+        // The other Session keeps its own JOURNAL ref plus the inserted RECOVERY
+        // ref; the retiring Session's copy is collected, not protected.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_id ="
-                + " 'media-outcome' AND tenant_id = ? AND session_id = ?", Long.class, tenant, "media-other")).isEqualTo(1);
+                + " 'media-outcome' AND tenant_id = ? AND session_id = ?", Long.class, tenant, "media-other")).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ?"
+                + " AND session_id = ? AND resource_id = 'media-outcome'", byte[].class, tenant, session)).isNull();
         assertThat(ledger().get("collected_bytes")).isEqualTo(expectedBytes);
         assertMediaReadable("media-other", mediaBytes(original));
     }

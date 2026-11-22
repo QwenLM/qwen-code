@@ -44,7 +44,7 @@ public final class JdbcRuntimeSessionRepository
             throw new IllegalArgumentException("An active transaction and scope are required");
         }
         return selectSession(connection, scope,
-                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"), true, 10);
+                BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId"), true, 10);
     }
 
     static List<RuntimeSessionRecord> lockActiveSessions(Connection connection,
@@ -139,7 +139,7 @@ public final class JdbcRuntimeSessionRepository
         if (scope == null) {
             throw new IllegalArgumentException("scope is required");
         }
-        String id = BrokerValues.requireId(runtimeSessionId,
+        String id = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         return JdbcRepositorySupport.read(dataSource, connection -> {
             RuntimeSessionRecord record = selectSession(connection, scope,
@@ -157,8 +157,8 @@ public final class JdbcRuntimeSessionRepository
     @Override
     public RuntimeSessionRecord findHistorical(String tenantId, String harnessSessionId, String runtimeSessionId) {
         BrokerValues.requireId(tenantId, "tenantId");
-        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
+        BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId");
         return JdbcRepositorySupport.read(dataSource, connection -> {
             List<RuntimeSessionRecord> matches = new ArrayList<>();
             try (PreparedStatement statement = connection.prepareStatement("SELECT " + SESSION_COLUMNS
@@ -189,10 +189,10 @@ public final class JdbcRuntimeSessionRepository
     public List<RuntimeSessionRecord> findHistoricalByIds(String tenantId,
             String harnessSessionId, java.util.Collection<String> runtimeSessionIds) {
         String tenant = BrokerValues.requireId(tenantId, "tenantId");
-        String harness = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String harness = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         java.util.LinkedHashSet<String> ids = new java.util.LinkedHashSet<>();
         for (String runtimeSessionId : runtimeSessionIds) {
-            ids.add(BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
+            ids.add(BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId"));
         }
         if (ids.isEmpty()) {
             return List.of();
@@ -321,7 +321,7 @@ public final class JdbcRuntimeSessionRepository
     public List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId, String harnessSessionId,
             RuntimeSessionRecord after, int limit, String excludeTurnKind) {
         BrokerValues.requireId(tenantId, "tenantId");
-        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         if (limit < 1 || limit > 100) {
             throw new IllegalArgumentException("Release batch must contain 1-100 Sessions");
         }

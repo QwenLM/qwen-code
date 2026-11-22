@@ -125,6 +125,39 @@ public final class BrokerValues {
     }
 
     /**
+     * An originating Harness Session identity stored in a VARCHAR(64) column
+     * (ma_runtime_session.harness_session_id, ma_tool_execution.harness_session_id,
+     * ma_session_head.harness_session_id). MySQL counts code points and H2 counts
+     * UTF-16 units, so the UTF-16 length bounds both. PAD SPACE collations fold
+     * trailing spaces, so the boundary refuses them rather than relying on the
+     * column to preserve exactness.
+     */
+    public static String requireHarnessSessionId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 64 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-64 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
+     * A Runtime execution Session identity stored in a VARCHAR(128) column
+     * (ma_runtime_session.runtime_session_id, ma_tool_execution.runtime_session_id,
+     * ma_storage_owner.runtime_session_id). PAD SPACE collations fold trailing
+     * spaces, so the boundary refuses them rather than relying on the column to
+     * preserve exactness.
+     */
+    public static String requireRuntimeSessionId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
      * An idempotency key stored in a VARCHAR(128) column. Unicode is allowed
      * (queue keys are not forced to ASCII); PAD SPACE collations fold trailing
      * spaces, so two distinct keys would compare equal and the boundary refuses

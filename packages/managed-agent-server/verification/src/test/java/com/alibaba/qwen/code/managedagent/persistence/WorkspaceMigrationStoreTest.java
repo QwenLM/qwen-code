@@ -440,6 +440,11 @@ class WorkspaceMigrationStoreTest {
                 + " VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1, 'workspace', 1, 'storage', '.', ?, 1, ?, ?)",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
+        // The idle gate joins ma_session on is_publication_retention_registered
+        // = 1; without registering the root the join is false for every state
+        // and the assertion below would hold vacuously.
+        jdbc.update("UPDATE ma_session SET is_publication_retention_registered = 1"
+                + " WHERE tenant_id = 'tenant' AND session_id = 'session'");
         jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id, tenant_id, session_id,"
                 + " target_kind, target_id, request_digest, request_json, state, phase, delivery_state, available_at, gmt_create, gmt_modified)"
                 + " VALUES (?, 'SESSION', ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",

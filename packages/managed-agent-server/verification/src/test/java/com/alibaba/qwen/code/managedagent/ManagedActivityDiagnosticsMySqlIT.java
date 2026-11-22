@@ -32,6 +32,10 @@ class ManagedActivityDiagnosticsMySqlIT extends ManagedActivityDiagnosticsTest {
                 + " ORDER BY gmt_create DESC, record_id DESC LIMIT 512", "tenant", "session",
                 "hosted_tool_diagnostic");
         assertThat(plan).hasSize(1);
-        assertThat(String.valueOf(plan.getFirst().get("possible_keys"))).contains("idx_ma_record_session_delivery");
+        // possible_keys still lists the index even when the planner chooses
+        // another one plus a filesort, so pin the chosen key and the absence
+        // of a filesort instead.
+        assertThat(String.valueOf(plan.getFirst().get("key"))).isEqualTo("idx_ma_record_session_delivery");
+        assertThat(String.valueOf(plan.getFirst().get("Extra"))).doesNotContain("Using filesort");
     }
 }

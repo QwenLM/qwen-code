@@ -214,7 +214,7 @@ public final class RuntimeAdmissionFences {
         boolean retirement = fence.contains(HarnessFence.RETIREMENT);
         boolean cleanup = fence.contains(HarnessFence.CLEANUP);
         if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
-            BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+            BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         } else if (!"session".equals(scope.getIsolationClass())
                 && !(WorkspaceExecutionProfile.isBoundWorkspaceScope(scope) && harnessSessionId != null
                         && authority != null)) {

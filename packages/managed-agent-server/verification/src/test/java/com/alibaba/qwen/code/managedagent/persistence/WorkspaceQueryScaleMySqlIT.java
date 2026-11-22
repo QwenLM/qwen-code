@@ -149,6 +149,23 @@ class WorkspaceQueryScaleMySqlIT {
                 assertThat(jdbc.queryForList(head.sql(), Integer.class, head.arguments())).isEmpty();
                 assertBounded(jdbc, head, "idx_ma_session_storage_scope", 5);
             }
+            // Positive case: the fixtures above all set is_resource_gc_completed
+            // = TRUE and a non-null workspace_storage_id, so the outer WHERE
+            // empties HEAD_AUTHORITY before the = 1 marker is ever evaluated.
+            // A live, un-collected root with a null storage scope exercises the
+            // marker itself: registered = 1 admits the row, = 0 excludes it.
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, session_kind, workspace_storage_id,"
+                    + " is_resource_gc_completed, is_publication_retention_registered, retirement_generation, retired_at, gmt_create, gmt_modified)"
+                    + " VALUES ('other-tenant', 'head-authority-live', 'CONTROL', NULL, FALSE, 1, 1, 1, 1, 1)");
+            jdbc.update("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, head_kind, workspace_id, state,"
+                    + " writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified)"
+                    + " VALUES ('other-tenant', 'head-authority-live', 'head-authority-live', 'MANAGED_SESSION', 'other-workspace', 'ACTIVE', 1, 0, 0, 0, 0, 'READY', "
+                    + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")");
+            var liveHead = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", "other-tenant", "other-storage"});
+            assertThat(jdbc.queryForList(liveHead.sql(), Integer.class, liveHead.arguments())).containsExactly(1);
+            jdbc.update("UPDATE ma_session SET is_publication_retention_registered = 0"
+                    + " WHERE tenant_id = 'other-tenant' AND session_id = 'head-authority-live'");
+            assertThat(jdbc.queryForList(liveHead.sql(), Integer.class, liveHead.arguments())).isEmpty();
         }
     }
 

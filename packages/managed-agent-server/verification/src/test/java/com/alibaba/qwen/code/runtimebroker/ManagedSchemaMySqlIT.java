@@ -207,13 +207,17 @@ class ManagedSchemaMySqlIT {
                 assertTrue(rows.next());
                 assertTrue(rows.getLong(1) > 0);
             }
-            statement.execute(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                            + " VALUES ('"
-                            + tenant
-                            + "','"
-                            + prefix
-                            + "session ','agent',0,0)");
+            // utf8mb4_bin is PAD SPACE, so a trailing-space variant of an
+            // existing session_id is the same primary key: the insert folds
+            // to a duplicate-key error rather than storing a second row.
+            assertThrows(SQLException.class,
+                    () -> statement.execute(
+                            "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                                    + " VALUES ('"
+                                    + tenant
+                                    + "','"
+                                    + prefix
+                                    + "session ','agent',0,0)"));
             assertThrows(
                     SQLException.class,
                     () ->
@@ -457,7 +461,7 @@ class ManagedSchemaMySqlIT {
         String bindingStorage = "v".repeat(256);
         String workspace = prefix + "w".repeat(512 - prefix.length());
         byte[] binding =
-                (prefix + "b".repeat(2048 - prefix.length())).getBytes(StandardCharsets.UTF_8);
+                (prefix + "b".repeat(128 - prefix.length())).getBytes(StandardCharsets.UTF_8);
         String request = "r".repeat(3000);
         String scope = "c".repeat(2048);
         String physical = "p".repeat(512);
@@ -520,6 +524,17 @@ class ManagedSchemaMySqlIT {
                 insert.setString(1, physical);
                 insert.setBytes(2, binding);
                 insert.executeUpdate();
+            }
+            // binding_id is VARCHAR(128): a 129-byte value must be refused,
+            // pinning 128 as the ceiling rather than the old 2048-byte budget.
+            try (var overflow =
+                    connection.prepareStatement(
+                            "INSERT INTO ma_storage_owner(physical_id,binding_id,runtime_generation)"
+                                    + " VALUES(?,?,1)")) {
+                overflow.setString(1, physical);
+                overflow.setBytes(2,
+                        (prefix + "b".repeat(129 - prefix.length())).getBytes(StandardCharsets.UTF_8));
+                assertThrows(SQLException.class, overflow::executeUpdate);
             }
             try (var read =
                     connection.prepareStatement(

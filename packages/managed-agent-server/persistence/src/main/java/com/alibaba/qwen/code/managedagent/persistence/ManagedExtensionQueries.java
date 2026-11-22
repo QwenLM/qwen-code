@@ -145,6 +145,14 @@ final class ManagedExtensionQueries {
         if (identity == null) {
             return Optional.empty();
         }
+        return targetByRecord(jdbc, store, tenant, session, identity[0], identity[1], mapper);
+    }
+
+    // Queries the raw (domain, record_id) business key directly, so a caller
+    // that already holds the row does not pay a Session-wide scan to re-resolve
+    // the public task id hash.
+    static Optional<TaskTarget> targetByRecord(JdbcTemplate jdbc, JdbcManagedExtensionRecordStore store,
+            String tenant, String session, String domain, String recordId, RowMapper<TaskRow> mapper) {
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns()
                         + " FROM ma_session_record WHERE record_kind = 'DOMAIN' AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?"
                         + " AND task_kind IS NOT NULL",
@@ -153,7 +161,7 @@ final class ManagedExtensionQueries {
                     return new String[] {result.getString("domain"), result.getString("record_id"),
                             result.getString("task_kind"), result.getString("task_state"),
                             Long.toString(result.getLong("revision")), result.getString("record_resource_id")};
-                }, tenant, session, identity[0], identity[1])
+                }, tenant, session, domain, recordId)
                 .stream().findFirst().map(row -> {
                     JsonNode body = JdbcManagedExtensionRecordStore.readBody(store.readResource(tenant, session, row[5]));
                     ManagedExtensionProjection.RECORD_BODIES.get(row[0]).require().accept(body);
@@ -163,7 +171,9 @@ final class ManagedExtensionQueries {
 
     // A public task id carries the record hash, but rows are keyed by the raw
     // (domain, record_id) tuple, so the hash is matched over the Session's tasks.
-    private static String[] recordIdentity(JdbcTemplate jdbc, String tenant, String session, String recordKey) {
+    // Package-private so a locking admission can resolve the tuple with a
+    // non-locking read before taking FOR UPDATE on the single resolved row.
+    static String[] recordIdentity(JdbcTemplate jdbc, String tenant, String session, String recordKey) {
         if (recordKey == null) {
             return null;
         }

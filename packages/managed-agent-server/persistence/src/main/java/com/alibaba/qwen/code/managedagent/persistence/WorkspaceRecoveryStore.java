@@ -736,7 +736,10 @@ public final class WorkspaceRecoveryStore implements com.alibaba.qwen.code.manag
     }
 
     private void insertWork(String kind, String key, String session, JsonNode metadata, String state) {
-        check(key.length() <= 512, "invalid_work_key");
+        // target_id is VARBINARY(512) bound as UTF-8 bytes, so the guard must
+        // measure bytes, not UTF-16 units, or a multi-byte key passes here and
+        // fails at INSERT as a raw DataAccessException instead of invalid_work_key.
+        check(key.getBytes(StandardCharsets.UTF_8).length <= 512, "invalid_work_key");
         operations.insertWork(KIND, id, workKind(kind), key, session,
                 WorkspaceOperations.values("metadata_json", metadata.toString()), state);
     }

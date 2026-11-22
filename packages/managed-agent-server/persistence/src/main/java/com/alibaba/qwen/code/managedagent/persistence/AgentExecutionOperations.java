@@ -211,12 +211,10 @@ final class AgentExecutionOperations {
         }
         var transactions = new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
-        transactions.executeWithoutResult(status -> backfillCompactionProjection(tenantId, sessionId, null, null));
+        transactions.executeWithoutResult(status -> backfillCompactionProjection(tenantId, sessionId));
     }
 
-    // The scope/key arguments are retained for callers built against the hashed
-    // record identity; the raw (domain, record_id) business key supersedes them.
-    void backfillCompactionProjection(String tenantId, String sessionId, String scope, String key) {
+    void backfillCompactionProjection(String tenantId, String sessionId) {
         var heads = jdbc.queryForList("SELECT workspace_id, journal_revision, compacted_through_revision FROM"
                 + " ma_session_head WHERE tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
                 tenantId, sessionId);
@@ -588,22 +586,24 @@ final class AgentExecutionOperations {
         }
         // The task row is the projection its own commits update, so the
         // locking read serializes this admission with the transition that
-        // would settle the task. The public task id is the minted record-key
-        // hash, so resolve it against the Session's raw (domain, record_id)
-        // task rows under the same lock.
+        // would settle the task. Resolve the public task id (the minted
+        // record-key hash) to its raw (domain, record_id) tuple with a
+        // non-locking read, then lock only that resolved row and re-verify it
+        // under the lock, so cancelling one task never locks the Session's
+        // other task rows or hashes them under the lock.
         String taskRecordKey = taskId.substring("task_".length());
-        List<String[]> task = jdbc.query("SELECT domain, record_id, task_kind, task_state FROM"
+        String[] identity = ManagedExtensionQueries.recordIdentity(jdbc, tenantId, sessionId, taskRecordKey);
+        if (identity == null) {
+            throw new ManagedAgentException(404, "task_not_found",
+                    "The task was not found.");
+        }
+        List<String[]> task = jdbc.query("SELECT task_kind, task_state FROM"
                         + " ma_session_record WHERE"
-                        + " tenant_id = ? AND session_id = ?"
+                        + " tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?"
                         + " AND task_kind IS NOT NULL FOR UPDATE",
-                (result, row) -> new String[] {result.getString("domain"),
-                        result.getString("record_id"), result.getString("task_kind"),
+                (result, row) -> new String[] {result.getString("task_kind"),
                         result.getString("task_state")},
-                tenantId, sessionId).stream()
-                .filter(row -> taskRecordKey.equals(
-                        ManagedExtensionProjection.recordKey(sessionId, row[0], row[1])))
-                .map(row -> new String[] {row[2], row[3]})
-                .toList();
+                tenantId, sessionId, identity[0], identity[1]);
         if (task.isEmpty()) {
             throw new ManagedAgentException(404, "task_not_found",
                     "The task was not found.");

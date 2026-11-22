@@ -50,6 +50,9 @@ public final class RuntimeProvisionRequest {
             }
             ManagedContextProtocol.validateScope(this);
         }
+        // Refuse an over-budget encoded request reference at admission, not at
+        // the repository INSERT that would otherwise raise a raw data error.
+        requestKey();
     }
 
     public String getStorageId() {

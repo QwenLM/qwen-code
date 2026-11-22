@@ -229,9 +229,11 @@ public class JdbcChannelInstanceStore
      */
     public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
-        // ma_session.is_publication_retention_registered stays 0 for PUBLIC
-        // Sessions (only CONTROL admission registers it), so the record join
-        // must stay on the raw tenant/session identity, not the marker.
+        // ma_session.is_publication_retention_registered is a retention-
+        // registration marker, not a Session scope: lockSessionRoot sets it on
+        // any root a journal lock registers, PUBLIC Sessions included. The
+        // record join must therefore stay on the raw tenant/session identity,
+        // not the marker, which a PUBLIC Session acquires on its first commit.
         return jdbc.query("SELECT r.session_id, MIN(r.gmt_create) AS"
                         + " oldest_due"
                         + " FROM ma_session_record r"

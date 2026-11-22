@@ -211,7 +211,7 @@ class JournalPackDeletionRegressionTest {
         AgentStoreRows storeRows = new AgentStoreRows(null, jdbc, JSON);
         AgentExecutionOperations operations = new AgentExecutionOperations(
                 null, null, null, null, storeRows, null, jdbc, null, null, false, packs);
-        operations.backfillCompactionProjection(TENANT, SESSION, null, null);
+        operations.backfillCompactionProjection(TENANT, SESSION);
         // With no context.compacted event the backfill still walks the deleted prefix and
         // lands the empty compaction-state resource instead of failing on null bytes.
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE resource_id LIKE"

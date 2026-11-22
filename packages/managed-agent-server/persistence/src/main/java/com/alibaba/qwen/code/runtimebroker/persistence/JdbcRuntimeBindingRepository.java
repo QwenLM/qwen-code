@@ -189,14 +189,18 @@ public final class JdbcRuntimeBindingRepository
                     }
                 }
                 if (member != null) {
+                    // Predicate on the claim's own (tenant_id, storage_id) so the
+                    // verdict is order-independent: uk_ma_storage_business_key
+                    // matches at most one row, and FOR UPDATE locks only that
+                    // alias rather than every alias of the physical id.
                     try (var alias = connection.prepareStatement(
-                            "SELECT tenant_id, storage_id FROM ma_storage WHERE physical_id = ? FOR UPDATE")) {
+                            "SELECT tenant_id, storage_id FROM ma_storage WHERE physical_id = ?"
+                                    + " AND tenant_id = ? AND storage_id = ? FOR UPDATE")) {
                         JdbcRepositorySupport.setIdentity(alias, 1, member);
+                        JdbcRepositorySupport.setIdentity(alias, 2, claim.getRequest().getScope().getTenantId());
+                        JdbcRepositorySupport.setIdentity(alias, 3, claim.getRequest().getStorageId());
                         try (var rows = alias.executeQuery()) {
-                            if (!rows.next()
-                                    || !claim.getRequest().getScope().getTenantId().equals(rows.getString("tenant_id"))
-                                    || !claim.getRequest().getStorageId().equals(
-                                            rows.getString("storage_id"))) {
+                            if (!rows.next()) {
                                 throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
                             }
                         }
@@ -599,7 +603,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requestHarnessDrain(String tenantId, String harnessSessionId) {
         BrokerValues.requireId(tenantId, "tenantId");
-        BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, tenantId);
             ExecutionAdmissionPlacement.lockDrainRoot(connection, tenantId, harnessSessionId);

@@ -966,10 +966,11 @@ class ManagedAgentMySqlIT {
                 .locations("classpath:db/managed-schema")
                 .load()
                 .migrate();
-        // The contract derives tenants up to prefix + 23 chars, which must
-        // fit the raw VARCHAR(36) tenant column.
+        // The contract derives tenants up to prefix + 28 chars
+        // ("-recovery-history-ids-tenant"), which must fit the raw
+        // VARCHAR(36) tenant column, so the prefix stays at 8 characters.
         JdbcRepositoryContract.verify(dataSource,
-                "f-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10));
+                "f-" + UUID.randomUUID().toString().replace("-", "").substring(0, 6));
     }
 
     @Test

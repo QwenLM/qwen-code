@@ -70,7 +70,7 @@ public final class ManagedIdentityRefs {
     }
 
     public static String commandRef(String operation, String commandId) {
-        return text(ManagedIdentityRef.encode(COMMAND_REF_BYTES, operation, commandId));
+        return requireRef(COMMAND_REF_BYTES, "journal command reference (operation/commandId)", operation, commandId);
     }
 
     public static String actorScopeRef(String tenantId, String sessionId, String actorId) {
@@ -80,6 +80,22 @@ public final class ManagedIdentityRefs {
     /** Encodes an arbitrary owner/physical/holder/runtime tuple within a named byte budget. */
     public static String ref(int maximumBytes, String... components) {
         return text(ManagedIdentityRef.encode(maximumBytes, components));
+    }
+
+    /**
+     * Encodes a tuple at an admission boundary, refusing an over-budget identity
+     * with a named error rather than letting the encode throw an unnamed overflow
+     * from a repository INSERT or replay path. The components' own validators
+     * bound characters, not the percent-encoded reference, so the encoded length
+     * must be checked where the identity is admitted.
+     */
+    public static String requireRef(int maximumBytes, String name, String... components) {
+        try {
+            return ref(maximumBytes, components);
+        } catch (IllegalArgumentException overflow) {
+            throw new IllegalArgumentException(name + " exceeds its " + maximumBytes
+                    + "-byte identity reference budget", overflow);
+        }
     }
 
     private static String text(byte[] encoded) {

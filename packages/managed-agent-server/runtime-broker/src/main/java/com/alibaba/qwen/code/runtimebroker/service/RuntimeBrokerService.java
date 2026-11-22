@@ -377,7 +377,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public CompletionStage<List<Map<String, Object>>> mcpDefinitions(String harnessSessionId, String runtimeSessionId) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         return resolveScope(harnessId, true, null).thenCompose(scope -> {
             bindingRepository.requireHarnessAdmission(scope, harnessId, null);
             RuntimeSessionRecord owner = McpOwners.resolve(sessionRepository, scope, harnessId, runtimeSessionId);
@@ -428,7 +428,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<Map<String, Object>> extensionControl(String harnessSessionId, String expectedBindingId,
             Long expectedGeneration, Map<String, Object> operation) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requirePathSafe(BrokerValues.requireId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
+        String harnessId = BrokerValues.requirePathSafe(BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"), "harnessSessionId");
         Map<String, Object> immutable = immutableMap(operation, "extension operation");
         ManagedExtensionProtocol.validateOperation(immutable);
         boolean recovery = ManagedExtensionProtocol.isRecovery(immutable);
@@ -545,7 +545,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<RuntimeBindingRecord> warm(String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
         String harnessId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         return resolveScope(harnessId, true, authority)
                 .thenCompose(scope -> bindingProvisioning.ensureBinding(
@@ -664,10 +664,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             String turnKind, RuntimeLifecycleAuthority authority, String mountClaimId) {
         requireOpen(closed);
         String harnessId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
+                BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
         String runtimeId = BrokerValues.requirePathSafe(
-                BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"),
+                BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId"),
                 "runtimeSessionId");
         CompletableFuture<SessionContext> current = bindingRegistry.session(runtimeId);
         if (current != null) {
@@ -1220,7 +1220,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(
             String harnessSessionId) {
         requireOpen(closed);
-        String id = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
+        String id = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
         return mapFailure(safeStage(() -> sessionResolver.resolveTenant(id)),
                 "runtime_hold_inventory_scope_failed",
                 "Runtime hold inventory scope resolution failed")
@@ -1455,8 +1455,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     public CompletionStage<Boolean> release(String harnessSessionId,
             String runtimeSessionId, boolean drain, RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId");
         CompletableFuture<SessionContext> local = bindingRegistry.session(runtimeId);
         if (local == null) {
             return releasedSession(harnessId, runtimeId, drain, authority);
@@ -1506,8 +1506,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             String runtimeSessionId, String mountClaimId,
             RuntimeLifecycleAuthority authority) {
         requireOpen(closed);
-        String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId, "runtimeSessionId");
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId, "harnessSessionId");
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId, "runtimeSessionId");
         String claimId = BrokerValues.requireId(mountClaimId, "mountClaimId");
         CompletableFuture<SessionContext> local = bindingRegistry.session(runtimeId);
         if (local == null) {

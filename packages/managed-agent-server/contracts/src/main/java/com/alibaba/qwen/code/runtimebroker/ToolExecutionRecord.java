@@ -117,9 +117,9 @@ public final class ToolExecutionRecord {
             throw new IllegalArgumentException(
                     "runtimeGeneration must be positive");
         }
-        this.harnessSessionId = BrokerValues.requireId(harnessSessionId,
+        this.harnessSessionId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        this.runtimeSessionId = BrokerValues.requireId(runtimeSessionId,
+        this.runtimeSessionId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         this.turnId = BrokerValues.requireId(turnId, "turnId");
         this.toolCallId = BrokerValues.requireToolCallId(toolCallId, "toolCallId");

@@ -71,7 +71,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                         + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
                         + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                         + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                        + " SELECT ?, tenant_id, workspace_id, ?, ?, 'execution-' || ?, ?, binding_json, binding_digest,"
+                        + " SELECT ?, tenant_id, workspace_id, ?, ?, CONCAT('execution-', ?), ?, binding_json, binding_digest,"
                         + " token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
                         + " is_write_evidence, is_accepted_complete, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
                         + " capture_used_bytes FROM ma_output_capture WHERE scope_ref = ? AND publication_id = 'pub-1'",

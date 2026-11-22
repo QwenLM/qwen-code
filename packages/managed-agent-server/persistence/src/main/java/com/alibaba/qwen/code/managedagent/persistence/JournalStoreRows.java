@@ -444,6 +444,16 @@ final class JournalStoreRows {
         validateText(tenantId, "tenantId", 128);
         validateKeyComponent(workspaceId, "workspaceId");
         validateKeyComponent(sessionId, "sessionId");
+        // The JOURNAL owner reference percent-encodes (tenant, session), so a
+        // sessionId the byte validator admits can still overflow the column
+        // budget. Refuse it at admission rather than at the resource-ref INSERT
+        // every commit performs.
+        try {
+            ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenantId, sessionId);
+        } catch (IllegalArgumentException overflow) {
+            throw invalid("sessionId exceeds the " + ManagedIdentityRefs.OWNER_REF_BYTES
+                    + "-byte journal owner reference budget.");
+        }
     }
 
     static void validateKeyComponent(String value, String label) {
@@ -720,7 +730,12 @@ final class JournalStoreRows {
     // canonical command reference, not a hash.
     static String commandKeyHash(String operation,
             String commandId) {
-        return ManagedIdentityRefs.commandRef(operation, commandId);
+        try {
+            return ManagedIdentityRefs.commandRef(operation, commandId);
+        } catch (IllegalArgumentException overflow) {
+            throw invalid("operation/commandId exceeds the "
+                    + ManagedIdentityRefs.COMMAND_REF_BYTES + "-byte command reference budget.");
+        }
     }
 
     static String sha256(byte[] value) {

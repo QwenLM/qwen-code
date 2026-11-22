@@ -71,7 +71,10 @@ public class ManagedSchemaBusinessStoreTest {
     void domainRecordsReadOnlyTheResourceInTheirOriginalSession() {
         String resourceId = "definition-body";
         var references = new java.util.HashMap<String, JsonNode>();
-        for (String ownerSession : List.of(session, session + " ")) {
+        // A trailing-space twin folds to the same uk_ma_resource_id key under
+        // the schema's PAD SPACE collation (MySQL 1062), so the second session
+        // is a genuinely distinct id rather than session + " ".
+        for (String ownerSession : List.of(session, session + "-twin")) {
             byte[] bytes = ownerSession.getBytes(java.nio.charset.StandardCharsets.UTF_8);
             references.put(ownerSession, new ObjectMapper().createObjectNode()
                     .put("resourceId", resourceId).put("kind", "automation-definition")

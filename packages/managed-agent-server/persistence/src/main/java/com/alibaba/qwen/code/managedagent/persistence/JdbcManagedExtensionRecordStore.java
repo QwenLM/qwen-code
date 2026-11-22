@@ -296,6 +296,13 @@ public class JdbcManagedExtensionRecordStore
                 (result, row) -> taskRow(result, tenantId, sessionId));
     }
 
+    @Override
+    public Optional<TaskTarget> findTaskTargetByRecord(String tenantId,
+            String sessionId, String domain, String recordId) {
+        return ManagedExtensionQueries.targetByRecord(jdbc, this, tenantId, sessionId, domain, recordId,
+                (result, row) -> taskRow(result, tenantId, sessionId));
+    }
+
     /** Reads only a committed resource in this Session's scope. */
     public JsonNode readRecordResource(String tenantId, String sessionId,
             JsonNode ref) {
@@ -1644,11 +1651,12 @@ public class JdbcManagedExtensionRecordStore
             throw new IllegalStateException(
                     "A Stage H record row is outside its Session scope");
         }
+        String domain = result.getString("domain");
+        String recordId = result.getString("record_id");
         return new TaskRow(ManagedExtensionProjection.taskId(
-                ManagedExtensionProjection.recordKey(sessionId,
-                        result.getString("domain"), result.getString("record_id"))),
+                ManagedExtensionProjection.recordKey(sessionId, domain, recordId)),
                 result.getString("task_kind"), projection(result),
-                result.getString("record_resource_id"));
+                result.getString("record_resource_id"), domain, recordId);
     }
 
     private static StoredRow storedRow(ResultSet result, int row)

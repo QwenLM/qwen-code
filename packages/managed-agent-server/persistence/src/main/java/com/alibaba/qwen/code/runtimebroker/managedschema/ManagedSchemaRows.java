@@ -31,6 +31,7 @@ public final class ManagedSchemaRows {
             "is_plan_enabled",
             "is_projection_pending",
             "is_provision_seeded",
+            "is_publication_retention_registered",
             "is_quarantined",
             "is_recovery_protected",
             "is_resource_gc_completed",

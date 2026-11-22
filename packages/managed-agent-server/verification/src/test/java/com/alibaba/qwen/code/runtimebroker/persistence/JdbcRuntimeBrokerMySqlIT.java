@@ -51,10 +51,11 @@ class JdbcRuntimeBrokerMySqlIT {
     @Test
     void repositoriesPreserveTheirContractsOnMySql() throws Exception {
         // The database outlives the run, so each run needs its own prefix.
-        // The contract derives tenants up to prefix + 23 chars, which must
-        // fit the raw VARCHAR(36) tenant column.
+        // The contract derives tenants up to prefix + 28 chars
+        // ("-recovery-history-ids-tenant"), which must fit the raw
+        // VARCHAR(36) tenant column, so the prefix stays at 8 characters.
         JdbcRepositoryContract.verify(dataSource(),
-                "m-" + UUID.randomUUID().toString().replace("-", "").substring(0, 10));
+                "m-" + UUID.randomUUID().toString().replace("-", "").substring(0, 6));
     }
 
     @Test
