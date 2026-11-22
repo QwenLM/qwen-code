@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { CommandInfo, TodoItem } from '../adapters/types.js';
 import { TranscriptViewport } from '../components/TranscriptViewport.js';
 import { ToolApproval } from '../components/messages/ToolApproval.js';
@@ -125,8 +125,6 @@ export function ChatSurface({
   // so gating the ref mutation on refOwnerRef makes the transition idempotent
   // instead of overwriting or deleting the entry it just parked.
   const ownerTokenRef = useRef({});
-  const controllerRef = useRef(controller);
-  controllerRef.current = controller;
   const parkedLatchesRef = useRef<
     Map<string, { token: object; inFlight: boolean; admissionLocked: boolean }>
   >(new Map());
@@ -159,6 +157,27 @@ export function ChatSurface({
     setSubmitInFlight(submitInFlightRef.current);
     setAdmissionLocked(admissionLockedRef.current);
   }
+  // Commit-time snapshot for async cancel settlement checks: refOwnerRef must
+  // keep updating during render for latch idempotency across discarded renders,
+  // whereas a cancel settling while an incoming switch render is suspended /
+  // discarded must still evaluate against the committed, on-screen session and
+  // controller (and stay silent once this surface has unmounted).
+  const committedSessionIdRef = useRef(controller.sessionId);
+  const committedTokenRef = useRef(ownerTokenRef.current);
+  const committedControllerRef = useRef(controller);
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    committedSessionIdRef.current = controller.sessionId;
+    committedTokenRef.current = ownerTokenRef.current;
+    committedControllerRef.current = controller;
+  });
+  useLayoutEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =
     controller.phase === 'running' ||
@@ -308,20 +327,24 @@ export function ChatSurface({
           onCancel={() => {
             const cancelSessionId = controller.sessionId;
             const cancelTurnId = controller.activeTurnId;
-            const token = ownerTokenRef.current;
+            const token = committedTokenRef.current;
             const isOwnerActive = (resultTurnId?: string) => {
+              if (!mountedRef.current) return false;
               const sameSession =
                 cancelSessionId !== ''
-                  ? refOwnerRef.current === cancelSessionId
-                  : ownerTokenRef.current === token;
+                  ? committedSessionIdRef.current === cancelSessionId
+                  : committedTokenRef.current === token;
               if (!sameSession) return false;
               const targetTurnId = resultTurnId ?? cancelTurnId;
-              return controllerRef.current.activeTurnId === targetTurnId;
+              return (
+                targetTurnId === undefined ||
+                committedControllerRef.current.activeTurnId === targetTurnId
+              );
             };
             // A refused or unknown stop admission must not be silent on the
             // session and turn that requested it, while a late settlement after
-            // a session switch or turn advance must not misattribute an older
-            // stop failure to a different session or a newer turn.
+            // a session switch, turn advance, or unmount must not misattribute
+            // an older stop failure to another session or a newer turn.
             void controller
               .cancel()
               .then((result) => {

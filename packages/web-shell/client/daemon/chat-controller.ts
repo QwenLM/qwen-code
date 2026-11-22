@@ -120,6 +120,11 @@ export interface DaemonChatControllerDeps {
     listener: (requestId: string, live: boolean) => void,
   ): () => void;
   readonly liveApprovalRequestIds?: readonly string[];
+  // Live prompt ids already admitted for this session before this controller
+  // instance was constructed (for example across a durable A -> B -> A session
+  // switch round-trip), in FIFO admission order. Deduped on seed so a settled
+  // prompt can never latch as the queue head.
+  readonly livePromptIds?: readonly string[];
 
   // The phase to report when no operation holds it open. The binding hook
   // populates it from the session's settled state (e.g. a failed session).
@@ -171,6 +176,13 @@ export function createDaemonChatController(
   // head — the active prompt — never the newest admitted id. A prompt leaves
   // the queue when its terminal event arrives or its submit is rejected.
   const livePromptQueue: string[] = [];
+  if (deps.livePromptIds) {
+    for (const id of deps.livePromptIds) {
+      if (id && !livePromptQueue.includes(id)) {
+        livePromptQueue.push(id);
+      }
+    }
+  }
   // Submit dispatches that have not bound or resolved yet; while any is
   // outstanding a terminal event may belong to it even though onAdmitted has
   // not run, so prompt witnesses are not pruned as orphans. Prompt ids are
@@ -384,8 +396,10 @@ export function createDaemonChatController(
           deps.submitPrompt(input, (id) => {
             promptId = id;
             // A terminal event already arrived: the turn is over, so it is not
-            // a live cancel target.
-            if (!terminalPromptOutcome.has(id)) livePromptQueue.push(id);
+            // a live cancel target. Dedupe against seeded ids so one terminal
+            // settlement always clears the queue entry.
+            if (!terminalPromptOutcome.has(id) && !livePromptQueue.includes(id))
+              livePromptQueue.push(id);
           }),
       );
       pendingSubmitBinds--;

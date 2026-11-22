@@ -77,20 +77,32 @@ restore the incoming session's latches:
   stale-owner return. If an inactive parked session's submit settles `unknown`
   (and not `rejected`), its parked entry records `admissionLocked = true`
   without disturbing the active session.
-- **Stop settlement errors stay on the requesting session and turn.**
-  `SessionChatController` exposes an optional `activeTurnId?: string` (projected
-  live from `livePromptQueue[0]` in `createDaemonChatController`), and
-  `cancel()` stamps the dispatch-time target turn onto `IntentResult.target.turnId`
-  (leaving the per-session operation retention key bounded). `onCancel` captures
-  the requesting `controller.sessionId`, `controller.activeTurnId`, and
-  `ownerTokenRef.current`, and reports `chat.stopNotConfirmed` only if both the
-  session is active (`refOwnerRef.current === cancelSessionId` for durable
-  sessions, or `ownerTokenRef.current === token` for an unallocated `''` chat)
-  and the current controller's `activeTurnId` still matches
-  `result.target?.turnId ?? cancelTurnId`. A delayed stop failure for an older
-  turn `T1` therefore never misattributes an unqualified stop error to a newer
-  turn `T2` (or an idle session) in the same session, while `IntentResult.target.turnId`
-  and `controller.operations` retain the turn-attributed evidence.
+- **Stop settlement errors stay on the requesting session and turn (for turns
+  admitted into the controller queue).** `SessionChatController` exposes an
+  optional `activeTurnId?: string` (projected live from `livePromptQueue[0]` in
+  `createDaemonChatController`, with `useDaemonChatController` retaining
+  per-session admitted prompt queues and seeding `livePromptIds` deduplicated on
+  controller rebuild so durable `A -> B -> A` round-trips keep `activeTurnId`),
+  and `cancel()` stamps the dispatch-time target turn onto the returned
+  `IntentResult.target.turnId` copy (while `controller.operations` intentionally
+  keeps its bare `{ sessionId }` target so `retainOperations` stays bounded per
+  session rather than growing per turn). `onCancel` reads commit-time refs
+  updated in `useLayoutEffect` (`committedSessionIdRef`, `committedTokenRef`,
+  `committedControllerRef`, and `mountedRef`) so a cancel settling while an
+  incoming switch render is suspended/discarded still evaluates against the
+  committed on-screen session and stays silent once unmounted. It reports
+  `chat.stopNotConfirmed` only when the surface is mounted, the session matches
+  (`committedSessionIdRef.current === cancelSessionId` for durable sessions, or
+  `committedTokenRef.current === token` for an unallocated `''` chat — any
+  `'' -> id` transition, including mid-flight allocation, is treated as a
+  switch and stays silent, matching the submit latch rule), and either no target
+  turn was bound (`targetTurnId === undefined`, e.g. Stop pressed while
+  `submitting` before admission) or `committedControllerRef.current.activeTurnId === targetTurnId`
+  (where `targetTurnId = result.target?.turnId ?? cancelTurnId`). For any cancel
+  whose target turn is in the controller's queue, a delayed failure for an older
+  turn `T1` does not surface an unqualified warning against a newer turn `T2`
+  (or an idle session); the suppressed `IntentResult` is currently discarded
+  because `ChatSurface` has no turn-attributed historical notice store yet.
 
 The switch updates the ref and the state halves together; updating only one
 would leave either a visible-but-dispatchable or an invisible-but-blocked
@@ -165,6 +177,14 @@ owning page override any of them explicitly.
 - **The main-column switch itself + visual before/after gate.** Requires carrying
   the streaming-tail projection, the submit orchestration, and the rich composer
   surface through the contract or slots; a multi-increment effort.
+- **Pre-mount / post-reload / other-client active turn seeding and historical
+  turn-attributed stop notices.** `useDaemonChatController` only tracks turns
+  admitted by this hook instance (`livePromptsBySessionRef`); turns already
+  running before mount (after a reload or started from another client) do not
+  populate `livePromptQueue` until the provider exposes a server-side active
+  turn id, and suppressed stale stop failures are discarded rather than surfaced
+  in a historical turn-attributed notice feed until the notification/operations
+  convergence slice lands.
 - **Status stack / usage-stat parity (slice 5)** once `statusFacts` carries the
   full queued-prompt and goal facts.
 - **Managed adapter (slice 3)** and **ChatPane convergence (slice 4)**.

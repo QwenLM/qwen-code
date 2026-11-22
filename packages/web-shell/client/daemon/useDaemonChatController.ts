@@ -206,6 +206,11 @@ export function useDaemonChatController(): SessionChatController {
   >(undefined);
   const answeredRef = useRef<Set<string>>(new Set());
   const prevPendingRef = useRef<Set<string>>(new Set());
+  // Tracks admitted prompts per durable session across controller rebuilds
+  // (e.g. s1 -> s2 -> s1) so a re-created controller for s1 still knows its
+  // active FIFO turn id until a terminal settlement removes it.
+  const livePromptsBySessionRef = useRef<Map<string, string[]>>(new Map());
+  const pendingSubmitSettledRef = useRef<Set<Set<string>>>(new Set());
 
   const controllerRef = useRef<{
     sessionId: string | undefined;
@@ -215,10 +220,11 @@ export function useDaemonChatController(): SessionChatController {
   if (!controllerRef.current || controllerRef.current.sessionId !== sessionId) {
     answeredRef.current = new Set();
     prevPendingRef.current = new Set();
+    const boundSessionId = sessionId ?? '';
     controllerRef.current = {
       sessionId,
       controller: createDaemonChatController({
-        sessionId: sessionId ?? '',
+        sessionId: boundSessionId,
         storageKey:
           getComposerDraftStorageKey(sessionId, connection.workspaceCwd) ?? '',
         get messages() {
@@ -260,7 +266,12 @@ export function useDaemonChatController(): SessionChatController {
         // pins a stale history handle or silently drops a retry.
         loadOlder: (options) => transcriptHistoryRef.current.loadMore(options),
         liveApprovalRequestIds: pendingApprovals.map((approval) => approval.id),
+        livePromptIds: boundSessionId
+          ? livePromptsBySessionRef.current.get(boundSessionId)
+          : undefined,
         async submitPrompt(input, onAdmitted) {
+          const settledDuringSubmit = new Set<string>();
+          pendingSubmitSettledRef.current.add(settledDuringSubmit);
           try {
             // submitPrompt is non-blocking and resolves the prompt id; it does
             // not invoke an onAdmitted option (only sendPrompt does), so bind
@@ -274,10 +285,26 @@ export function useDaemonChatController(): SessionChatController {
                 ? { inputAnnotations: [...input.metadata.inputAnnotations] }
                 : {}),
             });
+            if (
+              boundSessionId !== '' &&
+              accepted.promptId &&
+              !settledDuringSubmit.has(accepted.promptId)
+            ) {
+              let queue = livePromptsBySessionRef.current.get(boundSessionId);
+              if (!queue) {
+                queue = [];
+                livePromptsBySessionRef.current.set(boundSessionId, queue);
+              }
+              if (!queue.includes(accepted.promptId)) {
+                queue.push(accepted.promptId);
+              }
+            }
             onAdmitted(accepted.promptId);
             return 'accepted';
           } catch {
             return 'unknown';
+          } finally {
+            pendingSubmitSettledRef.current.delete(settledDuringSubmit);
           }
         },
         async cancelPrompt() {
@@ -393,10 +420,31 @@ export function useDaemonChatController(): SessionChatController {
 
   useDaemonPromptSettled(
     useCallback((event: DaemonPromptSettledEvent) => {
-      promptListenerRef.current?.({
-        promptId: event.promptId,
-        outcome: event.outcome,
-      });
+      for (const settled of pendingSubmitSettledRef.current) {
+        settled.add(event.promptId);
+      }
+      // Remove the settled prompt from its owning session's live queue
+      // (matching event.sessionId when present, or scanning all queues when a
+      // test fixture omits event.sessionId).
+      const targetSessions = event.sessionId
+        ? [event.sessionId]
+        : [...livePromptsBySessionRef.current.keys()];
+      for (const sid of targetSessions) {
+        const queue = livePromptsBySessionRef.current.get(sid);
+        if (!queue) continue;
+        const index = queue.indexOf(event.promptId);
+        if (index !== -1) queue.splice(index, 1);
+        if (queue.length === 0) livePromptsBySessionRef.current.delete(sid);
+      }
+      if (
+        !event.sessionId ||
+        event.sessionId === controllerRef.current?.sessionId
+      ) {
+        promptListenerRef.current?.({
+          promptId: event.promptId,
+          outcome: event.outcome,
+        });
+      }
     }, []),
   );
 

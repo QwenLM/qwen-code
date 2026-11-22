@@ -1001,15 +1001,17 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.admitSubmit('p2');
     await s2;
     expect(h.controller.activeTurnId).toBe('p1');
-    // Even an unconfirmed cancel carries the dispatch-time turnId on its target.
+    // Emit p1's terminal settlement while cancel1 is still in flight so the
+    // queue head advances to p2 before cancel1 settles: the returned target
+    // must still carry the dispatch-time subject ('p1'), not the settle-time
+    // head ('p2') (pins R2-3 against a settle-time queue read).
     const cancel1 = h.controller.cancel();
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBe('p2');
     h.resolveCancel('unknown');
     const res1 = await cancel1;
     expect(res1.admission).toBe('unknown');
     expect(res1.target.turnId).toBe('p1');
-    // Settling p1 advances activeTurnId to p2; settling p2 returns to undefined.
-    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
-    expect(h.controller.activeTurnId).toBe('p2');
     const cancel2 = h.controller.cancel();
     h.resolveCancel('rejected');
     const res2 = await cancel2;
@@ -1021,5 +1023,16 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.resolveCancel('rejected');
     const resIdle = await idleCancel;
     expect(resIdle.target.turnId).toBeUndefined();
+  });
+
+  it('seeds and deduplicates livePromptIds so a re-created controller keeps its FIFO head without latching settled prompts', () => {
+    const h = harness({ livePromptIds: ['p1', 'p1', '', 'p2'] });
+    expect(h.controller.activeTurnId).toBe('p1');
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    // Deduplication ensures one terminal event clears p1 instead of leaving a
+    // duplicate p1 latched at the FIFO head.
+    expect(h.controller.activeTurnId).toBe('p2');
+    h.emitPrompt({ promptId: 'p2', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBeUndefined();
   });
 });

@@ -37,6 +37,7 @@ const harness = vi.hoisted(() => ({
     capacityReached: false,
     paginationError: false,
   },
+  surfaceEditor: null as Record<string, unknown> | null,
 }));
 
 vi.mock('./session/DaemonSessionProvider.js', () => ({
@@ -61,7 +62,23 @@ vi.mock('../hooks/useMessages.js', () => ({
 vi.mock('../hooks/useComposerCore.js', () => ({
   getComposerDraftStorageKey: (sessionId: string) => `draft:${sessionId}`,
 }));
+vi.mock('../components/TranscriptViewport.js', () => ({
+  TranscriptViewport: () => null,
+}));
+vi.mock('../components/messages/ToolApproval.js', () => ({
+  ToolApproval: () => null,
+}));
+vi.mock('../components/messages/AskUserQuestion.js', () => ({
+  AskUserQuestion: () => null,
+}));
+vi.mock('../components/ChatEditor.js', () => ({
+  ChatEditor: (props: Record<string, unknown>) => {
+    harness.surfaceEditor = props;
+    return null;
+  },
+}));
 
+import { ChatSurface } from '../chat-core/ChatSurface.js';
 import { useDaemonChatController } from './useDaemonChatController.js';
 import { cleanupReact, mountReact } from '../test/reactHarness.js';
 
@@ -680,5 +697,81 @@ describe('useDaemonChatController', () => {
     expect(controller!.activeTurnId).toBe('p2');
     harness.promptSettledListener?.({ promptId: 'p2', outcome: 'completed' });
     expect(controller!.activeTurnId).toBeUndefined();
+  });
+
+  it('preserves activeTurnId across a session switch round-trip and clears it when settled away (R2-1)', async () => {
+    mountReact(<Probe />);
+    const first = controller!;
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p1' });
+    await first.submit({ text: 'turn 1' });
+    expect(first.activeTurnId).toBe('p1');
+    // Switch s1 -> s2 -> s1: each switch rebuilds the controller, yet the
+    // returned s1 controller must still report p1 as its active turn.
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    const second = controller!;
+    expect(second).not.toBe(first);
+    expect(second.activeTurnId).toBeUndefined();
+    harness.connection.sessionId = 's1';
+    forceRerender!();
+    const third = controller!;
+    expect(third).not.toBe(first);
+    expect(third.activeTurnId).toBe('p1');
+    // If p1 settles while viewing s2, returning to s1 must report undefined.
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    harness.promptSettledListener?.({
+      sessionId: 's1',
+      promptId: 'p1',
+      outcome: 'completed',
+    });
+    harness.connection.sessionId = 's1';
+    forceRerender!();
+    expect(controller!.activeTurnId).toBeUndefined();
+  });
+
+  it('reports a delayed stop failure after a real s1 -> s2 -> s1 controller rebuild round-trip (R2-1 / F1)', async () => {
+    const onError = vi.fn();
+    let rerenderSurface: (() => void) | undefined;
+    function ComposedSurface() {
+      const [, bump] = useReducer((x: number) => x + 1, 0);
+      rerenderSurface = () => act(() => bump());
+      const bound = useDaemonChatController();
+      return <ChatSurface controller={bound} onError={onError} />;
+    }
+    harness.surfaceEditor = null;
+    mountReact(<ComposedSurface />);
+    harness.submitPrompt.mockResolvedValueOnce({ promptId: 'p1' });
+    await act(async () => {
+      (
+        harness.surfaceEditor?.onSubmit as (
+          text: string,
+          images?: unknown,
+          files?: unknown,
+          commitAccepted?: () => void,
+        ) => unknown
+      )('turn 1', undefined, undefined, vi.fn());
+    });
+    let rejectCancel!: (err: unknown) => void;
+    harness.cancel.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectCancel = reject;
+        }),
+    );
+    await act(async () => {
+      (harness.surfaceEditor?.onCancel as () => void)();
+    });
+    // Switch s1 -> s2 -> s1 while p1 is still running on the daemon:
+    // useDaemonChatController builds a brand-new controller for s1 on return.
+    harness.connection.sessionId = 's2';
+    rerenderSurface!();
+    harness.connection.sessionId = 's1';
+    rerenderSurface!();
+    await act(async () => {
+      rejectCancel(new Error('stop transport timeout'));
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0]?.[1]).toBe('chat.stopNotConfirmed');
   });
 });

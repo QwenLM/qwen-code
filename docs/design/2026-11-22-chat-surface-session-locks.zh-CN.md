@@ -58,17 +58,24 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
   `result.admission === 'accepted'` 调用 `commitAccepted?.()`。若非活动的已暂存会话的
   提交以 `unknown`（而非 `rejected`）结算，其暂存条目记录 `admissionLocked = true` 而不打
   扰当前活动会话。
-- **停止结算错误留在发起会话与对应回合上。** `SessionChatController` 暴露可选的
-  `activeTurnId?: string`（`createDaemonChatController` 从 `livePromptQueue[0]` 实时
-  投影），`cancel()` 将派发时的目标回合写入返回的 `IntentResult.target.turnId`（同时保
-  持按会话的 operation 保留键有界）。`onCancel` 捕获发起请求的 `controller.sessionId`、
-  `controller.activeTurnId` 与 `ownerTokenRef.current`，仅当会话仍处于活动态（持久会话
-  匹配 `refOwnerRef.current === cancelSessionId`，未分配 `''` 聊天匹配
-  `ownerTokenRef.current === token`）且当前控制器的 `activeTurnId` 仍等于
-  `result.target?.turnId ?? cancelTurnId` 时才上报 `chat.stopNotConfirmed`。因此旧回合
-  `T1` 迟到的停止失败绝不会在同一会话内把无回合限定的停止错误误报给新回合 `T2`（或已空闲
-  会话），而 `IntentResult.target.turnId` 与 `controller.operations` 仍保留带回合归属的
-  证据。
+- **停止结算错误留在发起会话与对应回合上（针对已入控制器队列的回合）。**
+  `SessionChatController` 暴露可选的 `activeTurnId?: string`（`createDaemonChatController`
+  从 `livePromptQueue[0]` 实时投影，`useDaemonChatController` 按持久会话维护已准入队列
+  并在控制器重建时去重注入 `livePromptIds`，使持久会话 `A -> B -> A` 往返保留
+  `activeTurnId`），`cancel()` 将派发时的目标回合写入返回的 `IntentResult.target.turnId`
+  副本（`controller.operations` 有意保持裸 `{ sessionId }` 目标，使 `retainOperations`
+  维持按会话有界保留而非按回合增长）。`onCancel` 读取在 `useLayoutEffect` 中更新的提交期
+  ref（`committedSessionIdRef`、`committedTokenRef`、`committedControllerRef` 与
+  `mountedRef`），使切换渲染被挂起/丢弃期间结算的取消仍对照当前已提交在屏会话判定，且组件
+  卸载后保持静默。仅当组件仍挂载、会话匹配（持久会话比
+  `committedSessionIdRef.current === cancelSessionId`，未分配 `''` 聊天比
+  `committedTokenRef.current === token`——任何 `'' -> id` 转换含提交中途分配均视为切换并
+  保持静默，与提交闩规则一致），且未绑定目标回合（`targetTurnId === undefined`，例如在
+  `submitting` 准入前按下停止）或 `committedControllerRef.current.activeTurnId === targetTurnId`
+  （`targetTurnId = result.target?.turnId ?? cancelTurnId`）时才上报
+  `chat.stopNotConfirmed`。对于目标回合在控制器队列中的 cancel，旧回合 `T1` 迟到的失败
+  不会把无回合限定的警告错报到新回合 `T2`（或空闲会话）；被抑制的 `IntentResult` 当前直接
+  丢弃，`ChatSurface` 尚无按回合归因的历史通知存储。
 
 切换同时更新 ref 与 state 两半；只更新其一会留下「可见但可派发」或「不可见但被阻塞」
 的 composer。这镜像了 `App` 与 `ChatPane` 已有的会话归属准入状态
@@ -126,6 +133,11 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
 
 - **主列切换本身 + 视觉前后对比门。** 需要经契约或槽位承载流式尾部投影、提交编排
   与富 composer 面；多增量工程。
+- **挂载前 / 刷新后 / 其他客户端运行中回合种子，以及按回合归因的历史停止通知面。**
+  `useDaemonChatController` 仅跟踪本 hook 实例准入的回合（`livePromptsBySessionRef`）；
+  挂载前已在运行的回合（页面刷新后或其他客户端发起）在 provider 暴露服务端活跃回合 id 之
+  前不会进入 `livePromptQueue`，而被抑制的过期停止失败在通知/操作收敛切片落地前直接丢弃，
+  不写入历史回合通知流。
 - **状态栈 / 用量统计 parity（slice 5）**，待 `statusFacts` 承载完整排队提示与
   goal 事实。
 - **Managed 适配器（slice 3）** 与 **ChatPane 收敛（slice 4）**。
