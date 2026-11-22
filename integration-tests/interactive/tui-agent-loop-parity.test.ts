@@ -155,8 +155,7 @@ interface Run {
  * tripling its cost in the required gate. A starved shared host stretches
  * every mocked turn several-fold — the teammate case measured ~395s under
  * contention (#18119) — so the ceiling is 1.5x that. It bounds one case, not
- * all three arms, whose waits sum past it, and it stays at half the 20-minute
- * gate step so a stall cannot take the rest of the shard down with it.
+ * all three arms, whose waits sum past it.
  */
 const PARITY_CASE_OPTIONS = { retry: 0, timeout: 600_000 };
 

@@ -18,6 +18,11 @@ const source = readFileSync(
   join(root, 'integration-tests/interactive/tui-agent-loop-parity.test.ts'),
   'utf8',
 );
+const ceilingMs = Number(
+  /const PARITY_CASE_OPTIONS = \{[^}]*\btimeout: ([\d_]+)/
+    .exec(source)?.[1]
+    ?.replaceAll('_', ''),
+);
 
 describe('TUI agent loop parity suite source pins', () => {
   it('runs each scenario once, without the root config retries', () => {
@@ -38,13 +43,21 @@ describe('TUI agent loop parity suite source pins', () => {
       'Run required no-AK integration gate',
     );
     const stepMs = Number(/timeout-minutes: (\d+)/.exec(gate)?.[1]) * 60_000;
-    const ceilingMs = Number(
-      /const PARITY_CASE_OPTIONS = \{[^}]*\btimeout: ([\d_]+)/
-        .exec(source)?.[1]
-        ?.replaceAll('_', ''),
-    );
     // The step runs the whole no-AK list sharded two ways, and shard 1 also
     // typechecks, so a stalled case must leave its shard at least half.
     expect(ceilingMs).toBeLessThanOrEqual(stepMs / 2);
+  });
+
+  it('pins the later-turns wait the case ceiling has to cover', () => {
+    // The deflake is the wait, not the ceiling: a green run cannot show that a
+    // starved host still fits the chain, so reverting either value must red
+    // this pin rather than quietly restore the #18119 flake.
+    const pollMs = Number(
+      /'the session starts its later turns',\s*([\d_]+)/
+        .exec(source)?.[1]
+        ?.replaceAll('_', ''),
+    );
+    expect(pollMs).toBe(240_000);
+    expect(ceilingMs).toBeGreaterThan(pollMs);
   });
 });
