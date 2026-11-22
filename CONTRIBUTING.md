@@ -110,6 +110,8 @@ To install dependencies defined in `package.json` as well as root dependencies, 
 corepack pnpm install --frozen-lockfile
 ```
 
+The install also applies `patches/ink+7.0.3.patch` through the root `postinstall` (`patch-package`). `packages/cli` compiles against the `ink` frame-controller types that patch adds, and no published `ink` release exports them, so an install that skipped lifecycle scripts (`--ignore-scripts`, or `ignore-scripts=true` in your npm/pnpm config) leaves the build failing with many `Module 'ink' has no exported member ...` errors. `npm run build` re-applies the patch when it is missing; to apply it by hand, run `npm run postinstall`.
+
 To build the entire project (all packages):
 
 ```bash

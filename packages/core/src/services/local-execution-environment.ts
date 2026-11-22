@@ -56,6 +56,8 @@ interface PendingExecution {
   invocation: AnyToolInvocation;
   confirmation?: ToolCallConfirmationDetails;
   executing: boolean;
+  /** The scheduler's function-call id, when the call carries one. */
+  callId?: string;
 }
 
 /**
@@ -67,6 +69,8 @@ export type PreparedExecutionRunner = (
     readonly id: string;
     readonly toolName: string;
     readonly params: Record<string, unknown>;
+    /** The scheduler's function-call id, when the call carries one. */
+    readonly callId?: string;
   },
   signal: AbortSignal,
   updateOutput?: (output: ToolResultDisplay) => void,
@@ -116,6 +120,21 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
     return pending;
   }
 
+  /**
+   * The declaration of one admitted tool, as the model sees it: its name,
+   * description and parameter schema. An environment that dispatched the
+   * tool elsewhere publishes this so the durable record names what the host
+   * approved.
+   */
+  toolDefinition(name: string): Record<string, unknown> {
+    const {
+      name: toolName,
+      description,
+      parametersJsonSchema,
+    } = this.tool(name).schema;
+    return { name: toolName, description, parametersJsonSchema };
+  }
+
   async prepare(
     request: ExecutionPreparation,
     signal: AbortSignal,
@@ -143,6 +162,7 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
       toolName: request.toolName,
       invocation,
       executing: false,
+      ...(request.callId === undefined ? {} : { callId: request.callId }),
     });
     return {
       params: invocation.params as Record<string, unknown>,
@@ -212,7 +232,12 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
           );
         }
         return await this.run(
-          { id, toolName: pending.toolName, params },
+          {
+            id,
+            toolName: pending.toolName,
+            params,
+            ...(pending.callId === undefined ? {} : { callId: pending.callId }),
+          },
           controller.signal,
           updateOutput,
         );

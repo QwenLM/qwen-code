@@ -111,7 +111,23 @@ async function fixture(runtimeCallId = 'worker-call-a') {
         stopReason: 'end_turn',
         resultRef: await local.publish(
           'managed-turn-result',
-          Buffer.from('{}'),
+          Buffer.from(
+            JSON.stringify({
+              uuid: 'rec-turn-a',
+              parentUuid: null,
+              sessionId: key.sessionId,
+              timestamp: new Date(1).toISOString(),
+              type: 'system',
+              subtype: 'turn_result',
+              cwd: '/workspace',
+              version: 'test',
+              systemPayload: {
+                promptId: 'prompt-a',
+                state: 'completed',
+                stopReason: 'end_turn',
+              },
+            }),
+          ),
         ),
         occurredAt: 1,
         eventId: 'turn-a',
@@ -223,14 +239,9 @@ async function fixture(runtimeCallId = 'worker-call-a') {
     },
   };
   const writable = vi.fn(async () => {});
-  publisher = new HostedShellPublisher(
-    session,
-    resources,
-    writable,
-    'runtime-a',
-  );
+  publisher = new HostedShellPublisher(session, resources, writable);
   const descriptor = await publisher.start();
-  publisher.register(request, 'model-call-a');
+  publisher.register(request, 'model-call-a', 'runtime-a');
   const registry = new ManagedShellPublisherRegistry();
   const app = express();
   registry.register(

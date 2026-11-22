@@ -3,17 +3,28 @@ import './styles/globals.css';
 import React from 'react';
 import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
+import { WorkspaceHostsEnabled } from './config/workspace-hosts';
 import { isKnownDaemonTarget } from './config/daemon';
 import { isRemoteConnectionKnown } from './config/remote-connections';
 import { exchangePairingCode } from './config/pairing';
 import ReactDOM from 'react-dom/client';
 import { useCallback, useEffect, useState } from 'react';
 import { DaemonWorkspaceProvider } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  DaemonTargetProvider,
+  useDaemonTarget,
+  useFanoutUrlSync,
+} from './config/daemon-target';
 import { BrowserTurnNotifications } from './browser-turn-notifications';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
+import { managedDevelopmentOptions } from './components/managed/managed-development-options';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { StandaloneAuth } from './components/StandaloneAuth';
+import {
+  hasManagedAppMarker,
+  ManagedStandaloneApp,
+} from './ManagedStandaloneApp';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import {
@@ -23,7 +34,7 @@ import {
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
-import { normalizeLanguage, type WebShellLanguage } from './i18n';
+import { loadLanguage, normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
 import { inferStandaloneBasePath } from './utils/sessionPath';
@@ -37,9 +48,11 @@ import {
 import 'katex/dist/katex.min.css';
 import './styles/standalone.css';
 
-const DAEMON_BASE_URL = getDaemonBaseUrl();
+const MANAGED_APP = hasManagedAppMarker();
+const DAEMON_BASE_URL = MANAGED_APP ? '' : getDaemonBaseUrl();
 const REQUESTED_DAEMON_TARGET =
-  new URLSearchParams(window.location.search).get('daemon') || '';
+  (!MANAGED_APP && new URLSearchParams(window.location.search).get('daemon')) ||
+  '';
 const INVALID_DAEMON_TARGET =
   Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
 // A `?daemon=` link can name any origin; one this browser has never connected
@@ -185,15 +198,63 @@ function getDevelopmentManagedAgentProvider():
   if (!import.meta.env.DEV) return undefined;
   const params = new URLSearchParams(window.location.search);
   if (params.get('managedProvider') !== 'java') return undefined;
-  const tenantId = params.get('tenant')?.trim() || 'local-java-demo';
   return createJavaManagedAgentProvider({
     baseUrl: window.location.origin,
-    getHeaders: () => ({ 'X-Qwen-Tenant-Id': tenantId }),
-    productScope: tenantId,
+    ...managedDevelopmentOptions(params, {
+      VITE_MANAGED_AGENT_ACTOR_ID: import.meta.env[
+        'VITE_MANAGED_AGENT_ACTOR_ID'
+      ],
+      VITE_MANAGED_AGENT_MODEL_PRESETS: import.meta.env[
+        'VITE_MANAGED_AGENT_MODEL_PRESETS'
+      ],
+      VITE_MANAGED_AGENT_WORKSPACE_BINDING: import.meta.env[
+        'VITE_MANAGED_AGENT_WORKSPACE_BINDING'
+      ],
+    }),
   });
 }
 
-export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
+/**
+ * Interactive provider bound to the focused host (#13727): key-remount on a
+ * focused-host switch. Cheaper alternatives leak the old host's session
+ * context into the new one (a stale workspace cwd renders "workspace not
+ * found"); only a remount clears the whole connection surface today.
+ * Smooth in-context swapping is multi-provider phase 2 — the controller
+ * already rewrites `?daemon=` in place, so this shows a short connecting
+ * transition instead of a document flash. The boot token only applies to
+ * the boot origin; any other host must authenticate through its own
+ * per-origin token.
+ */
+function FocusedDaemonWorkspaceProvider({
+  bootToken,
+  children,
+}: {
+  bootToken?: string;
+  children: React.ReactNode;
+}) {
+  useFanoutUrlSync();
+  const { activeOrigin, activeToken } = useDaemonTarget();
+  const bootOrigin = DAEMON_BASE_URL || window.location.origin;
+  return (
+    <DaemonWorkspaceProvider
+      key={activeOrigin}
+      baseUrl={activeOrigin}
+      token={
+        activeToken ?? (activeOrigin === bootOrigin ? bootToken : undefined)
+      }
+    >
+      {children}
+    </DaemonWorkspaceProvider>
+  );
+}
+
+export function StandaloneApp({
+  daemonToken,
+  managedAgentProvider: providedManagedAgentProvider,
+}: {
+  daemonToken?: string;
+  managedAgentProvider?: ManagedAgentProvider;
+}) {
   const macosOverlayTitlebar = hasMacOSOverlayTitlebar();
   // The entry's own opinion — an explicit URL param or a stored in-app
   // choice. Passed down as the `theme`/`language` host props; `undefined`
@@ -218,10 +279,13 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   const [navigationBasePath] = useState(() =>
     inferStandaloneBasePath(window.location.pathname),
   );
-  const [managedAgentProvider] = useState(() =>
-    getDevelopmentManagedAgentProvider(),
+  const [developmentManagedAgentProvider] = useState(() =>
+    providedManagedAgentProvider
+      ? undefined
+      : getDevelopmentManagedAgentProvider(),
   );
-  const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  const managedAgentProvider =
+    providedManagedAgentProvider ?? developmentManagedAgentProvider;
   // One-shot ?theme=/?language=/?lang= params are consumed by the useState
   // initializers above; strip them once mounted so a bookmarked URL cannot
   // keep overriding stored preferences on later loads. (The reload retry
@@ -332,75 +396,85 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         options={{ defaultEnabled: true }}
       >
         <StandaloneContext.Provider value={true}>
-          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-            <WorkspaceSessionProvider
-              urlNavigation={{ basePath: navigationBasePath }}
-              chromeTheme={documentTheme}
-              chromeLanguage={documentLanguage}
-              webShellProps={{
-                theme,
-                onThemeChange: handleThemeChange,
-                onThemeResolved: handleThemeResolved,
-                language,
-                onLanguageChange: handleLanguageChange,
-                onLanguageResolved: handleLanguageResolved,
-                onBrandResolved: handleBrandResolved,
-                managedAgentProvider,
-                sidebar: {
-                  enabled: true,
-                  showLive: true,
-                  // Built from the sidebar's own defaults so a new entry
-                  // (e.g. Agents) cannot silently drop out of the standalone
-                  // shell.
-                  primaryNav: {
-                    items: DEFAULT_PRIMARY_NAV_ITEMS,
-                  },
-                  footer: {
-                    items: isDesktopShell()
-                      ? DESKTOP_DEFAULT_FOOTER_ITEMS
-                      : DEFAULT_FOOTER_ITEMS,
-                  },
-                },
-                showToolCalls: true,
-                className: macosOverlayTitlebar
-                  ? MACOS_TITLEBAR_CLASS
-                  : undefined,
-                header: {
-                  showMobileAccess: true,
-                  items: [
-                    'title',
-                    'environment',
-                    'rightPanel',
-                    'tokenUsage',
-                    'contextUsage',
-                  ],
-                },
-                rightPanel: {
-                  items: [
-                    'review',
-                    'sideTask',
-                    'terminal',
-                    'webPreview',
-                    'trajectory',
-                  ],
-                },
-                environmentPanel: {
-                  items: [
-                    'environment',
-                    'sources',
-                    'subagents',
-                    'backgroundTasks',
-                    'attachments',
-                    'artifacts',
-                  ],
-                },
-                compactThinking: true,
-                markdownTableMode: 'advanced',
-                composerToolbarAdditionalActions:
-                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-              }}
-            />
-          </DaemonWorkspaceProvider>
+          <WorkspaceHostsEnabled.Provider value={true}>
+            <DaemonTargetProvider>
+              <FocusedDaemonWorkspaceProvider bootToken={daemonToken}>
+                <WorkspaceSessionProvider
+                  urlNavigation={{ basePath: navigationBasePath }}
+                  chromeTheme={documentTheme}
+                  chromeLanguage={documentLanguage}
+                  webShellProps={{
+                    theme,
+                    onThemeChange: handleThemeChange,
+                    onThemeResolved: handleThemeResolved,
+                    language,
+                    onLanguageChange: handleLanguageChange,
+                    onLanguageResolved: handleLanguageResolved,
+                    onBrandResolved: handleBrandResolved,
+                    managedAgentProvider,
+                    sidebar: {
+                      enabled: true,
+                      showLive: true,
+                      // Built from the sidebar's own defaults so a new entry
+                      // (e.g. Agents) cannot silently drop out of the standalone
+                      // shell.
+                      primaryNav: {
+                        items: DEFAULT_PRIMARY_NAV_ITEMS,
+                      },
+                      footer: {
+                        items: isDesktopShell()
+                          ? DESKTOP_DEFAULT_FOOTER_ITEMS
+                          : DEFAULT_FOOTER_ITEMS,
+                      },
+                    },
+                    showToolCalls: true,
+                    className: macosOverlayTitlebar
+                      ? MACOS_TITLEBAR_CLASS
+                      : undefined,
+                    header: {
+                      showMobileAccess: true,
+                      items: [
+                        'title',
+                        'environment',
+                        'rightPanel',
+                        'artifacts',
+                        'tokenUsage',
+                        'contextUsage',
+                      ],
+                    },
+                    rightPanel: {
+                      // Every WebShellRightPanelItem, so a newly added entry
+                      // is not silently unreachable in the standalone shell
+                      // (main.test.tsx pins the completeness of this list).
+                      items: [
+                        'files',
+                        'review',
+                        'sideTask',
+                        'terminal',
+                        'webPreview',
+                        'trajectory',
+                        'changeOverview',
+                      ],
+                    },
+                    environmentPanel: {
+                      items: [
+                        'environment',
+                        'sources',
+                        'subagents',
+                        'backgroundTasks',
+                        'attachments',
+                        'artifacts',
+                      ],
+                    },
+                    compactThinking: true,
+                    markdownTableMode: 'advanced',
+                    composerToolbarAdditionalActions:
+                      STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+                  }}
+                />
+              </FocusedDaemonWorkspaceProvider>
+            </DaemonTargetProvider>
+          </WorkspaceHostsEnabled.Provider>
         </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
@@ -408,6 +482,12 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
 }
 
 async function main() {
+  if (MANAGED_APP) {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('daemon');
+    url.searchParams.delete('fanout');
+    window.history.replaceState(window.history.state, '', url);
+  }
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
   const storedToken = INVALID_DAEMON_TARGET
     ? undefined
@@ -430,15 +510,19 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
-  const pairing = await exchangePairingCode(
-    INVALID_DAEMON_TARGET ? '' : baseUrl,
-  );
+  const bootLanguage =
+    getInitialLanguage() ?? normalizeLanguage(navigator.language);
+  const localeReady = loadLanguage(bootLanguage);
+  const pairing = MANAGED_APP
+    ? undefined
+    : await exchangePairingCode(INVALID_DAEMON_TARGET ? '' : baseUrl);
   const daemonToken =
     pairing?.token ??
     storedToken ??
     (!INVALID_DAEMON_TARGET && baseUrl === window.location.origin
       ? await waitForDaemonTokenMessage()
       : undefined);
+  if (localeReady) await localeReady;
 
   const container = document.getElementById('root');
   // Boot can outlast the watchdog's grace period (a slow daemon, a token
@@ -457,13 +541,26 @@ async function main() {
         // The auth gate renders before settings are reachable, so it keeps
         // the browser-locale default; the app itself now receives "no
         // opinion" (undefined) and lets the daemon's settings win.
-        language={getInitialLanguage() ?? normalizeLanguage(navigator.language)}
+        language={bootLanguage}
         initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         theme={getInitialTheme()}
         invalidTarget={INVALID_DAEMON_TARGET}
         unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
       >
-        {(token) => <StandaloneApp daemonToken={token} />}
+        {(token) =>
+          MANAGED_APP ? (
+            <ManagedStandaloneApp daemonToken={token} language={bootLanguage}>
+              {(managedAgentProvider) => (
+                <StandaloneApp
+                  daemonToken={token}
+                  managedAgentProvider={managedAgentProvider}
+                />
+              )}
+            </ManagedStandaloneApp>
+          ) : (
+            <StandaloneApp daemonToken={token} />
+          )
+        }
       </StandaloneAuth>
     </React.StrictMode>,
   );

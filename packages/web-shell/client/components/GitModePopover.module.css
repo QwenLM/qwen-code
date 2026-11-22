@@ -296,8 +296,7 @@
   flex: 1;
   min-width: 0;
 }
-.confirmBranch,
-.confirmWorktree {
+.confirmBranch {
   padding: 4px 12px;
   border: none;
   border-radius: 6px;
@@ -314,23 +313,15 @@
   background: var(--git-mode-branch);
   color: var(--background);
 }
-.confirmWorktree {
-  background: var(--git-mode-worktree);
-  color: var(--background);
-}
 .confirmBranch:hover,
-.confirmBranch:focus-visible,
-.confirmWorktree:hover,
-.confirmWorktree:focus-visible {
+.confirmBranch:focus-visible {
   transform: translateY(-1px);
   filter: brightness(1.1);
 }
-.confirmBranch:active,
-.confirmWorktree:active {
+.confirmBranch:active {
   transform: translateY(0);
 }
-.confirmBranch:disabled,
-.confirmWorktree:disabled {
+.confirmBranch:disabled {
   opacity: 0.35;
   cursor: not-allowed;
   transform: none;

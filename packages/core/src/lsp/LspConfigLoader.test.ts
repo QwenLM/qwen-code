@@ -169,21 +169,47 @@ describe('LspConfigLoader config-driven behavior', () => {
     expect(configs).toEqual([]);
   });
 
-  it('forces user configs to require trusted workspaces', async () => {
-    mockLspJson({
-      typescript: {
-        command: 'typescript-language-server',
-        trustRequired: false,
+  it('loads a .lsp.json saved with a UTF-8 BOM', async () => {
+    mock({
+      [workspaceRoot]: {
+        '.lsp.json':
+          '\uFEFF' +
+          JSON.stringify({
+            typescript: { command: 'typescript-language-server' },
+          }),
       },
     });
     const configLoader = loader();
 
     await expect(configLoader.loadUserConfigs()).resolves.toEqual([
-      expect.objectContaining({ trustRequired: true }),
+      expect.objectContaining({ name: 'typescript-language-server' }),
     ]);
     await expect(configLoader.loadUserConfigsStrict()).resolves.toEqual({
       ok: true,
-      configs: [expect.objectContaining({ trustRequired: true })],
+      configs: [
+        expect.objectContaining({ name: 'typescript-language-server' }),
+      ],
+    });
+  });
+
+  it('forces user configs to require trusted workspaces', async () => {
+    mockLspJson({
+      typescript: {
+        command: 'typescript-language-server',
+        trustRequired: false,
+        source: 'extension',
+      },
+    });
+    const configLoader = loader();
+
+    await expect(configLoader.loadUserConfigs()).resolves.toEqual([
+      expect.objectContaining({ trustRequired: true, source: 'workspace' }),
+    ]);
+    await expect(configLoader.loadUserConfigsStrict()).resolves.toEqual({
+      ok: true,
+      configs: [
+        expect.objectContaining({ trustRequired: true, source: 'workspace' }),
+      ],
     });
   });
 });
@@ -242,5 +268,26 @@ describe('LspConfigLoader extension configs', () => {
 
     expect(configs).toHaveLength(1);
     expect(configs[0]?.env?.['EXT_ROOT']).toBe(extensionPath);
+  });
+
+  it('loads a referenced extension config saved with a UTF-8 BOM', async () => {
+    mock({
+      [extensionPath]: {
+        '.lsp.json':
+          '\uFEFF' +
+          JSON.stringify({
+            typescript: {
+              command: 'typescript-language-server',
+              extensionToLanguage: { '.ts': 'typescript' },
+            },
+          }),
+      },
+    });
+    const configs = await loader().loadExtensionConfigs([
+      tsPlugin('./.lsp.json'),
+    ]);
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.command).toBe('typescript-language-server');
   });
 });

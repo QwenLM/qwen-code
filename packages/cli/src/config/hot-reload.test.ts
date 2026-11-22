@@ -439,6 +439,28 @@ describe('registerMcpHotReload', () => {
     expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
   });
 
+  // CHARACTERIZATION, not a contract: `--disable-mcp-server` populates the
+  // exclude set at boot only, and `recomputeMcpGating` has no launch-flag
+  // input for it — unlike `cliAllowedMcpServerNames` on the allow side above.
+  // Pinned so the gap stays visible; the durable fix is #14009.
+  it('CHARACTERIZATION: a settings edit drops a boot --disable-mcp-server exclusion', async () => {
+    // Pre-image gating mimics `qwen --disable-mcp-server a`: boot populated the
+    // exclude set while settings carry no `mcp.excluded` at all.
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { a: { command: 'a' } },
+      gating: { excluded: ['a'] },
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    // Nothing MCP-relevant changed, yet the edit still reconciles — purely
+    // because the boot exclusion is not preserved.
+    merged.mcpServers = { a: { command: 'a' } };
+    await listener([]);
+
+    expect(fc.setExcludedMcpServers).toHaveBeenCalledWith([]);
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledOnce();
+  });
+
   it('emits McpPendingApprovalChanged when a gated server becomes newly pending', async () => {
     const fc = makeFakeConfig(cwd, { settingsMcp: {}, gating: {} });
     registerMcpHotReload(watcher, settings, fc.config, undefined);

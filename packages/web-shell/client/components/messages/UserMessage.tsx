@@ -24,7 +24,15 @@ import {
   parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import {
+  isAutomaticTriggerSource,
+  isDetailFreeAutomaticEcho,
+} from '../../utils/automatic-trigger';
+import type {
+  DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
+  SessionMessageTarget,
+} from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
 import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
@@ -34,11 +42,19 @@ import type {
   WebShellComposerTag,
   WebShellComposerTagIconMap,
 } from '../../customization';
-import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
+import type {
+  AttachmentPreviewRequest,
+  DaemonMessageAuthor,
+} from '../../adapters/messageTypes';
+import { AuthorAvatar } from './AuthorAvatar';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
-import { useTranscriptRenderMode } from '../../transcriptRenderMode';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
+import { workspaceBasename } from '../../utils/workspace';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
 
@@ -58,6 +74,7 @@ interface UserMessageFile {
 
 interface UserMessageProps {
   content: string;
+  source?: string;
   images?: UserMessageImage[];
   files?: UserMessageFile[];
   inputAnnotations?: readonly DaemonInputAnnotation[];
@@ -74,6 +91,12 @@ interface UserMessageProps {
   /** Click an uploaded image to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  /** Set when a workspace agent, not the user, posted this message. */
+  author?: DaemonMessageAuthor;
+  /** Set when another session sent this message here. */
+  sentFrom?: DaemonInputSourceAnnotation;
+  /** Set when the user sent this message to another session with `/send`. */
+  sentTo?: SessionMessageTarget;
 }
 
 interface ScheduledTaskRunContent {
@@ -167,10 +190,95 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
       <div className={styles.scheduledTaskPrompt}>
-        <LinkifiedText text={run.prompt} />
+        {renderUserMessageText(run.prompt)}
       </div>
     </div>
   );
+}
+
+function AutomaticTriggerMessage({
+  source,
+  summary,
+  hasDetails,
+  expanded,
+  onToggle,
+  children,
+}: {
+  source: 'cron' | 'loop';
+  summary: string;
+  hasDetails: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  return (
+    <div
+      className={styles.scheduledTaskRun}
+      data-web-shell-automatic-trigger-message
+      data-source={source}
+    >
+      <div
+        className={`${styles.scheduledTaskHeader} ${styles.automaticTriggerHeader}`}
+      >
+        <span className={styles.scheduledTaskIcon} aria-hidden="true">
+          <CalendarClockIcon />
+        </span>
+        <span className={styles.scheduledTaskHeading}>
+          <span className={styles.scheduledTaskEyebrow}>
+            {t('userMessage.automatic.title')}
+          </span>
+          <span
+            className={`${styles.scheduledTaskName}${
+              hasDetails ? '' : ` ${styles.automaticEchoSummary}`
+            }`}
+            data-web-shell-automatic-trigger-summary
+            title={summary}
+          >
+            {summary}
+          </span>
+        </span>
+        {!documentMode && hasDetails && (
+          <button
+            type="button"
+            className={`${styles.toggleButton} ${styles.automaticTriggerToggle}`}
+            aria-expanded={expanded}
+            onClick={onToggle}
+          >
+            {t(expanded ? 'userMessage.showLess' : 'userMessage.showMore')}
+          </button>
+        )}
+      </div>
+      {expanded && hasDetails && (
+        <div
+          className={styles.scheduledTaskPrompt}
+          data-web-shell-automatic-trigger-instructions
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function renderUserMessageText(text: string, isContinuation?: boolean) {
+  // Preserve captured line breaks separately from the slash tokens.
+  return text.split(/(^|\r\n?|\n)(\/[^ \r\n]*)/g).map((part, index) => {
+    const content = part.includes('://') ? (
+      <LinkifiedText key={index} text={part} />
+    ) : (
+      part
+    );
+    return index % 3 === 2 &&
+      (!isContinuation || index > 2 || text[0] !== '/') ? (
+      <span key={index} data-web-shell-user-slash-command>
+        {content}
+      </span>
+    ) : (
+      content
+    );
+  });
 }
 
 function DefaultUserMessageContent({
@@ -200,7 +308,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <LinkifiedText key={index} text={segment.text} />
+          renderUserMessageText(segment.text, index > 0)
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -226,6 +334,7 @@ function DefaultUserMessageContent({
 
 export const UserMessage = memo(function UserMessage({
   content,
+  source,
   images,
   files,
   inputAnnotations,
@@ -238,9 +347,13 @@ export const UserMessage = memo(function UserMessage({
   onEditCancel,
   onImagePreview,
   onAttachmentPreview,
+  author,
+  sentFrom,
+  sentTo,
 }: UserMessageProps) {
   const { t } = useI18n();
   const documentMode = useTranscriptRenderMode() === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -301,10 +414,61 @@ export const UserMessage = memo(function UserMessage({
     () => parseScheduledTaskRunContent(content),
     [content],
   );
+  const automaticTriggerSource =
+    !scheduledTaskRun &&
+    // A host-provided renderer owns the complete body, including any redaction.
+    !renderUserMessageContent &&
+    !parseUserMessageContent &&
+    !renderComposerTag &&
+    !renderComposerTagTooltip &&
+    isAutomaticTriggerSource(source)
+      ? source
+      : undefined;
+  const automaticPresentation = useMemo(() => {
+    if (!automaticTriggerSource) return undefined;
+    return {
+      summary: content.replace(/\s+/g, ' ').trim(),
+      // These runtime echoes contain only a label, not the full modelText.
+      hasDetails: !isDetailFreeAutomaticEcho(content),
+    };
+  }, [automaticTriggerSource, content]);
+  const expansionGeneration = {
+    // Replay aliases do not change the automatic variant or hide its details.
+    automatic: automaticTriggerSource !== undefined,
+    content,
+    imageCount: images?.length ?? 0,
+    fileCount: files?.length ?? 0,
+    editing,
+  };
+  const [detailsGeneration, setDetailsGeneration] =
+    useState(expansionGeneration);
+  if (
+    detailsGeneration.automatic !== expansionGeneration.automatic ||
+    detailsGeneration.content !== content ||
+    detailsGeneration.imageCount !== expansionGeneration.imageCount ||
+    detailsGeneration.fileCount !== expansionGeneration.fileCount ||
+    detailsGeneration.editing !== editing
+  ) {
+    // React compares this render against committed state, so an abandoned render cannot leak its generation into the current presentation.
+    setDetailsGeneration(expansionGeneration);
+    setExpanded(false);
+  }
+  const interactiveDetailsExpanded =
+    detailsGeneration.automatic === expansionGeneration.automatic &&
+    detailsGeneration.content === content &&
+    detailsGeneration.imageCount === expansionGeneration.imageCount &&
+    detailsGeneration.fileCount === expansionGeneration.fileCount &&
+    detailsGeneration.editing === editing &&
+    expanded;
+  const automaticInstructionsExpanded =
+    !automaticTriggerSource ||
+    (automaticPresentation?.hasDetails &&
+      (documentMode ? documentExpanded : interactiveDetailsExpanded));
   const renderedContent = useMemo(() => {
     if (scheduledTaskRun) {
       return <ScheduledTaskRunMessage run={scheduledTaskRun} />;
     }
+    if (!automaticInstructionsExpanded) return null;
     const explicit = renderUserMessageContent?.({
       content,
       images,
@@ -330,10 +494,22 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return <LinkifiedText text={content} />;
-    return parts.map((part, index) => {
+    if (!parts) return renderUserMessageText(content);
+    const mergedParts: Array<(typeof parts)[number]> = [];
+    for (const part of parts) {
+      const previous = mergedParts.at(-1);
+      if (part.type === 'text' && previous?.type === 'text') {
+        mergedParts[mergedParts.length - 1] = {
+          type: 'text',
+          text: previous.text + part.text,
+        };
+      } else {
+        mergedParts.push(part);
+      }
+    }
+    return mergedParts.map((part, index) => {
       if (part.type === 'text') {
-        return <LinkifiedText key={index} text={part.text} />;
+        return renderUserMessageText(part.text, index > 0);
       }
       return (
         <ReadonlyComposerTag
@@ -365,7 +541,22 @@ export const UserMessage = memo(function UserMessage({
     renderComposerTagTooltip,
     renderUserMessageContent,
     scheduledTaskRun,
+    automaticInstructionsExpanded,
   ]);
+  const bodyContent =
+    automaticTriggerSource && automaticPresentation ? (
+      <AutomaticTriggerMessage
+        source={automaticTriggerSource}
+        summary={automaticPresentation.summary}
+        hasDetails={automaticPresentation.hasDetails}
+        expanded={documentMode ? documentExpanded : interactiveDetailsExpanded}
+        onToggle={() => setExpanded((value) => !value)}
+      >
+        {renderedContent}
+      </AutomaticTriggerMessage>
+    ) : (
+      renderedContent
+    );
 
   const measureOverflow = useCallback(() => {
     const el = contentRef.current;
@@ -373,20 +564,42 @@ export const UserMessage = memo(function UserMessage({
     setHeightOverflowing(el.scrollHeight > 400);
   }, []);
 
+  // The generation above handles variant changes without resetting aliases.
   useLayoutEffect(() => {
-    setExpanded(false);
-    measureOverflow();
+    if (!automaticTriggerSource) {
+      setExpanded(false);
+      measureOverflow();
+    }
     // `editing` is a dep so leaving the editor re-measures the re-shown
     // content: it is `hidden` while editing, which reads as zero height.
-  }, [content, images?.length, editing, measureOverflow]);
+  }, [
+    content,
+    images?.length,
+    files?.length,
+    editing,
+    automaticTriggerSource,
+    measureOverflow,
+  ]);
 
   useEffect(() => {
     const el = contentRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
+    if (
+      !el ||
+      automaticTriggerSource ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return;
+    }
     const observer = new ResizeObserver(measureOverflow);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [measureOverflow]);
+  }, [
+    content,
+    files?.length,
+    editing,
+    automaticTriggerSource,
+    measureOverflow,
+  ]);
 
   return (
     <div className={styles.chatMessageRow} data-web-shell-user-row>
@@ -397,6 +610,36 @@ export const UserMessage = memo(function UserMessage({
             : ''
         }`}
       >
+        {sentFrom && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-from=""
+            title={sentFrom.workspaceCwd}
+          >
+            {t('user.sentFrom', {
+              session: sentFrom.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentFrom.workspaceCwd),
+            })}
+          </div>
+        )}
+        {sentTo && (
+          <div
+            className={styles.sentFrom}
+            data-web-shell-user-sent-to=""
+            title={sentTo.workspaceCwd}
+          >
+            {t('user.sentTo', {
+              session: sentTo.title?.trim() || t('sidebar.untitledSession'),
+              workspace: workspaceBasename(sentTo.workspaceCwd),
+            })}
+          </div>
+        )}
+        {author && (
+          <div className={styles.author}>
+            <AuthorAvatar name={author.name} color={author.color} />
+            <span className={styles.authorName}>{author.name}</span>
+          </div>
+        )}
         {images && images.length > 0 && (
           <div className={styles.chatImages} data-web-shell-user-images>
             {images.map((img, index) => {
@@ -474,20 +717,27 @@ export const UserMessage = memo(function UserMessage({
         {(content.trim().length > 0 || editing) && (
           <div
             className={`${styles.chatBubble}${
-              scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
+              scheduledTaskRun || automaticTriggerSource
+                ? ` ${styles.scheduledTaskBubble}`
+                : ''
+            }${
+              automaticTriggerSource ? ` ${styles.automaticTriggerBubble}` : ''
             }${isLocateFlashing ? ` ${flashStyles.flash}` : ''}`}
             data-web-shell-user-bubble
           >
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !documentMode && !expanded
+                heightOverflowing &&
+                !documentMode &&
+                !expanded &&
+                !automaticTriggerSource
                   ? styles.chatContentCollapsed
                   : ''
               }`}
               hidden={editing}
             >
-              {renderedContent}
+              {bodyContent}
             </div>
             {editing && (
               <div className={styles.editArea}>
@@ -525,34 +775,37 @@ export const UserMessage = memo(function UserMessage({
                 </div>
               </div>
             )}
-            {heightOverflowing && !documentMode && !editing && (
-              <button
-                type="button"
-                className={styles.toggleButton}
-                onClick={() => setExpanded((value) => !value)}
-              >
-                <span>
-                  {expanded
-                    ? t('userMessage.showLess')
-                    : t('userMessage.showMore')}
-                </span>
-                <svg
-                  className={`${styles.toggleIcon} ${
-                    expanded ? styles.toggleIconExpanded : ''
-                  }`}
-                  viewBox="0 0 16 16"
-                  aria-hidden="true"
+            {heightOverflowing &&
+              !documentMode &&
+              !editing &&
+              !automaticTriggerSource && (
+                <button
+                  type="button"
+                  className={styles.toggleButton}
+                  onClick={() => setExpanded((value) => !value)}
                 >
-                  <path
-                    d="m4 6 4 4 4-4"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </button>
-            )}
+                  <span>
+                    {expanded
+                      ? t('userMessage.showLess')
+                      : t('userMessage.showMore')}
+                  </span>
+                  <svg
+                    className={`${styles.toggleIcon} ${
+                      expanded ? styles.toggleIconExpanded : ''
+                    }`}
+                    viewBox="0 0 16 16"
+                    aria-hidden="true"
+                  >
+                    <path
+                      d="m4 6 4 4 4-4"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              )}
           </div>
         )}
         {sendFailed && onRetrySend && (

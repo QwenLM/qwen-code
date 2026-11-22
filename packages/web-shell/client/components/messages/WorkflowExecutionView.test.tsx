@@ -5,6 +5,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
+import { getAgentDescription } from './toolFormatting';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import {
   buildWorkflowGraphLayout,
   WORKFLOW_GRAPH_RENDER_LIMITS,
@@ -29,6 +32,7 @@ function workflowTask(
   return {
     kind: 'workflow',
     id: 'wf-1',
+    parentSessionId: 'workflow-parent',
     label: 'review-and-fix',
     description: 'Review and fix',
     status: 'running',
@@ -125,6 +129,88 @@ describe('WorkflowExecutionView', () => {
     expect(
       container.querySelector('[data-workflow-edge="dispatch-1:dispatch-2"]'),
     ).not.toBeNull();
+  });
+
+  it('adds declared phases the run has not reached as planned lanes', () => {
+    const task = workflowTask({
+      plannedPhases: [
+        { title: 'Inspect' },
+        { title: 'Review', detail: 'One reviewer per dimension' },
+        { title: 'Fix', detail: 'Apply the confirmed findings' },
+        { title: 'Report' },
+      ],
+    });
+
+    const layout = buildWorkflowGraphLayout(task);
+
+    expect(
+      layout.lanes.map((lane) => [lane.title, lane.planned ?? null]),
+    ).toEqual([
+      ['Inspect', null],
+      ['Review', null],
+      ['Fix', { detail: 'Apply the confirmed findings' }],
+      ['Report', {}],
+    ]);
+    expect(layout.lanes.map((lane) => lane.index)).toEqual([0, 1, 2, 3]);
+    expect(layout.omittedLanes).toBe(0);
+  });
+
+  it('drops planned lanes once the run can no longer reach them', () => {
+    const plannedPhases = [{ title: 'Fix' }];
+    for (const task of [
+      workflowTask({ plannedPhases, status: 'completed' }),
+      workflowTask({ plannedPhases, status: 'failed' }),
+      workflowTask({ plannedPhases, status: 'paused', isHistorical: true }),
+    ]) {
+      expect(
+        buildWorkflowGraphLayout(task).lanes.some((lane) => lane.planned),
+      ).toBe(false);
+    }
+    expect(
+      buildWorkflowGraphLayout(
+        workflowTask({ plannedPhases, status: 'paused' }),
+      ).lanes.some((lane) => lane.planned),
+    ).toBe(true);
+  });
+
+  it('shows the declared phases before the first agent is dispatched', () => {
+    const task = workflowTask({
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      plannedPhases: [
+        { title: 'Review', detail: 'One reviewer per dimension' },
+        { title: 'Verify' },
+      ],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowExecutionView task={task} />
+        </I18nProvider>,
+      );
+    });
+
+    const lanes = [...container.querySelectorAll('[data-planned="true"]')];
+    expect(
+      lanes.map((lane) => lane.getAttribute('data-workflow-lane')),
+    ).toEqual(['planned:0', 'planned:1']);
+    expect(lanes[0]?.textContent).toContain('Review');
+    expect(lanes[0]?.textContent).toContain('Not started');
+    expect(lanes[0]?.textContent).toContain('One reviewer per dimension');
+    expect(
+      container.querySelector('[data-workflow-lane="no-phase"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain(
+      'Waiting for the first agent dispatch',
+    );
   });
 
   it('builds edges only from recorded dispatch dependencies', () => {
@@ -768,5 +854,136 @@ describe('WorkflowExecutionView', () => {
     act(() => confirm?.click());
 
     expect(onDeleteHistory).toHaveBeenCalledWith('wf-abcd');
+  });
+});
+
+describe('workflow agent details', () => {
+  function mount(task = workflowTask(), documentMode = false) {
+    const onOpen = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const render = (next: DaemonSessionWorkflowTaskStatus) =>
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <TranscriptRenderModeProvider
+              value={documentMode ? 'document' : 'interactive'}
+            >
+              <SubagentDetailsProvider onOpen={onOpen}>
+                <WorkflowExecutionView task={next} />
+              </SubagentDetailsProvider>
+            </TranscriptRenderModeProvider>
+          </I18nProvider>,
+        );
+      });
+    render(task);
+    const node = (id: string) =>
+      container.querySelector<HTMLButtonElement>(
+        `[data-workflow-dispatch="${id}"]`,
+      )!;
+    return { onOpen, render, node };
+  }
+
+  it('preserves colon-space labels in the Agent panel description', () => {
+    const task = workflowTask();
+    task.dispatches[1].label = 'Review: check regressions';
+    const { onOpen, node } = mount(task);
+    act(() => node('dispatch-2').click());
+    expect(getAgentDescription(onOpen.mock.calls[0][0])).toBe(
+      'Review: check regressions',
+    );
+  });
+
+  it('opens the exact agent on activation, not initial selection, focus or polling', () => {
+    const { onOpen, render, node } = mount();
+    act(() => node('dispatch-2').focus());
+    render(workflowTask({ runtimeMs: 3_000 }));
+    expect(onOpen).not.toHaveBeenCalled();
+    act(() => node('dispatch-2').click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'correctness-agent-1',
+        toolName: 'agent',
+        title: 'Agent: Correctness',
+        status: 'in_progress',
+        args: {
+          description: 'Correctness',
+          prompt: 'Review behavior regressions',
+        },
+      }),
+      'workflow-parent',
+    );
+  });
+
+  it.each(['completed', 'failed', 'cancelled'] as const)(
+    'opens %s executions using their own persisted agent identity',
+    (status) => {
+      const task = workflowTask();
+      task.dispatches[1] = { ...task.dispatches[1]!, status, endedAt: 2_000 };
+      const { onOpen, node } = mount(task);
+      act(() => node('dispatch-2').click());
+      expect(onOpen).toHaveBeenCalledWith(
+        expect.objectContaining({
+          callId: 'correctness-agent-1',
+          status: status === 'completed' ? 'completed' : 'failed',
+          endTime: 2_000,
+          rawOutput: { type: 'task_execution', workflowRunId: 'wf-1', status },
+        }),
+        'workflow-parent',
+      );
+    },
+  );
+
+  it('keeps missing, queued and cached dispatches as summary-only selections', () => {
+    const task = workflowTask();
+    task.dispatches[1] = { ...task.dispatches[1]!, status: 'cached' };
+    task.dispatches[2] = { ...task.dispatches[2]!, subagentId: 'not-started' };
+    const { onOpen, node } = mount(task);
+    for (const dispatch of task.dispatches) {
+      act(() => node(dispatch.id).click());
+      expect(node(dispatch.id).getAttribute('aria-pressed')).toBe('true');
+    }
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it('uses the new agent identity after a run changes without opening automatically', () => {
+    const { onOpen, render, node } = mount();
+    const task = workflowTask({ id: 'rerun' });
+    task.dispatches[1] = { ...task.dispatches[1]!, subagentId: 'rerun-agent' };
+    render(task);
+    expect(onOpen).not.toHaveBeenCalled();
+    act(() => node('dispatch-2').click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'rerun-agent' }),
+      'workflow-parent',
+    );
+  });
+
+  it('opens historical executions with their original parent session', () => {
+    const { onOpen, node } = mount(
+      workflowTask({ isHistorical: true, parentSessionId: 'original-chat-a' }),
+    );
+    act(() => node('dispatch-2').click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'correctness-agent-1' }),
+      'original-chat-a',
+    );
+  });
+
+  it('does not guess the owner of legacy historical executions', () => {
+    const { onOpen, node } = mount(
+      workflowTask({ isHistorical: true, parentSessionId: undefined }),
+    );
+    act(() => node('dispatch-2').click());
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(node('dispatch-2').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('does not open agent tabs from document exports', () => {
+    const { onOpen, node } = mount(workflowTask(), true);
+    act(() => node('dispatch-2').click());
+    expect(onOpen).not.toHaveBeenCalled();
   });
 });

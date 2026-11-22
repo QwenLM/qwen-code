@@ -121,6 +121,7 @@ vi.mock('../peerMessaging/peer-messaging.js', () => ({
   PeerMessaging: { start: vi.fn() },
 }));
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  QWEN_DIR: '.qwen',
   registerSession: vi.fn(),
   createDebugLogger: () => ({
     debug: vi.fn(),
@@ -313,6 +314,7 @@ vi.mock('./service/filesystem.js', () => ({
   AcpFileSystemService: vi.fn(),
 }));
 vi.mock('../config/settings.js', () => ({
+  getOperatorTrustSettings: vi.fn(() => ({})),
   SettingScope: {},
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),

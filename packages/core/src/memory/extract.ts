@@ -41,9 +41,14 @@ export interface AutoMemoryExtractResult {
     | 'queued'
     | 'memory_tool'
     | 'memory_pressure'
-    | 'session_mismatch';
+    | 'session_mismatch'
+    | 'cadence';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
+  /** The extractor ran and used a tool (read or wrote memory files). */
+  extractorEngaged?: boolean;
+  /** Tool activity or a saved topic, independent of the replay cursor floor. */
+  madeGenuineProgress?: boolean;
 }
 
 function getSessionMismatchResult(
@@ -129,6 +134,14 @@ export async function runAutoMemoryExtract(params: {
   history: Content[];
   now?: Date;
   config?: Config;
+  skippedHistory?: Content[];
+  // Only the close-time cadence flush (#13004) sets this: an abandoned flush
+  // run aborts here instead of keeping a fork alive past its boundary.
+  abortSignal?: AbortSignal;
+  // Only the close-time cadence flush (#13004) sets this: the replayed
+  // snapshot's history can be shorter than the cursor a later run already
+  // persisted, so this run's write must not move that cursor backwards.
+  flushReplay?: boolean;
 }): Promise<AutoMemoryExtractResult> {
   const now = params.now ?? new Date();
   if (!params.config) {
@@ -136,6 +149,7 @@ export async function runAutoMemoryExtract(params: {
       'Managed auto-memory extraction requires config for forked-agent execution.',
     );
   }
+  params.abortSignal?.throwIfAborted();
   const expectedSessionId = params.config.getSessionId();
   const earlyMismatch = getSessionMismatchResult(
     params.sessionId,
@@ -161,7 +175,15 @@ export async function runAutoMemoryExtract(params: {
   // code ran partToString().replace() over EVERY message but the resulting
   // text was never read — fork agent context comes from the session-scoped
   // cache-safe params lookup.
-  const currentCursor = await readExtractCursor(params.projectRoot);
+  const { projectIndexRebuildPending, ...currentCursor } =
+    await readExtractCursor(params.projectRoot);
+  if (projectIndexRebuildPending) {
+    await rebuildManagedAutoMemoryIndex(params.projectRoot);
+    await writeExtractCursor(params.projectRoot, currentCursor);
+    await refreshMemoryInstruction(params.config, {
+      logContext: 'managed auto-memory index repair',
+    });
+  }
   const rawOffset =
     currentCursor.sessionId === params.sessionId
       ? (currentCursor.processedOffset ?? 0)
@@ -173,12 +195,18 @@ export async function runAutoMemoryExtract(params: {
   // Skip if there are no new, non-empty user messages in the unprocessed
   // slice. partToString runs only on this small slice and without the
   // global whitespace regex — the .trim().length check preserves the old
-  // behaviour of ignoring empty-text user turns.
-  const hasNewUserMessages = params.history
-    .slice(startOffset)
-    .some(
-      (m) => m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
-    );
+  // behaviour of ignoring empty-text user turns. A parked supplement
+  // (#13004) counts as new content on its own: the turns it holds are owed
+  // to the extractor, and an image-only live tail must not let this run
+  // advance the cursor past them without a fork.
+  const hasNewUserMessages =
+    (params.skippedHistory?.length ?? 0) > 0 ||
+    params.history
+      .slice(startOffset)
+      .some(
+        (m) =>
+          m.role === 'user' && partToString(m.parts ?? []).trim().length > 0,
+      );
   if (!hasNewUserMessages) {
     const cursor: AutoMemoryExtractCursor = {
       sessionId: params.sessionId,
@@ -199,44 +227,58 @@ export async function runAutoMemoryExtract(params: {
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
+    params.skippedHistory,
+    params.abortSignal,
   );
 
-  if (agentResult.touchedTopics.length > 0) {
+  const { failure, touchedTopics, touchedProjectScope, touchedUserScope } =
+    agentResult;
+  const rebuildProject =
+    failure?.reconcileAll ||
+    touchedProjectScope ||
+    (touchedTopics.length > 0 && !touchedUserScope);
+  const rebuildUser = failure?.reconcileAll || touchedUserScope;
+  if (rebuildProject || rebuildUser) {
+    const [projectResult] = await Promise.allSettled([
+      rebuildProject
+        ? rebuildManagedAutoMemoryIndex(params.projectRoot)
+        : Promise.resolve(),
+      rebuildUser
+        ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
+            debugLogger.warn(`Auto-memory user index rebuild failed: ${error}`);
+          })
+        : Promise.resolve(),
+    ]);
+
+    if (projectResult.status === 'rejected') {
+      // The topic is already on disk. A retry can find it and skip writing,
+      // so remember the index repair independently of the history offset.
+      await writeExtractCursor(params.projectRoot, {
+        ...currentCursor,
+        projectIndexRebuildPending: true,
+      }).catch((error: unknown) => {
+        debugLogger.warn(
+          `Could not record pending auto-memory index repair: ${error}`,
+        );
+      });
+      if (!failure) throw projectResult.reason;
+      debugLogger.warn(
+        `Auto-memory project index repair failed: ${projectResult.reason}`,
+      );
+    }
+    await refreshMemoryInstruction(params.config, {
+      logContext: 'managed auto-memory extraction',
+    });
+  }
+  if (failure) throw failure.error;
+
+  if (touchedTopics.length > 0) {
     await bumpMetadata(
       params.projectRoot,
       now,
       params.sessionId,
-      agentResult.touchedTopics,
+      touchedTopics,
     );
-    // Asymmetric failure isolation:
-    //   * project-level rebuild MUST bubble its error up. The cursor advances
-    //     only after rebuilds complete; a project rebuild failure that gets
-    //     silently swallowed would leave the memory file written, the index
-    //     stale, AND the cursor advanced — the memory becomes un-recallable
-    //     until some later session happens to trigger another rebuild. The
-    //     pre-existing `Promise.all` contract (throw → cursor stays → retry
-    //     on next session) is the durability guarantee we must preserve.
-    //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
-    //     (EACCES) must not poison the project-level rebuild or block the
-    //     cursor. Catch + warn, same shape as the user-level scaffold above.
-    const projectRebuild =
-      agentResult.touchedProjectScope || !agentResult.touchedUserScope
-        ? // Either explicitly touched, or the defensive fallback when both
-          // scope flags were unset (e.g. older planner) — both paths must
-          // surface project-level rebuild failures.
-          rebuildManagedAutoMemoryIndex(params.projectRoot)
-        : Promise.resolve();
-    const userRebuild = agentResult.touchedUserScope
-      ? rebuildUserAutoMemoryIndex().catch((error: unknown) => {
-          debugLogger.warn(
-            `Auto-memory user-level index rebuild failed (non-critical, project-level rebuild unaffected): ${error instanceof Error ? error.message : String(error)}`,
-          );
-        })
-      : Promise.resolve();
-    await Promise.all([projectRebuild, userRebuild]);
-    await refreshMemoryInstruction(params.config, {
-      logContext: 'managed auto-memory extraction',
-    });
   }
 
   const madeGenuineProgress =
@@ -244,7 +286,15 @@ export async function runAutoMemoryExtract(params: {
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
+    // A flush replay runs a parked snapshot whose history a later non-forking
+    // run may have already advanced the cursor past, so writing the snapshot's
+    // own offset would move that project cursor backwards and make the next run
+    // re-scan everything after it. Only the replay is floored: a genuine
+    // post-compaction run must still be able to move the cursor down.
+    processedOffset: Math.max(
+      params.flushReplay ? rawOffset : 0,
+      madeGenuineProgress ? params.history.length : startOffset,
+    ),
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);
@@ -258,5 +308,7 @@ export async function runAutoMemoryExtract(params: {
     touchedUserScope: agentResult.touchedUserScope,
     cursor,
     systemMessage: agentResult.systemMessage,
+    extractorEngaged: agentResult.extractorEngaged === true,
+    madeGenuineProgress,
   };
 }

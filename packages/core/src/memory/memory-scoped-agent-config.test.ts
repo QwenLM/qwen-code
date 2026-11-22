@@ -137,6 +137,39 @@ describe('createMemoryScopedAgentConfig', () => {
     await evalIs(pm, READ_FILE, getAutoMemoryRoot(projectRoot), 'deny');
   });
 
+  it('protects only the exact root indexes and their aliases when enabled', async () => {
+    const projectIndex = projMem('MEMORY.md');
+    const userIndex = userMem('MEMORY.md');
+    const alias = projMem('project', 'index-link.md');
+    await fs.writeFile(projectIndex, 'project index');
+    await fs.writeFile(userIndex, 'user index');
+    await fs.symlink(projectIndex, alias);
+    const pm = scopedPm({
+      protectMemoryIndexes: true,
+      restrictReadsToMemoryPaths: true,
+    });
+
+    for (const filePath of [projectIndex, userIndex, alias]) {
+      await evalIs(pm, WRITE_FILE, filePath, 'deny');
+      await evalIs(pm, EDIT, filePath, 'deny');
+      await evalIs(pm, READ_FILE, filePath, 'allow');
+      denyRuleIs(
+        pm,
+        EDIT,
+        filePath,
+        'ManagedAutoMemory(edit: memory indexes are read-only)',
+      );
+    }
+    const caseVariant = projMem('memory.md');
+    const sameIndex = await fs.access(caseVariant).then(
+      () => true,
+      () => false,
+    );
+    await evalIs(pm, WRITE_FILE, caseVariant, sameIndex ? 'deny' : 'allow');
+    await evalIs(pm, WRITE_FILE, projMem('project', 'MEMORY.md'), 'allow');
+    await evalIs(scopedPm(), WRITE_FILE, projectIndex, 'allow');
+  });
+
   it('protects project pinned memory and aliases while leaving ordinary memory writable', async () => {
     const pinnedDir = projMem(PINNED);
     const pinnedFile = path.join(pinnedDir, 'architecture.md');
@@ -351,11 +384,29 @@ describe('createMemoryScopedAgentConfig', () => {
       await expect(
         delegated.getToolRegistrationStatus(WEB_FETCH),
       ).resolves.toBe('disabled');
-      expect(status).toHaveBeenCalledWith(WEB_FETCH);
+      expect(status).toHaveBeenCalledWith(WEB_FETCH, undefined, undefined);
 
       await expect(
         scopedPm().getToolRegistrationStatus(WEB_FETCH),
       ).resolves.toBe('registered');
+    });
+
+    it('isToolEnabled forwards the alias and identity channels to the base PM', async () => {
+      const isToolEnabled = vi.fn().mockResolvedValue(false);
+      const delegated = scopedPm(undefined, { isToolEnabled });
+      const identity = { serverName: 'foo:bar', serverToolName: 'a.b' };
+      await expect(
+        delegated.isToolEnabled(
+          'mcp__foo_bar__a_b_1aofxjh',
+          ['mcp__foo:bar__a.b'],
+          identity,
+        ),
+      ).resolves.toBe(false);
+      expect(isToolEnabled).toHaveBeenCalledWith(
+        'mcp__foo_bar__a_b_1aofxjh',
+        ['mcp__foo:bar__a.b'],
+        identity,
+      );
     });
 
     it('gates the shell registration status on allowShell', async () => {

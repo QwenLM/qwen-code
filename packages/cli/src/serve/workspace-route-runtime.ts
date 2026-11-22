@@ -21,6 +21,7 @@ import type {
   WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
+  WorkspaceRuntimeGeneration,
 } from './workspace-registry.js';
 import { isInternalWorkspaceRuntime } from './workspace-runtime-visibility.js';
 
@@ -280,6 +281,28 @@ export function sendConversationRuntimeUnavailable(res: Response): void {
   });
 }
 
+/** Maps a ConversationRuntimeActivityGate rejection to the declared 503.
+ * Shared by every surface that runs work inside the gate so the draining
+ * response stays byte-identical across them. Returns false for any other
+ * error, leaving the caller's own handling in charge. */
+export function sendDaemonDrainingError(
+  res: Response,
+  error: unknown,
+): boolean {
+  if (
+    !error ||
+    typeof error !== 'object' ||
+    (error as { code?: unknown }).code !== 'daemon_draining'
+  ) {
+    return false;
+  }
+  res.status(503).json({
+    error: 'The daemon is draining and no longer accepts work.',
+    code: 'daemon_draining',
+  });
+  return true;
+}
+
 export function sendWorkspaceRuntimeUnavailable(
   res: Response,
   entry?: Pick<WorkspaceEntry, 'workspaceCwd' | 'workspaceId'>,
@@ -292,6 +315,61 @@ export function sendWorkspaceRuntimeUnavailable(
       ? { workspaceCwd: entry.workspaceCwd, workspaceId: entry.workspaceId }
       : {}),
   });
+}
+
+// Shared bounds of the plural batch routes (`POST /sessions/catalog`,
+// `POST /sessions/live-state`).
+export const MAX_BATCH_WORKSPACES = 20;
+export const MAX_SELECTOR_CHARS = 4096;
+export const MAX_MEMBER_BYTES = 512 * 1024;
+
+export interface BatchMemberFailure {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export function failedBatchMember(
+  workspace: string,
+  entry: WorkspaceEntry | undefined,
+  status: number,
+  code: string,
+  message: string,
+): BatchMemberFailure {
+  return {
+    workspace,
+    ...(entry
+      ? { workspaceId: entry.workspaceId, cwd: entry.workspaceCwd }
+      : {}),
+    error: { code, message, status },
+  };
+}
+
+/**
+ * Capture the entry's current generation so a batch member read can fail
+ * closed when the registry no longer holds this exact entry, the entry left
+ * the active state, or the generation was replaced or closed — each unknown,
+ * draining, removed, or replaced state must follow the member error semantics
+ * rather than serve a snapshot from a stale runtime.
+ */
+export function captureWorkspaceEntryCurrency(
+  registry: WorkspaceRegistry,
+  entry: WorkspaceEntry,
+): {
+  generation: WorkspaceRuntimeGeneration | undefined;
+  isCurrent: () => boolean;
+} {
+  const generation = entry.current;
+  return {
+    generation,
+    isCurrent: () =>
+      registry.getEntryByWorkspaceId(entry.workspaceId) === entry &&
+      entry.state === 'active' &&
+      entry.current?.generationId === generation?.generationId &&
+      generation !== undefined &&
+      !generation.guard.closed,
+  };
 }
 
 export function isGenerationClosedError(error: unknown): boolean {

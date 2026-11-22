@@ -23,6 +23,15 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 
+/** A durable store refused the transaction without appending any records. */
+export class ManagedSessionCommitRejectedError extends ManagedSessionRecordError {
+  constructor(cause: Error) {
+    super(cause.message);
+    this.cause = cause;
+    this.name = 'ManagedSessionCommitRejectedError';
+  }
+}
+
 export interface ManagedSessionCommitReceipt {
   readonly transactionId: string;
   readonly commandId: string;
@@ -45,6 +54,13 @@ export interface ManagedSessionActivationState {
   readonly renewalSeq: number;
   /** The install evidence a renewal must restate; null on old logs. */
   readonly installRef: ManagedSessionDurableRef | null;
+}
+
+export interface ManagedSessionActivationLease {
+  readonly activationId: string;
+  readonly epoch: number;
+  readonly renewalSeq: number;
+  readonly expiresAt: number;
 }
 
 export interface ManagedSessionCommittedTransaction {
@@ -89,6 +105,14 @@ export interface ManagedSessionCommitProof {
   readonly committedPrefixHash: string;
 }
 
+/** What the wake pump would pick from the committed prefix at suspension. */
+export interface ManagedSessionWakeStamp {
+  /** Whether a deliverable wake input remains. */
+  readonly pending: boolean;
+  /** When the earliest deliverable wake input is due; 0 when one is due now. */
+  readonly dueAt: number;
+}
+
 /**
  * Physical writer for one Managed Session journal.
  *
@@ -99,6 +123,22 @@ export interface ManagedSessionCommitProof {
 export interface ManagedSessionJournalHandle
   extends ManagedSessionJournalReader {
   appendTransaction(records: readonly unknown[]): Promise<void>;
+  /** Undefined means the store requires event-based activation renewal. */
+  renewActivation?(request: {
+    readonly activationId: string;
+    readonly epoch: number;
+    readonly renewalSeq: number;
+    readonly leaseDurationMs: number;
+  }): Promise<ManagedSessionActivationLease | undefined>;
+  /**
+   * Settles the append that last failed with an unknown outcome, by comparing
+   * the durable head against the attempt it kept. `landed` means those exact
+   * records are committed; `absent` means the head proves they never were.
+   * Implemented only by stores whose head is authoritative and re-acquirable
+   * after a lapsed writer lease; a local journal leaves an unknown outcome
+   * permanently fenced.
+   */
+  settleAppend?(): Promise<'landed' | 'absent'>;
   blockRecovery?(request: {
     readonly status:
       | 'BLOCKED_RESOURCE'
@@ -106,7 +146,20 @@ export interface ManagedSessionJournalHandle
       | 'BLOCKED_EXECUTION';
     readonly detailCode: string;
   }): Promise<void>;
-  seal(commit: ManagedSessionCommitProof): Promise<void>;
+  /**
+   * `wake` is a clean suspension's wake projection of the committed prefix
+   * it seals; a store that consumes it certifies that prefix's wake state.
+   */
+  seal(
+    commit: ManagedSessionCommitProof,
+    wake?: ManagedSessionWakeStamp,
+  ): Promise<void>;
+  /**
+   * True once the seal committed. A `seal()` rejection before that point
+   * left the writer open and still able to append, so durability decisions
+   * must key on this outcome rather than on the call having been attempted.
+   */
+  readonly writerSealed: boolean;
   /**
    * The commit proof this handle took over from a sealed writer, when it did.
    * Durable stores keep the proof server-side and omit it here.

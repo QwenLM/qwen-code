@@ -1459,7 +1459,7 @@
       ],
       "properties": {
         "captureStatus": {
-          "enum": ["complete", "partial", "unavailable"]
+          "enum": ["complete", "partial", "unavailable", "detached"]
         },
         "captureReason": {
           "anyOf": [
@@ -1500,7 +1500,7 @@
             "type": "object",
             "properties": {
               "captureStatus": {
-                "const": "complete"
+                "enum": ["complete", "detached"]
               }
             },
             "required": ["captureStatus"]
@@ -1539,6 +1539,26 @@
             "properties": {
               "manifest": {
                 "type": "object"
+              }
+            },
+            "required": ["manifest"]
+          }
+        },
+        {
+          "if": {
+            "type": "object",
+            "properties": {
+              "captureStatus": {
+                "const": "detached"
+              }
+            },
+            "required": ["captureStatus"]
+          },
+          "then": {
+            "type": "object",
+            "properties": {
+              "manifest": {
+                "type": "null"
               }
             },
             "required": ["manifest"]

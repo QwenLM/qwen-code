@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import {
+  disambiguateWorkspaceLabels,
   hasMultipleWorkspaces,
   isAgentCollaborationEnabledForWorkspace,
   isNonPrimaryWorkspaceSession,
@@ -179,5 +180,33 @@ describe('mergeSessionsById', () => {
     );
     expect(merged).toHaveLength(1);
     expect(merged[0].workspaceCwd).toBe('/w');
+  });
+});
+
+describe('disambiguateWorkspaceLabels', () => {
+  it('suffixes the parent directory only on colliding labels', () => {
+    const entries = [
+      { label: 'qwen-code', cwd: '/home/admin/jinjing.zzj/qwen-code' },
+      { label: 'qwen-code', cwd: '/home/admin/jinjing/QwenLM/qwen-code' },
+      { label: 'yiliang.skill', cwd: '/x/y/yiliang.skill' },
+    ];
+    expect(
+      disambiguateWorkspaceLabels(entries).map((entry) => entry.label),
+    ).toEqual([
+      'qwen-code (jinjing.zzj)',
+      'qwen-code (QwenLM)',
+      'yiliang.skill',
+    ]);
+  });
+
+  it('keeps bare labels when every label is unique or has no parent segment', () => {
+    const entries = [
+      { label: 'a', cwd: '/x/a' },
+      { label: 'bare', cwd: 'bare' },
+      { label: 'bare', cwd: 'bare' },
+    ];
+    expect(
+      disambiguateWorkspaceLabels(entries).map((entry) => entry.label),
+    ).toEqual(['a', 'bare', 'bare']);
   });
 });

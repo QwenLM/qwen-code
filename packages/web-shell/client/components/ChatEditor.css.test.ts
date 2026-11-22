@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import postcss, { type ChildNode, type Rule } from 'postcss';
 import { describe, expect, it } from 'vitest';
+import { TOUCH_COMPOSER_QUERY } from '../hooks/useIsTouchComposer';
 
 // jsdom does not compute the cascade, so pin the stylesheet's source shape
 // instead. The Plan chip's close mark is stacked over the Plan icon and the
@@ -192,5 +193,78 @@ describe('Plan chip close mark', () => {
     });
     expect(generic).toBeGreaterThan(0);
     expect(tint).toBeGreaterThan(generic);
+  });
+});
+
+describe('Composer tag right inset', () => {
+  // The label and value keep the four-value shorthand with a 0 right
+  // component, and the remove button closes the chip when the tag has one. A
+  // chip whose tag is not removable has no such button, so it ends on
+  // `.tagContent`, which is the box that has to carry the inset itself
+  // (issue #11997). Moving the inset onto the text, or dropping this rule,
+  // is what the pair of assertions below rules out.
+  it('puts the inset on the content box that ends the chip', () => {
+    expect(
+      sorted(entries((selector) => selector === '.tagContent:last-child')),
+    ).toEqual([
+      {
+        at: '',
+        selectors: ['.tagContent:last-child'],
+        decls: ['padding-right: 7px'],
+      },
+    ]);
+  });
+
+  it('leaves the text boxes without a right padding of their own', () => {
+    const shorthand = entries((selector) =>
+      /^\.tag(Label|Value)$/.test(selector),
+    )
+      .map((entry) => entry.decls.find((decl) => decl.startsWith('padding:')))
+      .filter((decl): decl is string => decl !== undefined);
+    expect(shorthand).toEqual([
+      'padding: 3px 0 3px 7px',
+      'padding: 3px 0 3px 0.5ch',
+    ]);
+  });
+});
+
+describe('Model sheet touch floor', () => {
+  // The sheet also stands in for the popover in narrow desktop windows, so
+  // every sizing rule it carries must stay behind the same pointer query the
+  // search field is gated on in JS. Restating the query here would let the two
+  // drift apart silently; hoisting a rule out of the block would size a
+  // mouse-driven window for touch.
+  const sizing = entries(
+    (selector) =>
+      selector.includes('[data-web-shell-model-sheet]') &&
+      !selector.endsWith('.dropdownItemLabel'),
+  ).filter((entry) =>
+    entry.decls.some((decl) =>
+      /^(min-height|min-width|inset-block):/.test(decl),
+    ),
+  );
+
+  it('has sizing rules to gate', () => {
+    expect(sizing.length).toBeGreaterThan(0);
+  });
+
+  it('keeps every sizing rule inside the shared touch query', () => {
+    expect(sizing.map((entry) => entry.at)).toEqual(
+      sizing.map(() => `@media ${TOUCH_COMPOSER_QUERY}`),
+    );
+  });
+
+  it('covers the rows, the footer button, the refresh icon and the switch', () => {
+    const selectors = sizing.flatMap((entry) => entry.selectors).join(' ');
+    for (const marker of [
+      '.dropdownItem:not(.sheetSectionRow)',
+      '.reasoningThinkingRow',
+      '.reasoningEffortRow',
+      '[data-web-shell-model-sheet-done]',
+      '.dropdownSearchRow > button',
+      '[data-web-shell-thinking-toggle]::after',
+    ]) {
+      expect(selectors).toContain(marker);
+    }
   });
 });

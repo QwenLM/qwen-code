@@ -29,7 +29,7 @@ export interface FileProjection {
 }
 
 export interface ValidatedFile {
-  data: Buffer;
+  data: Buffer<ArrayBuffer>;
   fileName: string;
   fileType: string;
 }

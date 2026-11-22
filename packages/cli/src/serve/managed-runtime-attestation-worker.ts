@@ -6,13 +6,12 @@
 
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { Readable } from 'node:stream';
 import express from 'express';
-import { MANAGED_TOOL_RESULT_ROUTES } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import {
-  OWNED_MANAGED_RUNTIME_ROUTES,
   ownedManagedRuntimeRouteGate,
   registerManagedRuntimeAttestationRoute,
   type ManagedRuntimeAttestationIdentity,
@@ -24,7 +23,6 @@ import {
   type ManagedContextReady,
 } from './managed-context-envelope.js';
 import {
-  MANAGED_CONTEXT_WORKER_ROUTES,
   ManagedContextMount,
   registerManagedContextRoutes,
 } from './managed-context-worker.js';
@@ -32,29 +30,52 @@ import {
   ManagedToolExecutor,
   type ManagedShellCapturePublisher,
 } from './managed-runtime-tool-executor.js';
-import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
-import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import {
-  ManagedShellPublisherRegistry,
-  MANAGED_SHELL_PUBLISHER_ROUTE,
-} from './managed-shell-publisher.js';
+  ManagedRuntimeLedger,
+  managedRuntimeLedgerFromEnvironment,
+} from './managed-runtime-ledger.js';
+import type { ManagedSshRuntime } from './managed-runtime-ssh-worker.js';
+import {
+  isWorkspaceToolCapability,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
+} from './managed-workspace-activation.js';
+import { ManagedRuntimeTerminals } from './managed-runtime-terminal.js';
+import { registerManagedTerminalRoutes } from './managed-terminal-routes.js';
+import { ManagedShellPublisherRegistry } from './managed-shell-publisher.js';
 import { registerManagedRuntimeToolRoutes } from './managed-runtime-tool-routes.js';
+import { resolveManagedRuntimeWorkerRoutePlan } from './managed-runtime-worker-routes.js';
 import { scrubAndReportInheritedLoaderEnv } from '../config/shared-env-keys.js';
-import { MANAGED_RUNTIME_PROVIDER_ROUTE } from './managed-runtime-provider-protocol.js';
 import { registerManagedRuntimeProviderRoute } from './managed-runtime-provider-worker.js';
 import {
   parseManagedCsiBoot,
   type ManagedCsiBoot,
 } from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
+import { isCsiFilesCapability } from './managed-csi-file-profile.js';
 import {
-  MANAGED_CSI_ATTEST_ROUTE,
-  MANAGED_CSI_DRAIN_ROUTE,
-  MANAGED_CSI_ACK_ROUTE,
+  parseManagedCsiFileBoot,
+  parseManagedCsiFileJson,
+  type ManagedCsiFileBoot,
+} from './managed-csi-file-envelope.js';
+import {
+  startManagedCsiFileWorker,
+  type ManagedCsiFileWorkerHandle,
+} from './managed-csi-file-worker.js';
+import {
   registerManagedCsiAttestationRoute,
   registerManagedCsiDrainRoute,
   registerManagedCsiAckRoute,
 } from './managed-csi-worker.js';
+
+import {
+  readManagedExternalBoot,
+  activateManagedExternalStorage,
+  type ManagedExternalContextBoot,
+} from './managed-external-storage.js';
+import {
+  ManagedExternalPublication,
+  EXTERNAL_PUBLICATION_ROUTES,
+} from './managed-external-publication.js';
 
 const MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES = 32 * 1024;
 const MANAGED_RUNTIME_WORKER_BOOT_TIMEOUT_MS = 30_000;
@@ -93,7 +114,12 @@ export interface ManagedRuntimeWorkerReady {
 }
 
 export interface ManagedRuntimeAttestationWorkerHandle {
-  readonly ready: ManagedRuntimeWorkerReady | ManagedContextReady;
+  readonly ready: (ManagedRuntimeWorkerReady | ManagedContextReady) & {
+    readonly publication?: {
+      readonly url: string;
+      readonly paths: readonly string[];
+    };
+  };
   close(): Promise<void>;
 }
 
@@ -136,12 +162,17 @@ function parseWorkerBoot(
     throw new Error(INVALID_BOOT_MESSAGE);
   }
   if (isExactBoot(parsed)) {
+    if (isCsiFilesCapability(parsed.capabilityDigest))
+      throw new Error(INVALID_BOOT_MESSAGE);
     return parsed;
   }
   try {
     // Boot v2 is UTF-8: bytes that are not are refused, never replaced.
     new TextDecoder('utf-8', { fatal: true }).decode(document);
-    return parseManagedContextBoot(parsed);
+    const boot = parseManagedContextBoot(parsed);
+    if (isCsiFilesCapability(boot.capabilityDigest))
+      throw new Error(INVALID_BOOT_MESSAGE);
+    return boot;
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
@@ -173,125 +204,268 @@ async function readBootDocument(input: Readable): Promise<Buffer> {
   }
 }
 
-export async function startManagedRuntimeAttestationWorker(
+export function startManagedRuntimeAttestationWorker(
+  bootDocument: ManagedCsiFileBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode?: boolean,
+  sshRuntime?: ManagedSshRuntime,
+): Promise<ManagedCsiFileWorkerHandle>;
+export function startManagedRuntimeAttestationWorker(
   bootDocument: ManagedRuntimeWorkerBoot | ManagedContextBoot | ManagedCsiBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode?: boolean,
+  sshRuntime?: ManagedSshRuntime,
+): Promise<ManagedRuntimeAttestationWorkerHandle>;
+export function startManagedRuntimeAttestationWorker(
+  bootDocument:
+    | ManagedRuntimeWorkerBoot
+    | ManagedContextBoot
+    | ManagedCsiBoot
+    | ManagedCsiFileBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode?: boolean,
+  sshRuntime?: ManagedSshRuntime,
+): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle>;
+export async function startManagedRuntimeAttestationWorker(
+  bootDocument:
+    | ManagedRuntimeWorkerBoot
+    | ManagedContextBoot
+    | ManagedCsiBoot
+    | ManagedCsiFileBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
   containerMode = false,
-): Promise<ManagedRuntimeAttestationWorkerHandle> {
+  sshRuntime?: ManagedSshRuntime,
+): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle> {
+  if (
+    bootDocument.version === 4 ||
+    bootDocument.version === 5 ||
+    bootDocument.version === 6
+  ) {
+    if (!containerMode || capturePublisher || remotePublishers || sshRuntime)
+      throw new Error(INVALID_BOOT_MESSAGE);
+    return startManagedCsiFileWorker(bootDocument);
+  }
   const resolved =
     bootDocument.version === 3
       ? parseManagedCsiBoot(bootDocument)
       : bootDocument;
   const csiBoot = resolved.version === 3 ? resolved : undefined;
-  const boot = resolved.version === 3 ? resolved.context : resolved;
+  const externalBoot =
+    resolved.version === 2 && 'storage' in resolved
+      ? (resolved as ManagedExternalContextBoot)
+      : undefined;
+  const boot = externalBoot
+    ? parseManagedContextBoot(
+        Object.fromEntries(
+          Object.entries(externalBoot).filter(([key]) => key !== 'storage'),
+        ),
+      )
+    : resolved.version === 3
+      ? resolved.context
+      : resolved;
   if (
+    externalBoot &&
+    (!containerMode || capturePublisher || remotePublishers || sshRuntime)
+  )
+    throw new Error(INVALID_BOOT_MESSAGE);
+  if (
+    isCsiFilesCapability(boot.capabilityDigest) ||
     (csiBoot !== undefined && !containerMode) ||
     (containerMode &&
       csiBoot === undefined &&
-      (boot.version !== 1 || boot.isolationClass !== 'session'))
+      ((boot.version !== 1 && !externalBoot) ||
+        boot.isolationClass !== 'session'))
   ) {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
+  const externalStorage = externalBoot
+    ? await activateManagedExternalStorage(externalBoot)
+    : undefined;
+  const publication =
+    externalStorage && externalBoot
+      ? new ManagedExternalPublication(
+          await mkdtemp(path.join(externalStorage.directory, 'publication-')),
+          externalBoot,
+        )
+      : undefined;
+  const externalMount = externalStorage
+    ? new ManagedContextMount(externalBoot!.mountRoot, externalStorage.verify)
+    : undefined;
+  if (externalMount && (await externalMount.resolve('')) === undefined)
+    throw new Error(INVALID_BOOT_MESSAGE);
   const app = express();
   app.disable('x-powered-by');
   const csiMount = csiBoot
     ? new ManagedCsiMount(csiBoot.context.mountRoot, csiBoot.storage.diskSerial)
     : undefined;
-  if (csiBoot && csiMount) {
-    await csiMount.observe();
-    registerManagedCsiAttestationRoute(app, csiBoot, csiMount);
-  }
   let executor: ManagedToolExecutor;
-  if (boot.version === 2) {
-    executor = registerManagedContextRoutes(
-      app,
-      boot,
-      capturePublisher,
-      remotePublishers,
-      csiMount,
-    );
-  } else {
-    registerManagedRuntimeAttestationRoute(app, boot);
-    executor = ManagedToolExecutor.forWorkspace(
-      boot.workspaceCwd,
-      boot.runtimeInstanceId,
-    );
-    registerManagedRuntimeToolRoutes(app, boot, executor);
-    const mount = new ManagedContextMount(boot.workspaceCwd);
-    registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
-      const directory = await mount.resolve('');
-      return directory === undefined
-        ? undefined
-        : { directory, workspaceRoot: directory, preapproved: false };
-    });
+  try {
+    if (csiBoot && csiMount) {
+      await csiMount.observe();
+      registerManagedCsiAttestationRoute(app, csiBoot, csiMount);
+    }
+    if (boot.version === 2) {
+      const ledger = publication
+        ? ManagedRuntimeLedger.create({
+            workFile: path.join(publication.directory, 'worker-ledger.json'),
+            worker: {
+              pid: process.pid,
+              pgid: process.pid,
+              hostPid: process.ppid,
+              incarnation: boot.runtimeIncarnation,
+              startedAt: Date.now(),
+            },
+          })
+        : (sshRuntime?.ledger ??
+          managedRuntimeLedgerFromEnvironment(boot.runtimeIncarnation));
+      ledger?.watch();
+      executor = registerManagedContextRoutes(
+        app,
+        boot,
+        publication ?? capturePublisher,
+        remotePublishers,
+        sshRuntime
+          ? new ManagedContextMount(boot.mountRoot, () =>
+              sshRuntime.verifyStorage(),
+            )
+          : (externalMount ?? csiMount),
+        ledger,
+        sshRuntime !== undefined || externalBoot !== undefined,
+      );
+      sshRuntime?.register(app, boot, executor);
+      // The main listener mounts the same publication channels as the
+      // dedicated listener; the route plan gates them from the same
+      // `publication` flag (#15685's shared-channel contract).
+      publication?.register(app, executor);
+    } else {
+      registerManagedRuntimeAttestationRoute(app, boot);
+      // A Managed session's host names one ledger per worker incarnation and
+      // sweeps it if the worker dies; a worker that cannot keep it must not
+      // answer a Shell, so a failure here fails the boot.
+      const ledger = managedRuntimeLedgerFromEnvironment(
+        boot.runtimeIncarnation,
+      );
+      ledger?.watch();
+      executor = ManagedToolExecutor.forWorkspace(
+        boot.workspaceCwd,
+        boot.runtimeInstanceId,
+        { ledger },
+      );
+      registerManagedRuntimeToolRoutes(app, boot, executor);
+      const mount = new ManagedContextMount(boot.workspaceCwd);
+      registerManagedRuntimeProviderRoute(app, boot, executor, async () => {
+        const directory = await mount.resolve('');
+        return directory === undefined
+          ? undefined
+          : { directory, workspaceRoot: directory, preapproved: false };
+      });
+    }
+    if (csiBoot) {
+      registerManagedCsiDrainRoute(app, csiBoot, executor);
+      registerManagedCsiAckRoute(app, csiBoot, executor);
+    }
+  } catch (error) {
+    return closeCsiMountAfterError(csiMount, error);
   }
-  if (csiBoot) {
-    registerManagedCsiDrainRoute(app, csiBoot, executor);
-    registerManagedCsiAckRoute(app, csiBoot, executor);
-  }
+  const routePlan = resolveManagedRuntimeWorkerRoutePlan({
+    bootVersion: boot.version === 2 ? 2 : 1,
+    capabilityDigest: boot.capabilityDigest,
+    managedExtensions:
+      boot.version === 2 && boot.managedExtensions !== undefined,
+    csi: csiBoot !== undefined,
+    sshRoute: sshRuntime?.route,
+    capturePublisher: capturePublisher !== undefined,
+    remotePublishers: remotePublishers !== undefined,
+    publication: publication !== undefined,
+  });
   const server = createServer(
-    ownedManagedRuntimeRouteGate(
-      app,
-      boot.version === 2
-        ? capturePublisher ||
-          remotePublishers ||
-          boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
-          ? [
-              ...MANAGED_CONTEXT_WORKER_ROUTES,
-              ...(csiBoot
-                ? [
-                    MANAGED_CSI_ATTEST_ROUTE,
-                    MANAGED_CSI_DRAIN_ROUTE,
-                    MANAGED_CSI_ACK_ROUTE,
-                  ]
-                : []),
-              ...MANAGED_TOOL_RESULT_ROUTES,
-              ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
-              ...(!capturePublisher &&
-              boot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
-                ? [PUBLICATION_INSTALL_ROUTE]
-                : []),
-            ]
-          : [
-              ...MANAGED_CONTEXT_WORKER_ROUTES,
-              ...(csiBoot
-                ? [
-                    MANAGED_CSI_ATTEST_ROUTE,
-                    MANAGED_CSI_DRAIN_ROUTE,
-                    MANAGED_CSI_ACK_ROUTE,
-                  ]
-                : []),
-            ]
-        : [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
-    ),
+    ownedManagedRuntimeRouteGate(app, routePlan.routes),
   );
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
   server.requestTimeout = 5_000;
   server.keepAliveTimeout = 1_000;
+  const terminals =
+    boot.capabilityDigest === MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST
+      ? new ManagedRuntimeTerminals(
+          boot,
+          boot.version === 2 ? boot.mountRoot : boot.workspaceCwd,
+          process.env,
+        )
+      : undefined;
+  if (terminals) {
+    terminals.register(server);
+    registerManagedTerminalRoutes(app, boot, terminals);
+  }
 
-  await new Promise<void>((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off('listening', onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off('error', onError);
-      resolve();
-    };
-    server.once('error', onError);
-    server.once('listening', onListening);
-    server.listen(
-      containerMode ? 43190 : 0,
-      containerMode ? '0.0.0.0' : '127.0.0.1',
-    );
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => {
+        server.off('listening', onListening);
+        reject(error);
+      };
+      const onListening = () => {
+        server.off('error', onError);
+        resolve();
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(
+        containerMode ? 43190 : 0,
+        containerMode ? '0.0.0.0' : '127.0.0.1',
+      );
+    });
+  } catch (error) {
+    if (publication) {
+      await executor.close();
+      await publication.close();
+      throw new Error(INVALID_BOOT_MESSAGE);
+    }
+    return closeCsiMountAfterError(csiMount, error);
+  }
 
   const address = server.address() as AddressInfo | null;
   if (!address) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
-    throw new Error('Managed Runtime worker listener is unavailable.');
+    return closeCsiMountAfterError(
+      csiMount,
+      new Error('Managed Runtime worker listener is unavailable.'),
+    );
+  }
+  const publicationServer = publication
+    ? createServer(
+        ownedManagedRuntimeRouteGate(
+          (() => {
+            const publicationApp = express();
+            publicationApp.disable('x-powered-by');
+            publication.register(publicationApp, executor);
+            return publicationApp;
+          })(),
+          EXTERNAL_PUBLICATION_ROUTES,
+        ),
+      )
+    : undefined;
+  if (publicationServer) {
+    publicationServer.maxHeadersCount = 32;
+    publicationServer.headersTimeout = 5_000;
+    publicationServer.requestTimeout = 5_000;
+    publicationServer.keepAliveTimeout = 1_000;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        publicationServer.once('error', reject);
+        publicationServer.listen(43191, '0.0.0.0', resolve);
+      });
+    } catch {
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await executor.close();
+      await publication?.close();
+      throw new Error(INVALID_BOOT_MESSAGE);
+    }
   }
   const ready =
     boot.version === 2
@@ -308,23 +482,85 @@ export async function startManagedRuntimeAttestationWorker(
   let closing: Promise<void> | undefined;
 
   return {
-    ready,
+    ready: publicationServer
+      ? {
+          ...ready,
+          publication: {
+            url: `http://127.0.0.1:${(publicationServer.address() as AddressInfo).port}`,
+            paths: EXTERNAL_PUBLICATION_ROUTES.map((route) => route.path),
+          },
+        }
+      : ready,
     close: () => {
-      closing ??= executor.close().then(
-        () =>
+      closing ??= (async () => {
+        const errors: unknown[] = [];
+        terminals?.dispose();
+        try {
+          await executor.close();
+        } catch (error) {
+          errors.push(error);
+        }
+        const cleanup = await Promise.allSettled([
           new Promise<void>((resolve, reject) => {
             server.close((error) => (error ? reject(error) : resolve()));
             server.closeAllConnections();
           }),
-      );
+          csiMount?.close(),
+          publication?.close(),
+          publicationServer &&
+            new Promise<void>((resolve, reject) => {
+              publicationServer.close((error) =>
+                error ? reject(error) : resolve(),
+              );
+              publicationServer.closeAllConnections();
+            }),
+        ]);
+        errors.push(
+          ...cleanup.flatMap((result) =>
+            result.status === 'rejected' ? [result.reason] : [],
+          ),
+        );
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1)
+          throw new AggregateError(
+            errors,
+            errors[0] instanceof Error
+              ? errors[0].message
+              : 'Managed Runtime worker shutdown failed.',
+            { cause: errors[0] },
+          );
+      })();
       return closing;
     },
   };
 }
 
+async function closeCsiMountAfterError(
+  mount: ManagedCsiMount | undefined,
+  error: unknown,
+): Promise<never> {
+  try {
+    await mount?.close();
+  } catch (cleanupError) {
+    throw new AggregateError(
+      [error, cleanupError],
+      error instanceof Error
+        ? error.message
+        : 'Managed Runtime worker startup failed.',
+      { cause: error },
+    );
+  }
+  throw error;
+}
+
 export async function readManagedRuntimeContainerBoot(
   bootPath: string,
-): Promise<ManagedRuntimeWorkerBoot | ManagedCsiBoot> {
+): Promise<
+  | ManagedRuntimeWorkerBoot
+  | ManagedExternalContextBoot
+  | ManagedCsiBoot
+  | ManagedCsiFileBoot
+> {
   if (!path.isAbsolute(bootPath)) throw new Error(INVALID_BOOT_MESSAGE);
   const input = createReadStream(bootPath);
   try {
@@ -336,9 +572,33 @@ export async function readManagedRuntimeContainerBoot(
       parsed &&
       typeof parsed === 'object' &&
       'version' in parsed &&
+      (parsed.version === 4 || parsed.version === 5 || parsed.version === 6)
+    ) {
+      return parseManagedCsiFileBoot(
+        parseManagedCsiFileJson(
+          document,
+          MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES,
+        ),
+      );
+    }
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'version' in parsed &&
       parsed.version === 3
     ) {
-      return parseManagedCsiBoot(parsed);
+      const boot = parseManagedCsiBoot(parsed);
+      if (isCsiFilesCapability(boot.context.capabilityDigest))
+        throw new Error(INVALID_BOOT_MESSAGE);
+      return boot;
+    }
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'version' in parsed &&
+      parsed.version === 2
+    ) {
+      return await readManagedExternalBoot(parsed, bootPath);
     }
     const boot = parseWorkerBoot(document);
     if (boot.version !== 1 || boot.isolationClass !== 'session') {
@@ -365,7 +625,11 @@ export async function runManagedRuntimeAttestationWorker(
       'Managed Runtime worker',
     );
   }
-  let boot: ManagedRuntimeWorkerBoot | ManagedContextBoot | ManagedCsiBoot;
+  let boot:
+    | ManagedRuntimeWorkerBoot
+    | ManagedContextBoot
+    | ManagedCsiBoot
+    | ManagedCsiFileBoot;
   try {
     boot =
       containerBootPath !== undefined
@@ -377,16 +641,27 @@ export async function runManagedRuntimeAttestationWorker(
     process.exitCode = 1;
     return;
   }
-  const contextBoot = boot.version === 3 ? boot.context : boot;
+  const contextBoot =
+    boot.version === 3 ||
+    boot.version === 4 ||
+    boot.version === 5 ||
+    boot.version === 6
+      ? boot.context
+      : boot;
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
     undefined,
     contextBoot.version === 2 &&
-      contextBoot.capabilityDigest === WORKSPACE_CAPABILITY_DIGEST
+      !('storage' in contextBoot) &&
+      (isWorkspaceToolCapability(contextBoot.capabilityDigest) ||
+        contextBoot.managedExtensions !== undefined)
       ? new ManagedShellPublisherRegistry()
       : undefined,
     containerBootPath !== undefined,
-  );
+  ).catch((error: unknown) => {
+    if ('storage' in contextBoot) throw new Error(INVALID_BOOT_MESSAGE);
+    throw error;
+  });
 
   await new Promise<void>((resolve, reject) => {
     let closing = false;

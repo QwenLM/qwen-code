@@ -1,0 +1,23 @@
+Managed Agent exposes a signed API.
+{{ if .Values.runtime.enabled }}
+Trusted single-node Workspace files and foreground Shell are enabled.
+Close every tool Session and confirm physical holders are clear before replacing the Pod.
+{{ else }}
+Workspace tools are disabled.
+{{ end }}
+
+Connect locally:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ .Release.Name }} 8080:8080
+
+Run deploy/kubernetes/smoke.mjs with the signing key from Secret {{ include "managed-agent.secret" . }}.
+See deploy/kubernetes/README.md for the command and upgrade procedure.
+{{ if .Values.web.enabled }}
+
+Connect to WebShell:
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ .Release.Name }} 4171:4171
+Authenticate using web-token from Secret {{ include "managed-agent.secret" . }}.
+The fixed browser identity is {{ .Values.web.tenantId }}/{{ .Values.web.actorId }}.
+{{ end }}
+
+Uninstall retains the managed Secret, MySQL PVC and any Runtime/Workspace PVCs. Back them up before upgrades.
+Do not use automatic Helm rollback across database migrations.

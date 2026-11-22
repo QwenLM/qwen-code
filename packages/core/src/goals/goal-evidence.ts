@@ -5,7 +5,6 @@
  */
 
 import type { Part } from '@google/genai';
-import { canonicalToolName, ToolNames } from '../tools/tool-names.js';
 import { goalToolResultProvenance } from './goal-tool-result-provenance.js';
 import type {
   GoalEvidenceProofKind,
@@ -44,7 +43,12 @@ type GoalRecordProvenance =
   | GoalEvidenceProvenance
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  // Session multi-agent records (agent_mention/agent_message) share the
+  // transcript; they carry no Goal context and are never evidence.
+  | 'external_agent'
+  // A Mod's own prompt is not the person's words, so it is never evidence.
+  | 'mod_prompt';
 
 export interface GoalEvidenceRecord {
   uuid: string;
@@ -143,7 +147,8 @@ export function buildGoalVerifierEvidenceWindow(
   options: BuildGoalVerifierEvidenceWindowOptions,
 ): GoalVerifierEvidenceWindow {
   assertPermitMatchesGoal(input);
-  const { cursorIndex, execCallIdsByTurn } = locateEvidenceCursor(input);
+  const { cursorIndex, executionOutputCallIdsByTurn } =
+    locateEvidenceCursor(input);
   const evidence: GoalVerifierEvidenceRecord[] = [];
   const seenTurnIds = new Set<string>();
   let remaining = options.budgetBytes;
@@ -176,7 +181,7 @@ export function buildGoalVerifierEvidenceWindow(
       proofKind: proofKindOf(
         record,
         provenance,
-        execCallIdsByTurn.get(context.turnId),
+        executionOutputCallIdsByTurn.get(context.turnId),
       ),
       content: capVerifierEvidenceContent(content),
     };
@@ -223,7 +228,7 @@ function assertPermitMatchesGoal(input: GoalEvidenceContext): void {
  */
 function locateEvidenceCursor(input: GoalEvidenceContext): {
   cursorIndex: number;
-  execCallIdsByTurn: Map<string, Set<string>>;
+  executionOutputCallIdsByTurn: Map<string, Set<string>>;
 } {
   const cursorId = input.goal.evidenceCursor.recordId;
   if (cursorId === null) {
@@ -233,7 +238,7 @@ function locateEvidenceCursor(input: GoalEvidenceContext): {
     );
   }
   const indexByUuid = new Map<string, number>();
-  const execCallIdsByTurn = new Map<string, Set<string>>();
+  const executionOutputCallIdsByTurn = new Map<string, Set<string>>();
   for (let index = 0; index < input.records.length; index += 1) {
     const uuid = input.records[index]!.uuid;
     if (indexByUuid.has(uuid)) {
@@ -264,9 +269,10 @@ function locateEvidenceCursor(input: GoalEvidenceContext): {
         })?.provenance !== 'execution_output'
       )
         continue;
-      const calls = execCallIdsByTurn.get(context.turnId) ?? new Set<string>();
+      const calls =
+        executionOutputCallIdsByTurn.get(context.turnId) ?? new Set<string>();
       calls.add(call.id);
-      execCallIdsByTurn.set(context.turnId, calls);
+      executionOutputCallIdsByTurn.set(context.turnId, calls);
     }
   }
   const cursorIndex = indexByUuid.get(cursorId);
@@ -276,13 +282,15 @@ function locateEvidenceCursor(input: GoalEvidenceContext): {
       `The Goal evidence cursor ${cursorId} is not in the active transcript chain.`,
     );
   }
-  return { cursorIndex, execCallIdsByTurn };
+  return { cursorIndex, executionOutputCallIdsByTurn };
 }
 
 function coherentEvidenceProvenance(
   record: GoalEvidenceRecord,
 ): GoalEvidenceProvenance | undefined {
   if (record.type === 'system') return undefined;
+  // Never the person's words, though its record has a typed prompt's shape.
+  if (record.provenance === 'mod_prompt') return undefined;
   const provenance = record.provenance ?? legacySafeProvenance(record);
   if (provenance === 'real_user') {
     return record.type === 'user' &&
@@ -430,20 +438,22 @@ function renderToolResponse(functionResponse: {
 function proofKindOf(
   record: GoalEvidenceRecord,
   provenance: GoalEvidenceProvenance,
-  execCallIds: ReadonlySet<string> | undefined,
+  executionOutputCallIds: ReadonlySet<string> | undefined,
 ): GoalEvidenceProofKind {
   if (provenance === 'real_user') return 'user_input';
   if (provenance === 'assistant_output') return 'delivered_output';
   if (
     provenance === 'execution_output' ||
-    // Older transcripts have no exec-specific provenance stamp.
+    // Older transcripts have no script/wrapper-specific provenance stamp.
     record.message?.parts?.some(
       (part) =>
         (part.functionResponse?.name !== undefined &&
-          canonicalToolName(part.functionResponse.name).toLowerCase() ===
-            ToolNames.EXEC) ||
+          goalToolResultProvenance({
+            name: part.functionResponse.name,
+            goalContext: parseGoalContext(record.goalContext),
+          })?.provenance === 'execution_output') ||
         (part.functionResponse?.id !== undefined &&
-          execCallIds?.has(part.functionResponse.id)),
+          executionOutputCallIds?.has(part.functionResponse.id)),
     )
   ) {
     return 'execution_output';

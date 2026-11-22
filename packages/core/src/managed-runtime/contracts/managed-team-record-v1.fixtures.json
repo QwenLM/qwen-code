@@ -1,0 +1,3100 @@
+{
+  "contract": "managed-team-record/1",
+  "domains": {
+    "team_state": {
+      "taskKind": null
+    },
+    "team_task": {
+      "taskKind": null
+    },
+    "team_message": {
+      "taskKind": null
+    },
+    "team_plan": {
+      "taskKind": null
+    }
+  },
+  "leader": "leader",
+  "limits": {
+    "maxMembers": 10,
+    "maxNameLength": 64,
+    "maxBlockers": 64,
+    "maxContentBytes": 65536,
+    "maxMetadataBytes": 32768
+  },
+  "messageKinds": [
+    "message",
+    "task_assignment",
+    "plan_approval_request",
+    "shutdown_approved",
+    "shutdown_rejected",
+    "plan_approval_response",
+    "shutdown_request"
+  ],
+  "keys": {
+    "team_state": [
+      "leadSessionId",
+      "lifecycle",
+      "members",
+      "membershipRevision",
+      "name",
+      "run",
+      "teamId"
+    ],
+    "team_task": [
+      "activeForm",
+      "blockedBy",
+      "descriptionRef",
+      "metadataRef",
+      "number",
+      "owner",
+      "run",
+      "status",
+      "subject",
+      "taskId",
+      "teamId"
+    ],
+    "team_message": [
+      "contentDigest",
+      "contentRef",
+      "from",
+      "inputId",
+      "kind",
+      "messageId",
+      "run",
+      "targetSessionId",
+      "teamId",
+      "to"
+    ],
+    "team_plan": [
+      "decision",
+      "feedbackRef",
+      "member",
+      "planRef",
+      "planRevision",
+      "requestId",
+      "run",
+      "teamId"
+    ]
+  },
+  "fixedKeys": {
+    "team_state": ["leadSessionId", "name", "teamId"],
+    "team_task": ["number", "taskId", "teamId"],
+    "team_message": [
+      "contentDigest",
+      "contentRef",
+      "from",
+      "kind",
+      "messageId",
+      "teamId",
+      "to"
+    ],
+    "team_plan": ["member", "planRef", "planRevision", "requestId", "teamId"]
+  },
+  "templates": {
+    "team_state": {
+      "teamId": "team-1",
+      "name": "review-team",
+      "leadSessionId": "session-lead",
+      "lifecycle": "active",
+      "membershipRevision": 1,
+      "members": [],
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    },
+    "team_state_staffed": {
+      "teamId": "team-1",
+      "name": "review-team",
+      "leadSessionId": "session-lead",
+      "lifecycle": "active",
+      "membershipRevision": 3,
+      "members": [
+        {
+          "name": "alice",
+          "childRunId": "run-1",
+          "planModeRequired": false
+        },
+        {
+          "name": "bob",
+          "childRunId": "run-2",
+          "planModeRequired": true
+        }
+      ],
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    },
+    "team_task": {
+      "teamId": "team-1",
+      "taskId": "task-1",
+      "number": 1,
+      "subject": "Audit the diff",
+      "descriptionRef": {
+        "resourceId": "description-1",
+        "kind": "managed-team-content",
+        "schemaVersion": 1,
+        "byteLength": 42,
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "activeForm": null,
+      "metadataRef": null,
+      "owner": null,
+      "status": "pending",
+      "blockedBy": [],
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    },
+    "team_message": {
+      "teamId": "team-1",
+      "messageId": "message-1",
+      "kind": "message",
+      "from": "leader",
+      "to": "alice",
+      "contentRef": {
+        "resourceId": "message-1",
+        "kind": "managed-team-content",
+        "schemaVersion": 1,
+        "byteLength": 20,
+        "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      "contentDigest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "targetSessionId": null,
+      "inputId": null,
+      "run": {
+        "state": "settled",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-send-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": {
+          "target": "session",
+          "state": "planned"
+        }
+      }
+    },
+    "team_plan": {
+      "teamId": "team-1",
+      "requestId": "request-1",
+      "member": "bob",
+      "planRevision": 1,
+      "planRef": {
+        "resourceId": "plan-1",
+        "kind": "managed-team-content",
+        "schemaVersion": 1,
+        "byteLength": 300,
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "decision": null,
+      "feedbackRef": null,
+      "run": {
+        "state": "waiting",
+        "reason": null,
+        "definition": null,
+        "executionCallId": null,
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": null,
+        "runtime": null,
+        "delivery": null
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "state-start",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "state-staffed",
+      "domain": "team_state",
+      "template": "team_state_staffed",
+      "patch": {},
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "state-closing",
+      "domain": "team_state",
+      "template": "team_state_staffed",
+      "patch": {
+        "lifecycle": "closing"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "state-deleted",
+      "domain": "team_state",
+      "template": "team_state_staffed",
+      "patch": {
+        "lifecycle": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "state-ten-members",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "member-0",
+            "childRunId": "run-0",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-1",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-2",
+            "childRunId": "run-2",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-3",
+            "childRunId": "run-3",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-4",
+            "childRunId": "run-4",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-5",
+            "childRunId": "run-5",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-6",
+            "childRunId": "run-6",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-7",
+            "childRunId": "run-7",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-8",
+            "childRunId": "run-8",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-9",
+            "childRunId": "run-9",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 11
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "state-closing-empty",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "lifecycle": "closing"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "state-extra-key",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "id": "state-members-null",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": null
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team members must be an array"
+    },
+    {
+      "id": "state-member-extra-key",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false,
+            "color": "#FF6B6B"
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "id": "state-lifecycle-unknown",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "lifecycle": "archived"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team lifecycle must be active, closing or deleted"
+    },
+    {
+      "id": "state-run-running",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team run must be admitted or cancelled"
+    },
+    {
+      "id": "state-run-with-call",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "run": {
+          "executionCallId": "call-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team run must be purely logical"
+    },
+    {
+      "id": "state-run-with-delivery",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team run must be purely logical"
+    },
+    {
+      "id": "state-deleted-admitted",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "lifecycle": "deleted"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team run must be cancelled exactly once the team is deleted"
+    },
+    {
+      "id": "state-active-cancelled",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team run must be cancelled exactly once the team is deleted"
+    },
+    {
+      "id": "state-members-not-array",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": "alice"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team members must be an array"
+    },
+    {
+      "id": "state-members-over-cap",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "member-0",
+            "childRunId": "run-0",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-1",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-2",
+            "childRunId": "run-2",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-3",
+            "childRunId": "run-3",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-4",
+            "childRunId": "run-4",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-5",
+            "childRunId": "run-5",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-6",
+            "childRunId": "run-6",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-7",
+            "childRunId": "run-7",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-8",
+            "childRunId": "run-8",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-9",
+            "childRunId": "run-9",
+            "planModeRequired": false
+          },
+          {
+            "name": "member-10",
+            "childRunId": "run-10",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 12
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team members exceed 10 entries"
+    },
+    {
+      "id": "state-member-leader",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "leader",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team member cannot be named leader"
+    },
+    {
+      "id": "state-member-uppercase",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "Alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team member name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-member-trailing-dash",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice-",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team member name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-member-name-too-long",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team member name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-member-name-not-text",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": 7,
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team member name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-member-name-at-limit",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "state-member-duplicate-name",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "alice",
+            "childRunId": "run-2",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team members must have distinct names and child runs"
+    },
+    {
+      "id": "state-member-duplicate-run",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team members must have distinct names and child runs"
+    },
+    {
+      "id": "state-member-empty-run",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "members.childRunId must be a non-empty string"
+    },
+    {
+      "id": "state-member-plan-not-boolean",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": "yes"
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "members.planModeRequired must be boolean"
+    },
+    {
+      "id": "state-revision-behind",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ]
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team membershipRevision must be one more than its member count"
+    },
+    {
+      "id": "state-revision-ahead",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "membershipRevision": 2
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team membershipRevision must be one more than its member count"
+    },
+    {
+      "id": "state-revision-zero",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "membershipRevision": 0
+      },
+      "valid": false,
+      "start": false,
+      "error": "membershipRevision must be an integer from 1"
+    },
+    {
+      "id": "state-revision-fraction",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "membershipRevision": 1.5
+      },
+      "valid": false,
+      "start": false,
+      "error": "membershipRevision must be an integer from 1"
+    },
+    {
+      "id": "state-name-spaced",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "name": "review team"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-name-leading-dash",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "name": "-review"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-name-double-dash",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "name": "review--team"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team name must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "state-lead-empty",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "leadSessionId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "leadSessionId must be a non-empty string"
+    },
+    {
+      "id": "state-team-id-control",
+      "domain": "team_state",
+      "template": "team_state",
+      "patch": {
+        "teamId": "team\u00071"
+      },
+      "valid": false,
+      "start": false,
+      "error": "teamId must not contain control characters"
+    },
+    {
+      "id": "task-start",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-in-progress",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "in_progress",
+        "owner": "alice"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-completed",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "completed",
+        "owner": "alice"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-completed-unowned",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "completed"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-owned-by-leader",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "owner": "leader"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-blocked",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": ["task-0", "task-2"]
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-detailed",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "activeForm": "Auditing the diff",
+        "metadataRef": {
+          "resourceId": "metadata-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 32768,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-description-at-limit",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "descriptionRef": {
+          "byteLength": 65536
+        }
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "task-deleted",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "task-extra-key",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "id": "task-status-unknown",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "blocked"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task status must be pending, in_progress, completed or deleted"
+    },
+    {
+      "id": "task-in-progress-unowned",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "in_progress"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task in progress must have an owner"
+    },
+    {
+      "id": "task-deleted-admitted",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "status": "deleted"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task run must be cancelled exactly once the task is deleted"
+    },
+    {
+      "id": "task-pending-cancelled",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task run must be cancelled exactly once the task is deleted"
+    },
+    {
+      "id": "task-run-with-dispatch",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "run": {
+          "dispatchId": "dispatch-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task run must be purely logical"
+    },
+    {
+      "id": "task-run-running",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "run": {
+          "state": "running"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task run must be admitted or cancelled"
+    },
+    {
+      "id": "task-number-zero",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "number": 0
+      },
+      "valid": false,
+      "start": false,
+      "error": "number must be an integer from 1"
+    },
+    {
+      "id": "task-number-fraction",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "number": 1.5
+      },
+      "valid": false,
+      "start": false,
+      "error": "number must be an integer from 1"
+    },
+    {
+      "id": "task-number-text",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "number": "1"
+      },
+      "valid": false,
+      "start": false,
+      "error": "number must be an integer from 1"
+    },
+    {
+      "id": "task-subject-empty",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "subject": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "subject must be a non-empty string"
+    },
+    {
+      "id": "task-subject-control",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "subject": "Audit\u0007"
+      },
+      "valid": false,
+      "start": false,
+      "error": "subject must not contain control characters"
+    },
+    {
+      "id": "task-subject-too-long",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "subject": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "valid": false,
+      "start": false,
+      "error": "subject exceeds 4096 UTF-8 bytes"
+    },
+    {
+      "id": "task-active-form-empty",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "activeForm": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "activeForm must be a non-empty string"
+    },
+    {
+      "id": "task-description-too-large",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "descriptionRef": {
+          "byteLength": 65537
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "descriptionRef exceeds 65536 bytes"
+    },
+    {
+      "id": "task-description-bad-digest",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "descriptionRef": {
+          "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "descriptionRef.digest must be a lowercase SHA-256 hex digest"
+    },
+    {
+      "id": "task-metadata-too-large",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "metadataRef": {
+          "resourceId": "metadata-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 32769,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "metadataRef exceeds 32768 bytes"
+    },
+    {
+      "id": "task-owner-uppercase",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "owner": "Alice"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task owner must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "task-blocked-by-self",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": ["task-1"]
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task blockedBy must name distinct other tasks"
+    },
+    {
+      "id": "task-blocked-by-twice",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": ["task-0", "task-0"]
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task blockedBy must name distinct other tasks"
+    },
+    {
+      "id": "task-blocked-by-not-array",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": "task-0"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task blockedBy must be an array"
+    },
+    {
+      "id": "task-blocked-by-empty-id",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": [""]
+      },
+      "valid": false,
+      "start": false,
+      "error": "blockedBy must be a non-empty string"
+    },
+    {
+      "id": "task-blocked-by-over-cap",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": [
+          "task-100",
+          "task-101",
+          "task-102",
+          "task-103",
+          "task-104",
+          "task-105",
+          "task-106",
+          "task-107",
+          "task-108",
+          "task-109",
+          "task-110",
+          "task-111",
+          "task-112",
+          "task-113",
+          "task-114",
+          "task-115",
+          "task-116",
+          "task-117",
+          "task-118",
+          "task-119",
+          "task-120",
+          "task-121",
+          "task-122",
+          "task-123",
+          "task-124",
+          "task-125",
+          "task-126",
+          "task-127",
+          "task-128",
+          "task-129",
+          "task-130",
+          "task-131",
+          "task-132",
+          "task-133",
+          "task-134",
+          "task-135",
+          "task-136",
+          "task-137",
+          "task-138",
+          "task-139",
+          "task-140",
+          "task-141",
+          "task-142",
+          "task-143",
+          "task-144",
+          "task-145",
+          "task-146",
+          "task-147",
+          "task-148",
+          "task-149",
+          "task-150",
+          "task-151",
+          "task-152",
+          "task-153",
+          "task-154",
+          "task-155",
+          "task-156",
+          "task-157",
+          "task-158",
+          "task-159",
+          "task-160",
+          "task-161",
+          "task-162",
+          "task-163",
+          "task-164"
+        ]
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team task blockedBy exceeds 64 entries"
+    },
+    {
+      "id": "task-blocked-by-at-cap",
+      "domain": "team_task",
+      "template": "team_task",
+      "patch": {
+        "blockedBy": [
+          "task-100",
+          "task-101",
+          "task-102",
+          "task-103",
+          "task-104",
+          "task-105",
+          "task-106",
+          "task-107",
+          "task-108",
+          "task-109",
+          "task-110",
+          "task-111",
+          "task-112",
+          "task-113",
+          "task-114",
+          "task-115",
+          "task-116",
+          "task-117",
+          "task-118",
+          "task-119",
+          "task-120",
+          "task-121",
+          "task-122",
+          "task-123",
+          "task-124",
+          "task-125",
+          "task-126",
+          "task-127",
+          "task-128",
+          "task-129",
+          "task-130",
+          "task-131",
+          "task-132",
+          "task-133",
+          "task-134",
+          "task-135",
+          "task-136",
+          "task-137",
+          "task-138",
+          "task-139",
+          "task-140",
+          "task-141",
+          "task-142",
+          "task-143",
+          "task-144",
+          "task-145",
+          "task-146",
+          "task-147",
+          "task-148",
+          "task-149",
+          "task-150",
+          "task-151",
+          "task-152",
+          "task-153",
+          "task-154",
+          "task-155",
+          "task-156",
+          "task-157",
+          "task-158",
+          "task-159",
+          "task-160",
+          "task-161",
+          "task-162",
+          "task-163"
+        ]
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-start",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-member-to-member",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "from": "alice",
+        "to": "bob"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-to-leader",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "from": "alice",
+        "to": "leader"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-task-assignment",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "task_assignment",
+        "from": "alice",
+        "to": "bob"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-task-assignment-from-leader",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "task_assignment"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-plan-request",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "plan_approval_request",
+        "from": "bob",
+        "to": "leader"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-plan-response",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "plan_approval_response",
+        "to": "bob"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-shutdown-request",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "shutdown_request"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-shutdown-approved",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "shutdown_approved",
+        "from": "alice",
+        "to": "leader"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-shutdown-rejected",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "shutdown_rejected",
+        "from": "alice",
+        "to": "leader"
+      },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "message-claimed",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "message-accepted",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "message-consumed",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "message-cancelled-unresolved",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "message-unknown",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "message-extra-key",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "id": "message-kind-unknown",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "broadcast"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message kind must be one of"
+    },
+    {
+      "id": "message-self",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "from": "alice"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message cannot address its own sender"
+    },
+    {
+      "id": "message-from-uppercase",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "from": "Leader"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message from must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "message-to-empty",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "to": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message to must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "message-plan-request-from-leader",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "plan_approval_request"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind plan_approval_request must go from a member to the leader"
+    },
+    {
+      "id": "message-plan-request-to-member",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "plan_approval_request",
+        "from": "bob",
+        "to": "alice"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind plan_approval_request must go from a member to the leader"
+    },
+    {
+      "id": "message-shutdown-approved-to-member",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "shutdown_approved",
+        "from": "alice",
+        "to": "bob"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind shutdown_approved must go from a member to the leader"
+    },
+    {
+      "id": "message-shutdown-rejected-from-leader",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "shutdown_rejected"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind shutdown_rejected must go from a member to the leader"
+    },
+    {
+      "id": "message-shutdown-request-from-member",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "shutdown_request",
+        "from": "bob"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind shutdown_request must go from the leader to a member"
+    },
+    {
+      "id": "message-plan-response-to-leader",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "plan_approval_response",
+        "from": "bob",
+        "to": "leader"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind plan_approval_response must go from the leader to a member"
+    },
+    {
+      "id": "message-task-assignment-to-leader",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "kind": "task_assignment",
+        "from": "alice",
+        "to": "leader"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message of kind task_assignment must go to a member"
+    },
+    {
+      "id": "message-run-admitted",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "state": "admitted"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message run must be settled"
+    },
+    {
+      "id": "message-run-with-execution",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "execution": "settled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message run must be purely logical"
+    },
+    {
+      "id": "message-run-with-effect",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "executionCallId": null,
+          "effectId": "effect-1"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message run must be purely logical"
+    },
+    {
+      "id": "message-without-call",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "executionCallId": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message run must name its sending call"
+    },
+    {
+      "id": "message-without-delivery",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": null
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message delivery must be a session delivery"
+    },
+    {
+      "id": "message-digest-mismatch",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "contentDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message contentDigest must name the content's digest"
+    },
+    {
+      "id": "message-content-too-large",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "contentRef": {
+          "byteLength": 65537
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "contentRef exceeds 65536 bytes"
+    },
+    {
+      "id": "message-claimed-without-target",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message must fix its target once its delivery is claimed"
+    },
+    {
+      "id": "message-accepted-without-input",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message names its target's input exactly once accepted"
+    },
+    {
+      "id": "message-planned-with-input",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "inputId": "message-1:input"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team message names its target's input exactly once accepted"
+    },
+    {
+      "id": "message-target-empty",
+      "domain": "team_message",
+      "template": "team_message",
+      "patch": {
+        "targetSessionId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "targetSessionId must be a non-empty string"
+    },
+    {
+      "id": "plan-start",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "plan-approved",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "plan-rejected-with-feedback",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "decision": "rejected",
+        "run": {
+          "state": "settled"
+        },
+        "feedbackRef": {
+          "resourceId": "feedback-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 80,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "plan-withdrawn",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "plan-extra-key",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "extra": "x"
+      },
+      "valid": false,
+      "start": false,
+      "error": "exactly"
+    },
+    {
+      "id": "plan-member-leader",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "member": "leader"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan member cannot be the leader"
+    },
+    {
+      "id": "plan-member-uppercase",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "member": "Bob"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan member must be dash-separated lowercase letters and digits"
+    },
+    {
+      "id": "plan-run-admitted",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "run": {
+          "state": "admitted"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan run must be waiting or settled or cancelled"
+    },
+    {
+      "id": "plan-run-with-delivery",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "planned"
+          }
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan run must be purely logical"
+    },
+    {
+      "id": "plan-decision-unknown",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "decision": "deferred",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan decision must be approved or rejected"
+    },
+    {
+      "id": "plan-waiting-decided",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "decision": "approved"
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan has a decision exactly once its run settled"
+    },
+    {
+      "id": "plan-settled-undecided",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan has a decision exactly once its run settled"
+    },
+    {
+      "id": "plan-cancelled-decided",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "decision": "rejected",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan has a decision exactly once its run settled"
+    },
+    {
+      "id": "plan-feedback-without-decision",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "feedbackRef": {
+          "resourceId": "feedback-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 80,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "Team plan feedback comes only with a decision"
+    },
+    {
+      "id": "plan-revision-zero",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "planRevision": 0
+      },
+      "valid": false,
+      "start": false,
+      "error": "planRevision must be an integer from 1"
+    },
+    {
+      "id": "plan-too-large",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "planRef": {
+          "byteLength": 65537
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "planRef exceeds 65536 bytes"
+    },
+    {
+      "id": "plan-feedback-too-large",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        },
+        "feedbackRef": {
+          "resourceId": "feedback-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 65537,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": false,
+      "start": false,
+      "error": "feedbackRef exceeds 65536 bytes"
+    },
+    {
+      "id": "plan-request-empty",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "patch": {
+        "requestId": ""
+      },
+      "valid": false,
+      "start": false,
+      "error": "requestId must be a non-empty string"
+    }
+  ],
+  "successors": [
+    {
+      "id": "state-join-one",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {},
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": true
+    },
+    {
+      "id": "state-join-second",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": true
+    },
+    {
+      "id": "state-join-two-at-once",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {},
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": false
+    },
+    {
+      "id": "state-join-while-closing",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "lifecycle": "closing"
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2,
+        "lifecycle": "closing"
+      },
+      "valid": false
+    },
+    {
+      "id": "state-join-and-close",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {},
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2,
+        "lifecycle": "closing"
+      },
+      "valid": false
+    },
+    {
+      "id": "state-close",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2,
+        "lifecycle": "closing"
+      },
+      "valid": true
+    },
+    {
+      "id": "state-delete",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2,
+        "lifecycle": "closing"
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2,
+        "lifecycle": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "state-delete-while-active",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2,
+        "lifecycle": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "state-reopen",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "lifecycle": "closing"
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "id": "state-stay-active",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": true
+    },
+    {
+      "id": "state-deleted-restated",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "lifecycle": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "after": {
+        "lifecycle": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "state-rename",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {},
+      "after": {
+        "name": "other-team"
+      },
+      "valid": false
+    },
+    {
+      "id": "state-change-lead",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {},
+      "after": {
+        "leadSessionId": "session-other"
+      },
+      "valid": false
+    },
+    {
+      "id": "state-reorder-members",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "after": {
+        "members": [
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          },
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": false
+    },
+    {
+      "id": "state-change-member",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": false
+    },
+    {
+      "id": "state-replace-member",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "carol",
+            "childRunId": "run-3",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "valid": false
+    },
+    {
+      "id": "state-drop-member",
+      "domain": "team_state",
+      "template": "team_state",
+      "before": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          },
+          {
+            "name": "bob",
+            "childRunId": "run-2",
+            "planModeRequired": true
+          }
+        ],
+        "membershipRevision": 3
+      },
+      "after": {
+        "members": [
+          {
+            "name": "alice",
+            "childRunId": "run-1",
+            "planModeRequired": false
+          }
+        ],
+        "membershipRevision": 2
+      },
+      "valid": false
+    },
+    {
+      "id": "task-claim",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {},
+      "after": {
+        "status": "in_progress",
+        "owner": "alice"
+      },
+      "valid": true
+    },
+    {
+      "id": "task-complete",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "in_progress",
+        "owner": "alice"
+      },
+      "after": {
+        "status": "completed",
+        "owner": "alice"
+      },
+      "valid": true
+    },
+    {
+      "id": "task-reopen",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "completed",
+        "owner": "alice"
+      },
+      "after": {
+        "status": "pending",
+        "owner": "alice"
+      },
+      "valid": true
+    },
+    {
+      "id": "task-reassign",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "in_progress",
+        "owner": "alice"
+      },
+      "after": {
+        "status": "in_progress",
+        "owner": "bob"
+      },
+      "valid": true
+    },
+    {
+      "id": "task-edit",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {},
+      "after": {
+        "subject": "Audit the whole diff",
+        "activeForm": "Auditing",
+        "descriptionRef": {
+          "resourceId": "description-2",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 50,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "task-add-blocker",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {},
+      "after": {
+        "blockedBy": ["task-0"]
+      },
+      "valid": true
+    },
+    {
+      "id": "task-append-blocker",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "blockedBy": ["task-0"]
+      },
+      "after": {
+        "blockedBy": ["task-0", "task-2"]
+      },
+      "valid": true
+    },
+    {
+      "id": "task-drop-blocker",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "blockedBy": ["task-0"]
+      },
+      "after": {
+        "blockedBy": []
+      },
+      "valid": false
+    },
+    {
+      "id": "task-reorder-blockers",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "blockedBy": ["task-0", "task-2"]
+      },
+      "after": {
+        "blockedBy": ["task-2", "task-0"]
+      },
+      "valid": false
+    },
+    {
+      "id": "task-renumber",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {},
+      "after": {
+        "number": 2
+      },
+      "valid": false
+    },
+    {
+      "id": "task-move-team",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {},
+      "after": {
+        "teamId": "team-2"
+      },
+      "valid": false
+    },
+    {
+      "id": "task-delete",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {},
+      "after": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "task-delete-claimed",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "in_progress",
+        "owner": "alice"
+      },
+      "after": {
+        "status": "deleted",
+        "owner": "alice",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "task-deleted-restated",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "after": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "task-deleted-edited",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "after": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        },
+        "subject": "Something else"
+      },
+      "valid": false
+    },
+    {
+      "id": "task-undelete",
+      "domain": "team_task",
+      "template": "team_task",
+      "before": {
+        "status": "deleted",
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "id": "message-claim",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "valid": true
+    },
+    {
+      "id": "message-accept",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "valid": true
+    },
+    {
+      "id": "message-consume",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "valid": true
+    },
+    {
+      "id": "message-cancel",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "message-unknown-accepted",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "unknown"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "valid": true
+    },
+    {
+      "id": "message-skip-to-accepted",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "valid": false
+    },
+    {
+      "id": "message-retarget",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-alice"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepting"
+          }
+        },
+        "targetSessionId": "session-bob"
+      },
+      "valid": false
+    },
+    {
+      "id": "message-reinput",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "accepted"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:input"
+      },
+      "after": {
+        "run": {
+          "delivery": {
+            "target": "session",
+            "state": "consumed"
+          }
+        },
+        "targetSessionId": "session-alice",
+        "inputId": "message-1:other"
+      },
+      "valid": false
+    },
+    {
+      "id": "message-change-content",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "contentRef": {
+          "resourceId": "message-2",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 20,
+          "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "message-change-kind",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "kind": "task_assignment"
+      },
+      "valid": false
+    },
+    {
+      "id": "message-change-recipient",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "to": "bob"
+      },
+      "valid": false
+    },
+    {
+      "id": "message-change-team",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "teamId": "team-2"
+      },
+      "valid": false
+    },
+    {
+      "id": "message-change-call",
+      "domain": "team_message",
+      "template": "team_message",
+      "before": {},
+      "after": {
+        "run": {
+          "executionCallId": "call-send-2"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "plan-approve",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {},
+      "after": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "plan-reject-with-feedback",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {},
+      "after": {
+        "decision": "rejected",
+        "run": {
+          "state": "settled"
+        },
+        "feedbackRef": {
+          "resourceId": "feedback-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 80,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "plan-withdraw",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "plan-decided-restated",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "after": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "plan-change-decision",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "after": {
+        "decision": "rejected",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "plan-add-feedback-later",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "after": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        },
+        "feedbackRef": {
+          "resourceId": "feedback-1",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 80,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "plan-decide-withdrawn",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {
+        "run": {
+          "state": "cancelled"
+        }
+      },
+      "after": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "plan-reopen",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {
+        "decision": "approved",
+        "run": {
+          "state": "settled"
+        }
+      },
+      "after": {},
+      "valid": false
+    },
+    {
+      "id": "plan-change-revision",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {},
+      "after": {
+        "planRevision": 2
+      },
+      "valid": false
+    },
+    {
+      "id": "plan-change-plan",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {},
+      "after": {
+        "planRef": {
+          "resourceId": "plan-2",
+          "kind": "managed-team-content",
+          "schemaVersion": 1,
+          "byteLength": 300,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "plan-change-member",
+      "domain": "team_plan",
+      "template": "team_plan",
+      "before": {},
+      "after": {
+        "member": "alice"
+      },
+      "valid": false
+    }
+  ]
+}

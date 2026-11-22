@@ -8,6 +8,8 @@ import type { ReactNode } from 'react';
 import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -23,6 +25,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -32,13 +35,17 @@ import type {
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSession,
+  DaemonSessionClient,
+  DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
   DaemonSessionStatsStatus,
+  DaemonSessionArtifact,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -93,6 +100,20 @@ export interface DaemonStandaloneConnectionState {
   errorCode?: string;
 }
 
+export interface DaemonWorkflowMode {
+  requested: boolean;
+  available: boolean;
+  effective: boolean;
+  reason?: string;
+}
+
+export type DaemonWorkflowModeStatus =
+  | 'unbound'
+  | 'unknown'
+  | 'syncing'
+  | 'ready'
+  | 'unsupported';
+
 export interface DaemonConnectionState {
   status: DaemonConnectionStatus;
   runtimeStopped?: boolean;
@@ -130,6 +151,9 @@ export interface DaemonConnectionState {
   models?: DaemonModelInfo[];
   currentModel?: string;
   reasoning?: DaemonReasoningControls;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
   currentMode?: string;
   planExecutionMode?: string;
   displayName?: string;
@@ -139,6 +163,8 @@ export interface DaemonConnectionState {
   /** Authoritative Goal v2 state for the current session. */
   goalState?: GoalSnapshotV2;
   backgroundTurn?: DaemonBackgroundTurn;
+  /** Browser-owned send, including the gap before an authoritative user echo. */
+  localPrompt?: { sessionId: string; startedAt: number };
   /** Stops a lagging live-state snapshot from reviving the finished execution. */
   finishedBackgroundTurnId?: string;
   /** Local monotonic time; orders background events against live-state requests. */
@@ -154,11 +180,42 @@ export interface DaemonConnectionState {
   loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
+  /**
+   * Restored artifact snapshot embedded in the load response. Available before
+   * the replay renders so a session-level artifact entry can appear early;
+   * live updates still come from the gated artifact fetch.
+   */
+  restoredArtifacts?: DaemonSessionArtifact[];
+  /**
+   * Session the restoredArtifacts snapshot belongs to. The optimistic session
+   * switch moves sessionId before the new restore lands, so consumers must
+   * only use the snapshot when this matches the current sessionId — otherwise
+   * the previous session's artifacts leak under the new one.
+   */
+  restoredArtifactsSessionId?: string;
+  /**
+   * Artifact count captured from the session-list summary at click time, so
+   * the header artifact entry can show it before the load response lands.
+   * A hint only: the load-embedded snapshot and the gated fetch supersede it,
+   * and the provider clears it once authoritative data commits.
+   */
+  artifactCountHint?: number;
+  /**
+   * Session the artifactCountHint belongs to. Same keying contract as
+   * restoredArtifactsSessionId: consumers must only use the hint when this
+   * matches the current sessionId.
+   */
+  artifactCountHintSessionId?: string;
   error?: string;
   /** Latest HTTP error status kept for diagnostics; use missingSession for UI. */
   errorStatus?: number;
   /** True only when the server confirmed the current session is missing. */
   missingSession?: boolean;
+  /**
+   * True while the connection is parked on the daemon's terminal 409
+   * `session_archived` answer for the session it tried to load.
+   */
+  sessionArchived?: boolean;
 }
 
 export interface DaemonReasoningControls {
@@ -276,6 +333,12 @@ export interface DaemonPromptSettledEvent {
   sessionId: string;
   promptId: string;
   outcome: DaemonPromptSettlementOutcome;
+  /**
+   * The client that submitted the prompt, from the terminal frame's
+   * envelope. Lets a submitter recognise its own turn when the admission
+   * response never reached it.
+   */
+  originatorClientId?: string;
   /** Daemon terminal reason. Present for completed and cancelled turns. */
   stopReason?: string;
   error?: {
@@ -308,6 +371,7 @@ export type DaemonNoticeOperation =
   | 'send_shell_command'
   | 'switch_model'
   | 'set_reasoning_effort'
+  | 'set_workflow_mode'
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
@@ -317,6 +381,7 @@ export type DaemonNoticeOperation =
   | 'create_session'
   | 'close_session'
   | 'rename_session'
+  | 'bind_session_pr'
   | 'release_session'
   | 'list_sessions'
   | 'load_context'
@@ -340,6 +405,8 @@ export type DaemonNoticeOperation =
   | 'generate_session_content'
   | 'btw_session'
   | 'branch_session'
+  | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -401,7 +468,14 @@ export interface DaemonCommandInfo {
 export interface SendPromptOptions {
   /** Original text declared at the user submission boundary, before host preparation. */
   submittedPrompt?: string;
+  source?: 'mcp-app';
   optimisticUserMessage?: boolean;
+  /**
+   * Existing transcript user block the admitted prompt binds to. Needed when
+   * `optimisticUserMessage: false` reuses the block a failed attempt already
+   * appended, so admission still has a block to bind.
+   */
+  bindBlockId?: string;
   images?: DaemonPromptImage[];
   files?: DaemonPromptFile[];
   inputAnnotations?: DaemonInputAnnotation[];
@@ -413,17 +487,21 @@ export interface SendPromptOptions {
   retry?: boolean;
   /** Fired after local validation, immediately before dispatch to the daemon. */
   onAdmissionStarted?: () => void;
+  /** Revalidates the caller before every HTTP attempt, including client recovery. */
+  beforeDispatch?: (clientId: string | undefined) => void;
   /**
    * Fired once the daemon has ACCEPTED the prompt (admission), before the turn
    * runs to completion. Lets a caller act on "the prompt reached the session"
    * without waiting for the whole turn — e.g. the scheduled-tasks "run now",
    * which records the run at admission so a long/stalled turn or a closed tab
-   * can't lose the record.
+   * can't lose the record. Carries the daemon's id for the prompt, the key
+   * its terminal `turn_complete` / `turn_error` settles under.
    */
-  onAdmitted?: () => void;
+  onAdmitted?: (admission: { promptId: string }) => void;
 }
 
-export interface SubmitPromptOptions extends SendPromptOptions {
+export interface SubmitPromptOptions
+  extends Omit<SendPromptOptions, 'beforeDispatch' | 'source' | 'bindBlockId'> {
   sessionId?: string;
   signal?: AbortSignal;
 }
@@ -434,6 +512,8 @@ export interface PendingPromptActionOptions {
 
 export interface GetTasksActionOptions {
   silent?: boolean;
+  /** Also list the sends the daemon reports back to this session. */
+  includeSubSessions?: boolean;
 }
 
 export interface DaemonPromptImage {
@@ -506,7 +586,7 @@ export interface DaemonSessionActions {
     requestStartedAt?: number,
   ): void;
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
-  continueSession(): Promise<void>;
+  continueSession(options?: { confirmCancellation?: string }): Promise<void>;
   /**
    * Non-blocking prompt submission. POSTs to the daemon and returns
    * immediately with the `promptId`. The daemon queues the prompt in its
@@ -517,8 +597,38 @@ export interface DaemonSessionActions {
     text: string,
     options?: SubmitPromptOptions,
   ): Promise<SubmitPromptResult>;
+  /**
+   * Admission-only dispatch to a session created for a first prompt whose
+   * submitter navigated away during creation. The client is not the
+   * provider's current session: nothing is written to the transcript store,
+   * prompt status, or connection. The turn runs on the daemon after the
+   * client detaches; a later loadSession attaches fresh.
+   */
+  sendDetachedPrompt(
+    session: DaemonSessionClient,
+    text: string,
+    options?: Pick<
+      SendPromptOptions,
+      | 'submittedPrompt'
+      | 'images'
+      | 'files'
+      | 'inputAnnotations'
+      | 'retry'
+      | 'onAdmissionStarted'
+      | 'onAdmitted'
+    >,
+  ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
+  refreshModels(
+    beforeRefresh?: (target: {
+      workspaceCwd: string;
+      sessionId?: string;
+    }) => void | Promise<void>,
+    options?: { reloadProviders?: boolean },
+  ): Promise<void>;
+
+  setWorkflowMode(requested: boolean): Promise<void>;
   setReasoningEffort(
     value: ReasoningSelection,
     opts?: { persist?: boolean },
@@ -549,6 +659,9 @@ export interface DaemonSessionActions {
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      /** Artifact count from the clicked session's list summary, shown in
+       * the header entry before the load response lands. Omit when unknown. */
+      artifactCountHint?: number;
     },
   ): Promise<void>;
   /** `memory` replay is reserved for the provider's live-journal repair. */
@@ -579,16 +692,34 @@ export interface DaemonSessionActions {
    * `options.modelServiceId` is a standalone-only atomic create override.
    *
    * `options.sourceType` records immutable creator attribution.
+   *
+   * `options.keepOnNavigation` is for first-prompt creation: when the user
+   * navigates away while the detached create is in flight, return the created
+   * client without binding the connection instead of detaching it and
+   * throwing, so the caller can still dispatch the submitted prompt.
+   * `options.navigationOutcome` reports whether the connection was bound
+   * (`bound: false` only on the keepOnNavigation path).
    */
   createSession(options?: {
     workspaceCwd?: string;
     getCurrentWorkspaceCwd?: () => string | undefined;
     sessionContext?: DaemonProductSessionContext;
     modelServiceId?: string;
+    startupConfig?: CreateSessionRequest['startupConfig'];
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
     branch?: { name: string };
+    keepOnNavigation?: boolean;
+    navigationOutcome?: { bound: boolean };
+    /**
+     * Draft generation that started this creation, with a live reader. A
+     * later create resets the shared navigation markers, so the bind
+     * decision also compares generations: a new draft means the originating
+     * submission was superseded even when the view looks session-less again.
+     */
+    sourceVersion?: number;
+    getCurrentSourceVersion?: () => number;
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(options?: { dropSessionContext?: boolean }): Promise<void>;
@@ -596,7 +727,10 @@ export interface DaemonSessionActions {
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
   refreshCommands(): Promise<void>;
-  getContext(): Promise<DaemonSessionContextStatus>;
+  getContext(opts?: {
+    /** Rethrow transient failures without recording a notice. */
+    silent?: boolean;
+  }): Promise<DaemonSessionContextStatus>;
   getContextUsage(opts?: {
     detail?: boolean;
     /** Reconcile composer counters after compression, without changing billing usage. */
@@ -606,16 +740,41 @@ export interface DaemonSessionActions {
     silent?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
   renameSession(displayName: string): Promise<SessionMetadataResult>;
+  /** Manually bind a GitHub PR to the current session (supplementary registration). */
+  bindSessionPr(
+    pr: Omit<DaemonSessionPrInfo, 'issues'>,
+  ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
+  /**
+   * Report a per-turn satisfied/not-satisfied mark to telemetry.
+   * Best-effort: with no live session this is a no-op, and failures are
+   * logged, never surfaced as notices — the local mark never depends on
+   * the outcome.
+   */
+  rateAssistantTurn(promptId: string, rating: 'up' | 'down'): Promise<void>;
   generateSessionContent(
     prompt: string,
     opts?: { signal?: AbortSignal },
   ): AsyncGenerator<DaemonSessionGenerationEvent>;
-  getRewindSnapshots(): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
+  getRewindSnapshots(opts?: {
+    /** Rethrow failures raw instead of recording a notice; for best-effort
+     * callers that fall back on their own. */
+    silent?: boolean;
+  }): Promise<{ snapshots: DaemonRewindSnapshotInfo[] }>;
   rewindSession(
     promptId: string,
-    opts?: { rewindFiles?: boolean },
+    opts?: {
+      rewindFiles?: boolean;
+      /** Rethrow failures raw instead of recording a notice; for best-effort
+       * callers that fall back on their own. */
+      silent?: boolean;
+    },
   ): Promise<DaemonRewindResult>;
+  btwSessionStream(
+    question: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<{ type: 'answer' | 'done'; answer: string }>;
+  /** Legacy JSON action retained for existing daemon-react-sdk consumers. */
   btwSession(
     question: string,
     opts?: { signal?: AbortSignal },
@@ -652,6 +811,16 @@ export interface DaemonSessionActions {
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
   /**
+   * Ask the daemon to deliver the queued mid-turn messages now, cutting short
+   * a model response that a foreground turn is streaming, unless it has
+   * started a tool call.
+   * Pre-flight the daemon's `session_mid_turn_send_now` capability: older
+   * daemons lack the route.
+   */
+  sendMidTurnMessagesNow(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonSendMidTurnMessagesNowResult>;
+  /**
    * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
    * daemon. Resolves `undefined` (never throws/raises a notice) when there
    * is no session or the query fails — callers preserve current state.
@@ -671,6 +840,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(opts?: GetTasksActionOptions): Promise<DaemonSessionTasksStatus>;
+  getTaskRuntime(taskId: string): Promise<DaemonSessionTaskRuntimeStatus>;
   getWorkflowTasks(
     opts?: GetTasksActionOptions,
   ): Promise<DaemonSessionWorkflowTasksStatus>;
@@ -727,6 +897,12 @@ export interface DaemonSessionActions {
     switchStarted: boolean;
     sourceWarnings?: string[];
   }>;
+  /** "Create branch here" on the session's detached managed worktree. */
+  createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
@@ -749,6 +925,11 @@ export interface DaemonWorkspaceEventSignals {
   extensionsVersion: number;
   artifactsVersion: number;
   sourcesVersion?: number;
+  /**
+   * Per caller session: how many times a send it made that the daemon
+   * reports back started or settled. Re-read its sub-session tasks on change.
+   */
+  subSessionTaskVersions?: Record<string, number>;
   lastExtensionChange?: {
     status?:
       | 'installed'
@@ -792,4 +973,5 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  reconcilePromptActivity?: boolean;
 }

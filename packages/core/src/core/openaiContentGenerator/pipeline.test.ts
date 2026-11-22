@@ -25,6 +25,7 @@ import {
 import { OpenAIContentConverter } from './converter.js';
 import { toolCallArgumentsWereIncomplete } from '../incomplete-tool-call-args.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import {
@@ -58,10 +59,13 @@ import {
 } from '../../providers/provider-config.js';
 import { DeepSeekOpenAICompatibleProvider } from './provider/deepseek.js';
 import { fnCall } from '../../test-utils/model-fixtures.js';
+import { retryContext } from '../../utils/retryContext.js';
 
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+/** Span attribute writes made through the attempt handle, keyed as recorded. */
+const mockSpanAttributes = vi.hoisted(() => new Map<string, unknown>());
 
 vi.mock('./converter.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./converter.js')>();
@@ -257,6 +261,11 @@ function expectStopWithUsage(response: GenerateContentResponse) {
 }
 
 describe('ContentGenerationPipeline', () => {
+  const httpResponse = (
+    headers: Record<string, string>,
+    body: ReadableStream | null = null,
+  ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
+
   let pipeline: ContentGenerationPipeline;
   let mockConfig: PipelineConfig;
   let mockProvider: OpenAICompatibleProvider;
@@ -268,6 +277,9 @@ describe('ContentGenerationPipeline', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockSpanAttributes.clear();
+    activeHandle = attemptHandle();
+    mockReportOpenAiRequest.mockReturnValue(activeHandle);
 
     mockClient = {
       chat: {
@@ -320,6 +332,26 @@ describe('ContentGenerationPipeline', () => {
   });
 
   const createMock = () => mockClient.chat.completions.create as Mock;
+
+  /**
+   * The handle the pipeline is given for one attempt. `recordResponseAttribute`
+   * is the only member the OpenRouter capture uses, so it records into a map
+   * rather than standing up a real span.
+   */
+  const attemptHandle = () => ({
+    controller: {
+      recordResponseAttribute: (
+        handle: unknown,
+        key: string,
+        value: unknown,
+      ) => {
+        if (handle !== activeHandle) return;
+        mockSpanAttributes.set(key, value);
+      },
+    },
+    generation: 1,
+  });
+  let activeHandle: ReturnType<typeof attemptHandle> | undefined;
 
   /** The body the SDK received on its `index`-th create() call. */
   const sentBody = (index = 0) => createMock().mock.calls.at(index)![0];
@@ -455,6 +487,34 @@ describe('ContentGenerationPipeline', () => {
   /** Makes every chunk conversion return `response`. */
   const convertEveryChunkTo = (response: GenerateContentResponse) =>
     (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(response);
+
+  /**
+   * Runs `body` with the real chunk converter installed on the module-level
+   * stub, then puts the factory default back. That stub is shared with every
+   * later test in this file and the top-level `vi.clearAllMocks()` clears
+   * calls without uninstalling implementations, so an explicit restore is what
+   * keeps the suite order-independent.
+   */
+  async function withRealChunkConverter(
+    body: () => Promise<void>,
+    parsingOptions: Record<string, boolean> = {
+      contentOnlyThinkingTagLeaks: true,
+    },
+  ) {
+    const actual =
+      await vi.importActual<typeof import('./converter.js')>('./converter.js');
+    vi.mocked(
+      OpenAIContentConverter.convertOpenAIChunkToLlm,
+    ).mockImplementation(actual.OpenAIContentConverter.convertOpenAIChunkToLlm);
+    mockProvider.getResponseParsingOptions = vi
+      .fn()
+      .mockReturnValue(parsingOptions);
+    try {
+      await body();
+    } finally {
+      vi.mocked(OpenAIContentConverter.convertOpenAIChunkToLlm).mockReset();
+    }
+  }
 
   /** Streams `chunks` (an Error item throws) and collects what is yielded. */
   const streamed = async (...chunks: unknown[]) =>
@@ -870,28 +930,158 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('never ships the max tier to the tiered DashScope family end to end', async () => {
-      // `/effort max` persists the tier in config, so a raw pass-through 400s
-      // on this and every later request of the session: through the real
-      // provider, the wire body must carry the tier capped at xhigh.
+    it.each([
+      'qwen3.8-max',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])(
+      'never ships the max tier to the tiered DashScope family end to end (%s)',
+      async (model) => {
+        // `/effort max` persists the tier in config, so a raw pass-through 400s
+        // on this and every later request of the session: through the real
+        // provider, the wire body must carry the tier capped at xhigh.
+        const apiCall = await executeWith(
+          {
+            baseUrl: DASHSCOPE_URL,
+            model,
+            authType: AuthType.QWEN_OAUTH,
+            reasoning: { effort: 'max' },
+          },
+          userRequest(model, {
+            thinkingConfig: { includeThoughts: true },
+          }),
+          'prompt-id',
+          DashScopeOpenAICompatibleProvider,
+        );
+
+        // The tier ships alone — no competing nested knob.
+        expectFields(apiCall, {
+          reasoning_effort: 'xhigh',
+          reasoning: undefined,
+        });
+      },
+    );
+
+    it('clamps qwen4 non-thinking output to the 131072 range', async () => {
+      // The auto budget is sized for thinking mode (262144, ceiling-exempt).
+      // With thinking disabled the non-thinking cap is 131072, so a short
+      // prompt must not ship the thinking-sized max_tokens (400 range error).
       const apiCall = await executeWith(
         {
           baseUrl: DASHSCOPE_URL,
-          model: 'qwen3.8-max',
+          model: 'qwen4-max',
           authType: AuthType.QWEN_OAUTH,
-          reasoning: { effort: 'max' },
+          samplingParams: undefined,
+          reasoning: false,
         },
-        userRequest('qwen3.8-max', {
-          thinkingConfig: { includeThoughts: true },
-        }),
+        userRequest('qwen4-max'),
         'prompt-id',
         DashScopeOpenAICompatibleProvider,
       );
-
-      // The tier ships alone — no competing nested knob.
       expectFields(apiCall, {
-        reasoning_effort: 'xhigh',
-        reasoning: undefined,
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('keeps the qwen4 thinking-mode output budget above the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: undefined,
+          reasoning: { effort: 'high' },
+        },
+        userRequest('qwen4-max', { thinkingConfig: { includeThoughts: true } }),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'high',
+        max_tokens: 262144,
+      });
+    });
+
+    it('clamps an explicit user max_tokens to the non-thinking cap when thinking is off', async () => {
+      // samplingParams merge into the base request before the reasoning
+      // shaping, so the clamp bounds an explicit user ceiling too — it only
+      // shrinks the value, never raises it.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_tokens: 131072,
+      });
+    });
+
+    it('clamps a provider output-budget key to the non-thinking cap when thinking is off', async () => {
+      // The budget can travel under max_completion_tokens (samplingParams
+      // escape hatch) instead of max_tokens; the non-thinking clamp must
+      // bound that key too, not just max_tokens.
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 262144 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 131072,
+      });
+    });
+
+    it('keeps an explicit provider output-budget key below the non-thinking cap', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 50000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 50000,
+      });
+    });
+
+    it('does not apply the qwen4-max non-thinking cap to other qwen4 routes', async () => {
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen4-plus',
+          authType: AuthType.QWEN_OAUTH,
+          samplingParams: { max_completion_tokens: 200000 },
+          reasoning: false,
+        },
+        userRequest('qwen4-plus'),
+        'prompt-id',
+        DashScopeOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        reasoning_effort: 'none',
+        max_completion_tokens: 200000,
       });
     });
 
@@ -1184,6 +1374,103 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
+    it('returns a required-thinking error on a single attempt', async () => {
+      const model = 'qwen3.8-max-preview';
+      pipelineWith({
+        baseUrl: TOKEN_PLAN_URL,
+        model,
+        extra_body: { enable_thinking: true },
+      });
+      providerAdds({ enable_thinking: true });
+      mockCompletion();
+      const error = requiredThinkingError();
+      createMock().mockRejectedValueOnce(error);
+      const context = {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      };
+
+      await expect(
+        retryContext.run(context, () =>
+          pipeline.execute(sideQuery(model), 'side-query:mod-model-complete'),
+        ),
+      ).rejects.toBe(error);
+      expect(createMock()).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ reasoning_effort: 'none' }),
+        expect.objectContaining({ maxRetries: 0 }),
+      );
+    });
+
+    it.each([
+      ['max_tokens', 111, 8],
+      ['max_completion_tokens', 111, 8],
+      ['max_new_tokens', 4, 4],
+    ])(
+      'keeps the isolated Mod request envelope and bounds %s',
+      async (outputField, configuredLimit, expectedLimit) => {
+        const body = await retryContext.run(
+          {
+            attempt: 1,
+            retryTotalDelayMs: 0,
+            requestSetupMs: 0,
+            singleAttempt: true,
+          },
+          () =>
+            executeWith(
+              {
+                samplingParams: {
+                  messages: [{ role: 'system', content: 'sampling override' }],
+                  enable_search: true,
+                  n: 2,
+                },
+                extra_body: {
+                  model: 'different-model',
+                  messages: [{ role: 'user', content: 'body override' }],
+                  tools: [{ type: 'function' }],
+                  functions: [{ name: 'legacy-function' }],
+                  web_search_options: { search_context_size: 'low' },
+                  search_options: { forced_search: true },
+                  stream: true,
+                  fixture_option: 'preserved',
+                  [outputField]: configuredLimit,
+                },
+              },
+              userRequest('requested-model', { maxOutputTokens: 8 }),
+              'side-query:mod-model-complete',
+              DefaultOpenAICompatibleProvider,
+            ),
+        );
+
+        expectFields(body, {
+          model: 'requested-model',
+          messages: [{ role: 'user', content: 'Hello' }],
+          tools: undefined,
+          functions: undefined,
+          enable_search: undefined,
+          web_search_options: undefined,
+          search_options: undefined,
+          n: undefined,
+          stream: false,
+          fixture_option: 'preserved',
+          max_tokens: undefined,
+          [outputField]: expectedLimit,
+        });
+      },
+    );
+
+    it('keeps configured hosted search options for ordinary requests', async () => {
+      const search = { search_context_size: 'low' };
+      const body = await executeWith(
+        { extra_body: { web_search_options: search } },
+        userRequest(),
+        'normal-prompt',
+        DefaultOpenAICompatibleProvider,
+      );
+      expect(body['web_search_options']).toEqual(search);
+    });
+
     it.each([
       {
         name: 'preserving unrelated chat_template_kwargs',
@@ -1334,7 +1621,9 @@ describe('ContentGenerationPipeline', () => {
     async function executeWithCapability(
       capability: unknown,
       configOverrides: Partial<ContentGeneratorConfig>,
-      model = 'deepseek-v4-pro',
+      // Neutral id: the DeepSeek-V4 prefix now carries a built-in contract on
+      // every host, which would mask the declared-capability path under test.
+      model = 'capability-probe',
     ): Promise<Record<string, unknown>> {
       mockCliConfig = {
         getResolvedModelConfig: vi
@@ -1373,6 +1662,376 @@ describe('ContentGenerationPipeline', () => {
         ),
       );
 
+    async function deepSeekWire(
+      settings: Partial<ContentGeneratorConfig>,
+      capability?: unknown,
+      requestModel?: string,
+    ) {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        model: 'deepseek-v4.1-flash-1017',
+        baseUrl: 'https://api.deepseek.com/v1',
+        authType: AuthType.USE_OPENAI,
+        enableCacheControl: false,
+        samplingParams: undefined,
+        extra_body: undefined,
+        reasoning: undefined,
+        ...settings,
+      };
+      mockCliConfig = {
+        ...mockCliConfig,
+        getContentGeneratorConfig: () => mockContentGeneratorConfig,
+        getResolvedModelConfig: vi
+          .fn()
+          .mockReturnValue(
+            capability
+              ? { capabilities: { reasoning: capability } }
+              : undefined,
+          ),
+        getCliVersion: () => 'test',
+      } as unknown as Config;
+      const provider = determineProvider(
+        mockContentGeneratorConfig,
+        mockCliConfig,
+      );
+      vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+      pipeline = new ContentGenerationPipeline({
+        ...mockConfig,
+        provider,
+        cliConfig: mockCliConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      });
+      await executeOk(
+        userRequest(requestModel ?? mockContentGeneratorConfig.model),
+      );
+      return sentBody(-1);
+    }
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'thinking'],
+      [
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        'enable_thinking',
+      ],
+      [TOKEN_PLAN_URL, 'enable_thinking'],
+      [DASHSCOPE_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
+      [
+        'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+        'enable_thinking',
+      ],
+    ])(
+      'sends built-in DeepSeek selection and defaults through %s',
+      async (baseUrl, field) => {
+        for (const [reasoning, effort] of [
+          [undefined, 'high'],
+          [{ effort: 'low' }, 'low'],
+          [{ effort: 'high' }, 'high'],
+          [{ effort: 'max' }, 'max'],
+          [{ effort: 'medium' }, 'high'],
+          [{ effort: 'xhigh' }, 'high'],
+          [false, undefined],
+        ] as const) {
+          const wire = await deepSeekWire({
+            baseUrl,
+            reasoning,
+            samplingParams: { max_tokens: 64 },
+          });
+          expect(wire.model).toBe('deepseek-v4.1-flash-1017');
+          expect(wire.reasoning).toBeUndefined();
+          expect(wire.reasoning_effort).toBe(effort);
+          expect(wire.max_tokens).toBe(64);
+          expect(wire[field]).toEqual(
+            field === 'thinking'
+              ? { type: reasoning === false ? 'disabled' : 'enabled' }
+              : reasoning !== false,
+          );
+          expect(
+            wire[field === 'thinking' ? 'enable_thinking' : 'thinking'],
+          ).toBeUndefined();
+        }
+      },
+    );
+
+    it.each([
+      ['https://api.deepseek.com/v1', 'thinking'],
+      [TOKEN_PLAN_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
+    ])(
+      'preserves static overrides with built-in and legacy capabilities on %s',
+      async (baseUrl, field) => {
+        for (const capability of [
+          undefined,
+          {
+            thinking: true,
+            efforts: ['low', 'high', 'max'],
+            defaultEffort: 'high',
+            disableField: field,
+          },
+        ]) {
+          const nested = await deepSeekWire(
+            {
+              baseUrl,
+              reasoning: { effort: 'low' },
+              extra_body: { reasoning: { effort: 'max', budget_tokens: 8192 } },
+            },
+            capability,
+          );
+          expect(nested.reasoning_effort).toBe('max');
+          expect(nested.reasoning).toEqual({ budget_tokens: 8192 });
+
+          const flat = await deepSeekWire(
+            {
+              baseUrl,
+              reasoning: { effort: 'high' },
+              samplingParams: { reasoning_effort: 'low' },
+              extra_body: { reasoning: { effort: 'max' } },
+            },
+            capability,
+          );
+          expect(flat.reasoning_effort).toBe('low');
+          expect(flat.reasoning).toBeUndefined();
+
+          for (const extra_body of [
+            { reasoning_effort: 'none' },
+            field === 'thinking'
+              ? { thinking: { type: 'disabled' } }
+              : { enable_thinking: false },
+          ]) {
+            const disabled = await deepSeekWire(
+              { baseUrl, extra_body },
+              capability,
+            );
+            expect(disabled.reasoning_effort).toBeUndefined();
+            expect(disabled[field]).toEqual(
+              field === 'thinking' ? { type: 'disabled' } : false,
+            );
+          }
+        }
+      },
+    );
+
+    it('preserves a declared static effort for a newly recognized MaaS alias', async () => {
+      // The alias was not a known id before prefix recognition, so even on a
+      // MaaS host the declaration governs: the built-in normalizer must not
+      // flatten or re-tier the static nested effort.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          samplingParams: { reasoning: { effort: 'medium' } },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toEqual({ effort: 'medium' });
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it('preserves a declared configured effort for a newly recognized MaaS alias', async () => {
+      // A tier outside the declaration is dropped by the declared-capability
+      // path (the pre-PR contract); the new built-in must not normalize it
+      // into a declared tier and ship that instead.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'xhigh' },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toBeUndefined();
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'a toggle-only declaration',
+        {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+        false,
+      ],
+      ['no declaration', undefined, true],
+    ] as const)(
+      'disables a qwen4 route with %s using the knob it reads',
+      async (_label, capability, tiered) => {
+        const wire = await deepSeekWire(
+          { baseUrl: DASHSCOPE_URL, reasoning: false },
+          capability,
+          'qwen4-plus',
+        );
+        if (tiered) {
+          expect(wire.reasoning_effort).toBe('none');
+          expect(wire.enable_thinking).toBeUndefined();
+        } else {
+          expect(wire.enable_thinking).toBe(false);
+          expect(wire.reasoning_effort).toBeUndefined();
+        }
+      },
+    );
+
+    it('uses the requested wire model for DeepSeek aliases and avoids leaking its knobs', async () => {
+      const legacy = await deepSeekWire(
+        {
+          baseUrl: TOKEN_PLAN_URL,
+          reasoning: { effort: 'xhigh' },
+        },
+        undefined,
+        'deepseek-v4-pro',
+      );
+      expect(legacy.reasoning_effort).toBe('max');
+      expect(legacy.enable_thinking).toBe(true);
+      const other = await deepSeekWire(
+        {
+          baseUrl: TOKEN_PLAN_URL,
+          reasoning: { effort: 'max' },
+        },
+        undefined,
+        'other-model',
+      );
+      expect(other.thinking).toBeUndefined();
+      expect(other.enable_thinking).toBeUndefined();
+      expect(other.reasoning_effort).toBeUndefined();
+      expect(other.reasoning).toEqual({ effort: 'xhigh' });
+    });
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'resolves inferred reasoning after the %s model override',
+      async (source) => {
+        const otherModel = 'qwen2.5-coder-32b-instruct';
+        const other = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: otherModel },
+        });
+        expect(other.model).toBe(otherModel);
+        expect(other.reasoning_effort).toBeUndefined();
+        expect(other.enable_thinking).toBeUndefined();
+        expect(other.thinking).toBeUndefined();
+        expect(other.reasoning).toBeUndefined();
+
+        const deepSeek = await deepSeekWire({
+          model: otherModel,
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: 'deepseek-v4.1-flash-1017' },
+        });
+        expect(deepSeek.model).toBe('deepseek-v4.1-flash-1017');
+        expect(deepSeek.reasoning_effort).toBe('high');
+        expect(deepSeek.enable_thinking).toBe(true);
+        expect(deepSeek.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each([
+      ['deepseek-v4.1-flash-1017', 'qwen2.5-coder-32b-instruct', 'high'],
+      ['qwen2.5-coder-32b-instruct', 'deepseek-v4.1-flash-1017', undefined],
+    ])(
+      'uses extra_body model %s after sampling model %s for reasoning',
+      async (finalModel, samplingModel, effort) => {
+        const wire = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          samplingParams: { model: samplingModel },
+          extra_body: { model: finalModel },
+        });
+        expect(wire.model).toBe(finalModel);
+        expect(wire.reasoning_effort).toBe(effort);
+        expect(wire.enable_thinking).toBe(effort ? true : undefined);
+        expect(wire.reasoning).toBeUndefined();
+      },
+    );
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'respects the final model profile after a %s override',
+      async (source) => {
+        const wire = await deepSeekWire({
+          baseUrl: DASHSCOPE_URL,
+          [source]: { model: 'company-alias' },
+          reasoningSnapshot: [
+            {
+              id: 'company-alias',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: DASHSCOPE_URL,
+              reasoning: {
+                profile: 'openai-reasoning',
+                efforts: ['low', 'medium', 'high'],
+                defaultEffort: 'medium',
+              },
+            },
+          ],
+        });
+        expect(wire.model).toBe('company-alias');
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.enable_thinking).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
+
+    it('keeps an unspecified legacy DeepSeek default off the wire', async () => {
+      const wire = await deepSeekWire(
+        {},
+        {
+          thinking: true,
+          efforts: ['low', 'max'],
+          disableField: 'thinking',
+        },
+      );
+      expect(wire.reasoning_effort).toBeUndefined();
+      expect(wire.reasoning).toBeUndefined();
+    });
+
+    it.each([
+      'https://api.deepseek.com/v1',
+      'https://model-proxy.alibaba-inc.com/v1',
+    ])(
+      'keeps explicit profiles ahead of built-in DeepSeek on %s',
+      async (baseUrl) => {
+        const wire = await deepSeekWire(
+          {
+            baseUrl,
+            samplingParams: { reasoning: { effort: 'medium' } },
+          },
+          {
+            profile: 'openai-reasoning',
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+          },
+        );
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
+
+    it('honors legacy capability tier subsets after normalizing a DeepSeek alias', async () => {
+      const wire = await deepSeekWire(
+        { reasoning: { effort: 'xhigh' } },
+        {
+          thinking: true,
+          efforts: ['low', 'max'],
+          defaultEffort: 'max',
+          disableField: 'thinking',
+        },
+      );
+      expect(wire.reasoning_effort).toBe('max');
+      expect(wire.reasoning).toBeUndefined();
+    });
+
     it.each([
       [{ effort: 'max' as const }, 'max', undefined],
       [{ effort: 'low' as const }, undefined, undefined],
@@ -1398,23 +2057,33 @@ describe('ContentGenerationPipeline', () => {
       ['moonshot', 'kimi-k2.7-code-highspeed', undefined, undefined, true],
       ['moonshot', 'kimi-k2.6', undefined, 'thinking', false],
       ['deepseek', 'deepseek-v4-pro', 'low', 'thinking', false],
-      ['deepseek', 'deepseek-v4-flash', 'low', 'thinking', false],
+      ['deepseek', 'deepseek-flash', 'low', 'thinking', false],
       [std, 'qwen3.8-max', 'low', 'reasoning_effort', false],
       [std, 'qwen3.8-max-0902', 'medium', 'reasoning_effort', false],
       [std, 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
       [std, 'qwen3.7-plus', undefined, 'enable_thinking', false],
       [std, 'deepseek-v4-pro', 'high', 'enable_thinking', false],
       [std, 'deepseek-v4-pro', 'max', 'enable_thinking', false],
-      [std, 'deepseek-v4-flash', 'high', 'enable_thinking', false],
+      [std, 'qwen3.8-max', 'max', 'reasoning_effort', false],
+      [std, 'qwen3.8-flash', 'max', 'reasoning_effort', false],
+      [std, 'deepseek-v4.1-flash', 'low', 'enable_thinking', false],
+      [std, 'glm-5.2', undefined, 'enable_thinking', false],
+      [std, 'glm-5.1', undefined, 'enable_thinking', false],
+      [std, 'glm-5.3', undefined, undefined, true],
       [std, 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
       [std, 'deepseek-v4-flash-0731', 'low', 'enable_thinking', false],
       [std, 'kimi-k3', 'low', undefined, true],
       [std, 'kimi-k2.7-code', undefined, undefined, true],
       [std, 'kimi-k2.6', undefined, 'enable_thinking', false],
-      ['token-plan', 'qwen3.8-max', 'low', undefined, true],
-      ['token-plan', 'qwen3.8-max-preview', 'medium', undefined, true],
+      ['token-plan', 'qwen3.8-max', 'low', 'reasoning_effort', false],
+      ['token-plan', 'qwen3.8-max', 'max', 'reasoning_effort', false],
       ['token-plan', 'qwen3.8-flash', 'low', 'reasoning_effort', false],
+      ['token-plan', 'qwen3.8-flash', 'max', 'reasoning_effort', false],
       ['token-plan', 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
+      ['token-plan', 'deepseek-v4.1-flash', 'low', 'enable_thinking', false],
+      ['token-plan', 'glm-5.2', undefined, 'enable_thinking', false],
+      ['token-plan', 'glm-5.3', undefined, undefined, true],
+      ['token-plan', 'MiniMax-M2.5', undefined, undefined, true],
       ['coding-plan', 'qwen3.5-plus', undefined, 'enable_thinking', false],
       ['coding-plan', 'kimi-k2.5', undefined, 'enable_thinking', false],
     ] as const)(
@@ -1608,9 +2277,122 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it.each(['samplingParams', 'extra_body'] as const)(
-      'keeps native DeepSeek %s reasoning projection with a profile',
-      async (source) => {
+    it('maps qwen4 subscription effort to the qwen4 thinking_budget ladder', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen4-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 262144,
+        reasoning_effort: undefined,
+      });
+    });
+
+    it('keeps the qwen3.8 subscription budget table for qwen3.8-max', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'xhigh'],
+          defaultEffort: 'xhigh',
+          disableField: 'reasoning_effort',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'xhigh' },
+        },
+        'qwen3.8-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 32768,
+      });
+    });
+
+    it('clamps qwen4 subscription non-thinking output to the 131072 range', async () => {
+      // The subscription gateway is not DashScope-detected, yet its disable
+      // shape (enable_thinking:false) ships through the same pipeline path.
+      // The real provider sizes the thinking-mode auto budget (262144); the
+      // clamp must still bound it to the non-thinking cap or the gateway
+      // rejects the max_tokens range (400).
+      const apiCall = await executeWith(
+        {
+          baseUrl: 'https://api.qwen.ai/compatible-mode/v1',
+          model: 'qwen4-max',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          samplingParams: undefined,
+          reasoning: false,
+        },
+        userRequest('qwen4-max'),
+        'prompt-id',
+        DefaultOpenAICompatibleProvider,
+      );
+      expectFields(apiCall, {
+        enable_thinking: false,
+        max_tokens: 131072,
+      });
+    });
+
+    it('clamps legacy tiers onto the declared qwen4 ladder instead of dropping them', async () => {
+      // The presets declare efforts:['low','high','xhigh'] without a profile.
+      // A persisted `max`/`medium` must ship as xhigh/high per the documented
+      // contract, not vanish into the server default (high).
+      const capability = {
+        thinking: true,
+        efforts: ['low', 'high', 'xhigh'],
+        defaultEffort: 'high',
+        disableField: 'reasoning_effort',
+      };
+      const maxWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'max' } },
+        'qwen4-max',
+      );
+      expectFields(maxWire, { reasoning_effort: 'xhigh' });
+      const mediumWire = await executeWithCapability(
+        capability,
+        { reasoning: { effort: 'medium' } },
+        'qwen4-max',
+      );
+      expectFields(mediumWire, { reasoning_effort: 'high' });
+    });
+
+    it('keeps the drop-to-server-default semantics for non-qwen4 declarations', async () => {
+      // Profile-less legacy declarations are not re-tiered; an unsupported
+      // tier stays dropped outside the qwen4 generation.
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['low', 'high', 'xhigh'],
+          defaultEffort: 'high',
+          disableField: 'reasoning_effort',
+        },
+        { reasoning: { effort: 'max' } },
+        'capability-probe',
+      );
+      expectFields(wire, { reasoning_effort: undefined });
+    });
+
+    it.each(
+      [
+        'deepseek-v4-pro',
+        'deepseek-reasoner',
+        'deepseek-v4-flash-vision-exp',
+      ].flatMap((model) =>
+        ['samplingParams', 'extra_body'].map((source) => [model, source]),
+      ),
+    )(
+      'keeps native DeepSeek %s %s reasoning projection with a profile',
+      async (model, source) => {
         routeThrough(DeepSeekOpenAICompatibleProvider);
         const wire = await executeWithCapability(
           {
@@ -1620,12 +2402,36 @@ describe('ContentGenerationPipeline', () => {
           },
           {
             baseUrl: 'https://api.deepseek.com/v1',
-            [source]: { reasoning: { effort: 'max' } },
+            [source]: { reasoning: { effort: 'max', budget_tokens: 8192 } },
           },
+          model,
         );
-        expectFields(wire, { reasoning_effort: 'max', reasoning: undefined });
+        expectFields(wire, {
+          reasoning_effort: 'max',
+          reasoning: { budget_tokens: 8192 },
+        });
       },
     );
+
+    it('preserves another explicit profile for an unlisted official model', async () => {
+      routeThrough(DeepSeekOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        {
+          profile: 'openai-reasoning',
+          efforts: ['high', 'max'],
+          defaultEffort: 'high',
+        },
+        {
+          baseUrl: 'https://api.deepseek.com/v1',
+          samplingParams: { reasoning: { effort: 'max' } },
+        },
+        'deepseek-reasoner',
+      );
+      expectFields(wire, {
+        reasoning: { effort: 'max' },
+        reasoning_effort: undefined,
+      });
+    });
 
     it.each([
       ['https://api.deepseek.com/v1', 'openai-effort', 'reasoning_content', ''],
@@ -2201,6 +3007,134 @@ describe('ContentGenerationPipeline', () => {
     });
   });
 
+  describe('OpenRouter routing attributes (non-streaming)', () => {
+    /** Serves `completion` from an OpenRouter-configured pipeline. */
+    const completeFromOpenRouter = async (
+      completion: Record<string, unknown>,
+      headers: Record<string, string> = {},
+    ) => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(Promise.resolve(completion), {
+          withResponse: () =>
+            Promise.resolve({
+              data: completion,
+              response: httpResponse(headers),
+            }),
+        }),
+      );
+      await pipeline.execute(userRequest(), 'test-id');
+    };
+
+    it('records the X-Generation-Id response header', async () => {
+      await completeFromOpenRouter(
+        { id: 'r', choices: [{ message: { content: 'ok' } }] },
+        { 'x-generation-id': 'gen-abc123' },
+      );
+
+      expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+        'gen-abc123',
+      );
+    });
+
+    it('records the provider from the response body', async () => {
+      await completeFromOpenRouter({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'DigitalOcean',
+      });
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+        'DigitalOcean',
+      );
+    });
+
+    it('still reads the body when withResponse is unavailable', async () => {
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' } }],
+        provider: 'SiliconFlow',
+      });
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.get('openrouter.provider')).toBe('SiliconFlow');
+      expect(mockSpanAttributes.has('openrouter.generation_id')).toBe(false);
+    });
+
+    it('records nothing for a non-OpenRouter endpoint', async () => {
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+
+      await pipeline.execute(userRequest(), 'test-id');
+
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+
+    it('records nothing when the exchange is disabled for telemetry', async () => {
+      // `reportOpenAiRequest` returns undefined whenever telemetry is off, so
+      // an OpenRouter response still reaches the capture with no controller.
+      mockReportOpenAiRequest.mockReturnValue(undefined);
+      createMock().mockImplementation(() =>
+        Object.assign(
+          Promise.resolve({
+            id: 'r',
+            choices: [{ message: { content: 'ok' } }],
+            provider: 'DigitalOcean',
+          }),
+          {
+            withResponse: () =>
+              Promise.resolve({
+                data: {
+                  id: 'r',
+                  choices: [{ message: { content: 'ok' } }],
+                  provider: 'DigitalOcean',
+                },
+                response: httpResponse({ 'x-generation-id': 'gen-abc123' }),
+              }),
+          },
+        ),
+      );
+      pipelineWith({ baseUrl: OPENROUTER_URL });
+      (mockConverter.convertOpenAIResponseToLlm as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const response = await pipeline.execute(userRequest(), 'test-id');
+
+      expect(response).toBeDefined();
+      expect(mockSpanAttributes.size).toBe(0);
+    });
+  });
+
   describe('executeStream', () => {
     /** An APIPromise for `stream` whose withResponse() returns `withResponse()`. */
     const apiPromise = (
@@ -2221,11 +3155,6 @@ describe('ContentGenerationPipeline', () => {
         ),
       );
     }
-
-    const httpResponse = (
-      headers: Record<string, string>,
-      body: ReadableStream | null = null,
-    ) => ({ headers: new Headers(headers), status: 200, body }) as Response;
 
     const bodyOf = (text: string) =>
       new ReadableStream({
@@ -2661,6 +3590,268 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it.each([false, true])(
+      'preserves pending suffix text without a normal stop (transport error: %s)',
+      async (transportError) =>
+        withRealChunkConverter(async () => {
+          const error = new Error('connection reset');
+          const { items, error: observedError } = await settle(
+            await streamFrom(
+              streamOf(
+                chunkOf({ content: 'Answer.\n</thi' }),
+                ...(transportError ? [error] : []),
+              ),
+            ),
+          );
+          expect(observedError).toBe(transportError ? error : undefined);
+          expect(
+            items
+              .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+              .map((part) => part.text ?? '')
+              .join(''),
+          ).toBe('Answer.\n</thi');
+          expect(
+            items.every((item) => !item.candidates?.[0]?.finishReason),
+          ).toBe(true);
+        }),
+    );
+
+    it('withholds the pending suffix when reasoning carried a thinking tag', async () =>
+      withRealChunkConverter(async () => {
+        const { items, error: observedError } = await settle(
+          await streamFrom(
+            streamOf(
+              chunkOf({ content: 'Answer.\n</thinking>' }),
+              chunkOf({ reasoning_content: 'Let me check<think>' }),
+            ),
+          ),
+        );
+        expect(observedError).toBeUndefined();
+        expect(
+          items
+            .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+            .filter((part) => !part.thought)
+            .map((part) => part.text ?? '')
+            .join(''),
+        ).toBe('Answer.');
+      }));
+
+    /** Joined non-thought text across everything the pipeline yielded. */
+    const visibleText = (items: GenerateContentResponse[]) =>
+      items
+        .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+        .filter((part) => !part.thought)
+        .map((part) => part.text ?? '')
+        .join('');
+
+    it.each(['leak verdict', 'transport error'] as const)(
+      'keeps a stranded filter tail out of a tagged-thinking turn (%s)',
+      async (termination) =>
+        withRealChunkConverter(
+          async () => {
+            // Once the stream hands off to TaggedThinkingParser,
+            // `convertOpenAITextToParts` never calls the filter again, so
+            // whatever it withheld is stranded rather than held for this
+            // turn's end.
+            const streamError = new Error('socket reset');
+            const { items, error } = await settle(
+              await streamFrom(
+                streamOf(
+                  chunkOf({ content: 'Answer.\n</thi' }),
+                  chunkOf({ reasoning_content: ' hmm' }),
+                  chunkOf({ content: '<think>\nleaked' }),
+                  ...(termination === 'transport error' ? [streamError] : []),
+                ),
+              ),
+            );
+            if (termination === 'transport error') {
+              expect(error).toBe(streamError);
+            } else {
+              expect(error).toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+            }
+            // The prose the caller was shown survives; the stranded tag
+            // fragment does not become ordinary model prose alongside it.
+            expect(visibleText(items)).toBe('Answer.');
+          },
+          {
+            contentOnlyThinkingTagLeaks: true,
+            taggedThinkingTagsAfterReasoning: true,
+          },
+        ),
+    );
+
+    it('hands a stranded whitespace tail to the tagged-thinking takeover', async () =>
+      withRealChunkConverter(
+        async () => {
+          // The filter withholds the newline ahead of the opened think block,
+          // and the takeover never calls it again, so that hold has to be
+          // handed back here or the model's line break is lost and two prose
+          // runs are glued together.
+          const { items, error } = await settle(
+            await streamFrom(
+              streamOf(
+                chunkOf({ reasoning_content: 'Let me think.' }),
+                chunkOf({ content: 'I will help.\n' }),
+                chunkOf({ content: '<think>hmm</thinking>Answer.' }),
+              ),
+            ),
+          );
+          expect(error).toBeUndefined();
+          expect(visibleText(items)).toBe('I will help.\nAnswer.');
+        },
+        {
+          contentOnlyThinkingTagLeaks: true,
+          taggedThinkingTagsAfterReasoning: true,
+        },
+      ));
+
+    it('does not release a lone closing tag over discarded parked prose', async () =>
+      withRealChunkConverter(async () => {
+        const streamError = new Error('connection reset');
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(
+              chunkOf({
+                content: 'Answer.\n</thinking>',
+                // A tool call with no name: the converter parks the parts it
+                // cannot attribute instead of yielding them.
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call_1',
+                    type: 'function',
+                    function: { arguments: '{}' },
+                  },
+                ],
+              }),
+              streamError,
+            ),
+          ),
+        );
+        expect(error).toBe(streamError);
+        // The error handler discards the parked prose, so releasing the
+        // withheld tail would leave a bare closer as the turn's only content.
+        expect(visibleText(items)).toBe('');
+      }));
+
+    it('does not release the filter tail into a cancelled turn', async () =>
+      withRealChunkConverter(async () => {
+        const abortController = new AbortController();
+        const abortError = new Error('Aborted');
+        abortError.name = 'AbortError';
+        const mockStream = {
+          async *[Symbol.asyncIterator]() {
+            yield chunkOf({ content: 'Answer.\n</thi' });
+            abortController.abort();
+            throw abortError;
+          },
+        };
+        const { items, error } = await settle(
+          await streamFrom(mockStream, abortable(abortController.signal)),
+        );
+        expect(error).toBe(abortError);
+        expect(visibleText(items)).toBe('Answer.');
+      }));
+
+    it('does not release a tail that arrived after the finish chunk', async () =>
+      withRealChunkConverter(async () => {
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(
+              chunkOf({ content: 'Answer.' }),
+              chunkOf({}, 'stop'),
+              // Withheld by the filter, so this response carries no parts and
+              // the in-loop "continued after a finish reason" guard cannot see
+              // it; the loop ends with the tail still pending.
+              chunkOf({ content: '\n</thinking>' }),
+            ),
+          ),
+        );
+        expect(error).toBeUndefined();
+        // Nothing visible may be delivered past the terminal finish reason.
+        expect(visibleText(items)).toBe('Answer.');
+        expect(items.some((item) => item.candidates?.[0]?.finishReason)).toBe(
+          true,
+        );
+      }));
+
+    it.each(['transport error', 'clean end'] as const)(
+      'withholds the filter tail on a quarantined tag candidate (%s)',
+      async (termination) =>
+        withRealChunkConverter(async () => {
+          // The converter quarantines `{text: '<thi'}` and parks nothing, so
+          // `pendingUntrustedResponseParts` exists but is empty. One byte
+          // stream, two terminations: the leak verdict the loop ends with has
+          // to agree with the error path.
+          const streamError = new Error('connection reset');
+          const { items, error } = await settle(
+            await streamFrom(
+              streamOf(
+                chunkOf({ reasoning_content: 'Let me think.' }),
+                chunkOf({ content: '<thi' }),
+                chunkOf({ content: '\n</thinking>' }),
+                ...(termination === 'transport error' ? [streamError] : []),
+              ),
+            ),
+          );
+          if (termination === 'transport error') {
+            expect(error).toBe(streamError);
+          } else {
+            expect(error).toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+          }
+          expect(visibleText(items)).toBe('');
+        }),
+    );
+
+    it('strips a complete orphan closer when the stream ends with no finish frame', async () =>
+      withRealChunkConverter(async () => {
+        // An endpoint that closes the SSE stream after the final content delta
+        // reports no reason at all, which the converter's own mapper treats as
+        // finished normally -- so the tail must be stripped, not released.
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(chunkOf({ content: 'Answer.\n</thinking>' })),
+          ),
+        );
+        expect(error).toBeUndefined();
+        expect(visibleText(items)).toBe('Answer.');
+        // The strip happened on this route, so it owes the same telemetry the
+        // in-loop strip path emits.
+        expect(logProtocolTagSanitized).toHaveBeenCalledTimes(1);
+        expect(logProtocolTagSanitized).toHaveBeenCalledWith(
+          mockCliConfig,
+          expect.objectContaining({ tag_name: 'thinking', tool_call_count: 0 }),
+        );
+      }));
+
+    it('releases a complete orphan closer verbatim when the stream errors', async () =>
+      withRealChunkConverter(async () => {
+        // A transport failure is a truncation, not an absent reason: the
+        // complete closer already received stays in the delivered answer.
+        const streamError = new Error('socket hang up');
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(chunkOf({ content: 'Answer.\n</thinking>' }), streamError),
+          ),
+        );
+        expect(error).toBe(streamError);
+        expect(visibleText(items)).toBe('Answer.\n</thinking>');
+        expect(logProtocolTagSanitized).not.toHaveBeenCalled();
+      }));
+
+    it('leaves the chunk-converter stub unimplemented for later tests', () => {
+      // Placed after every real-converter case above: the module-level stub
+      // must be back at its factory default (a bare `vi.fn()`), or every later
+      // test in this file silently runs real chunk conversion wherever it
+      // streamed one chunk more than it queued `mockReturnValueOnce` responses
+      // for.
+      expect(
+        vi
+          .mocked(OpenAIContentConverter.convertOpenAIChunkToLlm)
+          .getMockImplementation(),
+      ).toBeUndefined();
+    });
+
     it('should redact proxy credentials from stream creation errors', async () => {
       const request = userRequest();
       const testError = new Error('407 via http://user:pass@proxy.local');
@@ -2788,6 +3979,64 @@ describe('ContentGenerationPipeline', () => {
       // streamFrom resolves create() plainly — no withResponse method.
       const results = await streamed(chunkOf({ content: 'Hello' }, 'stop'));
       expect(results.length).toBeGreaterThan(0);
+    });
+
+    describe('OpenRouter routing attributes (streaming)', () => {
+      /** Streams `chunks` from an OpenRouter-configured pipeline. */
+      const streamFromOpenRouter = async (...chunks: unknown[]) => {
+        pipelineWith({ baseUrl: OPENROUTER_URL });
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(httpResponse({}), null, streamOf(...chunks));
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+      };
+
+      it('records the X-Generation-Id response header', async () => {
+        pipelineWith({ baseUrl: OPENROUTER_URL });
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(
+          httpResponse({ 'x-generation-id': 'gen-abc123' }),
+          null,
+        );
+
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+
+        expect(mockSpanAttributes.get('openrouter.generation_id')).toBe(
+          'gen-abc123',
+        );
+      });
+
+      it('records the provider from the first chunk that carries one', async () => {
+        await streamFromOpenRouter(
+          chunkOf({ content: 'a' }, null, { provider: 'SiliconFlow' }),
+          chunkOf({ content: 'b' }, null, { provider: 'DigitalOcean' }),
+        );
+
+        expect(mockSpanAttributes.get('openrouter.provider')).toBe(
+          'SiliconFlow',
+        );
+      });
+
+      it('skips chunks without a provider until the first one that has it', async () => {
+        await streamFromOpenRouter(
+          chunkOf({ content: 'a' }),
+          chunkOf({ content: 'b' }, null, { provider: 'Parasail' }),
+        );
+
+        expect(mockSpanAttributes.get('openrouter.provider')).toBe('Parasail');
+      });
+
+      it('records nothing for a non-OpenRouter endpoint with the same fields', async () => {
+        convertEveryChunkTo(new GenerateContentResponse());
+        serveWithResponse(
+          httpResponse({ 'x-generation-id': 'gen-abc123' }),
+          null,
+          streamOf(chunkOf({ content: 'a' }, null, { provider: 'X' })),
+        );
+
+        await collect(await pipeline.executeStream(userRequest(), 'test-id'));
+
+        expect(mockSpanAttributes.size).toBe(0);
+      });
     });
 
     it('should pass abort signal to OpenAI client for streaming requests', async () => {
@@ -3962,6 +5211,24 @@ describe('ContentGenerationPipeline', () => {
       expect(responses).toHaveLength(1);
       expect(responses[0]).toBe(finalResponse);
     });
+  });
+
+  it('reports the request dispatch after building the request and before the SDK call', async () => {
+    convertEveryChunkTo(new GenerateContentResponse());
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, async () => {
+      await collect(await streamFrom(streamOf(), userRequest(), 'p'));
+    });
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    const dispatchOrder = onDispatch.mock.invocationCallOrder[0];
+    expect(
+      (mockProvider.buildRequest as Mock).mock.invocationCallOrder[0],
+    ).toBeLessThan(dispatchOrder);
+    expect(dispatchOrder).toBeLessThan(
+      createMock().mock.invocationCallOrder[0],
+    );
   });
 
   describe('openaiRequestCaptureContext integration', () => {

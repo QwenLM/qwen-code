@@ -4,6 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
+import * as outputTruncation from '../tools/truncation.js';
+import * as sizeLoggers from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
@@ -21,12 +29,12 @@ import type {
   ToolExecutionStatus,
   ToolResult,
   ToolResultDisplay,
-  ToolRegistry,
 } from '../index.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { QwenLogger } from '../telemetry/qwen-logger/qwen-logger.js';
 import { DEFAULT_MAX_SUBAGENT_DEPTH } from '../config/config.js';
+import type { SubSessionSpawnRequest } from '../config/config.js';
 import {
   ApprovalMode,
   BaseDeclarativeTool,
@@ -49,7 +57,7 @@ import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import { createMemoryScopedAgentConfig } from '../memory/memory-scoped-agent-config.js';
-import type { PermissionManager } from '../permissions/permission-manager.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -63,6 +71,9 @@ import {
   extractToolFilePaths,
   getOptInToolNotFoundMessage,
   isToolCallConcurrencySafe,
+  TOOL_DISCARDED_FOR_USER_MESSAGE,
+  TOOL_INTERRUPTED_FOR_USER_MESSAGE,
+  USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from './coreToolScheduler.js';
 import type { CallableTool, Part, PartListUnion } from '@google/genai';
 import {
@@ -87,6 +98,9 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
+import { CreateSubSessionTool } from '../tools/create-sub-session.js';
+import { ToolRegistry } from '../tools/tool-registry.js';
+import { makeFakeConfig } from '../test-utils/config.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { ShellToolParams } from '../tools/shell.js';
@@ -103,6 +117,8 @@ import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
 } from '../tools/tool-call.js';
 import {
+  getChannelWorkflowOrigin,
+  isBackgroundWorkflowBlocked,
   getInvocationContext,
   runWithInvocationContext,
   type InvocationContextV1,
@@ -122,7 +138,9 @@ import {
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
+import { ManagedRuntimeOutcomeUnknownError } from '../services/execution-environment.js';
 import { fnResponse } from '../test-utils/model-fixtures.js';
+import type { HookSpanMetadata } from '../telemetry/session-tracing.js';
 
 /** MockTool that self-identifies as an omni media-policy tool, so a
  * `fixed_policy` execution origin passes the scheduler's origin/descriptor
@@ -157,16 +175,7 @@ type ToolSpanRecord = {
   /** Metadata passed to endToolBlockedOnUserSpan. */
   blockedMetadata?: { decision?: string; source?: string };
   /** Metadata passed to endHookSpan. */
-  hookMetadata?: {
-    success?: boolean;
-    shouldProceed?: boolean;
-    shouldStop?: boolean;
-    blockType?: string;
-    hasAdditionalContext?: boolean;
-    postBatchStop?: boolean;
-    postBatchStopReason?: string;
-    error?: string;
-  };
+  hookMetadata?: HookSpanMetadata;
 };
 
 const toolSpanRecords = vi.hoisted((): ToolSpanRecord[] => []);
@@ -254,6 +263,31 @@ vi.mock('../tools/modifiable-tool.js', async (importOriginal) => {
       modifyWithEditorOverride.value?.() ?? actual.modifyWithEditor(...args),
   };
 });
+
+// The vision bridge runs after a producer already settled, so it is the
+// reachable post-settlement step that can still throw.
+const bridgeRejection = vi.hoisted(() => ({
+  value: undefined as Error | undefined,
+}));
+
+vi.mock(
+  '../services/visionBridge/tool-result-vision-bridge.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/visionBridge/tool-result-vision-bridge.js')
+      >();
+    return {
+      ...actual,
+      bridgeToolResultImages: (
+        params: Parameters<typeof actual.bridgeToolResultImages>[0],
+      ) => {
+        if (bridgeRejection.value) return Promise.reject(bridgeRejection.value);
+        return actual.bridgeToolResultImages(params);
+      },
+    };
+  },
+);
 
 vi.mock('../telemetry/sdk.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
@@ -872,12 +906,146 @@ function autoApprovePendingTools(
       autoApproveCompatiblePendingTools: (
         signal: AbortSignal,
         triggeringCallId: string,
+        isActive: () => boolean,
       ) => Promise<void>;
     }
-  ).autoApproveCompatiblePendingTools(signal, triggeringCallId);
+  ).autoApproveCompatiblePendingTools(signal, triggeringCallId, () => true);
 }
 
 describe('CoreToolScheduler', () => {
+  it.each(['success', 'sync_error', 'async_error'])(
+    'observes actual execution boundary and settled status (%s)',
+    async (mode) => {
+      const order: string[] = [];
+      const execute = vi.fn(() => {
+        order.push('execute');
+        if (mode === 'sync_error') throw new Error('sync failure');
+        return mode === 'async_error'
+          ? Promise.reject(new Error('async failure'))
+          : Promise.resolve(textResult('done'));
+      });
+      const tool = new MockTool({
+        name: 'boundary_tool',
+        execute,
+        getDefaultPermission: async () => 'allow',
+      });
+      const onSettled = vi.fn(
+        (_id: string, status: ToolExecutionStatus, duration: number) => {
+          order.push('settled');
+          expect(status).toBe(mode === 'success' ? 'success' : 'error');
+          expect(duration).toBeGreaterThanOrEqual(0);
+        },
+      );
+      const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+        makeSchedulerConfig(makeToolRegistry(tool), {
+          getApprovalMode: () => ApprovalMode.YOLO,
+        }),
+        {
+          onToolExecutionStarted: (id, epoch) => {
+            expect(id).toBe('boundary');
+            expect(epoch).toBeGreaterThan(0);
+            order.push('started');
+          },
+          onToolExecutionSettled: onSettled,
+        },
+      );
+      await scheduleBatch(
+        scheduler,
+        toolRequest('boundary', tool.name, {}, 'prompt'),
+      );
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(order).toEqual(['started', 'execute', 'settled']);
+      expect(onSettled).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps observed execution success when PostToolUse changes the final result', async () => {
+    const settled = vi.fn();
+    const tool = new MockTool({
+      name: 'post_boundary_tool',
+      execute: async () => textResult('done'),
+      getDefaultPermission: async () => 'allow',
+    });
+    const messageBus = hookBus(async (request) => {
+      if (request.eventName === 'PostToolUse') {
+        expect(settled).toHaveBeenCalledWith(
+          'post-boundary',
+          'success',
+          expect.any(Number),
+        );
+        return hookResponse('post-stop', {
+          continue: false,
+          stopReason: 'post hook stopped',
+        });
+      }
+      return hookResponse('allow', { decision: 'allow' });
+    });
+    const { scheduler, onAllToolCallsComplete } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getDisableAllHooks: () => false,
+        getMessageBus: () => messageBus,
+      }),
+      { onToolExecutionSettled: settled },
+    );
+    await scheduleBatch(
+      scheduler,
+      toolRequest('post-boundary', tool.name, {}, 'prompt'),
+    );
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+    expect(
+      firstBatch<CompletedToolCall>(onAllToolCallsComplete)[0],
+    ).toMatchObject({
+      status: 'error',
+      response: { executionStatus: 'success' },
+    });
+    expect(settled).toHaveBeenCalledOnce();
+  });
+
+  it('keeps execution observer unsettled until an abort-ignoring tool actually returns', async () => {
+    let resolveExecution!: (result: ToolResult) => void;
+    const execute = vi.fn(
+      () =>
+        new Promise<ToolResult>((resolve) => {
+          resolveExecution = resolve;
+        }),
+    );
+    const tool = new MockTool({
+      name: 'late_boundary_tool',
+      execute,
+      getDefaultPermission: async () => 'allow',
+    });
+    const started = vi.fn();
+    const settled = vi.fn();
+    const { scheduler } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+      }),
+      { onToolExecutionStarted: started, onToolExecutionSettled: settled },
+    );
+    const controller = new AbortController();
+    const scheduled = scheduler.schedule(
+      [toolRequest('late-boundary', tool.name, {}, 'prompt')],
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+    controller.abort();
+    expect(started).toHaveBeenCalledOnce();
+    expect(settled).not.toHaveBeenCalled();
+    resolveExecution(textResult('late completion'));
+    await scheduled;
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce());
+    expect(settled).toHaveBeenCalledWith(
+      'late-boundary',
+      'cancelled',
+      expect.any(Number),
+    );
+  });
+
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
     boundaryObserveMock.mockClear();
@@ -1159,7 +1327,9 @@ describe('CoreToolScheduler', () => {
 
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
+    onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
     approvalMode?: ApprovalMode;
+    getApprovalMode?: () => ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     hookSystem?: { runtimeId?: string; firePermissionDeniedEvent: Mock };
@@ -1187,16 +1357,21 @@ describe('CoreToolScheduler', () => {
       promptId: string,
       fallbackOwner?: string,
     ) => string;
-    permissionManager?: {
-      isToolEnabled: (name: string) => Promise<boolean>;
-      findMatchingDenyRule: (ctx: unknown) => string | undefined;
-      hasRelevantRules?: (ctx: unknown) => boolean;
-      evaluate?: (ctx: unknown) => Promise<PermissionDecision>;
-      hasMatchingAskRule?: (ctx: unknown) => boolean;
-    };
+    permissionManager?: Pick<
+      PermissionManager,
+      'isToolEnabled' | 'findMatchingDenyRule'
+    > &
+      Partial<
+        Pick<
+          PermissionManager,
+          'hasRelevantRules' | 'hasMatchingAskRule' | 'evaluate'
+        >
+      >;
     deferredHiddenNames?: ReadonlySet<string>;
     includeToolSearch?: boolean;
     isToolExecutionAllowed?: (name: string) => boolean;
+    isInteractive?: boolean;
+    inputFormat?: InputFormat;
   }) {
     let autoModeDenialState = options.autoModeDenialState ?? {
       ...ZERO_DENIAL_STATE,
@@ -1234,7 +1409,9 @@ describe('CoreToolScheduler', () => {
             options.deferredHiddenNames?.has(name) ?? false,
         }),
         {
-          getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
+          getApprovalMode:
+            options.getApprovalMode ??
+            (() => options.approvalMode ?? ApprovalMode.YOLO),
           setApprovalMode: options.setApprovalMode ?? vi.fn(),
           getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
           getPermissionManager: () => options.permissionManager,
@@ -1284,8 +1461,8 @@ describe('CoreToolScheduler', () => {
           getWorkspaceContext: () => ({
             isPathWithinWorkspace: () => false,
           }),
-          isInteractive: () => true,
-          getInputFormat: () => undefined,
+          isInteractive: () => options.isInteractive ?? true,
+          getInputFormat: () => options.inputFormat,
           getExperimentalZedIntegration: () => false,
           getActiveTodoWorkChainOwner: options.getActiveTodoWorkChainOwner,
           // Threaded into resolveDeferredToolCall so the bridge's exclusion
@@ -1302,6 +1479,8 @@ describe('CoreToolScheduler', () => {
         chatRecordingService: options.chatRecordingService,
         onToolResultFullTurnModel: options.onToolResultFullTurnModel,
         isToolExecutionAllowed: options.isToolExecutionAllowed,
+        onPermissionPromptTerminalSequence:
+          options.onPermissionPromptTerminalSequence,
       },
     );
 
@@ -1376,6 +1555,12 @@ describe('CoreToolScheduler', () => {
       }
     },
   );
+
+  const URL_REQUIRED_PARAMS = {
+    type: 'object',
+    properties: { url: { type: 'string' } },
+    required: ['url'],
+  };
 
   /** tool_call bridge + hidden deferred MockTool (mcp__github__create_issue). */
   function bridgeWithDeferred(
@@ -1472,12 +1657,12 @@ describe('CoreToolScheduler', () => {
   function expectBridgeRefusal(completed: ToolCall): void {
     expectStatus(completed, 'error');
     expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(completed.response.executionStatus).toBe('not_started');
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
-    expect(
-      String(functionResponseOf(completed)?.response?.['error']).startsWith(
-        DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
-      ),
-    ).toBe(true);
+    const error = String(functionResponseOf(completed)?.response?.['error']);
+    expect(error.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)).toBe(true);
+    expect(error.indexOf(DEFERRED_TOOL_CALL_REFUSAL_PREFIX, 1)).toBe(-1);
+    expect(completed.response.contentLength).toBe(error.length);
   }
 
   it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
@@ -1511,7 +1696,11 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
-    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
+    expect(isToolEnabled).toHaveBeenCalledWith(
+      deferred.name,
+      undefined,
+      undefined,
+    );
     expect(messageBus.request.mock.calls[0][0]).toEqual(
       expect.objectContaining({
         eventName: 'PreToolUse',
@@ -1534,6 +1723,55 @@ describe('CoreToolScheduler', () => {
     );
     expect(producerObservations).toHaveLength(2);
     expectMutated(producerObservations, false);
+  });
+
+  it('applies a PreToolUse replacement to the tool_call target without rerouting it', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('created issue'));
+    const replacement = {
+      name: ToolNames.READ_FILE,
+      arguments: {},
+      title: 'Rewritten',
+    };
+    const messageBus = hookBus(async (request) =>
+      hookResponse(
+        request.eventName,
+        request.eventName === 'PreToolUse'
+          ? { hookSpecificOutput: { updatedInput: replacement } }
+          : {},
+      ),
+    );
+    const { deferred, scheduler, onAllToolCallsComplete } = bridgeWithDeferred(
+      { execute },
+      {
+        permissionManager: {
+          isToolEnabled: vi.fn().mockResolvedValue(true),
+          findMatchingDenyRule: () => undefined,
+          hasRelevantRules: () => false,
+          evaluate: vi.fn().mockResolvedValue('default'),
+          hasMatchingAskRule: () => false,
+        },
+        messageBus,
+        disableHooks: false,
+      },
+    );
+
+    await scheduleBridgeCall(
+      scheduler,
+      'bridge-rewrite',
+      deferred.name,
+      { title: 'Original' },
+      undefined,
+      'prompt-bridge',
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0]).toEqual(replacement);
+    expect(completed.request.name).toBe(deferred.name);
+    expect(
+      completed.status === 'success' && functionResponseOf(completed)?.name,
+    ).toBe(ToolNames.TOOL_CALL);
   });
 
   it('rejects tool_call targets that are not hidden deferred tools', async () => {
@@ -1632,12 +1870,66 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expectStatus(completed, 'error');
-    expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(completed.response.error?.message).toContain(
       "is not permitted by this agent's tool policy",
     );
-    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    expectBridgeRefusal(completed);
   });
+
+  it.each(['permission manager', 'legacy permissions', 'target validation'])(
+    'marks a bridge rejection before execution by %s',
+    async (denial) => {
+      const execute = vi.fn();
+      const { scheduler, onAllToolCallsComplete } = bridgeWithDeferred(
+        {
+          name: ToolNames.AGENT,
+          execute,
+          params: {
+            type: 'object',
+            properties: { description: { type: 'string' } },
+            required: ['description'],
+          },
+        },
+        {
+          permissionManager:
+            denial === 'permission manager'
+              ? {
+                  isToolEnabled: async (name) => name !== ToolNames.AGENT,
+                  findMatchingDenyRule: () => 'permissions.deny: agent',
+                }
+              : undefined,
+          getPermissionsDeny: () =>
+            denial === 'legacy permissions' ? [ToolNames.AGENT] : undefined,
+        },
+      );
+      await scheduleBridgeCall(
+        scheduler,
+        'bridge-target-denied',
+        ToolNames.AGENT,
+        denial === 'target validation' ? {} : { description: 'inspect' },
+      );
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+
+      expectStatus(completed, 'error');
+      expect(execute).not.toHaveBeenCalled();
+      expect(completed.response.executionStatus).toBe('not_started');
+      expect(completed.response.errorType).toBe(
+        denial === 'target validation'
+          ? ToolErrorType.INVALID_TOOL_PARAMS
+          : ToolErrorType.EXECUTION_DENIED,
+      );
+      const rawError = completed.response.error?.message;
+      expect(rawError).toBeTruthy();
+      expect(rawError).not.toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(functionResponseOf(completed)?.response?.['error']).toBe(
+        `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${rawError}`,
+      );
+      expect(completed.response.resultDisplay).toBe(rawError);
+      expect(completed.response.contentLength).toBe(
+        DEFERRED_TOOL_CALL_REFUSAL_PREFIX.length + rawError!.length,
+      );
+    },
+  );
 
   it('applies the retry-loop directive to repeated invalid tool_call envelopes', async () => {
     const { scheduler, onAllToolCallsComplete } =
@@ -1672,6 +1964,80 @@ describe('CoreToolScheduler', () => {
     expect(third.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
     expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
     expect(functionResponseOf(third)?.name).toBe(ToolNames.TOOL_CALL);
+  });
+
+  it('names the target when a bridged call fails its own validation (#12889)', async () => {
+    const { completed, deferred } = await runBridgeCall('bridge-invalid-args', {
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    expectStatus(completed, 'error');
+    expect(completed.response.errorType).toBe(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain(`Deferred tool "${deferred.name}"`);
+    expect(message).toContain("must have required property 'url'");
+    expect(message).toContain(ToolNames.TOOL_SEARCH);
+  });
+
+  it("leaves a direct call's validation error unlabelled", async () => {
+    const direct = new MockTool({
+      name: 'needs_url',
+      params: URL_REQUIRED_PARAMS,
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName: toolMap(direct) });
+
+    await scheduler.schedule(
+      toolRequest('direct-invalid-args', direct.name, {}, 'prompt-direct'),
+      new AbortController().signal,
+    );
+
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+    expectStatus(completed, 'error');
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain("must have required property 'url'");
+    expect(message).not.toContain('Deferred tool');
+  });
+
+  it('shares validation retries across bridged and direct calls', async () => {
+    const { deferred, scheduler, onAllToolCallsComplete } = bridgeWithDeferred({
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    for (const [index, name] of [
+      ToolNames.TOOL_CALL,
+      deferred.name,
+      ToolNames.TOOL_CALL,
+    ].entries()) {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        toolRequest(
+          `mixed-validation-${index}`,
+          name,
+          name === ToolNames.TOOL_CALL
+            ? { name: deferred.name, arguments: {} }
+            : {},
+          'prompt-mixed-validation',
+        ),
+        new AbortController().signal,
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(functionResponseOf(completed)?.name).toBe(name);
+      const message = completed.response.error?.message ?? '';
+      expect(message).toContain("must have required property 'url'");
+      expect(message.includes('Deferred tool')).toBe(
+        name === ToolNames.TOOL_CALL,
+      );
+      expect(message.includes('RETRY LOOP DETECTED')).toBe(index === 2);
+    }
   });
 
   it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
@@ -1846,8 +2212,81 @@ describe('CoreToolScheduler', () => {
       modelFacingName: ToolNames.TOOL_CALL,
       modelFacingArgs: { name: deferred.name, arguments: {} },
     });
+    expect(completed.response.executionStatus).toBe('cancelled');
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    expect(functionResponseOf(completed)?.response?.['error']).not.toContain(
+      DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+    );
   });
+
+  it('marks a bridge cancelled at confirmation as not started', async () => {
+    const execute = vi.fn();
+    const { deferred, scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      bridgeWithDeferred(
+        {
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+        },
+        { approvalMode: ApprovalMode.DEFAULT },
+      );
+    const scheduled = scheduleBridgeCall(
+      scheduler,
+      'bridge-confirmation-cancel',
+      deferred.name,
+    );
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+    await scheduled;
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+
+    expectStatus(completed, 'cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    expect(completed.response.executionStatus).toBe('not_started');
+    const error = String(functionResponseOf(completed)?.response?.['error']);
+    expect(error.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX)).toBe(true);
+    expect(completed.response.contentLength).toBe(error.length);
+  });
+
+  it.each(['failure', 'post-hook cancellation'])(
+    'keeps a bridge that executed before %s distinguishable from a refusal',
+    async (outcome) => {
+      const controller = new AbortController();
+      const execute = vi.fn(async () => {
+        if (outcome === 'failure')
+          throw new Error('delegated execution failed');
+        return textResult('delegated execution finished');
+      });
+      const { completed } = await runBridgeCall(
+        'bridge-executed',
+        { execute },
+        {
+          disableHooks: false,
+          messageBus: hookBus(async (request) => {
+            if (
+              outcome === 'post-hook cancellation' &&
+              request.eventName === 'PostToolUse'
+            ) {
+              controller.abort();
+            }
+            return hookResponse('post-hook', { decision: 'allow' });
+          }),
+        },
+        controller.signal,
+      );
+
+      expect(execute).toHaveBeenCalledOnce();
+      expectStatus(completed, outcome === 'failure' ? 'error' : 'cancelled');
+      expect(completed.response.executionStatus).toBe(
+        outcome === 'failure' ? 'error' : 'success',
+      );
+      const error = String(functionResponseOf(completed)?.response?.['error']);
+      expect(error).not.toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(error).not.toContain(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX);
+      expect(completed.response.contentLength).toBe(error.length);
+    },
+  );
 
   it('keeps the queued tool owner after another agent drains the scheduler', async () => {
     const owner = {
@@ -1911,81 +2350,104 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('restores the invocation context when a delayed confirmation executes', async () => {
-    const hookOwner = {
-      runtimeId: 'runtime',
-      sessionId: 'session-context',
-      agentId: 'A',
-    };
-    const invocationContext: InvocationContextV1 = {
-      version: 1,
-      sessionId: 'session-context',
-      promptId: 'prompt-context',
-    };
-    const unrelatedContext: InvocationContextV1 = {
-      ...invocationContext,
-      sessionId: 'unrelated-session',
-      promptId: 'unrelated-prompt',
-    };
-    let observedContext: InvocationContextV1 | undefined;
-    let observedPromptId: string | undefined;
-    let observedTodoWorkChainId: string | undefined;
-    const tool = new MockTool({
-      name: 'approval-context-tool',
-      getDefaultPermission: async () => 'ask',
-      getConfirmationDetails: async () => ({
-        type: 'info' as const,
-        title: 'Confirm context tool',
-        prompt: 'Run context tool?',
-        onConfirm: vi.fn().mockResolvedValue(undefined),
-      }),
-      execute: async () => {
-        expect(getHookExecutionOwner()).toEqual(hookOwner);
-        observedContext = getInvocationContext();
-        observedPromptId = promptIdContext.getStore();
-        observedTodoWorkChainId = todoWorkChainContext.getStore();
-        return textResult('ok');
-      },
-    });
-    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
-      toolsByName: toolMap(tool),
-      approvalMode: ApprovalMode.DEFAULT,
-      hookSystem: {
-        runtimeId: hookOwner.runtimeId,
-        firePermissionDeniedEvent: vi.fn(),
-      },
-      getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
-    });
+  it.each([false, true])(
+    'restores a Channel launch after delayed confirmation (daemon: %s)',
+    async (daemon) => {
+      const hookOwner = {
+        runtimeId: 'runtime',
+        sessionId: 'session-context',
+        agentId: 'A',
+      };
+      const invocationContext: InvocationContextV1 | undefined = daemon
+        ? {
+            version: 1,
+            sessionId: 'session-context',
+            promptId: 'prompt-context',
+          }
+        : undefined;
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        threadId: 'launch-thread',
+        senderId: 'launch-user',
+        userInitiated: true as const,
+      };
+      const unrelatedContext: InvocationContextV1 = {
+        version: 1,
+        sessionId: 'unrelated-session',
+        promptId: 'unrelated-prompt',
+      };
+      let observedContext: InvocationContextV1 | undefined;
+      let observedWorkflowOrigin: ReturnType<typeof getChannelWorkflowOrigin>;
+      let observedBackgroundWorkflowBlocked: boolean | undefined;
+      let observedPromptId: string | undefined;
+      let observedTodoWorkChainId: string | undefined;
+      const tool = new MockTool({
+        name: 'approval-context-tool',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () => ({
+          type: 'info' as const,
+          title: 'Confirm context tool',
+          prompt: 'Run context tool?',
+          onConfirm: vi.fn().mockResolvedValue(undefined),
+        }),
+        execute: async () => {
+          expect(getHookExecutionOwner()).toEqual(hookOwner);
+          observedContext = getInvocationContext();
+          observedWorkflowOrigin = getChannelWorkflowOrigin();
+          observedBackgroundWorkflowBlocked = isBackgroundWorkflowBlocked();
+          observedPromptId = promptIdContext.getStore();
+          observedTodoWorkChainId = todoWorkChainContext.getStore();
+          return textResult('ok');
+        },
+      });
+      const { scheduler, onToolCallsUpdate } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(tool),
+          approvalMode: ApprovalMode.DEFAULT,
+          hookSystem: {
+            runtimeId: hookOwner.runtimeId,
+            firePermissionDeniedEvent: vi.fn(),
+          },
+          getActiveTodoWorkChainOwner: () => 'mapped-work-chain',
+        });
 
-    await runWithHookExecutionOwner(hookOwner, () =>
-      runWithInvocationContext(invocationContext, () =>
-        scheduleBatch(
-          scheduler,
-          toolRequest(
-            'approval-context-call',
-            tool.name,
-            {},
-            invocationContext.promptId,
+      await runWithHookExecutionOwner(hookOwner, () =>
+        runWithInvocationContext(
+          invocationContext,
+          () =>
+            scheduleBatch(
+              scheduler,
+              toolRequest(
+                'approval-context-call',
+                tool.name,
+                {},
+                'prompt-context',
+              ),
+            ),
+          workflowOrigin,
+          true,
+        ),
+      );
+      const waiting = await waitForApproval(onToolCallsUpdate);
+
+      await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
+        todoWorkChainContext.run('stale-work-chain', () =>
+          runWithInvocationContext(unrelatedContext, () =>
+            waiting.confirmationDetails.onConfirm(
+              ToolConfirmationOutcome.ProceedOnce,
+            ),
           ),
         ),
-      ),
-    );
-    const waiting = await waitForApproval(onToolCallsUpdate);
+      );
 
-    await runWithHookExecutionOwner({ ...hookOwner, agentId: 'B' }, () =>
-      todoWorkChainContext.run('stale-work-chain', () =>
-        runWithInvocationContext(unrelatedContext, () =>
-          waiting.confirmationDetails.onConfirm(
-            ToolConfirmationOutcome.ProceedOnce,
-          ),
-        ),
-      ),
-    );
-
-    expect(observedContext).toEqual(invocationContext);
-    expect(observedPromptId).toBe(invocationContext.promptId);
-    expect(observedTodoWorkChainId).toBe('mapped-work-chain');
-  });
+      expect(observedContext).toEqual(invocationContext);
+      expect(observedWorkflowOrigin).toEqual(workflowOrigin);
+      expect(observedBackgroundWorkflowBlocked).toBe(true);
+      expect(observedPromptId).toBe('prompt-context');
+      expect(observedTodoWorkChainId).toBe('mapped-work-chain');
+    },
+  );
 
   it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
     const reminder = getPlanModeSystemReminder(false);
@@ -2469,6 +2931,153 @@ describe('CoreToolScheduler', () => {
     returnDisplay,
   });
 
+  it('waits for Managed Runtime settlement after a timeout and drains running siblings', async () => {
+    await withToolTimeoutEnv('50', async () => {
+      const onTimeout = vi.fn();
+      const loseOutcome = deferred();
+      const settleSibling = deferred();
+      const unknown = new ManagedRuntimeOutcomeUnknownError('outcome unknown');
+      const tools = new AbortController();
+      const read = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        canUpdateOutput: true,
+        execute: async (params, signal) => {
+          if (params['file_path'] === 'first.ts') {
+            signal?.addEventListener('abort', onTimeout, {
+              once: true,
+            });
+            await loseOutcome.promise;
+            throw unknown;
+          }
+          await settleSibling.promise;
+          return textResult('known outcome');
+        },
+      });
+      const config = makeSchedulerConfig(makeToolRegistry(read), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+        getManagedRuntimeEnvironment: () => ({
+          toolNames: new Set([read.name]),
+        }),
+      });
+      const onManagedRuntimeBatchFailed = vi.fn();
+      const onManagedRuntimeOutcomeUnknown = vi.fn((error) =>
+        tools.abort(error),
+      );
+      const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+        schedulerWithCallbacks(config, {
+          onManagedRuntimeBatchFailed,
+          onManagedRuntimeOutcomeUnknown,
+        });
+      const running = scheduler.schedule(
+        [
+          readFileRequest('first', 'first.ts', 'p'),
+          readFileRequest('sibling', 'sibling.ts', 'p'),
+        ],
+        tools.signal,
+      );
+      void running.catch(() => undefined);
+      await vi.waitFor(() => expect(onTimeout).toHaveBeenCalled());
+      loseOutcome.resolve();
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'first',
+        ),
+      );
+      expect(onManagedRuntimeBatchFailed).not.toHaveBeenCalled();
+      settleSibling.resolve();
+      await expect(running).rejects.toBe(unknown);
+      expect(onManagedRuntimeBatchFailed).toHaveBeenCalledExactlyOnceWith(
+        unknown,
+      );
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(reportedCalls(onToolCallsUpdate)).not.toContainEqual(
+        expect.objectContaining({
+          request: expect.objectContaining({ callId: 'first' }),
+          response: expect.anything(),
+        }),
+      );
+    });
+  });
+
+  it('reports an unknown outcome that settles just after a successful parallel tool', async () => {
+    const previous = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = '2';
+    try {
+      const unknown = new ManagedRuntimeOutcomeUnknownError('outcome unknown');
+      const loseOutcome = deferred();
+      const checkingThird = deferred();
+      const admitThird = deferred<boolean>();
+      const executeThird = vi.fn(() => textResult('too late'));
+      const read = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        execute: async (params) => {
+          if (params['file_path'] === 'second.ts') {
+            await loseOutcome.promise;
+            throw unknown;
+          }
+          if (params['file_path'] === 'third.ts') return executeThird();
+          return textResult('known outcome');
+        },
+      });
+      const config = makeSchedulerConfig(makeToolRegistry(read), {
+        getApprovalMode: () => ApprovalMode.YOLO,
+      });
+      const onManagedRuntimeBatchFailed = vi.fn();
+      const tools = new AbortController();
+      const onAllToolCallsComplete = vi.fn();
+      const onManagedRuntimeOutcomeUnknown = vi.fn((error: Error) =>
+        tools.abort(error),
+      );
+      const scheduler = makeTestScheduler(config, {
+        onManagedRuntimeOutcomeUnknown,
+        onManagedRuntimeBatchFailed,
+        onAllToolCallsComplete,
+        beforeToolLaunch: ({ request }) => {
+          if (request.callId !== 'third') return true;
+          checkingThird.resolve();
+          return admitThird.promise;
+        },
+      });
+      const settled = scheduler
+        .schedule(
+          [
+            readFileRequest('first', 'first.ts', 'p'),
+            readFileRequest('second', 'second.ts', 'p'),
+            readFileRequest('third', 'third.ts', 'p'),
+          ],
+          tools.signal,
+        )
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      await checkingThird.promise;
+      loseOutcome.resolve();
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeOutcomeUnknown).toHaveBeenCalledWith(
+          unknown,
+          'second',
+        ),
+      );
+      admitThird.resolve(true);
+      await vi.waitFor(() =>
+        expect(onManagedRuntimeBatchFailed).toHaveBeenCalledExactlyOnceWith(
+          unknown,
+        ),
+      );
+      expect(await settled).toBe(unknown);
+      expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+      expect(executeThird).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined)
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      else process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = previous;
+    }
+  });
+
   /** Runs lone `tool` as call `callId` with empty args; returns the handles. */
   const runLoneTool = (
     tool: MockTool,
@@ -2782,6 +3391,82 @@ describe('CoreToolScheduler', () => {
     expectNotInPlanModeGuidance(calls);
   });
 
+  describe('AUTO_EDIT and permissions.ask rules (#16795)', () => {
+    /** A PermissionManager whose verdict is `ask`, from a rule or not. */
+    const askingPm = (fromAskRule: boolean) => ({
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+      findMatchingDenyRule: vi.fn(),
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('ask' as PermissionDecision),
+      hasMatchingAskRule: vi.fn().mockReturnValue(fromAskRule),
+    });
+    const askingInfoTool = (execute: Mock) =>
+      new MockTool({
+        name: 'guarded_read',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () =>
+          infoConfirmation('Read guarded file', 'Allow?'),
+        execute,
+      });
+
+    it('asks instead of auto-approving a call that matches an ask rule', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const { onToolCallsUpdate } = await runLoneTool(
+        askingInfoTool(execute),
+        'ask-rule-read',
+        'prompt-ask-rule-read',
+        {
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          permissionManager: askingPm(true),
+        },
+      );
+
+      expect(
+        reportedCalls(onToolCallsUpdate).some(
+          (call) => call.status === 'awaiting_approval',
+        ),
+      ).toBe(true);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('still auto-approves an ask that comes from no rule', async () => {
+      // Edits and many reads default to `ask` on their own; AUTO_EDIT exists
+      // to approve exactly those, so only a matching rule may stop it.
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const { calls } = await runLoneTool(
+        askingInfoTool(execute),
+        'no-rule-read',
+        'prompt-no-rule-read',
+        {
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          permissionManager: askingPm(false),
+          waitForCompletion: true,
+        },
+      );
+
+      expect(calls[0].status).toBe('success');
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('denies an ask-rule match when no one can be asked', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const { calls } = await runLoneTool(
+        askingInfoTool(execute),
+        'headless-ask-rule-read',
+        'prompt-headless-ask-rule-read',
+        {
+          approvalMode: ApprovalMode.AUTO_EDIT,
+          permissionManager: askingPm(true),
+          isInteractive: false,
+          waitForCompletion: true,
+        },
+      );
+
+      expect(calls[0].status).toBe('error');
+      expect(execute).not.toHaveBeenCalled();
+    });
+  });
+
   it('does not let AUTO_EDIT approve an interaction-required info tool', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('executed'));
     const tool = new MockTool({
@@ -2856,6 +3541,274 @@ describe('CoreToolScheduler', () => {
       )?.status,
     ).toBe('awaiting_approval');
     expect(siblingExecute).not.toHaveBeenCalled();
+  });
+
+  it('retains AUTO review when an allowed pending invocation is rechecked', async () => {
+    const siblingPermission = vi.fn(
+      async (): Promise<PermissionDecision> => 'ask',
+    );
+    const siblingExecute = vi
+      .fn()
+      .mockResolvedValue(textResult('sibling executed'));
+    const siblingTool = askingTool({
+      name: ToolNames.CREATE_SUB_SESSION,
+      getDefaultPermission: siblingPermission,
+      requiresUserInteraction: () => false,
+      getConfirmationDetails: async () =>
+        infoConfirmation('Pending approval', 'Approve?'),
+      execute: siblingExecute,
+    });
+    const build = siblingTool.build.bind(siblingTool);
+    // This pins the general ToolInvocation contract, not a named remote
+    // confirmation, whose hideAlwaysAllow excludes it from this sweep.
+    vi.spyOn(siblingTool, 'build').mockImplementation((params) => {
+      const invocation = build(params);
+      invocation.requiresAutoReviewOnAllow = () => true;
+      return invocation;
+    });
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () =>
+        infoConfirmation('Ordinary approval', 'Approve?'),
+    });
+    let approvalMode = ApprovalMode.DEFAULT;
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const { scheduler, onToolCallsUpdate } = await runToolBatch(
+      [firstTool, siblingTool],
+      ['ordinary-confirmation', 'resolved-ask-sibling'],
+      {
+        getApprovalMode: () => approvalMode,
+        permissionManager,
+      },
+    );
+    await vi.waitFor(() =>
+      expect(
+        new Set(
+          reportedCalls(onToolCallsUpdate)
+            .filter((call) => call.status === 'awaiting_approval')
+            .map((call) => call.request.callId),
+        ),
+      ).toEqual(new Set(['ordinary-confirmation', 'resolved-ask-sibling'])),
+    );
+    queueClassifierBlocks('Cross-workspace delegation denied');
+    approvalMode = ApprovalMode.AUTO;
+    permissionManager.addSessionAllowRule(siblingTool.name);
+    await autoApprovePendingTools(
+      scheduler,
+      new AbortController().signal,
+      'ordinary-confirmation',
+    );
+
+    expect(siblingPermission).toHaveBeenCalledTimes(2);
+    expect(runSideQueryMock).toHaveBeenCalled();
+    expect(siblingExecute).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(
+        reportedCalls(onToolCallsUpdate).findLast(
+          (call) => call.request.callId === 'resolved-ask-sibling',
+        )?.status,
+      ).toBe('error'),
+    );
+  });
+
+  it('keeps a resolved workspace ask parked during sibling re-evaluation', async () => {
+    const approvalMode = ApprovalMode.DEFAULT;
+    const targetToolName = ToolNames.CREATE_SUB_SESSION;
+    const spawner = vi.fn(async () => ({ sessionId: 'child-id' }));
+    const resolveWorkspace = vi.fn().mockResolvedValue({
+      workspaceId: 'repo-a-id',
+      workspaceCwd: '/repo-a',
+      workspaceGeneration: 'generation-a',
+      sameWorkspace: true,
+    });
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const config = {
+      getApprovalMode: () => approvalMode,
+      getPermissionManager: () => permissionManager,
+      getSubSessionSpawner: () => spawner,
+      getSubSessionWorkspaceResolver: () => resolveWorkspace,
+      getTargetDir: () => '/repo-a',
+    } as unknown as Config;
+    const realTargetTool = new CreateSubSessionTool(
+      config,
+    ) as unknown as MockTool;
+    let targetInvocation: ReturnType<typeof realTargetTool.build> | undefined;
+    const build = realTargetTool.build.bind(realTargetTool);
+    vi.spyOn(realTargetTool, 'build').mockImplementation((params) => {
+      targetInvocation = build(params);
+      vi.spyOn(targetInvocation, 'getDefaultPermission');
+      return targetInvocation;
+    });
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () =>
+        infoConfirmation('Ordinary approval', 'Approve?'),
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [firstTool.name, firstTool],
+        [realTargetTool.name, realTargetTool],
+      ]),
+      getApprovalMode: () => approvalMode,
+      permissionManager,
+    });
+    await scheduler.schedule(
+      [
+        toolRequest('ordinary-confirmation', firstTool.name, {}, 'p'),
+        toolRequest(
+          'resolved-ask-sibling',
+          realTargetTool.name,
+          { prompt: 'delegate', workspace: 'current-alias' },
+          'p',
+        ),
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(
+        new Set(
+          reportedCalls(onToolCallsUpdate)
+            .filter((call) => call.status === 'awaiting_approval')
+            .map((call) => call.request.callId),
+        ),
+      ).toEqual(new Set(['ordinary-confirmation', 'resolved-ask-sibling'])),
+    );
+    expect(
+      reportedCalls(onToolCallsUpdate).findLast(
+        (call) => call.request.callId === 'resolved-ask-sibling',
+      )?.status,
+    ).toBe('awaiting_approval');
+    permissionManager.addPersistentRule(targetToolName, 'allow');
+    permissionManager.addPersistentRule(
+      `${targetToolName}(workspace:repo-a-id)`,
+      'ask',
+    );
+    await autoApprovePendingTools(
+      scheduler,
+      new AbortController().signal,
+      'ordinary-confirmation',
+    );
+
+    expect(
+      vi.mocked(targetInvocation!.getDefaultPermission),
+    ).toHaveBeenCalledTimes(2);
+    expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+    expect(spawner).not.toHaveBeenCalled();
+    expect(
+      reportedCalls(onToolCallsUpdate).findLast(
+        (call) => call.request.callId === 'resolved-ask-sibling',
+      )?.status,
+    ).toBe('awaiting_approval');
+  });
+
+  it('reschedules an ordinary invocation after adding an allow rule in AUTO', async () => {
+    const targetToolName = ToolNames.READ_FILE;
+    const siblingPermission = vi.fn(
+      async (): Promise<PermissionDecision> => 'ask',
+    );
+    const siblingExecute = vi
+      .fn()
+      .mockResolvedValue(textResult('sibling executed'));
+    const siblingTool = askingTool({
+      name: targetToolName,
+      getDefaultPermission: siblingPermission,
+      requiresUserInteraction: () => false,
+      getConfirmationDetails: async () =>
+        infoConfirmation('Delegate locally', 'Approve?'),
+      execute: siblingExecute,
+    });
+    let approvalMode = ApprovalMode.DEFAULT;
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const firstTool = new MockTool({
+      name: 'ordinary_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () =>
+        infoConfirmation('Ordinary approval', 'Approve?'),
+    });
+    const { scheduler, onToolCallsUpdate } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [firstTool.name, firstTool],
+        [siblingTool.name, siblingTool],
+      ]),
+      getApprovalMode: () => approvalMode,
+      permissionManager,
+    });
+    await scheduler.schedule(
+      [
+        toolRequest('ordinary-confirmation', firstTool.name, {}, 'p'),
+        toolRequest(
+          'ordinary-sibling',
+          siblingTool.name,
+          { prompt: 'delegate' },
+          'p',
+        ),
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() =>
+      expect(
+        new Set(
+          reportedCalls(onToolCallsUpdate)
+            .filter((call) => call.status === 'awaiting_approval')
+            .map((call) => call.request.callId),
+        ),
+      ).toEqual(new Set(['ordinary-confirmation', 'ordinary-sibling'])),
+    );
+
+    approvalMode = ApprovalMode.AUTO;
+    permissionManager.addSessionAllowRule(targetToolName);
+    await autoApprovePendingTools(
+      scheduler,
+      new AbortController().signal,
+      'ordinary-confirmation',
+    );
+
+    expect(siblingPermission).toHaveBeenCalledTimes(2);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(
+        reportedCalls(onToolCallsUpdate).findLast(
+          (call) => call.request.callId === 'ordinary-sibling',
+        )?.status,
+      ).toBe('scheduled'),
+    );
+    expect(siblingExecute).not.toHaveBeenCalled();
+    const firstWaiting = reportedCalls(onToolCallsUpdate).findLast(
+      (call) =>
+        call.request.callId === 'ordinary-confirmation' &&
+        call.status === 'awaiting_approval',
+    ) as WaitingToolCall;
+    await firstWaiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+    await vi.waitFor(() => expect(siblingExecute).toHaveBeenCalledOnce());
+    await vi.waitFor(() =>
+      expect(
+        reportedCalls(onToolCallsUpdate).findLast(
+          (call) => call.request.callId === 'ordinary-sibling',
+        )?.status,
+      ).toBe('success'),
+    );
   });
 
   it('dispatches legacy tool names through their canonical registered tools', async () => {
@@ -3232,7 +4185,9 @@ describe('CoreToolScheduler', () => {
     );
 
     expectStatus(completedCall, 'success');
-    expect(completedCall.response.responseParts).toEqual([
+    expect(
+      JSON.parse(JSON.stringify(completedCall.response.responseParts)),
+    ).toEqual([
       fnResponse(
         'malformedTool',
         { output: '(malformedTool completed with no output)' },
@@ -3476,6 +4431,75 @@ describe('CoreToolScheduler', () => {
     expect(outputOfTool(calls, 'defaultTool')).toBe('a'.repeat(8000));
   });
 
+  it('does not measure a self-bounded producer body as its own raw size', async () => {
+    // grep/ripGrep shorten their own render and then declare the raw size
+    // unknown: the pre-reduction size is no longer recoverable, and the
+    // scheduler must not certify the already-bounded body as the raw size
+    // (#13652 R2-5).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-unknown',
+      'prompt-grep-unknown',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(new ToolCallEvent(call).raw_content_length).toBeUndefined();
+
+    // Control: an ordinary producer that declares nothing is still measured
+    // from its own body, so the assertions above are not "never measured".
+    const { calls: plainCalls } = await runLoneTool(
+      toolReturning('plainTool', modelResult('plain body', 'plain body')),
+      'call-plain-raw',
+      'prompt-plain-raw',
+      { waitForCompletion: true },
+    );
+    expect(new ToolCallEvent(plainCalls[0]).raw_content_length).toBe(
+      'plain body'.length,
+    );
+  });
+
+  it('carries a producer-declared truncation bit when its raw size is unknown', async () => {
+    // A self-bounded producer cannot recover the pre-reduction size, but it
+    // knows it cut the body. Keep the bit instead of collapsing it into the
+    // unknown raw size (#14742).
+    const boundedBody = 'm'.repeat(19_000) + '\n[12 lines truncated] ...';
+    const { calls } = await runLoneTool(
+      toolReturning(
+        'grep',
+        {
+          llmContent: boundedBody,
+          returnDisplay: 'Found 1500 matches (truncated)',
+          rawOutputSize: null,
+          truncatedByProducer: true,
+        },
+        { maxOutputChars: 20_000 },
+      ),
+      'call-grep-truncated',
+      'prompt-grep-truncated',
+      { waitForCompletion: true },
+    );
+
+    const call = calls[0];
+    const provenance = getToolOutputProvenance(call.response.responseParts[0]);
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBe(true);
+    expect(new ToolCallEvent(call).truncated).toBe(true);
+  });
+
   /** Asserts lone tool `name` (Infinity budget) delivers `content` whole. */
   async function expectDeliveredWhole(name: string, content: string) {
     const { calls } = await runLoneTool(
@@ -3565,7 +4589,7 @@ describe('CoreToolScheduler', () => {
         toolReturning('budgetedTool', result, { maxOutputChars: 30_000 }),
         'c',
         'p',
-        { waitForCompletion: true },
+        { waitForCompletion: true, truncateToolOutputThreshold: 25000 },
       );
       return calls[0];
     }
@@ -3591,6 +4615,84 @@ describe('CoreToolScheduler', () => {
 
       expectSpilled(responseText(call), BODY);
     });
+
+    // With no saved output file, the part's non-enumerable recovery handle
+    // is the only carrier of its remediation text. Provenance re-stamps and
+    // hook context append both copy parts before the send-boundary budget.
+    it.each([
+      { budget: 660, hookEvent: undefined },
+      { budget: 1000, hookEvent: undefined },
+      { budget: 660, hookEvent: 'PreToolUse' },
+      { budget: 660, hookEvent: 'PostToolUse' },
+    ])(
+      'delivers the producer recovery text to a $budget-char send-boundary slot ($hookEvent)',
+      async ({ budget, hookEvent }) => {
+        // Wording mirrors `subagentTerminalReason(TIMEOUT)`: this is the line
+        // the parent model has to read to avoid re-issuing the same call.
+        const reason =
+          "Subagent did not complete (terminate mode: TIMEOUT). It ran out of time, so re-running the same call will time out again; raise the agent's `runConfig.max_time_minutes` instead.";
+        const marker = buildTranscriptMarker('/tmp/subagent-transcript.jsonl');
+        const recoveryText = `${reason}\n\n${marker}`;
+        const { calls } = await runLoneTool(
+          toolReturning(
+            'agentTool',
+            {
+              returnDisplay: 'x',
+              llmContent: `${recoveryText}\n\n${'a'.repeat(4_000)}`,
+              recoveryText,
+              ...(hookEvent ? { persistedOutputFiles: [] } : {}),
+              outputBudgetApplied: true,
+            },
+            { maxOutputChars: 30_000 },
+          ),
+          'c-recovery',
+          'p-recovery',
+          {
+            waitForCompletion: true,
+            truncateToolOutputThreshold: 25_000,
+            ...(hookEvent
+              ? {
+                  disableHooks: false,
+                  messageBus: hookBusAdding(hookEvent, {
+                    hookEventName: hookEvent,
+                    additionalContext: 'hook recovery context',
+                  }),
+                  toolOutputBatchBudget: 660,
+                }
+              : {}),
+          },
+        );
+        if (hookEvent) {
+          expect(responseText(calls[0])).toContain(reason);
+          expect(responseText(calls[0])).toContain(marker);
+          expect(responseText(calls[0])).toContain('hook recovery context');
+        }
+
+        // `llm-chat.ts`'s own send-boundary shape: one part per entry, no
+        // `persistedOutputFiles`, so nothing downstream can rebuild the handle.
+        const entries = (calls[0]?.response.responseParts ?? []).map(
+          (part) => ({
+            callId: 'send-boundary-test',
+            toolName: 'tool-response-batch',
+            responseParts: [part],
+          }),
+        );
+        const sent = enforceFunctionResponseBudget(
+          entries,
+          budget,
+          true,
+          false,
+        );
+        const output = sent[0]?.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ] as string;
+
+        expect(output).toContain(reason);
+        expect(output).toContain(
+          'The full output is in /tmp/subagent-transcript.jsonl.',
+        );
+      },
+    );
 
     it('skips the error gate while error.message is still the sized body', async () => {
       const call = await runBudgetedTool(BODY, true, { message: BODY });
@@ -4355,6 +5457,41 @@ describe('CoreToolScheduler', () => {
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
   });
 
+  it('hands its owner the terminal sequence of the permission prompt hook', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: 'needs-approval',
+      kind: Kind.Edit,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: async () =>
+        execDetails('Confirm', 'needs-approval', 'needs-approval', onConfirm),
+    });
+    const onPermissionPromptTerminalSequence = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: toolMap(tool),
+      approvalMode: ApprovalMode.DEFAULT,
+      messageBus: hookBus(async (request) =>
+        hookResponse(
+          `${request.eventName}-hook`,
+          request.eventName === 'Notification'
+            ? { terminalSequence: '\u0007' }
+            : {},
+        ),
+      ),
+      disableHooks: false,
+      onPermissionPromptTerminalSequence,
+    });
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('prompted', tool.name, {}, 'prompt-prompted'),
+    );
+
+    await vi.waitFor(() =>
+      expect(onPermissionPromptTerminalSequence).toHaveBeenCalledWith('\u0007'),
+    );
+  });
+
   it('marks invalid PermissionRequest rewrites as pre-execution span failures', async () => {
     const execute = vi.fn();
     const onConfirm = vi.fn().mockResolvedValue(undefined);
@@ -4423,6 +5560,646 @@ describe('CoreToolScheduler', () => {
       'invalid-permission-rewrite',
       'tool_exception',
     );
+  });
+
+  describe('PreToolUse updatedInput', () => {
+    /** PreToolUse answers `pre`; PermissionRequest answers `decision`. */
+    function rewriteHookBus(
+      pre: Record<string, unknown>,
+      decision?: Record<string, unknown>,
+    ) {
+      return hookBus(async (request) =>
+        hookResponse(
+          request.eventName,
+          request.eventName === 'PreToolUse'
+            ? { hookSpecificOutput: { hookEventName: 'PreToolUse', ...pre } }
+            : request.eventName === 'PermissionRequest' && decision
+              ? { hookSpecificOutput: { decision } }
+              : {},
+        ),
+      );
+    }
+
+    const hookEvents = (messageBus: { request: Mock }, eventName: string) =>
+      messageBus.request.mock.calls
+        .map(([request]) => request as HookRequest)
+        .filter((request) => request.eventName === eventName);
+
+    /** A tool taking `{ value, extra? }`; `options` override any member. */
+    function valueTool(
+      options: Partial<ConstructorParameters<typeof MockTool>[0]> = {},
+    ) {
+      return new MockTool({
+        name: 'value-tool',
+        kind: Kind.Edit,
+        params: {
+          type: 'object',
+          properties: {
+            value: { type: 'string' },
+            extra: { type: 'string' },
+          },
+          required: ['value'],
+          additionalProperties: false,
+        },
+        execute: vi.fn().mockResolvedValue(textResult('ran')),
+        ...options,
+      });
+    }
+
+    async function runOne(
+      tool: MockTool,
+      messageBus: { request: Mock },
+      args: Record<string, unknown>,
+      options: Partial<LegacySchedulerOptions> = {},
+    ) {
+      const built = createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(tool),
+        messageBus,
+        disableHooks: false,
+        ...options,
+      });
+      const request = toolRequest('rewrite', tool.name, args, 'p-rewrite');
+      await scheduleBatch(built.scheduler, request);
+      return { ...built, request };
+    }
+
+    async function completedCall(onAllToolCallsComplete: Mock) {
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      return firstBatch<CompletedToolCall>(onAllToolCallsComplete)[0];
+    }
+
+    it('builds and runs the replacement once, without merging the original', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('ran'));
+      const tool = valueTool({ execute });
+      const build = vi.spyOn(tool, 'build');
+      const messageBus = rewriteHookBus({ updatedInput: { value: 'b' } });
+      const { onAllToolCallsComplete, request } = await runOne(
+        tool,
+        messageBus,
+        { value: 'a', extra: 'x' },
+      );
+
+      const call = await completedCall(onAllToolCallsComplete);
+      expect(call.status).toBe('success');
+      expect(build.mock.calls).toEqual([[{ value: 'b' }]]);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute.mock.calls[0][0]).toEqual({ value: 'b' });
+      expect(call.request.args).toEqual({ value: 'b' });
+      expect(request.args).toEqual({ value: 'a', extra: 'x' });
+      const [pre] = hookEvents(messageBus, 'PreToolUse');
+      expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
+      expect(pre.input?.['tool_input']).toEqual({ value: 'a', extra: 'x' });
+      expect(hookEvents(messageBus, 'PostToolUse')[0].input).toMatchObject({
+        tool_input: { value: 'b' },
+        tool_use_id: pre.input?.['tool_use_id'],
+      });
+    });
+
+    it('lets a replacement repair an input that fails validation', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('ran'));
+      const { onAllToolCallsComplete } = await runOne(
+        valueTool({ execute }),
+        rewriteHookBus({ updatedInput: { value: 'b' } }),
+        {},
+      );
+
+      expect((await completedCall(onAllToolCallsComplete)).status).toBe(
+        'success',
+      );
+      expect(execute.mock.calls[0][0]).toEqual({ value: 'b' });
+    });
+
+    it('rejects a replacement that fails validation without running the original', async () => {
+      const execute = vi.fn();
+      const { onAllToolCallsComplete } = await runOne(
+        valueTool({ execute }),
+        rewriteHookBus({ updatedInput: {} }),
+        { value: 'a' },
+      );
+
+      const call = await completedCall(onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+      expect(call.response.executionStatus).toBe('not_started');
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-object replacement before building the tool', async () => {
+      const execute = vi.fn();
+      const tool = valueTool({ execute });
+      const build = vi.spyOn(tool, 'build');
+      const { onAllToolCallsComplete } = await runOne(
+        tool,
+        rewriteHookBus({ updatedInput: ['b'] }),
+        { value: 'a' },
+      );
+
+      const call = await completedCall(onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+      expect(call.response.error?.message).toContain('invalid updatedInput');
+      expect(build).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('checks permission rules against the replacement', async () => {
+      const execute = vi.fn();
+      const tool = new MockTool({
+        name: 'command-tool',
+        kind: Kind.Execute,
+        execute,
+      });
+      const { onAllToolCallsComplete } = await runOne(
+        tool,
+        rewriteHookBus({ updatedInput: { command: 'touch denied' } }),
+        { command: 'echo safe' },
+        {
+          permissionManager: {
+            isToolEnabled: async () => true,
+            hasRelevantRules: () => true,
+            hasMatchingAskRule: () => false,
+            evaluate: async (ctx) =>
+              (ctx as { command?: string }).command === 'touch denied'
+                ? 'deny'
+                : 'allow',
+            findMatchingDenyRule: () => 'Bash(touch *)',
+          },
+        },
+      );
+
+      const call = await completedCall(onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response.error?.message).toContain('Bash(touch *)');
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('confirms the replacement of a PreToolUse ask and runs it once', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('ran'));
+      const messageBus = rewriteHookBus({
+        permissionDecision: 'ask',
+        permissionDecisionReason: 'check b',
+        updatedInput: { value: 'b' },
+      });
+      const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
+        valueTool({
+          execute,
+          getConfirmationDetails: async () => ({
+            type: 'info',
+            title: 'Confirm',
+            prompt: 'run',
+            onConfirm: async () => {},
+          }),
+        }),
+        messageBus,
+        { value: 'a' },
+      );
+
+      const waiting = await waitForApproval(onToolCallsUpdate);
+      expect(waiting.request.args).toEqual({ value: 'b' });
+      expect(waiting.invocation.params).toEqual({ value: 'b' });
+      expect(execute).not.toHaveBeenCalled();
+      await waiting.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+      );
+
+      expect((await completedCall(onAllToolCallsComplete)).status).toBe(
+        'success',
+      );
+      expect(execute).toHaveBeenCalledOnce();
+      expect(execute.mock.calls[0][0]).toEqual({ value: 'b' });
+      expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
+      // The PermissionRequest hook ran but made no decision.
+      expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+    });
+
+    describe('PreToolUse ask with a PermissionRequest hook', () => {
+      const askTool = (execute: Mock) =>
+        valueTool({
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: async () => ({
+            type: 'info',
+            title: 'Confirm',
+            prompt: 'run',
+            onConfirm: async () => {},
+          }),
+        });
+      const ask = {
+        permissionDecision: 'ask',
+        permissionDecisionReason: 'check',
+      };
+
+      it('applies the PermissionRequest deny', async () => {
+        const execute = vi.fn();
+        const messageBus = rewriteHookBus(ask, {
+          behavior: 'deny',
+          message: 'policy says no',
+        });
+        const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
+          askTool(execute),
+          messageBus,
+          { value: 'a' },
+          { approvalMode: ApprovalMode.DEFAULT },
+        );
+
+        const call = await completedCall(onAllToolCallsComplete);
+        expect(call.status).toBe('error');
+        expect(call.response.error?.message).toBe('policy says no');
+        expect(
+          reportedCalls(onToolCallsUpdate).some(
+            (update) => update.status === 'awaiting_approval',
+          ),
+        ).toBe(false);
+        expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+        expect(execute).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['an allow', { behavior: 'allow' }, { value: 'a' }],
+        [
+          'an allow with a replacement',
+          { behavior: 'allow', updatedInput: { value: 'c' } },
+          { value: 'c' },
+        ],
+      ])(
+        'still asks the user after %s',
+        async (_label, decision, expectedArgs) => {
+          const execute = vi.fn().mockResolvedValue(textResult('ran'));
+          const messageBus = rewriteHookBus(ask, decision);
+          const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
+            askTool(execute),
+            messageBus,
+            { value: 'a' },
+            { approvalMode: ApprovalMode.YOLO },
+          );
+
+          const waiting = await waitForApproval(onToolCallsUpdate);
+          expect(waiting.request.args).toEqual(expectedArgs);
+          expect(execute).not.toHaveBeenCalled();
+          await waiting.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+
+          expect((await completedCall(onAllToolCallsComplete)).status).toBe(
+            'success',
+          );
+          expect(execute.mock.calls).toEqual([[expectedArgs]]);
+          expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
+          expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+        },
+      );
+    });
+
+    it('refuses a replacement for a fixed_policy invocation', async () => {
+      const execute = vi.fn();
+      const tool = new MockMediaPolicyTool({ name: 'media-tool', execute });
+      const built = createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(tool as unknown as MockTool),
+        messageBus: rewriteHookBus({ updatedInput: { prompt: 'b' } }),
+        disableHooks: false,
+      });
+      await scheduleBatch(built.scheduler, {
+        ...toolRequest('fixed', tool.name, { prompt: 'a' }, 'p-fixed'),
+        executionOrigin: {
+          kind: 'fixed_policy',
+          policyId: 'img-downsample',
+          stage: 'preprocessing',
+        },
+      });
+
+      const call = await completedCall(built.onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response.error?.message).toContain(
+        'not supported for policy-owned tool calls',
+      );
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('does not run a call whose checks predate a newly registered session hook', async () => {
+      const execute = vi.fn();
+      let hookIds: string[] = [];
+      const { onAllToolCallsComplete } = await runOne(
+        valueTool({ execute }),
+        rewriteHookBus({ additionalContext: 'seen' }),
+        { value: 'a' },
+        {
+          hookSystem: {
+            getSessionHooksManager: () => ({
+              getMatchingHooks: () => {
+                const matching = hookIds.map((hookId) => ({ hookId }));
+                // A sibling skill registers a hook once scheduling is done.
+                hookIds = ['skill-hook'];
+                return matching;
+              },
+            }),
+          } as unknown as LegacySchedulerOptions['hookSystem'],
+        },
+      );
+
+      const call = await completedCall(onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response.error?.message).toContain(
+        'registered after "value-tool" was checked',
+      );
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['runs model-batched shell calls together', {}, 2],
+      [
+        'runs hook-replaced shell calls one at a time',
+        { updatedInput: { command: 'touch replaced' } },
+        1,
+      ],
+    ])('Code Mode: %s', async (_label, pre, expectedPeak) => {
+      let inFlight = 0;
+      let peak = 0;
+      const execute = vi.fn(async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        inFlight -= 1;
+        return textResult('ok');
+      });
+      const shell = new MockTool({
+        name: ToolNames.SHELL,
+        kind: Kind.Execute,
+        execute,
+      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(shell),
+          messageBus: rewriteHookBus(pre),
+          disableHooks: false,
+        });
+      await scheduleBatch(
+        scheduler,
+        ...['a', 'b'].map((id) => ({
+          ...toolRequest(
+            id,
+            ToolNames.SHELL,
+            { command: `npm test ${id}` },
+            'p',
+          ),
+          source: 'code_mode' as const,
+        })),
+      );
+
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(peak).toBe(expectedPeak);
+    });
+
+    it('shows hooks unescaped paths but builds a replacement as given', async () => {
+      const execute = vi.fn().mockResolvedValue(textResult('ran'));
+      const tool = new MockTool({
+        name: 'path-tool',
+        params: {
+          type: 'object',
+          properties: { file_path: { type: 'string' } },
+          required: ['file_path'],
+        },
+        execute,
+      });
+      const build = vi.spyOn(tool, 'build');
+      const messageBus = rewriteHookBus({
+        updatedInput: { file_path: 'c\\ d' },
+      });
+      const { onAllToolCallsComplete } = await runOne(tool, messageBus, {
+        file_path: 'a\\ b',
+      });
+
+      const call = await completedCall(onAllToolCallsComplete);
+      expect(call.status).toBe('success');
+      expect(
+        hookEvents(messageBus, 'PreToolUse')[0].input?.['tool_input'],
+      ).toEqual({ file_path: unescapePath('a\\ b') });
+      expect(build.mock.calls).toEqual([[{ file_path: 'c\\ d' }]]);
+      expect(call.request.args).toEqual({ file_path: unescapePath('c\\ d') });
+    });
+
+    it('releases the batch abort listener when scheduling throws', async () => {
+      const tracing = await import('../telemetry/session-tracing.js');
+      vi.mocked(tracing.startToolSpan).mockImplementationOnce(() => {
+        throw new Error('tracer failed');
+      });
+      const { scheduler } = createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(valueTool()),
+      });
+      const controller = new AbortController();
+      const remove = vi.spyOn(controller.signal, 'removeEventListener');
+
+      await expect(
+        scheduler.schedule(
+          [toolRequest('throws', 'value-tool', { value: 'a' }, 'p')],
+          controller.signal,
+        ),
+      ).rejects.toThrow('tracer failed');
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
+    });
+
+    it('keeps cancellation working for a sibling after an earlier call is denied by its hook', async () => {
+      const execute = vi.fn();
+      const denied = new MockTool({ name: 'denied-tool', execute });
+      const asking = new MockTool({
+        name: 'asking-tool',
+        execute,
+        getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+        getConfirmationDetails: async () =>
+          execDetails('Confirm', 'asking', 'asking', vi.fn()),
+      });
+      const messageBus = hookBus(async (request) =>
+        hookResponse(
+          request.eventName,
+          request.eventName === 'PreToolUse' &&
+            request.input?.['tool_name'] === denied.name
+            ? { hookSpecificOutput: { permissionDecision: 'deny' } }
+            : {},
+        ),
+      );
+      const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: toolMap(denied, asking),
+          approvalMode: ApprovalMode.DEFAULT,
+          messageBus,
+          disableHooks: false,
+        });
+      const controller = new AbortController();
+      await scheduler.schedule(
+        [
+          toolRequest('first', denied.name, {}, 'p'),
+          toolRequest('second', asking.name, {}, 'p'),
+        ],
+        controller.signal,
+      );
+      await waitForApproval(onToolCallsUpdate);
+
+      controller.abort();
+
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+      expect(
+        firstBatch(onAllToolCallsComplete).map((call) => call.status),
+      ).toEqual(['error', 'cancelled']);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    describe('PermissionRequest replacement', () => {
+      /** An `ask` tool whose every confirmation has its own onConfirm spy. */
+      function askTool(
+        execute: Mock,
+        extra: Partial<ConstructorParameters<typeof MockTool>[0]> = {},
+      ) {
+        const confirms: Mock[] = [];
+        const tool = valueTool({
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: async () => {
+            const onConfirm = vi.fn().mockResolvedValue(undefined);
+            confirms.push(onConfirm);
+            return execDetails(
+              'Confirm',
+              'value-tool',
+              'value-tool',
+              onConfirm,
+            );
+          },
+          ...extra,
+        });
+        return { tool, confirms };
+      }
+
+      it('rechecks and runs a valid replacement with its own confirmation', async () => {
+        const execute = vi.fn().mockResolvedValue(textResult('ran'));
+        const { tool, confirms } = askTool(execute);
+        const messageBus = rewriteHookBus(
+          { updatedInput: { value: 'b' } },
+          { behavior: 'allow', updatedInput: { value: 'c' } },
+        );
+        const { onAllToolCallsComplete } = await runOne(
+          tool,
+          messageBus,
+          { value: 'a' },
+          { approvalMode: ApprovalMode.DEFAULT },
+        );
+
+        const call = await completedCall(onAllToolCallsComplete);
+        expect(call.status).toBe('success');
+        expect(execute).toHaveBeenCalledOnce();
+        expect(execute.mock.calls[0][0]).toEqual({ value: 'c' });
+        expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
+        const permissionRequests = hookEvents(messageBus, 'PermissionRequest');
+        expect(permissionRequests).toHaveLength(1);
+        expect(permissionRequests[0].input?.['tool_input']).toEqual({
+          value: 'b',
+        });
+        expect(confirms).toHaveLength(2);
+        expect(confirms[0]).not.toHaveBeenCalled();
+        expect(confirms[1]).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+        );
+      });
+
+      it.each([null, false, 0, ''])(
+        'rejects an invalid replacement %j without running any input',
+        async (updatedInput) => {
+          const execute = vi.fn();
+          const { tool, confirms } = askTool(execute);
+          const { onAllToolCallsComplete } = await runOne(
+            tool,
+            rewriteHookBus(
+              { updatedInput: { value: 'b' } },
+              { behavior: 'allow', updatedInput },
+            ),
+            {},
+            { approvalMode: ApprovalMode.DEFAULT },
+          );
+
+          const call = await completedCall(onAllToolCallsComplete);
+          expect(call.status).toBe('error');
+          expect(call.response.error?.message).toContain(
+            'invalid updatedInput',
+          );
+          expect(confirms[0]).toHaveBeenCalledWith(
+            ToolConfirmationOutcome.Cancel,
+            expect.anything(),
+          );
+          expect(execute).not.toHaveBeenCalled();
+        },
+      );
+
+      it('denies a replacement that a permission rule denies', async () => {
+        const execute = vi.fn();
+        const onConfirm = vi.fn().mockResolvedValue(undefined);
+        const tool = new MockTool({
+          name: 'command-tool',
+          kind: Kind.Execute,
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: async () =>
+            execDetails('Confirm', 'command', 'command', onConfirm),
+        });
+        const messageBus = rewriteHookBus(
+          {},
+          { behavior: 'allow', updatedInput: { command: 'touch denied' } },
+        );
+        const { onAllToolCallsComplete } = await runOne(
+          tool,
+          messageBus,
+          { command: 'echo a' },
+          {
+            approvalMode: ApprovalMode.DEFAULT,
+            permissionManager: {
+              isToolEnabled: async () => true,
+              hasRelevantRules: () => true,
+              hasMatchingAskRule: () => false,
+              evaluate: async (ctx) =>
+                (ctx as { command?: string }).command === 'touch denied'
+                  ? 'deny'
+                  : 'default',
+              findMatchingDenyRule: () => 'Bash(touch *)',
+            },
+          },
+        );
+
+        const call = await completedCall(onAllToolCallsComplete);
+        expect(call.status).toBe('error');
+        expect(call.response.error?.message).toContain('Bash(touch *)');
+        expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+        expect(onConfirm).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+      });
+
+      it('shows a replacement that needs a user decision instead of granting it', async () => {
+        const execute = vi.fn();
+        const { tool } = askTool(execute);
+        const build = tool.build.bind(tool);
+        vi.spyOn(tool, 'build').mockImplementation((params) => {
+          const invocation = build(params);
+          if (params['value'] === 'c') {
+            invocation.requiresUserInteraction = () => true;
+          }
+          return invocation;
+        });
+        const messageBus = rewriteHookBus(
+          {},
+          { behavior: 'allow', updatedInput: { value: 'c' } },
+        );
+        const { onToolCallsUpdate } = await runOne(
+          tool,
+          messageBus,
+          { value: 'a' },
+          { approvalMode: ApprovalMode.DEFAULT },
+        );
+
+        const waiting = await waitForApproval(onToolCallsUpdate);
+        expect(waiting.request.args).toEqual({ value: 'c' });
+        expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+        expect(execute).not.toHaveBeenCalled();
+        await waiting.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+        );
+      });
+    });
   });
 
   it('continues AUTO block handling when PermissionDenied hook fails', async () => {
@@ -4500,6 +6277,475 @@ describe('CoreToolScheduler', () => {
     );
     expect(setApprovalMode).toHaveBeenCalledWith(ApprovalMode.DEFAULT);
     expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('rejects an automatic workspace grant if the mode changes at the execution guard', async () => {
+    let approvalMode = ApprovalMode.AUTO;
+    const spawn = vi.fn(async () => ({ sessionId: 'child-id' }));
+    const toolName = ToolNames.CREATE_SUB_SESSION;
+    const subtools: AnyDeclarativeTool[] = [];
+    const registry = makeToolRegistry(undefined, {
+      getTool: () => subtools[0],
+      ensureTool: async () => subtools[0],
+      getToolByName: () => subtools[0],
+      getTools: () => subtools,
+      getAllTools: () => subtools,
+      getAllToolNames: () => [toolName],
+    });
+    const permissionManager = new PermissionManager({
+      getPermissionsAllow: () => [toolName],
+      getPermissionsAsk: () => [],
+      getPermissionsDeny: () => [],
+      getApprovalMode: () => approvalMode,
+    });
+    permissionManager.initialize();
+    const resolveWorkspace = vi.fn().mockResolvedValue({
+      workspaceId: 'repo-b-id',
+      workspaceCwd: '/repo-b',
+      workspaceGeneration: 'generation-b',
+      sameWorkspace: false,
+    });
+    const guardEvents: string[] = [];
+    let markGuardEntered!: () => void;
+    let releaseGuard!: () => void;
+    const guardEntered = new Promise<void>((resolve) => {
+      markGuardEntered = resolve;
+    });
+    const guardRelease = new Promise<void>((resolve) => {
+      releaseGuard = resolve;
+    });
+    const guard = vi.fn(async () => {
+      guardEvents.push(`invocation-guard-enter:${approvalMode}`);
+      markGuardEntered();
+      await guardRelease;
+      guardEvents.push(`invocation-guard-release:${approvalMode}`);
+      return { allowed: true };
+    });
+    const config = makeSchedulerConfig(registry, {
+      getApprovalMode: () => approvalMode,
+      getPermissionManager: () => permissionManager,
+      getSubSessionSpawner: () => spawn,
+      getSubSessionWorkspaceResolver: () => resolveWorkspace,
+      getMessageBus: () => permissionRequestHookBus({ behavior: 'allow' }),
+      getDisableAllHooks: () => false,
+      hasHooksForEvent: () => true,
+      getAutoModeDenialState: () => ({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 20,
+        totalUnavailable: 0,
+      }),
+      setAutoModeDenialState: vi.fn(),
+      getAutoModeSettings: () => ({}),
+      getToolInvocationGuard: () => guard,
+      getWorkspaceContext: () => ({ isPathWithinWorkspace: () => false }),
+      getCwd: () => '/repo-a',
+      getTargetDir: () => '/repo-a',
+      ...INTERACTIVE_CLI,
+    });
+    subtools.push(new CreateSubSessionTool(config));
+    const { scheduler, onAllToolCallsComplete } =
+      schedulerWithCallbacks(config);
+
+    const scheduling = scheduler.schedule(
+      [
+        toolRequest(
+          'late-workspace-grant',
+          toolName,
+          { prompt: 'delegate', workspace: 'repo-b-id' },
+          'late-grant-prompt',
+        ),
+      ],
+      new AbortController().signal,
+    );
+    await guardEntered;
+    guardEvents.push('external-mode-change:auto->default');
+    approvalMode = ApprovalMode.DEFAULT;
+    releaseGuard();
+    await scheduling;
+    await vi.waitFor(() =>
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+    );
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(resolveWorkspace).toHaveBeenCalledTimes(1);
+    expect(guard).toHaveBeenCalledOnce();
+    expect(guardEvents).toEqual([
+      'invocation-guard-enter:auto',
+      'external-mode-change:auto->default',
+      'invocation-guard-release:default',
+    ]);
+    const [call] = firstBatch<CompletedToolCall>(onAllToolCallsComplete);
+    expect(call.status).toBe('error');
+    expect(call.response).toMatchObject({
+      errorType: ToolErrorType.EXECUTION_DENIED,
+      executionStatus: 'error',
+      error: {
+        message: 'Approval mode changed before execution. Please retry.',
+      },
+    });
+  });
+
+  it.each([
+    { initialMode: ApprovalMode.YOLO, finalMode: ApprovalMode.AUTO },
+    { initialMode: ApprovalMode.AUTO, finalMode: ApprovalMode.YOLO },
+    { initialMode: ApprovalMode.DEFAULT, finalMode: ApprovalMode.YOLO },
+    {
+      initialMode: ApprovalMode.DEFAULT,
+      finalMode: ApprovalMode.AUTO,
+      invalidAtConfirmation: true,
+    },
+    {
+      initialMode: ApprovalMode.DEFAULT,
+      finalMode: ApprovalMode.AUTO,
+      abortDuringConfirmation: true,
+    },
+    {
+      initialMode: ApprovalMode.DEFAULT,
+      finalMode: ApprovalMode.AUTO,
+      abortAfterAutoConfirmation: true,
+    },
+  ])(
+    'preserves actual AUTO approval from $initialMode to $finalMode during remote workspace checks',
+    async ({
+      initialMode,
+      finalMode,
+      invalidAtConfirmation = false,
+      abortDuringConfirmation = false,
+      abortAfterAutoConfirmation = false,
+    }) => {
+      let approvalMode = initialMode;
+      const spawn = vi.fn(async (_request: SubSessionSpawnRequest) => ({
+        sessionId: 'child-id',
+      }));
+      const resolverModes: ApprovalMode[] = [];
+      const classifierModes: ApprovalMode[] = [];
+      const resolveWorkspace = vi.fn(async () => {
+        resolverModes.push(approvalMode);
+        return {
+          workspaceId: 'repo-b-id',
+          workspaceCwd: '/repo-b',
+          workspaceGeneration: 'generation-b',
+          sameWorkspace: false,
+        };
+      });
+      let markModGateEntered!: () => void;
+      let releaseModGate!: () => void;
+      const modGateEntered = new Promise<void>((resolve) => {
+        markModGateEntered = resolve;
+      });
+      const modGate = new Promise<void>((resolve) => {
+        releaseModGate = resolve;
+      });
+      let markClassifierEntered!: () => void;
+      let releaseClassifier!: () => void;
+      const classifierEntered = new Promise<void>((resolve) => {
+        markClassifierEntered = resolve;
+      });
+      const classifierGate = new Promise<void>((resolve) => {
+        releaseClassifier = resolve;
+      });
+      const classifier = vi.fn(async () => {
+        classifierModes.push(approvalMode);
+        markClassifierEntered();
+        await classifierGate;
+        return { shouldBlock: false };
+      });
+      runSideQueryMock.mockImplementation(classifier);
+      let markRulesEntered!: () => void;
+      let releaseRules!: () => void;
+      const rulesEntered = new Promise<void>((resolve) => {
+        markRulesEntered = resolve;
+      });
+      const rulesGate = new Promise<void>((resolve) => {
+        releaseRules = resolve;
+      });
+      let defaultPermissionReturned = false;
+      let permissionGateConsumed = false;
+      const config = makeFakeConfig({
+        sessionId: `workspace-mode-switch-${initialMode}-${finalMode}`,
+        cwd: '/repo-a',
+        targetDir: '/repo-a',
+        approvalMode: initialMode,
+        interactive: true,
+        disableAllHooks: true,
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      const permissionManager =
+        initialMode === ApprovalMode.DEFAULT
+          ? new PermissionManager({
+              getPermissionsAllow: () => [ToolNames.CREATE_SUB_SESSION],
+              getPermissionsAsk: () => [],
+              getPermissionsDeny: () => [],
+              getApprovalMode: () => approvalMode,
+            })
+          : ({
+              isToolEnabled: async () => true,
+              hasRelevantRules: () => false,
+              hasMatchingAskRule: () => false,
+              findMatchingDenyRule: () => undefined,
+            } as unknown as PermissionManager);
+      if (initialMode === ApprovalMode.DEFAULT) {
+        permissionManager.initialize();
+        const evaluate = permissionManager.evaluate.bind(permissionManager);
+        vi.spyOn(permissionManager, 'evaluate').mockImplementation(
+          async (context) => {
+            if (!permissionGateConsumed && defaultPermissionReturned) {
+              permissionGateConsumed = true;
+              markRulesEntered();
+              await rulesGate;
+            }
+            return evaluate(context);
+          },
+        );
+      }
+      config.getApprovalMode = () => approvalMode;
+      config.getPermissionManager = () => permissionManager;
+      config.setSubSessionSpawner(spawn, resolveWorkspace);
+      config.getLlmClient = () =>
+        ({
+          getHistoryTail: () => [],
+          getTrustedUserAnswers: () => [],
+        }) as unknown as ReturnType<Config['getLlmClient']>;
+      config.getBaseLlmClient = () =>
+        ({ generateJson: classifier }) as unknown as ReturnType<
+          Config['getBaseLlmClient']
+        >;
+      config.getAutoModeDenialState = () => ({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      });
+      config.setAutoModeDenialState = vi.fn();
+      config.getAutoModeSettings = () => ({});
+      const workspaceContext = config.getWorkspaceContext();
+      vi.spyOn(workspaceContext, 'isPathWithinWorkspace').mockReturnValue(
+        false,
+      );
+      const registry = new ToolRegistry(config);
+      const tool = new CreateSubSessionTool(config);
+      const controller = new AbortController();
+      const confirmedAutoModes: ApprovalMode[] = [];
+      let confirmationInvocation: ReturnType<typeof tool.build> | undefined;
+      if (initialMode === ApprovalMode.DEFAULT) {
+        const build = tool.build.bind(tool);
+        vi.spyOn(tool, 'build').mockImplementation((params) => {
+          const invocation = build(params);
+          if (
+            invalidAtConfirmation ||
+            abortDuringConfirmation ||
+            abortAfterAutoConfirmation
+          ) {
+            confirmationInvocation = invocation;
+            vi.spyOn(invocation, 'execute');
+            const getConfirmationDetails =
+              invocation.getConfirmationDetails.bind(invocation);
+            vi.spyOn(invocation, 'getConfirmationDetails').mockImplementation(
+              async (signal) => {
+                expect(classifierModes).toEqual([ApprovalMode.AUTO]);
+                expect(approvalMode).toBe(ApprovalMode.AUTO);
+                const details = await getConfirmationDetails(signal);
+                if (abortDuringConfirmation) {
+                  controller.abort('cancelled-during-confirmation');
+                }
+                if (abortAfterAutoConfirmation) {
+                  const onAutoConfirm = details.onAutoConfirm?.bind(details);
+                  expect(onAutoConfirm).toBeTypeOf('function');
+                  return {
+                    ...details,
+                    onAutoConfirm: async (mode: ApprovalMode) => {
+                      await onAutoConfirm?.(mode);
+                      confirmedAutoModes.push(mode);
+                      controller.abort('cancelled-after-auto-confirmation');
+                    },
+                  };
+                }
+                approvalMode = ApprovalMode.DEFAULT;
+                return details;
+              },
+            );
+          }
+          const getDefaultPermission =
+            invocation.getDefaultPermission.bind(invocation);
+          vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
+            async (signal) => {
+              const permission = await getDefaultPermission(signal);
+              expect(
+                (
+                  invocation as unknown as {
+                    permissionApprovalMode: ApprovalMode;
+                  }
+                ).permissionApprovalMode,
+              ).toBe(ApprovalMode.DEFAULT);
+              defaultPermissionReturned = true;
+              return permission;
+            },
+          );
+          return invocation;
+        });
+      }
+      registry.registerTool(tool);
+      config.getToolRegistry = () => registry;
+      const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+        schedulerWithCallbacks(config, {
+          modToolCheck: async (_input, verdict) => {
+            markModGateEntered();
+            await modGate;
+            return verdict;
+          },
+        });
+      const unexpectedCompletion = new Promise<never>((_, reject) => {
+        onAllToolCallsComplete.mockImplementation(
+          (calls: CompletedToolCall[]) => {
+            reject(
+              new Error(
+                `Tool completed before the expected gate: ${calls
+                  .map(
+                    (call) =>
+                      `${call.request.callId}: ${call.status}: ${
+                        call.response.error?.message ?? 'no error message'
+                      }`,
+                  )
+                  .join('\n')}`,
+              ),
+            );
+          },
+        );
+        onToolCallsUpdate.mockImplementation((calls: ToolCall[]) => {
+          for (const call of calls) {
+            if (call.status === 'awaiting_approval') {
+              const details = call.confirmationDetails;
+              reject(
+                new Error(
+                  `Unexpected manual approval: type=${details.type}, ` +
+                    `reason=${details.autoModeFallback?.reason ?? 'unknown'}, ` +
+                    `title=${details.title}`,
+                ),
+              );
+            }
+          }
+        });
+      });
+      const waitForGate = <T>(gate: Promise<T>) =>
+        Promise.race([gate, unexpectedCompletion]);
+
+      const scheduling = scheduler.schedule(
+        toolRequest(
+          `workspace-mode-switch-${initialMode}-${finalMode}`,
+          ToolNames.CREATE_SUB_SESSION,
+          {
+            prompt: 'answer directly',
+            workspace: 'repo-b-id',
+            completion: 'sent',
+          },
+          'workspace-mode-switch-prompt',
+        ),
+        controller.signal,
+      );
+      if (initialMode === ApprovalMode.DEFAULT) {
+        await waitForGate(rulesEntered);
+        approvalMode = ApprovalMode.AUTO;
+        releaseRules();
+      }
+      await waitForGate(modGateEntered);
+      if (initialMode === ApprovalMode.YOLO) {
+        approvalMode = ApprovalMode.AUTO;
+      }
+      releaseModGate();
+      await waitForGate(classifierEntered);
+      approvalMode = finalMode;
+      releaseClassifier();
+      await scheduling;
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+
+      expect(resolverModes).toEqual([initialMode]);
+      expect(classifierModes).toEqual([ApprovalMode.AUTO]);
+      expect(resolveWorkspace).toHaveBeenCalledOnce();
+      const expectedMarker =
+        finalMode === ApprovalMode.AUTO ? 'requiresAutoMode' : 'requiresYolo';
+      const otherMarker =
+        finalMode === ApprovalMode.AUTO ? 'requiresYolo' : 'requiresAutoMode';
+      const [call] = firstBatch<CompletedToolCall>(onAllToolCallsComplete);
+      if (
+        invalidAtConfirmation ||
+        abortDuringConfirmation ||
+        abortAfterAutoConfirmation
+      ) {
+        expect(spawn).not.toHaveBeenCalled();
+        expect(call.status).toBe(invalidAtConfirmation ? 'error' : 'cancelled');
+        expect(confirmationInvocation).toBeDefined();
+        expect(
+          vi.mocked(confirmationInvocation!.execute),
+        ).not.toHaveBeenCalled();
+        if (invalidAtConfirmation) {
+          expect(call.response).toMatchObject({
+            errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+            error: {
+              message:
+                'Approval mode changed before confirmation. Please retry.',
+            },
+          });
+        } else {
+          expect(call.response).toMatchObject({
+            executionStatus: 'not_started',
+          });
+        }
+        if (abortAfterAutoConfirmation) {
+          expect(confirmedAutoModes).toEqual([ApprovalMode.AUTO]);
+        }
+        return;
+      }
+      if (call.status !== 'success') {
+        throw new Error(
+          call.response.error?.message ?? 'Tool failed before spawning',
+        );
+      }
+      expect(spawn).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          prompt: 'answer directly',
+          completion: 'sent',
+          workspace: 'repo-b-id',
+          workspaceGeneration: 'generation-b',
+          [expectedMarker]: true,
+        }),
+      );
+      expect(spawn.mock.calls[0][0]).not.toHaveProperty(otherMarker);
+      expect(call.status).toBe('success');
+    },
+  );
+
+  it('consumes AUTO review for allowed invocations in the main scheduler path', async () => {
+    const execute = vi.fn().mockResolvedValue(textResult('must not execute'));
+    const tool = askingTool({ execute });
+    const build = tool.build.bind(tool);
+    vi.spyOn(tool, 'build').mockImplementation((params) => {
+      const invocation = build(params);
+      invocation.requiresAutoReviewOnAllow = () => true;
+      return invocation;
+    });
+    queueClassifierBlocks('Cross-workspace delegation denied');
+    const harness = autoScheduler(tool, {
+      permissionManager: {
+        isToolEnabled: async () => true,
+        findMatchingDenyRule: () => undefined,
+        hasRelevantRules: () => true,
+        hasMatchingAskRule: () => false,
+        evaluate: async () => 'allow',
+      },
+    });
+
+    await scheduleAndSettle(
+      harness,
+      toolRequest('auto-review-for-allowed', tool.name, {}, 'prompt-review'),
+    );
+
+    expect(runSideQueryMock).toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('skips PermissionDenied hooks when hooks are disabled', async () => {
@@ -4595,6 +6841,418 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it.each(['permission-request', 'execution-guard'] as const)(
+    'blocks a current-workspace ask added at %s',
+    async (checkpoint) => {
+      const spawn = vi.fn(async (_request: SubSessionSpawnRequest) => ({
+        sessionId: 'child-id',
+      }));
+      const resolveWorkspace = vi.fn(async () => ({
+        workspaceId: 'repo-a-id',
+        workspaceCwd: '/repo-a',
+        workspaceGeneration: 'generation-a',
+        sameWorkspace: true,
+      }));
+      const permissionManager = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+      });
+      permissionManager.initialize();
+      const config = makeFakeConfig({
+        cwd: '/repo-a',
+        targetDir: '/repo-a',
+        approvalMode: ApprovalMode.DEFAULT,
+        interactive: true,
+        disableAllHooks: false,
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      config.getPermissionManager = () => permissionManager;
+      config.setSubSessionSpawner(spawn, resolveWorkspace);
+      const addLateAsk = () =>
+        permissionManager.addPersistentRule(
+          'create_sub_session(workspace:repo-a-id)',
+          'ask',
+        );
+      const executionGuard =
+        checkpoint === 'execution-guard'
+          ? vi.fn(async () => {
+              addLateAsk();
+              return { allowed: true };
+            })
+          : undefined;
+      config.getToolInvocationGuard = vi.fn(() => executionGuard);
+      const messageBus = hookBus(async (request) => {
+        if (
+          checkpoint === 'permission-request' &&
+          request.eventName === 'PermissionRequest'
+        ) {
+          addLateAsk();
+        }
+        return hookResponse(request.eventName, {
+          hookSpecificOutput: {
+            ...(request.eventName === 'PermissionRequest'
+              ? { decision: { behavior: 'allow' } }
+              : { decision: 'allow' }),
+          },
+        });
+      });
+      config.getMessageBus = () =>
+        messageBus as unknown as ReturnType<Config['getMessageBus']>;
+      const tool = new CreateSubSessionTool(config);
+      const registry = new ToolRegistry(config);
+      registry.registerTool(tool);
+      config.getToolRegistry = () => registry;
+      const { scheduler, onAllToolCallsComplete } =
+        schedulerWithCallbacks(config);
+
+      await scheduler.schedule(
+        [
+          toolRequest(
+            `late-current-workspace-${checkpoint}`,
+            tool.name,
+            { prompt: 'summarize', workspace: 'repo-a-id' },
+            `late-current-prompt-${checkpoint}`,
+          ),
+        ],
+        new AbortController().signal,
+      );
+
+      const [call] = firstBatch<CompletedToolCall>(onAllToolCallsComplete);
+      expect(call.status).toBe('error');
+      expect(call.response).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus:
+          checkpoint === 'execution-guard' ? 'error' : 'not_started',
+        error: { message: expect.stringContaining('one-time human approval') },
+      });
+      expect(
+        messageBus.request.mock.calls.filter(
+          ([request]) => request.eventName === 'PermissionRequest',
+        ),
+      ).toHaveLength(1);
+      expect(resolveWorkspace).toHaveBeenCalledOnce();
+      expect(spawn).not.toHaveBeenCalled();
+      if (executionGuard) expect(executionGuard).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([
+    { finalMode: ApprovalMode.AUTO, expectExecution: true },
+    { finalMode: ApprovalMode.DEFAULT, expectExecution: false },
+    { finalMode: ApprovalMode.YOLO, expectExecution: true },
+    {
+      finalMode: ApprovalMode.DEFAULT,
+      expectExecution: true,
+      requiresAutoReview: false,
+    },
+    {
+      finalMode: ApprovalMode.AUTO,
+      expectExecution: false,
+      requiresHumanAfterReview: true,
+    },
+    {
+      finalMode: ApprovalMode.AUTO,
+      expectExecution: false,
+      requiresAutoReview: false,
+      requiresHumanAfterReview: true,
+    },
+  ])(
+    'revalidates an automatic hook approval after switching to $finalMode',
+    async ({
+      finalMode,
+      expectExecution,
+      requiresAutoReview = true,
+      requiresHumanAfterReview = false,
+    }) => {
+      let approvalMode = ApprovalMode.AUTO;
+      let requiresHuman = false;
+      let permissionRequestReached = false;
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const onAutoConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const execute = vi.fn().mockResolvedValue(textResult('executed'));
+      const tool = askingTool({
+        kind: Kind.Execute,
+        requiresUserInteraction: () => requiresHuman,
+        getConfirmationDetails: vi.fn().mockImplementation(async () => {
+          if (requiresHumanAfterReview) requiresHuman = true;
+          return {
+            ...execDetails(
+              'Delegate remotely',
+              'create',
+              'create',
+              onConfirmSpy,
+            ),
+            ...(requiresAutoReview ? { onAutoConfirm: onAutoConfirmSpy } : {}),
+          };
+        }),
+        execute,
+      });
+      if (requiresAutoReview) {
+        const build = tool.build.bind(tool);
+        vi.spyOn(tool, 'build').mockImplementation((params) => {
+          const invocation = build(params);
+          invocation.requiresAutoReviewOnAllow = () => true;
+          return invocation;
+        });
+      }
+      const messageBus = hookBus(async (request) => {
+        if (request.eventName === 'PermissionRequest') {
+          permissionRequestReached = true;
+          approvalMode = finalMode;
+          return hookResponse('mode-revalidation', {
+            hookSpecificOutput: { decision: { behavior: 'allow' } },
+          });
+        }
+        return hookResponse(`${request.eventName}-hook`, {
+          decision: 'allow',
+        });
+      });
+      const harness = autoScheduler(tool, {
+        getApprovalMode: () => approvalMode,
+        messageBus,
+        disableHooks: false,
+        autoModeDenialState: denialState({ totalBlock: 20 }),
+      });
+
+      await scheduleAndSettle(
+        harness,
+        shellRequest('mode-revalidation', 'delegate'),
+      );
+
+      expect(permissionRequestReached).toBe(true);
+      expect(onConfirmSpy).toHaveBeenCalledTimes(
+        expectExecution && !requiresAutoReview ? 1 : 0,
+      );
+      expect(onAutoConfirmSpy).toHaveBeenCalledTimes(
+        expectExecution && requiresAutoReview ? 1 : 0,
+      );
+      if (expectExecution && requiresAutoReview) {
+        expect(onAutoConfirmSpy).toHaveBeenCalledWith(finalMode);
+      }
+      expect(execute).toHaveBeenCalledTimes(expectExecution ? 1 : 0);
+      const [call] = firstBatch<CompletedToolCall>(
+        harness.onAllToolCallsComplete,
+      );
+      if (expectExecution) {
+        expect(call.status).toBe('success');
+      } else {
+        expect(call.response).toMatchObject({
+          errorType: ToolErrorType.EXECUTION_DENIED,
+          executionStatus: 'not_started',
+          error: {
+            message: requiresHumanAfterReview
+              ? expect.stringContaining('one-time human approval')
+              : 'Approval mode changed before confirmation. Please retry.',
+          },
+        });
+        expect(call.status).toBe('error');
+      }
+    },
+  );
+
+  it('does not let a PermissionRequest hook allow waive a destructive-command escalation', async () => {
+    // Counterpart to the test above. The escalation shares its reason code with
+    // the classifier arm, so without `requiresHumanDecision` this hook allow
+    // would schedule a command the deterministic guard classified as
+    // work-destroying, with no human in the loop.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+        disableHooks: false,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('destructive-hook-waiver', 'git reset --hard'),
+      new AbortController().signal,
+    );
+
+    // The hook fired and answered `allow`, but the call must still be waiting
+    // on a human rather than scheduled. `reportedCalls` flattens every snapshot
+    // ever emitted, and this test schedules exactly one call, so the last
+    // snapshot is that call's current state.
+    await vi.waitFor(() =>
+      expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+        'awaiting_approval',
+      ),
+    );
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not let a PermissionRequest hook allow waive an amend approval', async () => {
+    // The amend floor rides the plain fallback arm, so `requiresHumanDecision`
+    // is the only thing stopping this hook from rewriting a commit unattended.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails(
+              'Run command',
+              'git commit --amend',
+              'git',
+              onConfirmSpy,
+            ),
+          ),
+        execute,
+      }),
+      {
+        messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+        disableHooks: false,
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('amend-hook-waiver', 'git commit --amend --no-edit'),
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() =>
+      expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+        'awaiting_approval',
+      ),
+    );
+    // "always allow" would persist a rule that waives the guard.
+    const waiting = reportedCalls(harness.onToolCallsUpdate).find(
+      (call) => call.status === 'awaiting_approval',
+    ) as WaitingToolCall;
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'safety_check',
+        message: expect.stringContaining('requires manual approval'),
+      },
+    });
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it('does not reset AUTO denial counters when an amend approval is granted', async () => {
+    // The amend floor is a deterministic policy, not a recovery prompt: it is
+    // reached with the counters at any value, so approving one amend is not
+    // evidence that a denial streak is over. Arming this callId for the reset
+    // (as the denial-fallback reasons do) cleared a live streak on the main
+    // permission path only — the pending-tool sweep and the ACP host never
+    // armed it, so the same approval had two different effects.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const setAutoModeDenialState = vi.fn();
+    const streak = denialState({ consecutiveBlock: 2, totalBlock: 5 });
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails(
+              'Run command',
+              'git commit --amend',
+              'git',
+              onConfirmSpy,
+            ),
+          ),
+        execute,
+      }),
+      {
+        autoModeDenialState: streak,
+        setAutoModeDenialState,
+        disableHooks: true,
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('amend-counter-reset', 'git commit --amend --no-edit'),
+      new AbortController().signal,
+    );
+
+    const waiting = await waitForApproval(harness.onToolCallsUpdate);
+    // The dialog still carries the explanation and the hidden always-allow.
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: { reason: 'safety_check' },
+    });
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+    );
+
+    // The fallback path itself records no counter change, and the approval
+    // must not either: the streak survives.
+    expect(setAutoModeDenialState).not.toHaveBeenCalled();
+  });
+
+  it('denies a destructive-command escalation in non-interactive STREAM_JSON instead of offering it to the host', async () => {
+    // Counterpart to the test above for the other programmatic approver.
+    // STREAM_JSON is exempt from the non-interactive deny because a host can
+    // answer `can_use_tool`, but that host is not a human — so handing it this
+    // dialog lets `{behavior:'allow'}` resolve to ProceedOnce and run the
+    // work-destroying command. Without a human channel the escalation must
+    // deny, as it did before the escalation existed.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        isInteractive: false,
+        inputFormat: InputFormat.STREAM_JSON,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await scheduleAndSettle(
+      harness,
+      shellRequest('destructive-stream-json', 'git reset --hard'),
+    );
+
+    const [denied] = firstBatch<CompletedToolCall>(
+      harness.onAllToolCallsComplete,
+    );
+    expect(denied.status).toBe('error');
+    expect(denied.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    // `awaiting_approval` is the only status PermissionController's
+    // update callback picks up to emit `can_use_tool`, so never reaching it
+    // is what keeps the escalation off the wire.
+    expect(
+      reportedCalls(harness.onToolCallsUpdate).map((c) => c.status),
+    ).not.toContain('awaiting_approval');
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */
   function readToolMap(
     executes: Record<string, Mock | ToolResult>,
@@ -5155,6 +7813,40 @@ describe('CoreToolScheduler', () => {
     expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
+  it('records Goal-only discovery as bookkeeping', async () => {
+    const goalContext = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+    const output =
+      '<functions>\n<function>{"name":"update_goal"}</function>\n</functions>';
+    const recordToolResult = vi.fn();
+    await runReadBatch(
+      { [ToolNames.TOOL_SEARCH]: textResult(output) },
+      [
+        {
+          ...valueRequest(
+            ToolNames.TOOL_SEARCH,
+            'select:update_goal',
+            'prompt-goal-discovery',
+          ),
+          goalContext,
+        },
+      ],
+      {
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
+      },
+    );
+
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'call-tool_search',
+        status: 'success',
+      }),
+      { goalContext, provenance: 'goal_runtime' },
+    );
+  });
+
   it('includes failed tool responses in PostToolBatch payloads', async () => {
     const messageBus = allowAllHookBus();
     const recordToolResult = vi.fn();
@@ -5377,6 +8069,32 @@ describe('CoreToolScheduler', () => {
     expect(latestSpan('tool.alpha', 'call-alpha')?.ended).toBe(true);
   });
 
+  it('drops the producer raw size when a post-settlement step throws', async () => {
+    // A throw after `execute()` settled (here the vision bridge) replaces the
+    // producer's outcome with an error body, so that body must not inherit
+    // the producer's raw size or truncation status.
+    bridgeRejection.value = new Error('bridge failed');
+    try {
+      const { onAllToolCallsComplete } = await runReadBatch(
+        { alpha: textResult('p'.repeat(2000)) },
+        [valueRequest('alpha', 'a', 'prompt-post-settlement-throw')],
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.error?.message).toContain('bridge failed');
+      const provenance = getToolOutputProvenance(
+        completed.response.responseParts[0],
+      );
+      expect(provenance).toBeDefined();
+      expect(provenance?.rawSize).toBeUndefined();
+      expect(provenance?.truncated).toBeUndefined();
+      expect(new ToolCallEvent(completed).raw_content_length).toBeUndefined();
+    } finally {
+      bridgeRejection.value = undefined;
+    }
+  });
+
   it('applies PostToolBatch stop decisions and preserves additional context', async () => {
     const alpha = deferred<ToolResult>();
     const executeB = vi.fn().mockResolvedValue(textResult('beta output'));
@@ -5434,6 +8152,13 @@ describe('CoreToolScheduler', () => {
       'halt'.length + 'batch context'.length + 2,
     );
     expect(lastCompletedCall.outcome).toBeUndefined();
+    const provenance = getToolOutputProvenance(
+      lastCompletedCall.response.responseParts[0],
+    );
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+    expect(provenance?.budget).toBeUndefined();
     expect(debugLoggerInfoSpy).toHaveBeenCalledWith(
       'PostToolBatch hook stopped batch (2 calls): halt',
     );
@@ -6210,6 +8935,59 @@ describe('CoreToolScheduler with payload', () => {
 });
 
 describe('convertToFunctionResponse', () => {
+  it('carries pre-reduction producer sizes without inventing restored raw data', () => {
+    const [produced] = convertToFunctionResponse('shell', 'call', 'preview', {
+      rawOutputSize: { chars: 40000, estimatedTokens: 10000 },
+    });
+    expect(getToolOutputProvenance(produced)).toMatchObject({
+      rawSize: { chars: 40000, estimatedTokens: 10000 },
+      truncated: true,
+    });
+    const [restored] = convertToFunctionResponse('shell', 'call', 'preview');
+    expect(getToolOutputProvenance(restored)?.rawSize).toBeUndefined();
+  });
+
+  it('measures an undeclared body but keeps a declared null unknown', () => {
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const [measured] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'complete body',
+      {},
+      cfg,
+    );
+    // Undeclared means an ordinary producer whose body is complete, so the
+    // ACP and speculation paths report the same raw size as the scheduler.
+    expect(getToolOutputProvenance(measured)?.rawSize?.chars).toBe(
+      'complete body'.length,
+    );
+    expect(getToolOutputProvenance(measured)?.truncated).toBe(false);
+
+    const [declared] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null },
+      cfg,
+    );
+    // A producer that bounds its own render still declares raw size unknown.
+    expect(getToolOutputProvenance(declared)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(declared)?.truncated).toBeUndefined();
+
+    // ...but when it also declares the cut itself, the bit survives.
+    const [cut] = convertToFunctionResponse(
+      'read_file',
+      'call',
+      'preview',
+      { rawOutputSize: null, truncatedByProducer: true },
+      cfg,
+    );
+    expect(getToolOutputProvenance(cut)?.rawSize).toBeUndefined();
+    expect(getToolOutputProvenance(cut)?.truncated).toBe(true);
+  });
+
   const toolName = 'testTool';
   const callId = 'call1';
 
@@ -6276,7 +9054,11 @@ describe('convertToFunctionResponse', () => {
       'Tool execution succeeded.',
     ],
   ])('%s', (_title, llmContent, output, parts) => {
-    expect(convertToFunctionResponse(toolName, callId, llmContent)).toEqual([
+    expect(
+      JSON.parse(
+        JSON.stringify(convertToFunctionResponse(toolName, callId, llmContent)),
+      ),
+    ).toEqual([
       {
         functionResponse: {
           name: toolName,
@@ -6327,6 +9109,33 @@ describe('convertToFunctionErrorResponse', () => {
       });
     },
   );
+
+  it('reports no raw size for the body the error path replaces', () => {
+    const content = [
+      { inlineData: { mimeType: 'image/png', data: 'base64...' } },
+    ] satisfies PartListUnion;
+    const cfg = {
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+
+    const [part] = convertToFunctionErrorResponse(
+      toolName,
+      callId,
+      content,
+      'image read failed',
+      cfg,
+    );
+
+    expect(part.functionResponse?.response).toEqual({
+      error: 'image read failed',
+    });
+    // The measured body was replaced by `error`, so its size must not travel
+    // as this response's pre-reduction raw size (#13652 R4-1).
+    const provenance = getToolOutputProvenance(part);
+    expect(provenance).toBeDefined();
+    expect(provenance?.rawSize).toBeUndefined();
+    expect(provenance?.truncated).toBeUndefined();
+  });
 
   it('prefers an existing error and preserves media and response fields', () => {
     const content = {
@@ -6889,6 +9698,7 @@ describe('CoreToolScheduler request queueing', () => {
    */
   async function autoApprovePendingProtectedWrite(
     options?: {
+      command?: string;
       denialState?: TestDenialState;
       disableHooks?: boolean;
       failPermissionDeniedHook?: boolean;
@@ -6896,6 +9706,7 @@ describe('CoreToolScheduler request queueing', () => {
     signal = new AbortController().signal,
   ) {
     const cwd = '/repo';
+    const command = options?.command ?? PROTECTED_WRITE_COMMAND;
     let denialState = options?.denialState ?? blockedState(0);
     const setAutoModeDenialState = vi.fn((next: typeof denialState) => {
       denialState = next;
@@ -6943,7 +9754,7 @@ describe('CoreToolScheduler request queueing', () => {
     const request = toolRequest(
       'pending-protected-write',
       ToolNames.SHELL,
-      { command: PROTECTED_WRITE_COMMAND },
+      { command },
       'prompt-pending-protected-write',
     );
     const invocation = {
@@ -6964,8 +9775,8 @@ describe('CoreToolScheduler request queueing', () => {
         confirmationDetails: {
           type: 'exec',
           title: 'Confirm shell command',
-          command: PROTECTED_WRITE_COMMAND,
-          rootCommand: 'echo',
+          command,
+          rootCommand: command.split(' ')[0]!,
           onConfirm: vi.fn(),
         },
       },
@@ -7072,6 +9883,35 @@ describe('CoreToolScheduler request queueing', () => {
     expect(
       internals.autoModeFallbackCallIds.has('pending-protected-write'),
     ).toBe(true);
+  });
+
+  it('hides persistent approval when a pending amend requires a human', async () => {
+    const { internals, onToolCallsUpdate } =
+      await autoApprovePendingProtectedWrite({
+        command: 'git commit --amend --no-edit',
+      });
+
+    expect(internals.toolCalls[0]).toMatchObject({
+      status: 'awaiting_approval',
+      confirmationDetails: {
+        // The dialog must not offer "always allow": that option would persist
+        // the amend floor away, so it is hidden with the fallback decoration.
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'safety_check',
+          message: 'Rewriting a commit requires manual approval in AUTO mode.',
+        },
+      },
+    });
+    expect(
+      reportedCalls(onToolCallsUpdate).some(
+        (call) =>
+          call.status === 'awaiting_approval' &&
+          'autoModeFallback' in call.confirmationDetails &&
+          call.confirmationDetails.autoModeFallback?.reason === 'safety_check',
+      ),
+    ).toBe(true);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
   it('routes an exact retry through manual approval during pending re-evaluation', async () => {
@@ -7197,6 +10037,92 @@ describe('CoreToolScheduler truncated output protection', () => {
         true,
       ),
     );
+  });
+
+  it('names the output budget when the truncation carries one (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    await scheduleBatch(scheduler, {
+      ...toolRequest('1', TestApprovalTool.Name, { id: 'test-budget' }, 'p1'),
+      wasOutputTruncated: true,
+      outputBudgetAtTruncation: { usedTokens: 4096, limitTokens: 8192 },
+    });
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const message = expectTruncationRejection(
+      firstBatch(onAllToolCallsComplete)[0],
+    );
+    expect(message).toContain('used 4096 of the 8192-token output limit');
+    // R3-1: usage at exactly half the limit corroborates the cut (>=), so
+    // the size-each-part guidance is present — the positive arm the
+    // far-below-limit test leaves unpinned.
+    expect(message).toContain('size each part well under');
+  });
+
+  it('rejects without budget numbers when the truncation lacks them', async () => {
+    const message = expectTruncationRejection(
+      await completeTruncationCall(
+        approvalTool(),
+        { id: 'test-no-budget' },
+        'prompt-id-no-budget',
+        true,
+      ),
+    );
+    expect(message).not.toContain('output limit');
+  });
+
+  // #16417 mutation M3: folding the budget numbers into the retry-count key
+  // would reset the count at every truncation, so the third rejection with
+  // *different* budgets would carry the budget note instead of RETRY LOOP
+  // DETECTED. This pins the stable-key invariant.
+  it('keeps RETRY LOOP DETECTED on the third truncation with different budgets (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    const budgets = [
+      { usedTokens: 4096, limitTokens: 8192 },
+      { usedTokens: 5000, limitTokens: 8192 },
+      { usedTokens: 6000, limitTokens: 8192 },
+    ];
+    for (let i = 0; i < budgets.length; i++) {
+      await scheduleBatch(scheduler, {
+        ...toolRequest(
+          `${i + 1}`,
+          TestApprovalTool.Name,
+          { id: `test-loop-${i}` },
+          `prompt-loop-${i}`,
+        ),
+        wasOutputTruncated: true,
+        outputBudgetAtTruncation: budgets[i],
+      });
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i + 1),
+      );
+    }
+    // The LAST batch's result carries the threshold directive.
+    const lastBatch = onAllToolCallsComplete.mock.calls[
+      onAllToolCallsComplete.mock.calls.length - 1
+    ]?.[0] as unknown[];
+    const message = expectTruncationRejection(lastBatch[0] as ToolCall);
+    expect(message).toContain('RETRY LOOP DETECTED');
+  });
+
+  // #16417 R1-2: when the cut landed far below the configured limit (e.g.
+  // a provider-side cut at 3K against a 64K ceiling), the "size each part
+  // well under that limit" guidance is suppressed — it would license a
+  // retry an order of magnitude too large.
+  it('omits size-each-part guidance when the cut is far below the limit (#16417)', async () => {
+    const { scheduler, onAllToolCallsComplete } =
+      createTruncationTestScheduler(approvalTool());
+    await scheduleBatch(scheduler, {
+      ...toolRequest('1', TestApprovalTool.Name, { id: 'test-far-cut' }, 'p1'),
+      wasOutputTruncated: true,
+      outputBudgetAtTruncation: { usedTokens: 3000, limitTokens: 64000 },
+    });
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const message = expectTruncationRejection(
+      firstBatch(onAllToolCallsComplete)[0],
+    );
+    expect(message).toContain('used 3000 of the 64000-token output limit');
+    expect(message).not.toContain('size each part well under');
   });
 
   // The token-limit diagnosis being withdrawn must not withdraw the data-loss
@@ -8719,6 +11645,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    isFinished?: () => boolean;
     shouldObserveProducer?: (callId: string) => boolean;
     configOverrides?: Record<string, unknown>;
   };
@@ -8776,6 +11703,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       {
         onAllToolCallsComplete,
         onToolCallsUpdate,
+        isFinished: options.isFinished,
         shouldObserveProducer: options.shouldObserveProducer,
       },
     );
@@ -9163,6 +12091,35 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
+
+  it.each(['SLOT_CLOSED: Choose another slot.', ''])(
+    'keeps reported failures out of the success path (%j)',
+    async (body) => {
+      const hooks = eventHookBus(allowOnlyPreToolUse);
+      const { spanRecord, call } = await runSingleTool({
+        hooks,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: [{ text: body }],
+          returnDisplay: body,
+          isError: true,
+        }),
+      });
+
+      expectStatus(call, 'error');
+      expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
+      const error = body || 'Tool reported an error.';
+      expect(call.response.resultDisplay).toBe(error);
+      expect(
+        call.response.responseParts[0]?.functionResponse?.response,
+      ).toEqual({
+        error,
+      });
+      expect(
+        hooks.request.mock.calls.map(([request]) => request.eventName),
+      ).toEqual(['PreToolUse', 'PostToolUseFailure']);
+      expect(hooks.request.mock.calls[1]?.[0]?.input).toMatchObject({ error });
+    },
+  );
 
   it('preserves a structured tool display when the tool returns an error', async () => {
     const resultDisplay = {
@@ -9723,6 +12680,17 @@ describe('CoreToolScheduler telemetry spans', () => {
       'The tool had already completed',
       'User intentionally cancelled this tool call. Stop',
     ],
+    [
+      'tells the model a returned interruption result never completed',
+      {
+        llmContent:
+          'Command was cancelled by user before it could complete. There was no output before it was cancelled.',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+      'User intentionally cancelled this tool call.',
+      'had already completed',
+    ],
   ])('%s', async (_title, outcome, notice, wrongNotice) => {
     const { call } = await runAbortedDuringExecution({}, outcome);
 
@@ -9730,6 +12698,179 @@ describe('CoreToolScheduler telemetry spans', () => {
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain(notice);
     expect(responseText).not.toContain(wrongNotice);
+  });
+
+  it.each<[string, ToolResult | Error, string]>([
+    [
+      'a returned interruption',
+      {
+        llmContent: 'Command was cancelled by user before it could complete.',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+      TOOL_INTERRUPTED_FOR_USER_MESSAGE,
+    ],
+    [
+      'an abort error',
+      Object.assign(new Error('Tool call aborted'), { name: 'AbortError' }),
+      TOOL_INTERRUPTED_FOR_USER_MESSAGE,
+    ],
+    [
+      'a finished result',
+      textResult('done'),
+      'its output was discarded when the user interrupted to send you a message, which follows',
+    ],
+  ])(
+    'tells the model to read the message a tool was interrupted for (%s)',
+    async (_title, outcome, notice) => {
+      const abortController = new AbortController();
+      const { call } = await runSingleTool({
+        abortController,
+        execute: vi.fn().mockImplementation(async () => {
+          abortController.abort(USER_MESSAGE_INTERRUPT_ABORT_REASON);
+          if (outcome instanceof Error) throw outcome;
+          return outcome;
+        }),
+      });
+
+      const completedCall = expectSettled(call, 'cancelled', 'cancelled');
+      const responseText = JSON.stringify(completedCall.response.responseParts);
+      expect(responseText).toContain(notice);
+      expect(responseText).not.toContain('User intentionally cancelled');
+    },
+  );
+
+  it.each([
+    {
+      hook: 'PostToolUse',
+      outcome: textResult('done'),
+      interruptExecution: false,
+    },
+    {
+      hook: 'PostToolUseFailure',
+      outcome: { ...textResult('failed'), error: { message: 'failed' } },
+      interruptExecution: false,
+    },
+    {
+      hook: 'PostToolUseFailure',
+      outcome: {
+        ...textResult('interrupted'),
+        interruptedBeforeCompletion: true,
+      },
+      interruptExecution: true,
+    },
+  ])(
+    'settles after Send now without waiting for $hook (interrupted execution: $interruptExecution)',
+    async ({ hook, outcome, interruptExecution }) => {
+      toolSpanRecords.length = 0;
+      const abort = new AbortController();
+      const entered = deferred<HookRequest>();
+      const releaseHook = deferred<HookExecutionResponse>();
+      const executionStarted = deferred();
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        hooks: hookBus((request) => {
+          if (request.eventName === hook) {
+            entered.resolve(request);
+            return releaseHook.promise;
+          }
+          return hookResponse(request.eventName, {});
+        }),
+        execute: async () => {
+          if (interruptExecution) {
+            await new Promise<void>((resolve) => {
+              abort.signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+              executionStarted.resolve();
+            });
+          }
+          return outcome;
+        },
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('send-now-during-post-hook'),
+        abort.signal,
+      );
+      try {
+        if (interruptExecution) {
+          await executionStarted.promise;
+          abort.abort(USER_MESSAGE_INTERRUPT_ABORT_REASON);
+        }
+        const request = await entered.promise;
+        if (interruptExecution) {
+          expect(request.input?.['is_interrupt']).toBe(true);
+        } else {
+          abort.abort(USER_MESSAGE_INTERRUPT_ABORT_REASON);
+        }
+        const [call] = await settledLastBatch(onAllToolCallsComplete);
+        expectStatus(call, 'cancelled');
+        const hookSpan = definedHookSpan(hook);
+        expect(hookSpan.ended).toBe(true);
+        expect(hookSpan.hookMetadata?.waitInterrupted).toBe(true);
+        expect(hookSpan.hookMetadata?.error).toBeUndefined();
+        expect(hookSpan.hookMetadata?.success).toBeUndefined();
+        expect(JSON.stringify(call.response.responseParts)).toContain(
+          interruptExecution
+            ? TOOL_INTERRUPTED_FOR_USER_MESSAGE
+            : TOOL_DISCARDED_FOR_USER_MESSAGE,
+        );
+        if (!interruptExecution) {
+          expect(request.signal?.reason).toBe(
+            USER_MESSAGE_INTERRUPT_ABORT_REASON,
+          );
+        }
+      } finally {
+        releaseHook.resolve(hookResponse(hook, {}));
+        await scheduled;
+      }
+    },
+  );
+
+  it.each(['PostToolUse', 'PostToolUseFailure'])(
+    'reports actual %s hook errors to telemetry',
+    async (hook) => {
+      await runSingleTool({
+        ...(hook === 'PostToolUseFailure' && {
+          execute: executeToolError('tool failed'),
+        }),
+        hooks: hookBus(async (request) => {
+          if (request.eventName === hook) {
+            throw new Error('hook transport failed');
+          }
+          return hookResponse(request.eventName, {});
+        }),
+      });
+
+      expect(definedHookSpan(hook).hookMetadata).toMatchObject({
+        success: false,
+        error: 'hook transport failed',
+      });
+    },
+  );
+
+  // The notice says the call did not finish; the producer's own text says how
+  // far it got. Replacing the whole payload with the notice loses the partial
+  // output the model needs to decide what remains.
+  it('keeps the partial output a cancelled producer reported', async () => {
+    const { call } = await runAbortedDuringExecution(
+      {},
+      {
+        llmContent:
+          'Command was cancelled by user before it could complete. Below is the output before it was cancelled:\nstart',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+    );
+
+    const completedCall = expectSettled(call, 'cancelled', 'cancelled');
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call.',
+    );
+    expect(responseText).toContain(
+      'Below is the output before it was cancelled',
+    );
+    expect(responseText).toContain('start');
   });
 
   // A post-execution cancellation drops the model-visible output, but the
@@ -9933,14 +13074,22 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getBlockedSpans()).toHaveLength(0);
   });
 
-  // PreToolUse permissionDecision:'ask' bounces the tool from EXECUTION back to
-  // awaiting_approval for a native TUI confirmation instead of the historical
-  // deny; without a prompt surface (non-interactive / background agent) it
-  // still denies.
+  // PreToolUse permissionDecision:'ask' (fired before validation) makes the
+  // call's normal confirmation mandatory instead of the historical deny;
+  // without a prompt surface (non-interactive / background agent) it still
+  // denies.
 
   function askMessageBus(reason = 'please confirm') {
     return preHookBus({ decision: 'ask', reason });
   }
+
+  /** The generic info confirmation a real tool falls back to. */
+  const infoConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+    type: 'info',
+    title: 'Confirm mockTool',
+    prompt: 'run mockTool',
+    onConfirm: async () => {},
+  });
 
   /**
    * Schedules one `ask-call` with hooks enabled (default bus: askMessageBus())
@@ -9957,6 +13106,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     const built = buildScheduler({
       disableHooks: false,
       ...options,
+      tools: options.tools ?? [
+        new MockTool({
+          name: 'mockTool',
+          execute: options.execute,
+          getConfirmationDetails: infoConfirmation,
+        }),
+      ],
       messageBus: options.messageBus ?? askMessageBus(),
     });
     const abortController = options.abortController ?? new AbortController();
@@ -9978,7 +13134,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     return { ...built, abortController };
   }
 
-  /** scheduleWithAsk, then waits for the bounced call's approval prompt. */
+  /** scheduleWithAsk, then waits for the call's approval prompt. */
   async function askUntilApproval(
     options: Parameters<typeof scheduleWithAsk>[0] = {},
   ) {
@@ -10047,12 +13203,22 @@ describe('CoreToolScheduler telemetry spans', () => {
   /** Two Kind-`kind` tools, toolA and toolB, over the given execute mocks. */
   function toolPair(kind: Kind, aExecute: Mock, bExecute: Mock) {
     return [
-      new MockTool({ name: 'toolA', kind, execute: aExecute }),
-      new MockTool({ name: 'toolB', kind, execute: bExecute }),
+      new MockTool({
+        name: 'toolA',
+        kind,
+        execute: aExecute,
+        getConfirmationDetails: infoConfirmation,
+      }),
+      new MockTool({
+        name: 'toolB',
+        kind,
+        execute: bExecute,
+        getConfirmationDetails: infoConfirmation,
+      }),
     ];
   }
 
-  it('bounces a PreToolUse ask to awaiting_approval with an info confirmation', async () => {
+  it('confirms a PreToolUse ask despite YOLO, showing the hook reason', async () => {
     const { waiting } = await askUntilApproval({
       messageBus: askMessageBus('confirm deploy 38111'),
     });
@@ -10065,14 +13231,123 @@ describe('CoreToolScheduler telemetry spans', () => {
     };
     // The hook re-evaluates on every call, so "always allow" is hidden.
     expect(details.hideAlwaysAllow).toBe(true);
-    expect(details.prompt).toContain('confirm deploy 38111');
+    expect(details.prompt).toBe('confirm deploy 38111\n\nrun mockTool');
     expect(details.renderPromptAsPlainText).toBe(true);
-    // One open blocked_on_user span; the tool span stays open across the
-    // bounce (it is NOT finalized until the confirmation resolves).
+    // One open blocked_on_user span; the tool span stays open until the
+    // confirmation resolves.
     const blocked = getBlockedSpans();
     expect(blocked).toHaveLength(1);
     expect(blocked[0].ended).toBe(false);
     expect(getToolSpans()[0].ended).toBe(false);
+  });
+
+  it('shows a PreToolUse ask on an MCP tool as a literal-text info confirmation', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      // Distinct from `toolName`, as in production (#13687): the title
+      // assertion below must discriminate which field is read.
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const { waiting } = await askUntilApproval({
+      messageBus: askMessageBus(
+        'Save this exact content to the bound Mem0 repository memory?\n[visible](https://hidden.example/target)',
+      ),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute: vi.fn().mockResolvedValue(textResult('ok')),
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // MCP details have no body for the reason, so the ask falls back to the
+    // literal-text info confirmation the pre-merge hook bounce used (#13687).
+    expect(waiting.confirmationDetails.type).toBe('info');
+    const details = waiting.confirmationDetails as {
+      title: string;
+      prompt: string;
+      renderPromptAsPlainText?: boolean;
+      hideAlwaysAllow?: boolean;
+    };
+    expect(details.title).toBe(
+      'Hook requested confirmation to run context_remember',
+    );
+    // The reason stays literal and first; the destination follows it, because
+    // the info dialog renders no title and carries no server field.
+    expect(details.prompt).toBe(
+      'Save this exact content to the bound Mem0 repository memory?\n' +
+        '[visible](https://hidden.example/target)\n\n' +
+        'MCP Server: external-context\nTool: context_remember',
+    );
+    expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.hideAlwaysAllow).toBe(true);
+  });
+
+  it('still blocks a hook-asked MCP tool call in plan mode', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      approvalMode: ApprovalMode.PLAN,
+      configOverrides: { getSdkMode: () => false },
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute: vi.fn().mockResolvedValue(textResult('ok')),
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // The ask rewrite must not turn the blocked MCP call into an approvable
+    // `info` dialog: plan mode blocks it before any prompt is shown.
+    const [completed] = (await settledLastBatch(
+      onAllToolCallsComplete,
+    )) as CompletedToolCall[];
+    expectStatus(completed, 'error');
+    expect(JSON.stringify(completed.response.responseParts)).toContain(
+      'Tool blocked by plan mode',
+    );
+  });
+
+  it('does not let AUTO_EDIT auto-approve a hook-asked MCP call', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const execute = vi.fn().mockResolvedValue(textResult('ok'));
+    const { waiting } = await askUntilApproval({
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute,
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // The ask rewrite makes the details an approvable `info` shape, so the
+    // `!preToolUseAsk` term is the only thing between AUTO_EDIT and a silently
+    // executed write the hook explicitly asked the user about.
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
@@ -10085,7 +13360,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(completed[0].status).toBe('success');
     expect(execute).toHaveBeenCalledTimes(1);
-    // The re-execution skips the hook → PreToolUse fired exactly once.
+    // The hook ran before the confirmation, never again.
     expect(preToolUseCallCount(messageBus)).toBe(1);
 
     // Tool span finalized exactly once; blocked span ended.
@@ -10341,7 +13616,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
   });
 
-  it('forwards the host denial reason when a bounced edit confirmation is cancelled', async () => {
+  it('forwards the host denial reason when an ask edit confirmation is cancelled', async () => {
     const execute = vi.fn();
     const { onAllToolCallsComplete, waiting } = await askUntilApproval({
       messageBus: askMessageBus('review protected file'),
@@ -10351,8 +13626,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(waiting.confirmationDetails.type).toBe('edit');
 
     // stream-json hosts deny with onConfirm(Cancel, { cancelMessage }); the
-    // bounced edit wrapper must forward that payload like the info fallback
-    // (and the pre-PR synthetic prompt) instead of dropping it.
+    // ask edit confirmation must forward that payload instead of dropping it.
     await waiting.confirmationDetails.onConfirm(
       ToolConfirmationOutcome.Cancel,
       { cancelMessage: 'host policy: no edits' },
@@ -10404,81 +13678,42 @@ describe('CoreToolScheduler telemetry spans', () => {
     return { ...built, details };
   }
 
-  it('refuses a stale round-1 IDE resolution for a bounced edit confirmation', async () => {
-    // Round 1 (DEFAULT mode, IDE diffing on) opens the IDE diff; the user
-    // approves via the scheduler, the hook says 'ask' and the call bounces.
-    // Only THEN does round-1 openDiff resolve with edited panel content (as
-    // ToolConfirmationMessage.handleConfirm fires onConfirm before awaiting
-    // resolveDiffFromCli). Without the bouncedAwaitingApproval guard that
-    // stale content would flow through _applyInlineModify and execute with
-    // the hook never re-consulted.
-    const ideDiff = deferred<{ status: 'accepted'; content: string }>();
+  it('asks once for an edit and keeps it out of the IDE diff', async () => {
     vi.mocked(IdeClient.getInstance).mockResolvedValue(
       mockIdeClient as unknown as IdeClient,
     );
     mockIdeClient.isDiffingEnabled.mockReturnValue(true);
     mockIdeClient.openDiff.mockReset();
-    mockIdeClient.openDiff.mockReturnValue(ideDiff.promise);
 
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const messageBus = askMessageBus('review protected file');
-    const { details: awaitingSnapshots, onAllToolCallsComplete } =
-      await scheduleBouncingEdit('stale-ide-bounce', execute, messageBus, {
-        ideMode: true,
-      });
+    const { details, onAllToolCallsComplete } = await scheduleBouncingEdit(
+      'ask-edit',
+      execute,
+      messageBus,
+      { ideMode: true },
+    );
 
-    // Round-1 confirmation opened the IDE diff.
-    await vi.waitFor(() => expect(awaitingSnapshots).toHaveLength(1));
-    expect(mockIdeClient.openDiff).toHaveBeenCalledTimes(1);
-    const round1 = awaitingSnapshots[0];
+    await vi.waitFor(() => expect(details).toHaveLength(1));
+    expect(details[0]).toMatchObject({
+      type: 'edit',
+      hideModify: true,
+      skipIdeDiff: true,
+      warnings: ['review protected file'],
+    });
+    // The IDE accept path applies edited content, which the hook never saw.
+    expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
 
-    // Approve round-1 via the scheduler path; the hook ask bounces the
-    // call back to awaiting_approval with its own edit confirmation.
-    await round1.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-    await vi.waitFor(() => expect(awaitingSnapshots).toHaveLength(2));
-    const bounced = awaitingSnapshots[1];
-    expect(bounced).toMatchObject({ type: 'edit', hideModify: true });
-
-    // The stale round-1 IDE diff now resolves as accepted with edited
-    // panel content. It must be refused — the call stays parked on the
-    // bounced confirmation with the hook-reviewed content untouched.
-    ideDiff.resolve({ status: 'accepted', content: 'STALE-PANEL-CONTENT' });
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(execute).not.toHaveBeenCalled();
-    expect(awaitingSnapshots).toHaveLength(2);
-    expect(
-      (awaitingSnapshots.at(-1) as { newContent?: string }).newContent,
-    ).toBe('new content');
-
-    // The bounced confirmation is the only valid resolver: approving it
-    // executes exactly once (and the hook does not re-fire).
-    await bounced.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+    await details[0].onConfirm(ToolConfirmationOutcome.ProceedOnce);
     const completed = await settledLastBatch(onAllToolCallsComplete);
     expect(completed[0].status).toBe('success');
     expect(execute).toHaveBeenCalledTimes(1);
+    expect(details).toHaveLength(1);
     expect(preToolUseCallCount(messageBus)).toBe(1);
 
     // Leave the module-level IDE mocks the way this test found them.
-    mockIdeClient.openDiff.mockReset();
     mockIdeClient.isDiffingEnabled.mockReset();
     vi.mocked(IdeClient.getInstance).mockReset();
-  });
-
-  it('creates new confirmation details when a tool bounces after approval', async () => {
-    const { details: approvalDetails, onToolCallsUpdate } =
-      await scheduleBouncingEdit(
-        'approval-then-bounce',
-        vi.fn().mockResolvedValue(textResult('ok')),
-        askMessageBus(),
-      );
-    const initialWaiting = await waitForApproval(onToolCallsUpdate);
-    const initialDetails = initialWaiting.confirmationDetails;
-
-    await initialDetails.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-    await vi.waitFor(() => {
-      expect(approvalDetails).toHaveLength(2);
-      expect(approvalDetails[1]).not.toBe(initialDetails);
-    });
   });
 
   it('cancels the tool without executing when the user declines an ask', async () => {
@@ -10492,7 +13727,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('denies a PreToolUse ask (no bounce) in non-interactive mode', async () => {
+  it('denies a PreToolUse ask in non-interactive mode', async () => {
     const execute = vi.fn();
     const { onAllToolCallsComplete } = await scheduleWithAsk({
       execute,
@@ -10501,7 +13736,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     });
 
     await expectNotExecuted(onAllToolCallsComplete, 'error', execute);
-    // Never bounced → no blocked span.
+    // Never awaited approval → no blocked span.
     expect(getBlockedSpans()).toHaveLength(0);
   });
 
@@ -10522,8 +13757,8 @@ describe('CoreToolScheduler telemetry spans', () => {
     stage: 'preprocessing',
   };
 
-  it('denies a PreToolUse ask (no bounce) for a fixed_policy invocation', async () => {
-    // A model-originated call WOULD bounce here, so the exclusion comes from
+  it('denies a PreToolUse ask for a fixed_policy invocation', async () => {
+    // A model-originated call WOULD ask here, so the exclusion comes from
     // the origin alone: the orchestrator awaits the call headlessly, so an
     // awaiting_approval entry would sit unanswerable.
     const execute = vi.fn();
@@ -10538,14 +13773,14 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
 
     await expectNotExecuted(onAllToolCallsComplete, 'error', execute);
-    // Never bounced: no awaiting_approval transition, no blocked span.
+    // No awaiting_approval transition, no blocked span.
     const statuses = reportedCalls(onToolCallsUpdate).map((tc) => tc.status);
     expect(statuses).not.toContain('awaiting_approval');
     expect(getBlockedSpans()).toHaveLength(0);
   });
 
   it('still denies a hard PreToolUse deny for a fixed_policy invocation (fail-closed)', async () => {
-    // The fixed_policy exemption is scoped to the ask-bounce ONLY: a hook
+    // The fixed_policy exemption is scoped to the ask ONLY: a hook
     // that hard-denies must block a policy-originated run exactly like any
     // other — policies must not become a hook-bypass channel.
     const execute = vi.fn();
@@ -10579,11 +13814,10 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getToolSpans()[0]?.ended).toBe(true);
   });
 
-  it('does not double-unescape path args across an ask bounce', async () => {
+  it('unescapes path args once for a PreToolUse ask', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     // Two backslashes before the space: unescaping once → `a\ b`, twice →
-    // `a b`. The re-execution must skip the unescape prelude so the path is
-    // unescaped exactly once.
+    // `a b`. The path must be unescaped exactly once.
     const rawPath = 'a\\\\ b';
     const completed = await answerApproval(
       await scheduleWithAsk({
@@ -10599,11 +13833,9 @@ describe('CoreToolScheduler telemetry spans', () => {
     ).toBe(unescapePath(rawPath));
   });
 
-  it('approving a bounced ask runs the tool even while a sibling is still executing', async () => {
+  it('runs both calls once an ask on one of them is approved', async () => {
     toolSpanRecords.length = 0;
-    // toolA bounces while toolB is still 'executing' when A is approved; the
-    // attemptExecutionOfScheduledCalls guard fails on that pass, so without a
-    // re-check after toolB drains toolA would hang in 'scheduled' forever.
+    // toolA asks; nothing runs until it is approved, then both run.
     const b = deferred<ToolResult>();
     const aExecute = vi.fn().mockResolvedValue(textResult('A ok'));
     const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
@@ -10620,12 +13852,12 @@ describe('CoreToolScheduler telemetry spans', () => {
     const schedulePromise = scheduleBatch(scheduler, ...abRequests());
 
     const waiting = await waitForApproval(onToolCallsUpdate);
-    // Approve A while toolB's execute is still pending.
-    await waiting.confirmationDetails.onConfirm(
+    expect(aExecute).not.toHaveBeenCalled();
+    const approved = waiting.confirmationDetails.onConfirm(
       ToolConfirmationOutcome.ProceedOnce,
     );
-    // Let toolB finish — toolA must now run rather than stay stuck.
     b.resolve(textResult('B ok'));
+    await approved;
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     await schedulePromise;
@@ -10641,11 +13873,11 @@ describe('CoreToolScheduler telemetry spans', () => {
 
   it.each([
     [
-      'bounces a non-interactive STREAM_JSON ask (client can answer control requests)',
+      'asks in non-interactive STREAM_JSON (client can answer control requests)',
       { inputFormat: InputFormat.STREAM_JSON },
     ],
     [
-      'bounces a non-interactive ask under the Zed integration',
+      'asks in non-interactive mode under the Zed integration',
       { experimentalZedIntegration: true },
     ],
   ])('%s', async (_title, promptCapability) => {
@@ -10658,11 +13890,11 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getBlockedSpans()).toHaveLength(1);
   });
 
-  it("a sibling's ProceedAlways must not auto-approve a bounced ask", async () => {
+  it("a sibling's ProceedAlways must not auto-approve a PreToolUse ask", async () => {
     toolSpanRecords.length = 0;
-    // Both tools bounce; ProceedAlways on toolB runs
-    // autoApproveCompatiblePendingTools, which must NOT approve the bounced
-    // toolA — its hook 'ask' needs explicit confirmation, or the gate is moot.
+    // Both tools ask; ProceedAlways on toolB runs
+    // autoApproveCompatiblePendingTools, which must NOT approve toolA — its
+    // hook 'ask' needs explicit confirmation, or the gate is moot.
     const aExecute = vi.fn().mockResolvedValue(textResult('A'));
     const { scheduler, onToolCallsUpdate } = buildScheduler({
       tools: toolPair(
@@ -10682,7 +13914,7 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     await scheduleBatch(scheduler, ...abRequests());
 
-    // Both tools bounce to awaiting_approval.
+    // Both tools await approval.
     await vi.waitFor(() => {
       const awaiting = reportedCalls(onToolCallsUpdate)
         .filter((tc) => tc.status === 'awaiting_approval')
@@ -10697,8 +13929,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       ToolConfirmationOutcome.ProceedAlways,
     );
 
-    // toolA's hook 'ask' must still gate it: autoApprove skipped the bounced
-    // tool, so it never ran (and stays awaiting the user's own confirmation).
+    // toolA's hook 'ask' must still gate it: autoApprove skipped it, so it
+    // never ran (and stays awaiting the user's own confirmation).
     // toolB also doesn't run yet — the batch waits while toolA is non-terminal.
     expect(aExecute).not.toHaveBeenCalled();
     expect(latestCall(onToolCallsUpdate, 'a')?.status).toBe(
@@ -10706,13 +13938,18 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('ignores ModifyWithEditor for a bounced ask info confirmation', async () => {
+  it('ignores ModifyWithEditor for an ask info confirmation', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const getModifyContext = vi.fn(() => {
       throw new Error('info confirmation must not enter editor modify flow');
     });
     const tool = Object.assign(
-      new MockTool({ name: 'mockTool', kind: Kind.Edit, execute }),
+      new MockTool({
+        name: 'mockTool',
+        kind: Kind.Edit,
+        execute,
+        getConfirmationDetails: infoConfirmation,
+      }),
       { getModifyContext },
     );
     const { onToolCallsUpdate, waiting } = await askUntilApproval({
@@ -10732,7 +13969,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
   });
 
-  it('pauses later unsafe batches while a bounced ask awaits approval', async () => {
+  it('pauses later unsafe batches while an ask awaits approval', async () => {
     const aExecute = vi.fn().mockResolvedValue(textResult('A ok'));
     const bExecute = vi.fn().mockResolvedValue(textResult('B ok'));
     const { scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
@@ -10758,37 +13995,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(bExecute).toHaveBeenCalledTimes(1);
   });
 
-  it('abort drain leaves executing siblings to finish their own abort path', async () => {
-    const b = deferred<ToolResult>();
-    const bExecute = vi.fn().mockReturnValue(b.promise);
-    const abortController = new AbortController();
-    const { scheduler, onToolCallsUpdate } = buildScheduler({
-      tools: toolPair(
-        Kind.Read,
-        vi.fn().mockResolvedValue(textResult('A ok')),
-        bExecute,
-      ),
-      hooks: askForToolAHookBus(),
-    });
-
-    const schedulePromise = scheduler.schedule(
-      abRequests(),
-      abortController.signal,
-    );
-
-    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
-    await vi.waitFor(() => expect(bExecute).toHaveBeenCalled());
-
-    abortController.abort();
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    expect(latestCall(onToolCallsUpdate, 'b')?.status).toBe('executing');
-
-    b.resolve(textResult('B done'));
-    await schedulePromise;
-  });
-
-  it('abort drain cancels scheduled siblings behind a bounced ask', async () => {
+  it('abort drain cancels scheduled siblings behind an ask', async () => {
     const aExecute = vi.fn().mockResolvedValue(textResult('A ok'));
     const bExecute = vi.fn().mockResolvedValue(textResult('B ok'));
     const abortController = new AbortController();
@@ -10811,7 +14018,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(bExecute).not.toHaveBeenCalled();
   });
 
-  it('cleans bounce markers when post-ask re-execution fails before body runs', async () => {
+  it('cleans PreToolUse markers when execution fails before its body runs', async () => {
     const tracing = await import('../telemetry/session-tracing.js');
     const runInToolSpanContext = vi.mocked(tracing.runInToolSpanContext);
     const { scheduler, onAllToolCallsComplete, waiting } =
@@ -10838,12 +14045,16 @@ describe('CoreToolScheduler telemetry spans', () => {
     );
 
     const internals = scheduler as unknown as {
-      bouncedAwaitingApproval: Set<string>;
-      bouncedToolUseId: Map<string, string>;
+      preToolUseIds: Map<string, string>;
+      preToolUseAsks: Map<string, string>;
+      preToolUseSessionHookIds: Map<string, Set<string>>;
+      hookReplacedInputCallIds: Set<string>;
       toolSpans: Map<string, unknown>;
     };
-    expect(internals.bouncedAwaitingApproval.size).toBe(0);
-    expect(internals.bouncedToolUseId.size).toBe(0);
+    expect(internals.preToolUseIds.size).toBe(0);
+    expect(internals.preToolUseAsks.size).toBe(0);
+    expect(internals.preToolUseSessionHookIds.size).toBe(0);
+    expect(internals.hookReplacedInputCallIds.size).toBe(0);
     expect(internals.toolSpans.size).toBe(0);
   });
 
@@ -10954,6 +14165,75 @@ describe('CoreToolScheduler telemetry spans', () => {
         ? { hookSpecificOutput: { artifacts: [{ title, workspacePath }] } }
         : { decision: 'allow' },
     );
+
+  it.each(['resolve', 'reject'])(
+    'skips the failure hook when an abandoned tool settles by %s',
+    async (outcome) => {
+      const abort = new AbortController();
+      const entered = deferred();
+      const release = deferred();
+      let finished = false;
+      const hookEvents: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        isFinished: () => finished,
+        hooks: eventHookBus(allowAll, (name) => hookEvents.push(name)),
+        execute: async () => {
+          entered.resolve();
+          await release.promise;
+          if (outcome === 'reject') throw new Error('interrupted');
+          return textResult('done');
+        },
+      });
+      const scheduled = scheduler.schedule(
+        mockToolRequest('abandoned'),
+        abort.signal,
+      );
+      await entered.promise;
+      abort.abort();
+      finished = true;
+      release.resolve();
+      await scheduled;
+      const [call] = await settledLastBatch(onAllToolCallsComplete);
+      expectStatus(call, 'cancelled');
+      expect(hookEvents).toEqual(['PreToolUse']);
+    },
+  );
+
+  it('skips per-tool persistence when a post hook outlives the run', async () => {
+    const abort = new AbortController();
+    const entered = deferred();
+    const release = deferred();
+    let finished = false;
+    const trackToolResultBytes = vi.fn();
+    const { scheduler, onAllToolCallsComplete } = buildScheduler({
+      isFinished: () => finished,
+      execute: async () => textResult('x'.repeat(2320)),
+      hooks: hookBus(async ({ eventName }) => {
+        if (eventName === 'PostToolUse') {
+          entered.resolve();
+          await release.promise;
+        }
+        return hookResponse(eventName, { decision: 'allow' });
+      }),
+      configOverrides: {
+        getTruncateToolOutputThreshold: () => 128,
+        storage: { getProjectTempDir: () => '/dev/null/tool-results' },
+        trackToolResultBytes,
+      },
+    });
+    const scheduled = scheduler.schedule(
+      mockToolRequest('late-post-hook'),
+      abort.signal,
+    );
+    await entered.promise;
+    abort.abort();
+    finished = true;
+    release.resolve();
+    await scheduled;
+    const [call] = await settledLastBatch(onAllToolCallsComplete);
+    expectStatus(call, 'cancelled');
+    expect(trackToolResultBytes).not.toHaveBeenCalled();
+  });
 
   it('PostToolUseFailure hook span records is_interrupt=true on user-abort path (#4321)', async () => {
     // _executeToolCallBody's catch fires PostToolUseFailure with
@@ -11166,6 +14446,119 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(toolSpan?.spanAttributes['tool.failure_kind']).toBe(failureKind);
     return onAllToolCallsComplete;
   }
+
+  it.each([
+    ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    ToolConfirmationOutcome.ProceedAlwaysProject,
+    ToolConfirmationOutcome.ProceedAlwaysUser,
+  ])(
+    'does not apply approval side effects after abort during onConfirm: %s',
+    async (outcome) => {
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const originalOnConfirm = vi.fn(() => barrier);
+      const execute = vi.fn(async () => textResult('executed'));
+      const persist = vi.fn();
+      const setApprovalMode = vi.fn();
+      const tool = new MockTool({
+        name: 'confirmation_barrier',
+        getDefaultPermission: async () => 'ask',
+        getConfirmationDetails: async () => ({
+          type: 'exec',
+          title: 'Confirm command',
+          command: 'echo barrier',
+          rootCommand: 'echo',
+          permissionRules: ['Bash(echo barrier)'],
+          onConfirm: originalOnConfirm,
+        }),
+        execute,
+      });
+      const { scheduler, onToolCallsUpdate, onAllToolCallsComplete } =
+        schedulerWithCallbacks(
+          makeSchedulerConfig(makeToolRegistry(tool), {
+            ...INTERACTIVE_CLI,
+            setApprovalMode,
+            getOnPersistPermissionRule: () => persist,
+          }),
+        );
+      const controller = new AbortController();
+      await scheduler.schedule(
+        [
+          toolRequest('barrier-first', tool.name, {}, 'barrier'),
+          toolRequest('barrier-sister', tool.name, {}, 'barrier'),
+        ],
+        controller.signal,
+      );
+      const waiting = await waitForApproval(onToolCallsUpdate);
+      const responding = waiting.confirmationDetails.onConfirm(outcome);
+      await vi.waitFor(() => expect(originalOnConfirm).toHaveBeenCalledOnce());
+      controller.abort();
+      release();
+      await responding;
+      await vi.waitFor(() =>
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce(),
+      );
+      expect(persist).not.toHaveBeenCalled();
+      expect(setApprovalMode).not.toHaveBeenCalled();
+      expect(execute).not.toHaveBeenCalled();
+      expect(
+        firstBatch<CompletedToolCall>(onAllToolCallsComplete).every(
+          (call) => call.status === 'cancelled',
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it('does not apply a pending confirmation to a replacement with the same call id', async () => {
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalOnConfirm = vi.fn(() => barrier);
+    const persist = vi.fn();
+    const execute = vi.fn(async () => textResult('executed'));
+    const tool = new MockTool({
+      name: 'replacement_confirmation',
+      getDefaultPermission: async () => 'ask',
+      getConfirmationDetails: async () => ({
+        type: 'exec',
+        title: 'Confirm command',
+        command: 'echo replacement',
+        rootCommand: 'echo',
+        permissionRules: ['Bash(echo replacement)'],
+        onConfirm: originalOnConfirm,
+      }),
+      execute,
+    });
+    const { scheduler, onToolCallsUpdate } = schedulerWithCallbacks(
+      makeSchedulerConfig(makeToolRegistry(tool), {
+        ...INTERACTIVE_CLI,
+        getOnPersistPermissionRule: () => persist,
+      }),
+    );
+    const controller = new AbortController();
+    await scheduler.schedule(
+      toolRequest('same-call', tool.name, {}, 'replacement'),
+      controller.signal,
+    );
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    const responding = waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlwaysProject,
+    );
+    await vi.waitFor(() => expect(originalOnConfirm).toHaveBeenCalledOnce());
+    const internals = scheduler as unknown as { toolCalls: ToolCall[] };
+    const replacement = { ...internals.toolCalls[0] };
+    internals.toolCalls = [replacement];
+    release();
+    await responding;
+    expect(persist).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    expect(internals.toolCalls[0]).toBe(replacement);
+    expect(replacement.status).toBe('awaiting_approval');
+    controller.abort();
+  });
 
   it('keeps the exact runtime through manual approval', async () => {
     let runtimeDuringExecute: RuntimeContentGeneratorView | undefined;
@@ -11469,8 +14862,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       unsafeTool('secondMockTool');
     const lookup = (name: string) =>
       name === secondTool.name ? secondTool : firstTool;
-    // The auto-approve YOLO path skips _schedule's getMessageBus branch, so
-    // the only getMessageBus call is the _executeToolCallBody prelude one.
+    // Scheduling reads the bus once per call for PreToolUse; the next read
+    // is the _executeToolCallBody prelude one.
     const mockConfig = makeSchedulerConfig(
       makeToolRegistry(undefined, {
         getTool: lookup,
@@ -11481,9 +14874,13 @@ describe('CoreToolScheduler telemetry spans', () => {
       {
         getApprovalMode: () => ApprovalMode.YOLO,
         getContentGeneratorConfig: () => ({}),
-        getMessageBus: vi.fn(() => {
-          throw new Error('prelude boom — getMessageBus throws');
-        }),
+        getMessageBus: vi
+          .fn()
+          .mockReturnValueOnce(undefined)
+          .mockReturnValueOnce(undefined)
+          .mockImplementation(() => {
+            throw new Error('prelude boom — getMessageBus throws');
+          }),
         getDisableAllHooks: vi.fn().mockReturnValue(false),
       },
     );
@@ -11646,9 +15043,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       'prompt-rethrow-aborted',
     );
 
-    abortController.abort();
     const boom = new Error('originalOnConfirm boom while aborted');
     const throwingOnConfirm = async () => {
+      abortController.abort();
       throw boom;
     };
     await expect(
@@ -12069,7 +15466,10 @@ describe('Fire hook functions integration', () => {
       vi.unstubAllEnvs();
     });
 
-    function createScheduler(tools: Map<string, MockTool>) {
+    function createScheduler(
+      tools: Map<string, MockTool>,
+      options: Partial<ConstructorParameters<typeof CoreToolScheduler>[0]> = {},
+    ) {
       return schedulerWithCallbacks(
         makeSchedulerConfig(
           makeToolRegistry(undefined, {
@@ -12091,6 +15491,7 @@ describe('Fire hook functions integration', () => {
             trackToolResultBytes: vi.fn(),
           },
         ),
+        options,
       );
     }
 
@@ -12224,6 +15625,107 @@ describe('Fire hook functions integration', () => {
         .map((e) => executionLog.indexOf(e));
       const firstEnd = executionLog.findIndex((e) => e.startsWith('end:'));
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
+    });
+
+    it('asks beforeToolLaunch serially, in request order, inside a concurrent batch', async () => {
+      const log: string[] = [];
+      const asked: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          beforeToolLaunch: async (call) => {
+            asked.push(call.request.callId);
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            return true;
+          },
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(asked).toEqual(['1', '2', '3']);
+      expectAllSucceeded(onAllToolCallsComplete, 3);
+    });
+
+    it('cancels a call that beforeToolLaunch refuses, without running or logging it', async () => {
+      const log: string[] = [];
+      const logged = vi.spyOn(sizeLoggers, 'logToolCall');
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        { beforeToolLaunch: (call) => call.request.callId !== '2' },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      expect(logged.mock.calls.map(([, event]) => event.call_id)).toEqual([
+        '1',
+        '3',
+      ]);
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('cancelled');
+      expect(
+        refused && 'response' in refused
+          ? refused.response.executionStatus
+          : undefined,
+      ).toBe('not_started');
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('fails a call its owner refuses as execution-denied, without running it', async () => {
+      const log: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          refuseToolCall: (request) =>
+            request.callId === '2' ? 'Not in this session.' : undefined,
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('error');
+      expect(
+        refused && 'response' in refused ? refused.response : {},
+      ).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        error: new Error('Not in this session.'),
+      });
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('asks beforeToolLaunch for every call that fits in flight before launching them', async () => {
+      vi.stubEnv('QWEN_CODE_MAX_TOOL_CONCURRENCY', '2');
+      const log: string[] = [];
+      const { scheduler } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          beforeToolLaunch: (call) => {
+            log.push(`ask:${call.request.callId}`);
+            return true;
+          },
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log.slice(0, 4)).toEqual(['ask:1', 'ask:2', 'start:A', 'start:B']);
+      expect(log.indexOf('ask:3')).toBeGreaterThan(
+        log.findIndex((entry) => entry.startsWith('end:')),
+      );
     });
 
     it('ignores malformed QWEN_CODE_MAX_TOOL_CONCURRENCY values', async () => {
@@ -13931,5 +17433,78 @@ describe('CoreToolScheduler prompt_id propagation', () => {
     ).resolves.not.toThrow();
 
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+  });
+});
+
+describe('persistence size attribution', () => {
+  it('counts retained media with the configured estimate and bounds nested web_fetch envelopes', async () => {
+    const cfg = {
+      getTruncateToolOutputThreshold: () => 25000,
+      getChatCompression: () => ({ imageTokenEstimate: 800 }),
+    } as Config;
+    const owner = new CoreToolScheduler({
+      config: cfg,
+      getPreferredEditor: () => undefined,
+      onEditorClose: () => {},
+    }) as unknown as {
+      maybePersistLargeToolResult(
+        callId: string,
+        toolName: string,
+        content: PartListUnion,
+        budgetApplied: boolean,
+        promptId: string,
+      ): Promise<{ content: PartListUnion }>;
+    };
+    const persist = vi
+      .spyOn(outputTruncation, 'persistAndTruncateToolResult')
+      .mockResolvedValue({
+        content: 'preview',
+        outputFile: '/tmp/original.txt',
+        bytesWritten: 60000,
+      });
+    const log = vi
+      .spyOn(sizeLoggers, 'logToolResultSize')
+      .mockImplementation(() => {});
+    try {
+      const image = { inlineData: { mimeType: 'image/png', data: 'BASE64' } };
+      const input = [{ text: 'x'.repeat(60000) }, image];
+      const result = await owner.maybePersistLargeToolResult(
+        'media',
+        'mcp__image',
+        input,
+        false,
+        'p',
+      );
+      expect(result.content).toEqual([{ text: 'preview' }, image]);
+      const event = log.mock.calls[0][1];
+      expect(event.raw_estimated_tokens).toBe(
+        measureToolOutput(input, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBe(
+        measureToolOutput(result.content, cfg).estimatedTokens,
+      );
+      expect(event.injected_estimated_tokens).toBeGreaterThanOrEqual(800);
+      expect(event.prompt_id).toBe('p');
+      await owner.maybePersistLargeToolResult(
+        'page',
+        'web_fetch',
+        'header\n... [CONTENT TRUNCATED] ...\n' + 'x'.repeat(98000),
+        false,
+        'page-prompt',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+      expect(log.mock.calls[1][1].prompt_id).toBe('page-prompt');
+      await owner.maybePersistLargeToolResult(
+        'already',
+        'shell',
+        '<persisted-output>' + 'x'.repeat(60000),
+        false,
+        'p',
+      );
+      expect(persist).toHaveBeenCalledTimes(2);
+    } finally {
+      persist.mockRestore();
+      log.mockRestore();
+    }
   });
 });

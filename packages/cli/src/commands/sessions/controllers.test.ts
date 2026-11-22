@@ -50,6 +50,8 @@ const { MAX_CONTROLLER_LABEL_CHARS } = await import(
 );
 
 const TOKEN = `qpc_${'a'.repeat(64)}`;
+const REGISTRY_CHANGED =
+  '/home/u/.qwen/peer-controllers.json kept changing while this write was in progress; nothing was saved. Try again.';
 
 function record(over: Record<string, unknown> = {}) {
   return {
@@ -105,6 +107,8 @@ describe('controllers add', () => {
     const out = stdout.join('\n');
     expect(out).toContain('agents.crossSessionMessaging turned off');
     expect(out).toContain('restarted after changing that setting');
+    expect(out).toContain('ipcPath');
+    expect(out).toContain('OpenTUI');
     expect(out).toContain('without per-message review');
     expect(out).toContain('agents.crossSessionInbound');
   });
@@ -149,6 +153,18 @@ describe('controllers add', () => {
 
     expect(stdout).toHaveLength(0);
     expect(stderr.join('\n')).toBe('Error: A controller needs a label.');
+    expect(exitCode).toBe(1);
+  });
+
+  it('reports a registry that kept changing as the error it is', async () => {
+    addPeerController.mockRejectedValue(
+      new FakePeerControllerError(REGISTRY_CHANGED, 'registry-changed'),
+    );
+
+    await handleAdd({ label: 'voice bridge' });
+
+    expect(stdout).toHaveLength(0);
+    expect(stderr.join('\n')).toBe(`Error: ${REGISTRY_CHANGED}`);
     expect(exitCode).toBe(1);
   });
 
@@ -308,7 +324,20 @@ describe('controllers remove', () => {
   it('reports a failed write', async () => {
     removePeerController.mockRejectedValue(new Error('EROFS'));
     await handleRemove({ id: 'c_0123abcd' });
+    expect(stderr.join('\n')).toContain('/home/u/.qwen/peer-controllers.json');
     expect(stderr.join('\n')).toContain('EROFS');
+    expect(exitCode).toBe(1);
+  });
+
+  it('reports a registry that kept changing as the error it is', async () => {
+    removePeerController.mockRejectedValue(
+      new FakePeerControllerError(REGISTRY_CHANGED, 'registry-changed'),
+    );
+
+    await handleRemove({ id: 'c_0123abcd' });
+
+    expect(stdout).toHaveLength(0);
+    expect(stderr.join('\n')).toBe(`Error: ${REGISTRY_CHANGED}`);
     expect(exitCode).toBe(1);
   });
 

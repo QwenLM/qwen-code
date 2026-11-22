@@ -202,6 +202,7 @@ describe('inspectConversationBranches', () => {
         'session_artifact_snapshot',
       ),
       system('turn-result', 'conversation-leaf', 'turn_result'),
+      system('turn-attempt', 'conversation-leaf', 'turn_attempt'),
       system(
         'sources-snapshot',
         'conversation-leaf',
@@ -219,6 +220,7 @@ describe('inspectConversationBranches', () => {
       'session_artifact_snapshot',
       'session_sources_snapshot',
       'turn_result',
+      'turn_attempt',
     ] as const;
 
     for (const subtype of subtypes) {

@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { RetainedFileHistoryStorage } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
+import { digestFileReadSource } from '@qwen-code/qwen-code-core/utils/file-read-source.js';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat } from 'node:fs/promises';
@@ -24,6 +26,7 @@ export class ManagedRuntimeFileHistory {
     readonly ownerSessionId: string,
     readonly directory: string,
     state: HostedFileHistoryState | null,
+    private readonly retainedStorage?: RetainedFileHistoryStorage,
   ) {
     this.history = new ManagedToolFileHistory(
       ownerSessionId,
@@ -37,6 +40,7 @@ export class ManagedRuntimeFileHistory {
           ]),
         ),
       })) ?? [],
+      retainedStorage,
     );
     this.files = Object.assign(
       Object.create(null),
@@ -47,13 +51,17 @@ export class ManagedRuntimeFileHistory {
   async ready(checkPaths = true): Promise<void> {
     await this.history.ready();
     await this.history.service.validateRestoredSnapshots();
+    const checked = new Set<string>();
     for (const snapshot of this.history.state().snapshots) {
       for (const [file, backup] of Object.entries(
         snapshot.trackedFileBackups,
       )) {
-        if (checkPaths) await this.resolve(file.split(path.sep).join('/'));
         if (backup.failed)
           throw new Error('Hosted file history backup is unavailable.');
+        if (checkPaths && !checked.has(file)) {
+          await this.resolve(file.split(path.sep).join('/'));
+          checked.add(file);
+        }
       }
     }
   }
@@ -100,6 +108,7 @@ export class ManagedRuntimeFileHistory {
       this.ownerSessionId,
       this.directory,
       snapshots,
+      this.retainedStorage,
     );
     await previous.ready();
     try {
@@ -154,6 +163,8 @@ export class ManagedRuntimeFileHistory {
     filesFailed: string[];
     conflict: boolean;
   }> {
+    if (this.retainedStorage)
+      throw new Error('Retained history cannot rewind.');
     await this.ready(false);
     return this.history.run(async () => {
       let conflict = false;
@@ -194,6 +205,13 @@ export class ManagedRuntimeFileHistory {
 
   private async resolve(file: string): Promise<string> {
     historyPath(file);
+    if (this.retainedStorage) {
+      const absolute = path.join(this.directory, file);
+      return this.retainedStorage.withWorkingFile(
+        absolute,
+        async () => absolute,
+      );
+    }
     let current = this.directory;
     const segments = file.split('/');
     for (const [index, segment] of segments.entries()) {
@@ -217,6 +235,18 @@ export class ManagedRuntimeFileHistory {
   private async fingerprint(
     file: string,
   ): Promise<HostedFileHistoryState['files'][string]> {
+    historyPath(file);
+    if (this.retainedStorage)
+      return this.retainedStorage.withWorkingFile(
+        path.join(this.directory, file),
+        async (source) =>
+          source
+            ? {
+                digest: `sha256:${await digestFileReadSource(source)}`,
+                mode: source.stats.mode & 0o7777,
+              }
+            : null,
+      );
     const absolute = await this.resolve(file);
     try {
       const before = await lstat(absolute);

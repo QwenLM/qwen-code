@@ -13,6 +13,7 @@ import type {
 import { GenerateContentResponse } from '@google/genai';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type { Config } from '../../config/config.js';
+import type { RequestLifecycleEvent } from '../../telemetry/request-lifecycle.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -20,7 +21,10 @@ import type {
 import { AuthType } from '../contentGenerator.js';
 import { LoggingContentGenerator } from './index.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
+import { StreamingToolCallParser } from '../openaiContentGenerator/streamingToolCallParser.js';
 import { openaiRequestCaptureContext } from '../openaiContentGenerator/requestCaptureContext.js';
+import { markRequestDispatched } from './request-dispatch.js';
+import { setToolCallPreparations } from '../tool-call-preparation.js';
 import {
   convertResponsesEventToGemini,
   ResponsesStreamState,
@@ -36,6 +40,8 @@ import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 import { APIUserAbortError } from 'openai';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { withModelObservationScope } from '../../telemetry/model-observation.js';
+import { retryContext } from '../../utils/retryContext.js';
 import {
   collect,
   content,
@@ -65,6 +71,7 @@ const loggingSpanRecords = vi.hoisted(
       responseModel?: string;
       finishReasons?: string[];
       ttftMs?: number;
+      requestBuildMs?: number;
       requestSetupMs?: number;
       attempt?: number;
       retryTotalDelayMs?: number;
@@ -187,6 +194,7 @@ vi.mock('../../telemetry/index.js', () => {
           responseModel?: string;
           finishReasons?: string[];
           ttftMs?: number;
+          requestBuildMs?: number;
           requestSetupMs?: number;
           attempt?: number;
           retryTotalDelayMs?: number;
@@ -342,6 +350,8 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getTelemetrySensitiveSpanAttributeMaxLength: () =>
       (configContent['sensitiveSpanAttributeMaxLength'] as number) ??
       1024 * 1024,
+    getChatRecordingService: () => undefined,
+    notifyRequestLifecycle: vi.fn(),
     getSessionId: () =>
       (configContent['sessionId'] as string | undefined) ?? 'test-session',
     getTelemetryUserId: () => configContent['userId'] as string | undefined,
@@ -353,7 +363,7 @@ const createConfig = (overrides: Record<string, unknown> = {}): Config => {
     getToolRegistry: () =>
       configContent['toolRegistry'] ?? { getTool: () => undefined },
     getSkillManager: () => configContent['skillManager'] ?? null,
-  } as Config;
+  } as unknown as Config;
 };
 
 const createWrappedGenerator = (
@@ -505,6 +515,91 @@ const runContent = (
     promptId,
   );
 
+describe('Managed invocation observation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(startLLMRequestSpanWithContext).mockImplementation(
+      (model, promptId, options) => {
+        const span = createOwnedLlmSpan(model, promptId, options);
+        return {
+          span: span as never,
+          context: {
+            label: span.__spanName,
+            span,
+            getValue: () => options?.sessionId,
+          } as never,
+        };
+      },
+    );
+  });
+  const scope = <T>(observe: ReturnType<typeof vi.fn>, run: () => T) =>
+    withModelObservationScope(
+      {
+        sessionId: 'test-session',
+        source: 'main',
+        observe,
+        observationFailed: vi.fn(),
+      },
+      run,
+    );
+
+  it('collects model usage with telemetry disabled and a throwing telemetry logger', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    vi.mocked(logApiResponse).mockImplementationOnce(() => {
+      throw new Error('logger');
+    });
+    const observe = vi.fn();
+    const response = resp('observed');
+    response.usageMetadata = usage(13, 5);
+    await scope(observe, () => runContent(resolving(response), 'managed'));
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      outcome: 'success',
+      usage: { promptTokenCount: 13, candidatesTokenCount: 5 },
+    });
+  });
+
+  it.each([false, true])(
+    'closes a returned stream exactly once after iterated=%s',
+    async (iterated) => {
+      const observe = vi.fn();
+      const iterator = await scope(observe, () =>
+        openStream(streams(resp('partial')), 'managed-return'),
+      );
+      if (iterated) await iterator.next();
+      await iterator.return(undefined);
+      await iterator.return(undefined);
+      expect(observe).toHaveBeenCalledOnce();
+      expect(observe.mock.calls[0][0].outcome).toBe('interrupted');
+    },
+  );
+
+  it('retains partial usage on provider cancellation and an explicit outer retry ordinal', async () => {
+    const observe = vi.fn();
+    const abort = new AbortController();
+    const response = resp('partial');
+    response.usageMetadata = usage(10, 2);
+    const iterator = await scope(observe, () =>
+      retryContext.run(
+        { attempt: 2, requestSetupMs: 0, retryTotalDelayMs: 10 },
+        () =>
+          openStream(failingStream(userAbort(), response), 'managed-abort', {
+            request: helloRequest({ abortSignal: abort.signal }),
+          }),
+      ),
+    );
+    await iterator.next();
+    abort.abort();
+    await expect(iterator.next()).rejects.toBeInstanceOf(APIUserAbortError);
+    expect(observe).toHaveBeenCalledOnce();
+    expect(observe.mock.calls[0][0]).toMatchObject({
+      outcome: 'cancelled',
+      backoffRetryOrdinal: 1,
+      usage: { candidatesTokenCount: 2 },
+    });
+  });
+});
+
 /** Opens a stream through a fresh generator wrapping `stream`. */
 const openStream = (
   stream: ContentGenerator['generateContentStream'],
@@ -609,6 +704,390 @@ describe('LoggingContentGenerator', () => {
     convertLlmResponseToOpenAISpy.mockClear();
   });
 
+  describe('request lifecycle', () => {
+    const events = (config: Config): RequestLifecycleEvent[] =>
+      vi
+        .mocked(config.notifyRequestLifecycle)
+        .mock.calls.map(([event]) => event);
+
+    const expectEnded = (
+      config: Config,
+      outcome: 'success' | 'error' | 'cancelled' | 'interrupted',
+    ) => {
+      const [start, end] = events(config);
+      expect(events(config)).toHaveLength(2);
+      expect(start).toMatchObject({
+        v: 1,
+        kind: 'request',
+        phase: 'started',
+        sessionId: 'test-session',
+        model: 'test-model',
+      });
+      expect(start).not.toHaveProperty('durationMs');
+      expect(start).not.toHaveProperty('outcome');
+      expect(end).toMatchObject({
+        executionId: start.executionId,
+        startedAt: start.startedAt,
+        promptId: start.promptId,
+        phase: 'ended',
+        outcome,
+      });
+      if (end.phase === 'ended') {
+        expect(end.durationMs).toBeGreaterThanOrEqual(0);
+        expect(end.endedAt - start.startedAt).toBe(end.durationMs);
+      }
+    };
+
+    it('publishes start before the provider and succeeds with telemetry disabled', async () => {
+      vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+      const config = createConfig({ logPrompts: false });
+      const generate = vi.fn(async () => {
+        expect(events(config)).toHaveLength(1);
+        expect(events(config)[0]).toMatchObject({ phase: 'started' });
+        return resp('response');
+      });
+      await runContent(generate, 'lifecycle-success', { config });
+      expectEnded(config, 'success');
+      expect(loggedResponse().execution_id).toBe(events(config)[0].executionId);
+    });
+
+    it.each([false, true])(
+      'succeeds for a consumed stream, empty=%s',
+      async (empty) => {
+        const config = createConfig();
+        await runStream(
+          empty ? streams() : streams(resp('stream-response')),
+          'lifecycle-stream',
+          { config },
+        );
+        expectEnded(config, 'success');
+      },
+    );
+
+    it.each(['content', 'stream', 'iteration'] as const)(
+      'ends once when %s fails',
+      async (path) => {
+        const config = createConfig();
+        const error = new Error('provider failed');
+        const operation =
+          path === 'content'
+            ? runContent(rejecting(error), 'lifecycle-failure', { config })
+            : path === 'stream'
+              ? openStream(rejecting(error), 'lifecycle-failure', { config })
+              : runStream(
+                  failingStream(error, resp('partial')),
+                  'lifecycle-failure',
+                  { config },
+                );
+        await expect(operation).rejects.toBe(error);
+        expectEnded(config, 'error');
+      },
+    );
+
+    it('confirms cancellation when an aborted provider actually exits', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const gate = deferred();
+      const generate = vi.fn(async () => {
+        await gate.promise;
+        throw userAbort();
+      });
+      const pending = runContent(generate, 'lifecycle-abort', {
+        config,
+        request: helloRequest({ abortSignal: abort.signal }),
+      });
+      abort.abort();
+      expect(events(config).map((event) => event.phase)).toEqual(['started']);
+      gate.resolve();
+      await expect(pending).rejects.toBeInstanceOf(APIUserAbortError);
+      expectEnded(config, 'cancelled');
+    });
+
+    it('confirms cancellation when stream iteration exits after abort', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const iterator = await openStream(
+        failingStream(userAbort(), resp('partial')),
+        'lifecycle-stream-abort',
+        { config, request: helloRequest({ abortSignal: abort.signal }) },
+      );
+      await iterator.next();
+      abort.abort();
+      expect(events(config)).toHaveLength(1);
+      await expect(iterator.next()).rejects.toBeInstanceOf(APIUserAbortError);
+      expectEnded(config, 'cancelled');
+    });
+
+    it.each([false, true])(
+      'requests source return and ends once after iteration=%s',
+      async (iterated) => {
+        const config = createConfig();
+        const source = streamOf(resp('first'), resp('second'));
+        const close = vi.spyOn(source, 'return');
+        const iterator = await openStream(
+          resolving(source),
+          'lifecycle-return',
+          { config },
+        );
+        if (iterated) await iterator.next();
+        await iterator.return(undefined);
+        await iterator.return(undefined);
+        expect(close).toHaveBeenCalled();
+        expectEnded(config, 'interrupted');
+        expect(events(config)[1]).toMatchObject({ reason: 'consumer_closed' });
+        expect(logApiError).not.toHaveBeenCalled();
+      },
+    );
+
+    it('reports an injected failure before the first next and requests source return', async () => {
+      const config = createConfig();
+      const source = streamOf(resp('unconsumed'));
+      const close = vi.spyOn(source, 'return');
+      const iterator = await openStream(resolving(source), 'lifecycle-throw', {
+        config,
+      });
+      const error = new Error('consumer failed');
+      await expect(iterator.throw(error)).rejects.toBe(error);
+      expect(close).toHaveBeenCalledWith(undefined);
+      expectEnded(config, 'error');
+    });
+
+    it('confirms an injected abort before the first next after requesting source return', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const source = streamOf(resp('unconsumed'));
+      const close = vi.spyOn(source, 'return');
+      const iterator = await openStream(
+        resolving(source),
+        'lifecycle-throw-abort',
+        {
+          config,
+          request: helloRequest({ abortSignal: abort.signal }),
+        },
+      );
+      abort.abort();
+      const error = userAbort();
+      await expect(iterator.throw(error)).rejects.toBe(error);
+      expect(close).toHaveBeenCalledWith(undefined);
+      expectEnded(config, 'cancelled');
+    });
+
+    it.each(['return', 'throw'] as const)(
+      'preserves a source cleanup error on early %s despite an aborted signal',
+      async (operation) => {
+        const config = createConfig();
+        const abort = new AbortController();
+        const source = streamOf(resp('unconsumed'));
+        const cleanupError = new Error('cleanup failed');
+        vi.spyOn(source, 'return').mockRejectedValue(cleanupError);
+        const iterator = await openStream(
+          resolving(source),
+          'lifecycle-cleanup-error',
+          {
+            config,
+            request: helloRequest({ abortSignal: abort.signal }),
+          },
+        );
+        abort.abort();
+        const result =
+          operation === 'throw'
+            ? iterator.throw(userAbort())
+            : iterator.return(undefined);
+        await expect(result).rejects.toBe(cleanupError);
+        expectEnded(config, 'error');
+      },
+    );
+
+    it('does not declare an unconsumed and unclosed stream complete', async () => {
+      const config = createConfig();
+      const iterator = await openStream(
+        streams(resp('unconsumed')),
+        'lifecycle-abandoned',
+        { config },
+      );
+      expect(events(config).map((event) => event.phase)).toEqual(['started']);
+      await iterator.return(undefined);
+      expectEnded(config, 'interrupted');
+    });
+
+    it('continues request lifecycle after the span idle timer fires', async () => {
+      const config = createConfig();
+      const idle = captureIdleTimeout();
+      const gate = deferred();
+      try {
+        const iterator = await openStream(
+          resolving(
+            (async function* () {
+              yield resp('first');
+              await gate.promise;
+              yield resp('late');
+            })(),
+          ),
+          'lifecycle-idle',
+          { config },
+        );
+        await iterator.next();
+        expect(idle.callback).toBeDefined();
+        idle.callback?.();
+        expect(events(config).map((event) => event.phase)).toEqual(['started']);
+        gate.resolve();
+        expect((await iterator.next()).done).toBe(false);
+        expect((await iterator.next()).done).toBe(true);
+        expectEnded(config, 'success');
+      } finally {
+        gate.resolve();
+        idle.restore();
+      }
+    });
+
+    it.each(['abort-error', 'return', 'done', 'provider-error'] as const)(
+      'classifies %s after idle then cancellation',
+      async (exit) => {
+        const config = createConfig();
+        const abort = new AbortController();
+        const idle = captureIdleTimeout();
+        const error =
+          exit === 'provider-error'
+            ? new Error('provider failed')
+            : userAbort();
+        try {
+          const iterator = await openStream(
+            resolving(
+              (async function* () {
+                yield resp('first');
+                if (exit === 'abort-error' || exit === 'provider-error')
+                  throw error;
+              })(),
+            ),
+            'lifecycle-idle-abort',
+            { config, request: helloRequest({ abortSignal: abort.signal }) },
+          );
+          await iterator.next();
+          expect(idle.callback).toBeDefined();
+          idle.callback!();
+          abort.abort();
+          expect(events(config)).toHaveLength(1);
+          if (exit === 'return') await iterator.return(undefined);
+          else if (exit === 'done')
+            expect((await iterator.next()).done).toBe(true);
+          else await expect(iterator.next()).rejects.toBe(error);
+          expectEnded(
+            config,
+            exit === 'provider-error' ? 'error' : 'cancelled',
+          );
+        } finally {
+          idle.restore();
+        }
+      },
+    );
+
+    it('retains success when cancellation follows completion during logging', async () => {
+      const config = createConfig();
+      const abort = new AbortController();
+      const loggingEntered = deferred();
+      const loggingGate = deferred();
+      const generator = makeGenerator(
+        { stream: streams(resp('complete')) },
+        { enableOpenAILogging: true },
+        config,
+      );
+      openaiLogger().logInteraction.mockImplementationOnce(() => {
+        loggingEntered.resolve();
+        return loggingGate.promise;
+      });
+      const iterator = await generator.generateContentStream(
+        helloRequest({ abortSignal: abort.signal }),
+        'lifecycle-completed-abort',
+      );
+      await iterator.next();
+      const pending = iterator.next();
+      try {
+        await loggingEntered.promise;
+        expectEnded(config, 'success');
+        abort.abort();
+        loggingGate.resolve();
+        expect((await pending).done).toBe(true);
+        expectEnded(config, 'success');
+      } finally {
+        loggingGate.resolve();
+      }
+    });
+
+    it('ends a provider failure before delayed OpenAI logging completes', async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(10_000);
+      const config = createConfig();
+      const providerError = new Error('provider failed');
+      const loggingEntered = deferred();
+      const loggingGate = deferred();
+      const generator = makeGenerator(
+        { stream: failingStream(providerError) },
+        { enableOpenAILogging: true },
+        config,
+      );
+      openaiLogger().logInteraction.mockImplementationOnce(() => {
+        loggingEntered.resolve();
+        return loggingGate.promise;
+      });
+      const iterator = await generator.generateContentStream(
+        helloRequest(),
+        'lifecycle-delayed-error-log',
+      );
+      const pending = iterator.next();
+      try {
+        await loggingEntered.promise;
+        expectEnded(config, 'error');
+        const end = events(config)[1];
+        expect(end).toMatchObject({ endedAt: 10_000, durationMs: 0 });
+        vi.setSystemTime(40_000);
+        expect(events(config)).toHaveLength(2);
+        loggingGate.resolve();
+        await expect(pending).rejects.toBe(providerError);
+        expectEnded(config, 'error');
+        expect(events(config)[1]).toBe(end);
+      } finally {
+        loggingGate.resolve();
+      }
+    });
+
+    it('keeps concurrent identical prompts distinct when completion order reverses', async () => {
+      const config = createConfig();
+      const firstGate = deferred();
+      const secondGate = deferred();
+      const generate = vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          await firstGate.promise;
+          return resp('same-response');
+        })
+        .mockImplementationOnce(async () => {
+          await secondGate.promise;
+          return resp('same-response');
+        });
+      const generator = makeGenerator({ generate }, undefined, config);
+      const first = generator.generateContent(helloRequest(), 'same-prompt');
+      const second = generator.generateContent(helloRequest(), 'same-prompt');
+      const [firstStart, secondStart] = events(config);
+      expect(firstStart.executionId).not.toBe(secondStart.executionId);
+      secondGate.resolve();
+      await second;
+      firstGate.resolve();
+      await first;
+      expect(
+        events(config).map((event) => [event.executionId, event.phase]),
+      ).toEqual([
+        [firstStart.executionId, 'started'],
+        [secondStart.executionId, 'started'],
+        [secondStart.executionId, 'ended'],
+        [firstStart.executionId, 'ended'],
+      ]);
+      expect(events(config).slice(2)).toEqual([
+        expect.objectContaining({ outcome: 'success' }),
+        expect.objectContaining({ outcome: 'success' }),
+      ]);
+    });
+  });
+
   it('passes the owning config identity to a standalone LLM span', async () => {
     await runContent(resolving(resp('resp-owner')), 'owner-prompt', {
       request: textRequest('hello'),
@@ -677,6 +1156,52 @@ describe('LoggingContentGenerator', () => {
 
     expect(spanOptions()?.contextUsage?.window_size_tokens).toBe(100_000);
     await drain(stream); // so span finalization runs
+  });
+
+  it('shares one execution identity across request and response with telemetry disabled', async () => {
+    vi.mocked(isTelemetrySdkInitialized).mockReturnValue(false);
+    await runContent(resolving(resp('shared-response')), 'same-prompt');
+    expect(loggedRequest().execution_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(loggedResponse().execution_id).toBe(loggedRequest().execution_id);
+  });
+
+  it('keeps overlapping streams distinct even with identical prompt and response IDs', async () => {
+    const generator = makeGenerator({
+      stream: vi.fn().mockImplementation(async () =>
+        (async function* () {
+          yield resp('same-response');
+        })(),
+      ),
+    });
+    const first = await generator.generateContentStream(
+      helloRequest(),
+      'same-prompt',
+    );
+    const second = await generator.generateContentStream(
+      helloRequest(),
+      'same-prompt',
+    );
+    const ids = vi
+      .mocked(logApiRequest)
+      .mock.calls.map((call) => call[1].execution_id);
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).not.toBe(ids[0]);
+    await collect(second);
+    await collect(first);
+    expect(
+      vi.mocked(logApiResponse).mock.calls.map((call) => call[1].execution_id),
+    ).toEqual([ids[1], ids[0]]);
+  });
+
+  it('keeps the request identity on provider failure', async () => {
+    await expect(
+      runContent(
+        vi.fn().mockRejectedValue(new Error('provider failed')),
+        'failed-prompt',
+      ),
+    ).rejects.toThrow('provider failed');
+    expect(loggedError().execution_id).toBe(loggedRequest().execution_id);
+    expect(loggedError().execution_id).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('skips context snapshot work when telemetry is disabled', async () => {
@@ -1310,6 +1835,207 @@ describe('LoggingContentGenerator', () => {
     }
   });
 
+  /** Runs `chunks`, each arriving at its wall-clock time, then ends at `endMs`. */
+  const runTimedStream = async (
+    chunks: Array<[number, GenerateContentResponse]>,
+    endMs: number,
+  ) => {
+    let wallClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    try {
+      await runStream(
+        resolving(
+          (async function* () {
+            for (const [atMs, chunk] of chunks) {
+              wallClockMs = atMs;
+              yield chunk;
+            }
+            wallClockMs = endMs;
+          })(),
+        ),
+        'prompt-timed',
+      );
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  };
+
+  it('times a tool-call-only stream from its preparation to the complete call', async () => {
+    const preparation = createResponse('r1', 'test-model', []);
+    setToolCallPreparations(preparation, [
+      { callId: 'call_1', toolName: 'read_file' },
+    ]);
+    await runTimedStream(
+      [
+        [800, preparation],
+        [
+          1200,
+          createResponse(
+            'r1',
+            'test-model',
+            [{ functionCall: { id: 'call_1', name: 'read_file', args: {} } }],
+            usage(10, 40),
+            'STOP',
+          ),
+        ],
+      ],
+      1215,
+    );
+
+    expect(loggedResponse()).toMatchObject({
+      duration_ms: 1215,
+      ttft_ms: 800,
+      generation_ms: 400,
+    });
+    expect(llmSpan().endMetadata?.ttftMs).toBe(800);
+  });
+
+  it('times TTFT from the first request dispatch, not from before the request is built', async () => {
+    let wallClockMs = 0;
+    let monotonicClockMs = 0;
+    const dateNowSpy = vi
+      .spyOn(Date, 'now')
+      .mockImplementation(() => wallClockMs);
+    const performanceNowSpy = vi
+      .spyOn(performance, 'now')
+      .mockImplementation(() => monotonicClockMs);
+    const streamFn = vi.fn().mockImplementation(async () => {
+      wallClockMs = 200;
+      monotonicClockMs = 200;
+      markRequestDispatched();
+      wallClockMs = 250;
+      monotonicClockMs = 250;
+      markRequestDispatched();
+      return (async function* () {
+        wallClockMs = 1000;
+        monotonicClockMs = 1000;
+        yield createResponse('r1', 'test-model', [{ text: 'a' }]);
+        wallClockMs = 1500;
+        monotonicClockMs = 1500;
+        yield createResponse('r1', 'test-model', [{ text: 'b' }]);
+        wallClockMs = 1600;
+        monotonicClockMs = 1600;
+        yield createResponse('r1', 'test-model', [], usage(10, 40), 'STOP');
+      })();
+    });
+
+    try {
+      await runStream(streamFn, 'prompt-dispatch');
+
+      expect(loggedResponse()).toMatchObject({
+        duration_ms: 1600,
+        ttft_ms: 800,
+        generation_ms: 500,
+        first_visible_offset_ms: 1000,
+      });
+      const spanRecord = llmSpan();
+      expect(spanRecord.endMetadata).toMatchObject({
+        ttftMs: 800,
+        requestBuildMs: 200,
+        durationMs: 1600,
+      });
+      expect(spanRecord.attributes[TTFC]).toBeCloseTo(0.8);
+    } finally {
+      dateNowSpy.mockRestore();
+      performanceNowSpy.mockRestore();
+    }
+  });
+
+  it('ignores dispatches from a nested non-streaming request during stream setup', async () => {
+    let now = 0;
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const generator = makeGenerator({
+      generate: async () => {
+        now = 200;
+        markRequestDispatched();
+        return resp('inner');
+      },
+      stream: async () => {
+        await generator.generateContent(helloRequest(), 'nested');
+        now = 800;
+        markRequestDispatched();
+        return (async function* () {
+          now = 1000;
+          yield resp('outer');
+        })();
+      },
+    });
+
+    try {
+      await streamFrom(generator, 'outer');
+      const responses = vi
+        .mocked(logApiResponse)
+        .mock.calls.map((call) => call[1]);
+      expect(responses.map((response) => response.response_id)).toEqual([
+        'inner',
+        'outer',
+      ]);
+      expect(responses[0].ttft_ms).toBeUndefined();
+      expect(responses[1].ttft_ms).toBe(200);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('keeps a nested stream retry from starting the outer TTFT clock', async () => {
+    let now = 0;
+    const dateNowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const inner = makeGenerator({
+      stream: async () => {
+        now = 200;
+        markRequestDispatched();
+        return (async function* () {
+          now = 300;
+          markRequestDispatched();
+          now = 600;
+          yield resp('inner');
+        })();
+      },
+    });
+    const outer = makeGenerator({
+      stream: async () => {
+        await streamFrom(inner, 'inner');
+        now = 800;
+        markRequestDispatched();
+        return (async function* () {
+          now = 1000;
+          yield resp('outer');
+        })();
+      },
+    });
+
+    try {
+      await streamFrom(outer, 'outer');
+
+      expect(
+        vi.mocked(logApiResponse).mock.calls.map((call) => call[1]),
+      ).toMatchObject([
+        { response_id: 'inner', ttft_ms: 400 },
+        { response_id: 'outer', ttft_ms: 200, first_visible_offset_ms: 1000 },
+      ]);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('reports zero generation time when all visible output arrives in one chunk', async () => {
+    await runTimedStream(
+      [
+        [900, createResponse('r1', 'test-model', [{ text: 'done' }])],
+        [905, createResponse('r1', 'test-model', [], usage(10, 40), 'STOP')],
+      ],
+      910,
+    );
+
+    expect(loggedResponse()).toMatchObject({
+      duration_ms: 910,
+      ttft_ms: 900,
+      generation_ms: 0,
+    });
+  });
+
   it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
     await runStream(
       streams(
@@ -1328,6 +2054,94 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 100,
       cachedInputTokens: 40,
     });
+  });
+
+  it('forwards a converter-reported cache creation count to endLLMRequestSpan', async () => {
+    // The value only survives because provenance is a WeakMap keyed on the
+    // usage object and the stream forwards that same reference. Reading
+    // provenance off the converter's own object (which the converter tests
+    // do) cannot see a copy, a spread or a JSON round-trip on the way.
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+          prompt_tokens_details: { cache_write_tokens: 256 },
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-cache-write',
+    );
+
+    expect(llmSpan().endMetadata).toMatchObject({
+      inputTokens: 373,
+      cacheCreationInputTokens: 256,
+    });
+  });
+
+  it('leaves cache creation unreported when the provider omits the field', async () => {
+    const converted = OpenAIContentConverter.convertOpenAIChunkToLlm(
+      {
+        object: 'chat.completion.chunk',
+        id: 'chunk-no-cache-write',
+        created: 123,
+        model: 'test-model',
+        choices: [],
+        usage: {
+          prompt_tokens: 373,
+          completion_tokens: 112,
+          total_tokens: 485,
+        },
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      {
+        requestId: 'no-cache-write-request',
+        isStreaming: true,
+        toolCallParser: new StreamingToolCallParser(),
+        model: 'test-model',
+        modalities: { image: true, pdf: true, audio: true, video: true },
+        startTime: 0,
+      } as Parameters<typeof OpenAIContentConverter.convertOpenAIChunkToLlm>[1],
+    );
+
+    await runStream(
+      streams(
+        createResponse(
+          'r1',
+          'test-model',
+          [{ text: 'ok' }],
+          converted.usageMetadata,
+        ),
+      ),
+      'prompt-no-cache-write',
+    );
+
+    // Absent must stay absent: session-tracing writes the attribute only when
+    // the value is defined, so a defaulted 0 would emit it on every turn.
+    expect(llmSpan().endMetadata!.cacheCreationInputTokens).toBeUndefined();
   });
 
   it('leaves ttftMs undefined when stream yields no user-visible chunks (Phase 4a)', async () => {

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   assertExportTranscriptDocumentV1,
+  assertExportTranscriptDocumentV2,
   classifyPermissionResolutionForExport,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
 } from './export-transcript-document.js';
 import { escapeJsonForHtmlScriptData } from './html-script-data.js';
 import { expectWithinLatencyBudget } from '../../../test-utils/latency-budget.js';
@@ -53,6 +55,91 @@ const sessionData = {
 };
 
 describe('ExportTranscriptDocumentV1', () => {
+  it('keeps the persisted trigger source without surrounding metadata', () => {
+    const automaticText =
+      '/loop 5m retain the trigger presentation in an export';
+    const ordinaryText = 'An ordinary human input remains ordinary.';
+    const document = createExportTranscriptDocumentV2(
+      [
+        record('automatic', null, {
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: automaticText }] },
+          systemPayload: { displayText: automaticText, note: CANARY },
+        }),
+        record('ordinary', 'automatic', {
+          message: { role: 'user', parts: [{ text: ordinaryText }] },
+        }),
+        record('goal-runtime', 'ordinary', {
+          subtype: 'goal_runtime',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Continue the goal without a cron label' }],
+          },
+          systemPayload: {
+            displayText: 'Continue the goal without a cron label',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const automatic = document.blocks.find(
+      (block) => block.kind === 'user' && block.text === automaticText,
+    );
+    const ordinary = document.blocks.find(
+      (block) => block.kind === 'user' && block.text === ordinaryText,
+    );
+    const goal = document.blocks.find(
+      (block) =>
+        block.kind === 'user' &&
+        block.text === 'Continue the goal without a cron label',
+    );
+    if (!automatic || !ordinary || !goal) {
+      throw new Error('User projection is missing');
+    }
+    expect(document.schemaVersion).toBe(2);
+    expect(automatic).toMatchObject({ kind: 'user', text: automaticText });
+    const metadata = 'meta' in automatic ? automatic.meta : undefined;
+    expect(metadata).toEqual({ source: 'cron' });
+    expect(goal).not.toHaveProperty('meta');
+    expect(ordinary).not.toHaveProperty('meta');
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(() =>
+      assertExportTranscriptDocumentV2({
+        ...document,
+        blocks: [{ ...automatic, meta: { source: 'cron', timestamp: 1 } }],
+      }),
+    ).toThrow();
+  });
+
+  it('preserves the V1 envelope and rejects newly injected metadata', () => {
+    const automaticText = '/loop keep the legacy export presentation';
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('legacy-cron', null, {
+          subtype: 'cron',
+          message: { role: 'user', parts: [{ text: automaticText }] },
+          systemPayload: { displayText: automaticText },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const automatic = document.blocks.find(
+      (block) => block.kind === 'user' && block.text === automaticText,
+    );
+    if (!automatic) throw new Error('User projection is missing');
+    expect(document.schemaVersion).toBe(1);
+    expect(automatic).not.toHaveProperty('meta');
+    assertExportTranscriptDocumentV1(document);
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...document,
+        blocks: [{ ...automatic, meta: { source: 'cron' } }],
+      }),
+    ).toThrow();
+  });
+
   it('exports a complete outer transcript while retaining raw internal evidence', () => {
     const results = [
       {
@@ -141,6 +228,65 @@ describe('ExportTranscriptDocumentV1', () => {
     ).toEqual(['exec', 'get_goal']);
     expect(JSON.stringify(document)).not.toContain(CANARY);
     expect(JSON.stringify(records)).toBe(original);
+  });
+  it('keeps the history-gap notice when the chain breaks at an internal Code Mode result', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('calls', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ functionCall: { id: 'outer', name: 'exec', args: {} } }],
+          },
+        }),
+        record('nested', 'missing-parent', {
+          type: 'tool_result',
+          subtype: 'code_mode_tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'nested',
+                  name: 'write_file',
+                  response: { output: CANARY },
+                },
+              },
+            ],
+          },
+        }),
+        record('outer-result', 'nested', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'outer',
+                  name: 'exec',
+                  response: { output: 'script finished' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'outer',
+            status: 'success',
+            resultDisplay: 'script finished',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const text = document.blocks
+      .flatMap((block) => ('text' in block ? [block.text] : []))
+      .join('\n');
+
+    expect(text).toContain(
+      'Some earlier messages are unavailable because the saved history is incomplete.',
+    );
+    expect(JSON.stringify(document)).not.toContain(CANARY);
   });
   it('projects records through an explicit allowlist without raw leakage', () => {
     const records = [
@@ -2770,6 +2916,97 @@ describe('ExportTranscriptDocumentV1', () => {
       maxArrayLength: 1_000,
       maxRichRenderTasks: 100,
     });
+  });
+
+  it("names the agent on an agent's reply and on its posts", () => {
+    const records = [
+      record('prompt', null),
+      record('answer', 'prompt', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'Main answer.' }] },
+      }),
+      record('agent-reply', 'answer', {
+        subtype: 'agent_message',
+        provenance: 'external_agent',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message>Looks good.</agent_message>' }],
+        },
+        systemPayload: {
+          displayText: 'Looks good.',
+          author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+          runId: 'run-1',
+          status: 'completed',
+        },
+        agentId: 'agent-1',
+        agentName: 'claude-B',
+      }),
+      record('agent-post', 'agent-reply', {
+        subtype: 'agent_mention',
+        provenance: 'external_agent',
+        systemPayload: {
+          displayText: '@codex-C your turn',
+          mentionedAgentIds: ['agent-2'],
+          author: { agentId: 'agent-1', name: 'claude-B' },
+        },
+      }),
+    ];
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(
+      document.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+        'author' in block ? block.author : undefined,
+      ]),
+    ).toEqual([
+      ['user', 'prompt', undefined],
+      ['assistant', 'Main answer.', undefined],
+      ['assistant', 'Looks good.', { name: 'claude-B' }],
+      ['user', '@codex-C your turn', { name: 'claude-B' }],
+    ]);
+    // Only the name travels: no agent id, color or raw meta.
+    expect(JSON.stringify(document)).not.toContain('agent-1');
+    expect(JSON.stringify(document)).not.toContain('qwenAgentMessage');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
+  it('rejects an unsafe or widened block author', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('agent-reply', null, {
+          subtype: 'agent_message',
+          systemPayload: {
+            displayText: 'Hi.',
+            author: { agentId: 'agent-1', name: 'claude-B' },
+            runId: 'run-1',
+            status: 'completed',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const withAuthor = (author: unknown) => ({
+      ...document,
+      blocks: document.blocks.map((block) =>
+        'author' in block ? { ...block, author } : block,
+      ),
+    });
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: 'bad\u0007name' })),
+    ).toThrowError('invalid_block');
+    expect(() =>
+      assertExportTranscriptDocumentV1(
+        withAuthor({ name: 'claude-B', agentId: 'agent-1' }),
+      ),
+    ).toThrowError('schema_validation_failed');
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: '' })),
+    ).toThrowError('schema_validation_failed');
   });
 
   it('escapes HTML script terminators in serialized document data', () => {

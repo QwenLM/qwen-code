@@ -119,7 +119,7 @@ const TOKEN_PLAN: SubscriptionPlanDefinition<'token'> = {
   option: 'TOKEN_PLAN',
   title: 'Token Plan',
   description:
-    'For teams and companies · Usage-based billing with dedicated endpoint',
+    'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)',
   envKey: TOKEN_PLAN_ENV_KEY,
   authEventType: 'coding-plan',
   metadataKey: 'tokenPlan',

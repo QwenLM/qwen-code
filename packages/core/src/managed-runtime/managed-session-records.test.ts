@@ -13,6 +13,7 @@ import {
   assertManagedSessionEventActor,
   assertManagedSessionTransaction,
   isManagedSessionLifecycleTransitionAllowed,
+  managedSessionDurableRefsEqual,
   managedSessionEventsDigest,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -267,6 +268,27 @@ describe('managed session record envelope', () => {
     expect(event.sequence).toBe(1);
     expect(event.sessionKey).toEqual(sessionKey);
     expect(event.subject).toBeUndefined();
+  });
+
+  it('accepts input.accepted with a notBefore instant, null, or absent', () => {
+    const due = parseManagedSessionEvent(
+      withPayload(inputEvent(), { notBefore: 1_700_000_060_000 }),
+    );
+    expect(due.payload['notBefore']).toBe(1_700_000_060_000);
+    const immediate = parseManagedSessionEvent(
+      withPayload(inputEvent(), { notBefore: null }),
+    );
+    expect(immediate.payload['notBefore']).toBeNull();
+    // Absent stays valid: notBefore is optional, existing producers omit it.
+    const legacy = parseManagedSessionEvent(inputEvent());
+    expect(legacy.payload['notBefore']).toBeUndefined();
+  });
+
+  it('rejects a non-time notBefore on input.accepted', () => {
+    expectEventError(
+      withPayload(inputEvent(), { notBefore: 'soon' }),
+      /notBefore/,
+    );
   });
 
   it('rejects an unknown kind rather than skipping it', () => {
@@ -840,8 +862,9 @@ describe('managed session per-kind rules', () => {
   });
 
   it('registers the v1 domains including file history and session source', () => {
-    expect(MANAGED_SESSION_DOMAINS).toHaveLength(33);
-    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(33);
+    expect(MANAGED_SESSION_DOMAINS).toHaveLength(35);
+    expect(new Set(MANAGED_SESSION_DOMAINS).size).toBe(35);
+    expect(MANAGED_SESSION_DOMAINS).toContain('session_command');
   });
 
   it('validates the lifecycle target state', () => {
@@ -992,19 +1015,35 @@ describe('managed session header', () => {
     expect(parseManagedSessionHeader(header()).engine).toBe('managed');
   });
 
+  it('accepts a header without a minimum-reader requirement', () => {
+    const withoutReader: Record<string, unknown> = { ...header() };
+    delete withoutReader['minimumReader'];
+    const parsed = parseManagedSessionHeader(withoutReader);
+    expect(parsed.engine).toBe('managed');
+    expect(parsed.minimumReader).toBeUndefined();
+  });
+
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
-      { minimumReader: 'managed-session/2' },
+      { minimumReader: 'managed-session/4' },
       /is not supported by this reader/,
     );
   });
 
-  it('accepts an older minimum-reader requirement and returns its token', () => {
+  it('accepts supported minimum-reader requirements and returns their tokens', () => {
     expect(
       parseManagedSessionHeader(header({ minimumReader: 'managed-session/0' }))
         .minimumReader,
     ).toBe('managed-session/0');
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/1' }))
+        .minimumReader,
+    ).toBe('managed-session/1');
+    expect(
+      parseManagedSessionHeader(header({ minimumReader: 'managed-session/2' }))
+        .minimumReader,
+    ).toBe('managed-session/2');
   });
 
   it('refuses a malformed minimum-reader token', () => {
@@ -1281,5 +1320,111 @@ describe('managed session raw record parsing', () => {
     expect(parseJson(exact, cap)()).toBe('x'.repeat(cap - 2));
     const over = JSON.stringify('x'.repeat(cap - 1));
     expect(parseJson(over, cap)).toThrow(/exceeds 65536 UTF-8 bytes/);
+  });
+});
+
+describe('Hosted recovery envelopes', () => {
+  it('keeps old attempts readable and validates new references', () => {
+    expect(parseManagedSessionEvent(harnessEvent()).kind).toBe('model.attempt');
+    const payload = {
+      attemptId: 'a',
+      routeRef: ref(),
+      inputCheckpointRef: null,
+      state: 'started',
+      usageRef: null,
+      recoveryRef: ref('hosted-model-request'),
+    };
+    expect(
+      parseManagedSessionEvent(harnessEvent({ payload })).payload[
+        'recoveryRef'
+      ],
+    ).toEqual(payload.recoveryRef);
+    expect(() =>
+      parseManagedSessionEvent(
+        harnessEvent({ payload: { ...payload, recoveryRef: ref() } }),
+      ),
+    ).toThrow(/recoveryRef/);
+  });
+  it('requires a complete bounded retraction and ordered range', () => {
+    const event = (payload: unknown) =>
+      harnessEvent({ kind: 'message.retracted', payload });
+    const payload = { messageId: 'msg', turnId: 'turn', fromSequence: 2 };
+    expect(parseManagedSessionEvent(event(payload)).kind).toBe(
+      'message.retracted',
+    );
+    expect(() =>
+      parseManagedSessionEvent(event({ ...payload, throughSequence: 3 })),
+    ).toThrow(/together/);
+    const bounded = {
+      ...payload,
+      throughSequence: 3,
+      sourceBootId: 'boot',
+      sourceEventEpoch: 'epoch',
+    };
+    expect(parseManagedSessionEvent(event(bounded)).payload).toEqual(bounded);
+    expect(() =>
+      parseManagedSessionEvent(event({ ...bounded, throughSequence: 1 })),
+    ).toThrow(/range/);
+  });
+  it('validates batch plans and cleanup states under Harness ownership', () => {
+    for (const [kind, payload] of [
+      [
+        'hosted.batch.planned',
+        {
+          batchId: 'batch',
+          planRevision: 1,
+          planRef: ref('hosted-approval-continuation'),
+        },
+      ],
+      [
+        'hosted.cleanup',
+        {
+          cleanupId: 'cleanup',
+          descriptorRef: ref('hosted-turn-cleanup'),
+          state: 'owed',
+        },
+      ],
+    ] as const) {
+      const event = parseManagedSessionEvent(harnessEvent({ kind, payload }));
+      expect(() =>
+        assertManagedSessionEventActor(event, 'harness'),
+      ).not.toThrow();
+      expect(() =>
+        assertManagedSessionEventActor(event, 'trusted_entry'),
+      ).toThrow();
+    }
+    expect(() =>
+      parseManagedSessionEvent(
+        harnessEvent({
+          kind: 'hosted.cleanup',
+          payload: {
+            cleanupId: 'c',
+            descriptorRef: ref('hosted-turn-cleanup'),
+            state: 'released',
+          },
+        }),
+      ),
+    ).toThrow();
+  });
+});
+
+describe('managedSessionDurableRefsEqual', () => {
+  it('compares every field of a reference', () => {
+    const ref: ManagedSessionDurableRef = {
+      resourceId: 'resource-a',
+      kind: 'managed-message',
+      schemaVersion: 1,
+      byteLength: 6,
+      digest: 'a'.repeat(64),
+    };
+    expect(managedSessionDurableRefsEqual(ref, { ...ref })).toBe(true);
+    for (const other of [
+      { ...ref, resourceId: 'resource-b' },
+      { ...ref, kind: 'managed-checkpoint' },
+      { ...ref, schemaVersion: 2 },
+      { ...ref, byteLength: 7 },
+      { ...ref, digest: 'b'.repeat(64) },
+    ])
+      expect(managedSessionDurableRefsEqual(ref, other)).toBe(false);
   });
 });

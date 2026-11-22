@@ -8,6 +8,8 @@ import type {
   DaemonBackgroundTurn,
   DaemonSessionArtifactInput,
   DaemonInputAnnotation,
+  DaemonInputSourceAnnotation,
+  QwenAgentMessageMeta,
 } from '@qwen-code/sdk/daemon';
 
 import type { components } from '../components/managed/generated/managed-agent-api.js';
@@ -64,16 +66,26 @@ export interface DaemonMessageToolCall {
   parentToolCallId?: string;
   /** The producer's own call ID when `callId` is keyed by something else. */
   toolCallId?: string;
+  /** Stable producer identity from the daemon tool-block projection only. */
+  generatedUiToolCallId?: string;
   title?: string;
   content?: readonly DaemonMessageToolCallContent[];
   rawOutput?: unknown;
   toolResult?: components['schemas']['PublicToolResult'];
+  toolDetailsRevision?: number;
   locations?: DaemonMessageToolCallLocation[];
   kind?: DaemonMessageToolKind;
   startTime?: number;
   endTime?: number;
   wasCancelled?: boolean;
   subContent?: string;
+  /**
+   * Path-style identity of the agent that produced this call's sub-content,
+   * e.g. `/root/general-purpose`. Carried from the transcript block's `agent`
+   * field so the panel can name a subagent precisely instead of by type alone
+   * — two parallel subagents of the same type are otherwise indistinguishable.
+   */
+  agentPath?: string;
   subTools?: DaemonMessageToolCall[];
   /** Transcript blocks folded into this tool presentation. */
   sourceBlockIds?: string[];
@@ -103,6 +115,8 @@ export interface DaemonMessageAuthor {
  * cross-cutting field is declared once rather than on each role.
  */
 export interface DaemonMessageMeta {
+  sourceRecordIds?: string[];
+  localCommandId?: string;
   backgroundTurn?: DaemonBackgroundTurn;
   /**
    * Admitted prompt this message belongs to, copied from the daemon-stamped
@@ -144,7 +158,11 @@ export interface DaemonUserMessage extends DaemonMessageMeta {
     attachmentId?: string;
   }>;
   inputAnnotations?: DaemonInputAnnotation[];
+  /** The other session that sent this message (`/send`, a sub-session launch). */
+  sentFrom?: DaemonInputSourceAnnotation;
   source?: string;
+  /** `_meta.qwenAgentMessage` of an @-mention (`kind: 'agent_mention'`). */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonAssistantMessage extends DaemonMessageMeta {
@@ -153,6 +171,10 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
   role: 'assistant';
   content: string;
   isStreaming?: boolean;
+  /** The block's `meta.source`, such as `slash_command` for command output. */
+  source?: string;
+  /** Identifies subagent output rendered without its parent tool card. */
+  parentToolCallId?: string;
   branchRecordId?: string;
   /**
    * Token usage folded onto this assistant block by the daemon SDK reducer
@@ -161,6 +183,11 @@ export interface DaemonAssistantMessage extends DaemonMessageMeta {
    * Absent on sessions whose agent predates usage stamping.
    */
   usage?: { inputTokens: number; outputTokens: number; cachedTokens?: number };
+  /**
+   * `_meta.qwenAgentMessage` of a workspace agent's reply in this session
+   * (`kind: 'agent_message'`): its run status, error, steps and tokens.
+   */
+  agentMessage?: QwenAgentMessageMeta;
 }
 
 export interface DaemonThinkingMessage extends DaemonMessageMeta {
@@ -168,6 +195,8 @@ export interface DaemonThinkingMessage extends DaemonMessageMeta {
   role: 'thinking';
   content: string;
   isStreaming?: boolean;
+  /** Identifies a subagent's thought rendered without its parent tool card. */
+  parentToolCallId?: string;
 }
 
 export interface DaemonToolGroupMessage extends DaemonMessageMeta {
@@ -183,9 +212,11 @@ export interface DaemonToolGroupMessage extends DaemonMessageMeta {
    * trail the last tool.
    */
   thoughts?: Array<{
+    id?: string;
     content: string;
     isStreaming?: boolean;
     beforeToolCallId?: string;
+    parentToolCallId?: string;
   }>;
 }
 
@@ -225,6 +256,9 @@ export interface DaemonBtwMessage extends DaemonMessageMeta {
   question: string;
   answer: string;
   isPending: boolean;
+  /** Set when the question explains a background task, so the task's detail
+   * panel can mirror the answer in place. Absent for typed /btw. */
+  taskId?: string;
 }
 
 export interface DaemonInsightProgressMessage extends DaemonMessageMeta {

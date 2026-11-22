@@ -27,17 +27,20 @@ import { MessageType, type Message } from '../types.js';
 interface MockConfigOptions {
   userMemory?: string;
   autoMemoryPrompt?: string;
+  autoMemoryContext?: string;
   fileCount?: number;
 }
 
 function createMockConfig({
   userMemory = '',
   autoMemoryPrompt = '',
+  autoMemoryContext = '',
   fileCount = 0,
 }: MockConfigOptions): Config {
   return {
     getUserMemory: () => userMemory,
     getAutoMemoryPrompt: () => autoMemoryPrompt,
+    getAutoMemoryContext: () => autoMemoryContext,
     getMemoryFileCount: () => fileCount,
   } as unknown as Config;
 }
@@ -130,4 +133,20 @@ describe('createShowMemoryAction', () => {
       ),
     ).toBe(true);
   });
+});
+
+it('shows the request-only catalog together with stable memory policy', async () => {
+  const config = createMockConfig({
+    autoMemoryPrompt: 'stable policy',
+    autoMemoryContext: 'latest catalog',
+  });
+  const addMessage = vi.fn();
+  await createShowMemoryAction(config, mockSettings, addMessage)();
+  expect(addMessage).toHaveBeenCalledWith(
+    expect.objectContaining({
+      content: expect.stringContaining(
+        'stable policy\n\n---\n\nlatest catalog',
+      ),
+    }),
+  );
 });

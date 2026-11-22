@@ -5,42 +5,13 @@
  */
 
 /**
- * Client for `GET /workspaces/:ws/agent/events`, the collaboration stream.
+ * Client for the session-agents stream under `/workspaces/:ws/agent/`
+ * (`session-events?sessionId=`: a chat session's live agent runs). The roster
+ * has no stream; the Agents page polls it.
  *
  * `fetch` rather than `EventSource`: the daemon wants a bearer header, which
  * `EventSource` cannot send. Frames are plain `event:` + one `data:` line.
  */
-
-export interface AgentPermissionPromptView {
-  requestId: string;
-  title: string;
-  options: Array<{ optionId: string; name: string; kind?: string }>;
-}
-
-export interface AgentRunStepView {
-  id: string;
-  title: string;
-  status: 'running' | 'done' | 'failed';
-}
-
-export interface AgentRunProgressEvent {
-  type: 'progress';
-  threadId: string;
-  runId: string;
-  attempt: number;
-  sessionId: string;
-  stage: string;
-  detail: string;
-  outputText: string;
-  thoughtText: string;
-  activityAt: number;
-  permission?: AgentPermissionPromptView;
-  steps?: AgentRunStepView[];
-}
-
-export type AgentLiveEvent =
-  | { type: 'changed'; threadId?: string }
-  | AgentRunProgressEvent;
 
 export type AgentStreamState = 'open' | 'closed';
 
@@ -48,8 +19,10 @@ const MAX_RETRY_MS = 15_000;
 
 interface SharedStream {
   listeners: Set<{
-    onEvent: (event: AgentLiveEvent) => void;
+    onEvent: (event: unknown) => void;
     onState: (state: AgentStreamState) => void;
+    request: (signal: AbortSignal) => Promise<Response>;
+    onDisconnect: () => void;
   }>;
   state: AgentStreamState;
   stop: () => void;
@@ -62,24 +35,31 @@ const shared = new Map<string, SharedStream>();
  * connection: browsers allow only a handful per origin, and the sidebar plus
  * an open conversation would otherwise hold several for the same workspace.
  */
-export function subscribeAgentStream(
+export function subscribeAgentStream<T = unknown>(
   url: string,
   token: string | undefined,
-  onEvent: (event: AgentLiveEvent) => void,
+  onEvent: (event: T) => void,
   onState: (state: AgentStreamState) => void,
+  request: (signal: AbortSignal) => Promise<Response>,
+  onDisconnect: () => void,
 ): () => void {
   const key = `${url}\n${token ?? ''}`;
+  // Every subscriber of one URL reads the same stream, so they agree on `T`.
+  const listener = {
+    onEvent: onEvent as (event: unknown) => void,
+    onState,
+    request,
+    onDisconnect,
+  };
   let entry = shared.get(key);
-  const joining = entry !== undefined;
   if (!entry) {
     const created: SharedStream = {
-      listeners: new Set(),
+      listeners: new Set([listener]),
       state: 'closed',
       stop: () => {},
     };
     created.stop = openStream(
-      url,
-      token,
+      created.listeners,
       (event) => {
         for (const listener of created.listeners) listener.onEvent(event);
       },
@@ -90,12 +70,11 @@ export function subscribeAgentStream(
     );
     shared.set(key, created);
     entry = created;
+  } else {
+    entry.listeners.add(listener);
+    // A late joiner polls while the shared stream is down.
+    onState(entry.state);
   }
-  const listener = { onEvent, onState };
-  entry.listeners.add(listener);
-  // A late joiner learns where the shared stream is, so it polls while the
-  // stream is down just as the first subscriber does.
-  if (joining) onState(entry.state);
   const current = entry;
   return () => {
     current.listeners.delete(listener);
@@ -106,24 +85,21 @@ export function subscribeAgentStream(
 }
 
 function openStream(
-  url: string,
-  token: string | undefined,
-  onEvent: (event: AgentLiveEvent) => void,
+  listeners: SharedStream['listeners'],
+  onEvent: (event: unknown) => void,
   onState: (state: AgentStreamState) => void,
 ): () => void {
   let stopped = false;
   let controller: AbortController | undefined;
   let retryMs = 1_000;
+  let accepted = false;
 
   const readOnce = async () => {
+    accepted = false;
     controller = new AbortController();
-    const response = await fetch(url, {
-      headers: {
-        Accept: 'text/event-stream',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      signal: controller.signal,
-    });
+    const listener = listeners.values().next().value;
+    if (!listener) return;
+    const response = await listener.request(controller.signal);
     // A proxy, or a route mounted after startup, can answer 200 with HTML —
     // `threads-api.ts` guards its own calls against the same thing. Only an
     // event stream counts as open: reporting anything else as `'open'` resets
@@ -139,6 +115,7 @@ function openStream(
     ) {
       throw new Error(`Agent event stream failed (${response.status})`);
     }
+    accepted = true;
     onState('open');
     retryMs = 1_000;
     const reader = response.body
@@ -160,7 +137,7 @@ function openStream(
           .join('\n');
         if (!data) continue;
         try {
-          onEvent(JSON.parse(data) as AgentLiveEvent);
+          onEvent(JSON.parse(data) as unknown);
         } catch {
           // A malformed frame is skipped; the next `changed` resyncs anyway.
         }
@@ -176,6 +153,7 @@ function openStream(
         // Fall through to the retry below.
       }
       if (stopped) return;
+      if (accepted) listeners.values().next().value?.onDisconnect();
       onState('closed');
       await new Promise((resolve) => setTimeout(resolve, retryMs));
       retryMs = Math.min(retryMs * 2, MAX_RETRY_MS);

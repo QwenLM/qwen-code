@@ -35,6 +35,20 @@ const ALLOWED_ORIGINS = CHROME_EXTENSION_IDS.map(
   (id) => 'chrome-extension://' + id + '/',
 );
 
+/**
+ * Native Host registration is implemented for these platforms only. The
+ * reason is implementation-shaped, not a Chrome limitation: `resolveOptions`
+ * has Chrome profile roots for darwin and linux and writes a POSIX `#!/bin/sh`
+ * launcher. Windows does have a profile root and a Native Messaging registry
+ * key, so adding `win32` here is only correct together with teaching the
+ * installer to register there. The runtime's fast-fail for unregisterable
+ * platforms reads this same list, so the two cannot drift apart.
+ */
+export const NATIVE_HOST_SUPPORTED_PLATFORMS: readonly NodeJS.Platform[] = [
+  'darwin',
+  'linux',
+];
+
 export interface NativeHostInstallOptions {
   nativeHostPath: string;
   homeDir?: string;
@@ -274,7 +288,7 @@ export async function describeChromeProfiles(
   const described: Awaited<ReturnType<ChromeProfileDescriber>> = new Map();
   if (instanceIds.length === 0) return described;
   const platform = options.platform ?? process.platform;
-  if (platform !== 'darwin' && platform !== 'linux') return described;
+  if (!NATIVE_HOST_SUPPORTED_PLATFORMS.includes(platform)) return described;
   const { manifestPaths } = resolveOptions({
     ...options,
     nativeHostPath: '/unused',
@@ -354,7 +368,7 @@ function resolveOptions(options: NativeHostInstallOptions): {
   manifestPaths: string[];
 } {
   const platform = options.platform ?? process.platform;
-  if (platform !== 'darwin' && platform !== 'linux') {
+  if (!NATIVE_HOST_SUPPORTED_PLATFORMS.includes(platform)) {
     throw new Error(
       'Automatic Native Messaging installation supports macOS and Linux',
     );

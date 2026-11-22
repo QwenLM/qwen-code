@@ -31,6 +31,7 @@ import {
 } from './managed-extension-record.js';
 import {
   MANAGED_SESSION_DOMAINS,
+  MANAGED_SESSION_ENABLED_DOMAINS,
   ManagedSessionRecordError,
   assertManagedSessionDomainEnabled,
 } from './managed-session-records.js';
@@ -251,13 +252,13 @@ describe('Managed extension record contract', () => {
     );
   });
 
-  it('registers monitor_run without enabling it for submission', () => {
+  it('registers monitor_run and enables it for submission', () => {
+    // H3's enablement (#13856) lifted the gate after the physical pass.
     expect(MANAGED_SESSION_DOMAINS).toContain('monitor_run');
-    expect(
-      throwsContractError(() =>
-        assertManagedSessionDomainEnabled('monitor_run'),
-      ),
-    ).toBe(true);
+    expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain('monitor_run');
+    expect(() =>
+      assertManagedSessionDomainEnabled('monitor_run'),
+    ).not.toThrow();
   });
 
   it('allows exactly the listed step between every pair of states', () => {

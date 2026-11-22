@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -69,7 +70,8 @@ describe('ExitWorktreeTool', () => {
   // Real git invocations + user-global hooks can spike to 10-20s alongside
   // other integ tests; bump timeouts so CI / busy local runs aren't flaky.
   // (Phase C #4174.)
-  vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
+  const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
+  vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
   describe('metadata', () => {
     it('exposes the correct tool name', () => {
@@ -351,6 +353,111 @@ describe('ExitWorktreeTool', () => {
       expect(result.error?.message).toMatch(/unmerged|no other branch/i);
       // Both worktree and branch must still be present.
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
+    });
+
+    it('removes a worktree switched to a user branch whose commits survive (R8-2)', async () => {
+      // A named creation owns the slug ref; the agent then switches to a
+      // user branch and commits there. Removal deletes the directory and
+      // the slug ref (still at base, merged) — never feat/x — so it must
+      // not refuse on feat/x's unmerged commits.
+      const service = new GitWorktreeService(repoRoot);
+      const base = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim();
+      const created = await service.createUserWorktree('switched', 'main');
+      expect(created.success).toBe(true);
+      const wtPath = created.worktree!.path;
+      await writeWorktreeSessionMarker(wtPath, 'session-creator');
+      await writeWorktreeSession(
+        new SessionService(repoRoot).getWorktreeSessionPath('session-creator'),
+        {
+          slug: 'switched',
+          worktreePath: wtPath,
+          worktreeBranch: worktreeBranchForSlug('switched'),
+          originalCwd: repoRoot,
+          originalBranch: 'main',
+          originalHeadCommit: base,
+          worktreeBase: base,
+        },
+      );
+      execFileSync('git', ['switch', '-c', 'feat/x'], { cwd: wtPath });
+      await fs.writeFile(path.join(wtPath, 'new.txt'), 'work\n');
+      execFileSync('git', ['add', '.'], { cwd: wtPath });
+      execFileSync('git', ['commit', '-q', '-m', 'work', '--no-verify'], {
+        cwd: wtPath,
+      });
+      const result = await exitWith(
+        {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => 'session-creator',
+          getSessionService: () => new SessionService(repoRoot),
+        } as unknown as Config,
+        { name: 'switched', action: 'remove', discard_changes: true },
+      );
+      expect(result.error).toBeUndefined();
+      await expect(fs.access(wtPath)).rejects.toBeDefined();
+      const branches = listBranches(repoRoot);
+      expect(branches).toContain('feat/x');
+      expect(branches).not.toContain(worktreeBranchForSlug('switched'));
+    });
+
+    it('judges unmerged commits against worktreeBase, not originalHeadCommit (R5-4)', async () => {
+      // The branch-route shape: a detached worktree created at a sibling
+      // checkout's HEAD records originalHeadCommit = repo top HEAD. With
+      // no commits of its own it is clean at its CREATION base; judging
+      // against originalHeadCommit would read the sibling's commit as
+      // unmerged work and refuse removal of a clean worktree forever.
+      const service = new GitWorktreeService(repoRoot);
+      const rootHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim();
+      const sibling = await service.createUserWorktree('sibling', 'main', {
+        detached: true,
+      });
+      expect(sibling.success).toBe(true);
+      const siblingPath = sibling.worktree!.path;
+      await fs.writeFile(path.join(siblingPath, 'ahead.txt'), 'ahead\n');
+      execFileSync('git', ['add', 'ahead.txt'], { cwd: siblingPath });
+      execFileSync('git', ['commit', '-qm', 'sibling work', '--no-verify'], {
+        cwd: siblingPath,
+      });
+      const siblingHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: siblingPath,
+        encoding: 'utf8',
+      }).trim();
+      expect(siblingHead).not.toBe(rootHead);
+      const created = await service.createUserWorktree('task', siblingHead, {
+        detached: true,
+      });
+      expect(created.success).toBe(true);
+      const wtPath = created.worktree!.path;
+      await writeWorktreeSessionMarker(wtPath, 'session-creator');
+      await writeWorktreeSession(
+        new SessionService(repoRoot).getWorktreeSessionPath('session-creator'),
+        {
+          slug: 'task',
+          worktreePath: wtPath,
+          worktreeBranch: '',
+          originalCwd: repoRoot,
+          originalBranch: 'main',
+          originalHeadCommit: rootHead,
+          worktreeBase: siblingHead,
+        },
+      );
+
+      const result = await exitWith(
+        {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => 'session-creator',
+          getSessionService: () => new SessionService(repoRoot),
+        } as unknown as Config,
+        { name: 'task', action: 'remove' },
+      );
+
+      expect(result.error).toBeUndefined();
+      await expect(fs.access(wtPath)).rejects.toBeDefined();
     });
 
     it('keeps the marker owner stable across legacy writer calls', async () => {

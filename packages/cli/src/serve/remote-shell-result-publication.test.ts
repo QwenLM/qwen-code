@@ -27,6 +27,8 @@ import {
 
 const digest = (bytes: Buffer): string =>
   createHash('sha256').update(bytes).digest('hex');
+const succeeded = (receipt: unknown): string =>
+  JSON.stringify({ state: 'SUCCEEDED', receipt });
 
 const boot = {
   tenantId: 'tenant-a',
@@ -99,6 +101,153 @@ const request = {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('remote Shell result publication', () => {
+  it('waits for asynchronous verification with the same operation', async () => {
+    let posts = 0;
+    let polls = 0;
+    const operations = new Set<string>();
+    const bytes = Buffer.from('original');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL, init: RequestInit) => {
+        const headers = new Headers(init.headers);
+        operations.add(headers.get('X-Qwen-Tool-Publication-Operation')!);
+        if (!url.pathname.includes('/operations/')) {
+          posts++;
+          return new Response(JSON.stringify({ state: 'PENDING' }), {
+            status: 202,
+          });
+        }
+        polls++;
+        return new Response(
+          JSON.stringify(
+            polls < 2
+              ? { state: 'PENDING' }
+              : {
+                  state: 'SUCCEEDED',
+                  receipt: {
+                    captureId: 'capture-a',
+                    streamId: 'stdout',
+                    ordinal: 0,
+                    byteLength: bytes.length,
+                    digest: digest(bytes),
+                  },
+                },
+          ),
+        );
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    await expect(
+      store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes,
+      }),
+    ).resolves.toMatchObject({ status: 'ok' });
+    expect(posts).toBe(1);
+    expect(polls).toBe(2);
+    expect(operations.size).toBe(1);
+  });
+
+  it.each([
+    { status: 507, code: 'managed_tool_publication_quota_exhausted' },
+    { status: 403, code: 'managed_tool_publication_storage_denied' },
+    { status: 503, code: 'internal_error' },
+    { status: 400, code: 'managed_tool_result_digest_mismatch' },
+  ])(
+    'treats asynchronous FAILED $status as terminal',
+    async ({ status, code }) => {
+      let posts = 0;
+      let polls = 0;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: URL) => {
+          expect(url.pathname.endsWith('/recover')).toBe(false);
+          if (!url.pathname.includes('/operations/')) {
+            posts++;
+            return new Response(JSON.stringify({ state: 'PENDING' }), {
+              status: 202,
+            });
+          }
+          polls++;
+          return new Response(
+            JSON.stringify({ state: 'FAILED', error: { status, code } }),
+          );
+        }),
+      );
+      const publisher = new RemoteShellResultPublisher();
+      publisher.install(installation, boot);
+      const { sink } = await publisher.prepare(request);
+      const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+      const result = store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      });
+      if (code === 'managed_tool_result_digest_mismatch') {
+        await expect(result).resolves.toMatchObject({
+          status: 'refused',
+          code,
+        });
+      } else {
+        await expect(result).rejects.toThrow(
+          status === 507 ? 'quota_exhausted' : `HTTP ${status}`,
+        );
+      }
+      expect(posts).toBe(1);
+      expect(polls).toBe(1);
+    },
+  );
+
+  it.each([
+    undefined,
+    {},
+    { code: 'internal_error' },
+    { status: 503 },
+    { status: 503, code: '' },
+    { status: 503.5, code: 'internal_error' },
+  ])('rejects malformed FAILED without retrying: %j', async (error) => {
+    let posts = 0;
+    let polls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL) => {
+        expect(url.pathname.endsWith('/recover')).toBe(false);
+        if (!url.pathname.includes('/operations/')) {
+          posts++;
+          return new Response(JSON.stringify({ state: 'PENDING' }), {
+            status: 202,
+          });
+        }
+        polls++;
+        return new Response(JSON.stringify({ state: 'FAILED', error }));
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    await expect(
+      store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      }),
+    ).rejects.toThrow(
+      error === undefined
+        ? 'Publication record is invalid.'
+        : 'Invalid publication failure response.',
+    );
+    expect(posts).toBe(1);
+    expect(polls).toBe(1);
+  });
+
   it('keeps an installed grant blocked before any capture or tool starts', () => {
     const publisher = new RemoteShellResultPublisher();
     const resolver = vi.fn(async () => undefined);
@@ -198,7 +347,7 @@ describe('remote Shell result publication', () => {
                     byteLength: bytes.length,
                     digest: digest(bytes),
                   };
-          return new Response(JSON.stringify(receipt));
+          return new Response(succeeded(receipt));
         }),
       );
       const publisher = new RemoteShellResultPublisher();
@@ -278,7 +427,7 @@ describe('remote Shell result publication', () => {
         } else {
           throw new Error(`Unexpected publication route ${path}`);
         }
-        return new Response(JSON.stringify(receipt), { status: 200 });
+        return new Response(succeeded(receipt), { status: 200 });
       }),
     );
     const publisher = new RemoteShellResultPublisher();
@@ -397,7 +546,7 @@ describe('remote Shell result publication', () => {
           } else {
             throw new Error(`Unexpected publication route ${route}`);
           }
-          return new Response(JSON.stringify(receipt), { status: 200 });
+          return new Response(succeeded(receipt), { status: 200 });
         } finally {
           active = false;
         }
@@ -460,7 +609,7 @@ describe('remote Shell result publication', () => {
           );
         const bytes = Buffer.from(init.body as Buffer);
         return new Response(
-          JSON.stringify({
+          succeeded({
             captureId: 'capture-a',
             streamId: 'stdout',
             ordinal: 0,
@@ -519,7 +668,7 @@ describe('remote Shell result publication', () => {
             );
           }
           return new Response(
-            JSON.stringify({
+            succeeded({
               captureId: 'capture-a',
               streamId: 'stdout',
               ordinal: 0,
@@ -574,7 +723,7 @@ describe('remote Shell result publication', () => {
           );
         const bytes = Buffer.from(init.body as Buffer);
         return new Response(
-          JSON.stringify({
+          succeeded({
             captureId: 'capture-a',
             streamId: 'stdout',
             ordinal: 0,
@@ -615,7 +764,7 @@ describe('remote Shell result publication', () => {
           );
         const bytes = Buffer.from(init.body as Buffer);
         return new Response(
-          JSON.stringify({
+          succeeded({
             captureId: 'capture-a',
             streamId: 'stdout',
             ordinal: 0,
@@ -703,7 +852,7 @@ describe('remote Shell result publication', () => {
               { status: 409 },
             );
           return new Response(
-            JSON.stringify({
+            succeeded({
               captureId: 'capture-a',
               streamId: 'stdout',
               ordinal: 0,
@@ -755,7 +904,7 @@ describe('remote Shell result publication', () => {
             status: 409,
           });
         return new Response(
-          JSON.stringify({
+          succeeded({
             captureId: 'capture-a',
             streamId: 'stdout',
             ordinal: 0,
@@ -864,7 +1013,7 @@ describe('remote Shell result publication', () => {
               { status: 409 },
             );
           return new Response(
-            JSON.stringify({
+            succeeded({
               captureId: 'capture-a',
               streamId: 'stdout',
               ordinal: 0,
@@ -945,7 +1094,7 @@ describe('remote Shell result publication', () => {
         routes.push(decodeURIComponent(input.pathname));
         const bytes = Buffer.from(init.body as Buffer);
         return new Response(
-          JSON.stringify({
+          succeeded({
             resourceId: 'resource-' + routes.length,
             kind: 'managed-tool-result-page',
             schemaVersion: 1,
@@ -1018,7 +1167,7 @@ describe('remote Shell result publication', () => {
         const bytes = Buffer.from(init.body as Buffer);
         if (path.includes('/resources/'))
           return new Response(
-            JSON.stringify({
+            succeeded({
               resourceId: 'manifest-a',
               kind: 'managed-tool-result-manifest',
               schemaVersion: 1,
@@ -1124,7 +1273,7 @@ it.each(fixtureSuite.segmentSequences)(
             },
           );
         return new Response(
-          JSON.stringify(
+          succeeded(
             segment
               ? { ...result.result, captureId, streamId: segment[1] }
               : result.result,

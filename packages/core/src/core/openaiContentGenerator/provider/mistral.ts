@@ -63,7 +63,7 @@ export class MistralOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
 
     return {
       ...baseRequest,
-      messages: baseRequest.messages.map(stripReasoningContent),
+      messages: baseRequest.messages.flatMap(stripReasoningContent),
     };
   }
 }

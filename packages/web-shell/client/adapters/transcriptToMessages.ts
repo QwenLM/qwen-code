@@ -5,12 +5,17 @@
  */
 
 import { readReportedArtifacts } from './reported-artifacts.js';
+import { isAskUserQuestionToolName } from '../constants/toolNames.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
-  DaemonInputAnnotation,
+  DaemonBackgroundTurn,
+  DaemonLoopStop,
+  QwenAgentMessageMeta,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
@@ -52,7 +57,6 @@ type DaemonPermissionTranscriptBlock = Extract<
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
-    inputAnnotations?: unknown;
   };
 };
 
@@ -61,6 +65,8 @@ interface TranscriptMessageLabels {
   branchSuccess?: (name: string) => string;
   modelStreamInterrupted?: string;
   loopDetected?: string;
+  /** Text for a loop stop whose cause is known; undefined falls back. */
+  loopDetectedFor?: (loop: DaemonLoopStop) => string | undefined;
 }
 
 interface TranscriptMessageOptions {
@@ -73,6 +79,28 @@ interface BackgroundAgentTaskUpdate {
   status: string;
   awaitingProcessing: boolean;
   endTime: number;
+}
+
+/**
+ * The session agent behind a user or assistant block: its live / replayed
+ * `_meta.qwenAgentMessage`, or, in an exported transcript (which carries no
+ * `meta`), the block's `author`. The exported form keeps only the name, which
+ * is enough to render the reply as the agent's own message.
+ */
+function agentMessageOfBlock(
+  block: DaemonTextTranscriptBlock,
+  meta: Record<string, unknown> | undefined,
+): QwenAgentMessageMeta | undefined {
+  const live = parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY]);
+  if (live) return live;
+  if (block.kind !== 'user' && block.kind !== 'assistant') return undefined;
+  const author = getRecord((block as { author?: unknown }).author);
+  const name = getString(author, 'name')?.trim();
+  if (!name) return undefined;
+  return {
+    kind: block.kind === 'assistant' ? 'agent_message' : 'agent_mention',
+    author: { agentId: '', name },
+  };
 }
 
 function collectBackgroundTaskUpdates(
@@ -121,10 +149,21 @@ function collectBackgroundTaskUpdates(
     if (
       !turn ||
       completed ||
-      ('parentToolCallId' in block && block.parentToolCallId) ||
-      tasksByExecution.has(turn.turnId)
+      ('parentToolCallId' in block && block.parentToolCallId)
     )
       continue;
+    if (tasksByExecution.has(turn.turnId)) {
+      // A paginated transcript can keep the turn and its notification after
+      // the earlier completion block has scrolled out of the window.
+      if (
+        source === 'background_notification' &&
+        taskId === turn.taskId &&
+        task?.['fromSession']
+      ) {
+        tasksByExecution.set(turn.turnId, task);
+      }
+      continue;
+    }
     lastConsumedTaskIndex.set(turn.taskId, index);
     automaticTaskIds.add(turn.taskId);
     const result = latestTasks.get(turn.taskId);
@@ -238,7 +277,11 @@ function getErrorDisplayText(
   labels?: TranscriptMessageLabels,
 ): string {
   if (block.errorKind === 'loop_detected') {
-    return labels?.loopDetected ?? block.text;
+    return (
+      (block.loop ? labels?.loopDetectedFor?.(block.loop) : undefined) ??
+      labels?.loopDetected ??
+      block.text
+    );
   }
   if (
     block.errorKind === 'model_stream_interrupted' ||
@@ -533,7 +576,7 @@ export function transcriptBlocksToDaemonMessages(
   // message instead of being appended to text that appeared before the tool.
   let needsNewContentMessage = false;
   let previousPromptId: string | undefined;
-  const backgroundResultMarkers = new Set<string>();
+  const backgroundTurns = new Map<string, DaemonBackgroundTurn>();
   const loadedToolIds = new Set(
     blocks.flatMap((block) =>
       block.kind === 'tool' ? [block.toolCallId] : [],
@@ -550,9 +593,10 @@ export function transcriptBlocksToDaemonMessages(
     const blockMeta = getRecord(
       (block as ExtendedDaemonTextTranscriptBlock).meta,
     );
-    const backgroundTurn = parseDaemonBackgroundTurn(
-      block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
-    );
+    const backgroundTurn =
+      parseDaemonBackgroundTurn(
+        block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
+      ) ?? (block.promptId ? backgroundTurns.get(block.promptId) : undefined);
     const promptId = backgroundTurn?.turnId ?? block.promptId;
     if (
       promptId !== undefined &&
@@ -571,9 +615,9 @@ export function transcriptBlocksToDaemonMessages(
         block.kind === 'status' && block.source === 'background_task_completed'
       ) &&
       !('parentToolCallId' in block && block.parentToolCallId) &&
-      !backgroundResultMarkers.has(backgroundTurn.turnId)
+      !backgroundTurns.has(backgroundTurn.turnId)
     ) {
-      backgroundResultMarkers.add(backgroundTurn.turnId);
+      backgroundTurns.set(backgroundTurn.turnId, backgroundTurn);
       messages.push({
         id: `background-turn:${backgroundTurn.turnId}`,
         role: 'system',
@@ -674,9 +718,8 @@ export function transcriptBlocksToDaemonMessages(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
         const source = getString(meta, 'source');
-        const inputAnnotations = Array.isArray(meta?.inputAnnotations)
-          ? (meta.inputAnnotations as DaemonInputAnnotation[])
-          : undefined;
+        const sentFrom = textBlock.meta?.sourceAnnotation;
+        const inputAnnotations = textBlock.meta?.inputAnnotations;
         const images = textBlock.images?.map((img) => ({
           data: img.data,
           mimeType: img.mimeType || 'image/*',
@@ -703,6 +746,9 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = true;
           break;
         }
+        // An @-mention renders as an ordinary user message; one an agent
+        // posted into the session carries that agent as its author.
+        const agentMessage = agentMessageOfBlock(textBlock, meta);
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -710,7 +756,19 @@ export function transcriptBlocksToDaemonMessages(
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
-          ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(inputAnnotations?.length ? { inputAnnotations } : {}),
+          ...(sentFrom ? { sentFrom } : {}),
+          ...(agentMessage ? { agentMessage } : {}),
+          ...(agentMessage?.author
+            ? {
+                author: {
+                  name: agentMessage.author.name,
+                  ...(agentMessage.author.color
+                    ? { color: agentMessage.author.color }
+                    : {}),
+                },
+              }
+            : {}),
         };
         // Attach images if present
         if (images && images.length > 0) {
@@ -723,6 +781,7 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'assistant': {
         const textBlock = block as DaemonTextTranscriptBlock;
+        const { parentToolCallId } = textBlock;
         const notice = classifyAssistantSystemNotice(textBlock);
         if (notice) {
           currentAssistantIdx = null;
@@ -743,6 +802,7 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
         const meta = getRecord(textBlock.meta);
+        const source = getString(meta, 'source');
         const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({
@@ -798,10 +858,43 @@ export function transcriptBlocksToDaemonMessages(
           });
           break;
         }
+        const agentMessage = parentToolCallId
+          ? undefined
+          : agentMessageOfBlock(textBlock, meta);
+        if (agentMessage?.kind === 'agent_message') {
+          // A workspace agent's reply is always its own message: it is never
+          // folded into the main assistant's text, nor is the next assistant
+          // text folded into it. It shows even without text, since a failed
+          // or cancelled run still has a status to report.
+          messages.push({
+            id: block.id,
+            role: 'assistant',
+            content: textBlock.text,
+            isStreaming: textBlock.streaming,
+            timestamp: blockTime,
+            sourceBlockIds: [block.id],
+            agentMessage,
+            ...(agentMessage.author
+              ? {
+                  author: {
+                    name: agentMessage.author.name,
+                    ...(agentMessage.author.color
+                      ? { color: agentMessage.author.color }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(textBlock.usage ? { usage: textBlock.usage } : {}),
+          });
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          break;
+        }
         if (!textBlock.text && !textBlock.usage) break;
 
-        const parentSubAgent = textBlock.parentToolCallId
-          ? toolsByCallId.get(textBlock.parentToolCallId)
+        const parentSubAgent = parentToolCallId
+          ? toolsByCallId.get(parentToolCallId)
           : undefined;
         if (parentSubAgent) {
           appendSubContent(parentSubAgent, textBlock.text, block.id);
@@ -849,6 +942,10 @@ export function transcriptBlocksToDaemonMessages(
                   : `${block.id}-t-${messages.length}`,
                 role: 'assistant',
                 content: seg.text,
+                ...(source ? { source } : {}),
+                ...(parentToolCallId ? { parentToolCallId } : {}),
+                isStreaming: textBlock.streaming,
+                ...(backgroundTurn ? { backgroundTurn } : {}),
                 timestamp: blockTime,
                 sourceBlockIds: [block.id],
               });
@@ -881,13 +978,19 @@ export function transcriptBlocksToDaemonMessages(
           break;
         }
 
-        const target =
+        const previousAssistant =
           currentAssistantIdx !== null
             ? messages[currentAssistantIdx]
             : undefined;
+        const target =
+          previousAssistant?.role === 'assistant' &&
+          previousAssistant.parentToolCallId === parentToolCallId
+            ? previousAssistant
+            : undefined;
         if (
           target &&
-          target.role === 'assistant' &&
+          (target.source === 'slash_command') ===
+            (source === 'slash_command') &&
           !needsNewContentMessage &&
           textBlock.segmentId === undefined &&
           !isTextBlockEmpty(textBlock)
@@ -913,12 +1016,15 @@ export function transcriptBlocksToDaemonMessages(
           };
           needsNewContentMessage = false;
           currentThinkingIdx = null;
-        } else if (!isTextBlockEmpty(textBlock)) {
+        } else if (textBlock.text.trim().length > 0) {
           messages.push({
             id: block.id,
             role: 'assistant',
             content: textBlock.text,
+            ...(source ? { source } : {}),
+            ...(parentToolCallId ? { parentToolCallId } : {}),
             ...(reportedArtifacts.length ? { reportedArtifacts } : {}),
+            ...(backgroundTurn ? { backgroundTurn } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -930,7 +1036,7 @@ export function transcriptBlocksToDaemonMessages(
           currentAssistantIdx = messages.length - 1;
           currentThinkingIdx = null;
           needsNewContentMessage = false;
-        } else if (textBlock.usage && target && target.role === 'assistant') {
+        } else if (textBlock.usage && target) {
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
           messages[currentAssistantIdx!] = {
             ...target,
@@ -945,20 +1051,25 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'thought': {
         const textBlock = block as DaemonTextTranscriptBlock;
-        const parentSubAgent = textBlock.parentToolCallId
-          ? toolsByCallId.get(textBlock.parentToolCallId)
+        const { parentToolCallId } = textBlock;
+        const parentSubAgent = parentToolCallId
+          ? toolsByCallId.get(parentToolCallId)
           : undefined;
         if (parentSubAgent) {
           appendSubContent(parentSubAgent, textBlock.text, block.id);
           break;
         }
-        const target =
+        const previousThinking =
           currentThinkingIdx !== null
             ? messages[currentThinkingIdx]
             : undefined;
+        const target =
+          previousThinking?.role === 'thinking' &&
+          previousThinking.parentToolCallId === parentToolCallId
+            ? previousThinking
+            : undefined;
         if (
           target &&
-          target.role === 'thinking' &&
           !needsNewContentMessage &&
           textBlock.segmentId === undefined
         ) {
@@ -974,6 +1085,7 @@ export function transcriptBlocksToDaemonMessages(
             id: block.id,
             role: 'thinking',
             content: textBlock.text,
+            ...(parentToolCallId ? { parentToolCallId } : {}),
             isStreaming: textBlock.streaming,
             timestamp: blockTime,
             sourceBlockIds: [block.id],
@@ -1298,6 +1410,7 @@ export function transcriptBlocksToDaemonMessages(
           retryable:
             errorBlock.source === 'turn_error' &&
             isRetryableTurnErrorKind(errorKind),
+          ...(backgroundTurn ? { backgroundTurn } : {}),
           timestamp: blockTime,
           sourceBlockIds: [block.id],
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
@@ -1314,6 +1427,7 @@ export function transcriptBlocksToDaemonMessages(
           content: promptCancelledText,
           variant: 'info',
           source: 'prompt_cancelled',
+          ...(backgroundTurn ? { backgroundTurn } : {}),
           ...(block.elapsedMs !== undefined
             ? { data: { elapsedMs: block.elapsedMs } }
             : {}),
@@ -1348,6 +1462,7 @@ export function transcriptBlocksToDaemonMessages(
 
   synchronizeToolGroupSourceIdentity(messages);
   attachTurnPromptIds(messages, blocks);
+  attachDeletionIdentity(messages, blocks);
   if (!retainSourceIdentity) stripSourceIdentity(messages);
   return messages;
 }
@@ -1376,6 +1491,34 @@ function attachTurnPromptIds(
       const promptId = promptIdByBlockId.get(id);
       if (promptId) {
         message.promptId = promptId;
+        break;
+      }
+    }
+  }
+}
+
+function attachDeletionIdentity(
+  messages: DaemonMessage[],
+  blocks: readonly DaemonTranscriptBlock[],
+): void {
+  const byId = new Map(blocks.map((block) => [block.id, block]));
+  for (const message of messages) {
+    const sources = [message.id, ...(message.sourceBlockIds ?? [])].flatMap(
+      (id) => (byId.get(id) ? [byId.get(id)!] : []),
+    );
+    const records = [
+      ...new Set(sources.flatMap((block) => block.sourceRecordIds ?? [])),
+    ];
+    if (records.length) message.sourceRecordIds = records;
+    for (const block of sources) {
+      const meta = 'meta' in block ? getRecord(block.meta) : undefined;
+      const local =
+        getString(meta, 'localCommandId') ??
+        (block.promptId?.startsWith('local-command:')
+          ? block.promptId
+          : undefined);
+      if (local) {
+        message.localCommandId = local;
         break;
       }
     }
@@ -1521,6 +1664,8 @@ function mergeToolCall(
   target.status = source.status ?? target.status;
   target.title = source.title ?? target.title;
   target.toolName = source.toolName ?? target.toolName;
+  target.generatedUiToolCallId =
+    source.generatedUiToolCallId ?? target.generatedUiToolCallId;
   target.kind = source.kind ?? target.kind;
   target.sourceBlockIds = unionMessageIds(
     target.sourceBlockIds,
@@ -1621,6 +1766,7 @@ export function daemonToolBlockToToolCall(
 
   return {
     callId: block.toolCallId,
+    generatedUiToolCallId: block.toolCallId,
     toolName,
     title: block.title === block.toolName ? toolName : block.title,
     status:
@@ -1635,6 +1781,10 @@ export function daemonToolBlockToToolCall(
       : undefined,
     subagentSessionReady: block.subagentSessionReady,
     parentToolCallId: block.parentToolCallId,
+    // Replay rebuilds the AgentTool block's identity from its persisted
+    // `task_execution` display; a live sub-content frame that already adopted
+    // a path via `appendSubContent` keeps first-wins there.
+    ...(block.agent ? { agentPath: block.agent.agentName } : {}),
     startTime: block.createdAt,
     endTime:
       isComplete && !forceBackgroundPending ? block.updatedAt : undefined,
@@ -1994,9 +2144,7 @@ function normalizeToolContent(
 }
 
 function isAskUserQuestionBlock(block: DaemonToolTranscriptBlock): boolean {
-  if (!block.toolName) return false;
-  const normalized = block.toolName.toLowerCase();
-  return normalized === 'ask_user_question' || normalized === 'askuserquestion';
+  return !!block.toolName && isAskUserQuestionToolName(block.toolName);
 }
 
 function getToolContentText(

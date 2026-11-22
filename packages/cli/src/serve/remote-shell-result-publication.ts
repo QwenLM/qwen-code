@@ -175,7 +175,7 @@ class PublicationClient {
         'Cache-Control': 'no-store',
         ...headers,
       },
-      ...(body ? { body } : {}),
+      ...(body ? { body: body as BodyInit } : {}),
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     });
@@ -275,10 +275,27 @@ class PublicationClient {
           continue;
         }
       }
-      if (initial['state'] === undefined) return initial;
       let status = initial;
+      let pollDelay = 25;
       while (Date.now() < deadline) {
         if (status['state'] === 'SUCCEEDED') return record(status['receipt']);
+        if (status['state'] === 'FAILED') {
+          const error = record(status['error']);
+          if (
+            !Number.isInteger(error['status']) ||
+            Number(error['status']) < 400 ||
+            Number(error['status']) > 599 ||
+            typeof error['code'] !== 'string' ||
+            !error['code']
+          )
+            throw new Error('Invalid publication failure response.');
+          if (error['code'] === 'managed_tool_publication_quota_exhausted')
+            throw new Error('quota_exhausted');
+          throw new PublicationRejection(
+            Number(error['status']),
+            error['code'],
+          );
+        }
         if (status['state'] === 'RETRYABLE') break;
         if (status['state'] === 'EXPIRED' && recoveries < 3) {
           recoveries++;
@@ -305,7 +322,8 @@ class PublicationClient {
           throw new Error(
             `Publication operation ended as ${String(status['state'])}.`,
           );
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        await new Promise((resolve) => setTimeout(resolve, pollDelay));
+        pollDelay = Math.min(pollDelay * 2, 250);
         const current = await observe();
         if (current === null)
           throw new Error(

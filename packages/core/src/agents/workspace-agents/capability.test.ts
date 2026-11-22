@@ -7,30 +7,17 @@
 import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
-  buildAgentToolConfig,
+  buildSessionAgentToolConfig,
   classifyAgentTool,
   createAgentToolInvocationGuard,
-  THREAD_TOOL_NAMES,
+  createSessionAgentToolInvocationGuard,
   AGENT_TOOL_CLASSIFICATION,
 } from './capability.js';
 
 describe('agent capability boundary', () => {
-  it('classifies every core and thread tools exactly once', () => {
+  it('classifies every core tool exactly once', () => {
     expect(new Set(Object.keys(AGENT_TOOL_CLASSIFICATION))).toEqual(
-      new Set([...Object.values(ToolNames), ...THREAD_TOOL_NAMES]),
-    );
-    // `THREAD_TOOL_NAMES` is built from `ToolNames`, so the six are core wire
-    // names too. What must hold is that nothing else joins their class: an
-    // ordinary tool classified `thread` would be handed to every agent as part
-    // of the collaboration surface.
-    const threadNames = new Set<string>(THREAD_TOOL_NAMES);
-    expect(
-      Object.values(ToolNames)
-        .filter((name) => !threadNames.has(name))
-        .map(classifyAgentTool),
-    ).not.toContain('thread');
-    expect(THREAD_TOOL_NAMES.map(classifyAgentTool)).toEqual(
-      THREAD_TOOL_NAMES.map(() => 'thread'),
+      new Set(Object.values(ToolNames)),
     );
   });
 
@@ -39,40 +26,71 @@ describe('agent capability boundary', () => {
     expect(classifyAgentTool('__proto__')).toBe('deny');
   });
 
-  it('applies the built-in ceiling and always adds thread tools', () => {
-    const full = buildAgentToolConfig();
-    const wildcard = buildAgentToolConfig({ tools: ['*'] });
-    const narrowed = buildAgentToolConfig({
-      tools: [ToolNames.READ_FILE, ToolNames.EDIT, 'mcp__server__read'],
+  it('gives a session agent every tool unless a definition narrows it', () => {
+    expect(buildSessionAgentToolConfig()).toEqual({ tools: ['*'] });
+    expect(
+      buildSessionAgentToolConfig({
+        tools: [ToolNames.READ_FILE, ToolNames.EDIT],
+        executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SHELL],
+        disallowedTools: [ToolNames.SHELL, ToolNames.SHELL],
+      }),
+    ).toEqual({
+      tools: [ToolNames.READ_FILE, ToolNames.EDIT],
+      executionAllowedTools: [ToolNames.READ_FILE],
+      disallowedTools: [ToolNames.SHELL],
     });
-
-    expect(wildcard).toEqual(full);
-    expect(full.tools).not.toContain(ToolNames.SHELL);
-    expect(full.tools).not.toContain(ToolNames.MEMORY);
-    expect(full.tools).not.toContain(ToolNames.SKILL);
-    expect(full.disallowedTools).toEqual(
-      expect.arrayContaining([
-        ToolNames.EDIT,
-        ToolNames.WRITE_FILE,
-        ToolNames.MEMORY,
-      ]),
-    );
-    expect(narrowed.tools).toEqual([ToolNames.READ_FILE, ...THREAD_TOOL_NAMES]);
-    expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
-    expect(narrowed.disallowedTools).toEqual(full.disallowedTools);
   });
 
-  it('preserves definition execution and disallow restrictions', () => {
-    const narrowed = buildAgentToolConfig({
-      tools: ['*'],
-      executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SHELL],
-      disallowedTools: [ToolNames.READ_FILE, 'thread_post'],
-    });
+  it('lets a session agent call writes unless its allowlist excludes them', async () => {
+    const base = {
+      callId: 'call-1',
+      signal: new AbortController().signal,
+      args: {},
+      cwd: process.cwd(),
+    };
+    await expect(
+      createSessionAgentToolInvocationGuard()({
+        ...base,
+        toolName: ToolNames.EDIT,
+      }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      createSessionAgentToolInvocationGuard(
+        undefined,
+        new Set([ToolNames.READ_FILE]),
+      )({ ...base, toolName: ToolNames.EDIT }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+  });
 
-    expect(narrowed.tools).toEqual([...THREAD_TOOL_NAMES]);
-    expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
-    expect(narrowed.disallowedTools).not.toContain('thread_post');
-    expect(narrowed.disallowedTools).toContain(ToolNames.READ_FILE);
+  it("denies a session agent its definition's disallowedTools", async () => {
+    const base = {
+      callId: 'call-1',
+      signal: new AbortController().signal,
+      args: {},
+      cwd: process.cwd(),
+    };
+    // A deny-only definition: every tool but write_file and one MCP server.
+    const config = buildSessionAgentToolConfig({
+      tools: ['*'],
+      disallowedTools: [ToolNames.WRITE_FILE, 'mcp__secrets'],
+    });
+    expect(config.executionAllowedTools).toBeUndefined();
+    const guard = createSessionAgentToolInvocationGuard(
+      undefined,
+      undefined,
+      config.disallowedTools,
+    );
+    for (const [toolName, allowed] of [
+      [ToolNames.WRITE_FILE, false],
+      ['mcp__secrets__read', false],
+      [ToolNames.READ_FILE, true],
+      [ToolNames.EDIT, true],
+      ['mcp__other__read', true],
+    ] as const) {
+      await expect(guard({ ...base, toolName })).resolves.toEqual(
+        expect.objectContaining({ allowed }),
+      );
+    }
   });
 
   it('enforces the boundary at invocation time', async () => {

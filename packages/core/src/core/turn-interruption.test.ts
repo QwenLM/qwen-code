@@ -12,12 +12,54 @@ import {
   effectiveHistoryEnd,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from './turn-interruption.js';
+import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
+import { composePostCompactHistory } from '../services/postCompactAttachments.js';
 
 const reminder = (text: string) => ({
   text: `<system-reminder>\n${text}\n</system-reminder>`,
 });
 
 describe('detectTurnInterruption', () => {
+  it.each([false, true])(
+    'recovers pending compressed calls without treating context as a prompt (attachments: %s)',
+    async (attachments) => {
+      const call = {
+        functionCall: { id: 'pending', name: 'read_file', args: {} },
+      };
+      const history = await composePostCompactHistory(
+        [{ role: 'model', parts: [call] }],
+        'Summary.',
+        { maxFiles: 0, planModeActive: attachments },
+      );
+      expect(detectTurnInterruption(history)).toEqual({
+        kind: 'interrupted_turn',
+        danglingCalls: [{ callId: 'pending', name: 'read_file' }],
+      });
+      const response: Content = {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'pending',
+              name: 'read_file',
+              response: {},
+            },
+          },
+        ],
+      };
+      expect(
+        detectTurnInterruption([...history, response], ['pending']),
+      ).toEqual({ kind: 'none' });
+      const input: Content = {
+        role: 'user',
+        parts: [{ text: 'Next failed input.' }],
+      };
+      expect(
+        detectTurnInterruption([...history, response, input], ['pending']),
+      ).toEqual({ kind: 'interrupted_prompt', parts: input.parts });
+    },
+  );
+
   it('recovers only input after a recorded tool boundary', () => {
     const result: Content = {
       role: 'user',
@@ -467,6 +509,33 @@ describe('detectTurnInterruption with authoritative notification provenance', ()
     expect(detectTurnInterruption(history, undefined, 2)).toEqual({
       kind: 'none',
     });
+  });
+});
+
+describe('detectTurnInterruption with session agent records', () => {
+  const agentEntry: Content = {
+    role: 'user',
+    parts: [
+      {
+        text: formatAgentMessageModelText({
+          displayText: 'done',
+          author: { agentId: 'agent-1', name: 'claude-B' },
+          runId: 'run-1',
+          status: 'completed',
+        }),
+      },
+    ],
+  };
+  const answered: Content[] = [
+    { role: 'user', parts: [{ text: 'hi' }] },
+    { role: 'model', parts: [{ text: 'hello' }] },
+  ];
+
+  it('does not treat a trailing agent message as an unfinished turn', () => {
+    expect(detectTurnInterruption([...answered, agentEntry])).toEqual({
+      kind: 'none',
+    });
+    expect(effectiveHistoryEnd([...answered, agentEntry])).toBe(2);
   });
 });
 

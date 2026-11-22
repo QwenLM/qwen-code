@@ -449,6 +449,18 @@ describe('runSkillReviewByAgent limit wiring', () => {
     const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
     expect(call?.tools).toEqual([READ_FILE, WRITE_FILE, EDIT]);
   });
+
+  it('words the stop reason instead of passing the mode token through', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'MAX_TURNS',
+      filesTouched: [],
+    });
+
+    await expect(review()).rejects.toThrow(
+      'Agent stopped: maximum turns reached.',
+    );
+  });
 });
 
 describe('skill-scoped shim registration-gate delegation (#10075)', () => {
@@ -478,10 +490,28 @@ describe('skill-scoped shim registration-gate delegation (#10075)', () => {
     await expect(delegated.getToolRegistrationStatus(WEB_FETCH)).resolves.toBe(
       'disabled',
     );
-    expect(status).toHaveBeenCalledWith(WEB_FETCH);
+    expect(status).toHaveBeenCalledWith(WEB_FETCH, undefined, undefined);
 
     await expect(
       pmOver(undefined).getToolRegistrationStatus(WEB_FETCH),
     ).resolves.toBe('registered');
+  });
+
+  it('isToolEnabled forwards the alias and identity channels to the base PM', async () => {
+    const isToolEnabled = vi.fn().mockResolvedValue(false);
+    const delegated = pmOver({ isToolEnabled });
+    const identity = { serverName: 'foo:bar', serverToolName: 'a.b' };
+    await expect(
+      delegated.isToolEnabled(
+        'mcp__foo_bar__a_b_1aofxjh',
+        ['mcp__foo:bar__a.b'],
+        identity,
+      ),
+    ).resolves.toBe(false);
+    expect(isToolEnabled).toHaveBeenCalledWith(
+      'mcp__foo_bar__a_b_1aofxjh',
+      ['mcp__foo:bar__a.b'],
+      identity,
+    );
   });
 });

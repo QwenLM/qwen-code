@@ -1,3 +1,4 @@
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
 import {
   useCallback,
   useEffect,
@@ -10,6 +11,7 @@ import {
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
   getDaemonToken,
+  isDaemonMixedContent,
   navigateToDaemon,
   persistDaemonToken,
 } from '../config/daemon';
@@ -22,6 +24,10 @@ import {
   isRemoteWorkspaceAddActive,
   leaveRemoteWorkspaceAdd,
 } from '../config/remote-workspace-add';
+import {
+  openHostedWorkspace,
+  useWorkspaceHosts,
+} from '../config/workspace-hosts';
 import type { WebShellLanguage } from '../i18n';
 import { WebShellThemeId, type WebShellTheme } from '../themeContext';
 import { Button } from './ui/button';
@@ -35,6 +41,8 @@ import {
 } from './ui/card';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { Spinner } from './ui/spinner';
+import { DaemonConnectionHelp } from './DaemonConnectionHelp';
 
 // A probe must give up well before the SDK's own 30s fetch timeout
 // (DaemonClient DEFAULT_FETCH_TIMEOUT_MS) so the gate keeps retrying while the
@@ -57,6 +65,7 @@ interface AuthCopy {
   enterToken: string;
   policyBlocked: string;
   invalidAddress: string;
+  mixedContent: string;
   addressChanged: string;
   confirmTarget: string;
   remoteHint: string;
@@ -75,40 +84,78 @@ interface AuthCopy {
 
 // This gate renders before the app (and therefore before its I18nProvider), so
 // it carries its own copy table instead of calling useI18n.
+const EN_COPY: AuthCopy = {
+  pairingFailed:
+    'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
+  heading: 'Connect to Qwen Code',
+  connecting: 'Connecting…',
+  starting: 'Daemon is starting…',
+  unreachable: 'Cannot reach the daemon. Retrying…',
+  remoteUnreachable:
+    'Cannot reach the daemon. Retrying… The browser cannot distinguish a network, certificate, or cross-origin failure. See remote connection setup below.',
+  notReady: 'Daemon is not ready. Retrying…',
+  startFailed: 'Daemon failed to start.',
+  invalidToken:
+    'Invalid or expired token. Copy the current token from the server’s remote connection settings or startup output.',
+  enterToken:
+    'Enter the bearer token from the server’s remote connection settings or startup output.',
+  policyBlocked:
+    'The server or proxy refused the request (HTTP 403). Check its access rules, Host policy, and allowed page origins in remote connection settings.',
+  invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+  mixedContent:
+    'This HTTPS page cannot connect to a remote HTTP daemon. Use an HTTPS address for the remote service.',
+  addressChanged:
+    'Connection paused. Select Connect to use the entered address.',
+  confirmTarget:
+    'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+  remoteHint:
+    'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+  switchUnavailable:
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
+  addressLabel: 'Daemon address',
+  tokenLabel: 'Bearer token (optional)',
+  connect: 'Connect',
+  local: 'Return to local workspaces',
+  remoteAddCancel: 'Cancel adding workspace',
+  connectionAddCancel: 'Cancel adding connection',
+  retry: 'Retry',
+  hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
+};
+
 const COPY: Record<WebShellLanguage, AuthCopy> = {
-  en: {
+  en: EN_COPY,
+  'zh-TW': {
     pairingFailed:
-      'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
-    heading: 'Connect to Qwen Code',
-    connecting: 'Connecting…',
-    starting: 'Daemon is starting…',
-    unreachable: 'Cannot reach the daemon. Retrying…',
+      '配對失敗或二維碼已過期。請掃描新的二維碼，或輸入 daemon 令牌。',
+    heading: '連線到 Qwen Code',
+    connecting: '正在連線…',
+    starting: '守護程序正在啟動…',
+    unreachable: '無法訪問守護程序，正在重試…',
     remoteUnreachable:
-      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
-    notReady: 'Daemon is not ready. Retrying…',
-    startFailed: 'Daemon failed to start.',
+      '無法連線守護程序，正在重試… 瀏覽器無法區分網路、證書或跨域失敗，請檢視下方的遠端連線配置說明。',
+    notReady: '守護程序尚未就緒，正在重試…',
+    startFailed: '守護程序啟動失敗。',
     invalidToken:
-      'Invalid or expired token. Enter the token from the daemon terminal.',
-    enterToken: 'Enter the bearer token from the daemon terminal.',
+      '令牌無效或已過期，請從伺服器遠端連線設定或啟動輸出複製當前 token。',
+    enterToken: '請輸入伺服器遠端連線設定或啟動輸出中的 bearer token。',
     policyBlocked:
-      'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
-    addressChanged:
-      'Connection paused. Select Connect to use the entered address.',
+      '服務或代理拒絕了請求（HTTP 403），請檢查訪問規則、Host 策略，以及遠端連線設定是否允許當前頁面來源。',
+    invalidAddress: 'Daemon 地址無效。請輸入 HTTP 或 HTTPS origin。',
+    mixedContent:
+      '當前 HTTPS 頁面無法連線遠端 HTTP 服務，請使用遠端服務的 HTTPS 地址。',
+    addressChanged: '連線已暫停。點選“連線”以使用填寫的地址。',
     confirmTarget:
-      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
-    remoteHint:
-      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
-    switchUnavailable:
-      'Browser storage is unavailable, so the token could not be carried to that daemon.',
-    addressLabel: 'Daemon address',
-    tokenLabel: 'Bearer token (optional)',
-    connect: 'Connect',
-    local: 'Return to local workspaces',
-    remoteAddCancel: 'Cancel adding workspace',
-    connectionAddCancel: 'Cancel adding connection',
-    retry: 'Retry',
-    hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
+      '此頁面指向一個本瀏覽器從未連線過的守護程序。僅在你信任它時再連線。',
+    remoteHint: '令牌會傳送到上方顯示的地址。請只輸入該守護程序簽發的令牌。',
+    switchUnavailable: '瀏覽器儲存不可用，因此無法把 token 帶到該 daemon。',
+    addressLabel: 'Daemon 地址',
+    tokenLabel: 'Bearer token（可選）',
+    connect: '連線',
+    local: '返回本地工作區',
+    remoteAddCancel: '取消新增工作區',
+    connectionAddCancel: '取消新增連線',
+    retry: '重試',
+    hint: '該令牌擁有守護程序的完整訪問權限。請僅在從守護程序終端或其二維碼開啟的頁面中輸入。',
   },
   'zh-CN': {
     pairingFailed:
@@ -118,14 +165,17 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     starting: '守护进程正在启动…',
     unreachable: '无法访问守护进程，正在重试…',
     remoteUnreachable:
-      '无法访问守护进程，正在重试… 请检查地址、网络、HTTPS 证书，以及 --allow-origin 是否允许当前页面来源。',
+      '无法连接守护进程，正在重试… 浏览器无法区分网络、证书或跨域失败，请查看下方的远程连接配置说明。',
     notReady: '守护进程尚未就绪，正在重试…',
     startFailed: '守护进程启动失败。',
-    invalidToken: '令牌无效或已过期，请输入守护进程终端中显示的令牌。',
-    enterToken: '请输入守护进程终端中显示的 bearer token。',
+    invalidToken:
+      '令牌无效或已过期，请从服务器远程连接设置或启动输出复制当前 token。',
+    enterToken: '请输入服务器远程连接设置或启动输出中的 bearer token。',
     policyBlocked:
-      '访问被守护进程的 Origin 或 Host 策略拦截。请直接打开守护进程地址，或检查 --allow-origin 以允许跨域访问。',
+      '服务或代理拒绝了请求（HTTP 403），请检查访问规则、Host 策略，以及远程连接设置是否允许当前页面来源。',
     invalidAddress: 'Daemon 地址无效。请输入 HTTP 或 HTTPS origin。',
+    mixedContent:
+      '当前 HTTPS 页面无法连接远端 HTTP 服务，请使用远端服务的 HTTPS 地址。',
     addressChanged: '连接已暂停。点击“连接”以使用填写的地址。',
     confirmTarget:
       '此页面指向一个本浏览器从未连接过的守护进程。仅在你信任它时再连接。',
@@ -139,6 +189,44 @@ const COPY: Record<WebShellLanguage, AuthCopy> = {
     connectionAddCancel: '取消添加连接',
     retry: '重试',
     hint: '该令牌拥有守护进程的完整访问权限。请仅在从守护进程终端或其二维码打开的页面中输入。',
+  },
+  ru: {
+    pairingFailed:
+      'Сопряжение не удалось или QR-код истёк. Отсканируйте новый QR-код или введите токен демона.',
+    heading: 'Подключение к Qwen Code',
+    connecting: 'Подключение…',
+    starting: 'Демон запускается…',
+    unreachable: 'Не удаётся связаться с демоном. Повторная попытка…',
+    remoteUnreachable:
+      'Не удаётся связаться с демоном. Повторная попытка… Браузер не различает сетевой, сертификатный или cross-origin сбой. См. настройку удалённого подключения ниже.',
+    notReady: 'Демон ещё не готов. Повторная попытка…',
+    startFailed: 'Демону не удалось запуститься.',
+    invalidToken:
+      'Недействительный или истёкший токен. Скопируйте текущий токен из настроек удалённого подключения сервера или из вывода при запуске.',
+    enterToken:
+      'Введите bearer-токен из настроек удалённого подключения сервера или из вывода при запуске.',
+    policyBlocked:
+      'Сервер или прокси отклонил запрос (HTTP 403). Проверьте правила доступа, политику Host и разрешённые источники страниц в настройках удалённого подключения.',
+    invalidAddress:
+      'Недействительный адрес демона. Введите origin HTTP или HTTPS.',
+    mixedContent:
+      'Эта страница HTTPS не может подключиться к удалённому HTTP-демону. Используйте HTTPS-адрес удалённого сервиса.',
+    addressChanged:
+      'Подключение приостановлено. Нажмите «Подключить», чтобы использовать введённый адрес.',
+    confirmTarget:
+      'Эта страница указывает на демон, к которому этот браузер ещё не подключался. Подключайтесь, только если вы ему доверяете.',
+    remoteHint:
+      'Токен отправляется на адрес, указанный выше. Вводите только токен, выданный этим демоном.',
+    switchUnavailable:
+      'Хранилище браузера недоступно, поэтому токен не удалось перенести к этому демону.',
+    addressLabel: 'Адрес демона',
+    tokenLabel: 'Bearer-токен (необязательно)',
+    connect: 'Подключить',
+    local: 'Вернуться к локальным рабочим областям',
+    remoteAddCancel: 'Отменить добавление рабочей области',
+    connectionAddCancel: 'Отменить добавление подключения',
+    retry: 'Повторить',
+    hint: 'Этот токен даёт полный доступ к демону. Вводите его только на странице, которую вы открыли из терминала демона или по его QR-коду.',
   },
 };
 
@@ -189,6 +277,7 @@ export function StandaloneAuth({
   const copy = COPY[language] ?? COPY.en;
   const remoteWorkspaceAddActive = isRemoteWorkspaceAddActive();
   const remoteConnectionAddActive = isRemoteConnectionAddActive();
+  const hosts = useWorkspaceHosts();
   const [address, setAddress] = useState(initialAddress);
   const [token, setToken] = useState(initialToken ?? '');
   const [accepted, setAccepted] = useState<{ token?: string }>();
@@ -253,6 +342,12 @@ export function StandaloneAuth({
 
   const connect = useCallback(
     async (candidate: string) => {
+      if (isDaemonMixedContent(baseUrl)) {
+        setBusy(false);
+        setNeedsToken(false);
+        setStatus(copyRef.current.mixedContent);
+        return;
+      }
       const controller = new AbortController();
       controllerRef.current = controller;
       if (operatorProbeRef.current) {
@@ -277,7 +372,12 @@ export function StandaloneAuth({
         timerRef.current = setTimeout(() => setAttempt((n) => n + 1), delayMs);
       };
       try {
-        const response = await fetch(`${baseUrl}/capabilities`, {
+        const response = await createDaemonRestRequest(
+          baseUrl,
+          candidate,
+          undefined,
+          true,
+        )('/capabilities', {
           headers: candidate ? { Authorization: `Bearer ${candidate}` } : {},
           signal: controller.signal,
         });
@@ -383,6 +483,39 @@ export function StandaloneAuth({
   ]);
 
   if (accepted) return children(accepted.token);
+  // A credential supplied at boot (the desktop `#token=` URL, `serve --open`,
+  // or a per-tab stored token) almost always authenticates on the first
+  // probe. Painting the credential form during that round trip flashes a login
+  // screen at startup, so hold it back until the probe asks for input.
+  const verifyingBootCredential =
+    busy &&
+    attempt === 0 &&
+    !invalidTarget &&
+    !confirming &&
+    !awaitingPairing &&
+    Boolean(initialToken);
+  if (verifyingBootCredential) {
+    return (
+      <div
+        data-web-shell-root
+        data-web-shell-shadcn
+        data-web-shell-gate
+        className={`flex min-h-screen items-center justify-center bg-background p-6 text-foreground ${
+          theme === WebShellThemeId.Light
+            ? AppStyles.themeLight
+            : `${AppStyles.themeDark} dark`
+        }`}
+      >
+        <div
+          role="status"
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+        >
+          <Spinner aria-hidden="true" />
+          <span>{copy.connecting}</span>
+        </div>
+      </div>
+    );
+  }
   const normalizedAddress = getAllowedDaemonOrigin(address.trim());
   const changingTarget = invalidTarget || normalizedAddress !== baseUrl;
   return (
@@ -428,6 +561,12 @@ export function StandaloneAuth({
               if (!normalizedAddress) {
                 setBusy(false);
                 setStatus(copy.invalidAddress);
+                return;
+              }
+              if (isDaemonMixedContent(normalizedAddress)) {
+                retireProbe();
+                setBusy(false);
+                setStatus(copy.mixedContent);
                 return;
               }
               if (changingTarget) {
@@ -505,6 +644,17 @@ export function StandaloneAuth({
                     : copy.retry}
             </Button>
           </form>
+          {normalizedAddress &&
+            normalizedAddress !== window.location.origin && (
+              <DaemonConnectionHelp
+                language={language}
+                expanded={
+                  status === copy.remoteUnreachable ||
+                  status === copy.policyBlocked ||
+                  status === copy.mixedContent
+                }
+              />
+            )}
           {(remoteWorkspaceAddActive ||
             remoteConnectionAddActive ||
             invalidTarget ||
@@ -536,6 +686,26 @@ export function StandaloneAuth({
                   : copy.local}
             </Button>
           )}
+          {hosts
+            .filter(
+              (host) =>
+                host.origin !== baseUrl &&
+                host.origin !== window.location.origin,
+            )
+            .map((host) => (
+              <Button
+                key={host.origin}
+                variant="outline"
+                onClick={() => {
+                  // See the local-return button: leaving a target must retire
+                  // its probe loop before navigation is committed.
+                  retireProbe();
+                  openHostedWorkspace(host.origin);
+                }}
+              >
+                {host.origin}
+              </Button>
+            ))}
         </CardContent>
         <CardFooter className="justify-center">
           <p className="text-center text-xs text-muted-foreground">

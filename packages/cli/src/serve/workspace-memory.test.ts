@@ -25,6 +25,7 @@ import {
   setMemoryFilename,
 } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 import {
   InvalidClientIdError,
   type WorkspaceEventBridge,
@@ -213,6 +214,29 @@ describe('workspace memory routes', () => {
       expect(file.content).toHaveLength(1024 * 1024);
     });
 
+    it('returns complete BOM-free UTF-8 content at the 1 MB cap', async () => {
+      const wsFile = path.join(workspace, 'QWEN.md');
+      const content = 'a'.repeat(1024 * 1024);
+      await fs.writeFile(wsFile, content);
+      const app = buildApp({
+        bridge: buildBridgeStub(),
+        boundWorkspace: workspace,
+      });
+
+      const res = await request(app).get('/workspace/memory?content=true');
+
+      expect(res.status).toBe(200);
+      expect(res.body.files).toEqual([
+        {
+          kind: 'memory_file',
+          path: wsFile,
+          scope: 'workspace',
+          bytes: content.length,
+          content,
+        },
+      ]);
+    });
+
     it.each(['workspace', 'global'] as const)(
       'refuses content outside the %s root while retaining metadata',
       async (scope) => {
@@ -363,8 +387,45 @@ describe('workspace memory routes', () => {
       expect(res.status).toBe(200);
       const [file] = res.body.files as Array<Record<string, unknown>>;
       expect(file['path']).toBe(globalFile);
+      expect(file['truncated']).toBe(true);
       expect(file).not.toHaveProperty('content');
     });
+
+    it.each(
+      [
+        { encoding: 'UTF-8 BOM', prefix: [0xef, 0xbb, 0xbf] },
+        { encoding: 'UTF-16 BOM', prefix: [0xff, 0xfe] },
+        { encoding: 'invalid UTF-8', prefix: [0x80] },
+      ].flatMap((fixture) =>
+        [32, 1024 * 1024].map((bytes) => ({ ...fixture, bytes })),
+      ),
+    )(
+      'marks withheld $encoding workspace content read-only at $bytes bytes',
+      async ({ prefix, bytes }) => {
+        const wsFile = path.join(workspace, 'QWEN.md');
+        const original = Buffer.alloc(bytes, 0x61);
+        original.set(prefix);
+        await fs.writeFile(wsFile, original);
+        const app = buildApp({
+          bridge: buildBridgeStub(),
+          boundWorkspace: workspace,
+        });
+
+        const res = await request(app).get('/workspace/memory?content=true');
+
+        expect(res.status).toBe(200);
+        expect(res.body.files).toEqual([
+          {
+            kind: 'memory_file',
+            path: wsFile,
+            scope: 'workspace',
+            bytes,
+            truncated: true,
+          },
+        ]);
+        expect(await fs.readFile(wsFile)).toEqual(original);
+      },
+    );
 
     it('flags a torn read (size changed between stat and open) as truncated', async () => {
       // Memory writes are truncate-then-write; a read landing inside that
@@ -595,59 +656,58 @@ describe('workspace memory routes', () => {
       expect(res.body.error).not.toContain(filePath);
     });
 
-    it('omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on', async () => {
-      // Windows ignores Unix-style permission bits passed to
-      // `fs.chmod` — the directory stays writable, the POST succeeds
-      // with 200, and the EACCES path this test exercises is
-      // unreachable. The route logic itself is platform-agnostic; the
-      // Ubuntu + macOS runs cover it. Mirrors the
-      // `process.platform === 'win32'` early-return idiom already used
-      // in `customBanner.test.ts:232`.
-      if (process.platform === 'win32') return;
+    // Where permission bits do not bind (Windows ignores them; root
+    // holding CAP_DAC_OVERRIDE bypasses them) the directory stays
+    // writable, the POST succeeds with 200, and the EACCES path this test
+    // exercises is unreachable. The route logic itself is
+    // platform-agnostic; the Ubuntu + macOS runs cover it.
+    it.skipIf(!arePermissionBitsEnforced())(
+      'omits errorMessage + filePath in 500/413 responses unless QWEN_SERVE_DEBUG is on',
+      async () => {
+        // Default: production response carries no `errorMessage` or
+        // `filePath` fields — operators read the daemon stderr log
+        // for the path. Setting QWEN_SERVE_DEBUG=1 enables both.
+        const bridge = buildBridgeStub();
+        const app = buildApp({ bridge, boundWorkspace: workspace });
 
-      // Default: production response carries no `errorMessage` or
-      // `filePath` fields — operators read the daemon stderr log
-      // for the path. Setting QWEN_SERVE_DEBUG=1 enables both.
-      const bridge = buildBridgeStub();
-      const app = buildApp({ bridge, boundWorkspace: workspace });
+        // Force a 500 by making the workspace QWEN.md unwritable. We
+        // chmod the WORKSPACE directory (not the file) so `mkdir` and
+        // `writeFile` will fail with EACCES.
+        const before = await fs.stat(workspace);
+        await fs.chmod(workspace, 0o555);
+        const prevDebug = process.env['QWEN_SERVE_DEBUG'];
+        try {
+          delete process.env['QWEN_SERVE_DEBUG'];
+          const res = await request(app).post('/workspace/memory').send({
+            scope: 'workspace',
+            mode: 'append',
+            content: '- entry',
+          });
+          expect(res.status).toBe(500);
+          expect(res.body.code).toBe('file_error');
+          expect(res.body.scope).toBe('workspace');
+          expect(res.body.mode).toBe('append');
+          // Default response: no errorMessage, no filePath.
+          expect(res.body.errorMessage).toBeUndefined();
+          expect(res.body.filePath).toBeUndefined();
 
-      // Force a 500 by making the workspace QWEN.md unwritable. We
-      // chmod the WORKSPACE directory (not the file) so `mkdir` and
-      // `writeFile` will fail with EACCES.
-      const before = await fs.stat(workspace);
-      await fs.chmod(workspace, 0o555);
-      const prevDebug = process.env['QWEN_SERVE_DEBUG'];
-      try {
-        delete process.env['QWEN_SERVE_DEBUG'];
-        const res = await request(app).post('/workspace/memory').send({
-          scope: 'workspace',
-          mode: 'append',
-          content: '- entry',
-        });
-        expect(res.status).toBe(500);
-        expect(res.body.code).toBe('file_error');
-        expect(res.body.scope).toBe('workspace');
-        expect(res.body.mode).toBe('append');
-        // Default response: no errorMessage, no filePath.
-        expect(res.body.errorMessage).toBeUndefined();
-        expect(res.body.filePath).toBeUndefined();
-
-        // Toggle debug back on; the same payload now carries the
-        // detail.
-        process.env['QWEN_SERVE_DEBUG'] = '1';
-        const debugRes = await request(app).post('/workspace/memory').send({
-          scope: 'workspace',
-          mode: 'append',
-          content: '- entry',
-        });
-        expect(debugRes.status).toBe(500);
-        expect(typeof debugRes.body.errorMessage).toBe('string');
-      } finally {
-        if (prevDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
-        else process.env['QWEN_SERVE_DEBUG'] = prevDebug;
-        await fs.chmod(workspace, before.mode);
-      }
-    });
+          // Toggle debug back on; the same payload now carries the
+          // detail.
+          process.env['QWEN_SERVE_DEBUG'] = '1';
+          const debugRes = await request(app).post('/workspace/memory').send({
+            scope: 'workspace',
+            mode: 'append',
+            content: '- entry',
+          });
+          expect(debugRes.status).toBe(500);
+          expect(typeof debugRes.body.errorMessage).toBe('string');
+        } finally {
+          if (prevDebug === undefined) delete process.env['QWEN_SERVE_DEBUG'];
+          else process.env['QWEN_SERVE_DEBUG'] = prevDebug;
+          await fs.chmod(workspace, before.mode);
+        }
+      },
+    );
 
     it('returns 500 memory_discovery_failed when GET helper throws unexpectedly', async () => {
       const bridge = buildBridgeStub();

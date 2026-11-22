@@ -13,6 +13,7 @@ import { isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface Question {
   question: string;
@@ -31,6 +32,12 @@ interface AskUserQuestionProps {
   onError: (error: unknown, fallback: string) => void;
   variant?: 'inline' | 'floating';
   customInputLabel?: string;
+  /**
+   * Opens a side task that explains the pending question before the user
+   * answers. Omitted when the host has no side-task surface, which hides the
+   * action entirely.
+   */
+  onAskDetails?: () => void;
   /**
    * Whether this question should pull keyboard focus to its first option when it
    * becomes the topmost one. Defaults to true. Split-view panes pass false so an
@@ -52,6 +59,7 @@ export function AskUserQuestion({
   variant = 'inline',
   keyboardActive = true,
   customInputLabel,
+  onAskDetails,
 }: AskUserQuestionProps) {
   const submitShortcutLabel =
     typeof navigator !== 'undefined' &&
@@ -476,6 +484,20 @@ export function AskUserQuestion({
   // option navigation remains scoped to the roving-tabindex option group.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        ((e.key === 'Enter' && (e.ctrlKey || e.metaKey)) ||
+          (!isEditableTarget(e.target) &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-ask-option]') &&
+            ((e.key >= '1' && e.key <= '9') ||
+              e.key === 'Enter' ||
+              e.key === ' ')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
       if (collapsed) {
         if (
@@ -730,6 +752,7 @@ export function AskUserQuestion({
               />
             </svg>
           </button>
+          <BrowserNotificationControl />
         </div>
       </div>
 
@@ -913,6 +936,17 @@ export function AskUserQuestion({
             <p className={styles.shortcuts} title={shortcutHint}>
               {shortcutHint}
             </p>
+            {onAskDetails && (
+              <button
+                type="button"
+                className={styles.detailsButton}
+                disabled={submitting}
+                title={t('askUser.askDetailsHint')}
+                onClick={onAskDetails}
+              >
+                {t('askUser.askDetails')}
+              </button>
+            )}
             <button
               type="button"
               className={styles.ignoreButton}

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolOutputSize } from './tool-output-size.js';
+import type { ApprovalMode } from '../config/approval-mode.js';
+import type { SubscriptionQuotaDisplay } from '../utils/subscription-quota.js';
 import type { ShellResultDisplay } from '../utils/shell-result.js';
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
@@ -29,6 +32,14 @@ export interface ToolInvocation<
 
   /** Historical names accepted only when evaluating persisted permissions. */
   readonly permissionAliases?: readonly string[];
+
+  /**
+   * Producer-carried MCP identity (server name + tool name on that server),
+   * set by MCP tool invocations. Permission matchers read the server
+   * boundary from here instead of re-deriving it from a flattened
+   * `mcp__<server>__<tool>` spelling, which cannot tell `foo` from `foo_`.
+   */
+  readonly mcpIdentity?: { serverName: string; serverToolName: string };
 
   /**
    * Gets a pre-execution description of the tool operation.
@@ -81,9 +92,15 @@ export interface ToolInvocation<
   canAutoApproveOnAllow?(): boolean;
 
   /**
-   * Constructs the confirmation dialog details for this invocation.
-   * Only called when the final permission decision is `'ask'` and the user
-   * needs to be prompted interactively.
+   * Whether an allow decision must still be reviewed by AUTO mode.
+   * This is independent of host interaction-payload forwarding.
+   */
+  requiresAutoReviewOnAllow?(): boolean;
+
+  /**
+   * Constructs confirmation details and optional automatic-approval hooks.
+   * A host may call this after a real automatic decision even when no human
+   * interaction is required.
    *
    * @param abortSignal Signal to cancel the operation.
    * @returns The confirmation details for the UI to display.
@@ -138,6 +155,10 @@ export abstract class BaseToolInvocation<
 
   canAutoApproveOnAllow(): boolean {
     return true;
+  }
+
+  requiresAutoReviewOnAllow(): boolean {
+    return false;
   }
 
   /**
@@ -572,9 +593,19 @@ export interface ToolArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  /** Only refresh an artifact the session already has; never create one. */
+  updateOnly?: boolean;
 }
 
 export interface ToolResult {
+  /** Numeric size before a producer reduces its semantic result. */
+  rawOutputSize?: ToolOutputSize | null;
+  /**
+   * Set when the producer bounded its own render: the returned body is
+   * shortened. `rawOutputSize` may still be `null` (the pre-reduction size is
+   * unrecoverable), but the truncation fact itself is known here.
+   */
+  truncatedByProducer?: boolean;
   /**
    * Content meant to be included in LLM history.
    * This should represent the factual outcome of the tool execution.
@@ -593,6 +624,9 @@ export interface ToolResult {
    */
   persistedOutputFiles?: string[];
 
+  /** Producer-owned reason and recovery handle, preserved as one unit. */
+  recoveryText?: string;
+
   /**
    * Internal runtime marker: the producer already sized `llmContent` against
    * its own declared character budget, whether or not anything was cut. Records
@@ -605,6 +639,13 @@ export interface ToolResult {
    * is bounding it alone. The aggregate batch budget applies on every path.
    */
   outputBudgetApplied?: boolean;
+
+  /**
+   * Set by a producer that knows its own work was cut short but reports that
+   * outcome as an ordinary result instead of throwing. The scheduler uses it to
+   * tell the model the call was interrupted rather than completed.
+   */
+  interruptedBeforeCompletion?: boolean;
 
   /**
    * Markdown string for user display.
@@ -622,11 +663,22 @@ export interface ToolResult {
   resultFilePaths?: string[];
 
   /**
+   * The full collected set a result's count is computed over, before any
+   * display slice: glob's header certifies the collected count, so a
+   * containment check that reads only `resultFilePaths` would certify hits
+   * it never inspected.
+   */
+  collectedFilePaths?: string[];
+
+  /**
    * Structured artifacts produced by this tool call. Daemon/session surfaces
    * consume this as metadata only; the producer remains responsible for the
    * underlying file, URL, or managed resource lifecycle.
    */
   artifacts?: ToolArtifact[];
+
+  /** The tool returned a failure result. Its body is in llmContent. */
+  isError?: boolean;
 
   /**
    * If this property is present, the tool call is considered a failure.
@@ -821,6 +873,7 @@ export interface McpAppToolResult {
 /** A completed MCP tool call with an interactive MCP Apps resource. */
 export interface McpAppResultDisplay {
   type: 'mcp_app';
+  requiredFeature?: 'generated-ui';
   serverName: string;
   resourceUri: string;
   html: string;
@@ -894,6 +947,7 @@ export interface AskUserQuestionResultDisplay {
 }
 
 export type ToolResultDisplay =
+  | SubscriptionQuotaDisplay
   | ShellResultDisplay
   | string
   | AdvisorReviewDisplay
@@ -1162,6 +1216,8 @@ export interface ToolExecuteConfirmationDetails {
   hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Plain-text approval details for clients that render tool call content. */
+  approvalText?: string;
   /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
   permissionRules?: string[];
   /**
@@ -1215,7 +1271,9 @@ export interface AutoModeFallbackConfirmation {
     | 'consecutive_unavailable'
     | 'total_denial'
     | 'external_write'
-    | 'external_directory';
+    | 'external_directory'
+    // A human-only safety floor, currently the `git commit --amend` guard.
+    | 'safety_check';
   message: string;
 }
 
@@ -1229,6 +1287,11 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
+  /**
+   * Called instead of onConfirm for an automatic permission grant. This lets
+   * tools distinguish it from an explicit human approval at execution time.
+   */
+  onAutoConfirm?: (approvalMode: ApprovalMode) => Promise<void>;
 };
 
 export interface ToolPlanConfirmationDetails {

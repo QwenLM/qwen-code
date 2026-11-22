@@ -109,7 +109,7 @@ export function GitModePopover({
     setOpen(false);
   }, [branchName, branchValid, onIntentChange]);
 
-  const handleConfirmWorktree = useCallback(() => {
+  const handleSelectWorktree = useCallback(() => {
     onIntentChange({ mode: 'worktree' });
     setOpen(false);
   }, [onIntentChange]);
@@ -304,7 +304,7 @@ export function GitModePopover({
             role="radio"
             aria-checked={selectedMode === 'worktree'}
             className={`${styles.option} ${selectedMode === 'worktree' ? styles.optionSelected : ''}`}
-            onClick={() => setSelectedMode('worktree')}
+            onClick={handleSelectWorktree}
           >
             <span className={`${styles.optionIcon} ${styles.iconWorktree}`}>
               <GitForkIcon size={15} strokeWidth={1.5} />
@@ -327,7 +327,7 @@ export function GitModePopover({
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
                 : selectedMode === 'worktree'
-                  ? '$ git worktree add .qwen/worktrees/<slug>'
+                  ? '$ git worktree add --detach .qwen/worktrees/<slug>'
                   : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (
@@ -339,16 +339,6 @@ export function GitModePopover({
                 data-testid="git-mode-confirm-branch"
               >
                 {t('gitMode.confirmBranch')}
-              </button>
-            )}
-            {selectedMode === 'worktree' && (
-              <button
-                type="button"
-                className={styles.confirmWorktree}
-                onClick={handleConfirmWorktree}
-                data-testid="git-mode-confirm-worktree"
-              >
-                {t('gitMode.confirmWorktree')}
               </button>
             )}
           </div>

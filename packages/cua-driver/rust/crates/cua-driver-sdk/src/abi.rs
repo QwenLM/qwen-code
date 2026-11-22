@@ -974,7 +974,9 @@ pub unsafe extern "C" fn cua_driver_shutdown_v1(
         *out_operation = spawn_completion(
             executor,
             async move {
-                runtime.shutdown().await;
+                runtime.shutdown().await.map_err(|reason| {
+                    AbiFailure::new(CuaDriverStatus::RuntimeUnavailable, reason)
+                })?;
                 Ok("null".into())
             },
             callback,

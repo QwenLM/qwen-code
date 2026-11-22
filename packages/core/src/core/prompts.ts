@@ -270,6 +270,7 @@ export function getCustomSystemPrompt(
  */
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
   executionSandboxBackend?: 'bwrap' | 'landlock';
   executionSandboxNetwork?: 'open' | 'closed';
@@ -277,13 +278,15 @@ export interface PromptToolSurface {
 
 /**
  * Which tools each gated line of `## Using Your Tools` talks about. A line
- * survives only when every tool it names is declared: a line that named a
- * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. A deferred tool is reachable but not
- * declared, so its line drops too; its selection rule travels in the first
- * description line the deferred-tool reminder shows instead (#12702). Lines
- * absent from this table are policy that holds regardless of the tool surface
- * (tool fallback, parallel calls, respecting denials) and are never dropped.
+ * survives only when every tool it names is one the session can call: declared,
+ * or — for Agent alone — reachable through the deferred-tool bridge (see
+ * `gateToolGuidance`). A line that named an uncallable tool would send the
+ * model after something it cannot call, which is the defect this gating exists
+ * to fix. Any other deferred tool is reachable but not declared, so its line
+ * drops; its selection rule travels in the first description line the
+ * deferred-tool reminder shows instead (#12702). Lines absent from this table
+ * are policy that holds regardless of the tool surface (tool fallback, parallel
+ * calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;
@@ -314,7 +317,16 @@ const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
 const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
 
 /**
- * Drops the tool-guidance lines whose tools this session did not declare.
+ * Drops tool-guidance lines whose tools the session cannot call. Agent policy
+ * also survives when Agent is reachable through the deferred-tool bridge.
+ *
+ * Agent is deliberately the only tool with that exception: the delegation and
+ * codebase-search bullets are the policy that sends the model to the bridge to
+ * discover Agent, so dropping them whenever Agent is deferred would turn
+ * deferral into silent removal. Every other deferred tool's line (monitor
+ * included) is still dropped — discovery of those is the startup reminder's
+ * job, and their bullets are usage guidance rather than the policy that drives
+ * their own discovery.
  *
  * Implemented as a line filter rather than a rebuilt template on purpose: with
  * no snapshot the section returns unchanged, so the default prompt cannot drift
@@ -331,7 +343,14 @@ function gateToolGuidance(
     const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
       line.startsWith(entry.prefix),
     );
-    return !gate || gate.tools.every((tool) => declared.has(tool));
+    return (
+      !gate ||
+      gate.tools.every(
+        (tool) =>
+          declared.has(tool) ||
+          (tool === ToolNames.AGENT && surface?.agentReachable === true),
+      )
+    );
   });
   // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
   // goes when every tool it was going to recommend is gone.
@@ -498,6 +517,7 @@ function buildDefaultBasePrompt(
   todoWriteEnabled = false,
   codeModeOnly = false,
   surface?: PromptToolSurface,
+  identityOverride: string | null = null,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -523,7 +543,7 @@ When you create a todo list:
   // variant applies only to the default identity sentence — the override is
   // distributor-owned wording we must not rewrite.
   const coreIdentity =
-    resolveCoreIdentityOverride() ??
+    identityOverride ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
 
   const toolGuidance = getToolGuidanceSection(
@@ -699,6 +719,31 @@ export function resolveMainSessionOutputStyle(config: {
   return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
+export interface CoreSystemPromptSource {
+  systemMdPath: string;
+  systemPrompt?: string;
+  identity: string | null;
+}
+
+export function loadCoreSystemPromptSource(): CoreSystemPromptSource {
+  const systemMdEnabled = isSystemMdActive();
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  const systemMdPath =
+    systemMdEnabled && !resolution.isSwitch && resolution.value
+      ? resolution.value
+      : path.resolve(path.join(QWEN_DIR, 'system.md'));
+  if (systemMdEnabled && !fs.existsSync(systemMdPath)) {
+    throw new Error(`missing system prompt file '${systemMdPath}'`);
+  }
+  return {
+    systemMdPath,
+    ...(systemMdEnabled
+      ? { systemPrompt: fs.readFileSync(systemMdPath, 'utf8') }
+      : {}),
+    identity: systemMdEnabled ? null : resolveCoreIdentityOverride(),
+  };
+}
+
 /**
  * Builds the stable base system prompt (identity, mandates, tool guidance).
  *
@@ -728,33 +773,18 @@ export function getCoreSystemPrompt(
   // Trailing options object rather than an eighth positional parameter: this
   // function is re-exported from the package root and its arity is asserted by
   // callers' tests (#12032).
-  options?: PromptToolSurface,
+  options?: PromptToolSurface & { source?: CoreSystemPromptSource },
 ): string {
+  const source = options?.source;
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
     interactionMode,
   );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  const systemMdEnabled = isSystemMdActive();
-  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-
-  if (systemMdEnabled) {
-    // Resolve the environment variable to get either a path or a switch value.
-    const systemMdResolution = resolvePathFromEnv(
-      process.env['QWEN_SYSTEM_MD'],
-    );
-
-    // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
-      systemMdPath = systemMdResolution.value;
-    }
-
-    // require file to exist when override is enabled
-    if (!fs.existsSync(systemMdPath)) {
-      throw new Error(`missing system prompt file '${systemMdPath}'`);
-    }
-  }
+  const promptSource = source ?? loadCoreSystemPromptSource();
+  const systemMdEnabled = promptSource.systemPrompt !== undefined;
+  const systemMdPath = promptSource.systemMdPath;
 
   const interaction = getInteractionModePrompt(interactionMode);
   // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
@@ -768,7 +798,7 @@ export function getCoreSystemPrompt(
   // default-prompt branch and are ignored whenever `QWEN_SYSTEM_MD` is in
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
+    ? promptSource.systemPrompt!
     : buildDefaultBasePrompt(
         interaction,
         model,
@@ -776,6 +806,7 @@ export function getCoreSystemPrompt(
         todoWriteEnabled,
         codeModeOnly,
         options,
+        promptSource.identity,
       );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
@@ -785,7 +816,11 @@ export function getCoreSystemPrompt(
 
   // Check if the feature is enabled. This proceeds only if the environment
   // variable is set and is not explicitly '0' or 'false'.
-  if (writeSystemMdResolution.value && !writeSystemMdResolution.isDisabled) {
+  if (
+    !source &&
+    writeSystemMdResolution.value &&
+    !writeSystemMdResolution.isDisabled
+  ) {
     const writePath = writeSystemMdResolution.isSwitch
       ? systemMdPath
       : writeSystemMdResolution.value;
@@ -805,6 +840,7 @@ export function getCoreSystemPrompt(
             todoWriteEnabled,
             codeModeOnly,
             options,
+            promptSource.identity,
           ),
     );
   }
@@ -849,12 +885,6 @@ export interface SystemPromptLayers {
   /** Context layer: caller-supplied append prompt (e.g. --append-system-prompt). */
   appendPrompt?: string;
   /**
-   * Context layer: repo snapshot (branch + recent commits), computed once
-   * per session. Joined without a `---` separator — it carries its own
-   * heading.
-   */
-  gitStatus?: string | null;
-  /**
    * Volatile layer: the managed auto-memory section, rewritten in-session on
    * every memory save. Always last, so a save invalidates the shortest
    * possible cached prompt prefix.
@@ -868,7 +898,6 @@ export function assembleSystemPrompt(layers: SystemPromptLayers): string {
     buildSystemPromptSuffix(layers.mediaGuidance ?? undefined) +
     buildSystemPromptSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
-    (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
     buildSystemPromptSuffix(layers.autoMemory)
   );
 }

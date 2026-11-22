@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { promisify } from 'node:util';
+import { promisify, stripVTControlCharacters } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const TARGET_WORKFLOW = 'Qwen Code CI';
@@ -224,7 +224,104 @@ function redactLog(log) {
     );
 }
 
+// The post-strip pass, run per contiguous run of selected lines (see skillLog).
+// Keep these rules in sync with redactLog. Every difference from it is forced
+// by the strip deleting characters the rules use as separators or terminators:
+//   - the \b anchors are dropped: a control byte INSIDE a credential
+//     (`npm_\rABC…`) defeats every anchor on the first pass, and the same strip
+//     can weld a word character onto the token's front (`x\rnpm_…` → `xnpm_…`),
+//     leaving \b nothing to match. Over-redaction is the safe direction for a
+//     pass that only ever sees already-redacted text.
+//   - a value is a TEMPERED token: it runs to the next whitespace but never
+//     across the `##[error]` marker the excerpt exists to show. Excluding the
+//     marker's characters from a class instead would let a credential that
+//     legitimately contains #, [ or ] (a password, a PEM body, a log-supplied
+//     `[redacted]…` prefix) ship its tail in clear; tempering redacts the whole
+//     value and still stops before the marker.
+//   - the Bearer separator is horizontal whitespace, zero or more, so a control
+//     where the space was (`Bearer\rsecret` → `Bearersecret`) still redacts.
+//   - the URL scheme is length-bounded rather than lookbehind-bounded: a
+//     lookbehind refuses a start preceded by a digit (a welded `42https://…`),
+//     while the bound keeps the scan linear without refusing it. The userinfo
+//     is one-or-more @-segments, each a tempered token, so a password carrying
+//     @ or # is fully redacted while the marker still stops it. The env value
+//     likewise runs to whitespace only — not to a structural character like }
+//     or a quote — so a split-keyword value carrying one does not ship its tail.
+// Cookie:/Authorization: stay out: their value runs to the line end, so over
+// CR-free text they swallow the following line. A control inside the keyword
+// itself (`Coo\rkie:`) therefore escapes both passes.
+// Residual, inherent to deleting the control: a value cannot tell a weld INSIDE
+// the credential from a weld BEFORE following word-like text, so a bare
+// failure keyword (no `##[error]`) welded onto a value is still consumed; the
+// marker itself is protected by the temper. A `##[error]` inside a BEGIN…END
+// span likewise stops the private-key match, preserving the marker over
+// redacting the span. Recorded in the design doc.
+function redactWeldedTokens(log) {
+  return (
+    log
+      .replace(
+        /-----BEGIN [^-\r\n]+-----(?:(?!##\[error\])[\s\S])*?-----END [^-\r\n]+-----/g,
+        '[redacted private key]',
+      )
+      .replace(
+        /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+        '[redacted jwt]',
+      )
+      .replace(/(Bearer[^\S\n]*)(?:(?!##\[error\])[^\s])+/gi, '$1[redacted]')
+      .replace(
+        /(?:gh[pousr]_|github_pat_|glpat-|xox[bp]-)[A-Za-z0-9_-]{8,}/g,
+        '[redacted]',
+      )
+      .replace(/sk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
+      .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[redacted]')
+      .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
+      .replace(
+        /([a-z][a-z0-9+.-]{0,19}:\/\/)(?:(?:(?!##\[error\])[^/\s@])+@)+/gi,
+        '$1[redacted]@',
+      )
+      // Quoted values are bounded by their matching closing quote so a value does
+      // not run into the next JSON field. The value is bounded on the SAME line
+      // (it must not match \n: skillLog joins each contiguous run of selected
+      // lines with \n, so an unclosed quote would otherwise swallow every
+      // following selected line) and handles escapes (\\[^\n], so "C:\temp"
+      // reaches its closing quote; a backslash before a line break must not
+      // cross it). Unquoted values use a whitespace-bounded tempered token, but
+      // Do NOT infer completeness from the [redacted] placeholder: pass 1's
+      // value class stops INSIDE a credential at , } quote or a stripped control,
+      // so KEY=[redacted]<remainder> is produced by both a completed and a
+      // truncated redaction, and the character after the placeholder cannot tell
+      // them apart. Any value that already starts with [redacted] is therefore
+      // left exactly as pass 1 (base) left it — re-redacting it greedily deletes
+      // the failure payload, and skipping only on a delimiter ships a truncated
+      // secret tail. The repair redacts only values pass 1 missed (a control-split
+      // key), whose value is the secret itself, not the placeholder. A fork's
+      // [redacted]secret under a split key is left as base leaves it (a recorded
+      // base-equivalent limitation, not a new leak). The escape unit is tempered
+      // too, so a backslash directly before ##[error] cannot carry the value
+      // across the marker.
+      .replace(
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)(["'])((?:(?!##\[error\])(?:[^\\\n]|\\(?!##\[error\])[^\n]))*?)\4/gi,
+        '$1$2$3[redacted]',
+      )
+      .replace(
+        /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?(?!\[redacted\])(?:(?!##\[error\])[^\s])+["']?/gi,
+        '$1$2$3[redacted]',
+      )
+  );
+}
+
+const TERMINAL_CONTROLS =
+  // eslint-disable-next-line no-control-regex -- log text must not control the terminal
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+
 export function skillLog(log) {
+  // Select BEFORE stripping. The strip deletes characters the selectors use as
+  // terminators (\sFAIL\s needs the whitespace a leading \r supplies) and
+  // characters the value classes stop at, so selecting after it lets a weld
+  // consume the failure line before it can ever be chosen. The first pass runs
+  // on the unstripped text so a bare \r still supplies both the word boundary
+  // the anchored patterns (\bnpm_…, \bsk-…, \beyJ…) need and the line end that
+  // bounds the header rules.
   const lines = redactLog(log).split('\n');
   const selected = new Set();
   const primary = new Set();
@@ -258,9 +355,42 @@ export function skillLog(log) {
     .filter((index) => !primary.has(index))
     .sort((a, b) => a - b)
     .slice(-(120 - primary.size));
-  return [...primary, ...remaining]
-    .sort((a, b) => a - b)
-    .map((index) => lines[index].slice(0, 300))
+  // Strip and repair welds per CONTIGUOUS run of selected lines. The selected
+  // windows need not be adjacent in the log; joining them all would let the
+  // private-key rule pair a BEGIN in one window with an END in another and
+  // delete every selected line between them — including the failure the
+  // excerpt was fetched for. Grouping keeps the private-key repair only when
+  // the whole BEGIN…END span falls inside one selected window; a synthetic
+  // cross-window pair cannot form. A key longer than the window loses its BEGIN
+  // label and ships its body (a window limit, as in base — see the design doc).
+  // The strip drops the terminal controls (C0/DEL/C1, keeping \n and \t) plus
+  // the full Unicode Bidi_Control set — the same class safeReason drops — so a
+  // fork-controlled line can neither repaint nor reorder the excerpt.
+  const indices = [...primary, ...remaining].sort((a, b) => a - b);
+  const groups = [];
+  for (const index of indices) {
+    const last = groups.at(-1);
+    if (last && last.at(-1) === index - 1) last.push(index);
+    else groups.push([index]);
+  }
+  const shipped = groups
+    .map((group) =>
+      redactWeldedTokens(
+        group
+          // Clamp to 300 PRE-strip characters before the repair, to bound the
+          // quadratic keyword rule's input. Not a no-leak guarantee: a value
+          // whose terminator falls past the cut ships (the strip welds it), and
+          // a repair can lengthen a line so a near-300 line loses its tail to
+          // the final post-strip slice. See the design doc's Costs.
+          .map((index) => lines[index].slice(0, 300))
+          .join('\n')
+          .replace(TERMINAL_CONTROLS, ''),
+      ),
+    )
+    .join('\n');
+  return shipped
+    .split('\n')
+    .map((line) => line.slice(0, 300))
     .join('\n');
 }
 
@@ -428,12 +558,27 @@ export function eligibleAttemptJob(job, target, runAttempt, options = {}) {
 }
 
 function safeReason(reason) {
-  return reason
-    .trim()
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('@', '@\u200b');
+  return (
+    reason
+      .trim()
+      // A newline lets a reason open a block-level Markdown construct: a
+      // line-start fence swallows the folded Chinese block and renders the
+      // tracking marker as visible code. Keep the reason a single line.
+      .replace(/\s*\n\s*/g, ' ')
+      // Bidi overrides can visually rewrite a notice maintainers trust when
+      // deciding whether to update a branch; the reason is classifier output
+      // derived from untrusted logs, so drop them like the markup below.
+      // The class is the full Unicode Bidi_Control set.
+      .replace(/[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('@', '@\u200b')
+  );
+}
+
+function bilingualComment(en, zh, marker) {
+  return `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>\n\n${marker}`;
 }
 
 export async function actOnDecision(client, target, decision) {
@@ -474,7 +619,17 @@ export async function actOnDecision(client, target, decision) {
   const marker = markerFor(target, decision.action, count);
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
-    await client.comment(target.prNumber, marker);
+    // The notice must be visible: a marker-only comment left maintainers
+    // unable to tell a patrolled flake from a deterministic failure, so they
+    // clicked Update Branch — advancing the head and dismissing approvals.
+    await client.comment(
+      target.prNumber,
+      bilingualComment(
+        `CI Failure Patrol: this failure looks transient, not a PR regression: ${safeReason(decision.reason_en)}\n\nFailed jobs were re-run on the same commit. No Update Branch is needed — if the rerun passes, the failure was a flake.`,
+        `CI 失败巡逻：此失败疑似瞬时问题，而非 PR 引入的回归：${safeReason(decision.reason_zh)}\n\n已在同一 commit 上重跑失败的 job，无需 Update Branch；重跑通过即为 flake。`,
+        marker,
+      ),
+    );
     // A flaky TEST (not infra) also gets a deflake issue so the autofix loop
     // can stabilize it. Best-effort: the rerun + marker already succeeded, so a
     // transient issue-creation failure must not propagate (it would surface as
@@ -490,10 +645,21 @@ export async function actOnDecision(client, target, decision) {
   } else if (decision.action === 'comment') {
     await client.comment(
       target.prNumber,
-      `CI is failing because: ${safeReason(decision.reason_en)}\n\n<details>\n<summary>中文说明</summary>\n\n${safeReason(decision.reason_zh)}\n\n</details>\n\n${marker}`,
+      bilingualComment(
+        `CI is failing because: ${safeReason(decision.reason_en)}`,
+        safeReason(decision.reason_zh),
+        marker,
+      ),
     );
   } else {
-    await client.comment(target.prNumber, marker);
+    await client.comment(
+      target.prNumber,
+      bilingualComment(
+        `CI Failure Patrol: this failure could not be confidently classified: ${safeReason(decision.reason_en)}\n\nNo automatic action was taken. Inspect the failed job before rerunning or updating the branch.`,
+        `CI 失败巡逻：无法确信归类此失败：${safeReason(decision.reason_zh)}\n\n未采取自动动作。请先人工查看失败 job，再决定重跑或更新分支。`,
+        marker,
+      ),
+    );
   }
 }
 
@@ -511,6 +677,7 @@ export async function actOnDecisions(client, targets, decisions) {
   if (!Array.isArray(targets) || !Array.isArray(decisions)) return;
   const byKey = new Map(targets.map((target) => [decisionKey(target), target]));
   const handled = new Set();
+  let matched = 0;
   for (const decision of decisions) {
     const key = decisionKey(decision);
     if (handled.has(key)) continue;
@@ -523,12 +690,37 @@ export async function actOnDecisions(client, targets, decisions) {
         );
         continue;
       }
+      // Schema BEFORE counting. actOnDecision opens with the same check and
+      // returns silently, so counting on key resolution alone would let a list
+      // that carries all five identity fields but fails validDecision (a
+      // 240-char reason, rerun at low confidence, string-typed ids) match every
+      // key, act on nothing, and still report success.
+      if (!validDecision(target, decision)) {
+        process.stderr.write(
+          `act: invalid decision for PR ${decision?.prNumber ?? 'unknown'}; it fails the action/confidence/reason schema.\n`,
+        );
+        continue;
+      }
+      matched += 1;
       await actOnDecision(client, target, decision);
     } catch (error) {
       process.stderr.write(
         `act: skipping PR ${decision?.prNumber ?? 'unknown'}: ${error.message}${error.stderr ? `\n${String(error.stderr).trim()}` : ''}\n`,
       );
     }
+  }
+  // A non-empty list that addressed nothing is the hollow-green shape: the
+  // round uploads, runs act, prints a per-entry diagnostic and exits 0, while
+  // the workflow's verdict step is skipped because has_decisions is true. Fail
+  // loudly instead. Per-decision failures stay swallowed above — a candidate
+  // superseded between scan and act, one already handled, or one at the action
+  // cap is a deliberate decline of a real target and still counts, as does a
+  // decision whose action threw after being attempted. `no_action` counts too:
+  // it posts the "could not be confidently classified" marker, so it is an act.
+  if (decisions.length > 0 && matched === 0) {
+    throw new Error(
+      `act: ${decisions.length} decision(s) addressed no actionable candidate; this round acted on nothing.`,
+    );
   }
 }
 
@@ -563,7 +755,11 @@ export class GhClient {
   }
 
   async gh(args) {
-    const { stdout } = await execFile('gh', args, {
+    // The caller pins an absolute, verified gh. Resolving the bare name here
+    // would search PATH inside this child process, which on the shared pool
+    // can contain a co-tenant's gh in a uid-writable directory — and this
+    // client runs with the bot PAT in its environment.
+    const { stdout } = await execFile(process.env.PATROL_GH || 'gh', args, {
       encoding: 'utf8',
       maxBuffer: 16 * 1024 * 1024,
       timeout: 60_000,
@@ -713,7 +909,21 @@ export class GhClient {
   }
 
   async jobLog(jobId) {
-    return this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}/logs`]);
+    const path = `repos/${this.repo}/actions/jobs/${jobId}/logs`;
+    let log;
+    try {
+      // Current gh refuses to print a response containing terminal escape
+      // sequences without this flag, and Actions job logs essentially always
+      // contain them; older gh has neither the check nor the flag, so fall
+      // back to the bare call only when stderr says `unknown flag`. Strip VT
+      // control characters either way so raw ANSI never reaches skillLog's
+      // callers. Same three-part shape as autofix-pr/ci-log.ts's jobLog.
+      log = await this.gh(['api', '--allow-escape-sequences', path]);
+    } catch (error) {
+      if (!String(error?.stderr).includes('unknown flag')) throw error;
+      log = await this.gh(['api', path]);
+    }
+    return stripVTControlCharacters(log);
   }
 
   async hasOpenIssueWithMarker(marker) {

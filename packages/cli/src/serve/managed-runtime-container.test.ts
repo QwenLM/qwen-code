@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   readManagedRuntimeContainerBoot,
@@ -77,6 +78,22 @@ async function bootFile(contents: string): Promise<string> {
   return filename;
 }
 
+// The fixed container port 43190 collides with whatever else holds it on a
+// shared CI host (EADDRINUSE, #13775): keep asserting the requested
+// (43190, '0.0.0.0') bind while the real socket binds an ephemeral port on
+// the requested host, the pattern managed-runtime-attestation-worker.test.ts
+// established. Only the port is overridden — forcing loopback here would
+// make the ready.url host assertion below self-referential.
+function mockEphemeralListen() {
+  const nativeListen = Server.prototype.listen;
+  return vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+    this: Server,
+    ...args: unknown[]
+  ) {
+    return Reflect.apply(nativeListen, this, [0, ...args.slice(1)]);
+  });
+}
+
 describe('Managed Runtime container entry', () => {
   it('wires the gate in the actual boot3 startup while preserving boot2 route ownership', async () => {
     const fixtures = JSON.parse(
@@ -130,6 +147,7 @@ describe('Managed Runtime container entry', () => {
     vi.spyOn(ManagedCsiMount.prototype, 'resolve').mockResolvedValue(
       boot.context.mountRoot,
     );
+    const listen = mockEphemeralListen();
     const publicationInstall = vi.spyOn(
       RemoteShellResultPublisher.prototype,
       'install',
@@ -142,6 +160,7 @@ describe('Managed Runtime container entry', () => {
       true,
     );
     try {
+      expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
       const binding = {
         tenantId: boot.context.tenantId,
         workspaceId: boot.context.workspaceId,
@@ -301,7 +320,7 @@ describe('Managed Runtime container entry', () => {
   });
 
   it('opens the explicit container port with authenticated attestation', async () => {
-    const listen = vi.spyOn(Server.prototype, 'listen');
+    const listen = mockEphemeralListen();
     const worker = await startManagedRuntimeAttestationWorker(
       boot,
       undefined,
@@ -309,11 +328,9 @@ describe('Managed Runtime container entry', () => {
       true,
     );
     try {
-      expect(listen.mock.results[0]?.value?.address()).toMatchObject({
-        address: '0.0.0.0',
-        port: 43190,
-      });
-      expect(worker.ready.url).toBe('http://127.0.0.1:43190');
+      expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
+      const address = listen.mock.results[0]?.value?.address() as AddressInfo;
+      expect(worker.ready.url).toBe(`http://127.0.0.1:${address.port}`);
       const url = `${worker.ready.url}/internal/managed-runtime/v2/attest`;
       const body = {
         protocolVersion: 2,

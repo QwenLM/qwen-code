@@ -7,6 +7,7 @@
 export type {
   ExportConfig,
   ExportMessage,
+  ExportMessageAuthor,
   ExportSessionData,
 } from './types.js';
 export { collectSessionData, collectSessionMetadata } from './collect.js';
@@ -24,10 +25,15 @@ export {
   EXPORT_TRANSCRIPT_LIMITS_V1,
   ExportTranscriptDocumentError,
   assertExportTranscriptDocumentV1,
+  assertExportTranscriptDocumentV2,
   createExportTranscriptDocumentV1,
+  createExportTranscriptDocumentV2,
   type CreateExportTranscriptDocumentOptions,
   type ExportMetadataPresentationV1,
+  type ExportTranscriptAuthorV1,
   type ExportTranscriptBlockV1,
+  type ExportTranscriptBlockV2,
   type ExportTranscriptDiagnosticV1,
   type ExportTranscriptDocumentV1,
+  type ExportTranscriptDocumentV2,
 } from './export-transcript-document.js';

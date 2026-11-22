@@ -29,6 +29,8 @@ Enable IMAP and SMTP for the mailbox and export its credentials into the environ
 
 Run `qwen channel start agent-mail`. Password fields support the existing `$ENV_VAR` references; keep plaintext passwords out of settings. The adapter disables protocol logging and reports connection failures without credentials.
 
+The same channel can be created and edited in the Web Shell's channel manager, which lists it alongside the other configured channels. Because every email delivery is a direct conversation, the editor shows no group policy, allowed group IDs, or group member controls for this channel; a `groupPolicy` or `groups` entry already present in `settings.json` is left untouched when you save.
+
 Implicit TLS defaults to IMAP port 993 and SMTP port 465. For STARTTLS, set `imapSecure` or `smtpSecure` to `false`; the default ports become 143 and 587 respectively. STARTTLS and certificate verification remain mandatory. Override `imapPort` and `smtpPort` when needed. For a private CA, configure Node's `NODE_EXTRA_CA_CERTS` before launching Qwen Code.
 
 | Option                | Default    | Meaning                                                            |
@@ -48,7 +50,7 @@ At most 16 attachments are forwarded. PNG, JPEG, GIF and WebP images use the exi
 
 Reply to the agent's email to continue the conversation. `Message-ID`, `In-Reply-To` and `References` associate the conversation with its sender. Replies target that sender alone; `Reply-To`, CC, BCC and addresses inside the task cannot change SMTP recipients. Background task results reply through the saved accepted thread after the initiating turn ends. No-reply senders can start tasks but receive no response. Agent-generated, automatic, mailing-list and delivery-report mail is ignored.
 
-Text commands such as `/help`, `/status` and permission replies work in the email body. Email defaults to `followup` and supports `steer`. `collect` is rejected because buffered messages outlive their admission handler and cannot retain an individual durable completion claim. Admission remains active while a task waits. Up to 32 ordinary deliveries can be in flight; an additional slot permits control replies and busy responses. New tasks at capacity receive a request to resend after an active task finishes.
+Text commands such as `/help`, `/status` and permission replies work in the email body. Email defaults to `followup` and supports `steer`. `collect` and `inject` are rejected because a buffered or mid-turn message outlives its admission handler and cannot retain an individual durable completion claim. Admission remains active while a task waits. Up to 32 ordinary deliveries can be in flight; an additional slot permits control replies and busy responses. New tasks at capacity receive a request to resend after an active task finishes.
 
 Proactive delivery is disabled unless `proactiveRecipients` contains the exact target. A threaded proactive target must also resolve to a known, currently allowed sender/thread. Unknown targets fail without selecting another recipient or creating a replacement thread. The adapter retains 256 recent reply routes, up to 64 identifiers per route, and 1024 recent inbound identities. IMAP UID progress continues to prevent replay of older deliveries after those metadata entries expire; an evicted thread route cannot receive proactive replies until another accepted message restores it.
 

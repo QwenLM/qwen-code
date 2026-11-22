@@ -492,6 +492,46 @@ describe('modelConfigUtils', () => {
       );
     });
 
+    it.each([
+      'https://api.deepseek.com/v1',
+      'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    ])(
+      'distinguishes global none from a DeepSeek off preset on %s',
+      async (baseUrl) => {
+        const actual = await vi.importActual<
+          typeof import('@qwen-code/qwen-code-core')
+        >('@qwen-code/qwen-code-core');
+        for (const reasoningEffort of [undefined, 'none'] as const) {
+          vi.mocked(resolveModelConfig).mockImplementationOnce(
+            actual.resolveModelConfig,
+          );
+          const result = resolveCliGenerationConfig({
+            argv: {},
+            settings: makeMockSettings({
+              model: { name: 'deepseek-flash', reasoningEffort },
+              modelProviders: {
+                [AuthType.USE_OPENAI]: [
+                  {
+                    id: 'deepseek-flash',
+                    baseUrl,
+                    generationConfig: { reasoning: false },
+                  },
+                ],
+              },
+            }),
+            selectedAuthType: AuthType.USE_OPENAI,
+            env: {},
+          });
+          expect(result.generationConfig.reasoning).toBe(false);
+          expect(result.sources['reasoning']).toMatchObject(
+            reasoningEffort === 'none'
+              ? { kind: 'settings', settingsPath: 'model.reasoningEffort' }
+              : { kind: 'modelProviders' },
+          );
+        }
+      },
+    );
+
     it('should resolve config from argv with highest precedence', () => {
       const argv = {
         model: 'argv-model',

@@ -60,6 +60,8 @@ export function createDaemonTrustPolicyMonitor(
           lastRevision = snapshot.revision;
         }
       } catch (error) {
+        if (stopped) return;
+        lastRevision = undefined;
         options.onError?.(error);
       }
     }

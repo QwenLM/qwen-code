@@ -1470,3 +1470,44 @@ describe('TasksStatusMessage nested-agent tree', () => {
     expect(text).toContain('activity-7.ts');
   });
 });
+
+it.each([true, false])(
+  'opens workflow agents through the task callback (embedded=%s)',
+  (embedded) => {
+    const onOpenSubagent = vi.fn();
+    const task = workflowTask({
+      parentSessionId: 'original-chat-a',
+      dispatches: [
+        {
+          id: 'dispatch-detail',
+          phaseVisitId: null,
+          label: 'Inspect details',
+          prompt: 'Inspect workflow details',
+          subagentId: 'workflow-agent-detail',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_000,
+        },
+      ],
+    });
+    const container = renderPanel([task], {
+      embedded,
+      includeWorkflows: true,
+      onOpenSubagent,
+    });
+    const row = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((candidate) => candidate.textContent?.includes('review-and-fix'));
+    expect(row).toBeDefined();
+    act(() => row!.click());
+    const node = container.querySelector<HTMLButtonElement>(
+      '[data-workflow-dispatch="dispatch-detail"]',
+    );
+    expect(node).not.toBeNull();
+    act(() => node!.click());
+    expect(onOpenSubagent).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'workflow-agent-detail' }),
+      'original-chat-a',
+    );
+  },
+);

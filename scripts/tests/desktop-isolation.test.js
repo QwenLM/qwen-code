@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Three agreements nothing else in the suite reads, all of which fail green.
+// Two agreements nothing else in the suite reads, all of which fail green.
 //
 // 1. `scripts/check-desktop-isolation.js` keeps a `nativePrefixes` list, and
 //    the root workspace manifests keep a `!packages/*` negation per native
@@ -16,19 +16,8 @@
 //    guard to keep covering the package. Deleting the added line changes
 //    neither the guard's output nor its exit code, so only this file notices.
 //
-// 2. The `desktop_shell` job in `ci.yml` names the crate directory in five
-//    places -- the changed-files filter, the `Cargo.toml` existence guard and
-//    its `::notice::` text, the rust-cache `workspaces:`, and two
-//    `working-directory:` values. They have to name the same directory as each
-//    other and a directory that exists, or the job skips and reports success
-//    having compiled nothing.
-//
-// 3. That job's changed-files filter lists both updater-feed scripts.
-//    `packages/desktop/scripts/test-release.js` is the only test either of them
-//    has and it runs in this job, so a filter naming one script and not the
-//    other lets a PR that edits only the unlisted one skip its own test and
-//    still report green. The filter is only worth pinning together with the
-//    lane it gates, so the same test asserts that lane still runs the script.
+// 2. The Desktop release gate must agree on the crate directory across its
+//    presence guard, cache and working directories, and retain release tests.
 //
 // The npm/pnpm mirror of the negation list is already pinned by
 // `package-scripts.test.js` ("mirrors the npm workspace boundaries in
@@ -78,10 +67,178 @@ const npmNegations = JSON.parse(read('package.json'))
   .map((entry) => entry.slice(1));
 
 const ci = parseYaml(read('.github', 'workflows', 'ci.yml'));
-const desktopJob = ci.jobs.desktop_shell;
+const desktop = parseYaml(
+  read('.github', 'workflows', 'desktop-packaging-check.yml'),
+);
+const release = parseYaml(read('.github', 'workflows', 'desktop-release.yml'));
+const desktopJob = release.jobs.desktop_shell;
 const stepNamed = (name) =>
   desktopJob.steps.find((step) => step.name === name) ??
   desktopJob.steps.find((step) => String(step.uses ?? '').includes(name));
+
+describe('desktop rpm build-root dependencies', () => {
+  it('checks a versioned EPEL release before installing it', () => {
+    const install = release.jobs.build.steps.find(
+      (step) => step.name === 'Install rpm build-root dependencies',
+    );
+    const source = install.run;
+    const download = source.match(/curl[^\n]+ '(https:\/\/[^']+)'/);
+    expect(download).not.toBeNull();
+    // Re-derive both literals from the real RPM (`sha256sum <rpm>`) whenever
+    // the versioned filename moves; nothing offline can prove they agree.
+    expect(download[1]).toBe(
+      'https://dl.fedoraproject.org/pub/epel/10/Everything/x86_64/Packages/e/epel-release-10-9.el10_3.noarch.rpm',
+    );
+    expect(source).toContain(
+      'f567aa5c3cde55f579ba5c41c79df97da692a391efddd14b123a4eec0824fbc0',
+    );
+    const filename = new URL(download[1]).pathname.split('/').pop();
+    expect(source).toContain(`epel_rpm="$RUNNER_TEMP/${filename}"`);
+    expect(source).toMatch(
+      /echo '[0-9a-f]{64} {2}'"\$epel_rpm" \| sha256sum -c -/,
+    );
+    expect(source).toContain('set -euo pipefail');
+    expect(source.indexOf('sha256sum -c -')).toBeGreaterThan(
+      source.indexOf('curl '),
+    );
+    expect(source.indexOf('dnf install -y "$epel_rpm"')).toBeGreaterThan(
+      source.indexOf('sha256sum -c -'),
+    );
+  });
+
+  it('keeps the smoke runnable on rpm roots without Xvfb', () => {
+    const install = release.jobs.build.steps.find(
+      (step) => step.name === 'Install rpm build-root dependencies',
+    );
+    // The display server a leg can install is a matrix property: EPEL, which
+    // supplies weston, is only enabled on the leg that has no Xvfb.
+    const displays = Object.fromEntries(
+      release.jobs.build.strategy.matrix.include.map((leg) => [
+        leg.name,
+        leg.display,
+      ]),
+    );
+    expect(displays['Linux x64 (rpm, Fedora 44)']).toBe('xvfb');
+    expect(displays['Linux x64 (rpm, RHEL 10)']).toBe('weston');
+
+    // Fedora 44 ships weston from its own updates repo, so "weston ⇒ EPEL" is
+    // not the rule; the rule is that a non-Fedora root taking the weston arm
+    // has the EPEL bootstrap above enabled. Read the coupling from the matrix
+    // so a new leg with `display: 'weston'` and `epel: 'false'` turns this red
+    // instead of dying at `dnf install` in a release run.
+    const containerLegs = release.jobs.build.strategy.matrix.include.filter(
+      (leg) => leg.container,
+    );
+    expect(containerLegs.length).toBeGreaterThan(0);
+    for (const leg of containerLegs) {
+      expect(['xvfb', 'weston']).toContain(leg.display);
+      if (
+        leg.display !== 'xvfb' &&
+        !String(leg.artifact_suffix).includes('fedora')
+      ) {
+        expect(leg.epel).toBe('true');
+      }
+    }
+
+    // Bound the shared package list by the arm switch that follows it, not by
+    // a prose comment: rewording the comment must not move the bound.
+    const switchAt = install.run.indexOf("case '${{ matrix.display }}' in");
+    expect(switchAt).toBeGreaterThan(-1);
+    const sharedInstalls = install.run
+      .slice(0, switchAt)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(sharedInstalls).not.toContain('Xvfb');
+    // Each arm is bounded by its own pattern and terminating `;;`, so another
+    // `case`/`if` above cannot re-point the slice.
+    const installArm = (pattern) => {
+      const start = install.run.indexOf(`\n  ${pattern})`, switchAt);
+      expect(start).toBeGreaterThan(switchAt);
+      const end = install.run.indexOf(';;', start);
+      expect(end).toBeGreaterThan(start);
+      return install.run.slice(start, end);
+    };
+    const xvfbArm = installArm('xvfb');
+    const westonArm = installArm('weston');
+    expect(xvfbArm).toContain('xorg-x11-server-Xvfb');
+    expect(xvfbArm).not.toContain('weston');
+    expect(westonArm).toContain('weston xorg-x11-server-Xwayland');
+    expect(westonArm).not.toContain('xorg-x11-server-Xvfb');
+    // An unrecognised `matrix.display` must fail closed: defaulting it to the
+    // weston arm installs packages the root may have no repository for.
+    const fallbackArm = installArm('*');
+    expect(fallbackArm).toContain('exit 1');
+
+    const smoke = release.jobs.build.steps.find(
+      (step) =>
+        step.name === 'Smoke packaged application' &&
+        String(step.if).includes("runner.os == 'Linux'"),
+    );
+    expect(smoke.run).toContain('command -v xvfb-run');
+    expect(smoke.run).not.toContain('GDK_BACKEND=dummy');
+    // Both arms must run the same smoke under the step's own -e -u -o pipefail;
+    // a function shipped through `declare -f` into a child shell drops them.
+    expect(smoke.run).not.toContain('declare -f');
+    expect(
+      smoke.run.match(/npm run smoke:packaged -- "\$executable"/gu),
+    ).toHaveLength(2);
+
+    // The compositor socket the step exports has to be the one weston opens,
+    // and the export has to precede the launch: Xwayland reads its own
+    // environment at startup.
+    const socket = /--socket=(\S+)/u.exec(smoke.run)?.[1];
+    expect(socket).toBeTruthy();
+    // Without this flag weston finds no DRM device in the container and the
+    // leg dies in a release run, where nothing else reads this step.
+    expect(smoke.run).toContain(
+      `weston --backend=headless-backend.so --socket=${socket}`,
+    );
+    expect(smoke.run).toContain('XDG_RUNTIME_DIR');
+    const waylandExport = `export WAYLAND_DISPLAY=${socket}`;
+    expect(smoke.run).toContain(waylandExport);
+    expect(smoke.run.indexOf(waylandExport)).toBeLessThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
+    // Xwayland must not start before its compositor exists, so the weston
+    // readiness wait has to sit between the two launches.
+    const westonWait = `wait_for_socket "$XDG_RUNTIME_DIR/${socket}" weston`;
+    expect(smoke.run).toContain(westonWait);
+    expect(smoke.run.indexOf(westonWait)).toBeGreaterThan(
+      smoke.run.indexOf('weston_pid=$!'),
+    );
+    expect(smoke.run.indexOf(westonWait)).toBeLessThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
+    // Both daemons have to be reaped, or the runner hangs on the sockets.
+    expect(smoke.run).toContain("trap 'kill ${xwayland_pid:-} $weston_pid");
+
+    // A timed-out wait must fail the step: `[ -S ... ] && break` is exempt
+    // from `set -e`, so a helper that only prints would blame the app.
+    const helper = /wait_for_socket\(\) \{([\s\S]*?)\n\}/u.exec(smoke.run);
+    expect(helper).not.toBeNull();
+    expect(helper[1]).toContain('return 1');
+
+    // The display Xwayland serves, the socket the step waits on and the
+    // DISPLAY the app receives must all name the same number.
+    const display = /Xwayland :(\d+)/u.exec(smoke.run)?.[1];
+    expect(display).toBeTruthy();
+    expect(smoke.run).toContain(`wait_for_socket /tmp/.X11-unix/X${display}`);
+    const displayExport = `export DISPLAY=:${display}`;
+    expect(smoke.run).toContain(displayExport);
+    expect(smoke.run.indexOf(displayExport)).toBeGreaterThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+
+    // With both displays exported GTK3 prefers Wayland, which would leave the
+    // X11 bridge above unused; the app has to be pinned to it.
+    expect(smoke.run.indexOf('export GDK_BACKEND=x11')).toBeGreaterThan(
+      smoke.run.indexOf('Xwayland :'),
+    );
+  });
+});
 
 describe('desktop isolation guard — nativePrefixes coverage', () => {
   it('matches every negated native workspace entry', () => {
@@ -132,12 +289,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
   const filterStep = desktopJob.steps.find((step) => step.id === 'filter');
   const filterRun = String(filterStep?.run ?? '');
 
-  it('still carries the Cargo.toml existence guard, and it clears changed', () => {
-    // Not redundant with the filter: the filter also matches on ci.yml and
-    // desktop-release.yml changing, which a head with no crate at all can do.
-    // That is the #8132 failure the job's header comment describes.
-    // The condition is only half the guard: without the assignment inside its
-    // own body, every gated step still runs against a crate that is not there.
+  it('fails when the release commit does not contain the desktop crate', () => {
     const guardBody =
       /! -f \S+\/src-tauri\/Cargo\.toml \]\]; then\n([\s\S]*?)\n[ \t]*fi/u.exec(
         filterRun,
@@ -148,22 +300,16 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     ).toBeDefined();
     expect(
       guardBody,
-      'the Cargo.toml guard no longer sets changed=false inside its own body, so a head without the crate runs every gated step and reports a missing working directory as a failure of the PR',
-    ).toMatch(/^\s*changed=false\s*$/mu);
+      'a release commit without the desktop crate must fail the gate',
+    ).toMatch(/^\s*exit 1\s*$/mu);
   });
 
-  it('names one crate directory in all five places, and it exists', () => {
-    const filterAlternative = /\^\(([^|]+)\|/u.exec(filterRun)?.[1];
-    expect(
-      filterAlternative,
-      'changed-files filter lost its path alternative',
-    ).toBeDefined();
-
+  it('names one existing crate directory in every step', () => {
     const guardPath = /! -f (\S+)\/src-tauri\/Cargo\.toml/u.exec(
       filterRun,
     )?.[1];
-    // The notice names the crate's src-tauri, not the package directory.
-    const noticePath = /::notice::(\S+) is absent from this head/u
+    // The error names the crate's src-tauri, not the package directory.
+    const noticePath = /::error::(\S+) is absent from the release commit/u
       .exec(filterRun)?.[1]
       .replace(/\/src-tauri$/u, '');
 
@@ -177,11 +323,9 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       .filter((value) => value !== undefined)
       .map(String);
 
-    expect(filterAlternative).toBeDefined();
     const sites = {
-      'changed-files filter': filterAlternative.replace(/\/$/u, ''),
       'Cargo.toml guard': guardPath,
-      'guard ::notice::': noticePath,
+      'guard ::error::': noticePath,
       'rust-cache workspaces': cacheRoot,
       ...Object.fromEntries(
         workingDirs.map((dir, index) => [`working-directory[${index}]`, dir]),
@@ -189,7 +333,7 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
     };
 
     // Every site must resolve; an undefined one means the parser fell behind a
-    // rewrite of ci.yml, which must not read as agreement.
+    // rewrite of the workflow, which must not read as agreement.
     for (const [site, value] of Object.entries(sites)) {
       expect(
         value,
@@ -201,62 +345,66 @@ describe('desktop_shell CI job — the crate path agrees with itself', () => {
       JSON.stringify(sites, null, 2),
     ).toBe(1);
 
-    const crateDir = sites['changed-files filter'];
+    const crateDir = sites['Cargo.toml guard'];
     expect(
       existsSync(join(root, crateDir, 'src-tauri', 'Cargo.toml')),
-      `${crateDir}/src-tauri/Cargo.toml does not exist, so every gated step in desktop_shell skips and the job reports success having compiled nothing.`,
-    ).toBe(true);
-    // The filter is `grep -Eq '^(<alternative>|...)'` over the PR's changed
-    // file names, so the alternative is a bare path prefix and has to end in
-    // `/`: without it, `packages/desktop` also matches a sibling such as
-    // `packages/desktop-extra/`, and the job runs on heads that never touch
-    // the crate. Building a path out of `crateDir` -- this same alternative
-    // with the slash stripped -- and comparing it back proves nothing.
-    expect(
-      filterAlternative.endsWith('/'),
-      `the filter alternative ${filterAlternative} has no trailing slash, so the changed-files filter also matches sibling paths that merely start with it`,
+      `${crateDir}/src-tauri/Cargo.toml does not exist, so the release gate cannot test the desktop crate.`,
     ).toBe(true);
   });
 
-  it('lists both updater-feed scripts, so either one triggers the lane that tests them', () => {
-    // Read the alternatives out of the `grep -Eq '^(...)'` call instead of
-    // searching the whole run script. A substring match cannot tell an
-    // alternative of the anchored ERE from the same text in one of that step's
-    // comment lines, and it does not pin the `-E` mode the pattern's `\.`, `|`
-    // and `^(…)` depend on: under `grep -Fq` they are literals, the group
-    // never matches, every PR gets changed=false, and the job reports success
-    // having compiled nothing.
-    const pattern = /grep -Eq '\^\((.*)\)'/u.exec(filterRun)?.[1];
-    expect(
-      pattern,
-      "the changed-files filter is no longer an anchored `grep -Eq '^(...)'` alternation, so its `\\.` escapes and `|` separators are literals and no changed file ever matches",
-    ).toBeDefined();
-    const alternatives = pattern.split('|');
-    for (const script of [
-      'create-desktop-update-manifest',
-      'create-electron-bridge-manifest',
-    ]) {
-      expect(
-        alternatives,
-        `the changed-files filter does not list ${script}.mjs as an alternative, so a PR touching only that script skips 'Run desktop release tests' and reports green having tested nothing`,
-      ).toContain(`\\.github/scripts/${script}\\.mjs`);
-    }
+  it('runs daily or manually without registering PR desktop jobs', () => {
+    expect(ci.jobs.desktop_shell).toBeUndefined();
+    expect(desktop.jobs.desktop_shell).toBeUndefined();
+    expect(desktop.jobs.package.uses).toBe(
+      './.github/workflows/desktop-release.yml',
+    );
+    expect(desktop.jobs.package.with.dry_run).toBe(true);
+    expect(Object.keys(desktop.on).sort()).toEqual([
+      'schedule',
+      'workflow_dispatch',
+    ]);
+    expect(desktop.on.schedule).toEqual([{ cron: '0 16 * * *' }]);
+    expect(desktopJob.defaults.run.shell).toBe('bash');
+  });
 
-    // The filter is only the first link: the mechanism that closes #12806 is
-    // filter matches -> desktop_shell runs -> `Run desktop release tests`
-    // executes test-release.js -> the matrix/feed parity assert fires. Pin the
-    // last two links as well, or the filter can gate a lane that tests nothing.
-    // `toContain` on the changed-files conjunct, not equality on the whole
-    // `if:` -- that gate also carries `runner.os == 'Linux'`, which the
-    // windows-2022 leg of the job matrix legitimately does not satisfy.
+  it('gates publication on parallel checks of the same release commit', () => {
+    expect(desktopJob.needs).toBe('prepare');
+    expect(desktopJob.if).toBe(
+      "${{ needs.prepare.outputs.already_published != 'true' }}",
+    );
+    expect(desktopJob.strategy.matrix.os).toEqual([
+      'ubuntu-22.04',
+      'windows-2022',
+    ]);
+    expect(desktopJob['continue-on-error']).toBeUndefined();
+    // The shell lane runs in parallel with build; publish joins on both, so
+    // a failed shell check blocks publication without serializing ahead of
+    // the 120-minute build that runs the same tests on every matrix entry.
+    expect(release.jobs.build.needs).toBe('prepare');
+    expect(release.jobs.publish.needs).toEqual([
+      'prepare',
+      'desktop_shell',
+      'build',
+    ]);
+    for (const name of ['desktop_shell', 'build', 'publish']) {
+      const checkout = release.jobs[name].steps.find((step) =>
+        step.uses?.startsWith('actions/checkout@'),
+      );
+      expect(checkout.with.ref).toBe(
+        '${{ needs.prepare.outputs.qwen_code_sha }}',
+      );
+    }
+    expect(release.jobs.build.env.QWEN_CODE_COMMIT).toBe(
+      '${{ needs.prepare.outputs.qwen_code_sha }}',
+    );
+  });
+
+  it('runs release tests whenever the desktop crate is present', () => {
+    expect(filterRun).toMatch(/^changed=true$/mu);
     const lane = stepNamed('Run desktop release tests');
-    expect(
-      String(lane?.run ?? ''),
-      'desktop_shell no longer runs test-release.js, so the changed-files filter gates a lane that tests nothing',
-    ).toContain('node scripts/test-release.js');
-    expect(
-      String(lane?.if ?? ''),
-      'the test-release.js lane is no longer gated by the filter this test pins, so the two can drift apart silently',
-    ).toContain("steps.filter.outputs.changed == 'true'");
+    expect(lane.run).toBe('node scripts/test-release.js');
+    expect(lane.if).toBe(
+      "${{ steps.filter.outputs.changed == 'true' && runner.os == 'Linux' }}",
+    );
   });
 });

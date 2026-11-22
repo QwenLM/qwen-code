@@ -14,6 +14,32 @@
   stroke-width: 1.5;
 }
 
+.fullscreenPlaceholder {
+  margin: 8px 0;
+}
+
+.tableShell.fullscreenTable {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.fullscreenTable .toolbar {
+  flex-shrink: 0;
+  border-radius: 0;
+}
+
+.fullscreenTable .scroller {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  border-radius: 0;
+}
+
 .densityCompact {
   --table-row-height: 40px;
   --table-cell-padding: 7px 10px;
@@ -68,6 +94,14 @@
   display: none;
 }
 
+.summary,
+.selection {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .summary {
   color: var(--foreground);
   font-weight: 600;
@@ -83,17 +117,36 @@
 }
 
 .selectionStats {
+  display: contents;
+  color: var(--muted-foreground);
+}
+
+.selectionStatsSecondary {
   display: flex;
-  min-width: 0;
-  flex-wrap: nowrap;
   gap: 4px 10px;
   align-items: center;
   color: var(--muted-foreground);
+  min-width: 0;
+  align-self: stretch;
+  overflow: auto hidden;
+  scrollbar-width: thin;
+}
+
+.selectionStatsSecondary:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
 }
 
 .selectionMetric {
   flex: 0 0 auto;
   white-space: nowrap;
+}
+
+.selectionStats > .selectionMetric {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .selectionMetricValue {
@@ -116,36 +169,24 @@
   font-size: 12px;
 }
 
-.densityTrigger {
-  width: auto;
-  min-width: 0;
-  justify-content: flex-start;
+.toolbarMenuTrigger {
   gap: 4px;
-  padding-inline: 4px;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted-foreground);
-  font-size: 12px;
 }
 
-.densityTrigger[data-state='open'] {
-  border-color: transparent;
-  box-shadow: none;
-  outline: none;
-  --tw-ring-color: transparent;
-  --tw-ring-shadow: 0 0 #0000;
+.toolbarChevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
 }
 
-.densityTrigger svg,
-.densityMenu svg {
-  width: 14px;
-  height: 14px;
-  stroke-width: 1.5;
+.toolbarMenu {
+  width: auto;
+  min-width: 9rem;
 }
 
 .iconButton {
   display: inline-flex;
+  flex-shrink: 0;
   width: 28px;
   height: 28px;
   align-items: center;
@@ -181,6 +222,12 @@
 .scroller:focus-visible {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: -2px;
+}
+
+/* Pointer selection focuses the scroller for copy shortcuts but is not a
+   keyboard focus cue. */
+.scroller[data-pointer-focus]:focus-visible {
+  outline: none;
 }
 
 .frozenColumnShadow {
@@ -260,6 +307,7 @@
   align-items: center;
   min-width: 0;
   padding: var(--table-header-padding, 11px 14px);
+  gap: 2px;
 }
 
 .cell {
@@ -268,7 +316,7 @@
 
 .headerText {
   min-width: 0;
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -294,6 +342,17 @@
 .sortTrigger svg {
   width: 13px;
   height: 13px;
+}
+
+/* ArrowDownUp draws the descending arrow first, then the ascending one. */
+.sortTrigger[data-sort-direction='desc'] svg path:nth-child(-n + 2),
+.sortTrigger[data-sort-direction='asc'] svg path:nth-child(n + 3) {
+  stroke: var(--agent-blue-500);
+}
+
+.sortTrigger[data-sort-direction='desc'] svg path:nth-child(n + 3),
+.sortTrigger[data-sort-direction='asc'] svg path:nth-child(-n + 2) {
+  opacity: 0.35;
 }
 
 .filterTrigger:hover,
@@ -327,10 +386,6 @@
 
 .filterTriggerActive {
   background: color-mix(in srgb, var(--agent-blue-500) 18%, transparent);
-  color: var(--agent-blue-500);
-}
-
-.sortTriggerActive {
   color: var(--agent-blue-500);
 }
 
@@ -588,23 +643,41 @@ tr:hover .frozenCell.selectedCell {
 
 @supports (container-type: inline-size) {
   @container table-toolbar (max-width: 720px) {
-    .selectionMetricSecondary {
+    .selectionStatsSecondary {
       display: none;
     }
   }
 
-  @container table-toolbar (max-width: 500px) {
-    .compactToolbarLabel,
-    .selectionMetric:not(:first-child) {
+  @container table-toolbar (620px < width <= 1200px) {
+    .selectionStats
+      ~ .compactToolbarControl
+      :is(.compactToolbarLabel, .toolbarChevron) {
       display: none;
     }
 
-    .compactToolbarControl,
-    .densityTrigger {
+    .selectionStats ~ .compactToolbarControl {
+      width: 28px;
+      padding-inline: 0;
+    }
+  }
+
+  @container table-toolbar (max-width: 620px) {
+    .compactToolbarLabel,
+    .toolbarChevron {
+      display: none;
+    }
+
+    .compactToolbarControl {
       width: 28px;
       justify-content: center;
       gap: 0;
       padding-inline: 0;
+    }
+  }
+
+  @container table-toolbar (max-width: 550px) {
+    .selectionStats > .selectionMetric:not(:first-child) {
+      display: none;
     }
   }
 

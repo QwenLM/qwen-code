@@ -36,6 +36,7 @@ import {
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { dayKey, hourOfDay, parseDayKey, todayKey } from '../dates.js';
 
 const logger = createDebugLogger('DataProcessor');
@@ -1121,7 +1122,7 @@ None captured`;
             // report different totals for the same transcript.
             if (
               record.type === 'tool_result' &&
-              record.subtype !== 'code_mode_tool_result' &&
+              !isInternalCodeModeToolResult(record) &&
               record.toolCallResult?.resultDisplay
             ) {
               const display = record.toolCallResult.resultDisplay;

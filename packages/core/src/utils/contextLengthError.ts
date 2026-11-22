@@ -9,6 +9,16 @@ export interface ContextLengthExceededInfo {
   message: string;
   actualTokens?: number;
   limitTokens?: number;
+  /**
+   * What `limitTokens` bounds. `'input'` when the matched wording names the
+   * prompt/input allowance (DashScope's input range, an input token-count
+   * maximum), `'total'` when it names the context window itself (`maximum
+   * context length`, llama.cpp's available context size). Unset when the
+   * wording does not say (a bare `N tokens > M`), so a consumer that needs a
+   * window can treat "unknown" as "not an input bound" and keep its previous
+   * behavior.
+   */
+  limitKind?: 'input' | 'total';
 }
 
 const MAX_COLLECT_DEPTH = 4;
@@ -27,9 +37,18 @@ const CONTEXT_LENGTH_PATTERNS = [
   /\bprompt\s+(?:is\s+)?too long\b/i,
   /\binput\s+(?:token\s+)?(?:count\s+|length\s+)?(?:is\s+)?too long\b/i,
   /\brange of input length should be\b/i,
+  // Hugging Face TGI: "Input validation error: `inputs` tokens +
+  // `max_new_tokens` must be <= 32768. Given: 40000 `inputs` tokens and 1000
+  // `max_new_tokens`" and "`inputs` must have less than 32768 tokens. Given:
+  // 40000".
+  /\binputs`?\s+tokens\s*\+\s*`?max_new_tokens`?\s+must be\s*<=/i,
+  /\binputs`?\s+must have less than\s+\d[\d,]*\s+tokens\b/i,
   /\btoo many tokens\b/i,
   /\btokens?\s*>\s*[\d,]+\s*(?:maximum|max|limit)\b/i,
   /\b(?:input|prompt|messages?|context)\b[^\n]{0,120}\btokens?\b[^\n]{0,120}\bexceed(?:s|ed|ing)?\b/i,
+  // llama.cpp: "request (279935 tokens) exceeds the available context size
+  // (262144 tokens), try increasing it" (#13415).
+  /\bexceeds the available context size\b/i,
 ];
 
 function parseInteger(value: string): number {
@@ -39,6 +58,7 @@ function parseInteger(value: string): number {
 function parseTokenCounts(text: string): {
   actualTokens?: number;
   limitTokens?: number;
+  limitKind?: 'input' | 'total';
 } {
   const greaterThanMatch = text.match(/(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)/i);
   if (greaterThanMatch) {
@@ -55,15 +75,18 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(openAiMatch[2]!),
       limitTokens: parseInteger(openAiMatch[1]!),
+      limitKind: 'total',
     };
   }
 
+  // SGLang states the window as "maximum context length of N tokens".
   const maxContextLimitMatch = text.match(
-    /maximum context length is\s*(\d[\d,]*)\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]*)\s*tokens?/i,
   );
   if (maxContextLimitMatch) {
     return {
       limitTokens: parseInteger(maxContextLimitMatch[1]!),
+      limitKind: 'total',
     };
   }
 
@@ -74,18 +97,63 @@ function parseTokenCounts(text: string): {
     return {
       actualTokens: parseInteger(inputExceedsMatch[1]!),
       limitTokens: parseInteger(inputExceedsMatch[2]!),
+      limitKind: 'input',
     };
   }
 
   // DashScope: "Range of input length should be [1, 196608]" — the upper
   // bound is the server's REAL input ceiling (observed to differ from the
-  // configured context window), so parse it out for the retry paths.
+  // configured context window), so parse it out for the retry paths. It
+  // bounds the prompt, not the window: `prompt + max_tokens` may exceed it.
   const rangeMatch = text.match(
     /range of input length should be\s*\[\s*\d[\d,]*\s*,\s*(\d[\d,]*)\s*\]/i,
   );
   if (rangeMatch) {
     return {
       limitTokens: parseInteger(rangeMatch[1]!),
+      limitKind: 'input',
+    };
+  }
+
+  // TGI bounds `inputs + max_new_tokens` by `max_total_tokens`, the server's
+  // real window, and the prompt alone by `max_input_tokens`. Either way the
+  // `inputs` count is the prompt size compaction should start from.
+  const tgiTotalMatch = text.match(
+    /must be\s*<=\s*(\d[\d,]{0,31})\.?\s*Given:\s*(\d[\d,]{0,31})\s*`?inputs`?\s+tokens/i,
+  );
+  if (tgiTotalMatch) {
+    return {
+      actualTokens: parseInteger(tgiTotalMatch[2]!),
+      limitTokens: parseInteger(tgiTotalMatch[1]!),
+      limitKind: 'total',
+    };
+  }
+  const tgiInputMatch = text.match(
+    /must have less than\s+(\d[\d,]{0,31})\s+tokens\.?\s*Given:\s*(\d[\d,]{0,31})/i,
+  );
+  if (tgiInputMatch) {
+    return {
+      actualTokens: parseInteger(tgiInputMatch[2]!),
+      limitTokens: parseInteger(tgiInputMatch[1]!),
+      limitKind: 'input',
+    };
+  }
+
+  // llama.cpp: "request (279935 tokens) exceeds the available context size
+  // (262144 tokens), try increasing it" — the SECOND number is the server's
+  // real ceiling (its `-c` / model `n_ctx`), which routinely differs from the
+  // window we inferred from the model id. The reactive-compaction anchor
+  // consumes `actualTokens`; a `limitKind` of `'total'` makes `limitTokens`
+  // eligible as `observedServerCeiling` for reactive compaction sizing
+  // (#13432).
+  const llamaCppMatch = text.match(
+    /\(\s*(\d[\d,]*)\s*tokens?\s*\)\s*exceeds the available context size\s*\(\s*(\d[\d,]*)\s*tokens?\s*\)/i,
+  );
+  if (llamaCppMatch) {
+    return {
+      actualTokens: parseInteger(llamaCppMatch[1]!),
+      limitTokens: parseInteger(llamaCppMatch[2]!),
+      limitKind: 'total',
     };
   }
 
@@ -221,11 +289,7 @@ export function getContextLengthExceededInfo(
   // sibling field was reported as not-an-overflow and never reached the
   // compaction path. A fragment counts as evidence only if it names a
   // context-length failure and is not itself a timeout message.
-  const isExceeded = fragments.some(
-    (fragment) =>
-      CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
-      !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment)),
-  );
+  const isExceeded = fragments.some(isOverflowText);
   const counts = isExceeded ? parseTokenCounts(message) : {};
 
   return {
@@ -233,6 +297,35 @@ export function getContextLengthExceededInfo(
     message,
     ...counts,
   };
+}
+
+/** A fragment that names a context-length failure and is not a timeout. */
+function isOverflowText(fragment: string): boolean {
+  return (
+    CONTEXT_LENGTH_PATTERNS.some((pattern) => pattern.test(fragment)) &&
+    !TIMEOUT_PATTERNS.some((pattern) => pattern.test(fragment))
+  );
+}
+
+/**
+ * The context windows the error's rejections state: one per fragment that is
+ * itself a context-length rejection, when its wording names the window. A
+ * request may only be made smaller by these. An earlier attempt's rejection
+ * carried in another field still names a window the same server stated, so
+ * the caller takes the smallest. Two kinds of figure are left out: an untyped
+ * "N tokens > M" (rate-limit and quota text share the shape), and an input
+ * bound, which lets `prompt + max_tokens` exceed it, so sizing a window by it
+ * floors the summary budget (#13876).
+ */
+export function statedContextWindows(error: unknown): number[] {
+  return uniqueNonEmpty(collectStrings(error, new Set<object>()))
+    .filter(isOverflowText)
+    .map(parseTokenCounts)
+    .flatMap((counts) =>
+      counts.limitKind === 'total' && counts.limitTokens !== undefined
+        ? [counts.limitTokens]
+        : [],
+    );
 }
 
 export function isContextLengthExceededError(error: unknown): boolean {

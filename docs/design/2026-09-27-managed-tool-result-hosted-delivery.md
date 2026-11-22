@@ -233,8 +233,8 @@ Submit the slices as staged commits in one Draft PR. O2a does not open Shell. Re
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `packages/core/src/managed-runtime/`           | Remote segment/resource adapters, shared admission validation, HTTP Session commit/reader; local O1b/O1c and generic resource callers remain supported             |
 | `packages/cli/src/serve/`                      | Worker publisher injection, grant binding, v3 pending result and Hosted owner integration; default no-tool and file-only profiles remain unchanged                 |
-| `packages/sdk-java/managed-agent-server/`      | Store/controller/catalog/OSS adapter, migrations and Workspace transport; existing inline Session transactions/recovery remain compatible                          |
-| `packages/sdk-java/runtime-broker/`            | Transport interface and deferred dispatch carry original v3 binding and ACK; ordinary v2 dispatch remains unchanged                                                |
+| `packages/managed-agent-server/`               | Store/controller/catalog/OSS adapter, migrations and Workspace transport; existing inline Session transactions/recovery remain compatible                          |
+| `packages/managed-agent-server/`               | Transport interface and deferred dispatch carry original v3 binding and ACK; ordinary v2 dispatch remains unchanged                                                |
 | `packages/core/src/managed-runtime/contracts/` | New private publication/binding fixtures plus existing O1a conformance fixtures; TS/Java must agree on call-ID mapping, closed shapes, limits and error precedence |
 
 No WebShell change belongs in these slices. This is cross-package core feature work; apply the repository's maintainer awareness/review gate. The design does not authorize merging or bypassing that gate.

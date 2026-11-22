@@ -17,6 +17,7 @@ import type {
   PermissionDecision,
 } from '../permissions/types.js';
 import { runForkedAgent } from '../agents/forkedAgent.js';
+import { terminateReasonMessage } from '../agents/runtime/terminate-reason.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -254,18 +255,25 @@ export function createSkillScopedAgentConfig(
         : 'default';
       return mergePermissionDecision(scopedDecision, baseDecision);
     },
-    async isToolEnabled(toolName: string): Promise<boolean> {
+    async isToolEnabled(
+      toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
+    ): Promise<boolean> {
       if (isScopedTool(toolName)) return true;
-      if (basePm) return basePm.isToolEnabled(toolName);
+      if (basePm)
+        return basePm.isToolEnabled(toolName, toolAliases, mcpIdentity);
       return true;
     },
     async getToolRegistrationStatus(
       toolName: string,
+      toolAliases?: readonly string[],
+      mcpIdentity?: { serverName: string; serverToolName: string },
     ): Promise<ToolRegistrationStatus> {
       if (isScopedTool(toolName)) return 'registered';
       if (basePm) {
         return typeof basePm.getToolRegistrationStatus === 'function'
-          ? basePm.getToolRegistrationStatus(toolName)
+          ? basePm.getToolRegistrationStatus(toolName, toolAliases, mcpIdentity)
           : Promise.resolve('registered' as ToolRegistrationStatus);
       }
       return 'registered';
@@ -466,9 +474,13 @@ export async function runSkillReviewByAgent(params: {
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: this planner passes no abortSignal, so
+    // runForkedAgent cannot resolve 'cancelled' here.
     throw new Error(
-      result.terminateReason ||
+      terminateReasonMessage(
+        result.terminateReason,
         'Skill review agent did not complete successfully',
+      ),
     );
   }
 

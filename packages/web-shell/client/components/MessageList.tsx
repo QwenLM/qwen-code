@@ -18,8 +18,14 @@ import {
   type MutableRefObject,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { useVirtualizer } from '@tanstack/react-virtual';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import {
+  measureElement as measureVirtualElement,
+  useVirtualizer,
+} from '@tanstack/react-virtual';
+import type {
+  DaemonContextMemoryDetail,
+  DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import type {
   ToolGroupMessage as DaemonToolGroupMessage,
   ThinkingMessage as DaemonThinkingMessage,
@@ -50,6 +56,8 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { isAutomaticTriggerSource } from '../utils/automatic-trigger';
+import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -59,8 +67,13 @@ import {
   shouldOfferAssistantFeedback,
 } from '../utils/assistantFeedback';
 import { MessageItem } from './MessageItem';
+import { Checkbox } from './ui/checkbox';
+import { streamingTailUpdatePosition } from './streaming-tail';
+import type { MessageDeletionControls } from '../hooks/useMessageDeletion';
 import { summaryRunFirstMemberId, summaryRunId } from './summaryRunId';
 import type { SessionContentGenerator } from './messages/AssistantMessage';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
+import { collectHookStatisticsTurns } from './messages/hook-statistics-turns';
 import { MessageTimestamp } from './MessageTimestamp';
 import {
   TurnOutputs,
@@ -98,12 +111,19 @@ const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 const UNMATCHED_AGENT_COMPLETION_GRACE_MS = 5_000;
 
 export interface MessageListProps {
+  deletion?: MessageDeletionControls;
   messages: Message[];
   frozenViewport?: boolean;
+  hookStatisticsSessionId?: string;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -127,10 +147,8 @@ export interface MessageListProps {
   onLoadOlderHistory?: (options?: { force?: boolean }) => Promise<void>;
   /**
    * Identity of the session whose transcript `messages` show. Block ids are
-   * per-session ordinals, so changing it resets every session-scoped UI state
-   * (collapse overrides, pagination keep-open, pending page snapshots, the
-   * scroll anchor, the settled-stale-message latch) — a direct session switch
-   * never renders empty messages.
+   * per-session ordinals, so changing it resets the reading pause, collapse
+   * overrides, pagination keep-open, pending page snapshots and scroll anchor.
    */
   sessionKey?: string;
   transcriptBlockCount?: number;
@@ -204,44 +222,6 @@ export interface MessageListProps {
   onToolResultOpen?: (itemId: string) => void;
   onError?: (error: unknown, fallback: string) => void;
   generateContent?: SessionContentGenerator;
-}
-
-function isStreamingTailContentOnlyUpdate(
-  previous: readonly Message[] | undefined,
-  current: readonly Message[],
-): boolean {
-  if (!previous || previous.length !== current.length || current.length === 0) {
-    return false;
-  }
-  for (let i = 0; i < current.length - 1; i += 1) {
-    if (previous[i] !== current[i]) return false;
-  }
-  const before = previous[previous.length - 1];
-  const after = current[current.length - 1];
-  if (
-    before.id !== after.id ||
-    before.role !== after.role ||
-    (after.role !== 'assistant' && after.role !== 'thinking') ||
-    (before.role !== 'assistant' && before.role !== 'thinking') ||
-    before.isStreaming !== true ||
-    after.isStreaming !== true
-  ) {
-    return false;
-  }
-  if (before.role === 'assistant' && after.role === 'assistant') {
-    if (
-      typeof before.content !== 'string' ||
-      typeof after.content !== 'string'
-    ) {
-      return false;
-    }
-    return (
-      before.branchRecordId === after.branchRecordId &&
-      before.usage === after.usage &&
-      Boolean(before.content.trim()) === Boolean(after.content.trim())
-    );
-  }
-  return before.role === 'thinking' && after.role === 'thinking';
 }
 
 function sameIdentities(
@@ -447,17 +427,17 @@ function mergeCompactToolGroups(
     // Each thought remembers the tool that follows it. Consecutive agents may
     // later render as one row anchored at the first agent; launch narration
     // bound to later agents follows that aggregate row.
-    const thoughts: Array<{
-      content: string;
-      isStreaming?: boolean;
-      beforeToolCallId?: string;
-    }> = [];
+    const thoughts: NonNullable<DaemonToolGroupMessage['thoughts']> = [];
     const thoughtsAwaitingTool: Array<(typeof thoughts)[number]> = [];
     for (const item of run) {
       if (item.role === 'thinking') {
         const thought = {
+          id: item.id,
           content: item.content,
           ...(item.isStreaming === true ? { isStreaming: true } : {}),
+          ...(item.parentToolCallId
+            ? { parentToolCallId: item.parentToolCallId }
+            : {}),
         };
         thoughts.push(thought);
         thoughtsAwaitingTool.push(thought);
@@ -488,8 +468,9 @@ function mergeCompactToolGroups(
 function updateCompactStreamingThinkingTail(
   messages: readonly Message[],
   tail: DaemonThinkingMessage,
+  tailPosition: number,
 ): Message[] | undefined {
-  const group = messages[messages.length - 1];
+  const group = messages.at(tailPosition);
   if (
     group?.role !== 'tool_group' ||
     summaryRunFirstMemberId(group.id) === undefined ||
@@ -507,7 +488,7 @@ function updateCompactStreamingThinkingTail(
     isStreaming: true,
   };
   const result = messages.slice();
-  result[result.length - 1] = {
+  result[result.length + tailPosition] = {
     ...group,
     thoughts,
     ...(group.id === summaryRunId(tail.id)
@@ -735,12 +716,28 @@ export interface ApplyTurnCollapseOptions {
   enabled: boolean;
 }
 
+/**
+ * A workspace agent's reply in the session. It is never the session's own
+ * answer: its record can land inside a main-model turn (the user prompted
+ * while the agent ran), and taking it as that turn's final answer would fold
+ * the main reply on collapse and move the copy / feedback / branch footer
+ * onto the agent's reply.
+ */
+function isAgentReply(item: DisplayItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.message.role === 'assistant' &&
+    item.message.agentMessage?.kind === 'agent_message'
+  );
+}
+
 function isFinalContentCandidate(
   item: DisplayItem,
   includeBackgroundNotifications: boolean,
 ): boolean {
   return (
     item.type === 'message' &&
+    !isAgentReply(item) &&
     (item.message.role === 'assistant' ||
       (includeBackgroundNotifications &&
         item.message.role === 'system' &&
@@ -835,11 +832,53 @@ function collectFinalAssistantTurnIds(
   return turnIdByAssistantId;
 }
 
+// A passive completion can split one streamed answer into several rows.
+// Keep those segments, but stop at work or an automatic execution marker.
+function findAnswerStartIndex(
+  items: readonly DisplayItem[],
+  start: number,
+  answerIdx: number,
+): number {
+  let answerStartIdx = answerIdx;
+  if (answerIdx < 0 || !isFinalContentCandidate(items[answerIdx]!, false)) {
+    return answerStartIdx;
+  }
+  let crossedCompletion = false;
+  for (let i = answerIdx - 1; i > start; i--) {
+    const item = items[i]!;
+    if (item.type !== 'message') break;
+    if (item.message.role === 'system' && item.message.source === 'mod_log') {
+      continue;
+    }
+    if (
+      item.message.role === 'system' &&
+      item.message.source === 'background_task_completed'
+    ) {
+      crossedCompletion = true;
+    } else if (crossedCompletion && item.message.role === 'assistant') {
+      answerStartIdx = i;
+      crossedCompletion = false;
+    } else {
+      break;
+    }
+  }
+  return answerStartIdx;
+}
+
+function isTurnFromSession(data: unknown): boolean {
+  if (!data || typeof data !== 'object' || !('backgroundTask' in data)) {
+    return false;
+  }
+  const task = (data as { backgroundTask?: { fromSession?: unknown } })
+    .backgroundTask;
+  return !!task?.fromSession;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, mid-turn assistant text,
- * and non-final background notifications. The final content and any other
- * system/shell/insight rows (errors, cancellations, command output) are kept
- * visible even when the turn is collapsed.
+ * non-final background notifications, and background result markers. Final
+ * content and other system/shell/insight rows (errors, cancellations, command
+ * output) are kept visible even when the turn is collapsed.
  */
 function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
   if (item.type === 'parallel_agents') return true;
@@ -851,14 +890,26 @@ function isHideableStep(item: DisplayItem, isFinalAnswer: boolean): boolean {
     case 'plan':
       return true;
     case 'assistant':
-      return !isFinalAnswer;
+      // An agent's reply is its own message, kept like a user row.
+      return !isFinalAnswer && !isAgentReply(item);
     case 'thinking':
       return true;
     case 'system':
       if (item.message.source === 'background_notification') {
         return !isFinalAnswer;
       }
-      return item.message.source === 'vision_bridge_notice';
+      // A turn another session's reply started keeps its source in view.
+      if (
+        item.message.source === 'background_notification_turn_started' &&
+        isTurnFromSession(item.message.data)
+      ) {
+        return false;
+      }
+      return (
+        item.message.source === 'background_notification_turn_started' ||
+        item.message.source === 'background_task_completed' ||
+        item.message.source === 'vision_bridge_notice'
+      );
     case 'user':
     case 'user_shell':
     case 'btw':
@@ -1043,10 +1094,7 @@ function isScheduledTaskMessage(message: {
   role: Message['role'];
   source?: string;
 }): boolean {
-  return (
-    message.role === 'user' &&
-    (message.source === 'cron' || message.source === 'loop')
-  );
+  return message.role === 'user' && isAutomaticTriggerSource(message.source);
 }
 
 // Collapse and timeline turns start at chat prompts and shell prompts; new-chat
@@ -2063,27 +2111,39 @@ export function applyTurnCollapse(
     );
 
     const answerIdx = findFinalAnswerIndex(items, start, end);
-    let answerStartIdx = answerIdx;
-    // A passive completion can split one streamed answer into several rows.
-    // Keep those segments, but stop at work or an automatic execution marker.
-    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
-      let crossedCompletion = false;
-      for (let i = answerIdx - 1; i > start; i--) {
-        const item = items[i]!;
-        if (item.type !== 'message') break;
-        if (
-          item.message.role === 'system' &&
-          item.message.source === 'background_task_completed'
-        ) {
-          crossedCompletion = true;
-        } else if (crossedCompletion && item.message.role === 'assistant') {
-          answerStartIdx = i;
-          crossedCompletion = false;
-        } else {
-          break;
-        }
+    const answerStartIdx = findAnswerStartIndex(items, start, answerIdx);
+    const exchangeAnswers: Array<[number, number]> = [];
+    const keepExchangeAnswer = (from: number, to: number) => {
+      const idx = findFinalAnswerIndex(items, from, to);
+      if (idx >= 0) {
+        exchangeAnswers.push([findAnswerStartIndex(items, from, idx), idx]);
       }
+    };
+    let promptAnswerEnd: number | undefined;
+    let exchangeStart = start;
+    let exchangeFromSession = false;
+    for (let i = start + 1; i <= end; i++) {
+      const item = items[i]!;
+      if (
+        item.type !== 'message' ||
+        item.message.role !== 'system' ||
+        item.message.source !== 'background_notification_turn_started'
+      ) {
+        continue;
+      }
+      const nextFromSession = isTurnFromSession(item.message.data);
+      if (exchangeStart === start) promptAnswerEnd = i - 1;
+      if (nextFromSession && promptAnswerEnd !== undefined) {
+        keepExchangeAnswer(start, promptAnswerEnd);
+        promptAnswerEnd = undefined;
+      }
+      if (exchangeFromSession) keepExchangeAnswer(exchangeStart, i - 1);
+      exchangeStart = i;
+      exchangeFromSession = nextFromSession;
     }
+    const isAnswerAt = (i: number) =>
+      (i >= answerStartIdx && i <= answerIdx) ||
+      exchangeAnswers.some(([from, to]) => i >= from && i <= to);
     let hiddenCount = 0;
     let terminalTs: number | undefined;
     let cancelledElapsedMs: number | undefined;
@@ -2098,10 +2158,7 @@ export function applyTurnCollapse(
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
-      const isStep = isHideableStep(
-        item,
-        i >= answerStartIdx && i <= answerIdx,
-      );
+      const isStep = isHideableStep(item, isAnswerAt(i));
       if (isStep) {
         hiddenCount++;
       }
@@ -2280,8 +2337,7 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
-        result.push(item);
+      if (!isHideableStep(item, isAnswerAt(i))) result.push(item);
     }
   }
 
@@ -2410,14 +2466,6 @@ export function shouldAdjustVirtualScrollPosition(
   return itemEnd <= scrollOffset;
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds - minutes * 60;
-  return `${minutes}m ${seconds}s`;
-}
-
 type Translate = (
   key: string,
   vars?: Record<string, string | number>,
@@ -2425,7 +2473,7 @@ type Translate = (
 
 function durationMetricText(elapsedMs: number | undefined): string {
   return elapsedMs !== undefined && elapsedMs >= 0
-    ? formatDuration(elapsedMs)
+    ? formatTurnDuration(elapsedMs)
     : '';
 }
 
@@ -2474,6 +2522,14 @@ interface TurnCollapseRowProps {
   onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
+function hasTurnMetadataRow(turn: TurnCollapseHead): boolean {
+  return (
+    turn.hiddenCount > 0 ||
+    turn.liveStartedAt !== undefined ||
+    hasNonDurationMetrics(turn)
+  );
+}
+
 const TurnCollapseRow = memo(function TurnCollapseRow({
   turnCollapse,
   onToggleCollapse,
@@ -2481,10 +2537,7 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   const { t } = useI18n();
   const hasToggle = turnCollapse.hiddenCount > 0;
   const liveStartedAt = turnCollapse.liveStartedAt;
-  const showMetadataRow =
-    hasToggle ||
-    liveStartedAt !== undefined ||
-    hasNonDurationMetrics(turnCollapse);
+  const showMetadataRow = hasTurnMetadataRow(turnCollapse);
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
@@ -2686,7 +2739,8 @@ const SessionTimeline = memo(function SessionTimeline({
       return {
         entry,
         top: rect.top + rect.height / 2,
-        left: rect.right + 8,
+        // Anchor to the 28px hovered tick, not the full-width button.
+        left: rect.left + 28 + 8,
         clamped: false,
         themeVars: Object.fromEntries(
           SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
@@ -3008,11 +3062,14 @@ export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
+      deletion,
       frozenViewport = false,
+      hookStatisticsSessionId,
       sessionKey,
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
+      onOpenMemoryFile,
       onImagePreview,
       onAttachmentPreview,
       onInsightReportOpen,
@@ -3077,7 +3134,7 @@ export const MessageList = memo(
       let lastId: string | undefined;
       let turnIndex = 0;
       for (const message of messages) {
-        if (message.role !== 'user') continue;
+        if (message.role !== 'user' || message.agentMessage?.sentTo) continue;
         turnIndexById.set(message.id, turnIndex);
         lastId = message.id;
         turnIndex += 1;
@@ -3095,7 +3152,7 @@ export const MessageList = memo(
     // identity. An abandoned render cannot advance it, so its cache writes are
     // rejected by the next committed render.
     const previousMessagesRef = useRef<Message[] | undefined>(undefined);
-    const streamingTailContentOnly = isStreamingTailContentOnlyUpdate(
+    const streamingTailPosition = streamingTailUpdatePosition(
       previousMessagesRef.current,
       messages,
     );
@@ -3128,23 +3185,27 @@ export const MessageList = memo(
     );
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
-      const tail = messages[messages.length - 1];
       let value: Message[] | undefined;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
         cached.pendingApproval === pendingApproval
       ) {
+        const tail = messages.at(streamingTailPosition);
         if (
           tail?.role === 'assistant' &&
-          cached.value[cached.value.length - 1]?.id === tail.id
+          cached.value.at(streamingTailPosition)?.id === tail.id
         ) {
           value = cached.value.slice();
-          value[value.length - 1] = tail;
+          value[value.length + streamingTailPosition] = tail;
         } else if (tail?.role === 'thinking') {
           value = compactMode
-            ? updateCompactStreamingThinkingTail(cached.value, tail)
+            ? updateCompactStreamingThinkingTail(
+                cached.value,
+                tail,
+                streamingTailPosition,
+              )
             : splitStandaloneToolGroups(messages);
         }
       }
@@ -3265,7 +3326,7 @@ export const MessageList = memo(
       messages,
       pendingApproval,
       sessionKey,
-      streamingTailContentOnly,
+      streamingTailPosition,
     ]);
     useLayoutEffect(() => {
       const pending = pendingSettledMessagesRef.current;
@@ -3294,10 +3355,9 @@ export const MessageList = memo(
     >(undefined);
     const displayItems = useMemo(() => {
       const cached = displayItemsCache.current;
-      const tail = mergedMessages[mergedMessages.length - 1];
       let value: DisplayItem[] | undefined;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
@@ -3307,13 +3367,15 @@ export const MessageList = memo(
         cached.turnArtifacts === turnArtifacts &&
         cached.turnScheduledTasks === turnScheduledTasks
       ) {
-        const previousTail = cached.value[cached.value.length - 1];
+        const tail = mergedMessages.at(streamingTailPosition);
+        const previousTail = cached.value.at(streamingTailPosition);
         if (
+          tail &&
           previousTail?.type === 'message' &&
           previousTail.message.id === tail.id
         ) {
           value = cached.value.slice();
-          value[value.length - 1] = {
+          value[value.length + streamingTailPosition] = {
             ...previousTail,
             message: tail,
           };
@@ -3340,7 +3402,7 @@ export const MessageList = memo(
     }, [
       mergedMessages,
       messages,
-      streamingTailContentOnly,
+      streamingTailPosition,
       compactMode,
       pendingApproval,
       isResponding,
@@ -3662,7 +3724,7 @@ export const MessageList = memo(
       const cached = finalAssistantTurnIdsCache.current;
       let value: ReadonlyMap<string, string>;
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.isResponding === isResponding &&
@@ -3688,11 +3750,18 @@ export const MessageList = memo(
     }, [
       displayItems,
       messages,
-      streamingTailContentOnly,
+      streamingTailPosition,
       gateBackgroundAgentStatus,
       isResponding,
       latestTurnAwaitsAgentSummary,
     ]);
+    const latestFinalAssistantTurnId = useMemo(() => {
+      let latest: string | undefined;
+      for (const turnId of finalAssistantTurnIdByAssistantId.values()) {
+        latest = turnId;
+      }
+      return latest;
+    }, [finalAssistantTurnIdByAssistantId]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -3701,8 +3770,12 @@ export const MessageList = memo(
     // (collapsed once complete). `displayItems` stays the full, pre-collapse
     // list — used only to locate rows hidden inside a collapsed turn — while
     // `visibleItems` is what actually renders.
-    const { collapseCompletedTurns, sourceReferences, assistantFeedback } =
-      useWebShellCustomization();
+    const {
+      collapseCompletedTurns,
+      sourceReferences,
+      assistantFeedback,
+      overscan = 15,
+    } = useWebShellCustomization();
     // `sourceSessionId` is the transcript's own session, which is what a mark
     // belongs to.
     const {
@@ -3720,6 +3793,17 @@ export const MessageList = memo(
       }
       return heads;
     }, [messages]);
+    const hookTurns = useMemo<ReadonlyMap<string, HookStatisticsTurn>>(() => {
+      const sessionId = hookStatisticsSessionId ?? sourceSessionId;
+      return sessionId && transcriptRenderMode !== 'document'
+        ? collectHookStatisticsTurns(messages, sessionId)
+        : new Map();
+    }, [
+      messages,
+      hookStatisticsSessionId,
+      sourceSessionId,
+      transcriptRenderMode,
+    ]);
     const assistantFeedbackEnabled = shouldOfferAssistantFeedback({
       renderMode: transcriptRenderMode,
       sessionId: sourceSessionId,
@@ -3767,7 +3851,7 @@ export const MessageList = memo(
         sourceReferences,
       ] as const;
       const cached = sourcesByTurnCache.current;
-      return streamingTailContentOnly &&
+      return streamingTailPosition &&
         isResponding &&
         cached &&
         cached.sourceMessages === previousMessagesRef.current &&
@@ -3786,7 +3870,7 @@ export const MessageList = memo(
       workspaceCwd,
       sourceSessionId,
       sourceReferences,
-      streamingTailContentOnly,
+      streamingTailPosition,
       isResponding,
     ]);
     useLayoutEffect(() => {
@@ -3915,23 +3999,47 @@ export const MessageList = memo(
       setSuppressOlderHistoryLoadingStatus,
     ] = useState(false);
 
-    // A direct session switch never renders empty messages (the provider
-    // batches the store reset and the replay into one notification), so the
-    // /clear reset never runs for it. Block ids are per-session ordinals, so
-    // every session-scoped state must drop when the displayed session
-    // changes: stale keep-open and snapshot entries would collide with the
-    // new session's reused ids, and an old anchor would restore the previous
-    // session's scroll metrics into the new transcript.
+    // Shared subset of the per-session reset performed by the render-phase
+    // session switch below and the /clear effect; each caller keeps its
+    // remaining resets at the call site.
+    const resetSessionScopedViewState = useCallback(() => {
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        pendingFollowRecheckFrame.current = undefined;
+      }
+      pendingFollowRecheck.current = false;
+      if (turnLayoutAnimationTimer.current !== undefined) {
+        window.clearTimeout(turnLayoutAnimationTimer.current);
+        turnLayoutAnimationTimer.current = undefined;
+      }
+      turnLayoutTransitionStarted.current = false;
+      turnLayoutRowTops.current.clear();
+      for (const animation of turnLayoutAnimations.current) {
+        animation.cancel();
+      }
+      turnLayoutAnimations.current = [];
+      followPausedByUserRef.current = false;
+      pendingPaginationTurnCompares.current.clear();
+      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
+      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
+    }, []);
+
+    // Shipped routes either remount this list on a session change or, on the
+    // managed route, render an empty transcript first so the /clear leg below
+    // also resets; two other render sites pass no `sessionKey` at all. The
+    // reset below is the component contract for any consumer that keeps one
+    // instance mounted across a `sessionKey` change: block ids are
+    // per-session ordinals, so stale keep-open and snapshot entries would
+    // collide with the new session's reused ids, and an old anchor would
+    // restore the previous session's scroll metrics into the new transcript.
     const [trackedSessionKey, setTrackedSessionKey] = useState(sessionKey);
     if (trackedSessionKey !== sessionKey) {
       setTrackedSessionKey(sessionKey);
-      pendingPaginationTurnCompares.current.clear();
+      resetSessionScopedViewState();
       olderHistoryLoadGeneration.current += 1;
       olderHistoryLoadInFlight.current = false;
       olderHistoryRetryBlocked.current = false;
       setOlderHistoryAnchor(null);
-      setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-      setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
     }
 
     useEffect(() => {
@@ -4005,14 +4113,15 @@ export const MessageList = memo(
         paginatedExpandedTurns,
       ] as const;
       const cached = visibleItemsCache.current;
-      const currentTail = displayItems[displayItems.length - 1];
+      const currentTail = displayItems.at(streamingTailPosition ?? -1);
       if (
-        streamingTailContentOnly &&
+        streamingTailPosition &&
         isResponding &&
         cached &&
         cached.sourceMessages === previousMessagesRef.current &&
         sameIdentities(cached.dependencies, dependencies) &&
-        currentTail?.type === 'message'
+        currentTail?.type === 'message' &&
+        currentTail.message === mergedMessages.at(streamingTailPosition)
       ) {
         const key = getDisplayItemVirtualKey(currentTail);
         let index = -1;
@@ -4131,7 +4240,7 @@ export const MessageList = memo(
       return value;
     }, [
       displayItems,
-      streamingTailContentOnly,
+      streamingTailPosition,
       collapseOverrides,
       isResponding,
       activeTurnStartedAt,
@@ -4213,8 +4322,8 @@ export const MessageList = memo(
     //   5. Session restore / reconnect — during history replay
     //      (`catchingUp === true`), all auto-scrolling is suppressed to
     //      avoid fighting the rapidly replaying transcript. Once replay
-    //      finishes (`catchingUp` flips to falsy), a single scroll-to-
-    //      bottom fires so the user lands at the latest content.
+    //      finishes (`catchingUp` flips to falsy), scroll to the bottom
+    //      unless the user paused follow to read earlier content.
     //
     //   6. Short content — if the content doesn't overflow the container
     //      (no scrollbar), scrollToBottom is a no-op. This avoids a
@@ -4634,7 +4743,25 @@ export const MessageList = memo(
       getScrollElement,
       getItemKey,
       estimateSize: estimateItemSize,
-      overscan: 20,
+      measureElement: (element, entry, instance) => {
+        if (
+          entry ||
+          !shouldFollow.current ||
+          restoringOlderHistoryRef.current ||
+          frozenViewportRef.current ||
+          !element.ownerDocument.defaultView?.ResizeObserver
+        ) {
+          return measureVirtualElement(element, entry, instance);
+        }
+        // When following the tail, let the observer measure newly mounted
+        // rows after layout instead of reading each height during commit.
+        const index = instance.indexFromElement(element);
+        return (
+          instance.itemSizeCache.get(getItemKey(index)) ??
+          estimateItemSize(index)
+        );
+      },
+      overscan,
       anchorTo: 'end',
       useFlushSync: false,
       useAnimationFrameWithResizeObserver: true,
@@ -5566,20 +5693,18 @@ export const MessageList = memo(
     // against the next session.
     useEffect(() => {
       if (messages.length === 0) {
-        followPausedByUserRef.current = false;
+        // Without this a stale pre-clear snapshot survives into the next
+        // session and can mislabel a complete turn as keep-open (block ids
+        // are per-session ordinals), and an old follow recheck or turn-layout
+        // timer reads the next transcript's geometry as a user reading pause.
+        resetSessionScopedViewState();
         pendingBottomFollowAfterCooldown.current = false;
         setShouldFollow(true);
         pendingScrollRef.current = null;
-        // Drop the in-flight pagination snapshots too: without this a stale
-        // pre-clear snapshot survives into the next session and can mislabel
-        // a complete turn as keep-open (block ids are per-session ordinals).
-        pendingPaginationTurnCompares.current.clear();
         settledStaleMessagesRef.current = undefined;
         pendingSettledMessagesRef.current = undefined;
-        setCollapseOverrides((prev) => (prev.size ? new Map() : prev));
-        setPaginatedExpandedTurns((prev) => (prev.size ? new Set() : prev));
       }
-    }, [messages.length, setShouldFollow]);
+    }, [messages.length, resetSessionScopedViewState, setShouldFollow]);
 
     // Container-resize guard: when floating panels (e.g. TodoPanel)
     // appear or disappear the scroll container's clientHeight changes.
@@ -5639,11 +5764,13 @@ export const MessageList = memo(
     }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
-    // replay just finished. Scroll to bottom once so the user sees the
-    // latest content without the viewport fighting the replay.
+    // replay just finished. Preserve a reading pause across reconnects.
     useLayoutEffect(() => {
-      if (prevCatchingUp.current && !catchingUp) {
-        followPausedByUserRef.current = false;
+      if (
+        prevCatchingUp.current &&
+        !catchingUp &&
+        !followPausedByUserRef.current
+      ) {
         setShouldFollow(true);
         scrollToBottom('auto');
       }
@@ -5870,8 +5997,13 @@ export const MessageList = memo(
           // only stamps the prompt's; both carry the same value.
           const feedbackPromptId =
             displayItem.message.promptId ?? feedbackHead?.promptId;
+          // An agent's reply gets a copy button only: no feedback marks (they
+          // rate the session's own answer) and no branching from it.
+          const agentReply =
+            displayItem.message.role === 'assistant' &&
+            displayItem.message.agentMessage?.kind === 'agent_message';
           const branchRecordId =
-            displayItem.message.role === 'assistant'
+            displayItem.message.role === 'assistant' && !agentReply
               ? displayItem.message.branchRecordId
               : undefined;
           const editableUserContent =
@@ -5898,6 +6030,7 @@ export const MessageList = memo(
           return (
             <MessageItem
               message={displayItem.message}
+              hookTurn={hookTurns.get(displayItem.message.id)}
               onLocateBackgroundSource={
                 displayItem.message.role === 'system' &&
                 displayItem.message.source ===
@@ -5911,8 +6044,22 @@ export const MessageList = memo(
                   ? scrollToMessage
                   : undefined
               }
+              onDeleteMessage={
+                deletion &&
+                (deletion.active || !deletion.disabled) &&
+                deletion.canDelete(displayItem.message) &&
+                (displayItem.message.role === 'user' ||
+                  displayItem.message.localCommandId) &&
+                (displayItem.message.promptId ||
+                  displayItem.message.sourceRecordIds?.length ||
+                  displayItem.message.localCommandId)
+                  ? () => deletion.start(displayItem.message)
+                  : undefined
+              }
+              deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onOpenMemoryFile={onOpenMemoryFile}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
@@ -5948,21 +6095,32 @@ export const MessageList = memo(
               branchRecordId={branchRecordId}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                finalAssistantTurnIdByAssistantId.has(displayItem.message.id)
+                (agentReply ||
+                  finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
+              }
+              assistantFooterAlwaysVisible={
+                !isResponding &&
+                finalAssistantTurnId !== undefined &&
+                finalAssistantTurnId === latestFinalAssistantTurnId
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
+                !agentReply &&
                 !isResponding &&
                 branchRecordId !== undefined
               }
               assistantFeedbackTurnId={
-                assistantFeedbackEnabled ? finalAssistantTurnId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? finalAssistantTurnId
+                  : undefined
               }
               assistantFeedbackPromptId={
-                assistantFeedbackEnabled ? feedbackPromptId : undefined
+                assistantFeedbackEnabled && !agentReply
+                  ? feedbackPromptId
+                  : undefined
               }
               assistantFeedbackRating={
-                assistantFeedbackEnabled && feedbackPromptId
+                assistantFeedbackEnabled && !agentReply && feedbackPromptId
                   ? assistantFeedbackRatings[feedbackPromptId]
                   : undefined
               }
@@ -6012,12 +6170,14 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onOpenMemoryFile,
         displayItems,
         scrollToMessage,
         onImagePreview,
         onAttachmentPreview,
         onInsightReportOpen,
         onEditUserMessage,
+        deletion,
         onSubmitUserMessageEdit,
         editableUserTurn,
         hasOlderHistory,
@@ -6027,8 +6187,10 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
+        hookTurns,
         assistantFeedbackRatings,
         handleAssistantFeedbackRate,
         frozenViewport,
@@ -6106,50 +6268,78 @@ export const MessageList = memo(
       scheduleScrollOverflowReport();
     }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
+    const selectionByItem = useMemo(() => {
+      const selections = new Map<DisplayItem, string | undefined>();
+      if (!deletion?.active) return selections;
+      const groupOf = (item: DisplayItem) => {
+        const messageId =
+          item.type === 'message'
+            ? item.message.id
+            : item.type === 'turn_collapse'
+              ? item.turnCollapse.turnId
+              : item.turnId;
+        return (
+          deletion.groupByMessage.get(messageId) ??
+          deletion.groupByMessage.get(
+            summaryRunFirstMemberId(messageId) ?? messageId,
+          )
+        );
+      };
+      const replyGroups = new Set<string>();
+      for (const item of visibleItems) {
+        if (
+          item.type === 'turn_collapse' &&
+          hasTurnMetadataRow(item.turnCollapse)
+        ) {
+          const group = groupOf(item);
+          const key = group ?? item.turnCollapse.turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      let turnId = 'unowned';
+      for (const item of visibleItems) {
+        if (item.type === 'turn_collapse' || item.type === 'turn_outputs')
+          continue;
+        const group = groupOf(item);
+        if (item.type === 'message' && isTurnStartMessage(item.message)) {
+          turnId = item.message.id;
+          selections.set(item, group);
+        } else {
+          const key = group ?? turnId;
+          if (!replyGroups.has(key)) {
+            selections.set(item, group);
+            replyGroups.add(key);
+          }
+        }
+      }
+      return selections;
+    }, [deletion, visibleItems]);
+
+    const renderSelection = (item: DisplayItem | undefined) => {
+      if (!deletion?.active || !item || !selectionByItem.has(item)) return null;
+      const groupId = selectionByItem.get(item);
+      return (
+        <Checkbox
+          className={styles.deletionCheckbox}
+          aria-label={t('messageDelete.selectGroup')}
+          title={!groupId ? t('messageDelete.unavailable') : undefined}
+          checked={groupId ? deletion.selected.has(groupId) : false}
+          disabled={
+            !groupId || deletion.disabled || !deletion.allowed.has(groupId)
+          }
+          onCheckedChange={() => {
+            if (groupId) deletion.toggle(groupId);
+          }}
+        />
+      );
+    };
+
     return (
       <McpAppSessionContext.Provider value={mcpAppSessionId}>
-        <div
-          ref={containerRef}
-          className={joinClassNames(
-            styles.list,
-            hasHeader && centerWelcomeHeader
-              ? styles.listWithWelcomeHeader
-              : undefined,
-          )}
-          data-web-shell-message-list
-          onClickCapture={handleDisclosureClickCapture}
-        >
-          {showLoadingSkeleton && (
-            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-          )}
-          {loadingOlderHistory &&
-            !showLoadingSkeleton &&
-            !suppressOlderHistoryLoadingStatus && (
-              <div className={styles.historyStatus} role="status">
-                {t('history.loadingEarlier')}
-              </div>
-            )}
-          {historyCapacityReached && !showLoadingSkeleton && (
-            <div className={styles.historyStatus} role="status">
-              {t('history.capacityReached')}
-            </div>
-          )}
-          {historyPaginationError &&
-            !showLoadingSkeleton &&
-            !historyCapacityReached && (
-              <div className={styles.historyStatus}>
-                <span role="status">{t('history.paginationError')}</span>
-                {onLoadOlderHistory && (
-                  <button
-                    type="button"
-                    className={styles.historyRetryButton}
-                    onClick={retryOlderHistory}
-                  >
-                    {t('history.retry')}
-                  </button>
-                )}
-              </div>
-            )}
+        <div className={styles.listFrame}>
           <SessionTimeline
             action={timelineAction}
             entries={sessionTimelineEntries}
@@ -6160,57 +6350,108 @@ export const MessageList = memo(
             }
             onSelect={scrollToMessage}
           />
-          {useVirtualScroll ? (
-            <div ref={virtualizer.containerRef} className={styles.virtualSizer}>
-              {virtualItems.map((virtualRow) => (
-                <div
-                  key={virtualRow.key}
-                  data-index={virtualRow.index}
-                  ref={measureVirtualRow}
-                  className={joinClassNames(
-                    styles.virtualRow,
-                    getRowClassName(
+          <div
+            ref={containerRef}
+            className={joinClassNames(
+              styles.list,
+              deletion?.active ? styles.deletionMode : undefined,
+              hasHeader && centerWelcomeHeader
+                ? styles.listWithWelcomeHeader
+                : undefined,
+            )}
+            data-web-shell-message-list
+            onClickCapture={handleDisclosureClickCapture}
+          >
+            {showLoadingSkeleton && (
+              <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+            )}
+            {loadingOlderHistory &&
+              !showLoadingSkeleton &&
+              !suppressOlderHistoryLoadingStatus && (
+                <div className={styles.historyStatus} role="status">
+                  {t('history.loadingEarlier')}
+                </div>
+              )}
+            {historyCapacityReached && !showLoadingSkeleton && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.capacityReached')}
+              </div>
+            )}
+            {historyPaginationError &&
+              !showLoadingSkeleton &&
+              !historyCapacityReached && (
+                <div className={styles.historyStatus}>
+                  <span role="status">{t('history.paginationError')}</span>
+                  {onLoadOlderHistory && (
+                    <button
+                      type="button"
+                      className={styles.historyRetryButton}
+                      onClick={retryOlderHistory}
+                    >
+                      {t('history.retry')}
+                    </button>
+                  )}
+                </div>
+              )}
+            {useVirtualScroll ? (
+              <div
+                ref={virtualizer.containerRef}
+                className={styles.virtualSizer}
+              >
+                {virtualItems.map((virtualRow) => (
+                  <div
+                    key={virtualRow.key}
+                    data-index={virtualRow.index}
+                    ref={measureVirtualRow}
+                    className={joinClassNames(
+                      styles.virtualRow,
+                      getRowClassName(
+                        visibleItems[virtualRow.index - headerOffset],
+                      ),
+                    )}
+                    data-message-row-key={String(getItemKey(virtualRow.index))}
+                    data-source-block-ids={displayItemSourceBlockIds(
                       visibleItems[virtualRow.index - headerOffset],
-                    ),
-                  )}
-                  data-message-row-key={String(getItemKey(virtualRow.index))}
-                  data-source-block-ids={displayItemSourceBlockIds(
-                    visibleItems[virtualRow.index - headerOffset],
-                    messages,
-                  )}
-                  data-web-shell-message-row
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                  }}
-                >
-                  {renderVirtualItem(virtualRow.index)}
-                </div>
-              ))}
-            </div>
-          ) : (
-            Array.from({ length: totalCount }, (_, index) => {
-              const key = getItemKey(index);
-              const item = visibleItems[index - headerOffset];
-              return (
-                <div
-                  key={key}
-                  data-index={index}
-                  className={getRowClassName(item)}
-                  data-message-row-key={String(key)}
-                  data-source-block-ids={displayItemSourceBlockIds(
-                    item,
-                    messages,
-                  )}
-                  data-web-shell-message-row
-                >
-                  {renderVirtualItem(index)}
-                </div>
-              );
-            })
-          )}
+                      messages,
+                    )}
+                    data-web-shell-message-row
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                    }}
+                  >
+                    {renderSelection(
+                      visibleItems[virtualRow.index - headerOffset],
+                    )}
+                    {renderVirtualItem(virtualRow.index)}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              Array.from({ length: totalCount }, (_, index) => {
+                const key = getItemKey(index);
+                const item = visibleItems[index - headerOffset];
+                return (
+                  <div
+                    key={key}
+                    data-index={index}
+                    className={getRowClassName(item)}
+                    data-message-row-key={String(key)}
+                    data-source-block-ids={displayItemSourceBlockIds(
+                      item,
+                      messages,
+                    )}
+                    data-web-shell-message-row
+                  >
+                    {renderSelection(item)}
+                    {renderVirtualItem(index)}
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </McpAppSessionContext.Provider>
     );

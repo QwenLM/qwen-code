@@ -36,6 +36,737 @@ import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+const TEST_KEYBOARD_TOP = 437.5;
+
+async function installTestSoftwareKeyboard(page: Page): Promise<void> {
+  await page.addInitScript((keyboardTop) => {
+    let open = false;
+    const listeners = new Map<string, Set<EventListener>>();
+    const emit = (type: string) => {
+      for (const listener of listeners.get(type) ?? []) {
+        listener(new Event(type));
+      }
+    };
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: {
+        get height() {
+          return open ? keyboardTop : window.innerHeight;
+        },
+        get width() {
+          return window.innerWidth;
+        },
+        get offsetTop() {
+          return 0;
+        },
+        get offsetLeft() {
+          return 0;
+        },
+        get pageTop() {
+          return 0;
+        },
+        get pageLeft() {
+          return 0;
+        },
+        get scale() {
+          return 1;
+        },
+        addEventListener(type: string, listener: EventListener) {
+          const entries = listeners.get(type) ?? new Set<EventListener>();
+          entries.add(listener);
+          listeners.set(type, entries);
+        },
+        removeEventListener(type: string, listener: EventListener) {
+          listeners.get(type)?.delete(listener);
+        },
+      },
+    });
+
+    const setKeyboard = (nextOpen: boolean) => {
+      if (open === nextOpen) return;
+      open = nextOpen;
+      document.querySelector('[data-test-software-keyboard]')?.remove();
+      if (open) {
+        // Opaque band standing in for the software keyboard. Its `top` is the
+        // visible-viewport bottom edge and it intercepts every pointer that
+        // still lands under it (#17859), so a composer that has not been
+        // lifted onto the inset is genuinely unreachable in these tests.
+        const keyboard = document.createElement('div');
+        keyboard.dataset.testSoftwareKeyboard = '';
+        Object.assign(keyboard.style, {
+          position: 'fixed',
+          top: `${keyboardTop}px`,
+          right: '0',
+          bottom: '0',
+          left: '0',
+          zIndex: '10000',
+          background: '#25272a',
+          pointerEvents: 'auto',
+        });
+        document.body.append(keyboard);
+      }
+      emit('resize');
+    };
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboard: (visible: boolean) => void;
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboard = setKeyboard;
+    // Same state change without the `visualViewport` resize. A shell that only
+    // hears window resize must still recompute, and this is the only way to
+    // tell that listener apart from the viewport one.
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboardSilently = (nextOpen: boolean) => {
+      if (open === nextOpen) return;
+      open = nextOpen;
+      document.querySelector('[data-test-software-keyboard]')?.remove();
+    };
+    document.addEventListener(
+      'focusout',
+      (event) => {
+        if (
+          event.target instanceof HTMLTextAreaElement &&
+          event.target.matches('[data-web-shell-composer-editor]')
+        ) {
+          setKeyboard(false);
+        }
+      },
+      true,
+    );
+  }, TEST_KEYBOARD_TOP);
+}
+
+async function setTestSoftwareKeyboard(
+  page: Page,
+  visible: boolean,
+): Promise<void> {
+  await page.evaluate((nextVisible) => {
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboard: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboard(nextVisible);
+  }, visible);
+}
+
+async function expectUncoveredStableSend(
+  page: Page,
+  testInfo: TestInfo,
+  label: string,
+) {
+  const send = page.locator('[data-web-shell-composer-submit]');
+  const box = await send.boundingBox();
+  expect(box).not.toBeNull();
+  const screenshotPath = testInfo.outputPath(`${label}-before-tap.png`);
+  await page.screenshot({ path: screenshotPath });
+  await testInfo.attach(`${label}-before-tap`, {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  expect(box!.y + box!.height).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  const center = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  expect(
+    await page.evaluate(({ x, y }) => {
+      const hit = document.elementFromPoint(x, y);
+      const target = document.querySelector('[data-web-shell-composer-submit]');
+      return hit instanceof Node && target?.contains(hit);
+    }, center),
+  ).toBe(true);
+  await page.touchscreen.tap(center.x, center.y);
+}
+
+async function measureWelcomeLayout(page: Page) {
+  return page.getByTestId('chat-pane-container').evaluate((pane) => {
+    const measure = (selector: string) => {
+      const element = pane.querySelector(selector);
+      return element ? element.getBoundingClientRect() : null;
+    };
+    const paneRect = pane.getBoundingClientRect();
+    const header = measure('[data-e2e-mobile-welcome-header]');
+    const welcomeFooter = measure('[data-e2e-mobile-welcome-footer]');
+    const composer = measure('[data-web-shell-composer-surface]');
+    const send = measure('[data-web-shell-composer-submit]');
+    if (!header || !welcomeFooter || !composer || !send) {
+      throw new Error('Expected the mobile welcome chrome to render.');
+    }
+    return {
+      paneTop: paneRect.top,
+      paneBottom: paneRect.bottom,
+      headerTop: header.top,
+      headerBottom: header.bottom,
+      welcomeFooterTop: welcomeFooter.top,
+      composerTop: composer.top,
+      composerBottom: composer.bottom,
+      sendBottom: send.bottom,
+    };
+  });
+}
+
+test('simple mobile composer grows and submits Chinese multiline input @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer-variant="simple"]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const content = composer.locator('[data-web-shell-composer-content]');
+  const send = composer.locator('[data-web-shell-composer-submit]');
+  await expect(textarea).toBeVisible();
+  await expect(composer.locator('.cm-editor')).toHaveCount(0);
+  await expect(send).toBeVisible();
+  await expect(send).toBeDisabled();
+  await expect(
+    composer.getByRole('button', {
+      name: 'Start voice dictation',
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  const restingHeight = (await content.boundingBox())!.height;
+  expect(restingHeight).toBeLessThanOrEqual(72);
+  await textarea.fill('第一行');
+  await textarea.press('Enter');
+  await page.keyboard.insertText('第二行');
+  await expect(textarea).toHaveValue('第一行\n第二行');
+  expect(daemon.promptRequests()).toHaveLength(0);
+  await expect
+    .poll(async () => (await content.boundingBox())!.height)
+    .toBeGreaterThan(restingHeight);
+  await send.tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    '第一行\n第二行',
+  );
+  await expect(textarea).toHaveValue('');
+});
+
+test('simple mobile add drawer keeps advanced controls in advanced mode @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push(
+    'workspace_file_upload',
+    'workspace_qualified_rest_core',
+  );
+  scenario.capabilities.workspaces = [
+    { id: 'primary', cwd: scenario.workspaceCwd, primary: true, trusted: true },
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  await expect(composer.locator('[data-web-shell-model-button]')).toHaveCount(
+    0,
+  );
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('[data-web-shell-model-button]')).toHaveCount(0);
+  await expect(drawer.locator('[data-web-shell-mode-button]')).toHaveCount(0);
+  expect(
+    await drawer.getByRole('button').evaluateAll((buttons) =>
+      buttons
+        .filter((button) => button.textContent?.trim())
+        .map(
+          (button) =>
+            button.getAttribute('aria-label') ?? button.textContent?.trim(),
+        )
+        .filter(Boolean),
+    ),
+  ).toEqual([
+    'Photos',
+    'Take photo',
+    'Attach files',
+    'Upload to workspace',
+    'Reference file',
+    'Extensions',
+    'MCP',
+    'Skills',
+  ]);
+  await expect(
+    drawer
+      .getByTestId('composer-add-menu-reference-file')
+      .getByText('Reference file', { exact: true }),
+  ).toBeVisible();
+  await drawer.getByRole('button', { name: /^close$/i }).tap();
+  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  const model = composer.locator('[data-web-shell-model-button]');
+  await expect(model).toBeVisible();
+  await expect(composer.locator('[data-web-shell-mode-button]')).toBeVisible();
+  await model.tap();
+  const picker = page.locator('[data-web-shell-model-sheet]');
+  await expect(picker).toBeVisible();
+  await expect
+    .poll(() =>
+      picker.evaluate((element) => element.contains(document.activeElement)),
+    )
+    .toBe(true);
+  await expect(picker.locator('input[type="search"]')).not.toBeFocused();
+  const modelLabel = picker
+    .locator('[data-model-id] [class*="dropdownItemLabel"]')
+    .first();
+  await expect(modelLabel).toHaveCSS('white-space', 'normal');
+  const labelWidth = await modelLabel.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }));
+  expect(labelWidth.scroll).toBeLessThanOrEqual(labelWidth.client + 1);
+  await picker
+    .getByRole('button', { name: 'Qwen Test Alt', exact: true })
+    .tap();
+  await expect.poll(() => daemon.modelRequests().length).toBe(1);
+  await expect(picker).toBeVisible();
+  await picker.getByRole('button', { name: 'Done', exact: true }).tap();
+  await expect(picker).toBeHidden();
+  await expect(model).toBeFocused();
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  await expect(drawer).toBeVisible();
+  const rows = drawer.locator('[data-vaul-no-drag] button');
+  const layout = await rows.evaluateAll((buttons) =>
+    buttons.map((button) => ({
+      minHeight: getComputedStyle(button).minHeight,
+      hasIcon: Boolean(
+        button.querySelector(':scope > span[aria-hidden="true"]'),
+      ),
+    })),
+  );
+  expect(layout.length).toBeGreaterThan(8);
+  expect(layout.every((row) => row.minHeight === '52px' && row.hasIcon)).toBe(
+    true,
+  );
+});
+
+test('keeps the unavailable-model authorize action reachable inside the mobile sheet @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const params = new URLSearchParams({
+    sessionId: scenario.sessionId,
+    theme: 'dark',
+    sidebar: 'false',
+    unavailableModels: '1',
+    unavailableMount: '1',
+  });
+  await page.goto(`/e2e/settings-harness.html?${params}`);
+  await completeReplay(page, daemon, scenario.sessionId);
+  await page.locator('[data-web-shell-model-button]').tap();
+  const sheet = page.locator('[data-web-shell-model-sheet]');
+  await expect(sheet).toBeVisible();
+  const modelSection = sheet.locator('[data-web-shell-model-submenu-trigger]');
+  if (await modelSection.count()) await modelSection.tap();
+  const disabled = sheet.locator(
+    '[data-web-shell-unavailable-model][data-model-id="qwen-max"]',
+  );
+  await expect(disabled).toBeVisible();
+  await expect(disabled).toBeInViewport({ ratio: 1 });
+  await disabled.tap({ force: true });
+  const hint = page.locator('[data-web-shell-unavailable-model-tooltip]');
+  const authorize = hint.getByRole('button', { name: 'Authorize' });
+  await expect(authorize).toBeVisible();
+  await hint.evaluate(async (element) => {
+    await Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    );
+  });
+  const box = (await authorize.boundingBox())!;
+  const viewport = page.viewportSize()!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.y).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(viewport.width);
+  expect(box.y + box.height).toBeLessThanOrEqual(viewport.height);
+  await page.screenshot({
+    path: testInfo.outputPath('unavailable-authorize-mobile.png'),
+  });
+  await authorize.evaluate((button) => {
+    button.addEventListener('click', () => {
+      document.documentElement.dataset.authorizeClicked = 'true';
+    });
+  });
+  await authorize.tap();
+  await expect(page.locator('html')).toHaveAttribute(
+    'data-authorize-clicked',
+    'true',
+  );
+  await expect(sheet).toBeVisible();
+});
+
+test('model sheet rows and search field stay touch-sized, including on a tablet @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push('workspace_model_reload');
+  scenario.state.configOptions = [
+    {
+      id: 'reasoning_effort',
+      name: 'Reasoning effort',
+      type: 'select',
+      currentValue: 'high',
+      options: [
+        { value: 'none', name: 'Thinking off' },
+        { value: 'low', name: 'Low' },
+        { value: 'high', name: 'High' },
+      ],
+      _meta: { 'qwenCode/reasoning': { defaultEffort: 'high' } },
+    },
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-model-button]').tap();
+  const sheet = page.locator('[data-web-shell-model-sheet]');
+  await expect(sheet).toBeVisible();
+
+  const heightsOf = (locator: ReturnType<typeof page.locator>) =>
+    locator.evaluateAll((nodes) =>
+      nodes.map((node) => node.getBoundingClientRect().height),
+    );
+
+  const effortRows = sheet.locator('[data-web-shell-effort]');
+  await expect(effortRows.first()).toBeVisible();
+  const effortHeights = await heightsOf(effortRows);
+  expect(effortHeights.length).toBeGreaterThan(0);
+  for (const height of effortHeights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  // The Thinking row is a plain div; the switch inside it is the control, so
+  // its own hit rect has to reach 44px. Tap 11px above the track — outside the
+  // primitive's 8px pad, inside the sheet's 13px one — and require a toggle.
+  // The drawer slides up from below the fold. Coordinate-based taps must wait
+  // for it to arrive, or they land on whatever scrolled past that point.
+  await expect
+    .poll(async () => {
+      const first = (await sheet.boundingBox())!.y;
+      await page.waitForTimeout(120);
+      return (await sheet.boundingBox())!.y === first;
+    })
+    .toBe(true);
+
+  const thinking = sheet.locator('[data-web-shell-thinking-toggle]');
+  await expect(thinking).toBeVisible();
+  // The reasoning controls arrive asynchronously and the switch is disabled
+  // until they do. Anchor on the fixture's settled value (high) rather than
+  // on whatever the switch happens to read mid-hydration.
+  await expect(sheet.locator('[data-web-shell-effort="high"]')).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect(thinking).toBeEnabled();
+  await expect(thinking).toHaveAttribute('data-state', 'checked');
+  const pad = await thinking.evaluate((node) =>
+    parseFloat(getComputedStyle(node, '::after').insetBlockStart),
+  );
+  const track = (await thinking.boundingBox())!;
+  // The hit rect, not the pad constant: a smaller switch track must not
+  // shrink the target below 44px while the pad still reads 13.
+  expect(track.height + 2 * Math.abs(pad)).toBeGreaterThanOrEqual(44);
+  const thinkingRow = sheet.locator('[data-web-shell-thinking-row]');
+  expect((await thinkingRow.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const hit = await page.evaluate(
+    ([x, y]) => {
+      const el = document.elementFromPoint(x as number, y as number);
+      return el?.closest('[data-web-shell-thinking-toggle]')
+        ? 'switch'
+        : (el?.outerHTML.slice(0, 160) ?? 'none');
+    },
+    [track.x + track.width / 2, track.y - 11],
+  );
+  expect(hit).toBe('switch');
+  await page.touchscreen.tap(track.x + track.width / 2, track.y - 11);
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  // The toggle's own payload, not an effort row's: turning Thinking off sends
+  // 'none'. An effort row would have sent 'low' or 'high'.
+  expect(daemon.configOptionRequests()[0]!.body).toEqual({
+    configId: 'reasoning_effort',
+    value: 'none',
+    persist: true,
+  });
+
+  const done = sheet.locator('[data-web-shell-model-sheet-done]');
+  await expect(done).toBeVisible();
+  const doneBox = (await done.boundingBox())!;
+  expect(doneBox.height).toBeGreaterThanOrEqual(44);
+
+  const section = sheet.locator('[data-web-shell-model-submenu-trigger]');
+  // The section row carries its own taller floor; the row rule must not
+  // shrink it.
+  expect((await section.boundingBox())!.height).toBeGreaterThanOrEqual(48);
+  await section.tap();
+  const rows = sheet.locator('[data-model-id]');
+  await expect(rows.first()).toBeVisible();
+  const rowHeights = await heightsOf(rows);
+  expect(rowHeights.length).toBeGreaterThan(0);
+  for (const height of rowHeights) {
+    expect(height).toBeGreaterThanOrEqual(44);
+  }
+
+  const search = sheet.locator('input[type="search"]');
+  await expect(search).toBeVisible();
+  // Measured at the phone width too: a later 'md:h-11' would keep the tablet
+  // assertion green while putting the phone back at 32px.
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  const refresh = sheet.getByRole('button', {
+    name: 'Refresh models',
+    exact: true,
+  });
+  await expect(refresh).toBeVisible();
+  const refreshBox = (await refresh.boundingBox())!;
+  expect(refreshBox.width).toBeGreaterThanOrEqual(44);
+  expect(refreshBox.height).toBeGreaterThanOrEqual(44);
+
+  // A landscape tablet still matches the coarse-pointer half of the sheet
+  // query, but now also matches the Input's md: breakpoint.
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await expect(search).toBeVisible();
+  const fontSize = await search.evaluate((node) =>
+    parseFloat(getComputedStyle(node).fontSize),
+  );
+  expect(fontSize).toBeGreaterThanOrEqual(16);
+  expect((await search.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+});
+
+test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: () => new Promise(() => undefined),
+      },
+    });
+  });
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: ['voice_transcribe', 'workspace_voice'],
+    },
+    voice: { enabled: true },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const microphone = composer.getByRole('button', {
+    name: 'Start voice dictation',
+    exact: true,
+  });
+  const modeButton = composer.locator(
+    '[data-web-shell-composer-expand], [data-web-shell-composer-collapse]',
+  );
+  const send = composer.locator('[data-web-shell-composer-submit]');
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeHidden();
+  const modeBox = (await modeButton.boundingBox())!;
+  const micBox = (await microphone.boundingBox())!;
+  expect(modeBox.x + modeBox.width).toBeLessThanOrEqual(micBox.x);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAccessibleName('Start voice dictation');
+
+  await modeButton.tap();
+  await expect(modeButton).toHaveAccessibleName('Switch to simple mode');
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeVisible();
+  await expect(send).toBeDisabled();
+  const advancedModeBox = (await modeButton.boundingBox())!;
+  const advancedMicBox = (await microphone.boundingBox())!;
+  const advancedSendBox = (await send.boundingBox())!;
+  expect(advancedModeBox.x + advancedModeBox.width).toBeLessThanOrEqual(
+    advancedMicBox.x,
+  );
+  expect(advancedMicBox.x + advancedMicBox.width).toBeLessThanOrEqual(
+    advancedSendBox.x,
+  );
+  expect(
+    advancedSendBox.x - advancedMicBox.x - advancedMicBox.width,
+  ).toBeLessThanOrEqual(12);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await modeButton.tap();
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+
+  await textarea.fill('保留中文草稿和附件');
+  await expect(microphone).toBeHidden();
+  await expect(send).toBeVisible();
+  const typedModeBox = (await modeButton.boundingBox())!;
+  const sendBox = (await send.boundingBox())!;
+  expect(typedModeBox.x + typedModeBox.width).toBeLessThanOrEqual(sendBox.x);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await composer
+    .locator('input[type="file"]')
+    .last()
+    .setInputFiles({
+      name: 'retained-note.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('retained attachment'),
+    });
+  const attachments = composer.locator('[data-web-shell-composer-attachments]');
+  await expect(attachments).toBeVisible();
+  const textareaNode = (await textarea.elementHandle())!;
+  const attachmentText = await attachments.textContent();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+
+  await modeButton.tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await expect(
+    composer.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toBeVisible();
+  await expect(composer.locator('[data-web-shell-model-button]')).toBeVisible();
+  await expect(modeButton).toHaveAccessibleName('Switch to simple mode');
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeVisible();
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('[data-web-shell-expanded-editor]')).toHaveCount(0);
+  await expect(textarea).toHaveValue('保留中文草稿和附件');
+  expect(
+    await textareaNode.evaluate(
+      (node) =>
+        node ===
+        document.querySelector('textarea[data-web-shell-composer-editor]'),
+    ),
+  ).toBe(true);
+  expect(await attachments.textContent()).toBe(attachmentText);
+
+  await modeButton.tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+  await expect(
+    composer.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toHaveCount(0);
+  await expect(textarea).toHaveValue('保留中文草稿和附件');
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(
+    await textareaNode.evaluate(
+      (node) =>
+        node ===
+        document.querySelector('textarea[data-web-shell-composer-editor]'),
+    ),
+  ).toBe(true);
+  expect(await attachments.textContent()).toBe(attachmentText);
+
+  await composer
+    .getByRole('button', { name: 'Remove retained-note.txt', exact: true })
+    .tap();
+  await expect(attachments).toHaveCount(0);
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const submitted = JSON.stringify(firstRequestBody(daemon.promptRequests()));
+  expect(submitted).toContain('保留中文草稿和附件');
+  await expect(textarea).toHaveValue('');
+  await expect(attachments).toHaveCount(0);
+});
+
+test('switching to simple mode exits Shell before sending the retained draft @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const shellRequests: string[] = [];
+  await page.route(/\/shell\/?(?:\?|$)/, async (route) => {
+    shellRequests.push(route.request().url());
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        exitCode: 0,
+        output: 'Fixture only',
+        aborted: false,
+      }),
+    });
+  });
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const shellPrefix = textarea.locator('..').getByText('!', { exact: true });
+  await expect(textarea).toBeVisible();
+  const original = await textarea.elementHandle();
+  const placeholder = await textarea.getAttribute('placeholder');
+  const draft = '保留普通聊天草稿';
+  await textarea.fill(draft);
+  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await drawer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await expect(drawer).toBeHidden();
+  await expect(textarea).toHaveAttribute(
+    'placeholder',
+    'Enter terminal command',
+  );
+  await expect(shellPrefix).toBeVisible();
+  await composer.locator('[data-web-shell-composer-collapse]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+  await expect(textarea).toHaveValue(draft);
+  expect(
+    await textarea.evaluate((node, before) => node === before, original),
+  ).toBe(true);
+  expect.soft(await textarea.getAttribute('placeholder')).toBe(placeholder);
+  expect.soft(await shellPrefix.count()).toBe(0);
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect
+    .poll(() => daemon.promptRequests().length + shellRequests.length)
+    .toBe(1);
+  expect(shellRequests).toEqual([]);
+  expect(daemon.promptRequests()).toHaveLength(1);
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    draft,
+  );
+  await expect(textarea).toHaveValue('');
+});
 
 test('renders the textarea backend instead of CodeMirror on touch devices', async ({
   page,
@@ -64,10 +795,332 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   const layout = await emptyMobileComposerLayout(page);
   expectEmptyMobileComposerAnchored(layout);
 
+  // The bottom-anchored compact layout above is gated on the visual viewport
+  // actually being occluded. With no keyboard open the group must stay
+  // vertically centred, so this pins the `inset > 0` half of the toggle:
+  // forcing the attribute on would bottom-anchor a phone that has no keyboard.
+  const unoccluded = await page
+    .getByTestId('chat-pane-container')
+    .evaluate((chatPane) => {
+      const root = document.querySelector('[data-web-shell-root]');
+      const pane = chatPane.getBoundingClientRect();
+      const header = chatPane
+        .querySelector('[data-e2e-mobile-welcome-header]')!
+        .getBoundingClientRect();
+      const composer = chatPane
+        .querySelector('[data-web-shell-composer-surface]')!
+        .getBoundingClientRect();
+      return {
+        occluded: root?.hasAttribute('data-visual-viewport-occluded') ?? null,
+        inset: root
+          ? getComputedStyle(root).getPropertyValue(
+              '--web-shell-visual-viewport-inset-bottom',
+            )
+          : null,
+        paneTop: pane.top,
+        paneBottom: pane.bottom,
+        headerTop: header.top,
+        headerBottom: header.bottom,
+        composerTop: composer.top,
+        composerBottom: composer.bottom,
+        footerBottom:
+          chatPane
+            .querySelector('[data-e2e-mobile-welcome-footer]')
+            ?.getBoundingClientRect().bottom ?? null,
+      };
+    });
+  expect(unoccluded.occluded).toBe(false);
+  expect(unoccluded.inset).toBe('0px');
+  const paneCentre = (unoccluded.paneTop + unoccluded.paneBottom) / 2;
+  const groupCentre =
+    (unoccluded.headerTop +
+      (unoccluded.footerBottom ?? unoccluded.headerBottom)) /
+    2;
+  expect(Math.abs(groupCentre - paneCentre)).toBeLessThan(20);
+
   await textarea.tap();
   await textarea.fill('Composer remains interactive on touch devices');
   await expect(textarea).toHaveValue(
     'Composer remains interactive on touch devices',
+  );
+});
+
+test('recomputes the inset from a window resize the visual viewport never emits', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const inset = () =>
+    page.evaluate(() =>
+      getComputedStyle(
+        document.querySelector('[data-web-shell-root]') as HTMLElement,
+      )
+        .getPropertyValue('--web-shell-visual-viewport-inset-bottom')
+        .trim(),
+    );
+
+  await setTestSoftwareKeyboard(page, true);
+  await expect.poll(inset).not.toBe('0px');
+  const occludedInset = await inset();
+  expect(Number.parseFloat(occludedInset)).toBeGreaterThan(0);
+
+  // The keyboard state changes and the viewport stays silent; only the window
+  // resize below can deliver the new geometry to the shell.
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboardSilently(false);
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(inset).toBe('0px');
+});
+
+test('submits welcome and follow-up prompts on the first tap above a software keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await page.goto('/?language=en');
+  const installTapGeometry = () =>
+    page.evaluate(() => {
+      type TapEvent = {
+        type: string;
+        target: string;
+        active: string;
+        top: number | null;
+        viewportHeight: number;
+      };
+      const events: TapEvent[] = [];
+      (
+        window as typeof window & { __sendTapGeometry: TapEvent[] }
+      ).__sendTapGeometry = events;
+      for (const type of [
+        'pointerdown',
+        'mousedown',
+        'pointerup',
+        'mouseup',
+        'click',
+        'focusout',
+        'focusin',
+      ]) {
+        document.addEventListener(
+          type,
+          (event) => {
+            if (!(event.target instanceof Element)) return;
+            const send = event.target.closest(
+              '[data-web-shell-composer-submit]',
+            );
+            const editor = event.target.closest(
+              '[data-web-shell-composer-editor]',
+            );
+            if (!send && !editor) return;
+            const currentSend = document.querySelector(
+              '[data-web-shell-composer-submit]',
+            );
+            events.push({
+              type,
+              target: send ? 'send' : 'editor',
+              active: document.activeElement?.tagName ?? 'none',
+              top: currentSend?.getBoundingClientRect().top ?? null,
+              viewportHeight: window.visualViewport?.height ?? -1,
+            });
+          },
+          true,
+        );
+      }
+    });
+  const takeTapGeometry = () =>
+    page.evaluate(() => {
+      const state = window as typeof window & {
+        __sendTapGeometry: Array<{
+          type: string;
+          target: string;
+          active: string;
+          top: number | null;
+          viewportHeight: number;
+        }>;
+      };
+      return state.__sendTapGeometry.splice(0);
+    });
+
+  await installTapGeometry();
+  const welcome = page.locator(COMPOSER_TEXTAREA);
+  await welcome.tap();
+  await welcome.fill('hi');
+  await expect(welcome).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+  await expectUncoveredStableSend(page, testInfo, 'welcome');
+  const welcomeEvents = await takeTapGeometry();
+  await testInfo.attach('welcome-tap-events', {
+    body: JSON.stringify(welcomeEvents, null, 2),
+    contentType: 'application/json',
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain('hi');
+  const welcomeSendEvents = welcomeEvents.filter(
+    ({ target, type }) =>
+      target === 'send' && (type === 'pointerdown' || type === 'click'),
+  );
+  expect(welcomeSendEvents.map(({ type }) => type)).toEqual([
+    'pointerdown',
+    'click',
+  ]);
+  expect(welcomeSendEvents[0]?.top).toBe(welcomeSendEvents[1]?.top);
+
+  await expect(page).toHaveURL(new RegExp(`/session/${scenario.sessionId}`));
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect(
+    page.locator('[data-web-shell-composer-submit]'),
+  ).toHaveAttribute('aria-label', 'Stop');
+  await daemon.sendEvent(
+    assistantTextEvent('Done.', { id: 100, sessionId: scenario.sessionId }),
+  );
+  await daemon.sendEvent(
+    turnCompleteEvent('prompt-e2e', {
+      id: 101,
+      sessionId: scenario.sessionId,
+    }),
+  );
+  await expect(
+    page.locator('[data-web-shell-composer-submit]'),
+  ).toHaveAttribute('aria-label', 'Send message');
+  await installTapGeometry();
+  const followUp = page.locator(COMPOSER_TEXTAREA);
+  await expect(followUp).toBeVisible();
+  await followUp.tap();
+  await followUp.fill('follow up');
+  await setTestSoftwareKeyboard(page, true);
+  await expectUncoveredStableSend(page, testInfo, 'follow-up');
+  const followUpEvents = await takeTapGeometry();
+  await testInfo.attach('follow-up-tap-events', {
+    body: JSON.stringify(followUpEvents, null, 2),
+    contentType: 'application/json',
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(2);
+  expect(JSON.stringify(daemon.promptRequests()[1]?.body)).toContain(
+    'follow up',
+  );
+  const followUpSendEvents = followUpEvents.filter(
+    ({ target, type }) =>
+      target === 'send' && (type === 'pointerdown' || type === 'click'),
+  );
+  expect(followUpSendEvents.map(({ type }) => type)).toEqual([
+    'pointerdown',
+    'click',
+  ]);
+  expect(followUpSendEvents[0]?.top).toBe(followUpSendEvents[1]?.top);
+});
+
+test('keeps the custom-footer mobile welcome group inside the pane above a software keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.fill('custom footer welcome');
+  await expect(textarea).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+
+  const viewportHeight = page.viewportSize()!.height;
+  const expectedInset = `${viewportHeight - TEST_KEYBOARD_TOP}px`;
+  await expect
+    .poll(() =>
+      page
+        .locator('[data-web-shell-root]')
+        .evaluate((element) =>
+          getComputedStyle(element)
+            .getPropertyValue('--web-shell-visual-viewport-inset-bottom')
+            .trim(),
+        ),
+    )
+    .toBe(expectedInset);
+
+  const layout = await measureWelcomeLayout(page);
+
+  const screenshotPath = testInfo.outputPath(
+    'custom-footer-welcome-keyboard-open.png',
+  );
+  await page.screenshot({ path: screenshotPath });
+  await testInfo.attach('custom-footer-welcome-keyboard-open', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  await testInfo.attach('custom-footer-welcome-layout', {
+    body: JSON.stringify(layout, null, 2),
+    contentType: 'application/json',
+  });
+
+  // The inset is reserved by the pane padding, so the whole shrink-to-content
+  // welcome group must stay inside the pane instead of being displaced above
+  // its `overflow: hidden` box by the inset a second time.
+  expect(layout.headerTop).toBeGreaterThanOrEqual(layout.paneTop);
+  expect(layout.headerBottom).toBeLessThanOrEqual(layout.welcomeFooterTop);
+  expect(layout.welcomeFooterTop).toBeLessThanOrEqual(layout.composerTop);
+  expect(layout.composerBottom).toBeLessThanOrEqual(layout.paneBottom);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+
+  await expectUncoveredStableSend(page, testInfo, 'custom-footer-welcome');
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
+    'custom footer welcome',
+  );
+});
+
+test('keeps Send above the keyboard when the welcome footer outgrows the reduced pane @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  // Grow the host welcome footer until header + footer + composer no longer
+  // fit the inset-reduced pane. A centred group would then overflow both ways
+  // and leave Send under the keyboard; anchoring it to the bottom of the
+  // padded content box sends the overflow upward instead.
+  await page
+    .locator('[data-e2e-mobile-welcome-footer]:visible')
+    .evaluate((element) => {
+      (element as HTMLElement).style.minHeight = '360px';
+    });
+
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.fill('tall welcome footer');
+  await expect(textarea).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+
+  const layout = await measureWelcomeLayout(page);
+  await testInfo.attach('tall-welcome-footer-layout', {
+    body: JSON.stringify(layout, null, 2),
+    contentType: 'application/json',
+  });
+
+  // The group demonstrably overflowed the content box (its top starts above
+  // the pane), yet the composer stays on the reserved inset instead of
+  // following the overflow below the keyboard.
+  expect(layout.headerTop).toBeLessThan(layout.paneTop);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+
+  await expectUncoveredStableSend(page, testInfo, 'tall-welcome-footer');
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
+    'tall welcome footer',
   );
 });
 
@@ -140,14 +1193,17 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
     drawerWidth: element.parentElement?.getBoundingClientRect().width ?? 0,
     sidebarWidth: element.getBoundingClientRect().width,
   }));
-  expect(sidebarWidth).toBeCloseTo(drawerWidth * 0.7, 0);
+  expect(sidebarWidth).toBeCloseTo(
+    Math.min(Math.max(drawerWidth * 0.85, 220), 420),
+    0,
+  );
   expect(sidebarWidth).toBeLessThanOrEqual(drawerWidth);
 
   await page.screenshot({
     path: 'client/e2e/test-results/responsive-sidebar-drawer.png',
     fullPage: true,
   });
-  await page.getByRole('button', { name: 'Collapse' }).tap();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).tap();
   await expect(drawer).toBeHidden();
   await expect
     .poll(() =>
@@ -166,7 +1222,7 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
       sidebar.evaluate((element) => element.getBoundingClientRect().width),
     )
     .toBeCloseTo(420, 0);
-  await page.getByRole('button', { name: 'Collapse' }).click();
+  await page.getByRole('button', { name: 'Collapse', exact: true }).click();
   await expect(drawer).toBeHidden();
 
   await page.setViewportSize({ width: 1000, height: 915 });
@@ -313,58 +1369,33 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
 });
 
-test('history arrows recall the first welcome submission @smoke', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-  await page.goto('/');
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await textarea.fill('First input from mobile');
-  await page.locator('[data-web-shell-composer-submit]').tap();
-  await completeReplay(page, daemon, scenario.sessionId);
-  await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  await daemon.sendEvent(turnCompleteEvent('prompt-mobile', { id: 11 }));
-  await expect(textarea).toHaveValue('');
-
-  const draft = 'New draft 😀\nsecond line';
-  await textarea.fill(draft);
-  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
-  await expect(textarea).toHaveValue('First input from mobile');
-  await expect(textarea).toBeFocused();
-  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
-  await expect(textarea).toHaveValue(draft);
-  expect(daemon.promptRequests()).toHaveLength(1);
-});
-
 for (const width of [390, 240]) {
-  test(`history arrows restore the draft without submitting at ${width}px @smoke`, async ({
+  test(`editing row keeps 44px touch targets and fits the viewport at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
-    await page.addInitScript(() => {
-      localStorage.setItem(
-        'qwen-web-shell-history',
-        JSON.stringify(['first input', 'second input']),
-      );
-    });
     const scenario = createWebShellDaemonScenario();
     const daemon = await installScenario(page, scenario, testInfo);
     await gotoSession(page, scenario, daemon);
     const textarea = page.locator(COMPOSER_TEXTAREA);
-    const draft = '当前草稿 😀\nsecond line';
-    await textarea.fill(draft);
-    const previous = page.getByRole('button', {
-      name: 'Previous input',
-      exact: true,
-    });
-    const next = page.getByRole('button', { name: 'Next input', exact: true });
-    for (const button of [
-      previous,
-      next,
-      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    await textarea.fill('当前草稿 😀\nsecond line');
+    const buttons = page
+      .locator('[data-web-shell-mobile-editing-actions]')
+      .getByRole('button');
+    // Pin the controls this scenario must render before measuring them, so a
+    // dropped button fails the test instead of shrinking the iterated set.
+    // (Hide keyboard renders only while the textarea is focused; fill does
+    // focus it. The standalone dev host always opts into the Add entry, so
+    // the no-Add contextual buttons — Input history and the Shell toggle —
+    // never render here and this loop does not measure them.)
+    await expect(
       page.getByRole('button', { name: 'Expand editor', exact: true }),
-    ]) {
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    ).toHaveCount(1);
+    expect(await buttons.count()).toBeGreaterThan(0);
+    for (const button of await buttons.all()) {
       const bounds = await button.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.width).toBeGreaterThanOrEqual(44);
@@ -375,38 +1406,8 @@ for (const width of [390, 240]) {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBe(width);
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    await previous.tap();
-    await expect(textarea).toHaveValue('second input');
-    await expect(textarea).toBeFocused();
-    await previous.tap();
-    await expect(textarea).toHaveValue('first input');
-    await previous.tap();
-    await expect(textarea).toHaveValue('first input');
-    await next.tap();
-    await expect(textarea).toHaveValue('second input');
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    expect(daemon.promptRequests()).toHaveLength(0);
   });
 }
-
-test('history arrows leave the draft intact when history is empty', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-  await gotoSession(page, scenario, daemon);
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await textarea.fill('keep this draft');
-  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
-  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
-  await expect(textarea).toHaveValue('keep this draft');
-  expect(daemon.promptRequests()).toHaveLength(0);
-});
 
 test('mobile editing preserves draft, selection and keyboard dismissal @smoke', async ({
   page,
@@ -609,19 +1610,147 @@ test('mobile history search stays reachable above a soft keyboard @smoke', async
   expect(daemon.promptRequests()).toHaveLength(0);
 });
 
-test('mobile workspace row stays clear of the editing row @smoke', async ({
+test('mobile context icon is centered in a compact toolbar target @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    state: {
+      models: {
+        currentModelId: 'qwen-test',
+        availableModels: [
+          { modelId: 'qwen-test', name: 'Qwen Test', contextLimit: 100_000 },
+        ],
+      },
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await daemon.sendEvent({
+    id: 20,
+    v: 1,
+    type: 'session_update',
+    data: {
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { inputTokens: 1000 } },
+      },
+    },
+  });
+  const context = page.locator('[data-web-shell-context-usage]');
+  await expect(context).toBeVisible();
+  const button = (await context.boundingBox())!;
+  const icon = (await context.locator('svg').boundingBox())!;
+  expect(button.width).toBe(44);
+  expect(button.height).toBe(44);
+  expect(
+    Math.abs(icon.x + icon.width / 2 - button.x - button.width / 2),
+  ).toBeLessThanOrEqual(1);
+  const send = (await page
+    .locator('[data-web-shell-composer-submit]')
+    .boundingBox())!;
+  expect(send.x - button.x - button.width).toBeGreaterThanOrEqual(0);
+  expect(send.x - button.x - button.width).toBeLessThanOrEqual(4);
+  const add = (await page
+    .getByTestId('composer-add-menu-trigger')
+    .boundingBox())!;
+  const approval = (await page
+    .locator('[data-web-shell-mode-button]')
+    .boundingBox())!;
+  expect(approval.x - add.x - add.width).toBe(0);
+  await page.locator('[data-web-shell-composer]').screenshot({
+    path: testInfo.outputPath('mobile-toolbar-spacing.png'),
+  });
+  await page.setViewportSize({ width: 1200, height: 844 });
+  const percentage = context.locator('span[aria-hidden="true"]');
+  await expect
+    .poll(() =>
+      percentage.evaluate((element) => {
+        const label = element.getBoundingClientRect();
+        const target = element.closest('button')!.getBoundingClientRect();
+        return (
+          label.width > 0 &&
+          label.left >= target.left &&
+          label.right <= target.right
+        );
+      }),
+    )
+    .toBe(true);
+});
+
+test('mobile workspace controls share the editing row without overlapping @smoke', async ({
   page,
 }, testInfo) => {
   await installScenario(page, createGitWorkspaceScenario(), testInfo);
   await page.goto('/');
   const branch = page.locator('[data-web-shell-git-branch]');
   await expect(branch).toBeVisible({ timeout: 10_000 });
+  const chevron = branch.locator(':scope > svg');
+  await expect(chevron).toHaveCSS('width', '9px');
+  await expect(chevron).toHaveCSS('height', '9px');
+  await expect(
+    page
+      .getByRole('button', { name: 'Expand editor', exact: true })
+      .locator('svg'),
+  ).toHaveCSS('width', '18px');
   const branchBox = (await branch.boundingBox())!;
-  const previousBox = (await page
-    .getByRole('button', { name: 'Previous input' })
+  const actions = page.locator('[data-web-shell-mobile-editing-actions]');
+  await expect(actions.locator('[data-web-shell-git-branch]')).toBeVisible();
+  const expandBox = (await page
+    .getByRole('button', { name: 'Expand editor', exact: true })
     .boundingBox())!;
-  expect(previousBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
+  expect(branchBox.x + branchBox.width).toBeLessThanOrEqual(expandBox.x);
 });
+
+for (const width of [390, 240]) {
+  test(`mobile workspace and editing actions fit one row at ${width}px @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    const scenario = createGitWorkspaceScenario();
+    scenario.gitStatus = undefined;
+    scenario.capabilities.workspaces![0]!.cwd = `/tmp/${'long-workspace-name-'.repeat(6)}`;
+    scenario.capabilities.workspaces!.push({
+      id: 'secondary',
+      cwd: '/tmp/another-project',
+      primary: false,
+      trusted: true,
+    });
+    await installScenario(page, scenario, testInfo);
+    await page.goto('/');
+    const textarea = page.locator(COMPOSER_TEXTAREA);
+    await textarea.tap();
+    const composer = page.locator('[data-web-shell-composer]');
+    const workspace = composer.getByRole('button', {
+      name: 'Workspace',
+      exact: true,
+    });
+    const keyboard = composer.getByRole('button', {
+      name: 'Hide keyboard',
+      exact: true,
+    });
+    await expect(keyboard).toBeVisible();
+    const workspaceBox = (await workspace.boundingBox())!;
+    const keyboardBox = (await keyboard.boundingBox())!;
+    await expect(workspace.locator(':scope > svg')).toHaveCSS('width', '16px');
+    expect(Math.abs(workspaceBox.y - keyboardBox.y)).toBeLessThanOrEqual(1);
+    expect(workspaceBox.x + workspaceBox.width).toBeLessThanOrEqual(
+      keyboardBox.x,
+    );
+    const value = workspace.locator('[data-slot="select-value"]');
+    expect(
+      await value.evaluate(
+        (element) => element.scrollWidth > element.clientWidth,
+      ),
+    ).toBe(true);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBe(width);
+    await composer.screenshot({
+      path: testInfo.outputPath(`mobile-composer-${width}.png`),
+    });
+  });
+}
 
 // 412x450 is a Pixel 7 once the soft keyboard has resized the viewport. A
 // second workspace and a long branch wrap the workspace row onto two lines.

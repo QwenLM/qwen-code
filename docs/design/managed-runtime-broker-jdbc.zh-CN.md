@@ -75,7 +75,28 @@ Repository 契约覆盖：
 - 通过新 Repository 实例恢复最终结果；
 - Schema 可重复初始化。
 
-默认测试套件在 MySQL 兼容模式的 H2 上运行该契约。CI 还会通过 MySQL Connector/J 在 MariaDB 上运行 `mysql-integration` Maven profile，以便在真实 MySQL 兼容协议上覆盖 session time zone 处理和持久化租约往返读取。同一 profile 也可以在本地对调用方提供的 MySQL 数据库运行。
+默认测试套件在 MySQL 兼容模式的 H2 上运行该契约。CI 通过 MySQL Connector/J 在 MySQL 8.4 上运行完整的 `mysql-integration` Maven profile。同一 profile 也可以在本地对调用方提供的 MySQL 数据库运行。
+
+### 数据库验证范围
+
+MySQL 是受支持的数据库系列，也是完整集成 CI 的目标。MariaDB 最初作为租约时钟
+改动的真实数据库回归夹具引入，后来增加了独立的全量 CI 分支；现在不再作为持续兼容
+目标。历史 MariaDB 测量仍保留为当时运行的记录，留存的方言处理不构成兼容承诺。
+本次不修改生产 SQL、引擎准入、schema 或 catalog 迁移行为。
+
+数据库任务收敛为一个 MySQL 8.4 配置。两个 Maven 分叉仍各用独立临时实例，因为
+服务器级死锁计数器不能用数据库名隔离。继续关闭 native AIO 和二进制日志，每个实例
+保留大包预算。完整、无选择过滤的 Maven profile、非 Hosted 报告守卫、取消清理和
+full 档触发条件均保留。Hosted/故障恢复及 EventTransport 门控保留原任务及覆盖。
+
+MySQL 契约保留 UTC、+08:00、-04:00 时钟检查，并验证精确读数和整秒读数。
+共享 Repository 夹具使用非零 epoch 毫秒，约束 H2 和 MySQL 上 Binding/Session/活动
+时间及持久化 CAS 相等性。当前 V1 时间戳使用整数 epoch 毫秒；这些数值路径测试
+不宣称复现历史 DATETIME/Connector-J 小数秒丢失问题。
+
+验证必须证明单引擎策略能拒绝原双引擎矩阵，再对实际启动、配置、验证和清理 shell
+脚本覆盖就绪、退出、超时及第二个分叉失败的场景。已有工作流消费者、完整 profile
+守卫和选定的真实 MySQL JDBC 契约必须继续通过。提交后仍要求完整 CI 验收。
 
 ## 验收标准
 

@@ -162,7 +162,10 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/cancel$/,
     mapping: {
       method: 'session/cancel',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+      }),
       notification: true,
     },
   },
@@ -230,6 +233,17 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/model$/,
     mapping: {
       method: 'session/set_model',
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+      }),
+    },
+  },
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/config-option$/,
+    mapping: {
+      method: 'session/set_config_option',
       extractParams: (segs, body) => ({
         ...bodyRecord(body),
         sessionId: segs[0],

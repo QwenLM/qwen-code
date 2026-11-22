@@ -916,6 +916,27 @@ describe('autofix-status-heartbeat loop', () => {
     );
   });
 
+  it('the failed-mint gate failure carries the nothing-skipped shape', async () => {
+    // Nothing-skipped shape (the gate's other timeout face): the gate
+    // counts skip lines with `?? []`, so a log that never recorded a
+    // skip must still report `saw 0;` plus the last line instead of
+    // throwing on a null match. Without this witness nothing pins that
+    // documented text — dropping the null guard reddens no test.
+    const workdir = freshTmp();
+    writeFileSync(
+      join(workdir, 'heartbeat.log'),
+      '2026-09-02T00:00:00Z heartbeat started: comment 777 interval 1s max_age 20400s\n',
+    );
+    await assert.rejects(
+      () => awaitTwoSkipLines(workdir, 300),
+      (err) => {
+        assert.match(err.message, /saw 0;/);
+        assert.match(err.message, /last log line: ".*heartbeat started/);
+        return true;
+      },
+    );
+  });
+
   it('stamps each tick in flight around the gh call and clears it after', async () => {
     // finalize's drain relies on heartbeat-tick-inflight bracketing
     // every gh call: the fake gh observes the stamp FROM INSIDE the

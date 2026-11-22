@@ -13,7 +13,8 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
  * written in the current conversation, plus the (mtime, size) snapshot at
  * the time of that operation. It exists so that Edit / WriteFile can
  * verify the model is editing a file it has actually seen, and so that
- * repeated full Reads of an unchanged file can be short-circuited.
+ * repeated full Reads, and repeated identical offset/limit Reads, of an
+ * unchanged file can be short-circuited.
  *
  * This is a pure in-memory data structure. Callers are responsible for
  * `fs.stat`-ing the file and passing the resulting Stats in — the cache
@@ -50,6 +51,12 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
  * does not enforce isolation; it relies on the Config-per-session
  * invariant maintained by the surrounding code.
  */
+
+/**
+ * An exact line range as an explicit request asked for it (offset is the
+ * 0-based line index; `limit` undefined means open-ended).
+ */
+export type FileReadRange = { offset: number; limit?: number };
 
 /** A single tracked file. Mutated in place by {@link FileReadCache}. */
 export interface FileReadEntry {
@@ -120,6 +127,12 @@ export interface FileReadEntry {
    */
   lastReadCacheable: boolean;
   /**
+   * A recovered Edit preserved external bytes the model has not Read. The
+   * disk fingerprint is current, but Edit must keep using its recovery
+   * guards and WriteFile must wait for a successful text Read (partial is OK).
+   */
+  readBaselineNeedsRefresh: boolean;
+  /**
    * True iff the read/write that the fast-path would point at is still
    * quotable from conversation history — i.e. it has NOT been blanked
    * by idle microcompaction.
@@ -138,6 +151,28 @@ export interface FileReadEntry {
    * issue #4239 false-block this whole marker exists to avoid.
    */
   readResidentInHistory: boolean;
+  /**
+   * The request range of the most recent read when it was an explicit
+   * offset/limit text read; `undefined` when the most recent read was a
+   * no-args read, non-text, or page-based (PDF).
+   *
+   * With {@link lastReadRangeResident} this gates the ranged-read half
+   * of the ReadFile fast-path: a repeat Read with the same offset/limit
+   * against an unchanged file returns the `file_unchanged` placeholder
+   * instead of re-emitting bytes the model already holds. The full-read
+   * half keeps gating on {@link lastReadWasFull} +
+   * {@link readResidentInHistory}, so this field never widens what a
+   * no-args Read may quote.
+   */
+  lastReadRange?: FileReadRange;
+  /**
+   * True iff the view recorded in {@link lastReadRange} is still
+   * quotable from conversation history. Armed whenever a view is
+   * recorded; disarmed by {@link markReadEvictedFromHistory} /
+   * {@link markAllReadsEvictedFromHistory} alongside
+   * {@link readResidentInHistory}.
+   */
+  lastReadRangeResident: boolean;
 }
 
 /** Result of {@link FileReadCache.check}. */
@@ -146,6 +181,13 @@ export type FileReadCheckResult =
   | { state: 'stale'; entry: FileReadEntry }
   | { state: 'unverifiable' }
   | { state: 'unknown' };
+
+/** What a recorded read produced; see {@link FileReadCache.recordRead}. */
+export type FileReadRecordOpts = {
+  full: boolean;
+  cacheable: boolean;
+  range?: FileReadRange;
+};
 
 export class FileReadCache {
   private readonly byInode = new Map<string, FileReadEntry>();
@@ -197,9 +239,14 @@ export class FileReadCache {
    * saw the first 10 lines of, exactly the regression flagged in
    * the maintainer review.
    *
-   * The fast-path `file_unchanged` check still gates on the
-   * incoming request's own `isFullRead` (in `read-file.ts`), so a
-   * partial read does not get a placeholder it shouldn't.
+   * The fast-path `file_unchanged` check gates full reads on the
+   * incoming request's own `isFullRead` and ranged reads on an exact
+   * match against `lastReadRange`, so a read never receives a
+   * placeholder for a view it did not produce.
+   *
+   *  - `range`     — the request's `{ offset, limit }` on an explicit
+   *    ranged read (omit it for no-args and page reads); recorded as
+   *    {@link FileReadEntry.lastReadRange} when the read was cacheable.
    *
    * When `stats.ino` is `0` the read is not stored and the returned
    * entry is **detached**: it describes this read for the immediate
@@ -209,7 +256,7 @@ export class FileReadCache {
   recordRead(
     absPath: string,
     stats: Stats,
-    opts: { full: boolean; cacheable: boolean },
+    opts: FileReadRecordOpts,
   ): FileReadEntry {
     if (!FileReadCache.hasVerifiableIdentity(stats)) {
       const entry = FileReadCache.createEntry(absPath, stats);
@@ -217,6 +264,8 @@ export class FileReadCache {
       entry.readResidentInHistory = opts.full;
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
+      entry.lastReadRange = opts.cacheable ? opts.range : undefined;
+      entry.lastReadRangeResident = entry.lastReadRange !== undefined;
       return entry;
     }
 
@@ -225,9 +274,11 @@ export class FileReadCache {
     const sameFingerprint =
       existing !== undefined &&
       existing.mtimeMs === stats.mtimeMs &&
-      existing.sizeBytes === stats.size;
+      existing.sizeBytes === stats.size &&
+      !existing.readBaselineNeedsRefresh;
     const entry = this.upsert(absPath, stats);
     entry.lastReadAt = Date.now();
+    if (opts.cacheable) entry.readBaselineNeedsRefresh = false;
     if (opts.full) {
       // Only a full read re-arms: a partial read leaves a mere slice
       // in history while sticky `lastReadWasFull` stays true, so
@@ -255,6 +306,8 @@ export class FileReadCache {
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
     }
+    entry.lastReadRange = opts.cacheable ? opts.range : undefined;
+    entry.lastReadRangeResident = entry.lastReadRange !== undefined;
     return entry;
   }
 
@@ -266,12 +319,15 @@ export class FileReadCache {
    * see its own write as a "stale" external change.
    *
    * Read metadata is **always** refreshed alongside the write, not
-   * just for brand-new entries: the model authored the current content
-   * produced by the mutating tool, so for prior-read enforcement purposes
-   * it has now "seen" the bytes that tool wrote. Plain text writers use
+   * just for brand-new entries. Ordinary writes author current content and
+   * therefore count as having seen it; recovered writes retain the separate
+   * read-baseline restriction below. Plain text writers use
    * the default `cacheable: true`; structured writers such as notebook cell
    * editors can set `cacheable: false` so regular Edit / WriteFile still
-   * reject the file as a non-text payload.
+   * reject the file as a non-text payload. Recovered edits must explicitly
+   * pass readBaselineNeedsRefresh, including after atomic inode replacement:
+   * the new entry cannot inherit the old inode's baseline state. Only a
+   * successful text recordRead clears that state on an existing entry.
    *
    * As with {@link recordRead}, an `ino === 0` write returns a
    * **detached** entry that was never added to the map.
@@ -279,7 +335,7 @@ export class FileReadCache {
   recordWrite(
     absPath: string,
     stats: Stats,
-    opts: { cacheable?: boolean } = {},
+    opts: { cacheable?: boolean; readBaselineNeedsRefresh?: true } = {},
   ): FileReadEntry {
     const entry = FileReadCache.hasVerifiableIdentity(stats)
       ? this.upsert(absPath, stats)
@@ -287,11 +343,13 @@ export class FileReadCache {
     const now = Date.now();
     entry.lastWriteAt = now;
     entry.lastReadAt = now;
-    entry.lastReadWasFull = true;
+    entry.readBaselineNeedsRefresh =
+      opts.readBaselineNeedsRefresh ?? entry.readBaselineNeedsRefresh;
+    entry.lastReadWasFull = !entry.readBaselineNeedsRefresh;
     entry.lastReadCacheable = opts.cacheable ?? true;
-    // The model authored the current bytes and that result is in
-    // history, so the fast-path may serve a placeholder again.
-    entry.readResidentInHistory = true;
+    // A recovery preserves unread external bytes; only ordinary writes can
+    // make the complete result quotable from history.
+    entry.readResidentInHistory = !entry.readBaselineNeedsRefresh;
     return entry;
   }
 
@@ -305,8 +363,9 @@ export class FileReadCache {
    *  - `stale`   — entry exists but mtime or size differs. The file has
    *    been changed by something outside our control (or by us, before
    *    this stats call was taken).
-   *  - `fresh`   — entry exists and mtime + size match. Safe to assume
-   *    the bytes are what we last saw.
+   *  - `fresh`   — entry exists and mtime + size match the last recorded
+   *    operation. A recovered write may still require Read-baseline refresh;
+   *    fingerprint freshness alone does not authorize a full overwrite.
    *
    * Note: mtime + size is a best-effort fingerprint, not a hash. A file
    * rewritten with identical mtime *and* identical size will read as
@@ -331,8 +390,9 @@ export class FileReadCache {
    * history — its read/edit/write output was blanked by idle
    * microcompaction.
    *
-   * Surgical alternative to {@link clear} for microcompaction: only
-   * {@link FileReadEntry.readResidentInHistory} is disarmed; the
+   * Surgical alternative to {@link clear} for microcompaction: only the
+   * residency flags ({@link FileReadEntry.readResidentInHistory} and
+   * {@link FileReadEntry.lastReadRangeResident}) are disarmed; the
    * fingerprint / `lastReadAt` / `lastReadCacheable` that
    * read-before-write depends on are preserved (that is the issue
    * #4239 fix).
@@ -353,9 +413,18 @@ export class FileReadCache {
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (entry) {
       entry.readResidentInHistory = false;
+      entry.lastReadRangeResident = false;
       return true;
     }
     return false;
+  }
+
+  /** Disarm quote-back after truncation without revoking prior-read rights. */
+  markAllReadsEvictedFromHistory(): void {
+    for (const entry of this.byInode.values()) {
+      entry.readResidentInHistory = false;
+      entry.lastReadRangeResident = false;
+    }
   }
 
   /** Remove the entry for the given Stats, if any. */
@@ -473,7 +542,9 @@ export class FileReadCache {
       sizeBytes: stats.size,
       lastReadWasFull: false,
       lastReadCacheable: false,
+      readBaselineNeedsRefresh: false,
       readResidentInHistory: false,
+      lastReadRangeResident: false,
     };
   }
 }

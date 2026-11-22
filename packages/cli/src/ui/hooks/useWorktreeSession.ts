@@ -32,11 +32,15 @@ import { readWorktreeSession } from '@qwen-code/qwen-code-core/services/worktree
  * #3256239608.)
  */
 export function useWorktreeSession(config: Config): WorktreeSession | null {
-  const [session, setSession] = useState<WorktreeSession | null>(null);
+  const [loaded, setLoaded] = useState<{
+    sessionId: string;
+    session: WorktreeSession | null;
+  } | null>(null);
+  const sessionId = config.getSessionId();
 
   useEffect(() => {
     if (config.getShellExecutionSandbox?.()) {
-      setSession(null);
+      setLoaded(null);
       return;
     }
     let cancelled = false;
@@ -45,11 +49,11 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
       try {
         const filePath = config
           .getSessionService()
-          .getWorktreeSessionPath(config.getSessionId());
+          .getWorktreeSessionPath(sessionId);
         const ws = await readWorktreeSession(filePath);
-        if (!cancelled) setSession(ws);
+        if (!cancelled) setLoaded({ sessionId, session: ws });
       } catch {
-        if (!cancelled) setSession(null);
+        if (!cancelled) setLoaded({ sessionId, session: null });
       }
     };
 
@@ -57,7 +61,7 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
 
     const filePath = config
       .getSessionService()
-      .getWorktreeSessionPath(config.getSessionId());
+      .getWorktreeSessionPath(sessionId);
     const dirPath = path.dirname(filePath);
     const fileName = path.basename(filePath);
 
@@ -83,7 +87,7 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
       cancelled = true;
       watcher?.close();
     };
-  }, [config]);
+  }, [config, sessionId]);
 
-  return session;
+  return loaded?.sessionId === sessionId ? loaded.session : null;
 }

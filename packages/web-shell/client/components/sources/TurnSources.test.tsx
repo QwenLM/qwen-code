@@ -201,7 +201,7 @@ it('shows real source entries on a report without footnotes and reuses its open 
   const sources = container.querySelector(selector)!;
   expect(sources.textContent).toBe('2 sources');
   expect(sources.parentElement).toBe(
-    container.querySelector('[aria-label="Copy"]')?.parentElement,
+    container.querySelector('[aria-label="Copy content"]')?.parentElement,
   );
   click(sources);
   const list = document.querySelector(popup)!;

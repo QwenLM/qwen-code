@@ -67,6 +67,12 @@ function reference(value: unknown): ManagedToolReference | null {
   return body as unknown as ManagedToolReference;
 }
 
+export {
+  reference as parseManagedToolReference,
+  capture as parseManagedShellCapture,
+  receipt as parseManagedToolReceipt,
+};
+
 function body(
   value: unknown,
   keys: readonly string[],
@@ -156,8 +162,9 @@ function receipt(value: unknown): ToolResultAcknowledgement | null {
   const historyRevision = parsed['historyRevision'];
   if (
     deliveryStatus === 'committed'
-      ? !Number.isSafeInteger(historyRevision) ||
-        (historyRevision as number) < 1
+      ? !(manifest === null && historyRevision === null) &&
+        (!Number.isSafeInteger(historyRevision) ||
+          (historyRevision as number) < 1)
       : historyRevision !== null
   )
     return null;
@@ -220,7 +227,8 @@ export function registerManagedRuntimeToolV3Routes(
         !parsed ||
         !ref ||
         !cap ||
-        parsed['toolName'] !== 'run_shell_command' ||
+        (parsed['toolName'] !== 'run_shell_command' &&
+          parsed['toolName'] !== 'monitor') ||
         !input ||
         typeof input !== 'object' ||
         Array.isArray(input)
@@ -230,7 +238,7 @@ export function registerManagedRuntimeToolV3Routes(
         const view = await executor.executeV3({
           reference: ref,
           capture: cap,
-          toolName: 'run_shell_command',
+          toolName: parsed['toolName'] as 'run_shell_command' | 'monitor',
           input: input as Record<string, unknown>,
         });
         res.status(200).json({

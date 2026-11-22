@@ -17,6 +17,8 @@ import {
   SessionWriterConflictError,
   SessionWriterLostError,
   GitWorktreeService,
+  readWorktreeSnapshotMeta,
+  restoreWorktreeSnapshot,
   type SessionWriterLease,
   Storage,
   getCronFilePath,
@@ -37,6 +39,7 @@ import {
   SessionConflictError,
   SessionNotArchivedError,
   SessionNotFoundError,
+  SessionBusyError,
 } from '../acp-session-bridge.js';
 import {
   archiveDaemonSessions,
@@ -495,6 +498,60 @@ describe('archiveDaemonSessions', () => {
     expect(
       fs.existsSync(sessionPath(workspaceDir, sessionId, 'archived')),
     ).toBe(true);
+  });
+
+  it('keeps a busy session active when idle is required', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440102';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const closeSession = vi
+      .fn()
+      .mockRejectedValue(new SessionBusyError(sessionId));
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([
+      { sessionId, error: expect.any(SessionBusyError) },
+    ]);
+    expect(closeSession).toHaveBeenCalledWith(sessionId, undefined, {
+      requireAgentClose: true,
+      requireIdle: true,
+    });
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
+  });
+
+  it('keeps a closing session active instead of bypassing the idle guard', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440103';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const closingError = new SessionNotFoundError(
+      sessionId,
+      'The session is already closing',
+      'session_closing',
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: { closeSession: vi.fn().mockRejectedValue(closingError) },
+      coordinator: new SessionArchiveCoordinator(),
+      requireIdle: true,
+    });
+
+    expect(result.archived).toEqual([]);
+    expect(result.errors).toEqual([{ sessionId, error: closingError }]);
+    expect(fs.existsSync(sessionPath(workspaceDir, sessionId, 'active'))).toBe(
+      true,
+    );
   });
 
   it('archives a sealed Managed session through the sealed-writer fallback', async () => {
@@ -2121,9 +2178,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     vi.restoreAllMocks();
   });
 
-  const cleanupBridge = () => ({
+  const cleanupBridge = (liveSessionIds: string[] = []) => ({
     closeSession: vi.fn().mockResolvedValue(undefined),
     deleteSessionAttachments: vi.fn().mockResolvedValue(undefined),
+    getSessionSummary: vi.fn((id: string) => {
+      if (liveSessionIds.includes(id)) return {} as never;
+      throw new SessionNotFoundError(id);
+    }),
   });
 
   function setupWorktreeSession(
@@ -2163,6 +2224,43 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     return stderr.mock.calls.map((call) => String(call[0])).join('');
   }
 
+  // P6 U3: pin the archive-and-delete arm, then prove the actual user bytes
+  // are readable from that archive — surviving the checkout cannot satisfy it.
+  async function expectWorkArchived(
+    service: SessionService,
+    sessionId: string,
+    worktreePath: string,
+    relativeFile: string,
+    expected: string,
+    archiveState: 'active' | 'archived' = 'active',
+  ): Promise<void> {
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    const dir = path.dirname(
+      service.getWorktreeSessionPathForArchiveState(sessionId, archiveState),
+    );
+    const archive = fs
+      .readdirSync(dir)
+      .find(
+        (name) =>
+          name.startsWith(`${sessionId}.`) &&
+          name.endsWith('.worktree-snapshot.tar.gz'),
+      );
+    expect(archive).toBeDefined();
+    const base = archive!.replace(/\.tar\.gz$/, '.json');
+    const meta = await readWorktreeSnapshotMeta(path.join(dir, base));
+    const restored = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-work-archive-restore-'),
+    );
+    try {
+      await restoreWorktreeSnapshot(path.join(dir, archive!), restored, meta);
+      expect(fs.readFileSync(path.join(restored, relativeFile), 'utf8')).toBe(
+        expected,
+      );
+    } finally {
+      fs.rmSync(restored, { recursive: true, force: true });
+    }
+  }
+
   it('removes the owned checkout and branch on a confirmed delete', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440090';
     const { service, slug, worktreePath } = setupWorktreeSession(sessionId);
@@ -2183,6 +2281,154 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         encoding: 'utf8',
       }),
     ).not.toContain(worktreePath);
+  });
+
+  it('preserves the synchronous coordinator prefix for delete without a sidecar', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440088';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    const service = new SessionService(workspaceDir);
+    const coordinator = new SessionArchiveCoordinator();
+
+    const pending = deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(() => coordinator.assertNotTransitioning(sessionId)).toThrow(
+      SessionArchivingError,
+    );
+    await expect(pending).resolves.toMatchObject({ removed: [sessionId] });
+  });
+
+  it('keeps worktree content and binding across archive and unarchive', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440089';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'archive-me\n');
+    fs.writeFileSync(path.join(worktreePath, 'draft.txt'), 'not-in-head\n');
+    const coordinator = new SessionArchiveCoordinator();
+    const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+
+    const archived = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(archived.archived).toEqual([sessionId]);
+    expect(fs.existsSync(archivedSidecar)).toBe(true);
+    expect(fs.statSync(worktreePath).isDirectory()).toBe(true);
+    expect(fs.readFileSync(path.join(worktreePath, 'file.txt'), 'utf8')).toBe(
+      'archive-me\n',
+    );
+    expect(fs.readFileSync(path.join(worktreePath, 'draft.txt'), 'utf8')).toBe(
+      'not-in-head\n',
+    );
+    expect(
+      fs
+        .readdirSync(path.dirname(archivedSidecar))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+    expect(
+      fs
+        .readdirSync(path.dirname(service.getWorktreeSessionPath(sessionId)))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+
+    const unarchived = await unarchiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      coordinator,
+    });
+
+    expect(unarchived.unarchived).toEqual([sessionId]);
+    expect(fs.existsSync(archivedSidecar)).toBe(false);
+    const activeSidecar = service.getWorktreeSessionPath(sessionId);
+    expect(fs.existsSync(activeSidecar)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(activeSidecar, 'utf8'))).toMatchObject({
+      worktreePath,
+    });
+    expect(fs.readFileSync(path.join(worktreePath, 'draft.txt'), 'utf8')).toBe(
+      'not-in-head\n',
+    );
+  });
+
+  it('snapshots dirty content when deleting an already archived chat', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440094';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    const coordinator = new SessionArchiveCoordinator();
+    fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'archived-tracked\n');
+    fs.writeFileSync(path.join(worktreePath, 'draft.txt'), 'archived-draft\n');
+
+    const archived = await archiveDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(archived.archived).toEqual([sessionId]);
+    expect(fs.statSync(worktreePath).isDirectory()).toBe(true);
+    const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+      sessionId,
+      'archived',
+    );
+    expect(fs.existsSync(archivedSidecar)).toBe(true);
+    expect(
+      fs
+        .readdirSync(path.dirname(archivedSidecar))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+    expect(
+      fs
+        .readdirSync(path.dirname(service.getWorktreeSessionPath(sessionId)))
+        .filter((name) => name.endsWith('.worktree-snapshot.tar.gz')),
+    ).toEqual([]);
+
+    const removed = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator,
+    });
+
+    expect(removed.removed).toEqual([sessionId]);
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'file.txt',
+      'archived-tracked\n',
+      'archived',
+    );
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'draft.txt',
+      'archived-draft\n',
+      'archived',
+    );
+    const archiveFile = fs
+      .readdirSync(path.dirname(archivedSidecar))
+      .find((name) => name.endsWith('.worktree-snapshot.tar.gz'));
+    expect(archiveFile).toBeDefined();
+    const archiveMeta = await readWorktreeSnapshotMeta(
+      path.join(
+        path.dirname(archivedSidecar),
+        archiveFile!.replace(/\.tar\.gz$/, '.json'),
+      ),
+    );
+    expect(archiveMeta.dirty).toEqual({
+      tracked: 1,
+      untracked: 1,
+      deleted: [],
+    });
   });
 
   it('keeps the checkout when the session record was never there', async () => {
@@ -2344,14 +2590,397 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
   });
 
+  it('cleans a replacement whose checkout went through two resets', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400a4';
+    const middleId = '550e8400-e29b-41d4-a716-4466554400a5';
+    const firstId = '550e8400-e29b-41d4-a716-4466554400a6';
+    // Two worktree resets, first → middle → this session. Each reset
+    // rewrites only the pair it transfers between, so the first session's
+    // tombstone still names the middle one.
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { supersedes: middleId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(middleId),
+      JSON.stringify({ ...own, supersedes: firstId, supersededBy: sessionId }),
+    );
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(firstId),
+      JSON.stringify({ ...own, supersededBy: middleId }),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(warnings()).not.toContain('checkout shared with');
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
+
+  it.each([
+    { shape: 'three resets', deleteMiddle: false, resets: 3 },
+    { shape: 'a deleted middle session', deleteMiddle: true, resets: 2 },
+  ])(
+    'cleans a replacement next to the tombstones of $shape',
+    async ({ deleteMiddle, resets }) => {
+      // Session ids in reset order; the last one is the current owner.
+      const ids = [
+        '550e8400-e29b-41d4-a716-4466554400a7',
+        '550e8400-e29b-41d4-a716-4466554400a8',
+        '550e8400-e29b-41d4-a716-4466554400a9',
+        '550e8400-e29b-41d4-a716-4466554400aa',
+      ].slice(0, resets + 1);
+      const sessionId = ids[resets];
+      const { service, slug, worktreePath } = setupWorktreeSession(sessionId, {
+        sidecarOverrides: { supersedes: ids[resets - 1] },
+      });
+      const own = JSON.parse(
+        fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+      ) as Record<string, unknown>;
+      delete own['supersedes'];
+      for (let i = 0; i < resets; i++) {
+        if (deleteMiddle && i === 1) continue;
+        fs.writeFileSync(
+          service.getWorktreeSessionPath(ids[i]),
+          JSON.stringify({
+            ...own,
+            ...(i > 0 ? { supersedes: ids[i - 1] } : {}),
+            supersededBy: ids[i + 1],
+          }),
+        );
+      }
+
+      const result = await deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        bridge: cleanupBridge(),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(warnings()).not.toContain('checkout shared with');
+      expect(fs.existsSync(worktreePath)).toBe(false);
+      expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+    },
+  );
+
+  // Two resets, first -> middle -> this session: the middle session is the
+  // direct predecessor, the first one an older tombstone.
+  function setupTwoResetChain(
+    ids: { sessionId: string; middleId: string; firstId: string },
+    options: { upperCaseFirst?: boolean } = {},
+  ) {
+    const setup = setupWorktreeSession(ids.sessionId, {
+      sidecarOverrides: { supersedes: ids.middleId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(
+        setup.service.getWorktreeSessionPath(ids.sessionId),
+        'utf8',
+      ),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    const firstPath = setup.service.getWorktreeSessionPath(ids.firstId);
+    fs.writeFileSync(
+      options.upperCaseFirst
+        ? path.join(
+            path.dirname(firstPath),
+            `${ids.firstId.toUpperCase()}.worktree.json`,
+          )
+        : firstPath,
+      JSON.stringify({ ...own, supersededBy: ids.middleId }),
+    );
+    fs.writeFileSync(
+      setup.service.getWorktreeSessionPath(ids.middleId),
+      JSON.stringify({
+        ...own,
+        supersedes: ids.firstId,
+        supersededBy: ids.sessionId,
+      }),
+    );
+    return setup;
+  }
+
+  type LivenessBridge = {
+    getSessionSummary?: ReturnType<typeof vi.fn>;
+  };
+  it.each<{ answer: string; bridge: (firstId: string) => LivenessBridge }>([
+    {
+      answer: 'reports it',
+      bridge: (firstId) => ({
+        getSessionSummary: vi.fn((id: string) => {
+          if (id === firstId) return {} as never;
+          throw new SessionNotFoundError(id);
+        }),
+      }),
+    },
+    {
+      answer: 'says it is closing',
+      bridge: () => ({
+        getSessionSummary: vi.fn((id: string) => {
+          throw new SessionNotFoundError(
+            id,
+            'The session is already closing',
+            'session_closing',
+          );
+        }),
+      }),
+    },
+    {
+      answer: 'fails unexpectedly',
+      bridge: () => ({
+        getSessionSummary: vi.fn(() => {
+          throw new Error('bridge unavailable');
+        }),
+      }),
+    },
+    {
+      answer: 'cannot be asked',
+      bridge: () => ({ getSessionSummary: undefined }),
+    },
+  ])(
+    'keeps a checkout next to an older tombstone whose session the bridge $answer',
+    async ({ bridge }) => {
+      const ids = {
+        sessionId: '550e8400-e29b-41d4-a716-4466554400ad',
+        middleId: '550e8400-e29b-41d4-a716-4466554400ae',
+        firstId: '550e8400-e29b-41d4-a716-4466554400af',
+      };
+      const { service, worktreePath } = setupTwoResetChain(ids);
+
+      // A reset whose sever did not finish leaves the superseded session
+      // running; only a genuine not-found shows it is gone.
+      const result = await deleteDaemonSessions({
+        sessionIds: [ids.sessionId],
+        service,
+        bridge: { ...cleanupBridge(), ...bridge(ids.firstId) },
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([ids.sessionId]);
+      expect(fs.existsSync(worktreePath)).toBe(true);
+      expect(warnings()).toMatch(/superseded session \S+ is still live/);
+    },
+  );
+
+  it('finds an older tombstone live whatever the case of its sidecar name', async () => {
+    const ids = {
+      sessionId: '550e8400-e29b-41d4-a716-44665544a0d0',
+      middleId: '550e8400-e29b-41d4-a716-44665544a0d1',
+      firstId: '550e8400-e29b-41d4-a716-44665544a0d5',
+    };
+    const { service, worktreePath } = setupTwoResetChain(ids, {
+      upperCaseFirst: true,
+    });
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [ids.sessionId],
+      service,
+      bridge: cleanupBridge([ids.firstId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([ids.sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('is still live');
+  });
+
+  it('keeps a checkout while its direct predecessor is live behind older tombstones', async () => {
+    const ids = {
+      sessionId: '550e8400-e29b-41d4-a716-44665544a0d6',
+      middleId: '550e8400-e29b-41d4-a716-44665544a0d7',
+      firstId: '550e8400-e29b-41d4-a716-44665544a0d8',
+    };
+    const { service, worktreePath } = setupTwoResetChain(ids);
+
+    // The second reset's sever did not finish: the middle session still
+    // runs, possibly in the checkout.
+    const result = await deleteDaemonSessions({
+      sessionIds: [ids.sessionId],
+      service,
+      bridge: cleanupBridge([ids.middleId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([ids.sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain(
+      `superseded session ${ids.middleId} is still live`,
+    );
+  });
+
+  it('still cleans next to a live direct predecessor after one reset', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-44665544a0d9';
+    const oldId = '550e8400-e29b-41d4-a716-44665544a0da';
+    const { service, slug, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { supersedes: oldId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(oldId),
+      JSON.stringify({ ...own, supersededBy: sessionId }),
+    );
+
+    // The bridge may have reopened the predecessor at the workspace root
+    // (keepalive, ACP load); the one-reset rule discounts it regardless.
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge([oldId]),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(warnings()).not.toContain('still live');
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(branchExists(workspaceDir, `worktree-${slug}`)).toBe(false);
+  });
+
+  it.each([
+    { state: 'is still live', live: true },
+    { state: 'is gone', live: false },
+  ])(
+    'judges an archived replacement by an active tombstone that $state',
+    async ({ live }) => {
+      const sessionId = '550e8400-e29b-41d4-a716-44665544a0db';
+      const middleId = '550e8400-e29b-41d4-a716-44665544a0dc';
+      const firstId = '550e8400-e29b-41d4-a716-44665544a0dd';
+      const activeId = '550e8400-e29b-41d4-a716-44665544a0de';
+      const slug = `task-${sessionId.slice(-4)}`;
+      const worktreePath = gitAddWorktree(workspaceDir, slug);
+      writeSessionFile(workspaceDir, sessionId, 'archived');
+      const service = new SessionService(workspaceDir);
+      const base = {
+        slug,
+        worktreePath,
+        worktreeBranch: `worktree-${slug}`,
+        originalCwd: workspaceDir,
+        workspaceCwd: workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: 'abc123',
+      };
+      const archived = (id: string) =>
+        service.getWorktreeSessionPathForArchiveState(id, 'archived');
+      fs.mkdirSync(path.dirname(archived(sessionId)), { recursive: true });
+      // Three resets: active -> first -> middle -> this session. All but
+      // the first session are archived along with this one; the first one
+      // still runs where its reset's sever did not finish.
+      fs.writeFileSync(
+        archived(sessionId),
+        JSON.stringify({ ...base, supersedes: middleId }),
+      );
+      fs.writeFileSync(
+        archived(middleId),
+        JSON.stringify({
+          ...base,
+          supersedes: firstId,
+          supersededBy: sessionId,
+        }),
+      );
+      fs.writeFileSync(
+        archived(firstId),
+        JSON.stringify({
+          ...base,
+          supersedes: activeId,
+          supersededBy: middleId,
+        }),
+      );
+      fs.writeFileSync(
+        service.getWorktreeSessionPath(activeId),
+        JSON.stringify({ ...base, supersededBy: firstId }),
+      );
+      writeWorktreeMarker(worktreePath, sessionId);
+
+      const result = await deleteDaemonSessions({
+        sessionIds: [sessionId],
+        service,
+        bridge: cleanupBridge(live ? [activeId] : []),
+        coordinator: new SessionArchiveCoordinator(),
+      });
+
+      expect(result.removed).toEqual([sessionId]);
+      expect(fs.existsSync(worktreePath)).toBe(live);
+      if (live) {
+        expect(warnings()).toContain(
+          `session ${activeId} naming the checkout is still live`,
+        );
+      }
+    },
+  );
+
+  it('keeps a checkout a session shares next to a tombstone', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-44665544a0d2';
+    const oldId = '550e8400-e29b-41d4-a716-44665544a0d3';
+    const sharerId = '550e8400-e29b-41d4-a716-44665544a0d4';
+    const { service, worktreePath } = setupWorktreeSession(sessionId, {
+      sidecarOverrides: { supersedes: oldId },
+    });
+    const own = JSON.parse(
+      fs.readFileSync(service.getWorktreeSessionPath(sessionId), 'utf8'),
+    ) as Record<string, unknown>;
+    delete own['supersedes'];
+    // Discounting the tombstone must not end the scan: the other sibling
+    // names the checkout without `supersededBy`.
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(oldId),
+      JSON.stringify({ ...own, supersededBy: sessionId }),
+    );
+    fs.writeFileSync(
+      service.getWorktreeSessionPath(sharerId),
+      JSON.stringify(own),
+    );
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('checkout shared with');
+  });
+
+  it('keeps a checkout next to an unreadable sibling sidecar', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-4466554400ab';
+    const otherId = '550e8400-e29b-41d4-a716-4466554400ac';
+    const { service, worktreePath } = setupWorktreeSession(sessionId);
+    // A sibling that cannot be read might name the same checkout.
+    fs.writeFileSync(service.getWorktreeSessionPath(otherId), '{"slug":');
+
+    const result = await deleteDaemonSessions({
+      sessionIds: [sessionId],
+      service,
+      bridge: cleanupBridge(),
+      coordinator: new SessionArchiveCoordinator(),
+    });
+
+    expect(result.removed).toEqual([sessionId]);
+    expect(fs.existsSync(worktreePath)).toBe(true);
+    expect(warnings()).toContain('unreadable sibling sidecar');
+  });
+
   it('keeps a replacement whose checkout a live third session names', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-4466554400a2';
     const otherId = '550e8400-e29b-41d4-a716-4466554400a3';
     const { service, worktreePath } = setupWorktreeSession(sessionId, {
       sidecarOverrides: { supersedes: 'some-predecessor' },
     });
-    // A sibling naming the same checkout without being this session's
-    // superseded predecessor is genuine sharing, not a tombstone.
+    // A sibling naming the same checkout without carrying `supersededBy`
+    // is genuine sharing, not a tombstone.
     fs.copyFileSync(
       service.getWorktreeSessionPath(sessionId),
       service.getWorktreeSessionPath(otherId),
@@ -2396,7 +3025,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     }
   });
 
-  it('keeps a checkout with tracked changes', async () => {
+  it('preserves the work of a checkout with tracked changes (P6 U3 snapshot or keep)', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-44665544009a';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, 'file.txt'), 'modified\n');
@@ -2409,11 +3038,16 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'file.txt',
+      'modified\n',
+    );
   });
 
-  it('keeps a checkout with never-committed agent files', async () => {
+  it('preserves the work of a checkout with never-committed agent files (P6 U3 snapshot or keep)', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-44665544009e';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, 'draft.ts'), 'export {}\n');
@@ -2426,9 +3060,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(fs.existsSync(path.join(worktreePath, 'draft.ts'))).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'draft.ts',
+      'export {}\n',
+    );
   });
 
   it('keeps the checkout and warns on an invalid marker', async () => {
@@ -2574,7 +3212,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     );
   });
 
-  it('keeps a checkout whose only work sits under a git-ignored path', async () => {
+  it('preserves the work of a checkout whose only work sits under a git-ignored path (P6 U3 snapshot or keep)', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-4466554400b2';
     const { service, worktreePath } = setupWorktreeSession(sessionId);
     fs.writeFileSync(path.join(worktreePath, '.gitignore'), '.qwen/\n');
@@ -2595,12 +3233,16 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(fs.existsSync(draft)).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      '.qwen/pr-drafts/draft.md',
+      '# draft\n',
+    );
   });
 
-  it('keeps a checkout with untracked work when the repo hides untracked files', async () => {
+  it('preserves the work of a checkout with untracked work when the repo hides untracked files (P6 U3 snapshot or keep)', async () => {
     // `status.showUntrackedFiles=no` set on the main repo is shared by
     // every linked worktree; the gate pins its own mode so ambient
     // config cannot make a dirty checkout read clean.
@@ -2620,9 +3262,13 @@ describe('deleteDaemonSessions worktree cleanup', () => {
     });
 
     expect(result.removed).toEqual([sessionId]);
-    expect(fs.existsSync(worktreePath)).toBe(true);
-    expect(fs.existsSync(draft)).toBe(true);
-    expect(warnings()).toContain('uncommitted work');
+    await expectWorkArchived(
+      service,
+      sessionId,
+      worktreePath,
+      'draft.ts',
+      'export {}\n',
+    );
   });
 
   it('cleans a checkout whose only ignored content is disposable build output', async () => {

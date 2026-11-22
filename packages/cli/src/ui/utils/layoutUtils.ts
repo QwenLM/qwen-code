@@ -41,6 +41,21 @@ export const calculatePromptWidths = (terminalWidth: number) => {
 
 export const MAIN_CONTENT_HEIGHT_RESERVATION = 2;
 
+/**
+ * The static-chrome rows AppContainer subtracts from the terminal height when
+ * it budgets a dialog — the `staticExtraHeight` half of that budget. Exported
+ * so the OpenTUI popup region derives the same number rather than carrying a
+ * second copy that could drift.
+ *
+ * Three read sites, only two of them dialogs: ink's dialog manager, the
+ * OpenTUI popup region, and AppContainer's `mainContentHeightReservation`.
+ * The third is legacy-mode only — VP mode reserves nothing there — but it
+ * feeds `availableTerminalHeight`, and through it the shell tool's terminal
+ * height and the stream's viewport rows, so raising this constant takes a row
+ * from every popup and shortens every embedded shell result by one.
+ */
+export const STATIC_EXTRA_HEIGHT = 3;
+
 export const clampDialogHeight = (
   height: number | undefined,
 ): number | undefined =>
@@ -62,3 +77,22 @@ export const getDialogMaxHeight = (
     1,
     terminalHeight - staticExtraHeight - MAIN_CONTENT_HEIGHT_RESERVATION,
   );
+
+/** Minimum rows the `/btw` answer viewport keeps even on a tiny terminal. */
+export const MIN_BTW_ANSWER_ROWS = 3;
+
+/**
+ * The `/btw` side answer shares the bottom controls region with the composer
+ * and the live-agent panel, so unlike a dialog it cannot take the whole
+ * screen. It is capped at half the terminal, and never so tall that the
+ * composer would be pushed off a short one.
+ */
+export const getBtwAnswerMaxRows = (terminalHeight: number): number => {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return MIN_BTW_ANSWER_ROWS;
+  }
+  return Math.max(
+    MIN_BTW_ANSWER_ROWS,
+    Math.min(Math.floor(terminalHeight / 2), terminalHeight - 8),
+  );
+};

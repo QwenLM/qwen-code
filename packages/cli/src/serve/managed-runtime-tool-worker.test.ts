@@ -840,4 +840,164 @@ describe('Managed Runtime tool worker', () => {
     expect(settled.state).toBe('settled');
     expect(settled.result.executionStatus).toBe('cancelled');
   }, 15_000);
+
+  it('forgets a settled call on acknowledge and refuses its repeat', async () => {
+    const origin = await start();
+    const reference = executeBody({}).reference;
+    const executeResponse = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(
+          executeBody({ file_path: path.join(workspace, 'README.md') }),
+        ),
+      },
+    );
+    expect(executeResponse.status).toBe(200);
+    expect(await executeResponse.json()).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'success' },
+    });
+
+    const acknowledge = async () => {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/acknowledge`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({ protocolVersion: 2, reference }),
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-qwen-managed-runtime-incarnation')).toBe(
+        BOOT.runtimeIncarnation,
+      );
+      return response.json() as Promise<{ state: string }>;
+    };
+    expect(await acknowledge()).toEqual({
+      protocolVersion: 2,
+      state: 'acknowledged',
+    });
+    expect(await acknowledge()).toEqual({
+      protocolVersion: 2,
+      state: 'acknowledged',
+    });
+
+    const statusResponse = await fetch(
+      `${origin}/internal/managed-runtime/v2/status`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({ protocolVersion: 2, reference }),
+      },
+    );
+    expect(statusResponse.status).toBe(200);
+    const view = (await statusResponse.json()) as {
+      state: string;
+      lastSequence: number;
+      result?: unknown;
+    };
+    expect(view.state).toBe('acknowledged');
+    expect(view.result).toBeUndefined();
+    expect(view.lastSequence).toBeGreaterThan(0);
+
+    const repeat = await fetch(
+      `${origin}/internal/managed-runtime/v2/execute`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify(
+          executeBody({ file_path: path.join(workspace, 'README.md') }),
+        ),
+      },
+    );
+    expect(repeat.status).toBe(409);
+    expect(await repeat.json()).toMatchObject({
+      code: 'managed_runtime_identity_conflict',
+    });
+
+    const unknown = await fetch(
+      `${origin}/internal/managed-runtime/v2/acknowledge`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({
+          protocolVersion: 2,
+          reference: { ...reference, callId: 'call-never-seen' },
+        }),
+      },
+    );
+    expect(unknown.status).toBe(200);
+    expect(await unknown.json()).toEqual({
+      protocolVersion: 2,
+      state: 'unknown',
+    });
+  });
+
+  it('refuses to acknowledge a call still in flight', async () => {
+    const origin = await start();
+    const reference = {
+      sessionId: 'runtime-session-01',
+      promptId: 'prompt-01',
+      callId: 'call-ack-in-flight',
+      argsDigest: 'digest-ack-in-flight',
+    };
+    const running = fetch(`${origin}/internal/managed-runtime/v2/execute`, {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify({
+        protocolVersion: 2,
+        reference,
+        toolName: 'run_shell_command',
+        input: {
+          command:
+            'sleep 30 # intentional-sleep: probe for in-flight acknowledgement',
+        },
+      }),
+    });
+    await vi.waitFor(async () => {
+      const response = await fetch(
+        `${origin}/internal/managed-runtime/v2/status`,
+        {
+          method: 'POST',
+          headers: HEADERS,
+          body: JSON.stringify({ protocolVersion: 2, reference }),
+        },
+      );
+      expect(await response.json()).toMatchObject({ state: 'executing' });
+    });
+
+    const refused = await fetch(
+      `${origin}/internal/managed-runtime/v2/acknowledge`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({ protocolVersion: 2, reference }),
+      },
+    );
+    expect(refused.status).toBe(409);
+
+    await fetch(`${origin}/internal/managed-runtime/v2/cancel`, {
+      method: 'POST',
+      headers: HEADERS,
+      body: JSON.stringify({ protocolVersion: 2, reference }),
+    });
+    const settled = (await (await running).json()) as { state: string };
+    expect(settled.state).toBe('settled');
+
+    const settledAck = await fetch(
+      `${origin}/internal/managed-runtime/v2/acknowledge`,
+      {
+        method: 'POST',
+        headers: HEADERS,
+        body: JSON.stringify({ protocolVersion: 2, reference }),
+      },
+    );
+    expect(settledAck.status).toBe(200);
+    expect(await settledAck.json()).toEqual({
+      protocolVersion: 2,
+      state: 'acknowledged',
+    });
+  }, 15_000);
 });

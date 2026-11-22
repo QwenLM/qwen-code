@@ -51,6 +51,7 @@ export function corruptFrame(
 
 export function javaSessionPayload(lastSequence: number): string {
   const payload: JavaAgentSession = {
+    compactionRevision: 0,
     sessionId: 'session-1',
     agentId: 'dataworks_data_agent',
     status: 'active',
@@ -58,7 +59,12 @@ export function javaSessionPayload(lastSequence: number): string {
     createdAt: 1,
     updatedAt: 1,
     lastSequence,
-    capabilities: { tasks: true, artifacts: false, actions: false },
+    capabilities: {
+      tasks: true,
+      artifacts: false,
+      actions: false,
+      workspaceTurns: false,
+    },
   };
   return JSON.stringify(payload);
 }

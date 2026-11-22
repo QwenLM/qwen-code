@@ -97,6 +97,43 @@ const GATING_COMMANDS: readonly SlashCommand[] = [
   cmd({ name: 'review' }),
 ];
 
+describe('detectCompletionTarget AT queries', () => {
+  it.each([
+    ['hello @README.md', 'README.md'],
+    ['中文 @文件.ts', '文件.ts'],
+    ['😀 @README.md', 'README.md'],
+    ['@😀file.ts', '😀file.ts'],
+    ['😀😀 @src/𠮷file.ts', 'src/𠮷file.ts'],
+    ['😀 @src/😀file.ts', 'src/😀file.ts'],
+  ])('uses the complete file query from %s', (text, query) => {
+    const cursor = Array.from(text).length;
+    expect(detectCompletionTarget([text], 0, cursor, text, cursor)).toEqual({
+      mode: CompletionMode.AT,
+      query,
+      start: Array.from(text).indexOf('@') + 1,
+      end: cursor,
+    });
+  });
+
+  it('keeps code-point replacement bounds with the cursor inside a Unicode path', () => {
+    const text = '😀 @src/😀file.ts tail';
+    const target = detectCompletionTarget([text], 0, 7, text, 7);
+    expect(target).toEqual({
+      mode: CompletionMode.AT,
+      query: 'src/😀file.ts',
+      start: 3,
+      end: 15,
+    });
+    const applied = applyCompletion(
+      text,
+      target!,
+      { label: '😀done.ts', value: '😀done.ts' },
+      false,
+    );
+    expect(applied.line).toBe('😀 @😀done.ts tail');
+  });
+});
+
 describe('detectCompletionTarget mid-input gating (useCommandCompletion port, R1-86)', () => {
   const detect = (text: string, cursorOffset: number) => {
     const lines = text.split('\n');

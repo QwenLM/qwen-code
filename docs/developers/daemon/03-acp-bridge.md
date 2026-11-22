@@ -256,7 +256,12 @@ In addition to the core `spawnOrAttach`, `sendPrompt`, `cancelSession`,
 
 `BridgeSpawnRequest.sessionScope` was renamed from `'per-client'` to
 `'thread'`. `BridgeRestoredSession` now carries `compactedReplay`,
-`liveJournal`, and `lastEventId`. Those replay fields are a bounded in-memory
+`liveJournal`, optional `lifecycleReplay` and `lifecycleReplayIncomplete`, and
+`lastEventId`. The lifecycle supplement contains at most 1024 metadata-only
+frames from the in-memory replay window when refreshing a persisted page; it
+can overlap that page. A true incomplete flag means unavailable, degraded, or
+truncated lifecycle coverage. Neither the supplement nor a false flag promises
+complete history or currently running status. Those replay fields are a bounded in-memory
 window for live sessions, capped by `BridgeOptions.compactedReplayMaxBytes`
 (default 4 MiB, hard ceiling 256 MiB). The in-flight `liveJournal` is
 separately capped by `BridgeOptions.maxJournalEvents` (default 10 000 replay
@@ -268,6 +273,9 @@ boundaries remain intact. If older retained replay was dropped,
 entries were dropped, `liveJournal[0]` carries a `history_truncated` marker
 with `scope: 'live_journal'`. Its retained and truncated counts describe source events, not replay entries. The full persisted transcript remains on
 disk and is not exposed by this bridge response.
+
+A paged load skips persisted-page refresh while a foreground, background, or Goal turn is active or an interaction is pending, serving the available in-memory replay instead. If activity starts during a read, the bridge keeps the live replay and avoids further refresh reads, including traversal through empty pages. Pagination-anchor backfills for a truncated replay window remain separate from this refresh.
+
 `BridgeClientRequestContext` is the request context threaded through bridge
 calls; it carries `clientId`, `fromLoopback: boolean`, and `promptId`.
 

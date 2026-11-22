@@ -49,6 +49,7 @@ const AUTH_TYPE_CHOICES = [
   'openai-responses',
   'anthropic',
   'qwen-oauth',
+  'qwen-subscription',
   'gemini',
   'vertex-ai',
 ] as const satisfies ReadonlyArray<`${CoreAuthType}`>;
@@ -62,6 +63,7 @@ export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
   'openai-responses': true,
   anthropic: true,
   'qwen-oauth': true,
+  'qwen-subscription': true,
   gemini: true,
   'vertex-ai': true,
 };
@@ -192,6 +194,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     description:
       'Advisor model selector for this session. Use "off" to disable native Advisor for this run.',
   },
+  'workflow-mode': {
+    type: 'string' as const,
+    choices: ['on', 'off'] as const,
+    description: 'Set the persistent Workflow guidance mode for this session.',
+  },
   'fallback-model': {
     type: 'array' as const,
     description:
@@ -278,6 +285,10 @@ export const DEFAULT_COMMAND_OPTIONS = {
   'allowed-mcp-server-names': {
     type: 'array' as const,
     description: 'Allowed MCP server names',
+  },
+  'disable-mcp-server': {
+    type: 'array' as const,
+    description: 'MCP server names to disable for this invocation',
   },
   'mcp-config': {
     type: 'string' as const,

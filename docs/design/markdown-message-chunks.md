@@ -1,0 +1,35 @@
+# Markdown message chunking
+
+[English](markdown-message-chunks.md) | [简体中文](markdown-message-chunks.zh-CN.md)
+
+## Problem and scope
+
+DingTalk and WeCom currently split long Markdown inside links, table rows and code fences. Keep the existing ordinary-message delivery paths and add shared structure-aware splitting. Interactive cards, attachments, generic delivery/retry behavior and unrelated refactors are outside this change.
+
+## Contract
+
+The normal target remains 3800; a complete table, code block or inline element may exceed it up to 20,000. DingTalk counts UTF-16 units and WeCom counts UTF-8 bytes. Prefixes, mentions, repeated headers, reference definitions and generated fences consume these budgets. Prefer block, paragraph, list-item and sentence boundaries; keep a heading with the first following fragment when it fits. Preserve original URL spelling and Unicode characters.
+
+Tables above the hard maximum split only between rows and repeat the original two-line header. Oversized code blocks close and reopen fences, retaining language and metadata; prefer line boundaries. An indivisible element that exceeds the maximum uses explicitly labeled plain-text fenced fragments preserving its entire source. This cannot keep an oversized URL clickable across messages.
+
+Every ordinary delivery batch is planned before its first send, using the text already available for that batch (not future output from the entire task). Candidate chunks must each fit the hard budget, number at most four times `ceil((source size + reservedLength) / (targetLength + reservedLength))` (at least one), and total at most four times `(source size + reservedLength)` plus one full hard-budget allowance. `reservedLength` is the caller prefix/header length already subtracted from content budgets; count it on every candidate fragment when checking aggregate output (conservatively also for first-message-only mentions/headers). These proportional bounds allow boundary slack and lossless fencing; they are not a fixed message-count cap. Never truncate a batch to meet them. If a candidate fails, re-plan from the original source with the hard maximum as the target; if that still fails, use explicitly labeled literal fragments of the original batch without repeated Markdown container context. Nested budget `RangeError`s and candidate-output overflow abort only a structure-preserving attempt; try the next complete plan from source. Errors from the final literal attempt remain explicit. If even literal fragments cannot meet the bounds, fail before sending any fragment.
+
+When a fence wrapper consumes half the preferred budget, use the hard budget. A large wrapper or table header alone does not justify literal fallback: retain code language/metadata and table structure whenever the complete candidate satisfies the batch limits. Downgrade locally only when the actual hard budget cannot contain a code character with its wrapper or a table row with its header. Bound intermediate candidate arrays by the batch output allowance while generating them, abandoning an overflowing candidate and restarting from the original source rather than constructing thousands of repeated wrappers. Intermediate pieces may later be packed together, so their count is not treated as the final message count. Literal fragments use the hard budget, so nested list prefixes cannot leave only a few body characters at the soft target.
+
+## Implementation and rationale
+
+A shared `channel-base/markdown-chunks` subpath uses CommonMark source positions rather than Markdown serialization. Validate GFM table candidates with only their two header lines, avoiding full large-table parsing; parse non-table paragraphs for inline boundaries. A prose fragment that becomes a code fence at its new boundary uses the labeled lossless fallback so its text remains visible. Reopened code fences retain the original info-string spelling, including entities and escapes. Split lists at items and quoted content at block boundaries, retaining container markers and their budget. Unsupported oversized structures use the same labeled lossless fallback. Repeat top-level reference definitions in split messages. Nested multiline reference resolution remains outside this change.
+
+DingTalk and WeCom subtract their existing source/mention prefixes before splitting. If these prefixes leave less than half the ordinary target for content, use the remaining hard budget as the content target to avoid repeating a large label for tiny fragments. DingTalk proactive messages additionally measure the actual serialized `{title,text}` JSON against 15,000 UTF-8 bytes, including continuation titles. Re-plan the whole candidate batch from its source when lowering the JSON payload budget, rather than splitting already wrapped fragments again. Keep the prepared source in the delivery plan. If no text fragment has been sent, re-plan that entire source after background header/title recomposition; once sending has started, retain the existing unsent-fragment retry behavior. Streaming status cards use their separate update path; card fallbacks and individual background responses use this ordinary batch planning without waiting for task completion. Repacking must not repeat attachment preparation or alter the send/retry loop.
+
+Affected files are the new shared splitter and tests, channel-base package manifest and lockfile, DingTalk Markdown utilities and adapters/tests, and WeCom adapter/tests. The parser is not imported through the general channel-base barrel. No public configuration is added.
+
+## Validation and acceptance
+
+Use synthetic example-domain URLs only. Focused tests must retain complete links and all table rows/headers, preserve code content and fence closure, enforce both counting modes and prefix budgets, and capture serialized proactive payloads after background recomposition. Cover large documents using bounded table detection, fence info lengths 3789 and 19985, budget boundary neighbors, affordable 10.5k–15k code info and 10.5k–11k table headers that must retain structure, early candidate abandonment, repeated table headers, deep ordered-list prefixes, Chinese/emoji, source-label budgets and header/title recomposition. Assert complete source/body recovery as well as bounded count, aggregate output and individual payload size. Run package-local unit tests, build, bundle, typecheck and lint; perform independent read-only test-engineer verification, two clean self-audits and code review.
+
+Try the global CLI for the baseline and the built CLI for verification. If the CLI cannot reach channel delivery without real platform accounts, use captured adapter payloads and an independent Markdown renderer as a documented test-script fallback.
+
+## Open platform acceptance
+
+The 3800/20,000 values are application budgets, not proof of endpoint acceptance. Real DingTalk session replies and proactive messages, and WeCom Markdown delivery, still require recipient-based capacity and rendering validation. Local serialization and renderer tests cannot establish real platform behavior. This gap remains explicit; it does not change the accepted design.

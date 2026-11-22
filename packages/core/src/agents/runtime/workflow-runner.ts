@@ -20,6 +20,7 @@ import {
   createAbortController,
   createChildAbortController,
 } from '../../utils/abortController.js';
+import { isBackgroundWorkflowBlocked } from '../../utils/invocation-context.js';
 import {
   getWorkflowTaskMutationKey,
   isTerminalWorkflowStatus,
@@ -55,10 +56,6 @@ import {
 } from './workflow-orchestrator.js';
 import { WorkflowBudgetImpl } from './workflow-budget.js';
 import {
-  describeWorkflowDeterminismViolations,
-  scanWorkflowScriptShape,
-} from './workflow-script-shape.js';
-import {
   evaluateWorkflowSize,
   resolveWorkflowSizeCaps,
   resolveWorkflowSizeGuidelineSetting,
@@ -72,11 +69,9 @@ import {
   type ResolvedSavedWorkflow,
 } from './workflow-saved.js';
 import {
-  compileWorkflowScript,
-  describeWorkflowCompileError,
   type WorkflowMeta,
+  workflowPreLaunchGate,
 } from './workflow-sandbox.js';
-import { WorkflowUnsupportedSyntaxError } from './workflow-script-validation.js';
 import {
   resolveReviewWorkflowLimits,
   type ReviewWorkflowLimits,
@@ -115,6 +110,20 @@ export interface WorkflowRunnerOptions {
    * host starts itself is not the model's and is left unrestricted.
    */
   restrictNestedScriptPaths?: boolean;
+  /**
+   * Refuse every nested `workflow()` resolution, by name or path. Set by a
+   * host whose launch pinned exactly one script (the managed workflow
+   * child): any nested resolution would run bytes the pin never examined.
+   */
+  refuseNestedWorkflows?: boolean;
+  /**
+   * Give this run's `agent()` subagents no tools at all. Set by a host
+   * whose sandbox cannot honour the manager's tool calls (the managed
+   * workflow child): a text-only `agent()` runs against an empty
+   * declaration list while a tool-bearing `agent()` is refused, never
+   * letting a tool dispatch reach the wrong tree or host.
+   */
+  refuseSubagentTools?: boolean;
 }
 
 /**
@@ -147,6 +156,49 @@ async function resolveResumeName(
 export type WorkflowRunSettlement =
   | { ok: true; outcome: WorkflowRunOutcome }
   | { ok: false; message: string; details?: WorkflowExecutionError };
+
+/**
+ * Whether this host can take a model-requested background run: one that
+ * returns before it settles and reports back through the conversation.
+ * The interactive TUI, ACP sessions (Web Shell, IDE clients) and headless
+ * runs each feed the run's completion into their notification queue; a
+ * headless run waits for it before it exits. The tool still refuses a host
+ * that registered no completion callback.
+ *
+ * The Qwen Session Agent adapter only reads the original prompt, so
+ * it cannot deliver a detached workflow's completion.
+ *
+ * An ACP session also needs its workflow controls: workflows still
+ * enabled (a settings reload can turn them off without unregistering this
+ * tool), not bare mode, and a trusted workspace. Without them the client
+ * hides a session's workflow runs and refuses to cancel them, so a
+ * background run could be neither seen nor stopped. Trust is the resolved
+ * workspace decision (`isTrustedFolder`), the one the serve layer applies
+ * to the tasks view and cancel; a mock or host that cannot answer counts
+ * as off. A Channel turn that cannot deliver a background result
+ * (`isBackgroundWorkflowBlocked`) keeps its workflows in the foreground.
+ */
+export function hostSupportsBackgroundWorkflows(
+  config: Pick<
+    Config,
+    | 'getExperimentalZedIntegration'
+    | 'isSessionAgentSession'
+    | 'isWorkflowsEnabled'
+    | 'getBareMode'
+    | 'isTrustedFolder'
+  >,
+): boolean {
+  if (config.getExperimentalZedIntegration?.() === true) {
+    return (
+      config.isSessionAgentSession?.() !== true &&
+      config.isWorkflowsEnabled?.() === true &&
+      config.getBareMode?.() !== true &&
+      config.isTrustedFolder?.() === true &&
+      !isBackgroundWorkflowBlocked()
+    );
+  }
+  return true;
+}
 
 export class WorkflowRunHandle {
   readonly completion: Promise<WorkflowRunSettlement>;
@@ -323,7 +375,9 @@ export class WorkflowRunner {
         ? createAbortController()
         : createChildAbortController(options.signal);
     const controller = registry
-      ? registry.reserveStart(runId, createController)
+      ? registry.reserveStart(runId, createController, {
+          background: runInBackground,
+        })
       : createController();
     const releasePersistenceActivity = markWorkflowRunPersistenceActive(
       config,
@@ -392,30 +446,16 @@ export class WorkflowRunner {
         loaded?.savedWorkflowName ??
         registry?.get(runId)?.workflowName;
 
-      try {
-        scriptMeta = compileWorkflowScript(script).meta;
-      } catch (error) {
-        if (error instanceof WorkflowUnsupportedSyntaxError) {
-          throw new WorkflowScriptNotLaunchedError(error.message, '');
-        }
+      // The gate's own compile hands its meta back: one compile, one
+      // error taxonomy for the bytes this run launches.
+      const gate = workflowPreLaunchGate(script);
+      if (gate.refusal !== undefined) {
         throw new WorkflowScriptNotLaunchedError(
-          describeWorkflowCompileError(
-            error,
-            script.split(/\r\n|[\n\r\u2028\u2029]/).length,
-          ),
+          gate.refusal.detail,
+          gate.refusal.suppressSyntaxHint ? '' : undefined,
         );
       }
-      // A script that reads a clock or a random source cannot be replayed on
-      // resume. Refused here, before any agent spends a token, rather than on
-      // whichever call reaches the sandbox guard first.
-      const determinismViolations =
-        scanWorkflowScriptShape(script).determinismViolations;
-      if (determinismViolations.length > 0) {
-        throw new WorkflowScriptNotLaunchedError(
-          describeWorkflowDeterminismViolations(determinismViolations),
-          '',
-        );
-      }
+      scriptMeta = gate.meta;
 
       if (options.resumeFromRunId) {
         // A resume replays a journal. With none to replay it would dispatch
@@ -540,14 +580,19 @@ export class WorkflowRunner {
                   : () => undefined
             : undefined,
           reviewLimits?.subagent,
+          options.refuseSubagentTools,
+          options.toolUseId,
         );
       orchestrator = new WorkflowOrchestrator(dispatch);
       const registration: WorkflowTaskRegistration = {
         runId,
         toolUseId: options.toolUseId,
+        parentSessionId: config.getSessionId?.(),
         ...(workflowName ? { workflowName } : {}),
         ...(sourceRef ? { sourceRef } : {}),
-        meta: null,
+        // Parsed by the pre-launch gate, so clients can show the declared
+        // phases before the script reaches them.
+        meta: scriptMeta,
         status: 'running',
         startTime: Date.now(),
         outputFile: '',
@@ -577,9 +622,7 @@ export class WorkflowRunner {
         isBackgrounded: runInBackground,
         notifyOnCompletion: options.notifyOnCompletion,
         resumeInBackground:
-          runInBackground &&
-          config.isInteractive?.() === true &&
-          config.getExperimentalZedIntegration?.() !== true,
+          runInBackground && hostSupportsBackgroundWorkflows(config),
       };
       // A resume's checkpoint is not best-effort. `retry` from history
       // refuses a run whose checkpoint is still on disk, reading it as a
@@ -775,6 +818,11 @@ export class WorkflowRunner {
             emitter,
             budget,
             resolveSavedWorkflow: async (ref) => {
+              if (options.refuseNestedWorkflows === true) {
+                throw new Error(
+                  'workflow(): nested workflow runs are unavailable here; this run executes only its pinned script.',
+                );
+              }
               // A model call in a name-only session runs no script it cannot
               // name, nested or not. Any other malformed ref falls through to
               // the resolver's own type error.

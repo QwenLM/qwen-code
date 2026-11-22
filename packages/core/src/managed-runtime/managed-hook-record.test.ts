@@ -59,7 +59,9 @@ describe('managed-hook-record/1 shared contract', () => {
   it('enables both domains without projecting Session tasks', () => {
     for (const domain of ['hook_registration', 'hook_execution'] as const) {
       expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain(domain);
-      expect(MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKind).toBeNull();
+      expect(
+        MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKindOf(null),
+      ).toBeNull();
     }
   });
 

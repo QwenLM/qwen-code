@@ -21,6 +21,7 @@ import {
   type HostedLatencyMeasurement,
   type HostedLatencySample,
 } from './hosted-latency-baseline.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -44,7 +45,7 @@ const baselinePath = path.resolve(
   'integration-tests/baselines/hosted-latency.json',
 );
 const reportPath = path.resolve(
-  'packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json',
+  'packages/managed-agent-server/verification/target/hosted-latency-baseline.json',
 );
 const samples: HostedLatencySample[] = [];
 let sample: HostedLatencySample;
@@ -53,62 +54,78 @@ const elapsed = () => performance.now() - started;
 let initialMessages: unknown[] = [];
 let toolCallId = '';
 let contextVerified = false;
+const modelFailures: unknown[] = [];
 const model = await startFakeOpenAIServer(({ body, requestIndex }) => {
-  assert.equal(body['model'], 'hosted-fixture');
-  assert.equal(body['stream'], true);
-  assert.deepEqual(
-    (body['tools'] as Array<{ function: { name: string } }>)
-      .map((tool) => tool.function.name)
-      .sort(),
-    ['edit', 'read_file', 'write_file'],
-  );
-  const messages = body['messages'] as Array<{
-    role: string;
-    content: unknown;
-    tool_calls?: Array<{
-      id: string;
-      function: { name: string; arguments: string };
-    }>;
-    tool_call_id?: string;
-  }>;
-  if (sample.scenario === 'no-tool') return { content: 'TEXT_DONE' };
-  if (requestIndex === 1) {
-    initialMessages = structuredClone(messages);
-    assert(JSON.stringify(messages).includes('TOOL_CONTEXT_MARKER'));
-    return {
-      content: 'Preparing the Workspace file.',
-      toolCalls: [
-        fakeToolCall(
-          'write_file',
-          { file_path: 'proof.txt', content: 'latency-proof' },
-          toolCallId,
-        ),
+  try {
+    assert.equal(body['model'], 'hosted-fixture');
+    assert.equal(body['stream'], true);
+    assert.deepEqual(
+      (body['tools'] as Array<{ function: { name: string } }>)
+        .map((tool) => tool.function.name)
+        .sort(),
+      [
+        'ask_user_question',
+        'edit',
+        'glob',
+        'read_file',
+        'web_fetch',
+        'write_file',
       ],
-    };
-  }
-  assert.equal(requestIndex, 2, 'exactly one continuation');
-  assert.deepEqual(messages.slice(0, initialMessages.length), initialMessages);
-  assert.equal(messages.length, initialMessages.length + 2);
-  const [assistant, result] = messages.slice(initialMessages.length);
-  assert.equal(assistant.role, 'assistant');
-  assert.deepEqual(assistant.tool_calls, [
-    {
-      id: toolCallId,
-      type: 'function',
-      function: {
-        name: 'write_file',
-        arguments: JSON.stringify({
-          file_path: 'proof.txt',
-          content: 'latency-proof',
-        }),
+    );
+    const messages = body['messages'] as Array<{
+      role: string;
+      content: unknown;
+      tool_calls?: Array<{
+        id: string;
+        function: { name: string; arguments: string };
+      }>;
+      tool_call_id?: string;
+    }>;
+    if (sample.scenario === 'no-tool') return { content: 'TEXT_DONE' };
+    if (requestIndex === 1) {
+      initialMessages = structuredClone(messages);
+      assert(JSON.stringify(messages).includes('TOOL_CONTEXT_MARKER'));
+      return {
+        content: 'Preparing the Workspace file.',
+        toolCalls: [
+          fakeToolCall(
+            'write_file',
+            { file_path: 'proof.txt', content: 'latency-proof' },
+            toolCallId,
+          ),
+        ],
+      };
+    }
+    assert.equal(requestIndex, 2, 'exactly one continuation');
+    assert.deepEqual(
+      messages.slice(0, initialMessages.length),
+      initialMessages,
+    );
+    assert.equal(messages.length, initialMessages.length + 2);
+    const [assistant, result] = messages.slice(initialMessages.length);
+    assert.equal(assistant.role, 'assistant');
+    assert.deepEqual(assistant.tool_calls, [
+      {
+        id: toolCallId,
+        type: 'function',
+        function: {
+          name: 'write_file',
+          arguments: JSON.stringify({
+            file_path: 'proof.txt',
+            content: 'latency-proof',
+          }),
+        },
       },
-    },
-  ]);
-  assert.equal(result.role, 'tool');
-  assert.equal(result.tool_call_id, toolCallId);
-  assert.match(JSON.stringify(result.content), /Successfully created/);
-  contextVerified = true;
-  return { content: 'TOOLS_DONE' };
+    ]);
+    assert.equal(result.role, 'tool');
+    assert.equal(result.tool_call_id, toolCallId);
+    assert.match(JSON.stringify(result.content), /Successfully created/);
+    contextVerified = true;
+    return { content: 'TOOLS_DONE' };
+  } catch (cause) {
+    modelFailures.push(cause);
+    throw cause;
+  }
 });
 
 const proxyFailures: unknown[] = [];
@@ -208,21 +225,7 @@ const proxy = createServer(async (req, res) => {
     } else {
       const bytes = Buffer.from(await upstream.arrayBuffer());
       if (isWarm) active.runtimeReadyMs = elapsed();
-      res.writeHead(
-        upstream.status,
-        Object.fromEntries(
-          [...upstream.headers].filter(
-            ([key]) =>
-              ![
-                'connection',
-                'content-length',
-                'content-encoding',
-                'transfer-encoding',
-              ].includes(key),
-          ),
-        ),
-      );
-      res.end(bytes);
+      relayUpstream(res, upstream, bytes);
     }
   } catch (cause) {
     proxyFailures.push(cause);
@@ -351,6 +354,17 @@ try {
     }
     sample.storeRequests = turnStoreRequests;
     samples.push(structuredClone(sample));
+    await waitUntil(async () => {
+      const response = await cli.request(
+        `/session/${session.sessionId}/status`,
+        {
+          headers: cli.headers(clientId),
+        },
+      );
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      return JSON.parse(text).hasActivePrompt === false;
+    });
     await json(`/session/${session.sessionId}/detach`, {}, 204);
   }
   assert.deepEqual(proxyFailures, []);
@@ -366,8 +380,9 @@ try {
     'integration-tests/helpers/hosted-latency-driver.ts',
     'integration-tests/helpers/hosted-latency-baseline.ts',
     'integration-tests/helpers/hosted-harness-process.ts',
+    'integration-tests/helpers/hosted-relay-headers.ts',
     'integration-tests/fake-openai-server.ts',
-    'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
+    'packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
   ];
   const sourceHashes = Object.fromEntries(
     await Promise.all(
@@ -423,7 +438,7 @@ try {
     await writeFile(baselinePath, JSON.stringify(report, null, 2) + '\n');
   console.log('HOSTED_LATENCY_OK', JSON.stringify({ samples, comparison }));
 } catch (cause) {
-  console.error(cli.output, proxyFailures);
+  console.error(cli.output, proxyFailures, modelFailures);
   throw cause;
 } finally {
   await cli.close();

@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { parseQwenAgentMessageMeta } from '../../src/daemon/session-agents.js';
 import {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
@@ -17,6 +18,7 @@ import {
   estimateDaemonTranscriptBlockBytes,
   extractTranscriptTiming,
   getOutputText,
+  isDaemonRewindUserBlock,
   isDaemonUiSensitiveKey,
   normalizeDaemonEvent,
   reduceDaemonTranscriptEvents,
@@ -31,6 +33,38 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('names the caller whose sent sub-session task changed', () => {
+    expect(
+      normalizeDaemonEvent({
+        id: 7,
+        v: 1,
+        type: 'sub_session_task_changed',
+        data: { sessionId: 'caller-1' },
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'session.sub_session_task.changed',
+        sessionId: 'caller-1',
+      }),
+    ]);
+  });
+
+  it('treats config option updates as state metadata rather than chat or progress', () => {
+    expect(
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          sessionId: 'session',
+          update: {
+            sessionUpdate: 'config_option_update',
+            configOptions: [{ id: 'workflow_mode', currentValue: 'on' }],
+          },
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('retains tool prompt ownership after byte eviction and journal-only replay', () => {
     const event = {
       v: 1 as const,
@@ -230,6 +264,46 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { kind: 'user', text: 'hello' },
       { kind: 'assistant', text: 'hi there', streaming: true },
     ]);
+  });
+
+  it('keeps slash-command output separate from model text in the same prompt', () => {
+    const chunks = [
+      { text: 'Earlier model text.' },
+      { text: 'Skill notice. ', source: 'slash_command' },
+      { text: 'Some skills omitted.', source: 'slash_command' },
+      { text: 'Model ' },
+      { text: 'reply.' },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      chunks.flatMap(({ text, source }) =>
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          promptId: 'prompt-1',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              ...(source ? { _meta: { source } } : {}),
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'assistant', text: 'Earlier model text.', streaming: false },
+      {
+        kind: 'assistant',
+        text: 'Skill notice. Some skills omitted.',
+        meta: { source: 'slash_command' },
+        streaming: false,
+      },
+      { kind: 'assistant', text: 'Model reply.', streaming: true },
+    ]);
+    expect(state.blocks[0]).not.toHaveProperty('meta.source');
+    expect(state.blocks[2]).not.toHaveProperty('meta.source');
   });
 
   it('attaches branchRecordId when the decorated chunk merges into an existing block', () => {
@@ -591,6 +665,77 @@ describe('daemon UI normalizer and transcript reducer', () => {
       kind: 'user',
       meta: { inputAnnotations },
     });
+  });
+
+  it('separates sender metadata from the SDK reference annotations', () => {
+    const reference = {
+      type: 'reference',
+      start: 0,
+      end: 7,
+      text: '@file/a',
+      reference: { id: 'file:@file/a' },
+    };
+    const source = {
+      type: 'source',
+      sessionId: 'caller',
+      workspaceCwd: '/work/a',
+      title: 'Caller',
+    };
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: '@file/a' },
+          _meta: {
+            inputAnnotations: [
+              { type: 'source', sessionId: 3 },
+              reference,
+              source,
+            ],
+          },
+        },
+      },
+    });
+
+    const [message] = events;
+    if (message?.type !== 'user.text.delta')
+      throw new Error('Missing user message');
+    expect(
+      message.meta?.inputAnnotations?.map((item) => item.reference.id),
+    ).toEqual(['file:@file/a']);
+    expect(message.meta?.sourceAnnotation).toEqual(source);
+    expect(
+      reduceDaemonTranscriptEvents(createDaemonTranscriptState(), events)
+        .blocks[0],
+    ).toMatchObject({
+      meta: { inputAnnotations: [reference], sourceAnnotation: source },
+    });
+  });
+
+  it('excludes outgoing send records from rewindable user turns', () => {
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'user.text.delta', text: 'A prompt', promptId: 'real-prompt' },
+      {
+        type: 'user.text.delta',
+        text: 'An outgoing message',
+        segmentId: 'mention:outgoing',
+        meta: {
+          source: 'agent_mention',
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: {
+            kind: 'agent_mention',
+            sentTo: { sessionId: 'target', workspaceCwd: '/work/b' },
+          },
+        },
+      },
+    ]);
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks.filter(isDaemonRewindUserBlock)).toMatchObject([
+      { kind: 'user', promptId: 'real-prompt' },
+    ]);
   });
 
   it('preserves assistant message metadata on transcript blocks', () => {
@@ -2549,6 +2694,96 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('keeps the loop detector and its reason on loop-detected turn errors', () => {
+    const turnError = {
+      id: 48,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'Tool-call loop protection stopped this turn.',
+        code: 'LOOP_DETECTED',
+        errorKind: 'loop_detected',
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
+        promptId: 'prompt-1',
+      },
+    } as const;
+    const loop = {
+      loopType: 'turn_tool_call_cap',
+      loopReason: 'explicit_cap',
+      toolCallCount: 4,
+      toolCallLimit: 3,
+    };
+
+    expect(normalizeDaemonEvent(turnError)).toMatchObject([
+      { type: 'error', errorKind: 'loop_detected', loop },
+    ]);
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 100 }),
+      normalizeDaemonEvent(turnError),
+      { now: 101 },
+    );
+    expect(state.blocks).toMatchObject([
+      { kind: 'error', errorKind: 'loop_detected', loop },
+    ]);
+  });
+
+  it('keeps a loop type without numbers and drops malformed ones', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 49,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stopped',
+        errorKind: 'loop_detected',
+        loopType: 'invalid_tool_params_stagnation',
+        toolCallCount: 'many',
+      },
+    });
+
+    expect(event).toMatchObject({
+      loop: { loopType: 'invalid_tool_params_stagnation' },
+    });
+    expect(
+      event && 'loop' in event ? event.loop : undefined,
+    ).not.toHaveProperty('toolCallCount');
+  });
+
+  it('adds no loop detail to turn errors that name no detector', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 50,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stopped',
+        errorKind: 'loop_detected',
+      },
+    });
+
+    expect(event).not.toHaveProperty('loop');
+  });
+
+  it('adds no loop detail to turn errors of another kind', () => {
+    const [event] = normalizeDaemonEvent({
+      id: 51,
+      v: 1,
+      type: 'turn_error',
+      data: {
+        sessionId: 'session-1',
+        message: 'stream ended',
+        errorKind: 'model_stream_interrupted',
+        loopType: 'turn_tool_call_cap',
+      },
+    });
+
+    expect(event).not.toHaveProperty('loop');
+  });
+
   it('keeps older daemon terminated turn error text unchanged', () => {
     expect(
       normalizeDaemonEvent({
@@ -2589,6 +2824,19 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(event).not.toHaveProperty('errorKind');
   });
 
+  it.each(['', 'bailian'])(
+    'keeps automatic logout model changes silent (%s)',
+    (modelId) => {
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'model_switched',
+          data: { sessionId: 'session', modelId, subscriptionSignedOut: true },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('normalizes daemon lifecycle and control events', () => {
     expect(
       normalizeDaemonEvent({
@@ -2624,10 +2872,23 @@ describe('daemon UI normalizer and transcript reducer', () => {
           data: { queueSize: 200, maxQueued: 256 },
         }),
       ).toEqual([]);
-      expect(warn).toHaveBeenCalledWith('[daemon-ui] SSE stream is lagging', {
-        queueSize: 200,
-        maxQueued: 256,
-      });
+      expect(warn).toHaveBeenCalledWith(
+        '[daemon-ui] SSE stream is lagging',
+        '{\n  "queueSize": 200,\n  "maxQueued": 256\n}',
+      );
+      warn.mockClear();
+      expect(
+        normalizeDaemonEvent({
+          id: 54,
+          v: 1,
+          type: 'slow_client_warning',
+          data: '\x1b[2J\x1b]52;c;SGVsbG8=\x07queue lag',
+        }),
+      ).toEqual([]);
+      expect(warn).toHaveBeenCalledWith(
+        '[daemon-ui] SSE stream is lagging',
+        'queue lag',
+      );
     } finally {
       warn.mockRestore();
     }
@@ -3252,6 +3513,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders nothing for a lifecycle name-only tool event', () => {
+    expect(
+      daemonUiEventToTerminalText({
+        type: 'tool.update',
+        toolCallId: 'c',
+        toolName: 'read_file',
+        nameOnly: true,
+      }),
+    ).toBe('');
+  });
+
   it('renders managed memory events without a source fallback leak', () => {
     const output = daemonUiEventToTerminalText({
       type: 'workspace.memory.changed',
@@ -3703,6 +3975,132 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
       }),
     );
     expect(events).toEqual([]);
+  });
+
+  it("draws a Mod's log line below the reply it arrives during", () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...normalizeDaemonEvent(
+          envelopeOf('session_update', {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Hello ' },
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('mod_log', {
+            sessionId: 's1',
+            plugin: 'zh-display',
+            text: 'translated 1 row',
+          }),
+        ),
+        ...normalizeDaemonEvent(
+          envelopeOf('session_update', {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'world' },
+          }),
+        ),
+      ],
+    );
+    expect(
+      state.blocks.map((block) =>
+        'text' in block ? [block.kind, block.text] : [block.kind],
+      ),
+    ).toEqual([
+      ['assistant', 'Hello world'],
+      ['status', '[Mod zh-display] translated 1 row'],
+    ]);
+    expect(state.blocks[1]).toMatchObject({
+      source: 'mod_log',
+      data: { plugin: 'zh-display', text: 'translated 1 row' },
+    });
+    expect(
+      normalizeDaemonEvent(envelopeOf('mod_log', { sessionId: 's1' })),
+    ).toEqual([
+      expect.objectContaining({
+        type: 'debug',
+        debugReason: 'unrecognized_event',
+      }),
+    ]);
+  });
+
+  it.each(['block count', 'byte budget'] as const)(
+    'trims Mod logs before persisted dialogue at the %s limit',
+    (limit) => {
+      const page: DaemonUiEvent[] = [
+        { type: 'user.text.delta', text: 'Prompt', sourceRecordIds: ['r-1'] },
+        {
+          type: 'assistant.text.delta',
+          text: 'Answer',
+          sourceRecordIds: ['r-2'],
+        },
+      ];
+      const logs = [1, 2].flatMap((id) =>
+        normalizeDaemonEvent(
+          envelopeOf(
+            'mod_log',
+            { sessionId: 's1', plugin: 'mod', text: `log ${id}` },
+            id,
+          ),
+        ),
+      );
+      const pageBytes = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        page,
+      ).retainedBytes;
+      const onTruncation = vi.fn();
+      const store = createDaemonTranscriptStore({
+        ...(limit === 'block count'
+          ? { maxBlocks: 2 }
+          : { maxRetainedBytes: pageBytes }),
+        onTruncation,
+      });
+      store.dispatch([...page, ...logs]);
+
+      const snapshot = store.getSnapshot();
+      expect(snapshot.blocks.map((block) => block.sourceRecordIds)).toEqual([
+        ['r-1'],
+        ['r-2'],
+      ]);
+      expect(snapshot.retainedBytes).toBe(pageBytes);
+      expect(snapshot.lastEventId).toBe(2);
+      expect(onTruncation).toHaveBeenCalledTimes(1);
+      expect(onTruncation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'blocks',
+          oldestRetainedRecordId: 'r-1',
+          evictedOldest: false,
+          blockCount: 2,
+        }),
+      );
+    },
+  );
+
+  it('keeps the newest Mod log in place when only one log must be evicted', () => {
+    const store = createDaemonTranscriptStore({ maxBlocks: 3 });
+    const log = (id: number) =>
+      normalizeDaemonEvent(
+        envelopeOf(
+          'mod_log',
+          { sessionId: 's1', plugin: 'mod', text: `log ${id}` },
+          id,
+        ),
+      );
+    store.dispatch([
+      ...log(1),
+      { type: 'user.text.delta', text: 'Prompt' },
+      ...log(2),
+      { type: 'assistant.text.delta', text: 'Answer' },
+    ]);
+
+    const { blocks, blockIndexById } = store.getSnapshot();
+    expect(blocks.map((block) => block.kind)).toEqual([
+      'user',
+      'status',
+      'assistant',
+    ]);
+    expect(blocks[1]).toMatchObject({ eventId: 2 });
+    expect(blocks.map((block) => blockIndexById[block.id])).toEqual([0, 1, 2]);
   });
 
   it('stamps debugReason on unrecognized daemon events', () => {
@@ -11012,6 +11410,30 @@ describe('transcript timing frames', () => {
     ).toEqual([]);
   });
 
+  it.each(['execution-1', '', '   ', null, 42])(
+    'validates request execution identity %s',
+    (executionId) => {
+      const update = {
+        ...TIMING_FRAME,
+        _meta: {
+          ...TIMING_FRAME._meta,
+          timing: { ...TIMING_FRAME._meta.timing, executionId },
+        },
+      };
+      const timing = extractTranscriptTiming(update);
+      if (executionId === 'execution-1')
+        expect(timing?.executionId).toBe(executionId);
+      else expect(timing).not.toHaveProperty('executionId');
+      expect(
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          data: { update },
+        }),
+      ).toEqual([]);
+    },
+  );
+
   it('reads a request timing frame', () => {
     expect(extractTranscriptTiming(TIMING_FRAME)).toEqual({
       kind: 'request',
@@ -11024,6 +11446,21 @@ describe('transcript timing frames', () => {
       model: 'qwen3.8-max',
     });
   });
+
+  it.each([2544, -1, 7000, '2544'])(
+    'validates the request first visible offset %s',
+    (firstVisibleOffsetMs) => {
+      const timing = extractTranscriptTiming({
+        _meta: {
+          timing: { ...TIMING_FRAME._meta.timing, firstVisibleOffsetMs },
+        },
+      });
+      expect(timing?.ttftMs).toBe(2344);
+      expect(timing?.firstVisibleOffsetMs).toBe(
+        firstVisibleOffsetMs === 2544 ? 2544 : undefined,
+      );
+    },
+  );
 
   it('reads a tool timing frame', () => {
     expect(
@@ -11144,5 +11581,175 @@ describe('transcript timing frames', () => {
         },
       }),
     ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
+  });
+});
+
+describe('daemonBlockToPlainText sanitizes tool preview content', () => {
+  it('strips terminal escapes and control chars from a command preview', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'in_progress',
+      // Command text is model- and repository-controlled content; every other
+      // render path strips terminal escapes, so the copy-paste path must too.
+      preview: createDaemonToolPreview(
+        { command: 'echo hi\x1b[31mRED\x1b[0m\r\x1b[2J' },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b[');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('echo hiRED');
+  });
+
+  it('strips terminal escapes from a web_fetch method', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'WebFetch',
+      status: 'completed',
+      // detectWebFetch() copies `method` verbatim out of raw tool-call input
+      // and the field is typed free-form, so it is exactly as model-controlled
+      // as the command text above.
+      preview: createDaemonToolPreview({
+        url: 'https://api.example.com/data',
+        method: 'POST\x1b[31mPWN\x1b[0m\r',
+      }),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    // Assert the visible method survives too: a "fix" that dropped the field
+    // entirely would satisfy the two assertions above.
+    expect(plain).toContain('POSTPWN https://api.example.com/data');
+  });
+
+  it('strips terminal escapes from the tool status line', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      // `status` is an open string on the wire, so a non-conforming peer can
+      // put escapes here too.
+      status: 'completed\x1b]0;TITLE\x1b[31m\r',
+      preview: createDaemonToolPreview({ command: 'echo hi' }),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const plain = daemonBlockToPlainText(block);
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('status: completed');
+  });
+
+  const plainForThumbnail = async (thumbnailUrl: string) => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    return daemonBlockToPlainText({
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'gen',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { prompt: 'p', thumbnailUrl },
+        { toolName: 'image_generator', toolKind: 'tool' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+  };
+
+  it('strips terminal escapes from an image_generation thumbnail URL', async () => {
+    const plain = await plainForThumbnail(
+      'https://cdn.example.com/a.png\r\x1b[31mFAKE',
+    );
+    expect(plain).not.toContain('\x1b');
+    expect(plain).not.toContain('\r');
+    expect(plain).toContain('https://cdn.example.com/a.png');
+  });
+
+  it('keeps a long data:image thumbnail URL intact while sanitizing it', async () => {
+    const payload = 'A'.repeat(20_000);
+    const plain = await plainForThumbnail(`data:image/png;base64,${payload}`);
+    // The wrap must not be the length cap: ensureSafeImageUrl() deliberately
+    // admits arbitrary-length data:image/* payloads, and capping one turns a
+    // valid image into a broken URL.
+    expect(plain).not.toContain('[truncated]');
+    expect(plain).toContain(payload);
+  });
+
+  it('measures the preview cap against visible characters, not escape bytes', async () => {
+    const { daemonBlockToPlainText, createDaemonToolPreview } = await import(
+      '../../src/daemon/ui/index.js'
+    );
+    const block = {
+      id: 'b',
+      kind: 'tool' as const,
+      toolCallId: 't',
+      title: 'Bash: echo',
+      status: 'completed',
+      preview: createDaemonToolPreview(
+        { command: `${'A'.repeat(40)}\x1b[31m${'B'.repeat(40)}` },
+        { toolName: 'Bash', toolKind: 'execute' },
+      ),
+      clientReceivedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    // Sanitising before capping is the tradeoff the description names; if the
+    // two calls are swapped the escapes spend the budget and plaintext starts
+    // cutting visible text that markdown still renders.
+    const plain = daemonBlockToPlainText(block, { maxFieldLength: 80 });
+    expect(plain).not.toContain('[truncated]');
+    expect(plain).toContain('B'.repeat(40));
+  });
+});
+
+describe('parseQwenAgentMessageMeta', () => {
+  it('keeps where a /send message went and drops a malformed target', () => {
+    expect(
+      parseQwenAgentMessageMeta({
+        kind: 'agent_mention',
+        sentTo: {
+          sessionId: 'kid',
+          workspaceCwd: '/work/b',
+          title: 'Kid',
+          extra: 1,
+        },
+      }),
+    ).toEqual({
+      kind: 'agent_mention',
+      sentTo: { sessionId: 'kid', workspaceCwd: '/work/b', title: 'Kid' },
+    });
+    expect(
+      parseQwenAgentMessageMeta({
+        kind: 'agent_mention',
+        sentTo: { sessionId: 'kid' },
+      }),
+    ).toEqual({ kind: 'agent_mention' });
   });
 });

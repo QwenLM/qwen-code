@@ -43,6 +43,7 @@ import {
   writeStdoutLineSafe,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   ignoreBrokenPipe: vi.fn(),
@@ -1554,15 +1555,16 @@ describe('runRevertHunk', () => {
     expect(r.harnessFailure).toBe(true);
   });
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'returns the applied report even if the staging sweep cannot remove the dir',
     () => {
       // The finally's rmSync is best-effort: an un-removable staging dir (a
       // same-uid peer chmods it mid-apply) must not throw out of the finally
       // and turn applied:true into a refusal exit. Simulate by making the
-      // dir read-only right as the apply runs, via the exec seam. Skipped at
-      // uid 0: root bypasses the 0o500 mode, so rmSync succeeds and there is
-      // no un-removable dir to simulate.
+      // dir read-only right as the apply runs, via the exec seam. Skipped
+      // where permission bits do not bind (root with its DAC capabilities,
+      // or Windows): rmSync then succeeds and there is no un-removable dir
+      // to simulate.
       const { dir, diffPath } = twoHunkFixture();
       let stagingDir: string | undefined;
       const r = runRevertHunk({

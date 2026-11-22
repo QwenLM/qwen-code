@@ -550,6 +550,26 @@ describe('buildSessionTasksStatus monitor correlation', () => {
 });
 
 describe('buildSessionTasksStatus workflow graph', () => {
+  it('preserves the owner of project history viewed from another chat', () => {
+    const source = { ...workflowSnapshot(), parentSessionId: 'original-chat' };
+    const result = buildSessionTasksStatus(
+      'viewing-chat',
+      configWith([]),
+      2_000,
+      [source],
+      { includeWorkflows: true },
+    );
+    expect(result.tasks[0]).toMatchObject({ parentSessionId: 'original-chat' });
+    const legacy = buildSessionTasksStatus(
+      'viewing-chat',
+      configWith([]),
+      2_000,
+      [workflowSnapshot()],
+      { includeWorkflows: true },
+    );
+    expect(legacy.tasks[0]).not.toHaveProperty('parentSessionId');
+  });
+
   it('preserves independent correlation records in historical task snapshots', () => {
     const source = workflowSnapshot({
       toolUseId: 'exact-tool-call',
@@ -602,6 +622,69 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(entry?.dispatches[0]).not.toBe(source.dispatches?.[0]);
   });
 
+  it('carries the declared phases of live and saved runs, title and detail only', () => {
+    const meta = {
+      name: 'review-and-fix',
+      description: 'Review and fix',
+      phases: [
+        {
+          title: 'Review',
+          detail: 'One reviewer per dimension',
+          model: 'fast',
+        },
+        { title: 'Fix' },
+      ],
+    };
+    const live = {
+      kind: 'workflow',
+      id: 'wf_live',
+      runId: 'wf_live',
+      description: 'review-and-fix',
+      meta,
+      status: 'running',
+      startTime: 1_000,
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      events: [],
+      pendingApprovals: [],
+    } as unknown as WorkflowTask;
+    const expected = [
+      { title: 'Review', detail: 'One reviewer per dimension' },
+      { title: 'Fix' },
+    ];
+
+    const snapshot = buildSessionTasksStatus(
+      'session-1',
+      configWith([], [live]),
+      2_000,
+      [workflowSnapshot({ meta })],
+      { includeWorkflows: true },
+    );
+
+    const byId = new Map(snapshot.tasks.map((task) => [task.id, task]));
+    expect(byId.get('wf_live')).toMatchObject({ plannedPhases: expected });
+    expect(byId.get('wf_saved')).toMatchObject({ plannedPhases: expected });
+    expect(
+      buildSessionTasksStatus(
+        'session-1',
+        configWith([]),
+        2_000,
+        [workflowSnapshot()],
+        {
+          includeWorkflows: true,
+        },
+      ).tasks[0],
+    ).not.toHaveProperty('plannedPhases');
+  });
+
   it('omits workflow tasks unless the caller opts in', () => {
     const snapshot = buildSessionTasksStatus(
       'session-1',
@@ -618,6 +701,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
       kind: 'workflow',
       id: 'wf_graph',
       runId: 'wf_graph',
+      parentSessionId: 'live-chat',
       toolUseId: 'workflow-call-1',
       description: 'wf_graph',
       meta: null,
@@ -718,6 +802,7 @@ describe('buildSessionTasksStatus workflow graph', () => {
     expect(task).toMatchObject({
       kind: 'workflow',
       id: 'wf_graph',
+      parentSessionId: 'live-chat',
       toolUseId: 'workflow-call-1',
       workflowName: 'review-and-fix',
       label: 'review-and-fix',

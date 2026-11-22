@@ -22,6 +22,7 @@ import {
   stripRuntimeSnapshotPrefix,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from '../config/settings.js';
+import { getBuiltinDeepSeekReasoning } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
 
 /**
@@ -35,6 +36,7 @@ const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
+  [AuthType.QWEN_SUBSCRIPTION]: [],
 };
 
 /**
@@ -475,6 +477,12 @@ export function resolveCliGenerationConfig(
       : undefined;
   if (reasoningDisabled && generationConfig.thinkingMandatory !== true) {
     generationConfig.reasoning = false;
+    if (getBuiltinDeepSeekReasoning({ ...generationConfig, authType })) {
+      resolved.sources['reasoning'] = {
+        kind: 'settings',
+        settingsPath: 'model.reasoningEffort',
+      };
+    }
   } else if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),

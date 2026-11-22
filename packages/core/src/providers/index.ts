@@ -56,6 +56,9 @@ export {
   modelscopeProvider,
   moonshotProvider,
   openRouterProvider,
+  QWENCLOUD_PROVIDERS,
+  qwencloudStandardProvider,
+  qwencloudTokenPlanProvider,
   requestyProvider,
   THIRD_PARTY_PROVIDERS,
   tokenPlanProvider,
@@ -74,6 +77,21 @@ export {
   TOKEN_PLAN_ENV_KEY,
   TOKEN_PLAN_GLOBAL_BASE_URL,
 } from './presets/alibaba-token-plan.js';
+export {
+  QWENCLOUD_CHINA_API_KEY_URL,
+  QWENCLOUD_CHINA_BASE_URL,
+  QWENCLOUD_ENV_KEY,
+  QWENCLOUD_GLOBAL_API_KEY_URL,
+  QWENCLOUD_GLOBAL_BASE_URL,
+  QWENCLOUD_MODELS,
+} from './presets/qwencloud-standard.js';
+export {
+  QWENCLOUD_TOKEN_PLAN_CHINA_BASE_URL,
+  QWENCLOUD_TOKEN_PLAN_CHINA_DOC_URL,
+  QWENCLOUD_TOKEN_PLAN_ENV_KEY,
+  QWENCLOUD_TOKEN_PLAN_GLOBAL_BASE_URL,
+  QWENCLOUD_TOKEN_PLAN_GLOBAL_DOC_URL,
+} from './presets/qwencloud-token-plan.js';
 export { GROK_BASE_URL, GROK_ENV_KEY } from './presets/grok.js';
 export {
   OPENROUTER_BASE_URL,

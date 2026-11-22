@@ -138,7 +138,7 @@ export function shouldIgnore(
  * Apply the trust gate to an intent. Read-shaped intents (`read`,
  * `list`, `glob`, `stat`) always pass — remote clients debugging
  * an untrusted workspace still need to inspect state. Mutating
- * intents (`write`, `edit`) on an untrusted workspace throw
+ * intents (`write`, `edit`, `delete`) on an untrusted workspace throw
  * `untrusted_workspace`, which routes surface as 403.
  *
  * Trust is captured at factory build (a snapshot of
@@ -147,7 +147,7 @@ export function shouldIgnore(
  * cannot split-brain a session.
  *
  * The body is an exhaustive `switch` so adding a new variant to
- * `Intent` (e.g. a future `'delete'`) becomes a TypeScript error
+ * `Intent` becomes a TypeScript error
  * here — the gate must explicitly classify every intent rather
  * than silently defaulting to "allowed".
  */
@@ -161,6 +161,7 @@ export function assertTrustedForIntent(trusted: boolean, intent: Intent): void {
       return;
     case 'write':
     case 'edit':
+    case 'delete':
       throw new FsError(
         'untrusted_workspace',
         `workspace is not trusted; ${intent} operations are forbidden`,

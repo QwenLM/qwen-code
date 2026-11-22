@@ -6,6 +6,7 @@
 
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { getJsInterpreterCommand } from '../utils/runtime-info.js';
 import type {
   ProcessLaunch,
   ShellExecutionConfig,
@@ -38,7 +39,9 @@ export async function executeBwrap(
 ): Promise<SandboxExecutionHandle> {
   const relay = sandboxAsset('bwrap-relay');
   const inputBridge = payload.inheritStdin ? resolveStdinBridge() : undefined;
-  const node = realpathSync(process.execPath);
+  const interpreter = realpathSync(
+    getJsInterpreterCommand(import.meta.url).command,
+  );
   const requestedBwrap = policy.bwrapPath ?? '/usr/bin/bwrap';
   if (!path.isAbsolute(requestedBwrap))
     throw new Error('bwrap path must be absolute.');
@@ -51,7 +54,7 @@ export async function executeBwrap(
     payload,
     [
       path.dirname(relay),
-      path.dirname(node),
+      path.dirname(interpreter),
       path.dirname(bwrap),
       ...(inputBridge ? [path.dirname(inputBridge)] : []),
     ],
@@ -96,7 +99,7 @@ export async function executeBwrap(
       if (network === 'closed') bwrapArgs.push('--unshare-net');
       bwrapArgs.push('--chdir', cwd, '--', executable, ...args);
       return {
-        executable: node,
+        executable: interpreter,
         args: [
           relay,
           String(process.pid),

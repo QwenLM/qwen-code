@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
 
@@ -36,6 +37,7 @@ import {
   persistUsageBeforeTranscriptDeletion,
   prepareUsageBeforeTranscriptDeletion,
   commitUsageBeforeTranscriptDeletion,
+  _resetReplayCacheForTest,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -715,11 +717,12 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   it.skipIf(process.platform === 'win32')(
     'withLive: skips and logs non-regular transcript entries',
     async () => {
-      // A FIFO passing the `*.jsonl` name filter must be skipped before any
-      // read: opening it would block forever (no writer ever arrives) and
-      // wedge the rebuild — the daemon usage dashboard serves from this path.
-      // Observed in the wild from a test-suite leftover. The mkfifo call is
-      // skipped on Windows, matching storage.test.ts.
+      // Phase 1's statSync refuses this FIFO before any read — the log asserted
+      // below pins that skip. statSync is not mocked here, so the open is never
+      // reached. The fd-level isFile() recheck covers a file swapped in AFTER
+      // Phase 1 — see 'settles and skips a FIFO swapped in after the Phase-1
+      // stat'. Observed in the wild from a test-suite leftover. The mkfifo call
+      // is skipped on Windows, matching storage.test.ts.
       plantChatJsonl('sess-real', 1600);
       const fifoPath = planted('sess-fifo');
       const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
@@ -740,6 +743,992 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
           `rebuildFromSessionJsonl: cannot stat ${danglingPath}`,
         ),
       );
+    },
+  );
+});
+
+// The live merge rescans only transcripts whose mtime/size changed and serves
+// the rest from an in-process replay cache; the scan itself JSON-parses just
+// the header and telemetry lines, skipping the large tool-result payloads.
+describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
+  useTempQwenHome('qwen-usage-replay-cache-');
+  beforeEach(() => {
+    _resetReplayCacheForTest();
+  });
+
+  const plant = (sessionId: string, tokens: number) =>
+    writeTranscript('cache-project', sessionId, {
+      cwd: '/cache/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens,
+      assistant: true,
+    });
+
+  const tokensOf = (records: UsageSummaryRecord[], sessionId: string) => {
+    const r = records.find((x) => x.sessionId === sessionId);
+    return r
+      ? Object.values(r.models).reduce((sum, m) => sum + m.totalTokens, 0)
+      : undefined;
+  };
+
+  it('returns identical records on a repeated load of unchanged transcripts', async () => {
+    plant('sess-stable', 1000);
+    const first = await loadUsageHistoryWithLive();
+    const second = await loadUsageHistoryWithLive();
+    expect(second).toEqual(first);
+    expect(tokensOf(second, 'sess-stable')).toBe(1000);
+  });
+
+  it('rescans a transcript when it grows so active sessions stay current', async () => {
+    const filePath = plant('sess-grow', 1000);
+    const before = await loadUsageHistoryWithLive();
+    expect(tokensOf(before, 'sess-grow')).toBe(1000);
+
+    // Append a second api_response worth 500 tokens (size + mtime change).
+    fs.appendFileSync(
+      filePath,
+      JSON.stringify({
+        sessionId: 'sess-grow',
+        cwd: '/cache/project',
+        uuid: 'u-grow',
+        parentUuid: 'u3',
+        timestamp: '2026-06-11T00:03:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:03:00.000Z',
+            response_id: 'r2',
+            model: 'qwen-max',
+            duration_ms: 800,
+            input_token_count: 300,
+            output_token_count: 150,
+            cached_content_token_count: 0,
+            thoughts_token_count: 50,
+            total_token_count: 500,
+            prompt_id: 'p2',
+          },
+        },
+      }) + '\n',
+    );
+
+    const after = await loadUsageHistoryWithLive();
+    expect(tokensOf(after, 'sess-grow')).toBe(1500);
+  });
+
+  it('drops a transcript from the cache once the file is deleted', async () => {
+    plant('sess-keep', 1000);
+    const removed = plant('sess-remove', 500);
+    const before = await loadUsageHistoryWithLive();
+    expect(before.map((r) => r.sessionId).sort()).toEqual([
+      'sess-keep',
+      'sess-remove',
+    ]);
+
+    fs.rmSync(removed);
+    const after = await loadUsageHistoryWithLive();
+    expect(after.map((r) => r.sessionId)).toEqual(['sess-keep']);
+  });
+
+  it('skips large non-telemetry payloads, even ones whose text mentions ui_telemetry', async () => {
+    const sessionId = 'sess-bigline';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    // A ~1MB tool_result tagged `subtype:"ui_telemetry"` (so the cheap substring
+    // pre-filter matches it) AND carrying its own uiEvent worth 5000 tokens with
+    // distinct response/prompt ids. Only the `type === 'system'` guard keeps it
+    // out: deleting that guard lets this non-system record inflate the total to
+    // 6000. A fixture without a uiEvent could not discriminate the guard.
+    const bigText = 'x'.repeat(1024 * 1024);
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'tool_result',
+        subtype: 'ui_telemetry',
+        message: { role: 'user', content: bigText },
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r-embedded',
+            model: 'qwen-max',
+            duration_ms: 900,
+            input_token_count: 3000,
+            output_token_count: 1500,
+            cached_content_token_count: 0,
+            thoughts_token_count: 500,
+            total_token_count: 5000,
+            prompt_id: 'p-embedded',
+          },
+        },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: '2026-06-11T00:02:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:02:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(dir, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    const merged = await loadUsageHistoryWithLive();
+    // Only the real system telemetry counts (1000). The embedded uiEvent on the
+    // non-system tool_result (5000) must be rejected by the type guard — without
+    // the guard this total would be 6000.
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+  });
+
+  it('uses the regex-extracted timestamp when the trailing line is corrupt', async () => {
+    const sessionId = 'sess-corrupt-tail';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+    ];
+    // A truncated append: the final physical line is unparseable but still
+    // carries its own timestamp. The scan must keep the session and use that
+    // trailing timestamp (not drop the record, not reuse the earlier one).
+    const body =
+      records.map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      '{"timestamp":"2026-06-11T00:02:00.000Z","type":"assis';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const merged = await loadUsageHistoryWithLive();
+    const r = merged.find((x) => x.sessionId === sessionId);
+    expect(r).toBeDefined();
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+    expect(r!.timestamp).toBe(new Date('2026-06-11T00:02:00.000Z').getTime());
+  });
+
+  it('returns every session when candidates exceed the scan concurrency', async () => {
+    // More transcripts than REBUILD_CONCURRENCY (8) so the worker pool must
+    // hand off indices; none may be lost or duplicated by the parallel pass.
+    const n = 12;
+    const expected = new Map<string, number>();
+    for (let i = 0; i < n; i++) {
+      const sid = `sess-many-${String(i).padStart(2, '0')}`;
+      plant(sid, 100 + i);
+      expected.set(sid, 100 + i);
+    }
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.length).toBe(n);
+    for (const [sid, tokens] of expected) {
+      expect(tokensOf(merged, sid)).toBe(tokens);
+    }
+  });
+
+  it('does not cache a failed scan: a transient open failure recovers on the next load', async () => {
+    const filePath = plant('sess-transient', 1000);
+    const orig = fs.promises.open;
+    let failedOnce = false;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      if (!failedOnce && String(p) === filePath) {
+        failedOnce = true;
+        // An asynchronous open failure (EACCES-like), not a sync throw: this is
+        // the path that must NOT be memoized as "no usage".
+        return Promise.reject(
+          Object.assign(new Error('EACCES: simulated'), { code: 'EACCES' }),
+        );
+      }
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const first = await loadUsageHistoryWithLive();
+      expect(
+        first.find((r) => r.sessionId === 'sess-transient'),
+      ).toBeUndefined();
+      // The failure was not cached, so the next load rescans and recovers.
+      const second = await loadUsageHistoryWithLive();
+      expect(tokensOf(second, 'sess-transient')).toBe(1000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // POSIX-only: the fake handle witnesses the fd-level read/close semantics;
+  // openNoFollow's Windows fallback inserts an lstat/fstat identity step that a
+  // bare fake handle cannot satisfy (the helper's own tests cover that path).
+  it.skipIf(process.platform === 'win32')(
+    'does not cache a failed scan: a read error after a successful open recovers on the next load',
+    async () => {
+      // The open succeeds and the fd recheck passes; the failure lands mid-read
+      // (the `for await` catch -> rethrow branch), which an open-time rejection
+      // never exercises. A failed scan must not be memoized as "no usage".
+      const filePath = plant('sess-read-err', 1000);
+      const orig = fs.promises.open;
+      let failedOnce = false;
+      let closeCalls = 0;
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+        p: fs.PathLike,
+        flags?: string | number,
+        mode?: fs.Mode,
+      ) => {
+        if (!failedOnce && String(p) === filePath) {
+          failedOnce = true;
+          const fakeHandle = {
+            stat: async () => ({ isFile: () => true }) as unknown as fs.Stats,
+            createReadStream: () =>
+              new Readable({
+                read() {
+                  this.destroy(
+                    Object.assign(new Error('EIO: simulated'), { code: 'EIO' }),
+                  );
+                },
+              }),
+            close: async () => {
+              closeCalls++;
+            },
+          };
+          return Promise.resolve(
+            fakeHandle as unknown as fs.promises.FileHandle,
+          );
+        }
+        return orig(p, flags as number, mode);
+      }) as typeof fs.promises.open);
+      try {
+        const first = await loadUsageHistoryWithLive();
+        expect(
+          first.find((r) => r.sessionId === 'sess-read-err'),
+        ).toBeUndefined();
+        // The fd is owned explicitly, so it is closed even on the read-error path.
+        expect(closeCalls).toBe(1);
+        // The failure was not cached, so the next load rescans and recovers.
+        const second = await loadUsageHistoryWithLive();
+        expect(tokensOf(second, 'sess-read-err')).toBe(1000);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  // POSIX-only for the same reason as the read-error companion above.
+  it.skipIf(process.platform === 'win32')(
+    'closes the handle when stat() rejects before a stream exists, and does not cache the failure',
+    async () => {
+      // stat() can reject (EIO/ESTALE on a network- or FUSE-backed home) after a
+      // successful open but before any stream exists to inherit the fd. The
+      // handle must still be closed, and the failed scan must not be memoized.
+      const filePath = plant('sess-stat-err', 1000);
+      const orig = fs.promises.open;
+      let failedOnce = false;
+      let closeCalls = 0;
+      let readStreamCalls = 0;
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+        p: fs.PathLike,
+        flags?: string | number,
+        mode?: fs.Mode,
+      ) => {
+        if (!failedOnce && String(p) === filePath) {
+          failedOnce = true;
+          const fakeHandle = {
+            stat: async () => {
+              throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
+            },
+            createReadStream: () => {
+              readStreamCalls++;
+              return new Readable({ read() {} });
+            },
+            close: async () => {
+              closeCalls++;
+            },
+          };
+          return Promise.resolve(
+            fakeHandle as unknown as fs.promises.FileHandle,
+          );
+        }
+        return orig(p, flags as number, mode);
+      }) as typeof fs.promises.open);
+      try {
+        const first = await loadUsageHistoryWithLive();
+        expect(
+          first.find((r) => r.sessionId === 'sess-stat-err'),
+        ).toBeUndefined();
+        expect(closeCalls).toBe(1);
+        // The recheck must refuse before any stream is created: counting is
+        // discriminating (a createReadStream that throws would be swallowed by
+        // the inner catch and produce the same observables).
+        expect(readStreamCalls).toBe(0);
+        const second = await loadUsageHistoryWithLive();
+        expect(tokensOf(second, 'sess-stat-err')).toBe(1000);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  // POSIX-only: fake-handle fd semantics, like the companions above.
+  it.skipIf(process.platform === 'win32')(
+    'a close() failure after a complete read does not discard the scan',
+    async () => {
+      // The bytes are fully read; a best-effort close() that rejects must not
+      // replace the success (nor, on the read-error path, mask the read error).
+      const filePath = plant('sess-close-err', 1000);
+      const orig = fs.promises.open;
+      let failedOnce = false;
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+        p: fs.PathLike,
+        flags?: string | number,
+        mode?: fs.Mode,
+      ) => {
+        if (!failedOnce && String(p) === filePath) {
+          failedOnce = true;
+          const content = fs.readFileSync(filePath, 'utf8');
+          const fakeHandle = {
+            stat: async () => ({ isFile: () => true }) as unknown as fs.Stats,
+            createReadStream: () =>
+              new Readable({
+                read() {
+                  this.push(content);
+                  this.push(null);
+                },
+              }),
+            close: async () => {
+              throw Object.assign(new Error('EIO: close failed'), {
+                code: 'EIO',
+              });
+            },
+          };
+          return Promise.resolve(
+            fakeHandle as unknown as fs.promises.FileHandle,
+          );
+        }
+        return orig(p, flags as number, mode);
+      }) as typeof fs.promises.open);
+      try {
+        const first = await loadUsageHistoryWithLive();
+        expect(tokensOf(first, 'sess-close-err')).toBe(1000);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it('degrades to a plain open on an inode-0 volume so usage is not silently emptied', async () => {
+    // openNoFollow's no-O_NOFOLLOW fallback refuses an inode-0 volume (FAT/exFAT,
+    // some SMB) as unverifiable. A usage replay is not identity-sensitive, so it
+    // must degrade to the plain non-blocking open and still read the transcript
+    // (the gitDiff.ts posture). Force the fallback: hide O_NOFOLLOW and report
+    // ino 0 from the pre-open lstat, then load through a freshly imported module.
+    const filePath = plant('sess-eunv', 1000);
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        promises: {
+          ...actual.promises,
+          lstat: ((p: fs.PathLike, opts?: unknown) => {
+            if (String(p) === filePath) {
+              return Promise.resolve({
+                isSymbolicLink: () => false,
+                dev: 1n,
+                ino: 0n,
+              });
+            }
+            return actual.promises.lstat(p, opts as never);
+          }) as typeof actual.promises.lstat,
+        },
+      };
+      return { ...modified, default: modified };
+    });
+    try {
+      const { loadUsageHistoryWithLive: load } = await import(
+        './usageHistoryService.js'
+      );
+      const merged = await load();
+      expect(tokensOf(merged, 'sess-eunv')).toBe(1000);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
+
+  it('serves unchanged transcripts from the replay cache without re-reading them', async () => {
+    const paths = [
+      plant('sess-cache-a', 100),
+      plant('sess-cache-b', 200),
+      plant('sess-cache-c', 300),
+    ];
+    const opened: string[] = [];
+    const orig = fs.promises.open;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    const transcriptOpens = () =>
+      opened.filter((p) => paths.includes(p)).length;
+    try {
+      await loadUsageHistoryWithLive();
+      expect(transcriptOpens()).toBe(3); // cold: every transcript read
+
+      opened.length = 0;
+      await loadUsageHistoryWithLive();
+      expect(transcriptOpens()).toBe(0); // warm: no transcript re-read
+
+      // Grow one transcript; only it may be re-read on the next load.
+      fs.appendFileSync(
+        paths[0]!,
+        JSON.stringify({
+          sessionId: 'sess-cache-a',
+          cwd: '/cache/project',
+          uuid: 'u-extra',
+          parentUuid: 'u3',
+          timestamp: '2026-06-11T00:03:00.000Z',
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': '2026-06-11T00:03:00.000Z',
+              response_id: 'r-extra',
+              model: 'qwen-max',
+              duration_ms: 500,
+              input_token_count: 60,
+              output_token_count: 30,
+              cached_content_token_count: 0,
+              thoughts_token_count: 10,
+              total_token_count: 100,
+              prompt_id: 'p-extra',
+            },
+          },
+        }) + '\n',
+      );
+      opened.length = 0;
+      const third = await loadUsageHistoryWithLive();
+      expect(transcriptOpens()).toBe(1); // only the grown transcript
+      expect(tokensOf(third, 'sess-cache-a')).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not JSON-parse a large trailing tool_result line', async () => {
+    const sessionId = 'sess-bigtail';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    // The FINAL record is a ~1MB tool_result — the shape a session idles on
+    // right after a big tool call. It must not be parsed after the loop.
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: '2026-06-11T00:02:00.000Z',
+        type: 'tool_result',
+        message: { role: 'user', content: 'x'.repeat(1024 * 1024) },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(dir, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
+      // No parse may touch the megabyte trailing payload; header + telemetry
+      // lines are a few hundred chars each.
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('recovers the later timestamp from a small glued trailing line', async () => {
+    const sessionId = 'sess-glued-small';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const u1 = {
+      ...base,
+      uuid: 'u1',
+      parentUuid: null,
+      timestamp: '2026-06-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    };
+    const u2 = {
+      ...base,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      timestamp: '2026-06-11T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:01:00.000Z',
+          response_id: 'r1',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 600,
+          output_token_count: 300,
+          cached_content_token_count: 0,
+          thoughts_token_count: 100,
+          total_token_count: 1000,
+          prompt_id: 'p1',
+        },
+      },
+    };
+    // Two records fused on the final physical line (interrupted append); the
+    // second carries a much later timestamp. The small-tail parse must take the
+    // LAST recovered record, not the first.
+    const recA = {
+      ...base,
+      uuid: 'u3',
+      parentUuid: 'u2',
+      timestamp: '2026-06-11T00:02:00.000Z',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'a' },
+    };
+    const recB = {
+      ...base,
+      uuid: 'u4',
+      parentUuid: 'u3',
+      timestamp: '2026-06-11T23:59:00.000Z',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'b' },
+    };
+    const body =
+      [u1, u2].map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      JSON.stringify(recA) +
+      JSON.stringify(recB) +
+      '\n';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const merged = await loadUsageHistoryWithLive();
+    const r = merged.find((x) => x.sessionId === sessionId);
+    expect(r).toBeDefined();
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+    expect(r!.timestamp).toBe(new Date('2026-06-11T23:59:00.000Z').getTime());
+  });
+
+  it('takes the later timestamp from a large glued trailing line without parsing it', async () => {
+    const sessionId = 'sess-glued-large';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const u1 = {
+      ...base,
+      uuid: 'u1',
+      parentUuid: null,
+      timestamp: '2026-06-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    };
+    const u2 = {
+      ...base,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      timestamp: '2026-06-11T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:01:00.000Z',
+          response_id: 'r1',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 600,
+          output_token_count: 300,
+          cached_content_token_count: 0,
+          thoughts_token_count: 100,
+          total_token_count: 1000,
+          prompt_id: 'p1',
+        },
+      },
+    };
+    // A >64KB final line: a megabyte tool_result fused to a later record. The
+    // large-tail branch must take the LAST top-level timestamp as raw text
+    // (first-match would pick the earlier one) and must not JSON-parse the line.
+    const recA = {
+      ...base,
+      uuid: 'u3',
+      parentUuid: 'u2',
+      timestamp: '2026-06-11T00:05:00.000Z',
+      type: 'tool_result',
+      message: { role: 'user', content: 'x'.repeat(1024 * 1024) },
+    };
+    const recB = {
+      ...base,
+      uuid: 'u4',
+      parentUuid: 'u3',
+      timestamp: '2026-06-11T00:09:00.000Z',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'ok' },
+    };
+    const body =
+      [u1, u2].map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      JSON.stringify(recA) +
+      JSON.stringify(recB) +
+      '\n';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      const r = merged.find((x) => x.sessionId === sessionId);
+      expect(r).toBeDefined();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
+      expect(r!.timestamp).toBe(new Date('2026-06-11T00:09:00.000Z').getTime());
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('ignores a nested payload timestamp on a large trailing tool_result', async () => {
+    const sessionId = 'sess-nested-ts';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const u1 = {
+      ...base,
+      uuid: 'u1',
+      parentUuid: null,
+      timestamp: '2026-06-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    };
+    const u2 = {
+      ...base,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      timestamp: '2026-06-11T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:01:00.000Z',
+          response_id: 'r1',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 600,
+          output_token_count: 300,
+          cached_content_token_count: 0,
+          thoughts_token_count: 100,
+          total_token_count: 1000,
+          prompt_id: 'p1',
+        },
+      },
+    };
+    // A >64KB final tool_result whose own timestamp is 00:05 but whose payload
+    // (functionResponse.response) carries a much LATER nested timestamp. The
+    // depth-aware scan must keep the record's own 00:05, not the nested 2035.
+    const recA = {
+      ...base,
+      uuid: 'u3',
+      parentUuid: 'u2',
+      timestamp: '2026-06-11T00:05:00.000Z',
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        content: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: {
+                timestamp: '2035-01-01T00:00:00.000Z',
+                output: 'x'.repeat(100 * 1024),
+              },
+            },
+          },
+        ],
+      },
+    };
+    const body =
+      [u1, u2].map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      JSON.stringify(recA) +
+      '\n';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      const r = merged.find((x) => x.sessionId === sessionId);
+      expect(r).toBeDefined();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
+      expect(r!.timestamp).toBe(new Date('2026-06-11T00:05:00.000Z').getTime());
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('bounds the replay scan concurrency instead of one worker per candidate', async () => {
+    const paths: string[] = [];
+    for (let i = 0; i < 12; i++) paths.push(plant(`sess-conc-${i}`, 100));
+    const gated: Array<{
+      path: string;
+      resolve: (h: fs.promises.FileHandle) => void;
+    }> = [];
+    let opens = 0;
+    let gating = true;
+    const orig = fs.promises.open;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      if (gating && paths.includes(String(p))) {
+        opens++;
+        // A pending open: the worker blocks here, so no further opens occur.
+        return new Promise<fs.promises.FileHandle>((resolve) => {
+          gated.push({ path: String(p), resolve });
+        });
+      }
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const pending = loadUsageHistoryWithLive();
+      // Let the persisted-file read settle and the pool start: each worker
+      // blocks on its gated open, so no further opens can occur.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(opens).toBeGreaterThan(0);
+      expect(opens).toBeLessThanOrEqual(8); // REBUILD_CONCURRENCY
+      // Release the gates with real handles and stop gating so the load finishes.
+      gating = false;
+      for (const g of gated) {
+        g.resolve(
+          await orig(g.path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK),
+        );
+      }
+      await pending;
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'settles and skips a FIFO swapped in after the Phase-1 stat',
+    async () => {
+      // A real transcript plus a real FIFO. statSync is fooled into reporting
+      // the FIFO as a regular file (Phase 1), so only the fd-level recheck in
+      // summarizeTranscriptFile can reject it. O_NONBLOCK keeps the open from
+      // blocking (a writerless FIFO then reads as an empty stream), so the
+      // settle alone does not witness the recheck; the isFile() check is what
+      // refuses a non-regular file, and only its throw logs the message below.
+      const real = plant('sess-real', 1000);
+      const fifoPath = path.join(path.dirname(real), 'sess-fifo.jsonl');
+      const mkfifo = spawnSync('mkfifo', [fifoPath]);
+      expect(mkfifo.status).toBe(0);
+      const origStat = fs.statSync;
+      const statSpy = vi.spyOn(fs, 'statSync').mockImplementation(((
+        p: fs.PathLike,
+      ) => {
+        if (String(p) === fifoPath) {
+          return {
+            isFile: () => true,
+            mtimeMs: Date.now(),
+            size: 100,
+          } as unknown as fs.Stats;
+        }
+        return origStat(p);
+      }) as typeof fs.statSync);
+      debugMock.mockClear();
+      try {
+        const merged = await loadUsageHistoryWithLive();
+        expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+        // Pin the rejection, not just the settle: only the fd-level isFile()
+        // recheck throws "non-regular transcript", which the worker logs. With
+        // the recheck deleted the FIFO reads as an empty transcript and this
+        // message never appears.
+        expect(debugMock).toHaveBeenCalledWith(
+          expect.stringContaining(`non-regular transcript: ${fifoPath}`),
+        );
+      } finally {
+        statSpy.mockRestore();
+        fs.rmSync(fifoPath, { force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked transcript rather than replaying its target (no-follow open)',
+    async () => {
+      // The no-follow open refuses a symlinked final component, so a symlink
+      // planted in chats must not replay its target's usage. The target lives
+      // outside the chats enumeration with a distinct sessionId: if the open
+      // followed symlinks, that session would appear; refused, it must not.
+      const real = plant('sess-real', 1000);
+      // Reuse the same fixture as the real transcripts (no hand-copied records
+      // that could drift and make this negative assertion vacuous), then move
+      // the target out of the chats enumeration so it is reachable only through
+      // the symlink.
+      const targetInChats = plant('sess-link-target', 2000);
+      const targetPath = path.join(
+        process.env['QWEN_HOME']!,
+        'symlink-target.jsonl',
+      );
+      fs.renameSync(targetInChats, targetPath);
+      const linkPath = path.join(path.dirname(real), 'sess-link.jsonl');
+      fs.symlinkSync(targetPath, linkPath);
+      try {
+        const merged = await loadUsageHistoryWithLive();
+        expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+      } finally {
+        fs.rmSync(linkPath, { force: true });
+        fs.rmSync(targetPath, { force: true });
+      }
     },
   );
 });
@@ -803,6 +1792,110 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     );
     expect(fs.existsSync(usagePath())).toBe(false);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'salvage refuses a symlinked transcript without throwing or persisting (no-follow)',
+    async () => {
+      // The shared reader is no-follow for every caller, including the salvage:
+      // a symlinked transcript is refused (the salvage never throws) and nothing
+      // is written. If the open followed the link, the target's usage would be
+      // persisted instead.
+      const target = plantTranscript('sess-salvage-link-target', true);
+      const linkPath = path.join(
+        path.dirname(target),
+        'sess-salvage-link.jsonl',
+      );
+      fs.symlinkSync(target, linkPath);
+      try {
+        await expect(
+          persistUsageBeforeTranscriptDeletion(linkPath),
+        ).resolves.toBe(false);
+        expect(fs.existsSync(usagePath())).toBe(false);
+      } finally {
+        fs.rmSync(linkPath, { force: true });
+      }
+    },
+  );
+
+  it.each([
+    [false, 'request_lifecycle'],
+    [true, 'request_lifecycle'],
+    [false, 'tool_lifecycle'],
+    [true, 'tool_lifecycle'],
+    [false, 'hook_lifecycle'],
+    [true, 'hook_lifecycle'],
+  ] as const)(
+    'ignores lifecycle frames during usage rebuild and salvage (metrics: %s, event: %s)',
+    async (withMetrics, eventName) => {
+      const sessionId = `sess-lifecycle-${withMetrics}`;
+      const filePath = plantTranscript(sessionId, withMetrics);
+      const started = {
+        'event.name': eventName,
+        v: 1,
+        kind: eventName === 'tool_lifecycle' ? 'tool' : 'request',
+        ...(eventName === 'tool_lifecycle'
+          ? {
+              callId: 'call',
+              toolName: 'read_file',
+              executionStatus: 'running',
+            }
+          : {}),
+        executionId: 'execution',
+        sessionId,
+        promptId: `${sessionId}########1`,
+        model: 'qwen-max',
+        startedAt: 100,
+        phase: 'started',
+      };
+      fs.appendFileSync(
+        filePath,
+        [
+          started,
+          {
+            ...started,
+            phase: 'ended',
+            endedAt: 120,
+            durationMs: 20,
+            outcome: 'cancelled',
+            ...(eventName === 'tool_lifecycle'
+              ? { executionStatus: 'cancelled', executionDurationMs: 20 }
+              : {}),
+          },
+        ]
+          .map((uiEvent, i) =>
+            JSON.stringify({
+              uuid: `lifecycle-${i}`,
+              parentUuid: i === 0 ? 'u1' : 'lifecycle-0',
+              sessionId,
+              cwd: '/salvage/project',
+              timestamp: '2026-07-01T00:01:00.000Z',
+              type: 'system',
+              subtype: 'ui_telemetry',
+              systemPayload: { uiEvent },
+            }),
+          )
+          .join('\n') + '\n',
+      );
+
+      const rebuilt = await loadUsageHistory(undefined, {
+        persistRebuild: false,
+      });
+      expect(rebuilt).toHaveLength(withMetrics ? 1 : 0);
+      expect(aggregateUsage(rebuilt, 'all').sessionCount).toBe(
+        withMetrics ? 1 : 0,
+      );
+      const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+      if (withMetrics) {
+        expect(prepared?.record.models['qwen-max']?.totalTokens).toBe(1000);
+      } else {
+        expect(prepared).toBeNull();
+        await expect(
+          persistUsageBeforeTranscriptDeletion(filePath),
+        ).resolves.toBe(false);
+        expect(fs.existsSync(usagePath())).toBe(false);
+      }
+    },
+  );
 
   it('never throws for a missing transcript', async () => {
     await expect(

@@ -11,6 +11,9 @@
   --traj-ttft: color-mix(in srgb, var(--traj-request) 45%, var(--background));
 
   position: relative;
+  /* Span stacking (up to 1002 for the selected one) stays inside the strip
+     rather than rising over popovers opened from the summary bar. */
+  isolation: isolate;
   flex: none;
   box-sizing: border-box;
   height: 128px;

@@ -38,7 +38,20 @@ import {
 import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import { toOriginalKey } from './key-map.js';
-import { findNextEnabledIndex } from './dialogs-core.js';
+import {
+  clipToRows,
+  findNextEnabledIndex,
+  getSelectionScrollOffset,
+  wrappedRows,
+} from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
@@ -52,14 +65,26 @@ export interface OpenTuiArenaDialogProps {
   notify: (text: string, level?: 'info' | 'error') => void;
   /** ink handleArenaModelsSelected: fill the composer, keep it unsubmitted. */
   onFillInput?: (text: string) => void;
+  /** The popup region's row budget; the model and agent lists window from it. */
+  availableTerminalHeight?: number;
 }
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#modelproviders';
+const ARENA_NO_MODELS = 'No models available. Please configure models first.';
+const ARENA_OAUTH_NOTE = 'Note: qwen-oauth models are not supported in Arena.';
+const ARENA_NEED_MORE = 'Arena requires at least 2 models. To add more:';
+const ARENA_ADD_VIA_AUTH =
+  '  - Run /auth to set up a Coding Plan (includes multiple models)';
+const ARENA_ADD_VIA_SETTINGS =
+  '  - Or configure modelProviders in settings.json';
+const ARENA_MORE_MODELS_GUIDE =
+  'Configure more models with the modelProviders guide:';
 
 const STATUS_REFRESH_INTERVAL_MS = 2000;
 const IN_PROCESS_REFRESH_INTERVAL_MS = 1000;
 const MAX_MODEL_NAME_LENGTH = 35;
+const ARENA_SELECT_WINNER = 'Select a winner to apply changes:';
 const MAX_TASK_DISPLAY_LENGTH = 60;
 const DETAILED_DIFF_MAX_LINES = 180;
 
@@ -104,6 +129,7 @@ function ArenaFrame({
   hint: string;
   children?: React.ReactNode;
 }) {
+  const { width } = useTerminalDimensions();
   return (
     <box
       flexDirection="column"
@@ -113,7 +139,13 @@ function ArenaFrame({
       paddingRight={2}
       paddingTop={1}
       paddingBottom={1}
-      marginTop={1}
+      // A shrinkable frame lets a short region squeeze its text rows to zero
+      // and paint them over each other; staying natural height keeps the rows
+      // contiguous for the region's clip to cut at the tail, as ink does for
+      // /stats. The clip cuts child text but not the frame's own border
+      // strokes, so a frame taller than the region still paints its border
+      // past it, and a body with an explicit height windows itself from the
+      // region budget instead of relying on the clip (Decision 71).
       flexShrink={0}
     >
       <box flexDirection="row">
@@ -124,14 +156,24 @@ function ArenaFrame({
       </box>
       {children}
       <box marginTop={1}>
-        <text fg={C.dim}>{hint}</text>
+        <text fg={C.dim}>
+          {/* The hint is charged one row, so it clips to the frame's content
+              columns (region width less border and padding) instead of
+              wrapping onto a row the chrome count never paid for. */}
+          {clipToWidth(hint, Math.max(1, dialogAreaWidth(width) - 6))}
+        </text>
       </box>
     </box>
   );
 }
 
 /** `/arena start` — multi-select of configured models → fill the composer. */
-function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
+function ArenaStart({
+  config,
+  onClose,
+  onFillInput,
+  availableTerminalHeight: propsRegionHeight,
+}: OpenTuiArenaDialogProps) {
   const modelItems = useMemo(() => {
     const all = config?.getAllConfiguredModels?.() ?? [];
     return all
@@ -160,13 +202,92 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
   const needsMoreModels = selectableCount < 2;
   const showMoreModelsHint = selectableCount >= 2 && selectableCount < 3;
 
+  // The frame (7) and the list's margin row come off the region first; the
+  // error and guidance blocks pay their own rows, and the model list windows
+  // from what is left. A zero-row window refuses the cursor keys and Space —
+  // they address a row — while Enter stays live for the checks already made.
+  const regionHeight = clampDialogHeight(propsRegionHeight);
+  const { width } = useTerminalDimensions();
+  // Every charged run is measured at the frame's content width — the same
+  // width the ArenaFrame hint clips to: a run charged a flat row that wraps
+  // (the modelProviders URL is 88 columns) under-pays, and the unshrinkable
+  // frame grows past the region by the difference.
+  const frameContentWidth = Math.max(1, dialogAreaWidth(width) - 6);
+  // Each model row is charged one physical row, so the label — model labels
+  // come from the config — is clipped to what the row owns: the frame's
+  // content columns less the four columns of the `[x] ` checkbox.
+  const modelLabelWidth = Math.max(1, frameContentWidth - 4);
+  const errorRows = error ? 1 + wrappedRows(error, frameContentWidth) : 0;
+  // The empty branch paints a text row where the list would paint its first
+  // model row, so it pays the rows that text wraps into.
+  const emptyRows =
+    modelItems.length === 0
+      ? wrappedRows(ARENA_NO_MODELS, frameContentWidth)
+      : 0;
+  // The model list is the dialog's only interactive part, and no key wins an
+  // advisory row back, so the list keeps a one-row floor: an advisory block
+  // the floor cannot pay does not paint at all. Charging it less than it
+  // paints would instead grow the unshrinkable frame past the region's clip.
+  const advisoryRows =
+    regionHeight === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, regionHeight - 8 - emptyRows - errorRows - 1);
+  const guidanceBlockRows =
+    hasDisabledQwenOauth || needsMoreModels
+      ? 1 +
+        (hasDisabledQwenOauth
+          ? wrappedRows(ARENA_OAUTH_NOTE, frameContentWidth)
+          : 0) +
+        (needsMoreModels
+          ? wrappedRows(ARENA_NEED_MORE, frameContentWidth) +
+            wrappedRows(ARENA_ADD_VIA_AUTH, frameContentWidth) +
+            wrappedRows(ARENA_ADD_VIA_SETTINGS, frameContentWidth)
+          : 0)
+      : 0;
+  const moreModelsBlockRows = showMoreModelsHint
+    ? 1 +
+      wrappedRows(ARENA_MORE_MODELS_GUIDE, frameContentWidth) +
+      wrappedRows(MODEL_PROVIDERS_DOCUMENTATION_URL, frameContentWidth)
+    : 0;
+  const showGuidance =
+    (hasDisabledQwenOauth || needsMoreModels) &&
+    guidanceBlockRows <= advisoryRows;
+  const guidanceRows = showGuidance ? guidanceBlockRows : 0;
+  const showMoreModelsGuide =
+    showMoreModelsHint && moreModelsBlockRows <= advisoryRows - guidanceRows;
+  const moreModelsRows = showMoreModelsGuide ? moreModelsBlockRows : 0;
+  const modelWindowRows =
+    regionHeight === undefined
+      ? modelItems.length
+      : Math.max(
+          0,
+          regionHeight -
+            8 -
+            emptyRows -
+            errorRows -
+            guidanceRows -
+            moreModelsRows,
+        );
+  const modelOffset = getSelectionScrollOffset(
+    cursor,
+    modelItems.length,
+    modelWindowRows,
+  );
+
   useKeyboard((key) => {
     const o = toOriginalKey(key);
+    // The error's rows can take the window to zero, where the refusal keeps
+    // Space off the only rows that could satisfy the message; the next key
+    // clears it, so the window comes back. (The zero-row refusal itself
+    // stays: this key's closure still saw no painted row.)
+    if (error) setError(null);
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
+      if (modelWindowRows < 1) return;
       setCursor(findNextEnabledIndex(modelItems, cursorRef.current, o.name));
     } else if (o.name === 'space') {
+      if (modelWindowRows < 1) return;
       const item = modelItems[cursorRef.current];
       if (!item || item.disabled) return;
       const next = new Set(checkedRef.current);
@@ -193,25 +314,33 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
     >
       {modelItems.length === 0 ? (
         <box marginTop={1}>
-          <text fg={C.yellow}>
-            {'No models available. Please configure models first.'}
-          </text>
+          <text fg={C.yellow}>{ARENA_NO_MODELS}</text>
         </box>
       ) : (
         <box flexDirection="column" marginTop={1}>
-          {modelItems.map((m, i) => (
-            <box key={m.key} flexDirection="row">
-              <text fg={m.disabled ? C.dim : i === cursor ? C.accent : C.dim}>
-                {checked.has(m.key) ? '[x] ' : '[ ] '}
-              </text>
-              <text
-                fg={m.disabled ? C.dim : i === cursor ? C.text : C.dim}
-                attributes={!m.disabled && i === cursor ? 1 : 0}
-              >
-                {m.label}
-              </text>
-            </box>
-          ))}
+          {modelItems
+            .slice(modelOffset, modelOffset + modelWindowRows)
+            .map((m, i0) => {
+              const i = modelOffset + i0;
+              return (
+                <box key={m.key} flexDirection="row">
+                  <text
+                    fg={m.disabled ? C.dim : i === cursor ? C.accent : C.dim}
+                  >
+                    {checked.has(m.key) ? '[x] ' : '[ ] '}
+                  </text>
+                  <text
+                    fg={m.disabled ? C.dim : i === cursor ? C.text : C.dim}
+                    attributes={!m.disabled && i === cursor ? 1 : 0}
+                  >
+                    {truncateToWidth(
+                      sanitizeTerminalLine(m.label),
+                      modelLabelWidth,
+                    )}
+                  </text>
+                </box>
+              );
+            })}
         </box>
       )}
       {error && (
@@ -219,35 +348,23 @@ function ArenaStart({ config, onClose, onFillInput }: OpenTuiArenaDialogProps) {
           <text fg={C.red}>{error}</text>
         </box>
       )}
-      {(hasDisabledQwenOauth || needsMoreModels) && (
+      {showGuidance && (
         <box marginTop={1} flexDirection="column">
           {hasDisabledQwenOauth && (
-            <text fg={C.yellow}>
-              {'Note: qwen-oauth models are not supported in Arena.'}
-            </text>
+            <text fg={C.yellow}>{ARENA_OAUTH_NOTE}</text>
           )}
           {needsMoreModels && (
             <>
-              <text fg={C.yellow}>
-                {'Arena requires at least 2 models. To add more:'}
-              </text>
-              <text fg={C.yellow}>
-                {
-                  '  - Run /auth to set up a Coding Plan (includes multiple models)'
-                }
-              </text>
-              <text fg={C.yellow}>
-                {'  - Or configure modelProviders in settings.json'}
-              </text>
+              <text fg={C.yellow}>{ARENA_NEED_MORE}</text>
+              <text fg={C.yellow}>{ARENA_ADD_VIA_AUTH}</text>
+              <text fg={C.yellow}>{ARENA_ADD_VIA_SETTINGS}</text>
             </>
           )}
         </box>
       )}
-      {showMoreModelsHint && (
+      {showMoreModelsGuide && (
         <box marginTop={1} flexDirection="column">
-          <text fg={C.dim}>
-            {'Configure more models with the modelProviders guide:'}
-          </text>
+          <text fg={C.dim}>{ARENA_MORE_MODELS_GUIDE}</text>
           <text fg={C.dim}>{MODEL_PROVIDERS_DOCUMENTATION_URL}</text>
         </box>
       )}
@@ -564,49 +681,138 @@ function formatFileList(files: string[]): string {
   return `${visible.join(', ')}${suffix}`;
 }
 
-function AgentPreview({ result }: { result: ArenaAgentResult }) {
-  const files = result.diffSummary?.files ?? [];
+interface AgentPreviewRun {
+  label: string;
+  value: string;
+}
+
+interface ClippedAgentPreview {
+  title: string;
+  runs: AgentPreviewRun[];
+  /** The rows the clipped pane paints: its margin and title, then the runs. */
+  rows: number;
+}
+
+/**
+ * The preview pane's runs, clipped so the pane's row count never exceeds
+ * `rowBudget`: the pane's rows come out of the list's window, and the
+ * approach run — LLM-generated, with no length bound — can otherwise grow
+ * the unshrinkable frame past the clipped region. Runs clip in paint order
+ * (the unbounded approach first), and a run the budget can no longer pay
+ * does not paint at all. Each run is clipped and re-measured at the width
+ * its box actually gets — the pane is indented two columns and each value
+ * starts after its label. Undefined when the budget cannot pay the pane's
+ * own margin and title.
+ */
+function clipAgentPreview(
+  result: ArenaAgentResult,
+  frameContentWidth: number,
+  rowBudget: number | undefined,
+): ClippedAgentPreview | undefined {
+  // Sanitize before measuring: the summary is LLM-generated and the paths
+  // are git-derived, and a tab or newline measures zero columns for the clip
+  // while the terminal advances it — the charge and the paint must read the
+  // same bytes, like the sibling runs in this file.
+  const title = sanitizeTerminalLine(`Quick Preview · ${result.model.modelId}`);
+  const naturalRuns: AgentPreviewRun[] = [
+    {
+      label: 'Approach: ',
+      value: sanitizeTerminalLine(
+        result.approachSummary ?? 'No approach summary available.',
+      ),
+    },
+    {
+      label: 'Major files: ',
+      value: sanitizeTerminalLine(
+        formatFileList((result.diffSummary?.files ?? []).map((f) => f.path)),
+      ),
+    },
+    {
+      label: 'Metrics: ',
+      value: `${result.stats.outputTokens.toLocaleString()} tokens · ${formatDuration(result.stats.durationMs)} · ${result.stats.toolCalls} tools`,
+    },
+  ];
+  const runWidth = (label: string) =>
+    Math.max(1, frameContentWidth - 2 - getCachedStringWidth(label));
+  // The pane's marginTop plus the row(s) its title wraps into.
+  const chrome = 1 + wrappedRows(title, frameContentWidth);
+  if (rowBudget !== undefined && rowBudget < chrome) return undefined;
+  let remaining =
+    rowBudget === undefined ? Number.MAX_SAFE_INTEGER : rowBudget - chrome;
+  const runs: AgentPreviewRun[] = [];
+  let rows = chrome;
+  for (const run of naturalRuns) {
+    if (remaining < 1) break;
+    const width = runWidth(run.label);
+    const value = clipToRows(run.value, width, remaining);
+    const paid = wrappedRows(value, width);
+    runs.push({ label: run.label, value });
+    rows += paid;
+    remaining -= paid;
+  }
+  return { title, runs, rows };
+}
+
+/**
+ * The diff lines a region-capped pane paints: whole lines only, with the
+ * last painted row yielded to a truncation marker when the cap cuts.
+ */
+function cappedDiffLines(
+  lines: string[],
+  maxLines: number | undefined,
+): string[] {
+  if (maxLines === undefined || lines.length <= maxLines) return lines;
+  if (maxLines < 1) return [];
+  return [
+    ...lines.slice(0, maxLines - 1),
+    `… ${lines.length - (maxLines - 1)} more rows than the region leaves`,
+  ];
+}
+
+function AgentPreview({ preview }: { preview: ClippedAgentPreview }) {
   return (
     <box marginTop={1} flexDirection="column">
       <text fg={C.text} attributes={1}>
-        {`Quick Preview · ${result.model.modelId}`}
+        {preview.title}
       </text>
-      <box marginLeft={2} flexDirection="row">
-        <text fg={C.dim}>{'Approach: '}</text>
-        <text fg={C.text}>
-          {result.approachSummary ?? 'No approach summary available.'}
-        </text>
-      </box>
-      <box marginLeft={2} flexDirection="row">
-        <text fg={C.dim}>{'Major files: '}</text>
-        <text fg={C.text}>{formatFileList(files.map((f) => f.path))}</text>
-      </box>
-      <box marginLeft={2} flexDirection="row">
-        <text fg={C.dim}>{'Metrics: '}</text>
-        <text
-          fg={C.text}
-        >{`${result.stats.outputTokens.toLocaleString()} tokens · ${formatDuration(result.stats.durationMs)} · ${result.stats.toolCalls} tools`}</text>
-      </box>
+      {preview.runs.map((run) => (
+        <box key={run.label} marginLeft={2} flexDirection="row">
+          <text fg={C.dim}>{run.label}</text>
+          <text fg={C.text}>{run.value}</text>
+        </box>
+      ))}
     </box>
   );
 }
 
-function AgentDetailedDiff({ result }: { result: ArenaAgentResult }) {
-  const lines = visibleDiffLines(result.diff);
+function AgentDetailedDiff({
+  result,
+  maxLines,
+  lineWidth,
+}: {
+  result: ArenaAgentResult;
+  /** Region-paid cap on painted body rows; undefined when there is no region. */
+  maxLines?: number;
+  /** The pane's content columns: every painted line is charged one row. */
+  lineWidth: number;
+}) {
+  const lines = cappedDiffLines(visibleDiffLines(result.diff), maxLines);
   return (
     <box marginTop={1} flexDirection="column">
       <text fg={C.text} attributes={1}>
-        {`Detailed Diff · ${result.model.modelId}`}
+        {sanitizeTerminalLine(`Detailed Diff · ${result.model.modelId}`)}
       </text>
       {lines.length === 0 ? (
-        <box marginLeft={2}>
-          <text fg={C.dim}>{'No diff available.'}</text>
-        </box>
+        maxLines === 0 ? null : (
+          <box marginLeft={2}>
+            <text fg={C.dim}>{'No diff available.'}</text>
+          </box>
+        )
       ) : (
         <box marginLeft={2} flexDirection="column">
           {lines.map((line, index) => (
             <text key={index} fg={diffLineColor(line)}>
-              {line}
+              {clipToWidth(sanitizeTerminalLine(line), lineWidth)}
             </text>
           ))}
         </box>
@@ -616,7 +822,12 @@ function AgentDetailedDiff({ result }: { result: ArenaAgentResult }) {
 }
 
 /** `/arena select` — winner picker with preview panes and discard. */
-function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
+function ArenaSelect({
+  config,
+  onClose,
+  notify,
+  availableTerminalHeight,
+}: OpenTuiArenaDialogProps) {
   const manager = config?.getArenaManager?.() ?? null;
   const agents = useMemo(() => manager?.getAgentStates() ?? [], [manager]);
   const result = manager?.getResult();
@@ -630,8 +841,22 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
       agents.findIndex((a) => isSuccessStatus(a.status)),
     ),
   );
-  const [showPreview, setShowPreview] = useState(false);
-  const [showDetailedDiff, setShowDetailedDiff] = useState(false);
+  // The pane toggles decide direction from the flag the current key burst
+  // sees: two `p` presses in one stdin read share one render closure, so a
+  // useState read there toggles twice off the same stale value and ends with
+  // the pane open at a zero-row window — the state the guard below exists to
+  // prevent. The ref half of the mirror is written synchronously with the
+  // state half, so the second press reads the first's write.
+  const {
+    value: showPreview,
+    ref: showPreviewRef,
+    setValue: setShowPreview,
+  } = useBatchSafeState(false);
+  const {
+    value: showDetailedDiff,
+    ref: showDetailedDiffRef,
+    setValue: setShowDetailedDiff,
+  } = useBatchSafeState(false);
 
   const rows = useMemo(
     () =>
@@ -728,19 +953,117 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     }
   };
 
+  // Each agent row paints two physical rows (label, then stats), and the
+  // frame, the task line, the "Select a winner" line and the list's margin
+  // come off the region first (7 + 2 + 2 + 1); the task and the prompt are
+  // each charged one row, so each clips to frameContentWidth rather than
+  // wrapping onto a row the count never paid for. The window follows the
+  // cursor; at a zero-row window the cursor keys, Enter and the preview
+  // panes — everything that addresses a row — refuse, while x and Esc stay
+  // live (they address the session, not a row).
+  const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  // The frame pays a border column and two padding columns per side.
+  const frameContentWidth = Math.max(1, dialogAreaWidth(width) - 6);
+  // An open pane's rows come out of the list's window: the frame is
+  // unshrinkable inside the clipped region, so a pane added on top of a full
+  // window grows the frame past the region and the clip takes the pane the
+  // user opened it to read. Both panes cap to what the region leaves: the
+  // preview clips its runs to the leftover rows (reserving the diff pane's
+  // margin and title rows when both are open), and the detailed diff gets a
+  // line cap from what the list's zero-row floor leaves, because its 181-line
+  // ceiling can never fit a region. Neither paints at all when the region
+  // cannot pay its own chrome.
+  const diffOpen = Boolean(showDetailedDiff && selectedResult);
+  const diffLines = diffOpen ? visibleDiffLines(selectedResult?.diff) : [];
+  // The diff pane's margin and title, the title measured the way the
+  // preview pane measures its own: a model id long enough to wrap it would
+  // otherwise be paid one row for two.
+  const diffPaneChrome = selectedResult
+    ? 1 +
+      wrappedRows(
+        sanitizeTerminalLine(`Detailed Diff · ${selectedResult.model.modelId}`),
+        frameContentWidth,
+      )
+    : 0;
+  const diffChromeRows = diffOpen ? diffPaneChrome : 0;
+  // What the region leaves once the frame's own 12 rows are paid.
+  const paneRoom =
+    regionHeight === undefined ? undefined : Math.max(0, regionHeight - 12);
+  const clipPreview = (budget: number | undefined) =>
+    showPreview && selectedResult
+      ? clipAgentPreview(selectedResult, frameContentWidth, budget)
+      : undefined;
+  // Affordability is priced against the widest the preview can be, so a pane
+  // that passes still fits once the preview is re-clipped to what the pane
+  // leaves. A pane the region cannot pay does not paint and charges nothing —
+  // the frame is unshrinkable inside the clipped region, so painting it grows
+  // the frame past the region and the clip takes the list's rows instead.
+  let preview = clipPreview(paneRoom);
+  const diffVisible =
+    diffOpen &&
+    (paneRoom === undefined ||
+      paneRoom - (preview?.rows ?? 0) >= diffChromeRows);
+  if (diffVisible && paneRoom !== undefined) {
+    preview = clipPreview(Math.max(0, paneRoom - diffChromeRows));
+  }
+  const previewRows = preview?.rows ?? 0;
+  let agentWindowRows: number;
+  let diffLineCap: number | undefined;
+  if (regionHeight === undefined) {
+    agentWindowRows = rows.length;
+  } else if (diffVisible) {
+    // The pane pays its margin and title rows, then as many diff lines as
+    // fit (one row for the empty diff's notice — which a zero-line budget
+    // does not paint); the list windows from the rest. diffVisible already
+    // established the pane can pay its chrome, so neither budget clamps a
+    // deficit away.
+    const lineBudget = regionHeight - 12 - previewRows - diffChromeRows;
+    diffLineCap = lineBudget;
+    const painted =
+      diffLines.length === 0
+        ? lineBudget === 0
+          ? 0
+          : 1
+        : Math.min(diffLines.length, lineBudget);
+    agentWindowRows = Math.floor((lineBudget - painted) / 2);
+  } else {
+    agentWindowRows = Math.max(
+      0,
+      Math.floor((regionHeight - 12 - previewRows) / 2),
+    );
+  }
+  const agentOffset = getSelectionScrollOffset(
+    sel,
+    rows.length,
+    agentWindowRows,
+  );
+
   useKeyboard((key) => {
     const o = toOriginalKey(key);
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
+      if (agentWindowRows < 1) return;
       setSel(findNextEnabledIndex(rows, selRef.current, o.name));
     } else if (o.name === 'return') {
+      if (agentWindowRows < 1) return;
       const row = rows[selRef.current];
       if (row && !row.disabled) void applyWinner(row.key);
     } else if (!o.ctrl && !o.meta) {
-      if (o.name === 'p') setShowPreview((v) => !v);
-      else if (o.name === 'd') setShowDetailedDiff((v) => !v);
-      else if (o.name === 'x') void discardAll();
+      if (o.name === 'p' || o.name === 'd') {
+        // A zero-row window refuses to OPEN a pane — its rows come out of the
+        // list — but never refuses to CLOSE one: the open pane is what eats
+        // the rows the list needs. Direction is read from the burst-live ref,
+        // not this render's closure.
+        if (o.name === 'p') {
+          if (agentWindowRows < 1 && !showPreviewRef.current) return;
+          setShowPreview(!showPreviewRef.current);
+        } else {
+          if (agentWindowRows < 1 && !showDetailedDiffRef.current) return;
+          setShowDetailedDiff(!showDetailedDiffRef.current);
+        }
+      } else if (o.name === 'x') void discardAll();
     }
   });
 
@@ -756,7 +1079,12 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
     );
   }
 
-  const task = truncate(result?.task ?? '', MAX_TASK_DISPLAY_LENGTH);
+  const task = truncateToWidth(
+    sanitizeTerminalLine(result?.task ?? ''),
+    // Charged one row: 'Task: ' plus the two quotes come off the frame's
+    // content columns first.
+    Math.max(1, Math.min(MAX_TASK_DISPLAY_LENGTH, frameContentWidth - 8)),
+  );
 
   return (
     <ArenaFrame
@@ -768,47 +1096,95 @@ function ArenaSelect({ config, onClose, notify }: OpenTuiArenaDialogProps) {
         <text fg={C.text}>{`"${task}"`}</text>
       </box>
       <box marginTop={1}>
-        <text fg={C.dim}>{'Select a winner to apply changes:'}</text>
+        <text fg={C.dim}>
+          {/* Charged one row, so at thirty-three columns it clips to the
+              frame's content width like the hint does, instead of wrapping
+              onto a row the chrome count never paid for. */}
+          {clipToWidth(ARENA_SELECT_WINNER, frameContentWidth)}
+        </text>
       </box>
       <box marginTop={1} flexDirection="column">
-        {rows.map((row, i) => (
-          <box key={row.key} flexDirection="row" alignItems="flex-start">
-            <box minWidth={2} flexShrink={0}>
-              <text fg={i === sel ? C.green : C.text}>
-                {i === sel ? '›' : ' '}
-              </text>
-            </box>
-            <box flexDirection="column" flexGrow={1}>
-              <text fg={row.disabled ? C.dim : i === sel ? C.green : C.text}>
-                {row.label}
-              </text>
-              <box flexDirection="row">
-                <text fg={row.status.color}>{row.status.text}</text>
-                <text
-                  fg={C.dim}
-                >{` · ${row.duration} · ${row.tokens} tokens`}</text>
-                {row.fileCount > 0 && (
-                  <text fg={C.dim}>{` · ${row.fileCount} files`}</text>
-                )}
-                {(row.additions > 0 || row.deletions > 0) && (
-                  <>
-                    <text fg={C.dim}>{' · '}</text>
-                    <text fg={C.green}>{`+${row.additions}`}</text>
-                    <text fg={C.dim}>{'/'}</text>
-                    <text fg={C.red}>{`-${row.deletions}`}</text>
-                    <text fg={C.dim}>{' lines'}</text>
-                  </>
-                )}
+        {rows
+          .slice(agentOffset, agentOffset + agentWindowRows)
+          .map((row, i0) => {
+            const i = agentOffset + i0;
+            const statsSegments: Array<{ text: string; color: string }> = [
+              { text: row.status.text, color: row.status.color },
+              {
+                text: ` · ${row.duration} · ${row.tokens} tokens`,
+                color: C.dim,
+              },
+            ];
+            if (row.fileCount > 0) {
+              statsSegments.push({
+                text: ` · ${row.fileCount} files`,
+                color: C.dim,
+              });
+            }
+            if (row.additions > 0 || row.deletions > 0) {
+              statsSegments.push(
+                { text: ' · ', color: C.dim },
+                { text: `+${row.additions}`, color: C.green },
+                { text: '/', color: C.dim },
+                { text: `-${row.deletions}`, color: C.red },
+                { text: ' lines', color: C.dim },
+              );
+            }
+            // The stats run is the one run in the row that is not
+            // width-bounded, and the row is charged two physical rows
+            // (label + stats); drop the segments the row cannot pay whole,
+            // trailing segments first, so the run cannot wrap.
+            let statsBudget = Math.max(0, frameContentWidth - 2);
+            const statsRuns: Array<{ text: string; color: string }> = [];
+            for (const segment of statsSegments) {
+              const text = sanitizeTerminalLine(segment.text);
+              const segmentWidth = getCachedStringWidth(text);
+              // A segment the row cannot pay whole is dropped, not clipped:
+              // clipping `+40` to `+4` paints a count the user reads as the
+              // agent's real one, with nothing marking it truncated.
+              if (segmentWidth > statsBudget) break;
+              statsRuns.push({ text, color: segment.color });
+              statsBudget -= segmentWidth;
+            }
+            // The dropped segment can leave its separator as the run's tail.
+            while (statsRuns[statsRuns.length - 1]?.text.trim() === '·') {
+              statsRuns.pop();
+            }
+            return (
+              <box key={row.key} flexDirection="row" alignItems="flex-start">
+                <box minWidth={2} flexShrink={0}>
+                  <text fg={i === sel ? C.green : C.text}>
+                    {i === sel ? '›' : ' '}
+                  </text>
+                </box>
+                <box flexDirection="column" flexGrow={1}>
+                  <text
+                    fg={row.disabled ? C.dim : i === sel ? C.green : C.text}
+                  >
+                    {truncateToWidth(
+                      sanitizeTerminalLine(row.label),
+                      Math.max(1, frameContentWidth - 2),
+                    )}
+                  </text>
+                  <box flexDirection="row">
+                    {statsRuns.map((run, runIndex) => (
+                      <text key={runIndex} fg={run.color}>
+                        {run.text}
+                      </text>
+                    ))}
+                  </box>
+                </box>
               </box>
-            </box>
-          </box>
-        ))}
+            );
+          })}
       </box>
-      {showPreview && selectedResult && (
-        <AgentPreview result={selectedResult} />
-      )}
-      {showDetailedDiff && selectedResult && (
-        <AgentDetailedDiff result={selectedResult} />
+      {preview && <AgentPreview preview={preview} />}
+      {diffVisible && selectedResult && (
+        <AgentDetailedDiff
+          result={selectedResult}
+          maxLines={diffLineCap}
+          lineWidth={Math.max(1, frameContentWidth - 2)}
+        />
       )}
     </ArenaFrame>
   );

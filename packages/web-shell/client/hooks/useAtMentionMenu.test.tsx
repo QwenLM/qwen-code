@@ -17,6 +17,12 @@ import {
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 type HookResult = ReturnType<typeof useAtMentionMenu>;
+type ListDirectory = NonNullable<AtMentionWorkspaceActions['listDirectory']>;
+type DirectoryListing = Awaited<ReturnType<ListDirectory>>;
+type LoadMcpResources = NonNullable<
+  AtMentionWorkspaceActions['loadMcpResources']
+>;
+type McpResources = Awaited<ReturnType<LoadMcpResources>>;
 
 let latest: HookResult | null = null;
 let container: HTMLDivElement | null = null;
@@ -144,6 +150,98 @@ afterEach(() => {
 });
 
 describe('useAtMentionMenu', () => {
+  it('prepares a Managed snapshot before inserting its file chip', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolve!: (tag: WebShellComposerTag) => void;
+    const pending = new Promise<WebShellComposerTag>((done) => {
+      resolve = done;
+    });
+    const prepare = vi.fn(() => pending);
+    const discarded = vi.fn();
+    const effect = vi.fn(() => StateEffect.define<unknown>().of('snapshot'));
+    mount({
+      view,
+      builtinProviders: ['files'],
+      createInlineTagEffect: effect,
+      actions: {
+        filesOnly: true,
+        prepareFileReference: prepare,
+        onFileReferenceDiscarded: discarded,
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [{ name: 'notes.ts', kind: 'file', ignored: false }],
+          truncated: false,
+        }),
+      },
+    });
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => expect(latest!.accept(0)).toBe(true));
+    expect(prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: { fileKind: 'file', filePath: 'notes.ts' },
+      }),
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+    await act(async () =>
+      resolve({
+        id: 'snapshot',
+        kind: 'file',
+        value: 'notes.ts',
+        metadata: { contents: 'selected bytes' },
+      }),
+    );
+    expect(effect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tag: expect.objectContaining({
+          id: 'snapshot',
+          metadata: { contents: 'selected bytes' },
+        }),
+      }),
+    );
+    expect(view.dispatch).toHaveBeenCalledTimes(1);
+    expect(discarded).not.toHaveBeenCalled();
+  });
+
+  it('keeps a changed draft intact and reports a discarded file selection', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolve!: (tag: WebShellComposerTag) => void;
+    const pending = new Promise<WebShellComposerTag>((done) => {
+      resolve = done;
+    });
+    const discarded = vi.fn();
+    mount({
+      view,
+      builtinProviders: ['files'],
+      actions: {
+        filesOnly: true,
+        prepareFileReference: () => pending,
+        onFileReferenceDiscarded: discarded,
+        listDirectory: vi.fn().mockResolvedValue({
+          kind: 'list',
+          path: '.',
+          entries: [{ name: 'notes.ts', kind: 'file', ignored: false }],
+          truncated: false,
+        }),
+      },
+    });
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.accept(0));
+    setViewState(view, 'changed draft');
+    await act(async () =>
+      resolve({ id: 'snapshot', kind: 'file', value: 'notes.ts' }),
+    );
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(view.state.doc.toString()).toBe('changed draft');
+    expect(discarded).toHaveBeenCalledTimes(1);
+  });
+
   it('does not open while disabled', () => {
     mount({ disabled: true });
 
@@ -1771,11 +1869,12 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('shows an empty MCP resource list when resource loading is unavailable', async () => {
+  it('inserts an MCP server reference when resource loading is unavailable', async () => {
     vi.useFakeTimers();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const view = makeView('@');
     mount({
-      view: makeView('@'),
+      view,
       actions: {
         loadMcpStatus: vi.fn().mockResolvedValue({
           servers: [
@@ -1798,16 +1897,11 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(warn).toHaveBeenCalledWith(
-      '[@mention] loadMcpResources not available for server="docs"',
-    );
-    expect(latest!.state).toMatchObject({
-      level: 'items',
-      selectedProviderId: 'mcp-resources',
-      itemMode: 'mcpResources',
-      mcpServerName: 'docs',
-      items: [],
-      loading: false,
+    expect(warn).not.toHaveBeenCalled();
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@mcp:docs ' },
+      selection: { anchor: 10 },
+      scrollIntoView: true,
     });
     warn.mockRestore();
   });
@@ -2964,5 +3058,100 @@ describe('useAtMentionMenu', () => {
       to: 3,
       query: 'it',
     });
+  });
+});
+
+describe('cancelled @-mention cache ownership', () => {
+  it('keeps the latest directory query when an older abort settles late', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let firstSignal!: AbortSignal;
+    const firstRequest = Promise.withResolvers<DirectoryListing>();
+    const listDirectory = vi
+      .fn<ListDirectory>()
+      .mockImplementationOnce((_path, options) => {
+        firstSignal = options!.signal!;
+        return firstRequest.promise;
+      })
+      .mockResolvedValue({
+        kind: 'list',
+        path: '.',
+        truncated: false,
+        entries: [{ name: 'package.json', kind: 'file', ignored: false }],
+      });
+    try {
+      mount({ actions: { listDirectory } });
+      act(() => latest!.refreshForView(makeView('@pac')));
+      await runDebounce();
+      act(() => latest!.refreshForView(makeView('@pack')));
+      await runDebounce();
+      expect(firstSignal.aborted).toBe(true);
+      await act(async () => {
+        firstRequest.reject(new DOMException('aborted', 'AbortError'));
+      });
+      expect(latest!.state?.items.map((item) => item.label)).toEqual([
+        'package.json',
+      ]);
+      expect(listDirectory).toHaveBeenCalledTimes(2);
+      act(() => latest!.refreshForView(makeView('@packa')));
+      await runDebounce();
+      expect(latest!.state?.items.map((item) => item.label)).toEqual([
+        'package.json',
+      ]);
+      expect(listDirectory).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('keeps the latest MCP filter when an older abort settles late', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let firstSignal!: AbortSignal;
+    const firstRequest = Promise.withResolvers<McpResources>();
+    const loadMcpResources = vi
+      .fn<LoadMcpResources>()
+      .mockImplementationOnce((_server, options) => {
+        firstSignal = options!.signal!;
+        return firstRequest.promise;
+      })
+      .mockResolvedValue({ resources: [{ uri: 'res://two', name: 'Two' }] });
+    try {
+      mount({
+        view: makeView('@'),
+        actions: {
+          loadMcpStatus: vi.fn().mockResolvedValue({
+            servers: [
+              {
+                kind: 'mcp_server',
+                name: 'docs',
+                disabled: false,
+                resourceCount: 1,
+              },
+            ],
+          }),
+          loadMcpResources,
+        },
+      });
+      act(() => latest!.refreshForView(makeView('@')));
+      act(() => latest!.enterCategory(2));
+      await runDebounce();
+      act(() => latest!.accept(0));
+      await runDebounce();
+      act(() => latest!.updateSearch('two'));
+      await runDebounce();
+      expect(firstSignal.aborted).toBe(true);
+      await act(async () => {
+        firstRequest.reject(new DOMException('aborted', 'AbortError'));
+      });
+      expect(latest!.state?.items.map((item) => item.label)).toEqual(['Two']);
+      expect(loadMcpResources).toHaveBeenCalledTimes(2);
+      act(() => latest!.updateSearch('tw'));
+      await runDebounce();
+      expect(latest!.state?.items.map((item) => item.label)).toEqual(['Two']);
+      expect(loadMcpResources).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

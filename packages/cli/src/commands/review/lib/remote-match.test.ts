@@ -11,6 +11,7 @@ import {
   normalizeSegment,
   hostsEquivalent,
   isAoneCanonicalHost,
+  isAoneHostFamily,
 } from './remote-match.js';
 
 describe('parseRemoteUrl', () => {
@@ -470,5 +471,33 @@ describe('isAoneCanonicalHost', () => {
     expect(isAoneCanonicalHost('github.com')).toBe(false);
     expect(isAoneCanonicalHost(undefined)).toBe(false);
     expect(isAoneCanonicalHost('')).toBe(false);
+  });
+});
+
+describe('isAoneHostFamily', () => {
+  it('accepts both canonical Aone hosts', () => {
+    expect(isAoneHostFamily('gitlab.alibaba-inc.com')).toBe(true);
+    expect(isAoneHostFamily('code.alibaba-inc.com')).toBe(true);
+  });
+
+  it('normalizes the spelling variants through the shared helper', () => {
+    // Same three spellings `hostsEquivalent` and `isAoneCanonicalHost`
+    // admit: case, a port kept inside the CR-URL host capture, and the
+    // FQDN trailing dot.
+    expect(isAoneHostFamily('CODE.ALIBABA-INC.COM')).toBe(true);
+    expect(isAoneHostFamily('code.alibaba-inc.com:443')).toBe(true);
+    expect(isAoneHostFamily('code.alibaba-inc.com.')).toBe(true);
+  });
+
+  it('accepts the wider .alibaba-inc.com family', () => {
+    // Family detection is deliberately wider than the write router: a GHE
+    // instance must still be recognised as Aone here.
+    expect(isAoneHostFamily('ghe.alibaba-inc.com')).toBe(true);
+  });
+
+  it('rejects non-Aone and empty hosts', () => {
+    expect(isAoneHostFamily('github.com')).toBe(false);
+    expect(isAoneHostFamily(undefined)).toBe(false);
+    expect(isAoneHostFamily('')).toBe(false);
   });
 });

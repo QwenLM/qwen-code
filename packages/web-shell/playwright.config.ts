@@ -5,6 +5,7 @@ const baseURL =
   process.env['PLAYWRIGHT_BASE_URL'] ?? `http://127.0.0.1:${port}`;
 
 export default defineConfig({
+  tsconfig: './tsconfig.json',
   testDir: './client/e2e',
   // The visuals suite (screenshot/video capture) runs under its own
   // playwright.visuals.config.ts; keep it out of the smoke/e2e runs.
@@ -12,7 +13,10 @@ export default defineConfig({
   outputDir: './client/e2e/test-results',
   timeout: 60_000,
   expect: {
-    timeout: 10_000,
+    // A pool host runs other jobs beside this suite, so its first paint can
+    // miss the hosted 10 s budget: run 39185024821 lost ten @smoke tests to
+    // visibility waits while the same commit passed on a quieter host.
+    timeout: 20_000,
   },
   forbidOnly: !!process.env['CI'],
   retries: process.env['CI'] ? 2 : 0,

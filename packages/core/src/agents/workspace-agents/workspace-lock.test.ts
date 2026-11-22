@@ -10,10 +10,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { Storage } from '../../config/storage.js';
+import { readWorkspaceAgents } from './store.js';
 
 const PROJECT_ROOT = '/agent-workspace-lock-test';
 
-function runWorker(runtimeDir: string, count: number): Promise<number[]> {
+function runWorker(
+  runtimeDir: string,
+  tag: string,
+  count: number,
+): Promise<string[]> {
   const worker = fileURLToPath(
     new URL('./workspace-lock-worker.ts', import.meta.url),
   );
@@ -23,6 +29,7 @@ function runWorker(runtimeDir: string, count: number): Promise<number[]> {
         ...process.env,
         AGENT_LOCK_RUNTIME_DIR: runtimeDir,
         AGENT_LOCK_PROJECT_ROOT: PROJECT_ROOT,
+        AGENT_LOCK_TAG: tag,
         AGENT_LOCK_COUNT: String(count),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -41,7 +48,7 @@ function runWorker(runtimeDir: string, count: number): Promise<number[]> {
         reject(new Error(`workspace lock worker exited ${code}: ${stderr}`));
         return;
       }
-      resolve(JSON.parse(stdout) as number[]);
+      resolve(JSON.parse(stdout) as string[]);
     });
   });
 }
@@ -57,24 +64,23 @@ describe('agent workspace lock', () => {
     await fs.rm(runtimeDir, { recursive: true, force: true });
   });
 
-  it('issues unique increasing run sequences across two processes', async () => {
+  it('loses no roster update when two processes write at once', async () => {
     const count = 8;
     const [first, second] = await Promise.all([
-      runWorker(runtimeDir, count),
-      runWorker(runtimeDir, count),
+      runWorker(runtimeDir, 'a', count),
+      runWorker(runtimeDir, 'b', count),
     ]);
 
     expect(first).toHaveLength(count);
     expect(second).toHaveLength(count);
-    expect(
-      first.every((value, index) => index === 0 || value > first[index - 1]!),
-    ).toBe(true);
-    expect(
-      second.every((value, index) => index === 0 || value > second[index - 1]!),
-    ).toBe(true);
-    expect(new Set([...first, ...second]).size).toBe(count * 2);
-    expect([...first, ...second].sort((a, b) => a - b)).toEqual(
-      Array.from({ length: count * 2 }, (_, index) => index + 1),
-    );
+    Storage.setRuntimeBaseDir(runtimeDir);
+    try {
+      const names = (await readWorkspaceAgents(PROJECT_ROOT)).map(
+        (agent) => agent.name,
+      );
+      expect(names.sort()).toEqual([...first, ...second].sort());
+    } finally {
+      Storage.setRuntimeBaseDir(null);
+    }
   });
 });

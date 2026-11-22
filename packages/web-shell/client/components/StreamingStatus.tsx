@@ -1,4 +1,10 @@
-import { useCallback, useState, useEffect, useRef } from 'react';
+import {
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+  type ReactNode,
+} from 'react';
 import {
   PHRASE_CHANGE_INTERVAL_MS,
   getLoadingPhrases,
@@ -27,6 +33,9 @@ interface StreamingStatusProps {
    * (#9487). The daemon's session live state is the authoritative source.
    */
   hasActivePrompt?: boolean;
+  showResponseTokensPerSecond?: boolean;
+  /** Optional control rendered after the status metadata, e.g. the minigame. */
+  trailing?: ReactNode;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -36,6 +45,8 @@ export function StreamingStatus({
   backgroundLabel,
   showPhrase = true,
   hasActivePrompt,
+  showResponseTokensPerSecond = false,
+  trailing,
 }: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
@@ -140,6 +151,13 @@ export function StreamingStatus({
     estimatedOutputTokens > 0
       ? ` · ${arrow} ${t('stream.tokens', { count: formatTokenCount(estimatedOutputTokens) })}`
       : '';
+  const tokenRateStr =
+    showResponseTokensPerSecond &&
+    streamingState === 'responding' &&
+    isReceivingContent &&
+    elapsed > 0
+      ? ` · ${formatTokensPerSecond(estimatedOutputTokens / elapsed)}`
+      : '';
 
   return (
     <div className={styles.status}>
@@ -151,12 +169,19 @@ export function StreamingStatus({
             : loadingPhrase}
         </span>
       )}
-      <span className={styles.meta}>
-        ({timeStr}
-        {tokenStr} · {t('stream.cancel')})
+      <span className={`${styles.meta} ${styles.streamingMeta}`}>
+        {timeStr}
+        {tokenStr}
+        {tokenRateStr} · {t('stream.cancel')}
       </span>
+      {trailing}
     </div>
   );
+}
+
+function formatTokensPerSecond(rate: number): string {
+  if (!Number.isFinite(rate) || rate <= 0) return '0 t/s';
+  return `${rate >= 10 ? Math.round(rate) : rate.toFixed(1)} t/s`;
 }
 
 function formatDuration(milliseconds: number): string {

@@ -442,19 +442,15 @@ describe('navigateToDaemon', () => {
     expect(assigned.searchParams.get('daemon')).toBeNull();
   });
 
-  // Boot keeps a fragment token on the invalid-target path for recovery, and
-  // this escape hatch is the only recovery it offers — but the URL it assigns
-  // clears the hash, so the credential has to be persisted before the page
-  // turns over or the operator lands locked out of their own daemon.
-  it('salvages a URL credential when the escape hatch returns to the page origin', async () => {
+  // Boot keeps a fragment token on the invalid-target path for recovery, but
+  // returning to the page origin must not assign it to the page daemon.
+  it('does not persist a URL credential from a rejected daemon override', async () => {
     const { assign } = setupPage(
       'http://localhost:5173/app?daemon=ftp%3A%2F%2Fdaemon.example#token=url-secret',
     );
     const mod = await import('./daemon');
     expect(mod.navigateToDaemon('http://localhost:5173')).toBe(true);
-    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBe(
-      'url-secret',
-    );
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBeNull();
     const assigned = new URL(assign.mock.calls[0]![0] as string);
     expect(assigned.searchParams.get('token')).toBeNull();
     expect(assigned.hash).toBe('');
@@ -876,5 +872,85 @@ describe('persistDaemonToken', () => {
     const mod = await import('./daemon');
     mod.persistDaemonToken('mem-only');
     expect(mod.getDaemonToken()).toBe('mem-only');
+  });
+});
+
+describe('fanout origins (#13727)', () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  async function importAt(pageUrl: string) {
+    const url = new URL(pageUrl);
+    Object.defineProperty(window, 'location', {
+      value: {
+        origin: url.origin,
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port,
+        href: url.href,
+        search: url.search,
+      },
+      writable: true,
+      configurable: true,
+    });
+    return import('./daemon');
+  }
+
+  it('parses repeated validated origins, dedupes, and drops the page origin', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?fanout=https%3A%2F%2Fa.example' +
+        '&fanout=http%3A%2F%2F10.0.0.2%3A4170' +
+        '&fanout=https%3A%2F%2Fa.example' +
+        '&fanout=http%3A%2F%2Flocalhost%3A5173' +
+        '&fanout=file%3A%2F%2F%2Ftmp',
+    );
+    expect(mod.getFanoutOrigins()).toEqual([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+    ]);
+  });
+
+  it('returns empty when no fanout params are present', async () => {
+    const mod = await importAt('http://localhost:5173/');
+    expect(mod.getFanoutOrigins()).toEqual([]);
+  });
+
+  it('syncFanoutParams rewrites only the fanout set via replaceState', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?daemon=https%3A%2F%2Ffocus.example' +
+        '&workspace=ws-1&fanout=https%3A%2F%2Fstale.example&token=sekret',
+    );
+    const spy = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {});
+    mod.syncFanoutParams([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+      // The page origin never needs a param — CSP 'self' covers it.
+      'http://localhost:5173',
+    ]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    const next = new URL(spy.mock.calls[0][2] as string);
+    expect(next.searchParams.get('daemon')).toBe('https://focus.example');
+    expect(next.searchParams.get('workspace')).toBe('ws-1');
+    expect(next.searchParams.get('token')).toBe('sekret');
+    expect(next.searchParams.getAll('fanout')).toEqual([
+      'https://a.example',
+      'http://10.0.0.2:4170',
+    ]);
+    spy.mockRestore();
+  });
+
+  it('syncFanoutParams no-ops when the set is already in sync', async () => {
+    const mod = await importAt(
+      'http://localhost:5173/?fanout=https%3A%2F%2Fa.example',
+    );
+    const spy = vi
+      .spyOn(window.history, 'replaceState')
+      .mockImplementation(() => {});
+    mod.syncFanoutParams(['https://a.example', 'http://localhost:5173']);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

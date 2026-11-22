@@ -170,7 +170,9 @@ export async function installSseTransport<TEvent>(
   const frameFor = (event: TEvent) => `data: ${JSON.stringify(event)}\n\n`;
 
   const transport: SseTransport<TEvent> = {
-    async waitForConnection(sessionId, { timeout = 10_000 } = {}) {
+    // Matches the suite's visibility budget in playwright.config.ts: the
+    // handshake loses the same race against first paint on a busy pool host.
+    async waitForConnection(sessionId, { timeout = 20_000 } = {}) {
       await page.waitForFunction(
         ({ targetSessionId }) => {
           const harness = window.__webShellSseHarness;

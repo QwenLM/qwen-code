@@ -8,6 +8,7 @@ import {
   isSummaryReplayEvent,
   summarizeReplayEvent,
 } from './replay-summary.js';
+import { parseBackgroundNotificationTurn } from './bridgeTypes.js';
 import {
   EVENT_SCHEMA_VERSION,
   logEventSizingFailed,
@@ -57,6 +58,8 @@ const TRANSIENT_TYPES = new Set([
   'client_evicted',
   'replay_complete',
   'stream_error',
+  // The surviving prefix is already seeded; never nest it in later snapshots.
+  'session_rewound',
 ]);
 const LATEST_WINS_UPDATES = new Set([
   'available_commands_update',
@@ -98,6 +101,7 @@ interface LiveJournalTextSegment {
   chunks: string[];
   sourceRecordIds?: readonly string[];
   parentToolCallId?: string;
+  backgroundTurnIdentity?: string;
   promptId?: string;
   originatorClientId?: string;
   sessionId?: string;
@@ -510,6 +514,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       journal.entryBytes[currentIndex]! + bytes <= this.maxJournalBytes &&
       current.sessionUpdate === textChunk.sessionUpdate &&
       current.parentToolCallId === textChunk.parentToolCallId &&
+      current.backgroundTurnIdentity === textChunk.backgroundTurnIdentity &&
       stringArraysEqual(current.sourceRecordIds, textChunk.sourceRecordIds) &&
       current.promptId === event.promptId &&
       current.originatorClientId === event.originatorClientId &&
@@ -531,6 +536,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           chunks: [textChunk.text],
           sourceRecordIds: textChunk.sourceRecordIds,
           parentToolCallId: textChunk.parentToolCallId,
+          backgroundTurnIdentity: textChunk.backgroundTurnIdentity,
           promptId: event.promptId,
           originatorClientId: event.originatorClientId,
           sessionId: captureSessionId(event),
@@ -679,7 +685,12 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     switch (updateType) {
       case 'agent_message_chunk': {
-        if (hasDiscreteMessageMeta(data?.update?._meta)) {
+        const meta = data?.update?._meta as Record<string, unknown> | undefined;
+        if (
+          hasDiscreteMessageMeta(data?.update?._meta) ||
+          meta?.['executionLifecycle'] !== undefined ||
+          meta?.['hookLifecycle'] !== undefined
+        ) {
           this.slots.push({ kind: 'misc', event });
           break;
         }
@@ -696,6 +707,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       }
       case 'tool_call':
       case 'tool_call_update': {
+        const update = data?.update;
+        const meta = update?.['_meta'] as Record<string, unknown> | undefined;
+        if (
+          meta?.['toolLifecycle'] !== undefined &&
+          update?.['status'] === undefined &&
+          update?.['content'] === undefined
+        ) {
+          this.slots.push({ kind: 'misc', event });
+          break;
+        }
         const toolCallId = data?.update?.toolCallId;
         if (!toolCallId) {
           this.slots.push({ kind: 'misc', event });
@@ -799,13 +820,16 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     } else {
       // Top-level path: merge only consecutive same-kind chunks that
       // also have no parentToolCallId. Preserves text segmentation
-      // around tool calls (text before / text after stay separate).
+      // around tool calls and between slash-command output and model replies.
       const lastSlot = this.slots[this.slots.length - 1];
       if (
         lastSlot &&
         lastSlot.kind === kind &&
         lastSlot.parentToolCallId == null &&
-        stringArraysEqual(lastSlot.sourceRecordIds, sourceRecordIds)
+        stringArraysEqual(lastSlot.sourceRecordIds, sourceRecordIds) &&
+        (kind !== 'text' ||
+          hasSlashCommandSource(lastSlot.lastMeta) ===
+            hasSlashCommandSource(meta))
       ) {
         lastSlot.chunks.push(text);
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
@@ -1090,6 +1114,7 @@ function liveJournalTextChunk(event: BridgeEvent):
       text: string;
       sourceRecordIds?: readonly string[];
       parentToolCallId?: string;
+      backgroundTurnIdentity?: string;
     }
   | undefined {
   if (event.type !== 'session_update') return undefined;
@@ -1119,6 +1144,9 @@ function liveJournalTextChunk(event: BridgeEvent):
     text: content.text,
     sourceRecordIds: extractSourceRecordIdsFromMeta(data?.update?._meta),
     parentToolCallId: extractParentToolCallIdFromMeta(data?.update?._meta),
+    backgroundTurnIdentity: extractBackgroundTurnIdentityFromMeta(
+      data?.update?._meta,
+    ),
   };
 }
 
@@ -1249,6 +1277,16 @@ function extractParentToolCallIdFromMeta(meta: unknown): string | undefined {
   return undefined;
 }
 
+function extractBackgroundTurnIdentityFromMeta(
+  meta: unknown,
+): string | undefined {
+  if (typeof meta !== 'object' || meta === null) return undefined;
+  const backgroundTurn = parseBackgroundNotificationTurn(
+    (meta as Record<string, unknown>)['backgroundTurn'],
+  );
+  return backgroundTurn ? JSON.stringify(backgroundTurn) : undefined;
+}
+
 function extractSourceRecordIdsFromMeta(
   meta: unknown,
 ): readonly string[] | undefined {
@@ -1280,6 +1318,14 @@ function hasDiscreteMessageMeta(meta: unknown): boolean {
   );
 }
 
+function hasSlashCommandSource(meta: unknown): boolean {
+  return (
+    typeof meta === 'object' &&
+    meta !== null &&
+    (meta as Record<string, unknown>)['source'] === 'slash_command'
+  );
+}
+
 function hasOnlyTimestampEnvelopeMeta(meta: unknown): boolean {
   if (meta === undefined) return true;
   if (typeof meta !== 'object' || meta === null) return false;
@@ -1308,6 +1354,24 @@ function hasUnmodeledTextMeta(meta: unknown): boolean {
       // latest meta carry the label, so the live view must match instead
       // of splitting on it.
       if (typeof value !== 'string') return true;
+      continue;
+    }
+    if (key === 'agent') {
+      // Identity stamp SubAgentTracker pairs with the same two keys. Merging
+      // never reads it, so an unenrolled key would split every streamed
+      // subagent delta in the live view only.
+      if (typeof value !== 'object' || value === null) return true;
+      continue;
+    }
+    if (key === 'backgroundTurn') {
+      const backgroundTurn = parseBackgroundNotificationTurn(value);
+      if (
+        backgroundTurn === undefined ||
+        Object.keys(value as Record<string, unknown>).some(
+          (key) => !Object.hasOwn(backgroundTurn, key),
+        )
+      )
+        return true;
       continue;
     }
     if (key === 'qwenTranscript') {

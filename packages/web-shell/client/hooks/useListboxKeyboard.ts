@@ -1,8 +1,10 @@
 import { useContext, useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import {
   DialogShellIdContext,
   isTopDialogShellId,
 } from '../components/dialogs/DialogShell';
+import { getShadowAwareActiveElement } from '../utils/dom';
 
 export interface ListboxKeyboardOptions {
   /** Number of selectable items in the list. */
@@ -15,6 +17,12 @@ export interface ListboxKeyboardOptions {
   onConfirm: (index: number) => void;
   /** Disable the listener without unmounting the host component. */
   enabled?: boolean;
+  /**
+   * Optional element that must contain the focused element for keys to act.
+   * Dialogs that are not `DialogShell`s have no stack identity, so they use
+   * this to stay inert while another dialog is stacked above them.
+   */
+  scope?: RefObject<HTMLElement | null>;
 }
 
 export interface ListboxKeyboardResult {
@@ -57,8 +65,7 @@ const NON_TEXT_INPUT_TYPES = new Set([
  * but only a row the user visibly highlighted first (see the `active < 0`
  * guard in the Enter case).
  */
-function focusOwnsEnter(): boolean {
-  const el = typeof document !== 'undefined' ? document.activeElement : null;
+function focusOwnsEnter(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
   if (tag === 'BUTTON' || tag === 'A' || tag === 'TEXTAREA') return true;
@@ -74,8 +81,7 @@ function focusOwnsEnter(): boolean {
  * native caret behaviour (jump to start/end of the text) instead of being
  * hijacked to move the list highlight.
  */
-function focusOwnsHomeEnd(): boolean {
-  const el = typeof document !== 'undefined' ? document.activeElement : null;
+function focusOwnsHomeEnd(el: Element | null): boolean {
   if (!el) return false;
   const tag = el.tagName;
   if (tag === 'TEXTAREA') return true;
@@ -110,6 +116,7 @@ export function useListboxKeyboard({
   onActiveIndexChange,
   onConfirm,
   enabled = true,
+  scope,
 }: ListboxKeyboardOptions): ListboxKeyboardResult {
   const dialogShellId = useContext(DialogShellIdContext);
   // Keep latest values in a ref so the listener is bound once, not per keystroke.
@@ -135,6 +142,17 @@ export function useListboxKeyboard({
       // has a global listener. The shell id comes from DialogShell context, so
       // focus may sit on either the search input or the list itself.
       if (!isTopDialogShellId(dialogShellId)) return;
+      // Dialogs outside the DialogShell stack still need to yield while focus
+      // is in another dialog above them. `document.activeElement` retargets to
+      // the shadow host in portal mode, so resolve it from the panel's root.
+      const focused = scope
+        ? getShadowAwareActiveElement(scope.current)
+        : document.activeElement;
+      // Body means focus was dropped on non-focusable dialog chrome, which
+      // still belongs to this dialog. A shadow root reports `activeElement` as
+      // null in that state, so read the document for this check.
+      const bodyFocused = document.activeElement === document.body;
+      if (scope && !bodyFocused && !scope.current?.contains(focused)) return;
       // keyCode 229 is the cross-browser "this key belongs to the IME" marker.
       // WebKit fires `compositionend` BEFORE the committing Enter's keydown,
       // so that keydown arrives with isComposing === false — only the legacy
@@ -163,20 +181,20 @@ export function useListboxKeyboard({
           break;
         case 'Home':
           // Let an editable field keep Home for caret-to-start.
-          if (focusOwnsHomeEnd()) return;
+          if (focusOwnsHomeEnd(focused)) return;
           event.preventDefault();
           enterKeyboardMode();
           stateRef.current.onActiveIndexChange(0);
           break;
         case 'End':
-          if (focusOwnsHomeEnd()) return;
+          if (focusOwnsHomeEnd(focused)) return;
           event.preventDefault();
           enterKeyboardMode();
           stateRef.current.onActiveIndexChange(count - 1);
           break;
         case 'Enter': {
           // Let a focused button/link/etc. handle its own Enter activation.
-          if (focusOwnsEnter()) return;
+          if (focusOwnsEnter(focused)) return;
           // No highlighted row → nothing to confirm. Searchable dialogs open
           // with activeIndex -1 and reset to -1 on filter edits, so Enter in
           // the search box only ever acts on a row the user visibly chose.
@@ -192,7 +210,7 @@ export function useListboxKeyboard({
           // focused button natively, so only treat it as "select" when the
           // list truly owns the key. preventDefault also stops the browser's
           // default page-scroll when focus sits on the scrollable list.
-          if (focusOwnsEnter() || focusOwnsHomeEnd()) return;
+          if (focusOwnsEnter(focused) || focusOwnsHomeEnd(focused)) return;
           if (active < 0) return;
           event.preventDefault();
           stateRef.current.onConfirm(clamp(active, count));
@@ -219,7 +237,7 @@ export function useListboxKeyboard({
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('mousemove', exitKeyboardMode);
     };
-  }, [dialogShellId, enabled]);
+  }, [dialogShellId, enabled, scope]);
 
   return { keyboardMode };
 }

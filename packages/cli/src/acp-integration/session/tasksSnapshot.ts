@@ -187,6 +187,15 @@ function serializeMonitorTask(
   };
 }
 
+function plannedPhases(
+  meta: WorkflowTask['meta'] | undefined,
+): ServeSessionWorkflowTaskStatus['plannedPhases'] {
+  if (!meta?.phases?.length) return undefined;
+  return meta.phases.map(({ title, detail }) =>
+    detail === undefined ? { title } : { title, detail },
+  );
+}
+
 function serializeWorkflowTask(
   entry: WorkflowTask,
   now: number,
@@ -194,6 +203,7 @@ function serializeWorkflowTask(
   return {
     kind: 'workflow',
     id: entry.runId,
+    ...optionalField('parentSessionId', entry.parentSessionId),
     ...optionalField('toolUseId', entry.toolUseId),
     ...optionalField('workflowName', entry.workflowName),
     ...optionalField('sourceRef', entry.sourceRef && { ...entry.sourceRef }),
@@ -218,6 +228,7 @@ function serializeWorkflowTask(
     isBackgrounded: entry.isBackgrounded === true,
     currentPhase: entry.currentPhase,
     phaseVisits: entry.phaseVisits.map((visit) => ({ ...visit })),
+    ...optionalField('plannedPhases', plannedPhases(entry.meta)),
     dispatches: entry.dispatches.map((dispatch) => ({
       ...dispatch,
       dependsOn: [...dispatch.dependsOn],
@@ -251,6 +262,7 @@ function serializeWorkflowSnapshot(
   return {
     kind: 'workflow',
     id: snapshot.runId,
+    ...optionalField('parentSessionId', snapshot.parentSessionId),
     isHistorical: true,
     ...optionalField('argsOmitted', snapshot.argsOmitted),
     // The daemon's own answer, so a client never offers a retry or rerun it
@@ -291,6 +303,7 @@ function serializeWorkflowSnapshot(
     isBackgrounded: false,
     currentPhase: snapshot.phases.at(-1) ?? null,
     phaseVisits: (snapshot.phaseVisits ?? []).map((visit) => ({ ...visit })),
+    ...optionalField('plannedPhases', plannedPhases(snapshot.meta)),
     dispatches: (snapshot.dispatches ?? []).map((dispatch) => ({
       ...dispatch,
       dependsOn: [...dispatch.dependsOn],

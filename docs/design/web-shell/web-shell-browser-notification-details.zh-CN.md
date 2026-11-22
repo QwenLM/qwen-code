@@ -2,7 +2,9 @@
 
 [English](web-shell-browser-notification-details.md) | [简体中文](web-shell-browser-notification-details.zh-CN.md)
 
-基础版合入 #11398 后，本次增强让用户直接辨认通知对应的会话、查看本轮回复摘录，并点击返回对应会话。权限、后台触发和去重规则沿用基础版，内置入口现按品牌设计默认开启偏好。不增加 daemon 路由或协议字段；新增的公共 Web Shell 品牌选项见[品牌设计](web-shell-browser-notification-branding.zh-CN.md)。
+状态：截至 2026-10-12，回合结束通知的内容限制、图标及会话导航仍为当前设计。[操作提醒设计](../browser-action-notifications.zh-CN.md)扩展触发条件并更新任务名称；授权遵循已修订的[品牌接入行为](web-shell-browser-notification-branding.zh-CN.md#配置与接入)。
+
+基础版合入 #11398 后，本次增强让用户直接辨认通知对应的会话、查看本轮回复摘录，并点击返回对应会话。回合结束通知的后台触发和去重规则沿用基础版，内置入口现按品牌设计默认开启偏好。不增加 daemon 路由或协议字段；新增的公共 Web Shell 品牌选项见[品牌设计](web-shell-browser-notification-branding.zh-CN.md)。
 
 ## 内容与图标
 

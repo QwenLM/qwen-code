@@ -1,0 +1,140 @@
+# 会话标题 sidecar
+
+[English](session-title-sidecar.md) | [简体中文](session-title-sidecar.zh-CN.md)
+
+状态：已实现。日期：2026-11-04。
+
+## 问题
+
+会话在侧栏中的名字完全来自 transcript：服务端从 `custom_title` 记录取
+`customTitle`，否则回退到前十条记录中的首条用户 prompt。当 transcript 丢失头部
+时——文件被删除后由写入器在下次追加时重建、崩溃截断——首条 prompt 不存在了，
+`displayName` 变成空字符串，Web Shell 只能回退到会话 id 的前八个字符，而那不是
+名字。
+
+sidecar 无法覆盖整个目录被删除的情况：标签与 transcript 同目录，外部清空 chats
+目录时两者一起消失，该会话仍需手动重命名。
+
+实际案例：一个 live 会话的 transcript 在 15:57 被重建，只剩 `ui_telemetry` 与
+后台任务通知，列表行显示 `9d68a0dc`，尽管该会话创建时有正常的 prompt。
+
+## 目标
+
+- transcript 丢失头部时，列表标签仍然可用。
+- 用户手动改的名字在 transcript 重建后仍然保留。
+- 不再把裸会话 id 当作会话名显示。
+
+## 非目标
+
+- 从已经不存在的 transcript 重建历史。
+- 改变 `custom_title` 记录在 transcript 中的存储方式。
+- 改变从未有过名字的会话的重命名或搜索行为。
+
+## 方案
+
+在 transcript 旁边增加按会话的 sidecar：
+
+```
+<projectDir>/chats/<sessionId>.title.json
+```
+
+```json
+{
+  "version": 1,
+  "displayName": "CI 验证与复验",
+  "source": "prompt",
+  "updatedAt": "2026-11-04T09:44:49.085Z"
+}
+```
+
+`source` 取 `prompt`、`auto` 或 `manual`。
+
+### 写入时机
+
+- `ChatRecordingService.recordUserMessage` 在首条真实用户 prompt 时写入
+  `source: "prompt"`，使用与列表读取相同的「200 个码点 + 省略号」策略
+  （`truncateTitleForList`）与同一套标签选择规则：projection 明确为空时不提供
+  标签、留给后续 prompt；没有 projection 时回退到消息自身的文本 part；Mod 提交的
+  prompt 不做过滤。后续 prompt 不覆盖；首条 prompt 若没有文本 part（只有图片）
+  则不产生标签。
+- `ChatRecordingService.recordCustomTitle` 写入自定义标题及其来源。`prompt`
+  条目永远不会覆盖 `auto`/`manual` 条目，因此重命名不会被后续 prompt 冲掉。
+- `SessionService.renameSession`（没有 live recording 时使用的回退路径）在追加
+  `custom_title` 记录后写入 sidecar。
+- `ChatRecordingService` 在恢复 transcript 时补写 sidecar：优先已解析的自定义
+  标题，否则使用记录中的首条 prompt 标签。没有这一步，sidecar 机制之前创建的
+  会话永远不会获得 sidecar，因为恢复的会话不会再记录一次首条 prompt。已存在的
+  `manual`/`auto` 条目不会被补写的 prompt 覆盖。
+- projected restore 不携带记录流，无法恢复首条 prompt。经由该路径附着的
+  recorder 不会用恢复后的第一条 prompt 生成标签；transcript 头部仍在时名字仍由
+  transcript 提供。
+- `SessionService.forkSession` 在分支 transcript 提交后写入新会话的标题 sidecar。
+  调用方没有显式给出分支标题时，它复制源会话的 sidecar，因此无头源会话分叉出的
+  分支仍沿用源会话当前显示的名字。
+- Managed 会话日志跳过：它们自己管理元数据投影。
+
+### 读取时机
+
+- `SessionService.getSessionTitleInfo` / `getSessionTitle` 在 transcript 没有
+  自定义标题时，返回 `manual`/`auto` sidecar 中的标题。
+- `SessionService.listSessions` 与 `getSessionListItem` 在 transcript 没有首条
+  prompt 时，使用 `prompt` sidecar。
+- `SessionService.getSessionDisplayName` 在 transcript 读取损坏或没有名字时回退到
+  sidecar。若 transcript 因属于另一个项目而被拒绝，则返回空名字、不读 sidecar，
+  避免把别的项目的 prompt 文本带出来。
+- 标题查找看到与侧栏相同的名字：`findSessionsByTitle`、
+  `findSessionTitlesByPrefix`（选择器与其去重扫描）以及取消归档的碰撞守卫也接受
+  `manual`/`auto` 来源的 sidecar 名字。
+- transcript 仍是权威来源：可读的 `custom_title` 记录或首条 prompt 始终优先。
+
+### 生命周期
+
+- 归档 / 取消归档时 sidecar 随 transcript 一起移动。
+- 删除会话时删除 active 与 archived 两个位置的 sidecar。
+- 会话存储迁移到另一个 runtime base directory 时带上 sidecar。
+
+### Web Shell 兜底
+
+`displayName` 为空时，侧栏行显示本地化的 `sidebar.untitledSession`（英文
+“Untitled session” / 中文“未命名会话”），不再显示 id 前缀。搜索匹配与删除确认
+仍保留 id 回退，因为那里 id 是唯一的稳定标识。
+
+## 设计决策
+
+- **使用 sidecar，而不是重写 transcript。** 重新插入 prompt 记录会伪造模型可
+  回放的历史；sidecar 只是元数据。
+- **只存首条 prompt。** 存所有 prompt 会重复 transcript 并撑大 chats 目录；首条
+  prompt 本来就是列表使用的标签。
+- **best-effort 写入。** sidecar 写失败绝不能导致 prompt 或重命名失败；缺失的
+  sidecar 视为“没有持久化标签”。
+- **transcript 能提供的字段才不读 sidecar。** 列表路径只有在 transcript 同时给出
+  自定义标题与首条 prompt 时才跳过 sidecar；两者缺任一都会读取，因为 sidecar 可以
+  独立提供重命名或 prompt 标签。
+
+## 风险
+
+- 部分写入后 sidecar 可能与 transcript 不一致。读取优先 transcript，因此可见
+  名字仍是权威值。
+- sidecar 包含首条 prompt，可能含敏感文本。它与 transcript 同目录（权限
+  `0600`），暴露面相同。
+- 如果会话在服务之外被删除，可能留下孤儿 sidecar。会话扫描只接受
+  `<uuid>.jsonl`，因此这些文件会被忽略。
+
+## 验证
+
+- 单测覆盖：往返与校验、无头 transcript 的列表回退、重命名优先、active 与
+  archived 两个位置的删除、归档列表读取、首条 prompt / 自定义标题写入、共享同一
+  文件系统的写读、fork 复制、从 sidecar 做标题查找、项目归属与读取错误处理，以及
+  上面的恢复规则。
+- 真实 daemon 场景：用假 OpenAI 兼容端点启动隔离的 `qwen serve`，发送一条
+  prompt，把 transcript 替换成单条 `ui_telemetry` 记录，重启 daemon，确认列表
+  仍显示 prompt 推导出的名字；再重命名会话，再次替换 transcript，重启后确认
+  manual 名字保留且 `titleSource: "manual"`。
+
+## 验收标准
+
+- 有首条 prompt 或自定义标题的会话，其 transcript 丢头或被重建时不再产生空的
+  `displayName`，前提是 chats 目录本身仍然存在。
+- 手动重命名在 transcript 重建或截断后仍然保留。
+- 没有 sidecar 的会话显示中性标签，而不是 id 前缀。
+- 归档、取消归档与删除会话后，sidecar 状态与 transcript 保持一致。

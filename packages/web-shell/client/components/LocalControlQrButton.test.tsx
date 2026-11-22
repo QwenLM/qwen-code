@@ -8,6 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createElement, useContext, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DaemonAvailability } from '../daemon/availability';
+import { DaemonAvailabilityContext } from '../daemon/availability-context';
+let availability: DaemonAvailability | undefined;
 
 // The real popover shell is Radix, whose focus/scroll-lock effects never
 // settle under `act` in jsdom. Render trigger and content inline, wiring the
@@ -104,7 +107,9 @@ function mount(
   act(() => {
     root.render(
       <I18nProvider language={language}>
-        <LocalControlQrButton onOpenSettings={onOpenSettings} />
+        <DaemonAvailabilityContext.Provider value={availability}>
+          <LocalControlQrButton onOpenSettings={onOpenSettings} />
+        </DaemonAvailabilityContext.Provider>
       </I18nProvider>,
     );
   });
@@ -123,6 +128,7 @@ async function openPopover(label = 'Mobile access'): Promise<void> {
 }
 
 beforeEach(() => {
+  availability = undefined;
   vi.stubGlobal('fetch', vi.fn());
   writeClipboardText.mockClear();
 });
@@ -132,11 +138,67 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  availability?.dispose();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe('LocalControlQrButton', () => {
+  it('stops QR retries offline and requires a click before issuing another pairing POST', async () => {
+    vi.useFakeTimers();
+    const native = vi.fn().mockRejectedValue(new TypeError('offline'));
+    availability = new DaemonAvailability(
+      'http://127.0.0.1:8080',
+      'test-token',
+      native,
+    );
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=old',
+        qrText: 'OLD-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    mount(vi.fn(), 'zh-CN');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="手机访问"]')!
+        .click(),
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      availability!.reportFailure(new TypeError('offline')),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(container.textContent).not.toContain('OLD-QR');
+    expect(container.textContent).toContain(
+      '连接已中断，请点击重试刷新二维码。',
+    );
+    native
+      .mockResolvedValueOnce(Response.json({ status: 'ok' }))
+      .mockResolvedValueOnce(Response.json({ features: [] }));
+    await act(async () => availability!.check(true));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    vi.mocked(fetch).mockResolvedValue(
+      localControlResponse({
+        active: true,
+        url: 'http://qwen.test/#pairing=new',
+        qrText: 'NEW-QR',
+        expiresInMs: 60_000,
+      }),
+    );
+    await act(async () =>
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent === '重试')!
+        .click(),
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('NEW-QR');
+  });
+
   it('preserves the QR glyph language within Chinese UI', async () => {
     vi.mocked(fetch).mockResolvedValue(
       localControlResponse({
@@ -221,7 +283,7 @@ describe('LocalControlQrButton', () => {
     mount();
     await openPopover();
     expect(fetch).toHaveBeenLastCalledWith(
-      new URL('http://127.0.0.1:8080/workspace/local-control'),
+      'http://127.0.0.1:8080/workspace/local-control',
       expect.objectContaining({ method: 'GET' }),
     );
     expect(container.textContent).toContain('Local Control is off');
@@ -239,7 +301,7 @@ describe('LocalControlQrButton', () => {
     await openPopover();
 
     expect(fetch).toHaveBeenCalledWith(
-      new URL('http://127.0.0.1:8080/web-shell/pairing'),
+      'http://127.0.0.1:8080/web-shell/pairing',
       expect.objectContaining({ method: 'POST' }),
     );
     expect(container.textContent).toContain('QR-TEXT');
@@ -400,7 +462,7 @@ describe('LocalControlQrButton', () => {
     expect(container.textContent).toContain('daemon busy');
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenLastCalledWith(
-      new URL('http://127.0.0.1:8080/web-shell/pairing'),
+      'http://127.0.0.1:8080/web-shell/pairing',
       expect.objectContaining({ method: 'POST' }),
     );
   });

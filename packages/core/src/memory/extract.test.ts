@@ -132,6 +132,149 @@ describe('auto-memory extraction', () => {
     expect(cursor.processedOffset).toBe(2);
   });
 
+  it('forwards skipped context while keeping the cursor in raw-history offsets', async () => {
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'Prefer Chinese reviews.' }] },
+    ];
+    const history = Array.from({ length: 60 }, () => ({
+      role: 'user',
+      parts: [{ text: 'next' }],
+    }));
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(60);
+  });
+
+  // Regression (#13004): an image-only unprocessed tail must not let the
+  // no-new-user-message early return swallow a parked supplement — the turns
+  // it holds are owed to the extractor, so the fork still runs over them and
+  // the cursor only advances after a real run.
+  it('forks over an image-only unprocessed tail when skippedHistory is parked', async () => {
+    await fs.writeFile(
+      getAutoMemoryExtractCursorPath(projectRoot),
+      JSON.stringify({
+        sessionId: 'session-1',
+        processedOffset: 3,
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    const skippedHistory = [
+      { role: 'user', parts: [{ text: 'skipped-but-real-content' }] },
+    ];
+    const history = [
+      { role: 'user', parts: [{ text: 'a' }] },
+      { role: 'user', parts: [{ text: 'b' }] },
+      { role: 'user', parts: [{ text: 'c' }] },
+      {
+        role: 'user',
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'AAA' } }],
+      },
+    ];
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    });
+
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history,
+      skippedHistory,
+    });
+
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
+      mockConfig,
+      projectRoot,
+      skippedHistory,
+      undefined,
+    );
+    const cursor = JSON.parse(
+      await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+    ) as { processedOffset: number };
+    expect(cursor.processedOffset).toBe(4);
+  });
+
+  // Regression (#13004 R18-2): a close-time flush replays a parked snapshot
+  // whose history a later non-forking run already advanced the cursor past.
+  // The replay still owes its turns to the extractor, but its write must not
+  // move the project cursor backwards — the next run reads a rewound offset as
+  // unprocessed history and re-scans everything after it. A genuine
+  // post-compaction run keeps the downward move.
+  it('never rewinds the persisted cursor on a flush replay', async () => {
+    const cursorPath = getAutoMemoryExtractCursorPath(projectRoot);
+    const seedCursor = () =>
+      fs.writeFile(
+        cursorPath,
+        JSON.stringify({
+          sessionId: 'session-1',
+          processedOffset: 6,
+          updatedAt: new Date().toISOString(),
+        }),
+      );
+    const readOffset = async () =>
+      (
+        JSON.parse(await fs.readFile(cursorPath, 'utf-8')) as {
+          processedOffset: number;
+        }
+      ).processedOffset;
+    // No genuine progress, so the write falls back to startOffset — which the
+    // shrink clamp reduced to 0 because the cursor is ahead of this history.
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: false,
+      systemMessage: undefined,
+    });
+    const parked = Array.from({ length: 4 }, (_, i) => ({
+      role: 'user',
+      parts: [{ text: `parked ${i}` }],
+    }));
+    const skippedHistory = [{ role: 'user', parts: [{ text: 'owed' }] }];
+
+    await seedCursor();
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: parked,
+      skippedHistory,
+      flushReplay: true,
+    });
+    expect(runAutoMemoryExtractionByAgent).toHaveBeenCalled();
+    expect(await readOffset()).toBe(6);
+
+    // Control: the same run without the replay marker still moves the cursor
+    // down, so the shrink clamp keeps serving a real post-compaction history.
+    await seedCursor();
+    await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: parked,
+      skippedHistory,
+    });
+    expect(await readOffset()).toBe(0);
+  });
+
   it('skips a session mismatch without advancing the cursor', async () => {
     vi.mocked(getCacheSafeParamsSessionId)
       .mockReturnValueOnce('session-1')
@@ -214,22 +357,94 @@ describe('auto-memory extraction', () => {
       ) as { processedOffset?: number; sessionId?: string };
     }
 
-    it('project-scope rebuild failure bubbles up so the cursor is NOT advanced (retry on next session)', async () => {
-      // Pre-PR Promise.all behaviour: a project-level rebuild failure threw,
-      // the cursor never advanced, and the same slice was re-extracted on
-      // the next session — that durability guarantee is the whole point of
-      // the cursor. The user-level layer must isolate its OWN failures, but
-      // it cannot weaken the project-level retry contract.
+    it('repairs a failed project rebuild before retrying without new writes', async () => {
       const cursorBefore = await readCursor();
-      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-        touchedTopics: ['user'],
+      vi.mocked(runAutoMemoryExtractionByAgent)
+        .mockResolvedValueOnce({
+          touchedTopics: ['project'],
+          touchedProjectScope: true,
+          touchedUserScope: false,
+          hasToolActivity: true,
+        })
+        .mockResolvedValueOnce({
+          touchedTopics: [],
+          touchedProjectScope: false,
+          touchedUserScope: false,
+          hasToolActivity: true,
+        });
+      vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
+        new Error('EACCES: project memory index write failed'),
+      );
+      const params = {
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      };
+
+      await expect(runAutoMemoryExtract(params)).rejects.toThrow(
+        'EACCES: project memory index write failed',
+      );
+      expect(await readCursor()).toEqual({
+        ...cursorBefore,
+        projectIndexRebuildPending: true,
+      });
+
+      await runAutoMemoryExtract(params);
+
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(rebuildManagedAutoMemoryIndex).mock.invocationCallOrder[1]!,
+      ).toBeLessThan(
+        vi.mocked(runAutoMemoryExtractionByAgent).mock.invocationCallOrder[1]!,
+      );
+      expect(await readCursor()).toMatchObject({
+        sessionId: 'session-1',
+        processedOffset: 1,
+      });
+      expect(await readCursor()).not.toHaveProperty(
+        'projectIndexRebuildPending',
+      );
+    });
+
+    it('indexes successful partial writes and surfaces the failure without advancing', async () => {
+      const cursorBefore = await readCursor();
+      const error = new Error('maximum turns reached');
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValueOnce({
+        touchedTopics: ['project'],
         touchedProjectScope: true,
         touchedUserScope: false,
         hasToolActivity: true,
-        systemMessage: undefined,
+        failure: { error },
+      });
+
+      await expect(
+        runAutoMemoryExtract({
+          projectRoot,
+          sessionId: 'session-1',
+          config: mockConfig,
+          history: [...newHistory],
+        }),
+      ).rejects.toBe(error);
+
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+      expect(rebuildUserAutoMemoryIndex).not.toHaveBeenCalled();
+      expect(refreshMemoryInstruction).toHaveBeenCalledOnce();
+      expect(await readCursor()).toEqual(cursorBefore);
+    });
+
+    it('attempts both repairs when a rejected fork did not return receipts', async () => {
+      const cursorBefore = await readCursor();
+      const error = new Error('model stream aborted');
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValueOnce({
+        touchedTopics: [],
+        touchedProjectScope: false,
+        touchedUserScope: false,
+        hasToolActivity: false,
+        failure: { error, reconcileAll: true },
       });
       vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
-        new Error('EACCES: project memory index write failed'),
+        new Error('project index unavailable'),
       );
 
       await expect(
@@ -239,10 +454,14 @@ describe('auto-memory extraction', () => {
           config: mockConfig,
           history: [...newHistory],
         }),
-      ).rejects.toThrow('EACCES: project memory index write failed');
+      ).rejects.toBe(error);
 
-      const cursorAfter = await readCursor();
-      expect(cursorAfter).toEqual(cursorBefore);
+      expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+      expect(rebuildUserAutoMemoryIndex).toHaveBeenCalledOnce();
+      expect(await readCursor()).toEqual({
+        ...cursorBefore,
+        projectIndexRebuildPending: true,
+      });
     });
 
     it('user-scope rebuild failure is logged and swallowed; project rebuild + cursor advance still happen', async () => {
