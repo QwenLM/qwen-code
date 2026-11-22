@@ -193,18 +193,20 @@ beforeAll(async () => {
       { cwd: repoRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 },
     );
     commandSucceeded(patch, 'read working-tree changes');
-    commandSucceeded(
-      spawnSync(
-        'git',
-        ['-C', isolatedRoot, 'apply', '--whitespace=nowarn', '-'],
-        {
-          cwd: isolatedRoot,
-          encoding: 'utf8',
-          input: patch.stdout,
-        },
-      ),
-      'apply working-tree changes to isolated workspace',
-    );
+    if (patch.stdout !== '') {
+      commandSucceeded(
+        spawnSync(
+          'git',
+          ['-C', isolatedRoot, 'apply', '--whitespace=nowarn', '-'],
+          {
+            cwd: isolatedRoot,
+            encoding: 'utf8',
+            input: patch.stdout,
+          },
+        ),
+        'apply working-tree changes to isolated workspace',
+      );
+    }
     commandSucceeded(
       spawnSync(process.execPath, ['scripts/setup-worktree.js'], {
         cwd: isolatedRoot,
