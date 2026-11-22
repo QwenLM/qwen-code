@@ -2306,6 +2306,8 @@ describe('round-10 witnesses', () => {
         {},
         { repo: 'not-a-slug', pr: 42 },
         { repo: 'QwenLM/qwen-code', pr: 0 },
+        { repo: ['QwenLM/qwen-code'], pr: 42 },
+        { repo: { slug: 'QwenLM/qwen-code' }, pr: 42 },
       ]) {
         const round = setup(43, coordinates);
         const cross = check(round);

@@ -1425,7 +1425,10 @@ function main(argv) {
   // waiver. Without a trusted snapshot only the URL shape is checkable.
   const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
   const coordinatesFrom = (snapshot) => {
-    const repoMatch = /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot?.repo ?? '');
+    const repoMatch =
+      typeof snapshot?.repo === 'string'
+        ? /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot.repo)
+        : null;
     const pr =
       Number.isInteger(snapshot?.pr) && snapshot.pr > 0 ? snapshot.pr : null;
     // The number must come from the trusted snapshot, never the artifact
