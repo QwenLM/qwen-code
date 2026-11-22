@@ -12,9 +12,6 @@ const srcDir = join(assetsDir, 'src');
 const assetsDistDir = join(assetsDir, 'dist');
 const generatedDir = join(assetsDir, '..', 'generated');
 await mkdir(generatedDir, { recursive: true });
-await rm(assetsDistDir, { recursive: true, force: true });
-await mkdir(assetsDistDir, { recursive: true });
-await rm(join(generatedDir, 'exportHtmlTemplate.ts'), { force: true });
 
 const documentTemplateModulePath = join(
   generatedDir,
@@ -71,7 +68,15 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_560;
+// The baseline includes reader metadata and attachment-reference checks.
+// A clean build of the CI merge tree at 71161df9, including current upstream
+// Web Shell inputs, measures 2,154,340 injected JS bytes. Branch-only builds
+// must not replace this measured shared-tree baseline with an older estimate.
+// The expansion-preserving normalization adds 42 bytes to that merged build.
+// The schema-version narrowing capture adds a further 8 bytes.
+// Including the merged ChatSurface inputs, local builds and the CI merge tree
+// both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -198,8 +203,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_560;
 // component graph is not wired into any column and useDaemonChatController
 // has no importer, so no component code reaches the document entry; the
 // forbidden-input guard passes and the third-party input mix is unchanged.
-// Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_153_560;
+// A normal build at the measured size below is not warned; only further
+// growth is warned. The identity placeholder can change byte length when it
+// is replaced, so the budget measures the actual injected asset below,
+// including the metadata checks: 2,155,023 bytes with ChatSurface merged.
+// Reserve 430 bytes for toolchain variance.
+const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 430;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
@@ -373,6 +382,22 @@ const rendererDelegateIntegrity =
   process.env.QWEN_EXPORT_RENDERER_INTEGRITY?.trim() || undefined;
 const rendererDelegateCssIntegrity =
   process.env.QWEN_EXPORT_RENDERER_CSS_INTEGRITY?.trim() || undefined;
+const rendererDelegateSchemaOverride =
+  process.env.QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION?.trim() || undefined;
+if (rendererDelegateSchemaOverride && !rendererDelegateIdentity) {
+  throw new Error(
+    'QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION requires QWEN_EXPORT_RENDERER_IDENTITY.',
+  );
+}
+const exportTranscriptDocumentMaxSchemaVersion = rendererDelegateIdentity
+  ? Number(rendererDelegateSchemaOverride ?? 1)
+  : 2;
+if (![1, 2].includes(exportTranscriptDocumentMaxSchemaVersion)) {
+  throw new Error(
+    `QWEN_EXPORT_RENDERER_SCHEMA_MAX_VERSION must be 1 or 2; got ${rendererDelegateSchemaOverride}. ` +
+      'It must describe the delegated renderer actually pinned by the identity and SRI hashes.',
+  );
+}
 if (Boolean(rendererDelegateIdentity) !== Boolean(rendererDelegateIntegrity)) {
   throw new Error(
     'QWEN_EXPORT_RENDERER_IDENTITY and QWEN_EXPORT_RENDERER_INTEGRITY must be set together: ' +
@@ -416,6 +441,10 @@ if (
     `QWEN_EXPORT_RENDERER_CSS_INTEGRITY must be a sha384- base64 digest; got ${rendererDelegateCssIntegrity}.`,
   );
 }
+
+await rm(assetsDistDir, { recursive: true, force: true });
+await mkdir(assetsDistDir, { recursive: true });
+await rm(join(generatedDir, 'exportHtmlTemplate.ts'), { force: true });
 
 const documentBuildResult = await build({
   entryPoints: [join(srcDir, 'document-main.tsx')],
@@ -526,8 +555,21 @@ if (forbiddenInputs.length > 0) {
   );
 }
 
-const documentRendererJsBytes = Buffer.byteLength(documentJsBundle.text);
 const transcriptCssBytes = Buffer.byteLength(extractedTranscriptCss.css);
+const rendererBuildId = createHash('sha256')
+  .update(documentJsBundle.contents)
+  .digest('hex')
+  .slice(0, 16);
+const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
+if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
+  throw new Error('Document renderer build identity placeholder is missing.');
+}
+// Delegation changes generated documents, not the identity of this asset.
+const documentJs = documentJsBundle.text.replaceAll(
+  rendererVersionPlaceholder,
+  localRendererVersion,
+);
+const documentRendererJsBytes = Buffer.byteLength(documentJs);
 console.log(
   `Document export renderer JS is ${documentRendererJsBytes} bytes; ` +
     `component CSS moved to export-transcript-document.css is ${transcriptCssBytes} bytes`,
@@ -545,19 +587,6 @@ if (documentRendererJsBytes > DOCUMENT_RUNTIME_WARNING_BYTES) {
     `Document export renderer JS exceeds the ${DOCUMENT_RUNTIME_WARNING_BYTES}-byte warning threshold`,
   );
 }
-const rendererBuildId = createHash('sha256')
-  .update(documentJsBundle.contents)
-  .digest('hex')
-  .slice(0, 16);
-const localRendererVersion = `${exportTranscriptRendererPackageVersion}+${rendererBuildId}`;
-if (!documentJsBundle.text.includes(rendererVersionPlaceholder)) {
-  throw new Error('Document renderer build identity placeholder is missing.');
-}
-// Delegation changes generated documents, not the identity of this asset.
-const documentJs = documentJsBundle.text.replaceAll(
-  rendererVersionPlaceholder,
-  localRendererVersion,
-);
 const exportTranscriptRendererVersion =
   rendererDelegateIdentity ?? localRendererVersion;
 const documentRendererUrl = `https://unpkg.com/@qwen-code/qwen-code@${exportTranscriptRendererVersion.split('+')[0]}/export-transcript-document.js`;
@@ -617,6 +646,7 @@ const documentTemplateModule = `/**
 
 export const DOCUMENT_HTML_TEMPLATE = ${JSON.stringify(documentHtmlOutput)};
 export const EXPORT_TRANSCRIPT_RENDERER_VERSION = ${JSON.stringify(exportTranscriptRendererVersion)};
+export const EXPORT_TRANSCRIPT_DOCUMENT_MAX_SCHEMA_VERSION: 1 | 2 = ${exportTranscriptDocumentMaxSchemaVersion};
 export const EXPORT_TRANSCRIPT_RENDERER_LIMITS = Object.freeze({
   maxBlocks: ${exportTranscriptMaxBlocks},
   maxEnvelopeBytes: ${exportTranscriptMaxEnvelopeBytes},

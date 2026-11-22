@@ -25,7 +25,21 @@ vi.mock('../WebShellContexts', async () => {
 // drive the message-level ErrorBoundary (the real one, imported below); the
 // rest are inert. MessageTimestamp remains real to verify row spacing.
 const captured = vi.hoisted(() => ({
+  userRenderCount: 0,
   userMessageProps: null as null | {
+    source?: string;
+    images?: Array<{
+      data: string;
+      mimeType: string;
+      attachmentId?: string;
+    }>;
+    files?: Array<{
+      name: string;
+      mimeType: string;
+      data?: Blob;
+      text?: string;
+      attachmentId?: string;
+    }>;
     editing?: boolean;
     submittingEdit?: boolean;
   },
@@ -36,11 +50,25 @@ vi.mock('./messages/UserMessage', async () => {
   return {
     UserMessage: (props: {
       content: string;
+      source?: string;
+      images?: Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>;
+      files?: Array<{
+        name: string;
+        mimeType: string;
+        data?: Blob;
+        text?: string;
+        attachmentId?: string;
+      }>;
       editing?: boolean;
       submittingEdit?: boolean;
       onEditSubmit?: (content: string) => void;
     }) => {
       if (props.content.includes('__BOOM__')) throw new Error('user boom');
+      captured.userRenderCount += 1;
       captured.userMessageProps = props;
       return React.createElement(
         'div',
@@ -710,4 +738,138 @@ it('updates the Tool calls entry when the user message source is filled in', () 
   expect(messageMenuItem('View tool calls')).toBeDefined();
   act(() => root.render(row('goal_runtime')));
   expect(messageMenuItem('View tool calls')).toBeUndefined();
+});
+
+it('forwards automatic source updates to UserMessage', () => {
+  const row = (source?: string) => (
+    <MessageItem
+      message={{
+        id: 'automatic-prompt',
+        role: 'user',
+        content: 'Same automatic text',
+        timestamp: 0,
+        source,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row());
+  expect(captured.userMessageProps?.source).toBeUndefined();
+  act(() => root.render(row('cron')));
+  expect(captured.userMessageProps?.source).toBe('cron');
+  act(() => root.render(row('loop')));
+  expect(captured.userMessageProps?.source).toBe('loop');
+  act(() => root.render(row()));
+  expect(captured.userMessageProps?.source).toBeUndefined();
+});
+
+it('re-renders when only user-message files change', () => {
+  const files = [
+    { name: 'first.txt', mimeType: 'text/plain', text: 'first' },
+    { name: 'second.txt', mimeType: 'text/plain', text: 'second' },
+  ];
+  const row = (update: typeof files) => (
+    <MessageItem
+      message={{
+        id: 'file-update',
+        role: 'user',
+        content: 'Same prompt',
+        timestamp: 0,
+        source: 'cron',
+        files: update,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row(files.slice(0, 1)));
+  expect(captured.userMessageProps?.files).toEqual(files.slice(0, 1));
+  act(() => root.render(row(files)));
+  expect(captured.userMessageProps?.files).toEqual(files);
+});
+
+it('skips a structurally identical, newly allocated attachment array', () => {
+  const file = {
+    name: 'first.txt',
+    mimeType: 'text/plain',
+    text: 'same content',
+    attachmentId: 'same-attachment',
+    data: new Blob(['same bytes'], { type: 'text/plain' }),
+  };
+  const row = (files: Array<typeof file>) => (
+    <MessageItem
+      message={{
+        id: 'same-files',
+        role: 'user',
+        content: 'Same prompt',
+        timestamp: 0,
+        source: 'cron',
+        files,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row([file]));
+  const renderCount = captured.userRenderCount;
+  act(() => root.render(row([{ ...file }])));
+  expect(captured.userRenderCount).toBe(renderCount);
+});
+
+it.each(['name', 'mimeType', 'text', 'attachmentId', 'data'])(
+  'forwards a same-count file update to its %s field',
+  (field) => {
+    const originalBlob = new Blob(['same bytes'], { type: 'text/plain' });
+    const baseFile = {
+      name: 'first.txt',
+      mimeType: 'text/plain',
+      attachmentId: 'attachment-one',
+      text: 'first version',
+      data: originalBlob,
+    };
+    const updatedFile = { ...baseFile };
+    if (field === 'name') updatedFile.name = 'renamed.txt';
+    if (field === 'mimeType') updatedFile.mimeType = 'text/markdown';
+    if (field === 'text') updatedFile.text = 'second version';
+    if (field === 'attachmentId') updatedFile.attachmentId = 'attachment-two';
+    const row = (files: Array<typeof baseFile>) => (
+      <MessageItem
+        message={{
+          id: 'same-file-update',
+          role: 'user',
+          content: 'Same prompt',
+          timestamp: 0,
+          source: 'cron',
+          files,
+        }}
+      />
+    );
+    if (field === 'data') {
+      updatedFile.data = new Blob(['same bytes'], { type: 'text/plain' });
+    }
+    const { root } = renderWithRoot(row([baseFile]));
+    expect(captured.userMessageProps?.files).toEqual([baseFile]);
+    act(() => root.render(row([updatedFile])));
+    expect(captured.userMessageProps?.files).toEqual([updatedFile]);
+    expect(captured.userMessageProps?.files?.[0]?.data).toBe(updatedFile.data);
+  },
+);
+
+it('forwards a same-data image attachment ID update', () => {
+  const image = { data: 'same-image-data', mimeType: 'image/png' };
+  const updatedImage = { ...image, attachmentId: 'image-reference-2' };
+  const row = (images: Array<typeof image & { attachmentId?: string }>) => (
+    <MessageItem
+      message={{
+        id: 'same-image-update',
+        role: 'user',
+        content: 'Same image prompt',
+        timestamp: 0,
+        images,
+      }}
+    />
+  );
+  const { root } = renderWithRoot(row([image]));
+  const renderCount = captured.userRenderCount;
+  expect(captured.userMessageProps?.images?.[0]?.attachmentId).toBeUndefined();
+  act(() => root.render(row([updatedImage])));
+  expect(captured.userRenderCount).toBe(renderCount + 1);
+  expect(captured.userMessageProps?.images?.[0]?.attachmentId).toBe(
+    'image-reference-2',
+  );
 });

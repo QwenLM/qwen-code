@@ -3405,7 +3405,7 @@ describe('WebShellSidebar workspace removal', () => {
         : [],
     );
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -3416,7 +3416,10 @@ describe('WebShellSidebar workspace removal', () => {
     const items = await openSessionMenuItems('Pinned secondary');
     expect(items).toEqual(expect.arrayContaining(['Rename', 'Delete']));
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/other',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await act(async () => {
       await Promise.resolve();
       await Promise.resolve();
@@ -4778,7 +4781,10 @@ describe('WebShellSidebar non-primary archive', () => {
         : [],
     );
 
-    renderSidebar({ lockedWorkspaceCwd: '/tmp/danger' });
+    renderSidebar({
+      lockedWorkspaceCwd: '/tmp/danger',
+      sessionActions: { inlineItems: ['pin'] },
+    });
     await ensureWorkspaceExpanded('danger');
     expect(container.textContent).toContain('Untrusted active');
     expect(sessionAction('Untrusted active')).toBeUndefined();
@@ -5376,6 +5382,13 @@ describe('WebShellSidebar session source switch', () => {
     expect(Boolean(row?.querySelector(scenario.selector))).toBe(
       scenario.activeWorkState === 'active',
     );
+    if (scenario.activeWorkState === 'active') {
+      expect(
+        row
+          ?.querySelector(scenario.selector)
+          ?.classList.contains(sidebarStyles.sessionStatusDotRunning),
+      ).toBe(true);
+    }
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
@@ -7501,7 +7514,7 @@ describe('WebShellSidebar session toolbar archive action dedupe', () => {
     enableOrganization();
     useWorkspaceSessionCatalog(pinnedSecondaryCatalog);
 
-    renderSidebar();
+    renderSidebar({ sessionActions: { inlineItems: ['pin'] } });
     await settle();
     expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
     expect(archiveButtonsInRow('Pinned secondary')).toHaveLength(0);
