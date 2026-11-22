@@ -63,8 +63,8 @@ function parseTokenCounts(text: string): {
   limitTokens?: number;
   limitKind?: 'input' | 'total';
 } {
-  // Digit runs are capped at 32 characters so an unanchored scan over a long
-  // run of digits stays linear instead of backtracking from every position.
+  // Digit runs are capped at 32 characters so an unanchored scan does not
+  // backtrack through a long run of digits from every position.
   const greaterThanMatch = text.match(
     /(\d[\d,]{0,31})\s*tokens?\s*>\s*(\d[\d,]{0,31})/i,
   );
