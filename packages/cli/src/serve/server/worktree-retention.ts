@@ -6,7 +6,16 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import {
+  GitWorktreeService,
+  hasHiddenIndexBit,
+  worktreeHasPendingGitOperation,
+  worktreeHasPopulatedGitlink,
+} from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import {
+  selectWorktreeSnapshot,
+  verifyRestoredWorktreeSnapshot,
+} from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   readWorktreeSessionStrict,
   writeWorktreeSession,
@@ -227,7 +236,83 @@ async function collectEligible(
             : -1) || a.sessionId.localeCompare(b.sessionId),
     )
     .slice(scope.limit)
+    .reverse()
     .map(({ activityNs: _activityNs, ...plan }) => plan);
+}
+
+async function discardPreservedAttemptSnapshot(
+  runtime: WorkspaceRuntime,
+  registry: WorkspaceRegistry,
+  plan: WorktreeCleanupPlan,
+  snapshot: NonNullable<
+    Awaited<ReturnType<typeof executeWorktreeCleanup>>['snapshot']
+  >,
+  canContinue: () => boolean,
+): Promise<void> {
+  const service = createWorkspaceRuntimeSessionService(runtime);
+  const current = await preclassifyWorktreeCleanup(
+    service,
+    plan.sessionId,
+    runtime.workspaceCwd,
+  );
+  if (!current || current.sidecar.worktreeRemoved !== undefined) return;
+  const ownership = await verifyWorktreeCleanupOwnership(current, (id) =>
+    sessionLiveOnBridge(runtime.bridge, id),
+  );
+  if (!ownership.ok) return;
+  if (!(await assertCurrentRuntime(registry, runtime, canContinue))) {
+    return;
+  }
+  // Restrict deletion to the pair created by this attempt. Pre-existing or
+  // other-session archives are never promoted or pruned as orphans.
+  const selected = await selectWorktreeSnapshot({
+    directory: path.dirname(plan.sidecarPath),
+    sessionId: plan.sessionId,
+    slug: plan.sidecar.slug,
+    archiveKey: path.basename(snapshot.snapshotPath),
+  });
+  if (
+    !selected ||
+    selected.snapshotPath !== snapshot.snapshotPath ||
+    selected.metaPath !== snapshot.metaPath
+  ) {
+    return;
+  }
+  const [hiddenIndex, pending, populatedGitlink] = await Promise.all([
+    hasHiddenIndexBit(current.lockKey),
+    worktreeHasPendingGitOperation(current.lockKey),
+    worktreeHasPopulatedGitlink(current.lockKey, selected.meta.headCommit),
+  ]);
+  if (hiddenIndex || pending || populatedGitlink) return;
+  if (
+    !(await verifyRestoredWorktreeSnapshot({
+      worktreePath: current.lockKey,
+      snapshotPath: selected.snapshotPath,
+      meta: selected.meta,
+    }))
+  ) {
+    return;
+  }
+  if (
+    (await new SessionOrganizationService(
+      runtime.workspaceCwd,
+    ).isSessionPinnedStrict(plan.sessionId)) ||
+    sessionLiveOnBridge(runtime.bridge, plan.sessionId)
+  ) {
+    return;
+  }
+  if (
+    !(await assertCurrentRuntime(registry, runtime, canContinue)) ||
+    !(
+      await verifyWorktreeCleanupOwnership(current, (id) =>
+        sessionLiveOnBridge(runtime.bridge, id),
+      )
+    ).ok
+  ) {
+    return;
+  }
+  await fs.unlink(selected.metaPath);
+  await fs.unlink(selected.snapshotPath);
 }
 
 async function removeRetainedCheckout(
@@ -260,6 +345,19 @@ async function removeRetainedCheckout(
           return !sessionLiveOnBridge(runtime.bridge, plan.sessionId);
         },
       });
+      if (
+        !outcome.removed &&
+        outcome.snapshot?.checkoutMatchesCapture &&
+        assertCurrentRuntime(registry, runtime, canContinue)
+      ) {
+        await discardPreservedAttemptSnapshot(
+          runtime,
+          registry,
+          plan,
+          outcome.snapshot,
+          canContinue,
+        );
+      }
       if (!outcome.removed || !outcome.snapshot) return false;
       const archiveKey = path.basename(outcome.snapshot.snapshotPath);
       await writeWorktreeSession(plan.sidecarPath, {

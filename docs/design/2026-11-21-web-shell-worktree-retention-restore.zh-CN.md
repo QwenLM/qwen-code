@@ -36,6 +36,8 @@ P7 可配置 worktree 根、既有按龄期的 tool/agent 清扫、arena/managed
 
 对 linked checkout，仅凭原始 `cwd`/transcript cwd 或 `originalCwd` 不能证明 daemon workspace 的所有权。`originalCwd` 定位创建它的 worktree service/repository；需要由 `workspaceCwd`、marker、runtime 本地存储、当前 registry 与 session-owner index 共同证明归属。父级/包含关系须使用 canonical realpath；若 workspace 发现结果中有多个可包含的父级，则选择最具体的已登记父级 scope，而不是默认落到最外层 primary。该关系必须与当前 runtime owner 一致，不能只是字符串前缀或 `$QWEN_CODE_PROJECT_DIR`。历史记录缺少经证明的 `workspaceCwd`，或其它不能唯一证明 owner 的记录/根，都应保留并报告，不能凭假定清扫。
 
+计数按从已验证的来源根及 `getUserWorktreesDir()` 解析出的规范托管根限定，不依据任意路径前缀或仅依据仓库名称。每个归属独立的管理根分别执行保留清扫。
+
 若多个 runtime 声称同一个规范管理根，或其有效设置冲突，则停止该根的自动清扫并输出诊断。workspace 的 ownership 未知、不受信任、runtime 正在 drain，或其根不可读时，同样停止。这里不做跨 runtime 聚合计数，也不回退到 primary runtime。这是已选择的保守边界，不另外发明分布式锁或隐式的配置优先级赢家。
 
 清扫前会针对全部合规 siblings runtime 建立归属图。任何一个 root、环境或 settings 不可读时，自动清扫都会暂停，直到相关归属证据恢复；否则无法排除这个无法验证的 runtime 与其它 runtime 共享候选管理根。各 workspace 的 settings、storage 与上限仍独立适用，但「独立」不意味着在归属图不完整时也能继续删除。这是有意选择的保守暂停，不是借此静默忽略 secondary workspace。
@@ -55,6 +57,8 @@ P7 可配置 worktree 根、既有按龄期的 tool/agent 清扫、arena/managed
 保留清扫删除任何合规 checkout 前，都要先捕获该 checkout。即使现有会话删除规则允许对只含原始搬运覆盖层的 checkout 裸回收，也不适用此例外。来源在清扫后仍可能变化，保留的 chat 必须有可用于日后恢复的归档。
 
 其它生命周期路径原有的 U3 裸回收结果保持不变。U3 计算出的 `needsSnapshot`、`worktreeHasWork`、前后内容摘要、隐藏索引位检查、暂停操作检查、搬运来源复核、populated-gitlink 检查和 `checkoutMatchesCapture`，继续作为共享安全逻辑。不可读或快照不能忠实表示的状态一律保留 checkout，不放宽这些不变量。
+
+移除被拒绝或保留时，本轮清扫可能已经生成了一对归档。只有在重新验证 ownership、marker、pin/liveness、runtime 状态、隐藏索引位、暂停 Git 操作、populated-gitlink，以及当前 checkout 的实际内容后，才可以删除**该次尝试所选中的这一对**文件。当前 checkout 完整一致，足以证明这份冗余副本不再需要。归属不明、状态发生变化或部分/不匹配的 checkout 一律保留这对归档。已有或其它 session/orphan 归档不会被提升归属或被这份有界、同次清理删除；这里没有 TTL 或通用孤儿清扫，也不把多次文件 unlink 宣称为更大范围的原子事务。
 
 ### 4. 明确定义移除状态及其归档对键
 
@@ -140,7 +144,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 
 操作顺序如下：
 
-非 primary/linked workspace 的调用方必须显式提供该会话所属 runtime 的已注册 workspace `cwd`，不能因为请求中省略 `cwd` 就采用 resolver 默认给出的 primary。此 `cwd` 必须与 sidecar 注册的 owner、marker 及 live-owner resolution 一致。缺失、非规范、runtime 不符、不受信任、歧义或不匹配的 owner 证据都应拒绝，不得重定向到 primary。既有 primary 缺省规范化行为只保留给确实由 primary 拥有的流程。
+非 primary/linked workspace 的调用方必须显式提供该会话所属 runtime 的已注册 workspace `cwd`，不能因为请求中省略 `cwd` 就采用 resolver 默认给出的 primary。这个要求由真正的恢复操作根据调用方是否实际提供了 owner 范围来校验，不依赖仅对 resolver 结果的 `runtime.primary` 检查。只有确实由 primary 拥有的状态可以使用缺省 primary 规范化。此 `cwd` 必须与 sidecar 注册的 owner、marker 及 live-owner resolution 一致。缺失、非规范、runtime 不符、不受信任、歧义或不匹配的 owner 证据都应拒绝，不得重定向到 primary。既有 primary 缺省规范化行为只保留给确实由 primary 拥有的流程。
 
 1. 通过 `resolveRuntimeForSessionRestore`、`createWorkspaceRuntimeSessionService` 与 stored-id resolver，确定选定 runtime 及真实保存的 session id。具体的 workspace-qualified scope 必须与 sidecar 的 `workspaceCwd` 一致，scope 缺失或不明确时不得回退 primary workspace。
 2. 严格读取 worktree 记录，校验当前 runtime 的 root/source/slug containment。为缺失 checkout 提供所有权解析的变体：所属管理根下的目标缺失，不应套用现有 reset 的 `realpathSync` 规则而直接失败，也绝不能把请求转到 primary workspace。
@@ -149,7 +153,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 5. 对捕获时记录的命名分支，仅当目标 ref 仍解析到捕获 head，且不是不安全/越界引用时，才附着该分支。ref 缺失、已前进或含义不明时，改为在 `headCommit` 上 detached 恢复，报告命名 ref 未被修改，并将当前分支字段更新为真实值。`createUserWorktree(..., { detached: true })` 是不重写 ref 的路径；绝不能以 reset/rebase 强制把用户分支退到旧位置。
 6. 要求目标 fresh 且归属明确。只调用 `mkdir` 或 restore 并不是完整重建：必须使用 `createUserWorktree` 和 `getUserWorktreePath`，保持 checkout、Git 管理登记与托管根一致。已有、意外非空或外部目录一律拒绝，不得清空或覆盖。
 7. 使用所选头部调用 `restoreWorktreeSnapshot`，随后通过 `createWorktreeSessionMarkerExclusive` 为实际 stored session id 创建 marker。`.git` 和 marker 不属于快照内容。
-8. 将恢复内容与所选归档比较：原始字节、属主可执行位、真实链接目标、记录的删除、期望 commit，以及按上述分支决策产生的当前分支状态（有意 detached 时为空）。不能仅因合法的 detached 回退与捕获时分支名不同，就拒绝这次恢复。复用 snapshot 区域已有的比较职责，不以文件是否存在作为弱校验。必要时，在解档后及最终 sidecar 修改前分别比较。ignored 的可再生输出继续遵循 U1 的排除契约。
+8. 将恢复内容与所选归档比较：原始字节、属主可执行位、真实链接目标、记录的删除、期望 commit，以及不安全或非常规的迟到条目，再校验按上述分支决策产生的当前分支状态（有意 detached 时为空）。不能仅因合法的 detached 回退与捕获时分支名不同，就拒绝这次恢复。复用 snapshot 区域已有的比较职责，不以文件是否存在作为弱校验。必要时，在解档后及最终 sidecar 修改前分别比较。ignored 的可再生输出继续遵循 U1 的排除契约。
 9. 原子更新存活 sidecar，清除移除状态，并写入当前真实分支、路径与 carry identity；再次确认 marker 与 checkout 仍然有效。只有此时才允许普通 `restoreSessionCore` 迁移/打开该会话的 checkout，并向客户端提供已恢复状态。
 
 ### 失败与重试行为

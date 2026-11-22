@@ -218,7 +218,7 @@ describe('worktree restoration preview metadata', () => {
         listWorkspaceSessionsForResponse(
           bridge,
           target.repo,
-          { size: 100 },
+          { size: 100, view: 'organized' },
           { runtimeBaseDir: target.runtime.sessionRuntimeBaseDir },
         ),
       );

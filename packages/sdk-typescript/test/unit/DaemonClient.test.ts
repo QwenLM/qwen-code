@@ -229,13 +229,26 @@ describe('worktree snapshot restore', () => {
   });
 
   it('returns a replay-ready session client after ordinary restore', async () => {
+    const compactedReplay = [{ id: 1, v: 1, type: 'session_update', data: {} }];
+    const liveJournal = [{ id: 27, v: 1, type: 'session_update', data: {} }];
+    const lifecycleReplay = [
+      { id: 26, v: 1, type: 'session_update', data: {} },
+    ];
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {
         sessionId: 's-1',
         workspaceCwd: '/work/secondary',
-        state: {},
+        state: { mode: 'replay-ready' },
         lastEventId: 27,
         eventEpoch: 'epoch-restore',
+        compactedReplay,
+        liveJournal,
+        lifecycleReplay,
+        lifecycleReplayIncomplete: true,
+        historyHasMore: true,
+        historyAnchorRecordId: 'anchor-restore-1',
+        replayProjectionWatermark: 17,
+        replayDegraded: true,
         worktree: {
           slug: 'recovered',
           path: '/work/secondary/.qwen/worktrees/recovered',
@@ -250,6 +263,24 @@ describe('worktree snapshot restore', () => {
     expect(restored).toBeInstanceOf(DaemonSessionClient);
     expect(restored.workspaceCwd).toBe('/work/secondary');
     expect(restored.worktree?.branch).toBe('');
+    expect(restored.state).toEqual({ mode: 'replay-ready' });
+    expect(restored.replaySnapshot).toEqual({
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete: true,
+    });
+    expect(restored.lastEventId).toBe(27);
+    expect(restored.eventEpoch).toBe('epoch-restore');
+    expect(restored.historyHasMore).toBe(true);
+    expect(restored.historyAnchorRecordId).toBe('anchor-restore-1');
+    expect(restored.replayProjectionWatermark).toBe(17);
+    expect(restored.replayDegraded).toBe(true);
+    expect(restored.consumeReplaySnapshot().compactedReplay).toEqual(
+      compactedReplay,
+    );
+    expect(restored.replaySnapshot.compactedReplay).toEqual([]);
+    expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       cwd: '/work/secondary',

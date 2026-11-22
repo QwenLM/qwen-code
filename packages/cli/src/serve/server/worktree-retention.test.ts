@@ -34,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -116,6 +117,103 @@ describe('worktree retention with real repositories', () => {
         expect(read.session.worktreeRemoved).toBeUndefined();
       }
     }
+  });
+
+  it('sweeps the oldest excess checkouts before newer excess checkouts', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const oldest = await makeRetainedSession(target, {
+      slug: 'oldest',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const middle = await makeRetainedSession(target, {
+      slug: 'middle',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+
+    expect((await sweep(target)).removed).toEqual([oldest.id, middle.id]);
+    for (const session of [oldest, middle]) {
+      await expectRetainedSnapshot(target, session);
+    }
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('discards only a failed attempt snapshot after proving the checkout intact', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'retained-after-refusal',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const unrelated = path.join(
+      path.dirname(old.sidecarPath),
+      'unrelated.1.1.worktree-snapshot.tar.gz',
+    );
+    fs.writeFileSync(unrelated, 'unrelated-orphan');
+    const refusal = vi
+      .spyOn(GitWorktreeService.prototype, 'removeUserWorktree')
+      .mockResolvedValue({ success: false, error: 'injected refusal' });
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(fs.existsSync(old.worktreePath)).toBe(true);
+    expect(
+      fs
+        .readdirSync(path.dirname(old.sidecarPath))
+        .filter(
+          (entry) =>
+            entry.startsWith(`${old.id}.`) &&
+            entry.includes('.worktree-snapshot.'),
+        ),
+    ).toEqual([]);
+    expect(fs.readFileSync(unrelated, 'utf8')).toBe('unrelated-orphan');
+    const binding = await readWorktreeSessionStrict(old.sidecarPath);
+    expect(binding.state).toBe('valid');
+    if (binding.state === 'valid') {
+      expect(binding.session.worktreeRemoved).toBeUndefined();
+    }
+
+    refusal.mockRestore();
+    expect((await sweep(target)).removed).toEqual([old.id]);
+    await expectRetainedSnapshot(target, old);
+    expect(fs.readFileSync(unrelated, 'utf8')).toBe('unrelated-orphan');
+  });
+
+  it('retains the snapshot when the checkout may have been partly removed', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'partial-removal',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    vi.spyOn(
+      GitWorktreeService.prototype,
+      'removeUserWorktree',
+    ).mockImplementation(async () => {
+      fs.rmSync(path.join(old.worktreePath, 'tracked.txt'), { force: true });
+      return { success: false, error: 'injected partial removal' };
+    });
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(fs.existsSync(old.worktreePath)).toBe(true);
+    expect(
+      fs
+        .readdirSync(path.dirname(old.sidecarPath))
+        .some((entry) => entry.endsWith('.worktree-snapshot.tar.gz')),
+    ).toBe(true);
   });
 
   it('protects live and pinned chats outside the eligible quota', async () => {

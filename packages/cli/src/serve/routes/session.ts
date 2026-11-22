@@ -4974,15 +4974,6 @@ export function registerSessionRoutes(
       );
       if (resolved === undefined) return;
       const { runtime } = resolved;
-      if (!runtime.primary && !('cwd' in body)) {
-        res.status(400).json({
-          error:
-            'Non-primary worktree restore requires the registered workspace cwd',
-          code: 'workspace_mismatch',
-          sessionId,
-        });
-        return;
-      }
       if (isInternalWorkspaceRuntime(runtime)) {
         res.status(400).json({
           error:
@@ -5045,6 +5036,7 @@ export function registerSessionRoutes(
           sessionId: storedSessionId,
           archiveCoordinator,
           assertRuntimeGenerationOpen,
+          explicitWorkspaceCwd: Object.hasOwn(body, 'cwd'),
         });
       });
       await restoreSessionHandler('load')(req, res);

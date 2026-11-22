@@ -765,6 +765,65 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect((await fs.stat(result.snapshotPath)).size * 1000).toBeLessThan(
       20 * 1024 * 1024,
     );
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath: result.snapshotPath,
+        meta: await readWorktreeSnapshotMeta(result.metaPath),
+      }),
+    ).rejects.toThrow(/ratio|decompress/i);
+  });
+
+  it('rejects oversized metadata before creating an archive', async () => {
+    const files = Array.from(
+      { length: 900 },
+      (_, index) =>
+        `vendor/${'p'.repeat(64)}/component-${index.toString().padStart(3, '0')}.txt`,
+    );
+    for (const relativePath of files) {
+      const file = path.join(worktree, relativePath);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'delete me\n');
+    }
+    git(worktree, 'add', '--', ...files);
+    git(worktree, 'commit', '-qm', 'mass-delete', '--no-verify');
+    for (const relativePath of files) {
+      await fs.unlink(path.join(worktree, relativePath));
+    }
+    const capturedMeta = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'large-deletion-set',
+      slug: 'large-deletion-set',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(capturedMeta.dirty.deleted).toHaveLength(900);
+    await fs.mkdir(snapshotDir, { recursive: true });
+
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: capturedMeta,
+      }),
+    ).rejects.toThrow('Worktree snapshot metadata exceeds 64 KiB');
+    await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
+    await expect(
+      fs.readFile(path.join(worktree, 'committed.txt'), 'utf8'),
+    ).resolves.toBe('base\n');
+  });
+
+  it('returns undefined for an explicitly requested missing pair', async () => {
+    const archiveKey = 'session-snap.1.1.worktree-snapshot.tar.gz';
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const select = () =>
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey,
+      });
+    await expect(select()).resolves.toBeUndefined();
+    await fs.writeFile(path.join(snapshotDir, archiveKey), '', 'utf-8');
+    await expect(select()).resolves.toBeUndefined();
   });
 
   it('matches an unchanged sha256 repository', async () => {

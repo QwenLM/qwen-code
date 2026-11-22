@@ -32,6 +32,7 @@ import { runGit } from '../utils/git-branches.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
 
 export const WORKTREE_SNAPSHOT_SCHEMA_VERSION = 2;
+const META_READ_MAX_BYTES = 64 * 1024;
 
 export interface WorktreeSnapshotMeta {
   version: number;
@@ -627,12 +628,16 @@ export async function captureWorktreeSnapshot(
   const { worktreePath, snapshotDir, meta } = options;
   await fs.access(path.join(worktreePath, '.git'));
   const matcher = await readSnapshotExclusions(worktreePath);
-  await fs.mkdir(snapshotDir, { recursive: true });
   const fullMeta: WorktreeSnapshotMeta = {
     version: WORKTREE_SNAPSHOT_SCHEMA_VERSION,
     createdAt: Date.now(),
     ...meta,
   };
+  const serializedMeta = `${JSON.stringify(fullMeta, null, 2)}\n`;
+  if (Buffer.byteLength(serializedMeta, 'utf8') > META_READ_MAX_BYTES) {
+    throw new Error('Worktree snapshot metadata exceeds 64 KiB');
+  }
+  await fs.mkdir(snapshotDir, { recursive: true });
   // A session UUID may be reused (superseded records, caller-supplied id):
   // never let a later capture overwrite an earlier archive pair of the same
   // sessionId. Suffix by capture time and pid; readers glob on the
@@ -669,7 +674,7 @@ export async function captureWorktreeSnapshot(
   });
 
   await atomicWriteFile(metaPath, async (tmp) => {
-    await fs.writeFile(tmp, `${JSON.stringify(fullMeta, null, 2)}\n`, 'utf8');
+    await fs.writeFile(tmp, serializedMeta, 'utf8');
   });
 
   return {
@@ -688,6 +693,9 @@ export async function captureWorktreeSnapshot(
 export async function readWorktreeSnapshotMeta(
   metaPath: string,
 ): Promise<WorktreeSnapshotMeta> {
+  if ((await fs.stat(metaPath)).size > META_READ_MAX_BYTES) {
+    throw new Error(`Worktree snapshot metadata exceeds 64 KiB: ${metaPath}`);
+  }
   const raw = await fs.readFile(metaPath, 'utf8');
   const parsed: unknown = JSON.parse(raw);
   if (parsed === null || typeof parsed !== 'object') {
@@ -763,7 +771,19 @@ export async function selectWorktreeSnapshot(options: {
   ) {
     throw new Error('Invalid worktree snapshot archive key');
   }
-  if (!(await fs.lstat(options.directory)).isDirectory()) {
+  let directoryStat;
+  try {
+    directoryStat = await fs.lstat(options.directory);
+  } catch (error) {
+    if (
+      archiveKey !== undefined &&
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return undefined;
+    }
+    throw error;
+  }
+  if (!directoryStat.isDirectory()) {
     throw new Error('Snapshot directory is not a directory');
   }
   const names = await fs.readdir(options.directory);
@@ -774,7 +794,7 @@ export async function selectWorktreeSnapshot(options: {
       (name.endsWith(archiveSuffix) || name.endsWith(metaSuffix)),
   );
   if (archiveKey !== undefined && !matchingNames.includes(archiveKey)) {
-    throw new Error('Requested worktree snapshot pair was not found');
+    return undefined;
   }
   const bases = new Set(
     matchingNames.map((name) =>
@@ -788,7 +808,18 @@ export async function selectWorktreeSnapshot(options: {
     const snapshotPath = path.join(options.directory, `${base}.tar.gz`);
     const metaPath = path.join(options.directory, `${base}.json`);
     for (const file of [snapshotPath, metaPath]) {
-      const stat = await fs.lstat(file, { bigint: true });
+      let stat;
+      try {
+        stat = await fs.lstat(file, { bigint: true });
+      } catch (error) {
+        if (
+          archiveKey !== undefined &&
+          (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ) {
+          return undefined;
+        }
+        throw error;
+      }
       if (!stat.isFile() || stat.nlink !== 1n) {
         throw new Error(
           `Snapshot pair file is not an owned regular file: ${file}`,

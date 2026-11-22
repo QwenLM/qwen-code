@@ -955,6 +955,12 @@ export async function restoreWorktreeContext(
     return { contextMessage: null, session: null };
   }
 
+  if (session.worktreeRemoved !== undefined) {
+    // A present directory does not complete a retained removal. Only the
+    // owned snapshot-restore operation may decide whether it can bind again.
+    return { contextMessage: null, session: null };
+  }
+
   let worktreeAlive = false;
   try {
     const stat = await fs.stat(session.worktreePath);
@@ -964,11 +970,6 @@ export async function restoreWorktreeContext(
   }
 
   if (!worktreeAlive) {
-    // A retained snapshot can reconstruct the checkout, but ordinary resume
-    // must neither erase that binding nor pretend it is already restored.
-    if (session.worktreeRemoved !== undefined) {
-      return { contextMessage: null, session: null };
-    }
     try {
       await clearWorktreeSession(sidecarPath);
     } catch (error) {

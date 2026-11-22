@@ -58,6 +58,8 @@ Before a retention sweep deletes any eligible checkout, it captures that checkou
 
 The existing U3 bare-delete outcome for other lifecycle paths remains unchanged. U3's hydrated `needsSnapshot` value, `worktreeHasWork`, pre/post content digests, hidden-index checks, pending-operation checks, carried-source verification, populated-gitlink checks, and `checkoutMatchesCapture` remain shared safety behavior. An unreadable or non-representable state preserves the checkout rather than weakening these invariants.
 
+A removal that is refused or preserved may already have created a pair for that attempt. Only that attempt's exact, selected pair may be discarded, after ownership, marker, pin/liveness, runtime state, hidden-index, pending-operation, populated-gitlink, and actual checkout contents are revalidated against it. An unchanged checkout is then sufficient evidence that the redundant copy is not needed. Any ambiguity, changed state, or partial/mismatched checkout preserves the pair. Pre-existing and other-session/orphan archives are neither promoted nor pruned by this bounded same-attempt cleanup; there is no TTL or general orphan sweep, and no claim that multiple filesystem unlink operations form a larger atomic transaction.
+
 ### 4. The removed state is explicit and keyed to its archive pair
 
 Proposed optional sidecar state, retaining the existing back-compatible fields:
@@ -142,7 +144,7 @@ Add a restore operation beside the current worktree flow in `packages/cli/src/se
 
 The operation proceeds as follows:
 
-For a secondary or linked-workspace call, the client must explicitly provide the registered workspace `cwd` that owns the session. The request must not rely on the resolver's default primary when `cwd` is absent. That `cwd` must agree with the sidecar's registered owner, the marker, and the live-owner resolution. Missing, noncanonical, wrong-runtime, untrusted, ambiguous, or mismatched owner evidence is rejected rather than retargeted to primary. The existing default-primary normalization is preserved only for genuinely primary-owned flows.
+For a secondary or linked-workspace call, the client must explicitly provide the registered workspace `cwd` that owns the session. The request must not rely on the resolver's default primary when `cwd` is absent. The restore operation itself enforces this requirement using whether the caller actually supplied that scope, rather than relying on a resolver-only `runtime.primary` check. Only genuinely primary-owned state may use default-primary normalization. That `cwd` must agree with the sidecar's registered owner, the marker, and the live-owner resolution. Missing, noncanonical, wrong-runtime, untrusted, ambiguous, or mismatched owner evidence is rejected rather than retargeted to primary. The existing default-primary normalization is preserved only for genuinely primary-owned flows.
 
 1. Resolve the selected workspace runtime and the stored session id (`resolveRuntimeForSessionRestore`, `createWorkspaceRuntimeSessionService`, and the stored-id resolver). The concrete workspace-qualified scope must match the sidecar's `workspaceCwd`; no primary-workspace fallback for an absent or ambiguous scope.
 2. Strictly read the worktree record and validate root/source/slug containment for the currently selected runtime. Reuse ownership resolution with a missing-checkout variant: a missing expected target under the owned managed root is not the failure that the existing reset's `realpathSync` rule must report, and it must never be redirected to a primary workspace.

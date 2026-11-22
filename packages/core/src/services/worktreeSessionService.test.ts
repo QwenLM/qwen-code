@@ -1391,24 +1391,39 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toBeNull();
   });
 
-  it('preserves a retained snapshot binding when its directory is absent', async () => {
-    const session: WorktreeSession = {
-      ...sample,
-      originalCwd: tmpDir,
-      worktreePath: path.join(tmpDir, '.qwen', 'worktrees', 'removed'),
-      worktreeRemoved: {
-        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
-      },
-    };
-    await writeWorktreeSession(filePath, session);
+  it.each([false, true])(
+    'preserves a retained snapshot binding when its directory is present: %s',
+    async (directoryPresent) => {
+      const worktreePath = path.join(tmpDir, '.qwen', 'worktrees', 'removed');
+      if (directoryPresent) {
+        await fs.mkdir(worktreePath, { recursive: true });
+        await fs.writeFile(
+          path.join(worktreePath, '.qwen-session'),
+          'session-1',
+        );
+      }
+      const session: WorktreeSession = {
+        ...sample,
+        originalCwd: tmpDir,
+        worktreePath,
+        worktreeRemoved: {
+          archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+        },
+      };
+      await writeWorktreeSession(filePath, session);
 
-    const result = await restoreWorktreeContext(filePath);
-    expect(result).toEqual({ contextMessage: null, session: null });
-    await expect(strictRead()).resolves.toEqual({
-      state: 'valid',
-      session,
-    });
-  });
+      const result = await restoreWorktreeContext(
+        filePath,
+        undefined,
+        'session-1',
+      );
+      expect(result).toEqual({ contextMessage: null, session: null });
+      await expect(strictRead()).resolves.toEqual({
+        state: 'valid',
+        session,
+      });
+    },
+  );
 
   it('treats a regular file at worktreePath as not-a-worktree', async () => {
     const filePathTarget = path.join(tmpDir, 'pretend-worktree');

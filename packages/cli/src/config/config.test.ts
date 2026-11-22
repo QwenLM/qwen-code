@@ -6388,6 +6388,25 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
+  it('forwards a zero worktree retention limit to the core config', async () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'retention-config-'));
+    try {
+      const argv = await parseArguments();
+      await loadCliConfig(
+        { worktree: { maxRetained: 0 } } as Settings,
+        argv,
+        cwd,
+      );
+      expect(mockConfigConstructorParams).toHaveBeenCalled();
+      const forwarded = mockConfigConstructorParams.mock.lastCall?.[0];
+      expect(forwarded.worktree).toMatchObject({ maxRetained: 0 });
+      const config = new ServerConfig.Config(forwarded);
+      expect(config.getWorktreeSettings()?.maxRetained).toBe(0);
+    } finally {
+      fs.rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   describe('project hooks approval gate', () => {
     const projectHooks = { SessionStart: [{ hooks: [] }] };
     const cwd = path.resolve(path.sep, 'home', 'user', 'project');

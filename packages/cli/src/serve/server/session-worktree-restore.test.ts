@@ -24,7 +24,10 @@ import {
   preclassifyWorktreeCleanup,
   executeWorktreeCleanup,
 } from './worktree-orphan-cleanup.js';
-import { restoreWorktreeFromSessionSnapshot } from './session-worktree-restore.js';
+import {
+  restoreWorktreeFromSessionSnapshot,
+  WorktreeRestoreUnavailableError,
+} from './session-worktree-restore.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 
@@ -100,12 +103,17 @@ async function snapshotAndRemove(
   return { ...output, archiveKey };
 }
 
-async function restore(target: RetentionTestRuntime, sessionId: string) {
+async function restore(
+  target: RetentionTestRuntime,
+  sessionId: string,
+  explicitWorkspaceCwd = true,
+) {
   return runWithWorkspaceRuntimeStorage(target.runtime, () =>
     restoreWorktreeFromSessionSnapshot({
       runtime: target.runtime,
       sessionId,
       archiveCoordinator: new SessionArchiveCoordinator(),
+      explicitWorkspaceCwd,
     }),
   );
 }
@@ -289,5 +297,33 @@ describe('session worktree snapshot restore', () => {
         archiveKey: state.archiveKey,
       });
     }
+  });
+
+  it('requires explicit owner evidence for a secondary restore', async () => {
+    const target = makeRetentionRepo(root, 'secondary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, { slug: 'missing-owner', dirty: true }),
+    );
+    const before = fs.readdirSync(path.dirname(state.sidecarPath)).sort();
+
+    await expect(restore(target, state.id, false)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+
+    expect(fs.readdirSync(path.dirname(state.sidecarPath)).sort()).toEqual(
+      before,
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    await expect(readWorktreeSessionStrict(state.sidecarPath)).resolves.toEqual(
+      {
+        state: 'valid',
+        session: {
+          ...state.sidecar,
+          worktreeRemoved: { archiveKey: state.archiveKey },
+        },
+      },
+    );
   });
 });

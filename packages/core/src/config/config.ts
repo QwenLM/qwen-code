@@ -10070,16 +10070,18 @@ export class Config {
     this.setTeamContext(null);
   }
 
+  /** The worktree settings for consumers beyond symlink-only callers. */
+  getWorktreeSettings(): Readonly<WorktreeSettings> {
+    return this.worktreeSettings;
+  }
+
   /**
    * Convenience accessor for `worktree.symlinkDirectories` — returns an
    * empty array when the setting is unset, so callers can pass the
    * result directly into the GitWorktreeService loop without nullchecks.
-   *
-   * (No general `getWorktreeSettings()` getter yet — add one when a
-   * second field on `WorktreeSettings` justifies the broader API.)
    */
   getWorktreeSymlinkDirectories(): readonly string[] {
-    return this.worktreeSettings.symlinkDirectories ?? [];
+    return this.getWorktreeSettings().symlinkDirectories ?? [];
   }
 
   /**

@@ -68,6 +68,7 @@ import type {
   SessionSourceRemoveResult,
   DaemonSessionState,
   DaemonSession,
+  DaemonRestoredSession,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskRuntimeStatus,
@@ -461,53 +462,7 @@ export class DaemonSessionClient {
     clientId?: string,
   ): Promise<DaemonSessionClient> {
     const restored = await client.loadSession(sessionId, req, clientId);
-    const replaySnapshotComplete =
-      Array.isArray(restored.compactedReplay) &&
-      Array.isArray(restored.liveJournal);
-    const {
-      state,
-      hasActivePrompt,
-      compactedReplay,
-      liveJournal,
-      lifecycleReplay,
-      lifecycleReplayIncomplete,
-      historyHasMore,
-      historyAnchorRecordId,
-      replayProjectionWatermark,
-      replayDegraded,
-      partial,
-      replayError,
-      lastEventId: serverLastEventId,
-      eventEpoch,
-      artifacts,
-      ...session
-    } = restored;
-    const result = new DaemonSessionClient({
-      client,
-      session,
-      hasActivePrompt,
-      state,
-      lastEventId: serverLastEventId ?? 0,
-      eventEpoch,
-      restoredArtifacts: artifacts,
-      replaySnapshot: {
-        compactedReplay: compactedReplay ?? [],
-        liveJournal: liveJournal ?? [],
-        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
-        ...(lifecycleReplayIncomplete !== undefined
-          ? { lifecycleReplayIncomplete }
-          : {}),
-      },
-      replaySnapshotComplete,
-      replayPartial: partial === true,
-      replayError,
-      historyHasMore,
-      historyAnchorRecordId,
-      replayProjectionWatermark,
-      replayDegraded,
-    });
-    await result.hydrateReplaySnapshot(req.signal);
-    return result;
+    return this.fromRestoredSession(client, restored, req.signal);
   }
 
   /**
@@ -586,14 +541,62 @@ export class DaemonSessionClient {
     sessionId: string,
     req: RestoreWorktreeSessionRequest = {},
   ): Promise<DaemonSessionClient> {
-    const session = await client.restoreWorktreeSession(sessionId, req);
-    return new DaemonSessionClient({
+    const restored = await client.restoreWorktreeSession(sessionId, req);
+    return this.fromRestoredSession(client, restored, req.signal);
+  }
+
+  private static async fromRestoredSession(
+    client: DaemonClient,
+    restored: DaemonRestoredSession,
+    signal?: AbortSignal,
+  ): Promise<DaemonSessionClient> {
+    const replaySnapshotComplete =
+      Array.isArray(restored.compactedReplay) &&
+      Array.isArray(restored.liveJournal);
+    const {
+      state,
+      hasActivePrompt,
+      compactedReplay,
+      liveJournal,
+      lifecycleReplay,
+      lifecycleReplayIncomplete,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayProjectionWatermark,
+      replayDegraded,
+      partial,
+      replayError,
+      lastEventId: serverLastEventId,
+      eventEpoch,
+      artifacts,
+      ...session
+    } = restored;
+    const result = new DaemonSessionClient({
       client,
       session,
-      hasActivePrompt: session.hasActivePrompt,
-      lastEventId: session.lastEventId,
-      eventEpoch: session.eventEpoch,
+      hasActivePrompt,
+      state,
+      lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
+      restoredArtifacts: artifacts,
+      replaySnapshot: {
+        compactedReplay: compactedReplay ?? [],
+        liveJournal: liveJournal ?? [],
+        ...(lifecycleReplay !== undefined ? { lifecycleReplay } : {}),
+        ...(lifecycleReplayIncomplete !== undefined
+          ? { lifecycleReplayIncomplete }
+          : {}),
+      },
+      replaySnapshotComplete,
+      replayPartial: partial === true,
+      replayError,
+      historyHasMore,
+      historyAnchorRecordId,
+      replayProjectionWatermark,
+      replayDegraded,
     });
+    await result.hydrateReplaySnapshot(signal);
+    return result;
   }
 
   static async createStandalone(

@@ -131,8 +131,15 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
   sessionId: string;
   archiveCoordinator: SessionArchiveCoordinator;
   assertRuntimeGenerationOpen?: () => void;
+  /** True only for an explicit registered owner supplied by the caller. */
+  explicitWorkspaceCwd?: boolean;
 }): Promise<RestoredWorktreeBinding> {
   const { runtime, sessionId, archiveCoordinator } = options;
+  if (!runtime.primary && options.explicitWorkspaceCwd !== true) {
+    throw new WorktreeRestoreUnavailableError(
+      'Non-primary snapshot restore requires an explicit registered workspace owner',
+    );
+  }
   const service = createWorkspaceRuntimeSessionService(runtime);
   const initial = await preclassifyWorktreeCleanup(
     service,
