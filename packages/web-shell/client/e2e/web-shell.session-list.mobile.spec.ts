@@ -41,6 +41,19 @@ test.describe('Chromium CDP drawer gestures', () => {
         .locator('[data-web-shell-session-title]')
         .filter({ hasText: LONG_SESSION_TITLE })
         .locator('..');
+      const titleBox = await row
+        .locator('[data-web-shell-session-title]')
+        .boundingBox();
+      if (!titleBox) throw new Error('The long session title is not laid out.');
+      expect(titleBox.width).toBeGreaterThan(110);
+      const prLink = row.locator('a[href]');
+      await prLink.evaluate((link) => {
+        link.addEventListener('click', (event) => event.preventDefault());
+      });
+      await prLink.dblclick();
+      await expect(
+        sidebar.getByRole('textbox', { name: /^Rename:/ }),
+      ).toHaveCount(0);
       await row
         .getByRole('button', { name: 'More actions', exact: true })
         .tap();
@@ -220,6 +233,17 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       'style',
       /--session-actions-width:\s*26px/,
     );
+    await expect(row.locator('[class*="sessionActions"]')).toHaveCSS(
+      'opacity',
+      '1',
+    );
+    await expect(row.locator('[class*="sessionActions"]')).toHaveCSS(
+      'pointer-events',
+      'auto',
+    );
+    await expect(row.locator('[class*="sessionGitIcon"]')).toBeHidden();
+    await expect(row.getByRole('link', { name: /Pull Request/ })).toBeVisible();
+    await expect(row.getByTestId('session-goal-marker')).toBeVisible();
     const [buttonBox, sidebarBox] = await Promise.all([
       more.boundingBox(),
       sidebar.boundingBox(),
@@ -228,6 +252,10 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       throw new Error('Recent row is not visible.');
     const rowBox = await row.boundingBox();
     if (!rowBox) throw new Error('Recent row is not visible.');
+    await testInfo.attach('narrow-recent-geometry', {
+      body: JSON.stringify({ buttonBox, rowBox, sidebarBox }, null, 2),
+      contentType: 'application/json',
+    });
     expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
       rowBox.x + rowBox.width + 0.5,
     );
@@ -257,6 +285,9 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       .filter({ hasText: 'Recent narrow row with PR and goal metadata' })
       .locator('..')
       .getByRole('button', { name: 'More actions', exact: true });
+    const baselinePointerEvents = await page.evaluate(
+      () => document.body.style.pointerEvents,
+    );
     await expandedMore.tap();
     await expect(menu).toBeVisible();
     const outsideMenu = { x: 1000, y: 400 };
@@ -277,6 +308,9 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
     await expect(menu).toHaveCount(0);
     await expect(expandedSidebar).toBeVisible();
     await expect(expandedMore).not.toBeFocused();
+    await expect
+      .poll(() => page.evaluate(() => document.body.style.pointerEvents))
+      .toBe(baselinePointerEvents);
   } finally {
     await context.close();
   }

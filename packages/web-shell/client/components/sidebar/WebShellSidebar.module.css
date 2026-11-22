@@ -1573,6 +1573,7 @@ button.livePendingSession:hover {
   .sessionActions {
     position: static;
     opacity: 1;
+    pointer-events: auto;
   }
 
   .sessionActionButton {
@@ -1585,6 +1586,20 @@ button.livePendingSession:hover {
 @media (hover: none) and (pointer: coarse) and (max-width: 280px) {
   .sidebar.mobileOpen .sessionGitIcon {
     display: none;
+  }
+
+  /* Intrinsic badge widths must not push More outside its row. */
+  .sidebar.mobileOpen .sessionRow:has(.sessionMetaSlotReserved) {
+    padding-right: 26px;
+  }
+
+  .sidebar.mobileOpen .sessionRow .sessionMetaSlotReserved {
+    position: absolute;
+    top: 2px;
+    right: 0;
+    bottom: 2px;
+    width: 26px;
+    height: auto;
   }
 }
 

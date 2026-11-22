@@ -551,6 +551,7 @@ interface GroupMenuState {
   session: DaemonSessionSummary;
   top: number;
   left: number;
+  parentMenu?: HTMLElement;
   returnFocus?: HTMLButtonElement;
 }
 
@@ -2227,14 +2228,13 @@ export function WebShellSidebar({
   }, []);
   const handleSessionMenuCloseAutoFocus = useCallback(
     (event: Event) => {
-      // A Group menu can mount before Radix finishes dismissing More.
-      if (groupMenuRef.current) {
-        focusGroupMenuSelection();
+      if (renameFocusSuppressRef.current) {
+        renameFocusSuppressRef.current = false;
         event.preventDefault();
         return;
       }
-      if (renameFocusSuppressRef.current) {
-        renameFocusSuppressRef.current = false;
+      if (groupMenu?.parentMenu === event.currentTarget) {
+        focusGroupMenuSelection();
         event.preventDefault();
         return;
       }
@@ -2242,7 +2242,7 @@ export function WebShellSidebar({
       sessionMenuPointerDismissRef.current = false;
       event.preventDefault();
     },
-    [focusGroupMenuSelection],
+    [focusGroupMenuSelection, groupMenu],
   );
   const isCollapsedCloseBlocked = useCallback(
     () =>
@@ -3376,8 +3376,11 @@ export function WebShellSidebar({
       setGroupMenu(null);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (groupMenuRef.current?.contains(document.activeElement)) {
         closeGroupMenu();
+      } else {
+        setGroupMenu(null);
       }
     };
     document.addEventListener('mousedown', handlePointerDown);
@@ -5010,6 +5013,7 @@ export function WebShellSidebar({
     async (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
       if (!canOrganizeSession(session, 'group')) return;
       const returnFocus = groupMenuTriggerRef.current;
+      const parentMenu = anchorEl.closest<HTMLElement>('[role="menu"]');
       let groupCount = 0;
       try {
         const sessionActions = getSessionWorkspaceActions(session);
@@ -5053,6 +5057,7 @@ export function WebShellSidebar({
         session,
         top,
         left,
+        parentMenu: parentMenu ?? undefined,
         returnFocus: returnFocus ?? undefined,
       });
     },

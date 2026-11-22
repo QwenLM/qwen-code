@@ -521,10 +521,9 @@ test('activity rows share hover details, scoped pin actions and the normal sessi
     .click();
   await expect(page.locator('[data-web-shell-activity]')).toHaveCount(0);
   const ordinaryPinned = page
-    .locator('[data-web-shell-session-title]')
-    .filter({ hasText: /^unread-result$/ })
-    .locator('xpath=ancestor::*[@role="button"][1]')
-    .first();
+    .locator('[class*="pinnedSessionList"]')
+    .getByRole('button', { name: 'unread-result More actions', exact: true });
+  await expect(ordinaryPinned).toHaveCount(1);
   await ordinaryPinned.hover();
   await ordinaryPinned
     .getByRole('button', { name: 'More actions', exact: true })

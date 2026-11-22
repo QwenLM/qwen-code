@@ -1040,6 +1040,99 @@ it('restores More focus after Escape with a shadow portal', async () => {
   expect(document.activeElement).toBe(more);
 });
 
+async function openShadowGroup(displayName: string) {
+  connection.capabilities = {
+    ...organizationCapabilities,
+    features: [
+      ...organizationCapabilities.features,
+      'workspace_session_metadata',
+    ],
+  };
+  active.sessions = [makeSession('group-shadow', { displayName })];
+  active.data = active.sessions;
+  workspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: ['red'],
+  });
+  portalHostForCleanup = document.createElement('div');
+  const portalRoot = portalHostForCleanup.attachShadow({ mode: 'open' });
+  portalRoot.appendChild(document.createElement('div'));
+  document.body.appendChild(portalHostForCleanup);
+  renderSidebar({ portalRoot: portalRoot.firstElementChild as HTMLElement });
+  await flushSidebar();
+  const title = Array.from(
+    container.querySelectorAll('[data-web-shell-session-title]'),
+  ).find((item) => item.textContent === displayName)!;
+  const more = title
+    .closest('[role="button"]')!
+    .querySelector<HTMLButtonElement>('[aria-label="More actions"]')!;
+  await act(async () => click(more, true));
+  const portalMenu = portalRoot.querySelector('[role="menu"]')!;
+  const group = Array.from(
+    portalMenu.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent === 'Group')!;
+  await act(async () => click(group, true));
+  await flushSidebar();
+  const selected = container.querySelector<HTMLButtonElement>(
+    '[data-web-shell-session-group-menu] [role="menuitemradio"]',
+  )!;
+  await act(async () => {
+    await vi.waitFor(() => expect(document.activeElement).toBe(selected));
+  });
+  return { more, portalRoot };
+}
+
+it('does not steal external focus when Escape closes a Group menu', async () => {
+  const { more } = await openShadowGroup('External focus');
+  const input = document.createElement('input');
+  document.body.appendChild(input);
+  await act(async () => input.focus());
+  expect(document.activeElement).toBe(input);
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).not.toBeNull();
+
+  await act(async () => {
+    input.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+    );
+  });
+
+  expect(
+    container.querySelector('[data-web-shell-session-group-menu]'),
+  ).toBeNull();
+  expect(document.activeElement).toBe(input);
+  expect(document.activeElement).not.toBe(more);
+  input.remove();
+});
+
+it('keeps Rename focused when More reopens while a Group menu is mounted', async () => {
+  const { more, portalRoot } = await openShadowGroup('Rename focus');
+
+  await act(async () => more.focus());
+  await act(async () => {
+    more.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await vi.waitFor(() => {
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+  });
+  const menuItems = () =>
+    Array.from(portalRoot.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+  expect(menuItems().map((item) => item.textContent)).toContain('Rename');
+  const rename = menuItems().find((item) => item.textContent === 'Rename');
+  await act(async () => click(rename));
+  await flushSidebar();
+  const input = container.querySelector('input[aria-label^="Rename:"]');
+  expect(input).not.toBeNull();
+  expect(document.activeElement).toBe(input);
+});
+
 describe('WebShellSidebar pinned group members (issue #10391)', () => {
   const defaultGroupsCatalog = {
     groups: [],
