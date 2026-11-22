@@ -32,7 +32,7 @@ const {
   getThinkingSummaryKey,
 } = await import('./AssistantMessage');
 const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
-const { ModAssistantMessage, ModReplyRowsProvider } = await import(
+const { ModAssistantMessage, ModRowsProvider } = await import(
   './ModAssistantMessage'
 );
 
@@ -731,7 +731,7 @@ describe('AssistantMessage Mod rows', () => {
       const content = '**Hello**';
       const container = render(
         <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
-          <ModReplyRowsProvider
+          <ModRowsProvider
             messages={[
               { id: 'earlier', role: 'assistant', content: 'Earlier' },
               { id: 'reply', role: 'assistant', content },
@@ -742,7 +742,7 @@ describe('AssistantMessage Mod rows', () => {
               content={content}
               showFooterActions
             />
-          </ModReplyRowsProvider>
+          </ModRowsProvider>
         </ModRowAskerContext.Provider>,
       );
       await act(async () => {});
@@ -777,7 +777,7 @@ describe('AssistantMessage Mod rows', () => {
       const content = '![](https://example.com/a.png)';
       const container = render(
         <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
-          <ModReplyRowsProvider
+          <ModRowsProvider
             messages={[{ id: 'reply', role: 'assistant', content }]}
           >
             <ModAssistantMessage
@@ -785,7 +785,7 @@ describe('AssistantMessage Mod rows', () => {
               content={content}
               showFooterActions
             />
-          </ModReplyRowsProvider>
+          </ModRowsProvider>
         </ModRowAskerContext.Provider>,
       );
       await act(async () => {});
@@ -828,7 +828,7 @@ describe('AssistantMessage Mod rows', () => {
       const asker = new ModRowAsker(ask);
       const reply = (isStreaming: boolean) => (
         <ModRowAskerContext.Provider value={asker}>
-          <ModReplyRowsProvider
+          <ModRowsProvider
             messages={[{ id: 'reply', role: 'assistant', content: 'Hello' }]}
           >
             <ModAssistantMessage
@@ -836,7 +836,7 @@ describe('AssistantMessage Mod rows', () => {
               content="Hello"
               isStreaming={isStreaming}
             />
-          </ModReplyRowsProvider>
+          </ModRowsProvider>
         </ModRowAskerContext.Provider>
       );
       render(reply(true));
@@ -861,6 +861,234 @@ describe('AssistantMessage Mod rows', () => {
     expect(container.querySelector(`.${styles.content}`)!.textContent).toBe(
       'Hello',
     );
+  });
+});
+
+describe('ThinkingMessage Mod rows', () => {
+  // Each IntersectionObserver the rows create, by its callback.
+  function watchScreen() {
+    const observers: Array<
+      (entries: Array<{ isIntersecting: boolean }>) => void
+    > = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+        ) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    return observers;
+  }
+
+  it('asks for a thought once it is complete, expanded and on screen, and keeps the answer', async () => {
+    const observers = watchScreen();
+    try {
+      const ask = vi.fn(async () => ({
+        status: 'answered' as const,
+        props: { text: '先看队列。' },
+      }));
+      const asker = new ModRowAsker(ask);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const draw = (isStreaming: boolean) =>
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <ModRowAskerContext.Provider value={asker}>
+                <ModRowsProvider messages={[]}>
+                  <ThinkingMessage
+                    content={'Check the queue.\n\n'}
+                    isStreaming={isStreaming}
+                    timestamp={0}
+                  />
+                </ModRowsProvider>
+              </ModRowAskerContext.Provider>
+            </I18nProvider>,
+          ),
+        );
+      const toggle = () =>
+        act(() =>
+          container
+            .querySelector<HTMLButtonElement>('button[aria-expanded]')!
+            .click(),
+        );
+      const body = () =>
+        container.querySelector(`.${styles.thinkingExpandedWrap}`)?.textContent;
+
+      draw(true);
+      toggle();
+      expect(body()).toBe('Check the queue.');
+      expect(observers).toHaveLength(0);
+      draw(false);
+      expect(observers).toHaveLength(1);
+      act(() => observers[0]!([{ isIntersecting: false }]));
+      expect(ask).not.toHaveBeenCalled();
+      await act(async () => observers[0]!([{ isIntersecting: true }]));
+      expect(ask).toHaveBeenCalledWith({
+        component: 'Thinking',
+        props: { text: 'Check the queue.' },
+      });
+      expect(body()).toBe('先看队列。');
+      act(() => observers[0]!([{ isIntersecting: false }]));
+      expect(body()).toBe('先看队列。');
+      toggle();
+      expect(body()).toBeUndefined();
+      toggle();
+      expect(body()).toBe('先看队列。');
+      expect(ask).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('hides the translate button once a Mod rewrote the thought', async () => {
+    const ask = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: '先看队列。' },
+    }));
+    // jsdom has no IntersectionObserver, so a mounted body counts as shown.
+    const container = render(
+      <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+        <ModRowsProvider messages={[]}>
+          <ThinkingMessage
+            content="Check the queue."
+            generateContent={vi.fn()}
+            timestamp={0}
+          />
+        </ModRowsProvider>
+      </ModRowAskerContext.Provider>,
+      'zh-CN',
+    );
+    const translate = () => container.querySelector('button[title="翻译"]');
+    const toggle = () =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-expanded]')!
+        .click();
+    expect(translate()).not.toBeNull();
+    await act(async () => toggle());
+    expect(ask).toHaveBeenCalledOnce();
+    expect(translate()).toBeNull();
+    act(() => toggle());
+    expect(translate()).toBeNull();
+  });
+
+  it.each([
+    { afterReplay: 'Read the file.', collapsed: false, hasAsker: true },
+    { afterReplay: 'Read the file.', collapsed: true, hasAsker: true },
+    { afterReplay: 'Check the queue.', collapsed: false, hasAsker: true },
+    { afterReplay: 'Check the queue.', collapsed: false, hasAsker: false },
+    { afterReplay: 'Check the queue.', collapsed: true, hasAsker: true },
+    { afterReplay: 'Check the queue.', collapsed: true, hasAsker: false },
+  ])(
+    'restores Translate for a reused thought row ($afterReplay, collapsed: $collapsed, asker: $hasAsker)',
+    async ({ afterReplay, collapsed, hasAsker }) => {
+      const original = 'Check the queue.';
+      const rewrite = '先看队列。';
+      const originalAsker = new ModRowAsker(async () => ({
+        status: 'answered',
+        props: { text: rewrite },
+      }));
+      const askAfterReplay = vi.fn(async () => ({
+        status: 'answered' as const,
+      }));
+      const replayAsker = new ModRowAsker(askAfterReplay);
+      const generateContent = vi.fn();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const draw = (content: string, asker: typeof originalAsker | undefined) =>
+        act(async () =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <ModRowAskerContext.Provider value={asker}>
+                <ModRowsProvider messages={[]}>
+                  <ThinkingMessage
+                    key="thought-2"
+                    content={content}
+                    generateContent={generateContent}
+                    timestamp={0}
+                  />
+                </ModRowsProvider>
+              </ModRowAskerContext.Provider>
+            </I18nProvider>,
+          ),
+        );
+      const summary = () =>
+        container.querySelector<HTMLButtonElement>('button[aria-expanded]')!;
+      const translate = () => container.querySelector('button[title="翻译"]');
+      const body = () =>
+        container.querySelector(`.${styles.thinkingExpandedWrap}`)?.textContent;
+
+      await draw(original, originalAsker);
+      const sameSummary = summary();
+      await act(async () => sameSummary.click());
+      expect(body()).toBe(rewrite);
+      expect(translate()).toBeNull();
+      if (collapsed) act(() => sameSummary.click());
+
+      await draw(afterReplay, hasAsker ? replayAsker : undefined);
+      expect(summary()).toBe(sameSummary);
+      if (collapsed) {
+        expect(body()).toBeUndefined();
+        expect(askAfterReplay).not.toHaveBeenCalled();
+        expect(translate()).not.toBeNull();
+        await act(async () => sameSummary.click());
+      }
+      if (hasAsker) {
+        expect(askAfterReplay).toHaveBeenCalledExactlyOnceWith({
+          component: 'Thinking',
+          props: { text: afterReplay },
+        });
+      } else {
+        expect(askAfterReplay).not.toHaveBeenCalled();
+      }
+      expect(body()).toBe(afterReplay);
+      expect(translate()).not.toBeNull();
+    },
+  );
+
+  it("asks for neither a collapsed, a blank nor a subagent's thought", () => {
+    const observers = watchScreen();
+    try {
+      const ask = vi.fn();
+      const container = render(
+        <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+          <ModRowsProvider messages={[]}>
+            <ThinkingMessage content="Collapsed thought" timestamp={0} />
+            <ThinkingMessage content={' \n'} timestamp={0} />
+            <ThinkingMessage
+              content="Subagent thought"
+              fromSubagent
+              timestamp={0}
+            />
+          </ModRowsProvider>
+        </ModRowAskerContext.Provider>,
+      );
+      const toggles = container.querySelectorAll<HTMLButtonElement>(
+        'button[aria-expanded]',
+      );
+      act(() => {
+        toggles[1]!.click();
+        toggles[2]!.click();
+      });
+      expect(
+        [...container.querySelectorAll(`.${styles.thinkingExpandedWrap}`)].map(
+          (wrap) => wrap.textContent,
+        ),
+      ).toEqual(['', 'Subagent thought']);
+      expect(observers).toHaveLength(0);
+      expect(ask).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

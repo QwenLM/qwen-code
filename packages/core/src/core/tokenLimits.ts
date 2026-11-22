@@ -357,6 +357,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
  */
 const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Google Gemini
+  [/^gemini-4/, LIMITS['64k']], // Gemini 4.x: 64K
   [/^gemini-3/, LIMITS['64k']], // Gemini 3.x: 64K
   [/^gemini-/, LIMITS['8k']], // Gemini fallback: 8K
 

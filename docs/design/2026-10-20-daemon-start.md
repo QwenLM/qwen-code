@@ -29,8 +29,8 @@ Supported inputs: `--port`, `--hostname`, `--workspace` (repeatable),
 The child is a new daemon, not a worker of the session that launched it. The
 start command removes the parent's session and worker bindings before spawn:
 `QWEN_CODE_SESSION_ID`, `QWEN_CODE_PROMPT_ID`, `QWEN_CODE_PROJECT_DIR`,
-`QWEN_CODE_SERVE`, `QWEN_CODE_AGENT_ID`, `QWEN_DAEMON_TOKEN`,
-`QWEN_CODE_MESSAGING_TOKEN`, `QWEN_CODE_MESSAGING_SOCKET`,
+`QWEN_CODE_SERVE`, `QWEN_CODE_MANAGED_RUNTIME`, `QWEN_CODE_AGENT_ID`,
+`QWEN_DAEMON_TOKEN`, `QWEN_CODE_MESSAGING_TOKEN`, `QWEN_CODE_MESSAGING_SOCKET`,
 `QWEN_CODE_CLI`, `QWEN_CODE_NO_RELAUNCH`, and every key starting with
 `QWEN_CODE_PRIVATE_` (including the Conversations runtime and guard-provider
 markers). Relative `QWEN_RUNTIME_DIR` and `QWEN_HOME` values are resolved

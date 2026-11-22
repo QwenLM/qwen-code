@@ -2,7 +2,7 @@
 
 [English](2026-11-16-mod-thinking-rows.md) | [简体中文](2026-11-16-mod-thinking-rows.zh-CN.md)
 
-状态：已在 Ink 和 OpenTUI 终端实现。本文新增 `Thinking` 渲染站点，在 #13749 跟踪，建立在 [Mod 回复行](2026-11-10-mod-assistant-message-rows.zh-CN.md) 之上。
+状态：已在 Ink 和 OpenTUI 终端实现，Web Shell 由 [Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 实现。本文新增 `Thinking` 渲染站点，在 #13749 跟踪，建立在 [Mod 回复行](2026-11-10-mod-assistant-message-rows.zh-CN.md) 之上。
 
 ## 问题与现状
 
@@ -21,7 +21,7 @@ Mod 能改写回复每一块的显示（`AssistantMessage`），但改不了模�
 非目标：
 
 - 折叠行（`Thought for 12s`），由宿主绘制。
-- 流式中的思考、子代理视图、会话预览、headless 运行和 ACP 宿主。
+- 流式中的思考、子代理视图、会话预览、headless 运行和 ACP 宿主。Web Shell 的 ACP 会话之后才有了这个站点。
 - 用树替换整行，与回复行相同。
 
 ## 契约

@@ -428,6 +428,15 @@ public final class ToolPublicationContract {
         return node == null ? "" : node.path(key).asText("");
     }
 
+    /**
+     * Plaintext tenant/workspace/session segments of a publication scope key,
+     * joined for OSS object paths. SQL scope keys keep the hashed form; only
+     * externalized object keys use this layout.
+     */
+    public static String ossScope(JsonNode key) {
+        return text(key, "tenantId") + "/" + text(key, "workspaceId") + "/" + text(key, "sessionId");
+    }
+
     public static final class ContractViolationException extends IllegalArgumentException {
         private ContractViolationException(String message) {
             super(message);
