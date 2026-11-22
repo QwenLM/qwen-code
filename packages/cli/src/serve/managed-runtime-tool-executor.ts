@@ -1486,6 +1486,9 @@ export class ManagedToolExecutor {
       });
     }
     if (this.closing || tools.isActive?.() === false) {
+      (prepared.publisher ?? this.capturePublisher)?.discardWorkerRun?.(
+        capture.executionCallId,
+      );
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1565,6 +1568,7 @@ export class ManagedToolExecutor {
           launchStarted === undefined ? 0 : performance.now() - launchStarted,
         ),
       );
+      publisher.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1733,7 +1737,11 @@ export class ManagedToolExecutor {
       });
     }
     if (this.closing || tools.isActive?.() === false) {
-      this.capturePublisher?.discardWorkerRun?.(capture.executionCallId);
+      // The composite capturePublisher does not forward discardWorkerRun;
+      // prepared.publisher is the registry that owns the prepared run.
+      (prepared.publisher ?? this.capturePublisher)?.discardWorkerRun?.(
+        capture.executionCallId,
+      );
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
