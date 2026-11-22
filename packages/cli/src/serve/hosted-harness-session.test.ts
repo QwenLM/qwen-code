@@ -28262,7 +28262,7 @@ describe('Hosted Harness tool approvals', () => {
         };
       },
     );
-    let degradedComponents: ReadonlyArray<'mcp' | 'hooks'> | undefined;
+    let degradedComponents: ReadonlyArray<'mcp' | 'hooks' | 'agents'> | undefined;
     vi.spyOn(
       HostedWorkspaceBroker.prototype,
       'extensionControl',
