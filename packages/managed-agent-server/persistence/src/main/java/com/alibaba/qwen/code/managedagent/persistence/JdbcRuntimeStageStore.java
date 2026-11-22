@@ -66,10 +66,6 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
         this(jdbc, DEFAULT_STAGED_BYTES_WATERMARK, DEFAULT_STAGED_BYTES_HARD_CAP);
     }
 
-    public JdbcRuntimeStageStore(DataSource dataSource) {
-        this(new JdbcTemplate(dataSource), DEFAULT_STAGED_BYTES_WATERMARK, DEFAULT_STAGED_BYTES_HARD_CAP);
-    }
-
     public JdbcRuntimeStageStore(
             JdbcTemplate jdbc,
             long stagedBytesWatermark,

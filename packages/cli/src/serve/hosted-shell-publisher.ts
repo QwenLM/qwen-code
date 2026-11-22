@@ -368,9 +368,8 @@ export class HostedShellPublisher {
         if (delivered.deliverySeq !== applied + 1) {
           throw new Error('Staged delivery sequence is not contiguous.');
         }
-        if (delivered.resources.length > 0) {
-          await this.publishDeliveryResources(delivered);
-        }
+        // The Broker stored a staged entry's resources itself and stripped
+        // them from the row, so only the entry applies here.
         await this.applyDeliveryEntry(capture, delivered, executionCallId);
         applied = delivered.deliverySeq;
         this.appliedThrough.set(executionCallId, applied);
@@ -378,11 +377,8 @@ export class HostedShellPublisher {
       await acknowledgeRun(executionCallId, applied);
     }
     for (const [executionCallId, acked] of Object.entries(observedRuns)) {
-      if (Number.isSafeInteger(acked) && acked > 0) {
-        const prev = this.appliedThrough.get(executionCallId) ?? 0;
-        if (acked > prev) {
-          this.appliedThrough.set(executionCallId, acked);
-        }
+      if (acked > (this.appliedThrough.get(executionCallId) ?? 0)) {
+        this.appliedThrough.set(executionCallId, acked);
       }
     }
   }

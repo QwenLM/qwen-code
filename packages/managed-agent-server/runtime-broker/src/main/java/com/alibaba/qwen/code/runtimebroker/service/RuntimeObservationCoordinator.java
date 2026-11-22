@@ -211,7 +211,7 @@ final class RuntimeObservationCoordinator {
                 return transport.installPublisher(
                         context.lease(), context.session(), descriptor, writerGeneration);
             }).thenApply(workerResponse -> {
-                onPublisherInstalled(runtimeSessionId);
+                kick();
                 Map<String, Object> response = new LinkedHashMap<>();
                 response.put("installed", true);
                 response.put("bindingGeneration", Long.toString(context.binding().getGeneration()));
@@ -296,10 +296,6 @@ final class RuntimeObservationCoordinator {
                             tenantId, sessionId, validWriter, writerGeneration, validCallId, throughSeq);
                     kick();
                 });
-    }
-
-    void onPublisherInstalled(String runtimeSessionId) {
-        kick();
     }
 
     void close() {

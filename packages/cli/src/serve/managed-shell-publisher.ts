@@ -517,8 +517,6 @@ export class ManagedShellPublisherRegistry
           this.sessionGenerations.set(sessionId, writerGeneration);
         }
         if (this.observation.enabled) {
-          const effectiveGen =
-            writerGeneration ?? this.sessionGenerations.get(sessionId) ?? 1;
           for (const {
             sessionId: runSession,
             run,
@@ -526,7 +524,7 @@ export class ManagedShellPublisherRegistry
             if (runSession === sessionId) {
               observedRuns[run.executionCallId] = run.lastApplied;
               if (writerGeneration !== undefined) {
-                run.attach(publisher, effectiveGen);
+                run.attach(publisher, writerGeneration);
               }
             }
           }

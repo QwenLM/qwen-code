@@ -51,7 +51,6 @@ const RUN_OUTBOX_BYTES = 8 * 1024 * 1024;
 const PUSH_RETRY_BASE_MS = 1000;
 const PUSH_RETRY_MAX_MS = 30_000;
 const MONITOR_DEBOUNCE_FLOOR_MS = 1000;
-const EVENT_LINE_TRUNCATE = 2000;
 
 function sha256(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -123,10 +122,6 @@ export class WorkerDeliveryResourceStore {
       .map((entry) => ({
         ref: entry.ref,
         bytesBase64: entry.bytes.toString('base64'),
-        shape:
-          entry.ref.kind === MANAGED_TOOL_RESULT_KINDS.content
-            ? ('published' as const)
-            : ('referenced' as const),
       }));
   }
 
@@ -180,8 +175,6 @@ export class BackgroundDeliveryRun {
   private nextSeq = 1;
   private outboxBytes = 0;
   private appliedThrough = 0;
-  private harnessAppliedThrough = 0;
-  private stagedThrough = 0;
   private mode: DeliveryMode = 'held';
   private descriptor: ShellPublisherDescriptor | undefined;
   private writerGeneration = 0;
@@ -212,7 +205,6 @@ export class BackgroundDeliveryRun {
     readonly executionCallId: string,
     readonly bindingGeneration: string,
     readonly recordDomain: 'child_run' | 'monitor_run',
-    private readonly onBackpressure?: (paused: boolean) => void,
   ) {}
 
   get deliveryMode(): DeliveryMode {
@@ -221,14 +213,6 @@ export class BackgroundDeliveryRun {
 
   get lastApplied(): number {
     return this.appliedThrough;
-  }
-
-  get lastHarnessApplied(): number {
-    return this.harnessAppliedThrough;
-  }
-
-  get lastStaged(): number {
-    return this.stagedThrough;
   }
 
   get pendingCount(): number {
@@ -295,7 +279,6 @@ export class BackgroundDeliveryRun {
       this.outboxBytes + size > RUN_OUTBOX_BYTES &&
       this.outbox.length > 0
     ) {
-      this.onBackpressure?.(true);
       await new Promise<void>((resolve) => this.roomWaiters.push(resolve));
     }
     if (this.closed || this.tailDropped) return false;
@@ -447,7 +430,7 @@ export class BackgroundDeliveryRun {
           if (!Number.isSafeInteger(appliedThrough)) {
             throw new Error('Delivery acknowledgement is invalid.');
           }
-          this.acknowledge(appliedThrough);
+          this.advanceAckedPrefix(appliedThrough);
           this.retryAttempt = 0;
           if (this.mode === 'held' && this.descriptor === descriptor) {
             this.mode = 'attached';
@@ -501,6 +484,8 @@ export class BackgroundDeliveryRun {
     if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
   }
 
+  /** A consumer's acknowledgement: the Harness's applied watermark or the
+   * Broker's staging one. */
   private advanceAckedPrefix(ackedThrough: number): void {
     if (ackedThrough <= this.appliedThrough) return;
     this.appliedThrough = ackedThrough;
@@ -512,34 +497,19 @@ export class BackgroundDeliveryRun {
       this.outboxBytes -= entryBytes(dropped);
     }
     if (this.outboxBytes < RUN_OUTBOX_BYTES) {
-      this.onBackpressure?.(false);
       for (const waiter of this.roomWaiters.splice(0)) waiter();
     }
     if (this.terminalEmitted && this.outbox.length === 0) this.onDrained?.();
-  }
-
-  private acknowledge(appliedThrough: number): void {
-    if (appliedThrough > this.harnessAppliedThrough) {
-      this.harnessAppliedThrough = appliedThrough;
-    }
-    this.advanceAckedPrefix(appliedThrough);
-  }
-
-  /** The Broker's staging acknowledgement (Slice 2). */
-  acknowledgeStaged(stagedThrough: number): void {
-    if (stagedThrough > this.stagedThrough) this.stagedThrough = stagedThrough;
-    this.advanceAckedPrefix(stagedThrough);
   }
 
   private selectStageBatch(
     afterSeq: number,
     maxEntries: number,
   ): ManagedDeliveryEntry[] {
-    const cursor = Math.max(afterSeq, this.stagedThrough);
     const batch: ManagedDeliveryEntry[] = [];
     let batchBytes = 0;
     for (const entry of this.outbox) {
-      if (entry.deliverySeq <= cursor) continue;
+      if (entry.deliverySeq <= afterSeq) continue;
       const size = entryBytes(entry);
       if (
         batch.length > 0 &&
@@ -603,14 +573,10 @@ export class BackgroundDeliveryRun {
     // A Harness holding a publisher applies the outbox itself and may not
     // have drained what the Broker staged meanwhile, so only a run no
     // Harness holds lets a staging acknowledgement trim it.
-    if (
-      params.ackThrough !== undefined &&
-      params.ackThrough > 0 &&
-      !this.descriptor
-    ) {
-      this.acknowledgeStaged(params.ackThrough);
+    if (params.ackThrough !== undefined && !this.descriptor) {
+      this.advanceAckedPrefix(params.ackThrough);
     }
-    const maxEntries = Math.max(1, Math.min(params.maxEntries ?? 64, 256));
+    const maxEntries = params.maxEntries ?? 64;
     if (this.mode === 'attached') {
       return Promise.resolve({
         status: 'attached',
@@ -620,7 +586,7 @@ export class BackgroundDeliveryRun {
       });
     }
     const immediate = this.selectStageBatch(params.afterSeq, maxEntries);
-    const waitMs = Math.max(0, Math.min(params.waitMs ?? 0, 30_000));
+    const waitMs = params.waitMs ?? 0;
     if (immediate.length > 0 || waitMs === 0 || this.isClosedOrTerminal) {
       return Promise.resolve({
         status: 'held',
@@ -1062,5 +1028,3 @@ export class WorkerMonitorPolicy {
     this.idle = undefined;
   }
 }
-
-export { EVENT_LINE_TRUNCATE };

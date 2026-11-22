@@ -5086,11 +5086,9 @@ export function registerHostedHarnessSessionRoutes(
     (session.hooks?.hasPendingOperations ?? false) ||
     compressionBusy(session) ||
     session.fileHistoryOwed !== undefined ||
-    (!backgroundCertified && hasHostedCleanupDebt(session.managed)) ||
     session.childConsumption.size > 0 ||
     (session.messageOperations?.size ?? 0) > 0 ||
     unsettledInputs(session).size > 0 ||
-    (!backgroundCertified && session.heldRuntimeTurns.size > 0) ||
     session.automations?.hasPendingGateReleases === true ||
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
@@ -5102,23 +5100,22 @@ export function registerHostedHarnessSessionRoutes(
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
     session.streams.size > 0 ||
+    // The background terms a certified suspension exempts (§4.8).
     (!backgroundCertified &&
-      [...(session.shell?.monitorLoops?.values() ?? [])].some(
-        (loop) => loop.live,
-      )) ||
-    (!backgroundCertified &&
-      [...(session.backgroundLane?.monitorLoops?.values() ?? [])].some(
-        (loop) => loop.live,
-      )) ||
-    (!backgroundCertified &&
-      ['child_run', 'monitor_run'].some((domain) =>
-        session.managed.authority
-          .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
-          .some(
-            (entry) =>
-              !['settled', 'failed', 'cancelled'].includes(entry.run.state),
-          ),
-      )) ||
+      (hasHostedCleanupDebt(session.managed) ||
+        session.heldRuntimeTurns.size > 0 ||
+        [
+          ...(session.shell?.monitorLoops?.values() ?? []),
+          ...(session.backgroundLane?.monitorLoops?.values() ?? []),
+        ].some((loop) => loop.live) ||
+        ['child_run', 'monitor_run'].some((domain) =>
+          session.managed.authority
+            .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
+            .some(
+              (entry) =>
+                !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+            ),
+        ))) ||
     (session.mcp !== undefined &&
       isHostedWorkspacePublicShellProfile(session.toolProfile) &&
       session.lifecycleProtocolVersion !== 2);

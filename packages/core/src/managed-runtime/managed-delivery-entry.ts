@@ -22,18 +22,12 @@ import {
 // acknowledges the highest contiguous sequence it made durable; the worker
 // drops an entry only after that acknowledgement.
 
-export const MANAGED_DELIVERY_PROTOCOL = 'managed-delivery/1';
-
-/** Segment bytes keep the PUBLISHED shape; everything else is REFERENCED. */
-export type ManagedDeliveryResourceShape = 'published' | 'referenced';
-
 export interface ManagedDeliveryResource {
   readonly ref: ManagedSessionDurableRef;
   readonly bytesBase64: string;
-  readonly shape: ManagedDeliveryResourceShape;
 }
 
-export type ManagedDeliveryEntryKind = 'output' | 'observation' | 'terminal';
+type ManagedDeliveryEntryKind = 'output' | 'observation' | 'terminal';
 
 interface ManagedDeliveryEntryBase {
   readonly deliverySeq: number;
@@ -133,17 +127,7 @@ function parseResource(value: unknown): ManagedDeliveryResource {
   if (bytes.byteLength !== ref.byteLength) {
     throw new Error('Delivery resource byte length conflicts.');
   }
-  const shape = value['shape'];
-  if (shape !== 'published' && shape !== 'referenced') {
-    throw new Error('Delivery resource shape is invalid.');
-  }
-  if (
-    (shape === 'published') !==
-    (ref.kind === MANAGED_TOOL_RESULT_KINDS.content)
-  ) {
-    throw new Error('Delivery resource shape conflicts with its kind.');
-  }
-  return { ref, bytesBase64, shape };
+  return { ref, bytesBase64 };
 }
 
 function parseResources(value: unknown): ManagedDeliveryResource[] {
