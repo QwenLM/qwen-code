@@ -8,7 +8,7 @@ import type {
   DaemonScheduledTask,
   DaemonWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import type { TranslateFn } from '../components/dialogs/scheduledTasksSchedule';
+import type { TranslateFn } from '../components/dialogs/scheduledTasksSchedule.js';
 
 export type ScheduledTaskRunPrompt = (
   prompt: string,
