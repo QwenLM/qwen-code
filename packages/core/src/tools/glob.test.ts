@@ -152,6 +152,25 @@ describe('GlobTool', () => {
       }
     });
 
+    it('filters paths covered by a path-scoped Read deny rule', async () => {
+      const deniedFile = path.join(tempRootDir, 'fileA.txt');
+      const tool = toolWith({
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async (context: { filePath?: string }) =>
+            context.filePath === deniedFile ? 'deny' : 'default',
+        }),
+      });
+
+      const result = await run({ pattern: '*.txt' }, tool);
+
+      expect(result.llmContent).not.toContain('fileA.txt');
+      expect(result.llmContent).toContain('FileB.TXT');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'FileB.TXT'),
+      ]);
+    });
+
     it('should find files case-insensitively by default (pattern: *.TXT)', async () => {
       expectFound(await run({ pattern: '*.TXT' }), 2, 'fileA.txt', 'FileB.TXT');
     });
@@ -683,6 +702,26 @@ describe('GlobTool', () => {
       expect(llmContent).toContain('Found at least');
       expect(llmContent).toContain('Narrow the pattern or path');
       expect(result.returnDisplay).toContain('(truncated)');
+    });
+
+    it('reports truncation when every collected entry is denied', async () => {
+      mockGlobStreamResults('denied', 10_005);
+      const tool = toolWith({
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async () => 'deny',
+        }),
+      });
+
+      const result = await run({ pattern: '*.streamlimit' }, tool);
+
+      expect(result.llmContent).toContain('Results truncated after scanning');
+      expect(result.llmContent).toContain(
+        'Results may be omitted by permission rules',
+      );
+      expect(result.returnDisplay).toBe(
+        'Results truncated (permission-filtered)',
+      );
     });
 
     it('should truncate results when more than 100 files are found', async () => {

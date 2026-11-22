@@ -35,6 +35,10 @@ import {
   type GlobDirectoryReply,
   type GlobPath,
 } from './glob-search.js';
+import {
+  hasPermissionFilteringRules,
+  isPathDeniedByReadRule,
+} from '../core/permission-helpers.js';
 export type { GlobPath } from './glob-search.js';
 
 const debugLogger = createDebugLogger('GLOB');
@@ -287,12 +291,46 @@ class GlobToolInvocation extends BaseToolInvocation<
         }
       }
 
-      const filteredEntries = allFilteredEntries;
-
-      if (!filteredEntries || filteredEntries.length === 0) {
+      // Glob is auto-approved for workspace paths, but result paths still
+      // need to honour path-scoped Read deny rules. Filter before sorting and
+      // counting so denied names cannot leak in result metadata either.
+      const permissionManager = this.config.getPermissionManager?.();
+      const permissionFilteringActive = hasPermissionFilteringRules(
+        permissionManager,
+        ToolNames.GLOB,
+      );
+      const filteredEntries: GlobPath[] = [];
+      for (const entry of allFilteredEntries) {
+        signal.throwIfAborted();
+        if (
+          !(await isPathDeniedByReadRule(
+            permissionManager,
+            entry.fullpath(),
+            this.config.getTargetDir(),
+            ToolNames.GLOB,
+            this.params as unknown as Record<string, unknown>,
+            this.config.getApprovalMode?.() === 'yolo',
+          ))
+        ) {
+          filteredEntries.push(entry);
+        }
+      }
+      if (filteredEntries.length === 0) {
+        if (hitCollectionLimit) {
+          return {
+            llmContent: `Results truncated after scanning ${allFilteredEntries.length} matching files.${permissionFilteringActive ? ' Results may be omitted by permission rules.' : ''} Narrow the pattern or path.`,
+            returnDisplay: `Results truncated${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
+          };
+        }
+        if (allFilteredEntries.length === 0) {
+          return {
+            llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
+            returnDisplay: `No files found`,
+          };
+        }
         return {
-          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}`,
-          returnDisplay: `No files found`,
+          llmContent: `No files found matching pattern "${this.params.pattern}" ${searchLocationDescription}. Results may be omitted by permission rules.`,
+          returnDisplay: `No files found (permission-filtered)`,
         };
       }
 
@@ -331,16 +369,19 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (hitCollectionLimit) {
-        resultMessage += `\n---\n[Results truncated after scanning ${totalFileCount} matching files. Narrow the pattern or path.]`;
+        resultMessage += `\n---\n[Results truncated after scanning matching files.${permissionFilteringActive ? ' Results may be omitted by permission rules.' : ''} Narrow the pattern or path.]`;
       } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
       }
+      if (permissionFilteringActive && !hitCollectionLimit) {
+        resultMessage += `\n---\n[Results may be omitted by permission rules.]`;
+      }
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
         resultFilePaths: sortedAbsolutePaths,
         // The certified count covers the collected set, not the display
         // slice — containment consumers must check this, never the slice.

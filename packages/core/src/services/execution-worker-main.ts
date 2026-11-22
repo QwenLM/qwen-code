@@ -16,7 +16,8 @@ try {
     './execution-worker.js'
   );
   await runExecutionWorker(
-    createExecutionWorkerEnvironment(options),
+    (bootstrap) =>
+      createExecutionWorkerEnvironment({ ...options, ...bootstrap }),
     process.stdin,
     process.stdout,
   );
