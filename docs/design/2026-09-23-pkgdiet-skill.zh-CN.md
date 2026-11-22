@@ -21,6 +21,7 @@
 
 - `user-invocable: true`，`disable-model-invocation: true`：模型绝不自主触发该技能，仅当用户显式输入 `/pkgdiet` 时方可激活。
 - `allowedTools: undefined`：无预先授权工具。所有操作（包括注册服务与包安装）均须通过显式用户确认。
+- **技能来源与不受信覆盖隔离**：引导阶段排查技能来源：若存在项目级或用户级同名技能（如 `.qwen/skills/pkgdiet/SKILL.md` 或 `~/.qwen/skills/pkgdiet/SKILL.md`），一律视为不受信并立刻终止执行，防止仓库提交的同名技能顶掉内建技能正文或绕过校验与授权流程。
 - **会话级与生态边界**：技能防护指引仅在显式调用 `/pkgdiet` 的交互会话内有效，不限制后台子智能体、钩子、工作流脚本或外部终端命令。仅防护 npm 生态管理器（`npm`、`pnpm`、`yarn`、`bun`）。
 
 ### 2.2 注册与存储范围
@@ -35,8 +36,8 @@
 - **白名单身份校验**：用户级配置按白名单比对：仅允许包含 `command`、`args` 与工作区外的独立 `cwd`（须为现有绝对路径，且不含 `$`、反引号、引号或换行等字符，如 `$(`），且命令与参数严格匹配 `npx` 及 `["-y", "pkgdiet@2.0.0", "mcp"]`。任何多余字段（`env`、`headers`、`trust`、`timeout` 等）或非法路径字符均视为白名单不匹配并拒绝执行。
 - **不受信的作用域隔离**：任何来源于项目或工作区作用域（`.mcp.json`、`.qwen/settings.json`）的 `pkgdiet` 条目均视为不受信。技能立刻终止并拒绝批准（halts immediately and refuses approval）。工作区条目可通过 `"${QWEN_CODE_CLI:-qwen}" mcp remove --scope project pkgdiet` 移除；`.mcp.json` 条目须手动编辑对应文件。
 - **配置作用域限制**：白名单校验仅作用于用户作用域（user scope）条目（`$QWEN_HOME/settings.json` 或 `~/.qwen/settings.json`）。SystemDefaults（`system-defaults.json` 或 `QWEN_CODE_SYSTEM_DEFAULTS_PATH`）、系统作用域（Linux `/etc/qwen-code/settings.json`、macOS `/Library/Application Support/QwenCode/settings.json`、Windows `C:\ProgramData\qwen-code\settings.json` 或 `QWEN_CODE_SYSTEM_SETTINGS_PATH`）、CLI 标志（`--mcp-config`）、扩展提供以及 ACP/IDE 会话注入的 MCP 服务均不在本技能的可检查与校验范围内。若服务处于活跃状态但无法在三个可读作用域（用户、工作区、项目）中找到配置条目，服务的来源无法确认，技能立刻终止并不将其作为守卫服务。
-- **评估器源地址完整性**：引导阶段在评估器非工作区工作目录执行配置探测，避免 shell 插值（或安全单引号 `cd -- '<cwd>'`）。若 npm 执行失败或退出码非零，终止注册。默认源地址通过去除末尾斜杠归一化后必须严格等于 `https://registry.npmjs.org`。此外探测须验证无指向其他地址的作用域源映射（`@<scope>:registry`，如 `@pkgdiet:registry`）且未配置 `cafile` 或 `ca` 覆盖。任何镜像源、非默认作用域映射或重定向均视为身份不匹配（identity mismatch）而非残留风险并终止注册。
-- **配置还原保证**：若 `$QWEN_HOME/settings.json`（或 `~/.qwen/settings.json`）中已存在旧的用户级配置，其完整配置对象在写入前被记录；若注册命令退出码非零，完整还原该对象；若连通性重试超时，保留配置并引导用户重启。
+- **评估器源地址完整性**：引导阶段在评估器非工作区工作目录执行配置探测，避免 shell 插值（或安全单引号 `cd -- '<cwd>' && npm config ls -l --json`），采用单一完整的 `npm config ls -l --json` 探测（`npm config get registry` 仅输出默认源地址，严禁替代）。若 npm 执行失败或退出码非零，终止注册。默认源地址通过去除末尾斜杠归一化后必须严格等于 `https://registry.npmjs.org`。此外探测须验证无指向其他地址的作用域源映射（`@<scope>:registry`，如 `@pkgdiet:registry`）、未配置 `cafile` 或 `ca` 覆盖、`strict-ssl` 未设为 `true` 之外的任何值（必须严格为 `true`），且当前会话环境中未配置 `NODE_EXTRA_CA_CERTS` 或 `NODE_TLS_REJECT_UNAUTHORIZED`。任何镜像源、非默认作用域映射、CA 覆盖、非 true 的 `strict-ssl` 或 TLS 信任篡改均视为身份不匹配（identity mismatch）而非残留风险并终止注册。
+- **配置还原保证**：若 `$QWEN_HOME/settings.json`（或 `~/.qwen/settings.json`）中已存在旧的用户级配置，其完整配置对象在写入前被记录；若写入用户设置条目失败或命令退出码非零，完整还原该记录配置并停止执行；若连通性重试超时，保留配置并引导用户重启。
 - **有限重试探测**：连通性检查增加有界重试以容纳冷启动下载。若仍未连通，标记为已注册未运行，通过 `mcp list` 查看连接状态并建议在终端直接执行命令查看 stderr。
 - **沙箱快路径优先**：在沙箱校验前先进行连通性、配置与源地址检查，允许挂载了用户设置的容器化沙箱会话直接复用已有的守卫服务（前提是会话环境内可执行 `npm` 以在评估器非工作区 `cwd` 中验证源地址完整性）。
 
