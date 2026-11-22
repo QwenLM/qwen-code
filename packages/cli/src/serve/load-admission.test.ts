@@ -455,14 +455,115 @@ describe('load admission observation-gap latch', () => {
     }
     expect(monitor.snapshot().overloaded).toBe(false);
 
-    // Exactly 4 intervals elapsed (> 3 * sampleMs, <= 4 * sampleMs):
-    // must be classified untimely, latch observation_gap, and not reuse the
-    // pre-stall healthy streak to clear itself on the same tick.
-    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    // Exactly three intervals is still timely (inclusive bound) on both
+    // snapshot() (> 3 * sampleMs) and tick() (<= 3 * sampleMs).
+    monoNow += 3 * LOAD_ADMISSION_SAMPLE_MS;
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+    });
     vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+    });
+
+    // One millisecond past three intervals latches on snapshot().
+    monoNow += 3 * LOAD_ADMISSION_SAMPLE_MS + 1;
     expect(monitor.snapshot()).toMatchObject({
       overloaded: true,
       reason: 'observation_gap',
+    });
+
+    // And a fresh monitor with a 4-interval overdue tick latches on tick().
+    monitor.dispose();
+    const monitor2 = makeMonitor();
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor2.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'observation_gap',
+    });
+    monitor2.dispose();
+  });
+
+  it('resets a partial post-gap healthy streak on an untimely tick', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+
+    // Latch gap via an overdue tick.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // Two timely healthy ticks (one short of release).
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES - 1; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // One untimely tick interrupts recovery and must zero the partial streak.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+
+    // One more timely tick must NOT complete the earlier 2-tick streak.
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+    monitor.dispose();
+  });
+
+  it('resets a partial post-gap healthy streak when a signal overloads mid-recovery', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+
+    // Overdue tick lands with high CPU: latches gap (streak 0) and starts
+    // CPU enterStreak = 1.
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // Timely tick #1 with high CPU: cpu.overloaded is still false (enterStreak
+    // = 2), so healthyTimelyStreak advances to 1.
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // Timely tick #2 with high CPU: cpu.overloaded flips true (enterStreak = 3),
+    // which MUST reset healthyTimelyStreak from 1 back to 0.
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // CPU exits over 3 low ticks: on the 3rd exit tick cpu.overloaded flips
+    // false, counting as healthy tick #1 (not #2).
+    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 5 };
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // Next timely healthy tick is #2: without the overload reset, the streak
+    // carried from before cpu.overloaded would reach 3 and release early here.
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // Third fresh timely healthy tick completes release.
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
     });
     monitor.dispose();
   });
@@ -482,18 +583,19 @@ describe('load admission observation-gap latch', () => {
 
 describe('load admission real event-loop stall', () => {
   it('latches observation_gap across a genuine synchronous busy-wait stall', async () => {
-    // Real timers + real monotonic performance.now() on a short 20 ms cadence:
-    // a 100 ms synchronous block exceeds 3 * 20 ms regardless of whether the
-    // overdue tick or the post-stall read runs first.
+    // Real timers + real monotonic performance.now() on a 100 ms cadence:
+    // 3 * sampleMs = 300 ms gives generous scheduler headroom for the
+    // healthy precondition under CI load, while a 360 ms synchronous stall
+    // reliably exceeds it even when the overdue tick fires before the read.
     const monitor = createLoadAdmissionMonitor({
       readSignals: () => ({ loadRatio: 0.1, eventLoopLagP99Ms: 1 }),
-      sampleMs: 20,
+      sampleMs: 100,
     });
     try {
-      await new Promise((r) => setTimeout(r, 45));
+      await new Promise((r) => setTimeout(r, 160));
       expect(monitor.snapshot().overloaded).toBe(false);
 
-      const stallEnd = performance.now() + 100;
+      const stallEnd = performance.now() + 360;
       while (performance.now() < stallEnd) {
         // deliberate synchronous stall
       }
