@@ -47237,10 +47237,11 @@ describe('idle suspension', () => {
       .set('X-Qwen-Client-Id', clientId)
       .send({ title: 'still here' })
       .expect(200);
-    // Past the original deadline (4000ms + ≤10% jitter), before the one
-    // the title re-armed (≥6400ms from the create). Both bounds are real
-    // timers, so the 1600ms of slack on each side is what a loaded shard's
-    // late setTimeout callbacks have to fit inside (#18053).
+    // Past the original deadline (4000ms + ≤10% jitter = ≤4400ms) and before
+    // the one the title re-armed (≥6400ms from the create). Each sleep(2400)
+    // has 1600ms of overrun tolerance before its own bound, but the residency
+    // check itself clears the worst-case original fire by only ~400ms, so the
+    // two sleeps must total more than idleMs * 1.1 (#18053).
     await sleep(2400);
     expect((await statusOf(server, clientId)).status).toBe(200);
     await vi.waitFor(
