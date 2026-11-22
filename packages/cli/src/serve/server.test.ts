@@ -48113,6 +48113,7 @@ describe('Live conversation runtime lifecycle', () => {
       inodeVerifiable: boolean;
     }> = {},
     serveOverrides: Partial<ServeOptions> = {},
+    daemonEnvOverrides: NodeJS.ProcessEnv = {},
   ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
@@ -48223,7 +48224,7 @@ describe('Live conversation runtime lifecycle', () => {
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
       getSessionBridges: () =>
         registry.listManaged().map((runtime) => runtime.bridge),
-      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
+      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1', ...daemonEnvOverrides },
       runtimePlatform: 'darwin',
       webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
     } as Parameters<typeof createServeApp>[2]);
@@ -48257,45 +48258,53 @@ describe('Live conversation runtime lifecycle', () => {
     };
   }
 
-  it('passes the boot-resolved export channel into the standalone service', async () => {
-    // Pins the createServeApp -> StandaloneSessionService wiring: dropping
-    // exportChannel from that construction must red this case, not just the
-    // service-level one (which builds its own harness).
-    const setup = setupLiveRuntime();
-    const sid = '22222222-2222-4222-8222-222222222222';
-    vi.spyOn(
-      SessionService.prototype,
-      'findSessionIdIgnoringCase',
-    ).mockResolvedValue(sid);
-    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
-      'active',
-    );
-    vi.spyOn(
-      SessionService.prototype,
-      'readCreationMetadataIfReadable',
-    ).mockResolvedValue({ sourceType: 'standalone' });
-    exportSessionTranscriptSpy.mockResolvedValueOnce({
-      format: 'json',
-      mimeType: 'application/json',
-      filename: 'session.json',
-      content: '{}',
-      metadata: {},
-    });
-    const pending = request(setup.app)
-      .get(`/standalone/sessions/${sid}/export?format=json`)
-      .set('Host', `127.0.0.1:${baseOpts.port}`)
-      .then((response) => response);
-    await vi.waitFor(() => {
-      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
-    });
-    setup.resolveCreation();
-    const res = await pending;
-    expect(res.status).toBe(200);
-    const call = exportSessionTranscriptSpy.mock.calls.at(-1)?.[0] as {
-      config?: { getChannel?: () => string | undefined };
-    };
-    expect(call?.config?.getChannel?.()).toBe('daemon');
-  });
+  it.each([
+    ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+    ['daemon', {}],
+  ] as const)(
+    'passes the boot-resolved export channel (%s) into the standalone service',
+    async (expectedChannel, daemonEnvOverrides) => {
+      // Pins the createServeApp -> StandaloneSessionService wiring: dropping
+      // exportChannel from that construction, or hardcoding it to 'daemon',
+      // must red this case, not just the service-level one (which builds its
+      // own harness).
+      const setup = setupLiveRuntime({}, {}, {}, daemonEnvOverrides);
+      const sid = '22222222-2222-4222-8222-222222222222';
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockResolvedValue(sid);
+      vi.spyOn(
+        SessionService.prototype,
+        'getSessionLocation',
+      ).mockResolvedValue('active');
+      vi.spyOn(
+        SessionService.prototype,
+        'readCreationMetadataIfReadable',
+      ).mockResolvedValue({ sourceType: 'standalone' });
+      exportSessionTranscriptSpy.mockResolvedValueOnce({
+        format: 'json',
+        mimeType: 'application/json',
+        filename: 'session.json',
+        content: '{}',
+        metadata: {},
+      });
+      const pending = request(setup.app)
+        .get(`/standalone/sessions/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+      const res = await pending;
+      expect(res.status).toBe(200);
+      const call = exportSessionTranscriptSpy.mock.calls.at(-1)?.[0] as {
+        config?: { getChannel?: () => string | undefined };
+      };
+      expect(call?.config?.getChannel?.()).toBe(expectedChannel);
+    },
+  );
 
   it.each([
     ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],
