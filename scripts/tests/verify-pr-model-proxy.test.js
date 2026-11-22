@@ -775,11 +775,17 @@ describe('local container recipe pins', () => {
       if (text.endsWith(logSuffix)) {
         text = text.slice(0, -logSuffix.length).trim();
       }
+      text = text.replace(/--([a-z-]+)=/g, '$1 ');
+      // Only the documented call vocabulary may pass. Spaces inside quoted
+      // text are not parsed, but shell substitution/operators never become
+      // an option value merely because they follow another string.
+      if (/[`$;|&]/.test(text)) return false;
       const options = new Map();
       const positional = [];
       const tokens = text.split(' ').filter(Boolean);
       for (let index = 0; index < tokens.length; index += 1) {
         const token = tokens[index];
+        if (/[<>]/.test(token) && !/^<[^<>]+>$/.test(token)) return false;
         if (token === '--trust-pr-head') {
           if (options.has(token)) return false;
           options.set(token, true);
@@ -813,6 +819,7 @@ describe('local container recipe pins', () => {
         );
       }
       if (!['host', 'vm'].includes(execution)) return false;
+      if (!/^(?:[1-9]\d*|<r>)$/.test(options.get('--round'))) return false;
       if (
         ['--round', '--reason', '--context-out'].some(
           (key) => !options.has(key),
@@ -877,11 +884,34 @@ describe('local container recipe pins', () => {
       '<n> --repo <owner>/<repo> --execution container --trust-pr-head',
       `${basic.trim()} # --execution container`,
       `${logged.trim()} ; echo unexpected`,
+      `${basic.trim()} > /tmp/hijack`,
     ]) {
       expect(
         onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
       ).toBe(false);
     }
+    const injected =
+      '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason $(touch${IFS}/tmp/should-not-write;printf${IFS}why) --context-out /tmp/pr.json';
+    const backtickInjected = injected.replace(
+      '$(touch${IFS}/tmp/should-not-write;printf${IFS}why)',
+      '`touch /tmp/should-not-write;printf why`',
+    );
+    for (const hostile of [injected, backtickInjected]) {
+      expect(
+        onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
+      ).toBe(false);
+    }
+    expect(
+      onlyDocumentedPrepareCalls(
+        skill.replace(
+          basic.trim(),
+          '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 0 --reason why --context-out /tmp/pr.json',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      onlyDocumentedPrepareCalls(skill.replace('--repo ', '--repo=')),
+    ).toBe(true);
     const invocation = `node ${script}`;
     const unsafeHost =
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json # --execution container';

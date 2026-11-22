@@ -316,18 +316,22 @@ claim to mirror the gate's full trigger:
   and a general Java+Node battery derivative is a declared non-goal; a mixed
   round runs its JS suites in the JS recipe's container and its Java battery
   in this one, sharing the artifact directory through the host. The
-  **seed/gate** image is the exception: it bundles a digest-pinned Node so
-  the Node-based isolation gate can run in the same container that seeds the
-  PR's Maven code (R16-6) — that is a gate requirement, not a general
-  multi-language battery image.
+  **seed/gate** image needs a digest-pinned Node only **when the optional
+  gate is chosen**, so that this Node-based isolation gate can run in the
+  same container that seeds the PR's Maven code (R16-6). A plain Maven+JDK
+  image remains sufficient for the explicitly gate-less seed; no Node
+  derivative is required for the offline battery itself. The optional gate
+  choice must not be reinterpreted as a mandatory image requirement.
 
 ## Constraints
 
 - The container sees no host credentials; the shared seeded repository is
   dependency jars only, mounted read-only — a writing row uses its own copy
   (see step 2), so the shared seed never holds a round-installed artifact.
-- `--require-isolation` must exit 0 inside; a container marker alone does not
-  pass (existing rule).
+- When the optional seed gate is chosen, `--require-isolation` must exit 0
+  inside; a container marker alone does not pass (existing rule). An
+  explicitly gate-less seed instead records `gate: null` and the operator's
+  measured boundary facts; it never claims to have run or passed a gate.
 - No host step executes PR code — not even "resolution only": the host
   prepares the sanitized copy and copies the repository out, and every
   Maven goal against the PR's poms runs inside the seed container. The
