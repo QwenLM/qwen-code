@@ -278,7 +278,7 @@ remote191 上指定的公开 files/close E2E（`ExternalPublicFilesE2E`，随第
 
 ### 边界
 
-新增一个独立档案 `hosted-workspace-external-shell/1`，声明 `read_file`、`write_file`、`edit`、`glob`，以及**仅前台**的 `run_shell_command`。它绝不是 `hosted-workspace-external-files/1` 的重新解释：那个档案继续拒绝所有 Shell 调用，两者靠各自的 capability digest 区分，也不共用 part/handle 版本。
+新增一个独立档案 `hosted-workspace-external-shell/1`，声明 `read_file`、`write_file`、`edit`、`glob`，以及**仅前台**的 `run_shell_command`；Session 钉住 skill 目录时，Turn 另加只读内容的 `skill` 工具。它绝不是 `hosted-workspace-external-files/1` 的重新解释：那个档案继续拒绝所有 Shell 调用，两者靠各自的 capability digest 区分，也不共用 part/handle 版本。
 
 它的 capability 是自己的：`sha256("managed-workspace-execution/1;external-shell/1")`，与 terminal capability 一样从规范字符串派生，两侧钉同一个 hex。它的 resource-handle 版本是 **2**，与 files 档案的 **1** 区分开；启动恢复同时接受 1 和 2，这样本切片之前准入的 worker 代次仍可恢复，而新供给一律写 2，`validateHandle` 精确比对。
 
