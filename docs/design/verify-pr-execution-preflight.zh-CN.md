@@ -60,7 +60,7 @@ coordinate path 的 `--execution` 默认为 `container`，使旧 watch prompt �
 
 ### 他人 fork 的批准评论
 
-对于其他 fork，即使是新轮次，也先以 40 位 head 和未使用的正整数轮次运行 `node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`，其中 state root 必须是位于 PR 克隆外的可信绝对目录；注册留在 PR 克隆外，并先于任何 PR 代码执行。轮次继续使用现有 complete/release 命令。prepare 要求单链接普通状态文件中存在该仓库、PR、head 和 round 的唯一实际 in-flight 条目，并且包括每个中间 `.qwen/tmp` 目录在内的完整规范化路径都位于 PR 克隆之外。每次实际 `--start` 都分配并打印一个 `registrationNonce`；head 前缀匹配与当前注册条目的查找统一归 watch-state 所有。该 nonce 在此注册的 in-flight prepare 重试和执行模式切换期间保持不变。完成或释放会消耗该身份：之后的 `--start`（即使 head/round 相同，或位于另一个可信 state root）得到不同的 nonce，无法沿用旧评论。
+对于其他 fork，即使是新轮次，也先以 40 位 head 和未使用的正整数轮次运行 `node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`，其中 state root 必须是位于 PR 克隆外的可信绝对目录；注册留在 PR 克隆外，并先于任何 PR 代码执行。轮次继续使用现有 complete/release 命令。prepare 要求单链接普通状态文件中存在该仓库、PR、head 和 round 的唯一实际 in-flight 条目，并且包括每个中间 `.qwen/tmp` 目录在内的完整规范化路径都位于 PR 克隆之外。每次实际 `--start` 都分配并打印一个 `registrationNonce`；head 前缀匹配与当前注册条目的查找统一归 watch-state 所有。该 nonce 在此注册的 in-flight prepare 重试和执行模式切换期间保持不变。带 nonce 的注册在 `--complete` 和 `--release` 时必须通过 `--registration-nonce <nonce>` 重复其 start 的值；不会替调用方从当前状态推定。verified 记录保留该 nonce 供 replay 校验。即使 head/round 相同地重启，旧 nonce 也不能消费替换注册的 live 标记或覆盖其已完成 verdict。之后在任意可信 state root 中的 `--start` 得到不同的 nonce，无法沿用旧评论。缺失或陈旧的身份都会被拒绝，并且不改变状态。
 
 没有 nonce 的 legacy in-flight 条目仍可由现有 complete/release 命令读取，但不能授权新的评论批准。运营方必须显式释放并重开以分配 nonce，再请求新的标记批准；prepare 绝不静默把旧评论迁移成对新注册的授权。
 
@@ -108,7 +108,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 
 等待批准不移到注册之前：watch cursor 已经交付 head，等待中被杀也必须留下可恢复的 in-flight 标记。从 container 切换到 host/VM 时，同一注册贯穿 prepare、电池、发布和 `--complete`，不得仅为切换模式而释放。注册也先于本地信任，但后者的 prepare 不需要公开标记或 `--state-root`。评论路径一旦使用显式 state root，后续每次 prepare 重试以及该注册的 `--complete`/`--release` 都必须沿用同一个可信 root；默认 container 路径仍不需要评论标记。
 
-新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。in-flight 状态唯一的 schema 新增是 `registrationNonce`；没有平行批准文件或新的 next-round 命令。瞬时 prepare 失败保留注册和 nonce，所以其重试可以沿用匹配评论。实际释放后再 `--start` 总是分配新 nonce：即使 head/round 相同，也需要新的评论标记。非评论容器重试或后续轮次只需匹配的 head/round 注册，不需要评论批准。
+新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。`registrationNonce` 是记录在 in-flight 并随产生的 verified 保留的注册身份，没有平行批准文件或新的 next-round 命令。`--complete` 与 `--release` 接受匹配的 nonce；verified 的 replay 也只接受同一 nonce。瞬时 prepare 失败保留注册和 nonce，所以其重试可以沿用匹配评论。实际释放后再 `--start` 总是分配新 nonce：即使 head/round 相同，也需要新的评论标记。非评论容器重试或后续轮次在 complete/release 时仍须匹配 head/round 以及该注册的 nonce，但不需要公共批准标记。
 
 无人值守 watch 不得编造宿主批准。它选择容器，或停下等待维护者，不能为未来未知 head 持久保存 `--trust-pr-head`。未带 `--execution` 的旧持久 watch prompt 保持容器默认值：既不会在 cursor 交付后被拒绝，也不会被提升为未经批准的宿主轮次。
 
@@ -118,6 +118,8 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 
 - `scripts/verify-pr-prepare.mjs`：execution 参数、远端批准验证、context/声明写入和输出/用法说明。
 - `scripts/verify-pr-check.mjs`：宿主 context 批准对账及拒绝场景。
+- `scripts/verify-pr-watch-state.mjs`：注册身份传播、按 nonce 完成/释放，以及 verified replay 兼容。
+- `scripts/tests/verify-pr-watch-state.test.js`：nonce 轮换、替换注册、缺失/错误 nonce 见证、正常 replay、legacy 迁移与 CLI。
 - `scripts/tests/verify-pr-prepare.test.js`：fake-`gh` API 回复、参数与顺序覆盖、拒绝与成功见证。
 - `scripts/tests/verify-pr-check.test.js`：可信权威记录、篡改、陈旧 head、缺 context/digest、CI/容器回归覆盖。
 - `scripts/tests/verify-pr-model-proxy.test.js`：覆盖 skill 中全部 prepare/checker 调用的 trusted-path pin。
@@ -143,7 +145,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 - 合法 prepare 产生相同的产物声明与宿主 context 批准；checker 接受匹配的副本。
 - 编辑或删除产物声明、替换批准、改动 source 或 round、或移动可信 head 后，发布失败。
 - 现有容器夹具测试与边界内门禁套件保持全绿，宿主 coordinate prepare 不增加 observed-marker 要求。
-- watch/re-verification 的注册仍在批准等待之前，等待中被杀会留下现有可恢复标记。本地信任和评论批准两条路径都在无 earlier verdict 时完成 start → 模式回退 → prepare → checker 成功 → complete。匹配的在飞重试保留 nonce。state root A 完成后，在 root B 以相同 head/round 新 start 时拒绝 A 的标记、接受 B 的新标记，并有源码删除红对照。无 nonce 的 legacy 条目明确记录并测试 fresh-marker 迁移。旧持久 prompt 保留容器默认值，而不是丢失已交付 head。
+- watch/re-verification 的注册仍在批准等待之前，等待中被杀会留下现有可恢复标记。本地信任和评论批准两条路径都在无 earlier verdict 时完成 start → 模式回退 → prepare → checker 成功 → complete。匹配的在飞重试保留 nonce。相同 head/round 的替换注册拒绝旧 nonce 或缺失 nonce 对 live 标记和已完成 verdict 的操作，保持新 verdict 和产物不变；正确 nonce 的完成、释放和带 nonce 的 replay 仍成功。head-only release 与明确的 legacy 无 nonce 迁移保留兼容用例。state root A 完成后，在 root B 以相同 head/round 新 start 时拒绝 A 的标记、接受 B 的新标记，并有源码删除红对照。无 nonce 的 legacy 条目明确记录并测试 fresh-marker 迁移。旧持久 prompt 保留容器默认值，而不是丢失已交付 head。
 - 冻结时钟真实 CLI 探针以受控 exit 3 拒绝软链或非目录的时间戳产物父目录，且不在外部写 context/批准；普通同秒重试继续成功，删除规范父目录守卫会让用例转红。只读批准文件产生受控 exit 3。checker CLI 对本地信任与评论批准的真实 VM 记录均接受，对无 context/无 digest 形态均拒绝。
 - 每次本地 prepare 前移除陈旧宿主 context/digest 文件；宿主/VM checker 调用没有当前 digest 时 fail closed。
 - 实现后运行脚本夹具套件、格式化、lint、build、typecheck，以及规定的 bundle 和定向 E2E 探针。

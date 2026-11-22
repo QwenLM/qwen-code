@@ -961,7 +961,13 @@ describe.skipIf(process.platform === 'win32')(
           'utf8',
         ),
       ).inFlightHeads[0].registrationNonce;
-    const watchState = (stateRoot, head, round, verb = '--start') =>
+    const watchState = (
+      stateRoot,
+      head,
+      round,
+      verb = '--start',
+      registrationNonce,
+    ) =>
       spawnSync(
         process.execPath,
         [
@@ -972,6 +978,10 @@ describe.skipIf(process.platform === 'win32')(
           head,
           '--round',
           String(round),
+          // Legacy migration deliberately leaves the nonce absent.
+          ...(verb !== '--start' && registrationNonce
+            ? ['--registration-nonce', registrationNonce]
+            : []),
           ...(verb === '--complete' ? ['--verdict', 'merge-ready'] : []),
           '--repo',
           REPO,
@@ -1609,7 +1619,10 @@ describe.skipIf(process.platform === 'win32')(
         permissions: { approver: { permission: 'admin' } },
       });
       expect(runPrepare(dir, a.artifactArgs, env).status).toBe(0);
-      expect(watchState(a.stateRoot, head, 1, '--complete').status).toBe(0);
+      expect(
+        watchState(a.stateRoot, head, 1, '--complete', a.registrationNonce)
+          .status,
+      ).toBe(0);
 
       const b = command({ trust: false, approval: permalink, head, round: 1 });
       expect(b.registrationNonce).not.toBe(a.registrationNonce);
@@ -1659,7 +1672,13 @@ describe.skipIf(process.platform === 'win32')(
         permissions: { approver: { permission: 'admin' } },
       });
       expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
-      const completed = watchState(stateRoot, head, 1, '--complete');
+      const completed = watchState(
+        stateRoot,
+        head,
+        1,
+        '--complete',
+        registrationNonce,
+      );
       expect(completed.status).toBe(0);
       const before = readdirSync(join(dir, 'tmp'));
       const replay = runPrepare(dir, artifactArgs, env);
@@ -1715,7 +1734,9 @@ describe.skipIf(process.platform === 'win32')(
       });
       try {
         await waitFor(`${gate}.paused`);
-        expect(watchState(stateRoot, head, 1, '--release').status).toBe(0);
+        expect(
+          watchState(stateRoot, head, 1, '--release', registrationNonce).status,
+        ).toBe(0);
         expect(watchState(stateRoot, head, 1).status).toBe(0);
         const currentNonce = registrationNonceFor(stateRoot);
         expect(currentNonce).not.toBe(registrationNonce);
@@ -2385,6 +2406,8 @@ describe.skipIf(process.platform === 'win32')(
             head,
             '--round',
             '1',
+            '--registration-nonce',
+            before.registrationNonce,
             '--verdict',
             'merge-ready',
             '--artifact-dir',
@@ -2409,6 +2432,7 @@ describe.skipIf(process.platform === 'win32')(
           round: 1,
           verdict: 'merge-ready',
           artifactDir: artifacts,
+          registrationNonce: before.registrationNonce,
         });
         expect(before).toMatchObject({ head, round: 1 });
       },

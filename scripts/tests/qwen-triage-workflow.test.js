@@ -6837,7 +6837,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // copy would strand the marker — reintroducing R17-2). Removing --repo
     // from the sentence reds this whole-form pin.
     expect(manualSlice).toContain(
-      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`',
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>`',
     );
     // R1-11: a released registration gets a new nonce, including at the same
     // round; comment approval and container-only recovery stay distinct.
@@ -6863,7 +6863,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // R1-1 (round 3) + R4-1: the manual moved-head terminal case (<H> variant)
     // re-resolves and starts the newer head itself — there is no watch fire.
     expect(manualSlice).toContain(
-      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <H> --round <r> --repo <owner>/<repo>` it and do not restart it',
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>` it and do not restart it',
     );
     expect(manualSlice).toContain(
       'There is no watch fire here to deliver the live head, so re-resolve it yourself',
@@ -6934,7 +6934,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // head: recovery releases the head the error names, not `H` itself.
     // Both forms carry --repo: the guard refuses them without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>',
     );
     expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
@@ -6942,7 +6942,7 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // R17-2: the directory prepare printed is recorded at --complete.
     expect(manualSlice).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
     );
     // Deferred (round 6): the replay-omission clause is pinned in this section.
     expect(manualSlice).toContain(
@@ -7098,11 +7098,18 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       "A differing head is the moved-head case below: release this round's marker and run neither the battery nor `--complete`",
     );
+    // The registration nonce is an identity, not an optional comment field.
+    expect(flat).toContain(
+      'new registrations match by head, round and this nonce',
+    );
+    expect(flat).toContain(
+      'A completed verdict keeps its nonce for replay verification',
+    );
     // R1-1: the watch prompt's prepare-failure recovery carries the full
     // --release form with --repo (the <headSha> variant; the manual section
     // uses <H>). Removing --repo reds this whole-form pin.
     expect(flat).toContain(
-      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`',
+      'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>`',
     );
     // R1-11: after release, even a same-round comment marker must name the
     // new registration; a non-comment container restart asks for no marker.
@@ -7151,7 +7158,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // without restart; the newer head arrives by the next fire (the gate
     // cursor tracks the live head) or is already deferred, which you start.
     expect(promptSlice).toContain(
-      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not restart it',
+      'If prepare refuses because the head it names is not the head this round registered — moved forward or force-pushed; prepare tests exact equality and states no ordering — the registered head can never prepare: `--release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>` it and do not restart it',
     );
     expect(promptSlice).toContain(
       'the live head is delivered by the next fire (the gate cursor tracks the live head), or is already in the deferred list the release prints, which you then start',
@@ -7206,7 +7213,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // --release form with --repo (anchored on the watch-only continuation, so
     // the manual twin cannot satisfy it). Removing --repo reds it.
     expect(flat).toContain(
-      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>` and then start the last deferred head, or the deferral is never delivered',
+      'recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>` and then start the last deferred head, or the deferral is never delivered',
     );
     // R2-1 (round 4): the bullet tells the operator to read the marker's round
     // from the state file and pass it — an omitted --round skips the match and
@@ -7237,7 +7244,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // The completion and release forms carry --repo too: the guard
     // refuses a registered round's completion without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
     );
     // Deferred (round 6): the replay-omission clause is pinned in this section
     // (the manual twin uses `H`, so it cannot satisfy this prompt-only form).
@@ -7251,7 +7258,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'a completion without it exits 2 and leaves the head in flight forever',
     );
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>',
     );
     // The state root is the trusted clone's main worktree, and <dir> is
     // the directory prepare printed — not a value invented at registration.

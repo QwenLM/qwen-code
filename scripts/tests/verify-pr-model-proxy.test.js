@@ -775,7 +775,7 @@ describe('local container recipe pins', () => {
       if (text.endsWith(logSuffix)) {
         text = text.slice(0, -logSuffix.length).trim();
       }
-      text = text.replace(/--([a-z-]+)=/g, '$1 ');
+      text = text.replace(/(^|\s)--repo=/g, '$1--repo ');
       // Only the documented call vocabulary may pass. Spaces inside quoted
       // text are not parsed, but shell substitution/operators never become
       // an option value merely because they follow another string.
@@ -836,14 +836,20 @@ describe('local container recipe pins', () => {
     const onlyDocumentedPrepareCalls = (document) => {
       const calls = [
         ...document.matchAll(
-          /(?:^|&&)\s*(?:(\S+)\s+)?([^\s`]*verify-pr-prepare\.mjs)([^`\n]*)/gm,
+          /(?:^|&&)\s*(?:(\S+)\s+)?([^\s`]*verify-pr-prepare\.mjs)([^\n]*)/gm,
         ),
       ];
+      const argumentsOf = (match) => {
+        const text = match[3].trimEnd();
+        // Drop only the final inline-code delimiter used in this recipe;
+        // preceding backticks remain visible to the hostile-input check.
+        return text.endsWith('`') ? text.slice(0, -1) : text;
+      };
       const coordinates = calls.filter(
-        (match) => !match[3].trim().startsWith('--require-isolation'),
+        (match) => !argumentsOf(match).trim().startsWith('--require-isolation'),
       );
       const gates = calls.filter((match) =>
-        match[3].trim().startsWith('--require-isolation'),
+        argumentsOf(match).trim().startsWith('--require-isolation'),
       );
       const trustedPaths = new Set([
         script,
@@ -855,12 +861,13 @@ describe('local container recipe pins', () => {
         gates.length === 1 &&
         calls.every((match) => match[1] === 'node') &&
         coordinates.every(
-          (match) => trustedPaths.has(match[2]) && validCoordinate(match[3]),
+          (match) =>
+            trustedPaths.has(match[2]) && validCoordinate(argumentsOf(match)),
         ) &&
         gates.every(
           (match) =>
             match[2] === '/trusted-scripts/verify-pr-prepare.mjs' &&
-            match[3].replace(/\s+/g, ' ').trim() ===
+            argumentsOf(match).replace(/\s+/g, ' ').trim() ===
               '--require-isolation --artifact-dir <round-dir>',
         )
       );
@@ -885,6 +892,8 @@ describe('local container recipe pins', () => {
       `${basic.trim()} # --execution container`,
       `${logged.trim()} ; echo unexpected`,
       `${basic.trim()} > /tmp/hijack`,
+      `${basic.trim()} \`touch /tmp/should-not-write\``,
+      '<n> --repo <owner>/<repo> --execution=host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
     ]) {
       expect(
         onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),

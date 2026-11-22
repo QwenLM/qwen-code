@@ -20,10 +20,10 @@
  *   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> \
  *     [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
- *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
+ *     --registration-nonce <nonce> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
  *     [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --release --head <oid> \
- *     [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
+ *     [--round <n>] [--registration-nonce <nonce>] [--repo <owner>/<repo>] [--state-root <dir>]
  *
  * Every verb exits 3 when the state belongs to another repository (a PR
  * number is only unique within its repo); an omitted --repo does not
@@ -49,7 +49,8 @@
  * that entry's `seq` (legacy seq-less entries stay seq-less); the list is kept
  * in seq order and the supersede filter keys on it, never on the write clock.
  * `--complete` removes only its own round's in-flight entry (matched by
- * head and round) and upserts its verified entry, except for
+ * head, round and, when present, its exact registration nonce). A recorded
+ * verified entry keeps that nonce to reject replacement replays, except for
  * `inconclusive`, which releases the marker without filing the head as
  * verified and re-defers the head at its original seq so the next command
  * names it again (a head that already keeps an earlier verdict is not
@@ -64,7 +65,9 @@
  * in-flight entry and refuses a head with no entry, including when no
  * markers exist at all — a release aimed at the wrong state root must not
  * read as success. A supplied `--round` must match the marker's round, so
- * a retried recovery cannot delete a newer round's live marker.
+ * a retried recovery cannot delete a newer round's live marker. Likewise,
+ * nonce-bearing entries require their exact registration nonce, and a
+ * delayed old registration cannot release or complete over its replacement.
  *
  * Every read-modify-write holds an exclusive lock file beside the state
  * file, so two concurrent invocations cannot each build state from the same
@@ -684,7 +687,7 @@ export function startRound(
 
 export function completeRound(
   stateRoot,
-  { pr, head, round, verdict, commentId, artifactDir, repo },
+  { pr, head, round, verdict, commentId, artifactDir, repo, registrationNonce },
   now = new Date(),
 ) {
   return withStateLock(stateRoot, pr, () => {
@@ -734,6 +737,16 @@ export function completeRound(
         };
       }
     }
+    const registration = ownFlight ?? prior;
+    if (
+      registration?.registrationNonce !== undefined &&
+      registration.registrationNonce !== registrationNonce
+    ) {
+      return {
+        registrationMismatch: true,
+        path: statePath(stateRoot, pr),
+      };
+    }
     // A verdict needs a head some round actually ran: an in-flight marker
     // or an earlier verdict. A deferred entry is NOT a registration — a
     // deferred head was refused because another round was in flight, so
@@ -765,6 +778,7 @@ export function completeRound(
               verdict,
               commentId: commentId ?? prior?.commentId ?? null,
               artifactDir: dir,
+              registrationNonce: registration.registrationNonce,
               completedAt,
             },
           ];
@@ -845,7 +859,10 @@ export function completeRound(
  * match the marker's round: a retried recovery of a dead round must not
  * delete the live marker of a newer round that restarted the same head.
  */
-export function releaseRound(stateRoot, { pr, head, round, repo }) {
+export function releaseRound(
+  stateRoot,
+  { pr, head, round, repo, registrationNonce },
+) {
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
     if (existing?.repo && !sameRepo(repo, existing.repo)) {
@@ -871,6 +888,12 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
         recordedRound: entry.round,
         path: statePath(stateRoot, pr),
       };
+    }
+    if (
+      entry.registrationNonce !== undefined &&
+      entry.registrationNonce !== registrationNonce
+    ) {
+      return { registrationMismatch: true, path: statePath(stateRoot, pr) };
     }
     const deferred = deferredEntries(existing).filter(
       (candidate) => !sameCommit(candidate.head, head),
@@ -910,8 +933,8 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
 
 const HELP = `Usage:
   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--registration-nonce <nonce>] [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--registration-nonce <nonce>] [--repo <owner>/<repo>] [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
 Register with --start AHEAD of prepare (R17-2): --artifact-dir is optional on
@@ -923,8 +946,13 @@ marker's directory when the start carried one, else an earlier verdict's
 directory for the same head, else none — a non-inconclusive verdict that
 resolves to none warns that it has no evidence directory. Each actual start
 allocates and prints registrationNonce; a comment approval must match the
-current registration's value. Completion or release consumes it, so a later
-start needs a fresh marked approval rather than replaying the old comment.
+current registration's value. Repeat that exact value with
+--registration-nonce on --complete and --release so a delayed call cannot
+consume a replacement registration or replay over its verdict. No nonce is
+inferred from current state for the caller. Only legacy entries without a
+stored nonce may use the explicit no-nonce migration path. Completion or
+release consumes the live marker, so a later start needs a fresh marked
+approval rather than replaying the old comment.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -964,6 +992,7 @@ function parseArgs(argv) {
     artifactDir: null,
     repo: null,
     stateRoot: null,
+    registrationNonce: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -977,6 +1006,7 @@ function parseArgs(argv) {
     else if (arg === '--artifact-dir') out.artifactDir = argv[++i];
     else if (arg === '--repo') out.repo = argv[++i];
     else if (arg === '--state-root') out.stateRoot = argv[++i];
+    else if (arg === '--registration-nonce') out.registrationNonce = argv[++i];
     else if (!arg.startsWith('-') && out.pr === null) out.pr = Number(arg);
     else throw new Error(`unknown argument ${arg}\n\n${HELP}`);
   }
@@ -1032,6 +1062,16 @@ function parseArgs(argv) {
   }
   if (out.stateRoot !== null && !isAbsolute(out.stateRoot)) {
     throw new Error(`--state-root must be an absolute path\n\n${HELP}`);
+  }
+  if (
+    out.registrationNonce !== null &&
+    (out.start ||
+      typeof out.registrationNonce !== 'string' ||
+      out.registrationNonce.trim() === '')
+  ) {
+    throw new Error(
+      `--registration-nonce must be a non-empty value on --complete or --release\n\n${HELP}`,
+    );
   }
   // --repo is persisted as the PR's permanent identity and compared by exact
   // string equality on every later verb, so it must be the canonical
@@ -1143,6 +1183,12 @@ function main(argv) {
       const result = completeRound(root, args);
       if (result.locked) return lockHeld(args.pr);
       if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
+      if (result.registrationMismatch) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; pass --registration-nonce printed by the exact --start (missing or stale identity cannot consume or replay a replacement registration)\n`,
+        );
+        return 3;
+      }
       if (result.staleCompletion) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} head ${args.head} was already answered by round ${result.recordedRound}; refusing a stale completion from round ${args.round}\n`,
@@ -1197,6 +1243,12 @@ function main(argv) {
       if (result.noMarker) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} has no in-flight marker for ${args.head} at ${root}; nothing to release (check --state-root)\n`,
+        );
+        return 3;
+      }
+      if (result.registrationMismatch) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} does not match the supplied registration nonce; refusing to consume a replacement registration with a stale or missing --registration-nonce\n`,
         );
         return 3;
       }

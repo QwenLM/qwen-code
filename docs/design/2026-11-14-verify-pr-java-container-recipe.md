@@ -47,8 +47,13 @@ without `boundary.json`); this design removes the reason for it.
 - A Java-heavy local round can run its compile, battery, and mutation matrix
   inside a credential-free boundary, with no host SSH keys, cloud profiles,
   `gh` token, or model keys visible.
-- The boundary passes `verify-pr-prepare.mjs --require-isolation`
-  (`QWEN_VERIFY_CREDENTIAL_FREE=1`, no credential signals).
+- When the optional seed-provenance gate is chosen, it passes
+  `verify-pr-prepare.mjs --require-isolation`
+  (`QWEN_VERIFY_CREDENTIAL_FREE=1`, no credential signals). An explicitly
+  gate-less seed instead records `gate: null` and concrete operator or
+  measured-launcher boundary facts, which are not themselves proof of the
+  boundary. Both seed paths require step 4's host/VM execution approval
+  before any PR plugin or seed execution.
 - Runtime parity with ONE lane cell — the Linux Java 21 leg (Temurin 21,
   Maven 3.9.11). The lane runs the same job across five JDK/OS cells (Java
   11, 17, 21 on Ubuntu plus 21 on macOS/Windows); the 17 and 11 legs are out
@@ -263,7 +268,8 @@ claim to mirror the gate's full trigger:
    prepare revalidates that registration under the watch-state lock. Its
    `--approval` and `--state-root` therefore travel together, and the eventual
    `--complete` (or a genuinely abandoned round's `--release`) uses the same
-   trusted root. A seed gate is not authorization to run the independent
+   trusted root and repeats that exact start's nonce as
+   `--registration-nonce <nonce>`. A seed gate is not authorization to run the independent
    battery. If approval fails, no PR plugin, seed or battery may run.
 
 5. **Declaration.** The optional seed gate run

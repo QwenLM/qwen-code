@@ -294,8 +294,11 @@ requirement. The shapes:
   migrated. Ordinary prose containing a head, duplicate or malformed
   markers, an approval for another PR or a previous registration, and a
   synthetic/completed marker fail closed. Register completion with the
-  existing `--complete` form only after publication succeeds. Reserve
-  `--release` for abandoning a failed setup, not for changing modes. When the
+  `--complete` form below only after publication succeeds, repeating this
+  start's value with `--registration-nonce <nonce>`. Reserve `--release` for
+  abandoning a failed setup, not for changing modes, and pass the same nonce
+  there too. New live registrations and completed verdicts both require
+  that identity; missing or stale nonces cannot consume a replacement. When the
   comment path used an explicit `--state-root`, pass that **identical trusted
   root** to every prepare retry and to the registration's `--complete` or
   `--release`; omitting it selects the helper's default trusted main worktree
@@ -840,8 +843,11 @@ Register the round **first, ahead of prepare** (R17-2), with
 a round killed in the prepare window leaves a recoverable in-flight marker
 rather than a silently dropped head (the probe cursor already advanced past the
 delivered head). `<r>` is this round's number — pick the next integer and
-**repeat the same value in `--complete`**; the completion is matched by head and
-round. Before prepare, select `--execution container` for an unattended
+**repeat the same value in `--complete`**. Keep the registrationNonce printed
+by that exact start and pass it as `--registration-nonce` to both completion
+and release; new registrations match by head, round and this nonce, while a
+legacy no-nonce entry retains the explicit migration behavior described
+above. Before prepare, select `--execution container` for an unattended
 watch. Do not persist `--trust-pr-head` for unknown future heads or invent a
 fork approval: if the maintainer selects VM/host for this delivered head,
 stop for their explicit current decision, then resume with the approval path
@@ -857,7 +863,7 @@ round's marker and run neither the battery nor `--complete`. If prepare
 refuses, compare the head it names (the "not PR head …" in its refusal) with
 `<headSha>` — a differing head is the moved-head case below, not a transient
 failure. If prepare fails after `--start`, recover with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`,
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>`,
 then start the head again at the SAME round
 (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`)
 and retry prepare. A release followed by `--start` creates a new
@@ -884,7 +890,7 @@ counter whose cap is the terminal not-covered state, so two transient prepare
 failures would retire a head no round examined. If prepare refuses because the head it names is not the head
 this round registered — moved forward or force-pushed; prepare tests exact
 equality and states no ordering — the registered head can never prepare:
-`--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not
+`--release --head <headSha> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>` it and do not
 restart it — the live head is delivered by the next fire (the gate cursor
 tracks the live head), or is already in the deferred list the release prints,
 which you then start. The started head is its own round — repeat its head and
@@ -906,7 +912,7 @@ Exit 3 has several shapes, each with its own reaction:
   advanced past it in the same call, so no second event will arrive. The
   round that owns the blocking head may have finished without `--complete`;
   if it is no longer running, recover with
-  `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
+  `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>`
   and then start the last deferred head, or the deferral is never delivered.
   Here `<r>` is the dead round's number (the blocking marker's), not this
   round's. Read it from the state file's in-flight entry and pass it (reading
@@ -914,7 +920,12 @@ Exit 3 has several shapes, each with its own reaction:
   `--round` skips the round match, so a retried release would delete a newer
   round's live marker for the same head. Omit `--round` only for a legacy
   marker whose entry records no round; a supplied `--round` that differs from
-  the marker's is refused.
+  the marker's is refused. A live nonce-bearing marker likewise requires
+  `--registration-nonce` from its own start; a delayed old call must not use
+  a nonce read from the replacement registration.
+- A missing or stale registration nonce is refused (exit 3). Carry the value
+  from that exact start to completion or release. A completed verdict keeps
+  its nonce for replay verification; an old identity cannot replace it.
 - The state lock is held by another invocation: retry shortly; if a killed
   invocation left the `.lock` file beside the state file, remove that lock
   file (never the state file) and retry. This applies to `--complete` too —
@@ -936,7 +947,7 @@ Exit 3 has several shapes, each with its own reaction:
   slug at `--start`.
 
 Record the finished round with the same script's completion form:
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
 — `--artifact-dir <dir>` records the directory prepare printed (the `--start`
 registration ran before prepare and carried none); omit it on a replayed
 completion to inherit the directory already recorded for the head rather than
@@ -964,7 +975,7 @@ push order, newest last, so the last head is the PR's current head; that is
 the only event those heads will ever get, and starting it supersedes older
 deferred heads. If
 a round dies after `--start`, recover its marker with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --repo <owner>/<repo>`
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>`
 before starting the next round for that head — never hand-edit the state
 file. A supplied `--round` must match the marker's round, so a retried
 recovery cannot delete a newer round's live marker for the same head. The
@@ -1130,7 +1141,10 @@ ambiguous rather than verify a guessed PR. Then, in order:
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`
    — no `--artifact-dir`, because prepare has not printed the directory yet.
    `<r>` is this round's number; repeat the same value in `--complete`. Keep
-   registration ahead of any approval wait, then select the execution and
+   the registrationNonce printed by this exact start and repeat it with
+   `--registration-nonce <nonce>` on completion or release: new live
+   registrations and retained completed verdicts both check that identity.
+   Keep registration ahead of any approval wait, then select the execution and
    approval path above. Run prepare with `--execution container | vm | host`
    and its matching arguments; it creates and prints the artifact directory
    `<dir>`, which you record at `--complete`. When prepare succeeds, compare the `head` line it
@@ -1141,7 +1155,7 @@ ambiguous rather than verify a guessed PR. Then, in order:
    file that head's evidence under `<H>`. A differing head is the moved-head
    case below: release this round's marker and run neither the battery nor
    `--complete`. If prepare fails after `--start`, recover with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`.
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>`.
    A release alone leaves the head unregistered and no probe fire will deliver
    it again (`--repo` is required once `--start` recorded it). After the
    release, restart at the SAME `<r>`
@@ -1164,7 +1178,7 @@ ambiguous rather than verify a guessed PR. Then, in order:
    counter whose cap is the terminal not-covered state. If prepare refuses because the head it names is
    not the head this round registered — moved forward or force-pushed; prepare
    tests exact equality and states no ordering — the registered head can never
-   prepare: `--release --head <H> --round <r> --repo <owner>/<repo>` it and do
+   prepare: `--release --head <H> --round <r> --registration-nonce <nonce> --repo <owner>/<repo>` it and do
    not restart it. There is no watch fire here to deliver the live head, so re-resolve it
    yourself (`gh pr view <n> --repo <owner>/<repo> --json headRefOid`), then
    `--start --head <live> --round <next> --repo <owner>/<repo>` and run prepare
@@ -1190,7 +1204,7 @@ ambiguous rather than verify a guessed PR. Then, in order:
    repo guard applies to `--complete` and `--release` too. When the in-flight
    round is dead (killed session, OOM, aborted turn), nothing will answer:
    recover the marker with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>`
    — the head the exit-3 message names as in flight, which under
    one-round-per-PR may be a different head than `H`; `<r>` is the dead
    round's number, so a retried release cannot delete a newer round's live
@@ -1201,7 +1215,7 @@ ambiguous rather than verify a guessed PR. Then, in order:
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
    (`<dir>` is the artifact directory prepare printed; omit it on a replayed
    completion to inherit the directory already recorded for `H`).
    A completion whose `--round` differs from the marker, or from a round

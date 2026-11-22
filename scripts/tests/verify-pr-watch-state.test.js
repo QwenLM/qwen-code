@@ -22,11 +22,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  completeRound,
+  completeRound as completeRoundImpl,
   duplicateHead,
   inFlightRegistration,
   readState,
-  releaseRound,
+  releaseRound as releaseRoundImpl,
   sameCommit,
   startRound,
   statePath,
@@ -53,10 +53,61 @@ function makeRoot() {
   return dir;
 }
 
+// Modern starts need to carry their registration identity into completion
+// and release. The unwrapped imports retain missing/stale-nonce controls.
+function withRegistrationNonce(root, invocation, allowHeadOnly = false) {
+  if (Object.hasOwn(invocation, 'registrationNonce')) return invocation;
+  const state = readState(root, invocation.pr);
+  const registration =
+    (allowHeadOnly && invocation.round == null
+      ? (state?.inFlightHeads ?? []).find((entry) =>
+          sameCommit(entry.head, invocation.head),
+        )
+      : null) ??
+    inFlightRegistration(state, invocation.head, invocation.round ?? null) ??
+    (state?.verifiedHeads ?? []).find(
+      (entry) =>
+        sameCommit(entry.head, invocation.head) &&
+        entry.round === invocation.round,
+    );
+  return registration?.registrationNonce
+    ? { ...invocation, registrationNonce: registration.registrationNonce }
+    : invocation;
+}
+
+function completeRound(root, invocation, now) {
+  return completeRoundImpl(root, withRegistrationNonce(root, invocation), now);
+}
+
+function releaseRound(root, invocation) {
+  return releaseRoundImpl(root, withRegistrationNonce(root, invocation, true));
+}
+
 function run(root, args) {
-  return spawnSync(process.execPath, [SCRIPT, ...args, '--state-root', root], {
-    encoding: 'utf8',
-  });
+  const headIndex = args.indexOf('--head');
+  const roundIndex = args.indexOf('--round');
+  const invocation =
+    !args.includes('--start') &&
+    !args.includes('--registration-nonce') &&
+    (args.includes('--complete') || args.includes('--release'))
+      ? withRegistrationNonce(
+          root,
+          {
+            pr: Number(args[0]),
+            head: headIndex < 0 ? undefined : args[headIndex + 1],
+            round: roundIndex < 0 ? null : Number(args[roundIndex + 1]),
+          },
+          args.includes('--release') && !args.includes('--complete'),
+        )
+      : null;
+  const commandArgs = invocation?.registrationNonce
+    ? [...args, '--registration-nonce', invocation.registrationNonce]
+    : args;
+  return spawnSync(
+    process.execPath,
+    [SCRIPT, ...commandArgs, '--state-root', root],
+    { encoding: 'utf8' },
+  );
 }
 
 const START = ['16866', '--start', '--head', HEAD, '--round', '11'];
@@ -70,6 +121,173 @@ const COMPLETE = [
   '--verdict',
   'merge-ready',
 ];
+
+describe('registration identity', () => {
+  function replacedRegistration(root) {
+    startRound(root, { pr: 1, head: HEAD, round: 11 });
+    const first = readState(root, 1).inFlightHeads[0].registrationNonce;
+    expect(releaseRound(root, { pr: 1, head: HEAD, round: 11 }).released).toBe(
+      true,
+    );
+    startRound(root, { pr: 1, head: HEAD, round: 11 });
+    const second = readState(root, 1).inFlightHeads[0].registrationNonce;
+    expect(second).not.toBe(first);
+    return { first, second };
+  }
+
+  it('refuses an old or missing nonce without consuming the new live marker', () => {
+    const root = makeRoot();
+    const { first, second } = replacedRegistration(root);
+    const before = readState(root, 1);
+    for (const registrationNonce of [first, undefined]) {
+      expect(
+        completeRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          registrationNonce,
+          verdict: 'merge-ready',
+        }),
+      ).toMatchObject({ registrationMismatch: true });
+      expect(readState(root, 1)).toEqual(before);
+    }
+    expect(before.inFlightHeads[0].registrationNonce).toBe(second);
+  });
+
+  it('retains the nonce in a verdict and rejects a replacement replay', () => {
+    const root = makeRoot();
+    const { first, second } = replacedRegistration(root);
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      registrationNonce: second,
+      verdict: 'findings',
+      commentId: 'current-findings',
+      artifactDir: 'current-artifacts',
+    });
+    const before = readState(root, 1);
+    expect(before.verifiedHeads[0]).toMatchObject({
+      verdict: 'findings',
+      commentId: 'current-findings',
+      artifactDir: 'current-artifacts',
+      registrationNonce: second,
+    });
+    for (const registrationNonce of [first, undefined]) {
+      expect(
+        completeRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          registrationNonce,
+          verdict: 'merge-ready',
+          commentId: 'old-merge-ready',
+          artifactDir: 'old-artifacts',
+        }),
+      ).toMatchObject({ registrationMismatch: true });
+      expect(readState(root, 1)).toEqual(before);
+    }
+    const replay = completeRoundImpl(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      registrationNonce: second,
+      verdict: 'findings',
+    });
+    expect(replay.artifactDir).toBe('current-artifacts');
+    expect(replay.state.verifiedHeads[0].commentId).toBe('current-findings');
+  });
+
+  it('refuses to release a replacement marker with an old or missing nonce', () => {
+    const root = makeRoot();
+    const { first, second } = replacedRegistration(root);
+    const before = readState(root, 1);
+    for (const registrationNonce of [first, undefined]) {
+      expect(
+        releaseRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          registrationNonce,
+        }),
+      ).toMatchObject({ registrationMismatch: true });
+      expect(readState(root, 1)).toEqual(before);
+    }
+    expect(
+      releaseRoundImpl(root, {
+        pr: 1,
+        head: HEAD,
+        round: 11,
+        registrationNonce: second,
+      }).released,
+    ).toBe(true);
+    expect(readState(root, 1).inFlightHeads).toEqual([]);
+  });
+
+  it('keeps the explicit legacy no-nonce completion and release migration', () => {
+    for (const action of ['complete', 'release']) {
+      const root = makeRoot();
+      const path = statePath(root, 1);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(
+        path,
+        JSON.stringify({ pr: 1, inFlightHead: HEAD, artifactDir: 'legacy' }),
+      );
+      if (action === 'release') {
+        expect(releaseRoundImpl(root, { pr: 1, head: HEAD }).released).toBe(
+          true,
+        );
+      } else {
+        const result = completeRoundImpl(root, {
+          pr: 1,
+          head: HEAD,
+          round: 11,
+          verdict: 'findings',
+        });
+        expect(result.state.verifiedHeads[0].registrationNonce).toBeUndefined();
+      }
+      expect(readState(root, 1).inFlightHeads).toEqual([]);
+    }
+  });
+
+  it('binds the real CLI to the supplied identity without inferring it', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const before = readState(root, 16866);
+    const nonce = before.inFlightHeads[0].registrationNonce;
+    const missing = spawnSync(
+      process.execPath,
+      [SCRIPT, ...COMPLETE, '--state-root', root],
+      { encoding: 'utf8' },
+    );
+    expect(missing.status).toBe(3);
+    expect(missing.stderr).toMatch(/registration nonce/);
+    expect(readState(root, 16866)).toEqual(before);
+
+    const stale = run(root, [
+      ...COMPLETE,
+      '--registration-nonce',
+      '00000000-0000-4000-8000-000000000000',
+    ]);
+    expect(stale.status).toBe(3);
+    expect(stale.stderr).toMatch(/registration nonce/);
+    expect(readState(root, 16866)).toEqual(before);
+
+    const current = run(root, [...COMPLETE, '--registration-nonce', nonce]);
+    expect(current.status).toBe(0);
+    expect(readState(root, 16866).verifiedHeads[0].registrationNonce).toBe(
+      nonce,
+    );
+
+    expect(
+      run(makeRoot(), [...START, '--registration-nonce', nonce]).status,
+    ).toBe(2);
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--registration-nonce'])
+        .status,
+    ).toBe(2);
+  });
+});
 
 describe('startRound', () => {
   it('writes the in-flight state with a UTC timestamp', () => {

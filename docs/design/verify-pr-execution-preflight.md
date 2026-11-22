@@ -121,9 +121,14 @@ the PR clone, including every intermediate `.qwen/tmp` directory. Each actual
 `--start` allocates and prints a `registrationNonce`; prefix matching against
 the registered head and lookup of this entry stay owned by watch-state. The
 nonce stays unchanged during that registration's in-flight prepare retries
-and execution-mode changes. Completion or release consumes that identity: a
-later `--start`, including one for the same head/round or in another trusted
-state root, gets a different nonce and cannot reuse its old comment.
+and execution-mode changes. For a nonce-bearing registration, `--complete`
+and `--release` must repeat that start's value with
+`--registration-nonce <nonce>`; it is never inferred from current state for
+a caller. A recorded verified entry retains the nonce for replay validation.
+If the same head/round restarts, an old nonce cannot consume the replacement
+live marker or overwrite its completed verdict. A later `--start`, including
+one in another trusted state root, gets a different nonce and cannot reuse
+its old comment. Missing or stale identities fail without changing state.
 
 Legacy in-flight entries without a nonce remain readable by the existing
 complete/release commands, but cannot authorize a new comment approval. The
@@ -245,13 +250,17 @@ A fresh local-trust round without a marker uses round 1 because its explicit
 flag is a new trust decision on every invocation. A comment-backed round,
 including a fresh one, also registers: its first registration may use round
 1; subsequent executions need another unused positive round rather than
-silently replaying the old comment. The in-flight state's only schema addition
-is `registrationNonce`; there is no parallel approval file or new next-round
-command. A transient prepare failure keeps the registration and nonce, so its
-retry can reuse its matching comment. An actual release followed by `--start`
-always allocates a new nonce: even the same head/round then needs a fresh
-comment marker. Non-comment container retries or later rounds need matching
-head/round registration but no comment approval.
+silently replaying the old comment. `registrationNonce` is the registration
+identity recorded in flight and retained by a resulting verified entry;
+there is no parallel approval file or new next-round command. Its
+`--complete` and `--release` forms accept the matching nonce, and a resulting
+verified entry also accepts only the same nonce for replay. A transient
+prepare failure keeps the registration and nonce, so its retry can reuse its
+matching comment. An actual release followed by `--start` always allocates a
+new nonce: even the same head/round then needs a fresh comment marker.
+Non-comment container retries or later rounds need matching head/round
+registration and the registration's nonce at completion/release, but no
+public approval marker.
 
 An unattended watch must not invent host approval. It selects a container or
 stops for the maintainer rather than persisting `--trust-pr-head` for unknown
@@ -272,6 +281,10 @@ publication.
   verification, context/declaration writing and output/usage documentation.
 - `scripts/verify-pr-check.mjs`: host-context approval comparison and
   refusal cases.
+- `scripts/verify-pr-watch-state.mjs`: registration identity propagation,
+  nonce-bound complete/release and verified replay compatibility.
+- `scripts/tests/verify-pr-watch-state.test.js`: rotation, replacement and
+  missing/wrong nonce witnesses, normal replay, legacy migration and CLI.
 - `scripts/tests/verify-pr-prepare.test.js`: fake-`gh` API responses, argument
   and ordering coverage, refusal and success witnesses.
 - `scripts/tests/verify-pr-check.test.js`: trusted authority, tamper, stale
@@ -339,9 +352,14 @@ publication.
   killed wait leaves the existing recoverable marker. Start → mode fallback →
   prepare → successful checker → complete works with no earlier verdict for
   both local trust and comment approval. A matching in-flight retry keeps its
-  nonce. A completion in root A followed by a fresh same-head/round start in
-  root B refuses A's marker, accepts B's new marker, and has a source-removal
-  red control. Legacy nonce-less entries disclose and test their fresh-marker
+  nonce. A same-head/round replacement refuses an old or missing nonce for
+  both its live marker and its already-completed verdict, preserves the new
+  verdict and artifacts, and accepts the correct completion, release and
+  nonce-bearing replay. Head-only release and the explicit legacy no-nonce
+  migration retain their compatibility tests. A completion in root A
+  followed by a fresh same-head/round start in root B refuses A's marker,
+  accepts B's new marker, and has a source-removal red control. Legacy
+  nonce-less entries disclose and test their fresh-marker
   migration. Old persisted prompts retain the container default instead of
   losing the delivered head.
 - Frozen-clock real-CLI probes reject a symlinked or non-directory stamped
