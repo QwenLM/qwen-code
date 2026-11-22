@@ -7,7 +7,10 @@
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import type { ManagedSessionInputRequest } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import type { ManagedChildRunProcess } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-supervisor.js';
-import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
+import {
+  boundMonitorObservationLines,
+  buildMonitorNotificationInput,
+} from './hosted-monitor-notification.js';
 
 // H3 of #12827: the observation loop of one admitted Monitor. The funnel
 // owns the record line; this loop owns time: stdout lines aggregate into one
@@ -386,7 +389,7 @@ export class HostedMonitorLoop {
   /** Commits whatever the window buffered as one observation revision. */
   private async flush(settleQuota: boolean = true): Promise<void> {
     if (this.ended || this.buffered.length === 0) return;
-    const lines = this.buffered;
+    const lines = boundMonitorObservationLines(this.buffered);
     this.buffered = [];
     const nextSequence =
       (this.monitors.record(this.monitorId)?.observationSequence ?? 0) + 1;
