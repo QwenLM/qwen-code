@@ -73,7 +73,10 @@ import {
 } from './managed-workspace-binding.js';
 import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js';
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
-import { readHostedSkills } from './hosted-skill-catalog.js';
+import {
+  parseSessionSkillsRef,
+  readHostedSkills,
+} from './hosted-skill-catalog.js';
 import {
   hasHostedExternalExcludedOptions,
   isHostedWorkspaceExternalProfile,
@@ -855,6 +858,11 @@ export async function verifyRecoverySession(
               definition,
               definition['toolProfile'],
             )) &&
+          // The external lanes admit a Session skill catalog, so the malformed
+          // reference the exclusion list used to reject needs its own check:
+          // the resident load parses the same field and would fail every turn.
+          (definition['sessionSkillsRef'] === undefined ||
+            Boolean(parseSessionSkillsRef(definition['sessionSkillsRef']))) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',
