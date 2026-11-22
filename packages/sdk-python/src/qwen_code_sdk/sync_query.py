@@ -11,10 +11,9 @@ from typing import Any, cast
 
 from .protocol import SDKMessage, SDKUserMessage
 from .query import Query, query
-from .types import QueryOptions, QueryOptionsDict
+from .types import _SYNC_TIMEOUT_MARGIN, QueryOptions, QueryOptionsDict
 
 _STOP = object()
-_SYNC_TIMEOUT_MARGIN = 5.0
 
 
 class SyncQuery:

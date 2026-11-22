@@ -174,9 +174,12 @@ Use only one of `resume`, `continue_session`, or `session_id` in a request. The
 SDK raises `ValidationError` if these session options are combined.
 
 Timeout values must be an `int` or `float` (not `bool`), greater than zero and
-representable as finite floating-point seconds. Invalid types raise `TypeError`;
-non-positive, non-finite or out-of-range values raise `ValueError`, whether
-supplied in a mapping or a `TimeoutOptions` object.
+representable as finite floating-point seconds. `control_request` must also be at
+most `threading.TIMEOUT_MAX - 5.0` seconds, reserving the synchronous wrapper's
+five-second wait margin. Invalid types raise `TypeError`; non-positive,
+non-finite or out-of-range values raise `ValueError`. Supply a nested timeout
+mapping such as `{"timeout": {"control_request": 5}}`, or pass
+`QueryOptions(timeout=TimeoutOptions(control_request=5))` as the query options.
 
 Unsupported in v1:
 
@@ -453,7 +456,8 @@ delegates the selection of the latest session to the CLI.
 ## Error Model
 
 - `ValidationError`: invalid options, invalid UUIDs, unsupported combinations
-- `TypeError`: a timeout value is not an `int` or `float`, or is a `bool`
+- `TypeError`: an option value has the wrong Python type (for a timeout, a value
+  that is not an `int` or `float`, or is a `bool`)
 - `ValueError`: a timeout value is non-positive, non-finite, or out of range
 - `ControlRequestTimeoutError`: initialize, interrupt, or other control request
   timed out
@@ -469,18 +473,21 @@ from qwen_code_sdk import (
 )
 
 try:
-    with query_sync("Say hello", {"path_to_qwen_executable": "qwen"}) as result:
-        for message in result:
-            if is_sdk_result_message(message):
-                if message.get("is_error"):
-                    error = message.get("error") or {}
-                    print(f"Error: {error.get('message', 'Unknown error')}")
-                else:
-                    print(message.get("result", ""))
+    session = query_sync("Say hello", {"path_to_qwen_executable": "qwen"})
 except (ValidationError, TypeError, ValueError) as exc:
     print(f"Invalid SDK options: {exc}")
-except ProcessExitError as exc:
-    print(f"qwen exited with {exc.exit_code}: {exc}")
+else:
+    try:
+        with session as result:
+            for message in result:
+                if is_sdk_result_message(message):
+                    if message.get("is_error"):
+                        error = message.get("error") or {}
+                        print(f"Error: {error.get('message', 'Unknown error')}")
+                    else:
+                        print(message.get("result", ""))
+    except ProcessExitError as exc:
+        print(f"qwen exited with {exc.exit_code}: {exc}")
 ```
 
 ## Troubleshooting

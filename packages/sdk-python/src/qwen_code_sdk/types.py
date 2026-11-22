@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from inspect import Parameter, Signature, iscoroutinefunction, signature
 from math import isfinite
+from threading import TIMEOUT_MAX
 from typing import (
     Any,
     Literal,
@@ -15,6 +16,8 @@ from typing import (
 )
 
 from typing_extensions import NotRequired
+
+_SYNC_TIMEOUT_MARGIN = 5.0
 
 PermissionMode: TypeAlias = Literal["default", "plan", "auto-edit", "auto", "yolo"]
 AuthType: TypeAlias = Literal[
@@ -97,6 +100,12 @@ class TimeoutOptions:
                 finite = False
             if not finite or value <= 0:
                 raise ValueError(f"timeout.{name} must be a positive finite number")
+
+        if self.control_request > TIMEOUT_MAX - _SYNC_TIMEOUT_MARGIN:
+            raise ValueError(
+                "timeout.control_request must not exceed "
+                f"{TIMEOUT_MAX - _SYNC_TIMEOUT_MARGIN} seconds"
+            )
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any] | None) -> TimeoutOptions:
