@@ -563,7 +563,7 @@ export function AuthMessage({
         modelIds: normalizeModelIds(models),
         ...(modelSpecs.length > 0 ? { modelSpecs } : {}),
         advancedConfig,
-      } as Parameters<typeof workspaceActions.installAuthProvider>[0])
+      })
       .then(async (result) => {
         if (!isCurrent()) return;
         let syncFailed = result.runtimeSync?.status === 'failed';
