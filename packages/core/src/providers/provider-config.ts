@@ -72,7 +72,11 @@ export function resolveOwnsModel(
 function buildGenerationConfig(
   spec: Pick<
     ModelSpec,
-    'enableThinking' | 'thinkingMandatory' | 'contextWindowSize' | 'modalities'
+    | 'enableThinking'
+    | 'thinkingMandatory'
+    | 'contextWindowSize'
+    | 'modalities'
+    | 'service_tier'
   >,
   protocol: AuthType,
 ): ProviderModelConfig['generationConfig'] | undefined {
@@ -98,6 +102,10 @@ function buildGenerationConfig(
   }
   if (spec.modalities && Object.values(spec.modalities).some(Boolean)) {
     parts.modalities = spec.modalities;
+    hasAny = true;
+  }
+  if (spec.service_tier) {
+    parts.service_tier = spec.service_tier;
     hasAny = true;
   }
   return hasAny ? parts : undefined;
@@ -133,6 +141,10 @@ function buildAdvancedGenerationConfig(
   }
   if (advCfg?.maxTokens && advCfg.maxTokens > 0) {
     cfg.samplingParams = { max_tokens: advCfg.maxTokens };
+    hasAny = true;
+  }
+  if (advCfg?.service_tier) {
+    cfg.service_tier = advCfg.service_tier;
     hasAny = true;
   }
   return hasAny ? cfg : undefined;
@@ -174,6 +186,24 @@ function applyProviderCustomHeaders(
           ...(config.customHeaders as Record<string, string>),
           ...(existing.customHeaders as Record<string, string> | undefined),
         },
+      },
+    };
+  });
+}
+
+function applyProviderServiceTier(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  if (!config.service_tier) return models;
+  return models.map((model) => {
+    const existing = model.generationConfig ?? {};
+    if (existing.service_tier !== undefined) return model;
+    return {
+      ...model,
+      generationConfig: {
+        ...existing,
+        service_tier: config.service_tier,
       },
     };
   });
@@ -244,7 +274,10 @@ function buildModelConfigs(
     });
   }
 
-  return applyProviderCustomHeaders(models, config);
+  return applyProviderCustomHeaders(
+    applyProviderServiceTier(models, config),
+    config,
+  );
 }
 
 // ---------------------------------------------------------------------------
