@@ -79,4 +79,23 @@ describe('ProcessTransport stdin errors', () => {
     ).not.toThrow();
     expect(transport.exitError).toBeNull();
   });
+
+  it.each(['stdin-first', 'process-first'])(
+    'retains an independent process failure after a clean close (%s)',
+    async (order) => {
+      const { child, stdin, transport } = setup();
+      const pipeError = new Error('write EPIPE');
+      const processError = new Error('kill ESRCH');
+      if (order === 'stdin-first') stdin.emit('error', pipeError);
+      child.emit('error', processError);
+      if (order === 'process-first') stdin.emit('error', pipeError);
+      const firstError = transport.exitError;
+      Object.assign(child, { exitCode: 0 });
+      child.emit('close', 0, null);
+      await expect(transport.waitForExit()).rejects.toBe(firstError);
+      expect(firstError?.message).toContain(
+        order === 'stdin-first' ? 'EPIPE' : 'ESRCH',
+      );
+    },
+  );
 });

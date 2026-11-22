@@ -25,6 +25,7 @@ export class ProcessTransport implements Transport {
   private options: TransportOptions;
   private ready = false;
   private _exitError: Error | null = null;
+  private recoverableStdinError: Error | null = null;
   private closed = false;
   private inputClosed = false;
   private abortController: AbortController;
@@ -281,22 +282,29 @@ export class ProcessTransport implements Transport {
     this.childStdin?.on('error', (error: Error) => {
       this.inputClosed = true;
       // Writable errors are emitted asynchronously, outside write()'s catch.
-      if (this.closed) return;
+      if (this.closed || this.childProcess?.exitCode === 0) return;
       this.ready = false;
-      this._exitError ??= new Error(`CLI stdin error: ${error.message}`, {
-        cause: error,
-      });
+      if (!this._exitError) {
+        this.recoverableStdinError = new Error(
+          `CLI stdin error: ${error.message}`,
+          { cause: error },
+        );
+        this._exitError = this.recoverableStdinError;
+      }
       this.requestChildProcessExit();
     });
 
     this.childProcess.on('error', (error) => {
       this.unregisterForProcessExit();
       this.ready = false;
+      // A separate process failure must survive even a later clean close.
+      this.recoverableStdinError = null;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
       } else {
-        this._exitError ??= new Error(`CLI process error: ${error.message}`);
-        logger.error(this._exitError.message);
+        const processError = new Error(`CLI process error: ${error.message}`);
+        this._exitError ??= processError;
+        logger.error(processError.message);
       }
     });
 
@@ -311,6 +319,13 @@ export class ProcessTransport implements Transport {
         if (error) {
           this._exitError ??= error;
           logger.error(error.message);
+        } else if (
+          code === 0 &&
+          signal === null &&
+          this._exitError === this.recoverableStdinError
+        ) {
+          // A successful child may close its pipe before buffered input drains.
+          this._exitError = null;
         }
       }
     });
