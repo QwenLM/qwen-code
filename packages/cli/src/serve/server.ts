@@ -238,6 +238,7 @@ import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
 } from './routes/workspace-permissions.js';
+import { registerWorkspaceInputHistoryRoutes } from './routes/workspace-input-history.js';
 import {
   readEffectiveSessionWorkflow,
   registerWorkspaceQualifiedSettingsRoutes,
@@ -3567,6 +3568,13 @@ export function createServeApp(
     workspaceRegistry,
     mutate,
     safeBody,
+  });
+  registerWorkspaceInputHistoryRoutes(app, {
+    mutate,
+    safeBody,
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceVoiceRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,

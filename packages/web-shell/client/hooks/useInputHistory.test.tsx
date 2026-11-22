@@ -2,7 +2,12 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
-import { pushInputHistoryEntry, useInputHistory } from './useInputHistory';
+import {
+  getShellHistoryStorageKey,
+  mergeRemoteInputHistory,
+  pushInputHistoryEntry,
+  useInputHistory,
+} from './useInputHistory';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -185,4 +190,52 @@ it('does not re-render the host for history interactions nothing consumes', () =
   act(() => history.reset());
 
   expect(renderCount).toBe(baseline);
+});
+
+it('scopes shell history storage keys by workspace with legacy default', () => {
+  expect(getShellHistoryStorageKey()).toBe('qwen-web-shell-command-history');
+  expect(getShellHistoryStorageKey('/repo/a')).toBe(
+    `qwen-web-shell-command-history:${encodeURIComponent('/repo/a')}`,
+  );
+});
+
+it('merges remote history ahead at the newest tail while keeping local-only entries', () => {
+  expect(
+    mergeRemoteInputHistory(
+      ['local-only', 'shared', 'older-local'],
+      ['from-desktop-1', 'shared', 'from-desktop-2'],
+    ),
+  ).toEqual([
+    'local-only',
+    'older-local',
+    'from-desktop-1',
+    'shared',
+    'from-desktop-2',
+  ]);
+});
+
+it('applies remote entries without re-rendering and ignores stale responses after a local push', () => {
+  pushInputHistoryEntry('workspace', 'local-1');
+  render('workspace');
+  const baseline = renderCount;
+
+  const v0 = history.getMutationVersion();
+  expect(history.applyRemoteEntries(['desktop-1', 'desktop-2'], v0)).toBe(true);
+  expect(history.getReverseMatches('')).toEqual([
+    'desktop-2',
+    'desktop-1',
+    'local-1',
+  ]);
+  expect(renderCount).toBe(baseline);
+
+  // Applying the same remote entries again is a no-op.
+  expect(history.applyRemoteEntries(['desktop-1', 'desktop-2'], v0)).toBe(
+    false,
+  );
+
+  // A stale response captured before a local push must not clobber the new local entry.
+  const staleVersion = history.getMutationVersion();
+  act(() => history.push('fresh-mobile'));
+  expect(history.applyRemoteEntries(['desktop-1'], staleVersion)).toBe(false);
+  expect(history.getLastEntry()).toBe('fresh-mobile');
 });

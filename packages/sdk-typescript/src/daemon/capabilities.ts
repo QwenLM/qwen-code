@@ -374,6 +374,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_git_worktrees: { since: 'v1' },
   // Read-only, bounded Git ignore classification for per-turn file summaries.
   workspace_git_check_ignore: { since: 'v1' },
+  // Workspace-scoped composer prompt and shell input history (`GET`/`POST`
+  // `/workspace/input-history` and `/workspaces/:workspace/input-history`),
+  // auto-recorded from admitted prompts, mid-turn messages, and shell runs so
+  // desktop and mobile Web Shell sessions share history per workspace.
+  workspace_input_history: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live

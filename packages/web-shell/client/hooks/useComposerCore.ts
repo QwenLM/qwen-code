@@ -68,9 +68,12 @@ import {
 } from '../utils/commandDisplay';
 import {
   getPromptHistoryStorageKey,
+  getShellHistoryStorageKey,
   pushInputHistoryEntry,
   useInputHistory,
 } from '../hooks/useInputHistory';
+import { subscribeSidechannelRemotePrompt } from '../daemon/remotePromptSidechannel';
+import type { DaemonInputHistoryKind } from '../daemon/workspace/types';
 import {
   useAtMentionMenu,
   type AtMentionMenuState,
@@ -1766,6 +1769,13 @@ export function useComposerCore(
     promptHistoryStorageKey === legacyPromptHistoryStorageKey
       ? undefined
       : legacyPromptHistoryStorageKey;
+  const shellHistoryStorageKey = getShellHistoryStorageKey(storageScopeKey);
+  const legacyShellHistoryStorageKey = getShellHistoryStorageKey();
+  const shellHistoryFallbackStorageKey =
+    disableLegacyHistoryFallback ||
+    shellHistoryStorageKey === legacyShellHistoryStorageKey
+      ? undefined
+      : legacyShellHistoryStorageKey;
   const composerDraftStorageKey = getComposerDraftStorageKey(
     sessionId,
     storageScopeKey,
@@ -2114,6 +2124,8 @@ export function useComposerCore(
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const searchModeRef = useRef(searchMode);
   searchModeRef.current = searchMode;
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchUiRef = useRef<HTMLDivElement>(null);
   const searchDraftRef = useRef('');
@@ -3353,13 +3365,16 @@ export function useComposerCore(
     promptHistoryFallbackStorageKey,
   );
   const shellHistory = useInputHistory(
+    shellModeEnabled ? shellHistoryStorageKey : promptHistoryStorageKey,
     shellModeEnabled
-      ? 'qwen-web-shell-command-history'
-      : promptHistoryStorageKey,
+      ? shellHistoryFallbackStorageKey
+      : promptHistoryFallbackStorageKey,
   );
 
   const {
     push,
+    applyRemoteEntries,
+    getMutationVersion,
     navigateUp,
     navigateDown,
     isNavigating,
@@ -3370,6 +3385,8 @@ export function useComposerCore(
   } = promptHistory;
   const historyActionsRef = useRef({
     push,
+    applyRemoteEntries,
+    getMutationVersion,
     navigateUp,
     navigateDown,
     isNavigating,
@@ -3380,6 +3397,8 @@ export function useComposerCore(
   });
   historyActionsRef.current = {
     push,
+    applyRemoteEntries,
+    getMutationVersion,
     navigateUp,
     navigateDown,
     isNavigating,
@@ -3406,6 +3425,200 @@ export function useComposerCore(
     },
     [isTouchComposer],
   );
+  const getSearchMatchesRef = useRef(getSearchMatches);
+  getSearchMatchesRef.current = getSearchMatches;
+
+  const inputHistoryTarget = useMemo(() => {
+    if (!workspace || !workspaceFeaturesEnabled) return undefined;
+    const features = workspace.capabilities?.features ?? [];
+    if (!features.includes('workspace_input_history')) return undefined;
+    if (typeof workspace.actions?.loadInputHistory !== 'function')
+      return undefined;
+    const listed = workspace.capabilities?.workspaces ?? [];
+    if (atWorkspaceCwd) {
+      if (listed.length === 0) {
+        if (workspace.workspaceCwd && atWorkspaceCwd !== workspace.workspaceCwd)
+          return undefined;
+        return {
+          workspaceId: undefined as string | undefined,
+          targetKey: '<primary>',
+        };
+      }
+      const matches = listed.filter((entry) => entry.cwd === atWorkspaceCwd);
+      if (matches.length !== 1) return undefined;
+      if (matches[0].primary) {
+        return {
+          workspaceId: undefined as string | undefined,
+          targetKey: matches[0].id,
+        };
+      }
+      if (
+        matches[0].trusted === false ||
+        !features.includes('workspace_qualified_rest_core')
+      ) {
+        return undefined;
+      }
+      return {
+        workspaceId: matches[0].id as string | undefined,
+        targetKey: matches[0].id,
+      };
+    }
+    if (listed.length === 0) {
+      return {
+        workspaceId: undefined as string | undefined,
+        targetKey: '<primary>',
+      };
+    }
+    const primaryMatches = listed.filter((entry) => entry.primary);
+    if (primaryMatches.length !== 1) return undefined;
+    return {
+      workspaceId: undefined as string | undefined,
+      targetKey: primaryMatches[0].id,
+    };
+  }, [workspace, workspaceFeaturesEnabled, atWorkspaceCwd]);
+
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
+  const inputHistoryTargetRef = useRef(inputHistoryTarget);
+  inputHistoryTargetRef.current = inputHistoryTarget;
+  const inputHistoryTargetKey = inputHistoryTarget?.targetKey;
+  const remoteHistoryEtagRef = useRef<{
+    targetKey?: string;
+    prompt?: string;
+    shell?: string;
+  }>({});
+  const remoteHistoryInFlightRef = useRef<{
+    prompt?: string;
+    shell?: string;
+  }>({});
+  const remoteHistoryPendingRef = useRef<{
+    prompt?: boolean;
+    shell?: boolean;
+  }>({});
+  const remoteHistoryFocusAtRef = useRef(0);
+
+  const syncRemoteHistory = useCallback(
+    async (kind: DaemonInputHistoryKind) => {
+      const target = inputHistoryTargetRef.current;
+      const loadInputHistory = workspaceRef.current?.actions?.loadInputHistory;
+      if (!target || typeof loadInputHistory !== 'function') return;
+      if (remoteHistoryEtagRef.current.targetKey !== target.targetKey) {
+        remoteHistoryEtagRef.current = { targetKey: target.targetKey };
+        remoteHistoryInFlightRef.current = {};
+        remoteHistoryPendingRef.current = {};
+      }
+      if (remoteHistoryInFlightRef.current[kind] === target.targetKey) {
+        remoteHistoryPendingRef.current[kind] = true;
+        return;
+      }
+      const history =
+        kind === 'shell'
+          ? shellHistoryActionsRef.current
+          : historyActionsRef.current;
+      const mutationVersion = history.getMutationVersion();
+      const ifNoneMatch = remoteHistoryEtagRef.current[kind];
+      remoteHistoryInFlightRef.current[kind] = target.targetKey;
+      remoteHistoryPendingRef.current[kind] = false;
+      try {
+        const result = await loadInputHistory({
+          kind,
+          workspaceId: target.workspaceId,
+          ...(ifNoneMatch ? { ifNoneMatch } : {}),
+        });
+        if (inputHistoryTargetRef.current?.targetKey !== target.targetKey) {
+          return;
+        }
+        if (result.notModified) return;
+        if (history.getMutationVersion() !== mutationVersion) {
+          // A local push occurred while this GET was in flight; skip applying
+          // and leave the cached ETag unset so the next refresh sees the update.
+          return;
+        }
+        if (result.revision) {
+          remoteHistoryEtagRef.current[kind] = `"v1:${result.revision}"`;
+        }
+        const changed = history.applyRemoteEntries(
+          result.entries,
+          mutationVersion,
+        );
+        if (
+          changed &&
+          searchModeRef.current &&
+          (kind === 'shell') === shellModeRef.current
+        ) {
+          const nextMatches = getSearchMatchesRef.current(
+            searchQueryRef.current,
+          );
+          setSearchMatches(nextMatches);
+          setSearchActiveIndex((index) =>
+            nextMatches.length === 0
+              ? 0
+              : Math.min(index, nextMatches.length - 1),
+          );
+        }
+      } catch {
+        // Best-effort sync; keep localStorage history working offline.
+      } finally {
+        if (remoteHistoryInFlightRef.current[kind] === target.targetKey) {
+          remoteHistoryInFlightRef.current[kind] = undefined;
+          if (
+            remoteHistoryPendingRef.current[kind] &&
+            inputHistoryTargetRef.current?.targetKey === target.targetKey
+          ) {
+            remoteHistoryPendingRef.current[kind] = false;
+            void syncRemoteHistoryRef.current(kind);
+          }
+        }
+      }
+    },
+    [],
+  );
+  const syncRemoteHistoryRef = useRef(syncRemoteHistory);
+  syncRemoteHistoryRef.current = syncRemoteHistory;
+
+  useEffect(() => {
+    if (!inputHistoryTargetKey) return;
+    void syncRemoteHistory('prompt');
+  }, [inputHistoryTargetKey, syncRemoteHistory]);
+
+  useEffect(() => {
+    if (!inputHistoryTargetKey || !shellMode) return;
+    void syncRemoteHistory('shell');
+  }, [inputHistoryTargetKey, shellMode, syncRemoteHistory]);
+
+  useEffect(() => {
+    if (!inputHistoryTargetKey || typeof window === 'undefined') return;
+    const onForeground = () => {
+      if (
+        typeof document !== 'undefined' &&
+        document.visibilityState === 'hidden'
+      ) {
+        return;
+      }
+      const now = Date.now();
+      if (now - remoteHistoryFocusAtRef.current < 1500) return;
+      remoteHistoryFocusAtRef.current = now;
+      void syncRemoteHistory(shellModeRef.current ? 'shell' : 'prompt');
+    };
+    window.addEventListener('focus', onForeground);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', onForeground);
+    }
+    return () => {
+      window.removeEventListener('focus', onForeground);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', onForeground);
+      }
+    };
+  }, [inputHistoryTargetKey, syncRemoteHistory]);
+
+  useEffect(() => {
+    if (!inputHistoryTargetKey || !sessionId) return;
+    return subscribeSidechannelRemotePrompt((event) => {
+      if (event.sessionId !== sessionId) return;
+      void syncRemoteHistory(event.kind);
+    });
+  }, [inputHistoryTargetKey, sessionId, syncRemoteHistory]);
 
   const openHistorySearch = useCallback(() => {
     if (disabledRef.current) return;
@@ -3424,6 +3637,9 @@ export function useComposerCore(
     setSearchMatches(getSearchMatches(''));
     setSearchActiveIndex(0);
     history.resetSearch();
+    void syncRemoteHistoryRef.current(
+      shellModeRef.current ? 'shell' : 'prompt',
+    );
   }, [closeAtMenu, closeSlashMenu, getSearchMatches, isTouchComposer]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
@@ -3709,6 +3925,18 @@ export function useComposerCore(
       } else {
         historyActionsRef.current.push(text);
         historyActionsRef.current.reset();
+        if (text.trimStart().startsWith('/')) {
+          const target = inputHistoryTargetRef.current;
+          const recordInputHistory =
+            workspaceRef.current?.actions?.recordInputHistory;
+          if (target && typeof recordInputHistory === 'function') {
+            void recordInputHistory({
+              kind: 'prompt',
+              entry: text,
+              workspaceId: target.workspaceId,
+            }).catch(() => {});
+          }
+        }
       }
       historyBrowseActiveRef.current = false;
       if (!isComposerUnchanged()) return;
@@ -4101,6 +4329,9 @@ export function useComposerCore(
           const current = view.state.doc.toString();
           if (!isBrowsingHistory) {
             saveCurrentDraftRef.current();
+            void syncRemoteHistoryRef.current(
+              shellModeRef.current ? 'shell' : 'prompt',
+            );
           }
           const prev = history.navigateUp(current);
           if (prev === null) return false;

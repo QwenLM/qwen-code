@@ -215,6 +215,11 @@ import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
 } from '../skill-details-redaction.js';
+import {
+  appendWorkspaceInputHistory,
+  extractPromptHistoryText,
+  type WorkspaceInputHistoryKind,
+} from '../workspace-input-history.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import {
   readSessionToolCalls,
@@ -9765,6 +9770,29 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (
+          !classification.channelPrompt &&
+          !classification.requestedChannelPrompt
+        ) {
+          const historyText = extractPromptHistoryText(
+            prompt,
+            classification.submittedPrompt,
+          );
+          if (historyText) {
+            void appendWorkspaceInputHistory(
+              runtime.workspaceCwd,
+              'prompt',
+              historyText,
+            ).catch((err) => {
+              daemonLog?.warn('failed to record workspace input history', {
+                sessionId,
+                kind: 'prompt' satisfies WorkspaceInputHistoryKind,
+                workspaceCwd: runtime.workspaceCwd,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
+        }
         res.status(202).json({
           promptId: admission.promptId,
           lastEventId: admission.lastEventId,
@@ -12757,6 +12785,20 @@ export function registerSessionRoutes(
             ...(mediaBlocks ? { content: mediaBlocks } : {}),
           },
         );
+        if (trimmed.length > 0) {
+          void appendWorkspaceInputHistory(
+            runtime.workspaceCwd,
+            'prompt',
+            trimmed,
+          ).catch((err) => {
+            daemonLog?.warn('failed to record workspace input history', {
+              sessionId,
+              kind: 'prompt' satisfies WorkspaceInputHistoryKind,
+              workspaceCwd: runtime.workspaceCwd,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
         res.status(200).json(result);
       },
     ),
@@ -12950,6 +12992,19 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const trimmedCommand = command.trim();
+        void appendWorkspaceInputHistory(
+          runtime.workspaceCwd,
+          'shell',
+          trimmedCommand,
+        ).catch((err) => {
+          daemonLog?.warn('failed to record workspace input history', {
+            sessionId,
+            kind: 'shell' satisfies WorkspaceInputHistoryKind,
+            workspaceCwd: runtime.workspaceCwd,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
         const abort = new AbortController();
         const onResClose = () => {
           if (!res.writableEnded) abort.abort();
@@ -12958,7 +13013,7 @@ export function registerSessionRoutes(
         try {
           const result = await runtime.bridge.executeShellCommand(
             sessionId,
-            command.trim(),
+            trimmedCommand,
             abort.signal,
             { clientId },
           );

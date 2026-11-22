@@ -1,12 +1,65 @@
 import { useCallback, useEffect, useRef } from 'react';
 
 const DEFAULT_STORAGE_KEY = 'qwen-web-shell-history';
+const DEFAULT_SHELL_STORAGE_KEY = 'qwen-web-shell-command-history';
 const MAX_HISTORY = 100;
 
 export function getPromptHistoryStorageKey(workspaceCwd?: string): string {
   return workspaceCwd
     ? `${DEFAULT_STORAGE_KEY}:${encodeURIComponent(workspaceCwd)}`
     : DEFAULT_STORAGE_KEY;
+}
+
+export function getShellHistoryStorageKey(workspaceCwd?: string): string {
+  return workspaceCwd
+    ? `${DEFAULT_SHELL_STORAGE_KEY}:${encodeURIComponent(workspaceCwd)}`
+    : DEFAULT_SHELL_STORAGE_KEY;
+}
+
+/**
+ * Merges local entries with authoritative daemon entries (both oldest-to-newest).
+ * Keeps unique local-only entries first so pre-existing browser history is not
+ * lost, then appends canonical server entries at the newest tail.
+ */
+export function mergeRemoteInputHistory(
+  localEntries: readonly string[],
+  remoteEntries: readonly string[],
+): string[] {
+  const remoteSeen = new Set<string>();
+  const remoteNewestFirst: string[] = [];
+  for (let i = remoteEntries.length - 1; i >= 0; i--) {
+    const entry = remoteEntries[i];
+    if (
+      typeof entry !== 'string' ||
+      entry.length === 0 ||
+      remoteSeen.has(entry)
+    )
+      continue;
+    remoteSeen.add(entry);
+    remoteNewestFirst.push(entry);
+    if (remoteNewestFirst.length >= MAX_HISTORY) break;
+  }
+  const normalizedRemote = remoteNewestFirst.reverse();
+
+  const localOnlyNewestFirst: string[] = [];
+  const localSeen = new Set<string>(remoteSeen);
+  const remainingSlots = MAX_HISTORY - normalizedRemote.length;
+  if (remainingSlots > 0) {
+    for (let i = localEntries.length - 1; i >= 0; i--) {
+      const entry = localEntries[i];
+      if (
+        typeof entry !== 'string' ||
+        entry.length === 0 ||
+        localSeen.has(entry)
+      ) {
+        continue;
+      }
+      localSeen.add(entry);
+      localOnlyNewestFirst.push(entry);
+      if (localOnlyNewestFirst.length >= remainingSlots) break;
+    }
+  }
+  return [...localOnlyNewestFirst.reverse(), ...normalizedRemote];
 }
 
 function readHistory(storageKey: string): string[] | null {
@@ -82,6 +135,7 @@ export function useInputHistory(
   const indexRef = useRef<number>(-1);
   const draftRef = useRef<string>('');
   const searchIndexRef = useRef<number>(-1);
+  const mutationVersionRef = useRef<number>(0);
 
   useEffect(() => {
     if (
@@ -97,6 +151,7 @@ export function useInputHistory(
     indexRef.current = -1;
     draftRef.current = '';
     searchIndexRef.current = -1;
+    mutationVersionRef.current++;
   }, [fallbackStorageKey, storageKey]);
 
   const readCurrentHistory = useCallback(() => {
@@ -107,8 +162,11 @@ export function useInputHistory(
     );
   }, []);
 
+  const getMutationVersion = useCallback(() => mutationVersionRef.current, []);
+
   const push = useCallback(
     (text: string) => {
+      mutationVersionRef.current++;
       const h = readCurrentHistory();
       if (h[h.length - 1] === text) {
         if (
@@ -125,6 +183,35 @@ export function useInputHistory(
       if (h.length > MAX_HISTORY) h.shift();
       unsavedHistoryRef.current = !saveHistory(storageKeyRef.current, h);
       indexRef.current = -1;
+    },
+    [readCurrentHistory],
+  );
+
+  const applyRemoteEntries = useCallback(
+    (
+      remoteEntries: readonly string[],
+      expectedMutationVersion?: number,
+    ): boolean => {
+      if (
+        expectedMutationVersion !== undefined &&
+        expectedMutationVersion !== mutationVersionRef.current
+      ) {
+        return false;
+      }
+      const current = readCurrentHistory();
+      const merged = mergeRemoteInputHistory(current, remoteEntries);
+      if (
+        merged.length === current.length &&
+        merged.every((entry, idx) => entry === current[idx])
+      ) {
+        return false;
+      }
+      const saved = saveHistory(storageKeyRef.current, merged);
+      unsavedHistoryRef.current = !saved;
+      if (indexRef.current === -1 || !saved) {
+        historyRef.current = merged;
+      }
+      return true;
     },
     [readCurrentHistory],
   );
@@ -235,6 +322,8 @@ export function useInputHistory(
 
   return {
     push,
+    applyRemoteEntries,
+    getMutationVersion,
     navigateUp,
     navigateDown,
     isNavigating,

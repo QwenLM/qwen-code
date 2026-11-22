@@ -839,6 +839,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_git_log_exclude_refs',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
+  'workspace_input_history',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -966,6 +967,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_git_log_exclude_refs' &&
       f !== 'workspace_git_worktrees' &&
       f !== 'workspace_git_check_ignore' &&
+      f !== 'workspace_input_history' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -1025,6 +1027,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_git_log_exclude_refs',
   'workspace_git_worktrees',
   'workspace_git_check_ignore',
+  'workspace_input_history',
   'workspace_mcp_restart',
   'session_recap',
   'session_mod_rows',
@@ -53426,4 +53429,94 @@ describe('Deferred #17502 review pins (issue #17554, follow-up 4)', () => {
       { timeout: 5_000 },
     );
   }, 15_000);
+});
+
+it('auto-records prompt, mid-turn-message, and shell inputs into workspace input history', async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-input-hist-'));
+  const home = path.join(root, 'home');
+  const workspace = path.join(root, 'workspace');
+  await fsp.mkdir(home, { recursive: true });
+  await fsp.mkdir(workspace, { recursive: true });
+  vi.stubEnv('QWEN_HOME', home);
+  const bridge = fakeBridge();
+  const app = createServeApp(
+    { ...baseOpts, token: 'tkn', workspace, enableSessionShell: true },
+    undefined,
+    { bridge },
+  );
+  try {
+    const created = await request(app)
+      .post('/session')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ cwd: workspace });
+    expect(created.status).toBe(200);
+    const sessionId = created.body.sessionId as string;
+
+    // 1. Prompt with submittedPrompt metadata records the user-typed original.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'expanded file contents' }],
+        _meta: { 'qwen.submittedPrompt': 'check @src/a.ts' },
+      })
+      .expect(202);
+
+    // 2. Channel-marked prompt must NOT enter composer input history.
+    await request(app)
+      .post(`/session/${sessionId}/prompt`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({
+        prompt: [{ type: 'text', text: 'external channel message' }],
+        _meta: { 'qwen.channel.prompt': true },
+      })
+      .expect(202);
+
+    // 3. Mid-turn message records into prompt history.
+    await request(app)
+      .post(`/session/${sessionId}/mid-turn-message`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ message: '  follow up mid turn  ' })
+      .expect(200);
+
+    // 4. Shell command records into shell history.
+    await request(app)
+      .post(`/session/${sessionId}/shell`)
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', '127.0.0.1:4170')
+      .set('X-Qwen-Client-Id', 'desktop-client')
+      .send({ command: 'git status' })
+      .expect(200);
+
+    await vi.waitFor(async () => {
+      const promptHist = await request(app)
+        .get('/workspace/input-history?kind=prompt')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(promptHist.status).toBe(200);
+      expect(promptHist.body.entries).toEqual([
+        'check @src/a.ts',
+        'follow up mid turn',
+      ]);
+
+      const shellHist = await request(app)
+        .get('/workspace/input-history?kind=shell')
+        .set('Authorization', 'Bearer tkn')
+        .set('Host', '127.0.0.1:4170');
+      expect(shellHist.status).toBe(200);
+      expect(shellHist.body.entries).toEqual(['git status']);
+    });
+  } finally {
+    await stopCreatedApps();
+    vi.unstubAllEnvs();
+    await fsp.rm(root, { recursive: true, force: true });
+  }
 });
