@@ -821,7 +821,7 @@ describeTui(SUITE, () => {
             (request) => request.transport.closedAt !== undefined,
           ),
         'model requests settle',
-        30_000,
+        TURN_BUDGET,
         () => session!.viewport(),
       );
       await session!.idle(1_000, 30_000);
@@ -1556,15 +1556,17 @@ describeTui(SUITE, () => {
       );
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
     try {
+      const gateStart = Date.now();
       const reply = helperReply();
-      let settled = false;
+      let settledAt = 0;
       void reply.then(
-        () => (settled = true),
-        () => (settled = true),
+        () => (settledAt = Date.now()),
+        () => (settledAt = Date.now()),
       );
       await vi.advanceTimersByTimeAsync(HELPER_GATE_BUDGET - 1_000);
-      expect(settled).toBe(false);
+      expect(settledAt).toBe(0);
       await vi.advanceTimersByTimeAsync(2_000);
+      expect(settledAt - gateStart).toBeGreaterThanOrEqual(HELPER_GATE_BUDGET);
       await expect(reply).rejects.toThrow(
         'the leader records its waiting answer',
       );
