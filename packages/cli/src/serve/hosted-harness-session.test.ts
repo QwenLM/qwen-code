@@ -47564,6 +47564,224 @@ describe('idle suspension', () => {
     }
   });
 
+  it('parks with the approval expiry when it precedes the Turn deadline', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      // The deadline lies past the 60s approval expiry: the clamp must wake
+      // at the expiry, not at the deadline.
+      const clientId = await promptApproval(server, undefined, 120_000);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      const wakeAt = (state.wakeStamps[0] as { parkedTurn: { wakeAt: number } })
+        .parkedTurn.wakeAt;
+      expect(wakeAt).toBeGreaterThan(Date.now() + 55_000);
+      expect(wakeAt).toBeLessThanOrEqual(Date.now() + 60_000);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('parks an approval while an event stream reader is attached', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    const server = await app(true, undefined, true, { idleSuspendMs: 500 });
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('No port');
+    const stream = new AbortController();
+    try {
+      const clientId = await promptApproval(server, undefined, 30_000);
+      const opened = await fetch(
+        `http://127.0.0.1:${address.port}/session/${SESSION_ID}/events`,
+        {
+          headers: {
+            'X-Qwen-Harness-Protocol-Version': '1',
+            'X-Qwen-Harness-Boot-Id': BOOT_ID,
+            'X-Qwen-Client-Id': clientId,
+          },
+          signal: stream.signal,
+        },
+      );
+      expect(opened.status).toBe(200);
+      let ended = false;
+      void (async () => {
+        const reader = opened.body!.getReader();
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) {
+            ended = true;
+            break;
+          }
+        }
+      })();
+      // The park exemption ends the attached stream in teardown instead of
+      // refusing the park across every idle period.
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(() => expect(ended).toBe(true), { timeout: 5000 });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      expect(statsOf(server).cleanSuspensions).toBe(1);
+    } finally {
+      stream.abort();
+      server.closeAllConnections();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('clears the Turn deadline timer at the park so no late abort settles the sealed Turn', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server, undefined, 1_500);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      // Outlive the original deadline: the cleared timer must not fire a
+      // terminal settlement from the dropped resident.
+      await sleep(2_000);
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      expect(
+        journal.events.filter((event) => event.kind === 'turn.settled'),
+      ).toHaveLength(0);
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('parks while retaining the runtime lease the resumed Turn executes against', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptApproval(server, undefined, 30_000);
+      // The lease shape a workspace-profile park holds in production.
+      (
+        wakeDeps.last as {
+          session: {
+            runtimeLeaseHeld?: { promptId: string; runtimeSessionId: string };
+          };
+        }
+      ).session.runtimeLeaseHeld = {
+        promptId: PROMPT_ID,
+        runtimeSessionId: hostedRuntimeSessionId(PROMPT_ID),
+      };
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+      // The retain clause skips the handback for the parked prompt.
+      expect(release).not.toHaveBeenCalled();
+
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      // The resumed Turn still executes against the retained runtime.
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      release.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
   it('keeps an approval resident when Action parking is not advertised', async () => {
     // Wake dispatch stays on so only the Action parking grant gates the park.
     state.wakeDispatch = true;
@@ -47626,6 +47844,12 @@ describe('idle suspension', () => {
       .mockImplementation((key) => {
         if (failed || waiting.mock.calls.length === 0) return get(key);
         failed = true;
+        // The gate re-read must observe this bump: the sealed certificate
+        // has to carry the revision read after the failure, not a stale one.
+        state.approvalSelections.set(SESSION_ID, {
+          mode: 'default',
+          revision: 1,
+        });
         throw new Error('Approval selection is unavailable.');
       });
     try {
@@ -47636,7 +47860,7 @@ describe('idle suspension', () => {
       });
       expect(failed).toBe(true);
       expect(state.wakeStamps[0]).toMatchObject({
-        parkedTurn: { promptId: PROMPT_ID },
+        parkedTurn: { promptId: PROMPT_ID, approvalRevision: 1 },
       });
     } finally {
       read.mockRestore();

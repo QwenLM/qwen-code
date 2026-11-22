@@ -170,6 +170,67 @@ class ManagedApprovalChangeTest {
                 .isEqualTo(TurnExecutionStore.HARNESS_ACTION_PARKED);
     }
 
+    @Test
+    void aSecondLiveTurnKeepsTheParkedCertificateFromExemptingTheApprovalChange() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        String turnId = parkedApprovalTurn();
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                + "status,gmt_create,gmt_modified) VALUES (?,?,'second-turn','second-prompt','[]','digest2','RUNNING',0,0)",
+                tenant, session);
+
+        assertCode(() -> change("actor", "parked-second-turn", "yolo", 0), "session_context_busy");
+
+        assertThat(store.findTurn(tenant, session, turnId).orElseThrow().errorCode())
+                .isEqualTo(TurnExecutionStore.HARNESS_ACTION_PARKED);
+    }
+
+    @Test
+    void aForeignRequestedActionKeepsTheParkedCertificateFromExemptingTheApprovalChange() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        String turnId = parkedApprovalTurn();
+        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
+                + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json,prompt_id)"
+                + " VALUES (?,?,?,'action','action2',1,1,'ACTION','requested','action2',1,'{}','other-prompt')",
+                "c".repeat(64), tenant, session);
+
+        assertCode(() -> change("actor", "parked-foreign-action", "yolo", 0), "session_context_busy");
+
+        assertThat(store.findTurn(tenant, session, turnId).orElseThrow().errorCode())
+                .isEqualTo(TurnExecutionStore.HARNESS_ACTION_PARKED);
+    }
+
+    @Test
+    void aRulesCarryingChangeIsAdmittedOnAMatchingParkedCertificateAndUnparks() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        when(harness.supportsPermissionRules()).thenReturn(true);
+        String turnId = parkedApprovalTurn();
+        var rules = Map.of("allow", List.of("Read"), "ask", List.of("WebFetch(domain:example.com)"),
+                "deny", List.of("mcp__private__*"));
+
+        var changed = transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "parked-rules", "default", 0, null, rules));
+
+        assertThat(changed.approvalRevision()).isEqualTo(1);
+        assertThat(changed.permissionRules()).isEqualTo(rules);
+        var unParked = store.findTurn(tenant, session, turnId).orElseThrow();
+        assertThat(unParked.errorCode()).isNull();
+        assertThat(unParked.retryAfter()).isNull();
+    }
+
+    @Test
+    void aRulesCarryingChangeOnAMismatchedParkedCertificateStillRefuses() {
+        when(harness.supportsLiveApprovalSelection()).thenReturn(true);
+        when(harness.supportsPermissionRules()).thenReturn(true);
+        parkedApprovalTurn();
+        jdbc.update("UPDATE ma_session_head SET wake_seal_parked_approval_revision=99"
+                + " WHERE tenant_id=? AND session_id=?", tenant, session);
+        var rules = Map.of("allow", List.of("Read"), "ask", List.of("WebFetch(domain:example.com)"),
+                "deny", List.of("mcp__private__*"));
+
+        assertCode(() -> transaction().execute(status -> service.changeWebShellSessionApproval(tenant, "actor", session,
+                "parked-rules-mismatch", "default", 0, null, rules)), "turn_active");
+    }
+
     // A real parked seal through the production park guard: the head
     // certificate, the claimed Turn and the projected Action row all carry
     // the identities the guard joins, never a hand-written Turn error code.
