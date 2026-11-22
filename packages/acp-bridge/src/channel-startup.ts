@@ -38,10 +38,24 @@ import {
   startChannelLivenessMonitor,
   type ChannelLivenessFailure,
 } from './channel-liveness.js';
-import { sampleChannelProcess } from './channel-process-sample.js';
+import {
+  sampleChannelProcess,
+  type ChannelProcessSample,
+} from './channel-process-sample.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import { withTimeout } from './with-timeout.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+
+// Single source for the sample-field guards shared by the kill line and the
+// grace line: an operator comparing both lines from one incident must see
+// one format for the same sample. Field order stays pinned by bridge tests.
+function wchanEvidence(sample: ChannelProcessSample | undefined): string {
+  return sample?.wchan || '?';
+}
+
+function rssMbEvidence(sample: ChannelProcessSample | undefined): string {
+  return sample ? String(Math.round(sample.rssBytes / 1048576)) : '?';
+}
 
 export interface ChannelStartupOptions {
   channelFactory: ChannelFactory;
@@ -464,7 +478,7 @@ export function createChannelStartup({
         // SIGKILL destroys the scene; the evidence must land in the log
         // before the kill so the next incident is triageable.
         const evidenceSuffix = evidence
-          ? ` pid=${info.channel.pid ?? '?'} state=${sample?.state ?? '?'} wchan=${sample?.wchan || '?'} cpuDelta=${evidence.lastCpuDeltaTicks ?? '?'} busy=${evidence.busyExtensions} timeouts=${evidence.consecutiveTimeouts} rssMB=${sample ? Math.round(sample.rssBytes / 1048576) : '?'}`
+          ? ` pid=${info.channel.pid ?? '?'} state=${sample?.state ?? '?'} wchan=${wchanEvidence(sample)} cpuDelta=${evidence.lastCpuDeltaTicks ?? '?'} busy=${evidence.busyExtensions} timeouts=${evidence.consecutiveTimeouts} rssMB=${rssMbEvidence(sample)}`
           : '';
         writeStderrLine(
           `qwen serve: channel liveness failed (${error.code})${evidenceSuffix}; killing channel`,
@@ -484,7 +498,7 @@ export function createChannelStartup({
         sampleProcess: () => sampleChannelProcess(info.channel.pid),
         onBusyExtension: ({ extension, limit, cpuDeltaTicks, sample }) => {
           const graceSuffix = sample
-            ? ` state=${sample.state} wchan=${sample.wchan || '?'} rssMB=${Math.round(sample.rssBytes / 1048576)}`
+            ? ` state=${sample.state} wchan=${wchanEvidence(sample)} rssMB=${rssMbEvidence(sample)}`
             : '';
           writeStderrLine(
             `qwen serve: channel liveness probe timed out but agent pid=${info.channel.pid ?? '?'} consumed CPU (${cpuDeltaTicks} ticks)${graceSuffix}; extending grace ${extension}/${limit}`,

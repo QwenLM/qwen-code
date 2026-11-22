@@ -16823,6 +16823,7 @@ describe('createAcpSessionBridge', () => {
         ).toBe(false);
         expect(Object.values(attrs).every((v) => v !== undefined)).toBe(true);
         expect(vi.mocked(sampleChannelProcess)).toHaveBeenCalledWith(4242);
+        expect(handle.killed).toBe(true);
         const killLines = stderrSpy.mock.calls
           .map((c) => String(c[0]))
           .filter((l) => l.includes('channel liveness failed'));
@@ -16966,6 +16967,7 @@ describe('createAcpSessionBridge', () => {
           'qwen-code.daemon.channel.liveness.busy_extensions': 6,
           'qwen-code.daemon.channel.liveness.consecutive_timeouts': 0,
         });
+        expect(handle.killed).toBe(true);
         await bridge.shutdown();
       } finally {
         stderrSpy.mockRestore();

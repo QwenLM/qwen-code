@@ -48,7 +48,7 @@ This bounds detection to 35 seconds when a child wedges just after a healthy pro
 
 > **Superseded in part (2026-11-21):** the two-strike escalation above now applies only to timeouts with no observed CPU progress. A CPU-advancing agent receives bounded busy extensions (at most six) before condemnation, and every failure and every busy extension carries process evidence (pid, state, wchan, CPU delta, RSS, counters). The 35-second bound therefore holds for zero-CPU wedges only. See [channel liveness busy grace and failure evidence](2026-11-21-channel-liveness-busy-grace.md) ([简体中文](2026-11-21-channel-liveness-busy-grace.zh-CN.md)).
 
-At most two requests can remain unresolved: the first timed-out request and its retry. ACP request ids keep a late first response separate from the retry. Once the channel is condemned, the existing transport teardown closes both.
+A zero-CPU episode leaves at most two requests unresolved: the first timed-out request and its retry. A busy-grace episode leaves up to `1 + CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT` probe requests unresolved — one per window, plus one more when a zero-CPU strike precedes the extensions (seven with the current limit of six) — because each extension issues a fresh `channelPing` with a new nonce and cancels nothing. It is the nonce echo, not the request count, that keeps a late response from being mistaken for the current probe, and the 256-message pipe limit (`ndJsonStream.ts` `maxQueuedMessages`) keeps the extra outstanding pings well inside the queue budget. Once the channel is condemned, the existing transport teardown closes all of them.
 
 ## Host suspend and parent stalls
 

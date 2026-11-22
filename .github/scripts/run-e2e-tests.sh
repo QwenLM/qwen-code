@@ -125,6 +125,7 @@ bulk_args=(
   --exclude '**/channel-plugin.test.ts'
   --exclude '**/chat-transcript-document.test.ts'
   --exclude '**/qwen-serve-routes.test.ts'
+  --exclude '**/cli/qwen-serve-liveness-grace.test.ts'
   --exclude '**/sdk-typescript/**'
   --poolOptions.forks.maxForks=3
   --shard="$shard"
@@ -132,7 +133,7 @@ bulk_args=(
 
 run_shard() {
   run_vitest "${bulk_args[@]}" &&
-    run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1
+    run_vitest sdk-typescript cli/qwen-serve-routes.test.ts cli/qwen-serve-liveness-grace.test.ts --poolOptions.forks.maxForks=1
 }
 
 if [ "$sandbox" = 'sandbox:docker' ]; then

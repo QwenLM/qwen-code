@@ -48,7 +48,7 @@ qwen/status/channel/ping { v: 1, nonce: N }
 
 > **部分被取代（2026-11-21）：** 上述两次 strike 升级如今只适用于没有观察到 CPU 进展的超时。消耗 CPU 的 agent 在被判处失败前获得有界忙碌宽限（至多 6 次），且每次失败与每次忙碌宽限都携带进程证据（pid、state、wchan、CPU 增量、RSS、计数器）。因此 35 秒上界只对零 CPU 卡死成立。见 [通道 liveness 忙碌宽限与失败证据](2026-11-21-channel-liveness-busy-grace.zh-CN.md)（[English](2026-11-21-channel-liveness-busy-grace.md)）。
 
-至多两个请求可以保持未决：第一个超时请求及其重试。ACP 请求 id 使迟到的第一次响应与重试分离。通道一旦被判处失败，既有传输 teardown 关闭两者。
+零 CPU 周期至多留下两个未决请求：第一个超时请求及其重试。忙碌宽限周期至多留下 `1 + CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT` 个未决探测请求——每个窗口一个，若宽限之前还有一次零 CPU strike 则再加一个（当前上限 6 时为 7 个）——因为每次宽限都以新 nonce 再发一个 `channelPing` 且不取消任何请求。使迟到响应不被误认为当前探测的是 nonce 回显而非请求计数；256 条管道上限（`ndJsonStream.ts` 的 `maxQueuedMessages`）保证这些额外未决 ping 远未触及队列预算。通道一旦被判处失败，既有传输 teardown 关闭全部。
 
 ## 宿主挂起与父进程停摆
 
