@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { reachableEntries } from '../../../src/peer/directory.js';
 import type { SessionRecord } from '../../../src/peer/registry.js';
 
@@ -16,17 +16,48 @@ describe('peer discovery under a finite descriptor budget', () => {
       qwenVersion: null,
       ipcPath: `/tmp/peer-${index}.sock`,
     }));
+    records.splice(10, 0, {
+      ...records[0]!,
+      sessionId: 'shared-inbox-session',
+      name: 'shared-inbox-peer',
+    });
+    const firstPath = records[0]!.ipcPath!;
+    const secondPath = records[1]!.ipcPath!;
+    let releaseFirst!: () => void;
+    const firstReady = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
     let inFlight = 0;
-    const peers = await reachableEntries(records, async () => {
+    let peak = 0;
+    const completed: string[] = [];
+    const probe = vi.fn(async (path: string) => {
       // Descriptor exhaustion makes the real probe return unknown, even
       // though the peer is alive. Leave room for a realistic small budget.
-      if (inFlight >= 32) return 'unknown';
+      if (inFlight >= 32) return 'unknown' as const;
       inFlight++;
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      peak = Math.max(peak, inFlight);
+      if (path === firstPath) await firstReady;
+      else await new Promise<void>((resolve) => setImmediate(resolve));
+      completed.push(path);
       inFlight--;
-      return 'alive';
+      return 'alive' as const;
     });
+    const finding = reachableEntries(records, probe);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseFirst();
+    const peers = await finding;
 
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(16);
+    expect(completed.indexOf(secondPath)).toBeLessThan(
+      completed.indexOf(firstPath),
+    );
+    expect(probe).toHaveBeenCalledTimes(
+      new Set(records.map((record) => record.ipcPath)).size,
+    );
+    expect(
+      probe.mock.calls.filter(([path]) => path === firstPath),
+    ).toHaveLength(1);
     expect(peers.map((peer) => peer.sessionId)).toEqual(
       records.map((record) => record.sessionId),
     );
