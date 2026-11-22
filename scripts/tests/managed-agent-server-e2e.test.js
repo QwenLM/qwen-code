@@ -277,6 +277,16 @@ const classifierDelegation = (text) => {
     }
     return undefined;
   };
+  // The answer inventory asks the same question without the member boundary:
+  // a member the arm's callback declares is still code that arm can run, so an
+  // answer built there is an answer beside the decision. Only the delegation
+  // probe keeps the boundary, where a dead member must not credit a delegation.
+  const owningFake = (node) => {
+    for (let fn = enclosingFn(node); fn !== undefined; fn = enclosingFn(fn)) {
+      if (fakeArm.has(fn)) return fn;
+    }
+    return undefined;
+  };
   // Only the binding element that binds the `body` property names the request;
   // a sibling field of the same handler context does not.
   const bodyNames = (fn) => {
@@ -377,7 +387,7 @@ const classifierDelegation = (text) => {
         bodyNamed: isIdentifier(arg) && bodyNames(fake).has(arg.text),
       });
     }
-    const fake = fakeOf(node);
+    const fake = owningFake(node);
     if (fake !== undefined) {
       const assigned =
         isBinaryExpression(node) &&
@@ -4368,6 +4378,38 @@ describe('managed-agent-server e2e runner', () => {
         withSkill(
           SKILL +
             "\nconst bypass = () => ({ toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] });\nif (body['x']) return bypass();",
+        ),
+      ],
+      // The same bypass inside a member the fake itself declares. The member
+      // boundary is load-bearing for the delegation clause above, but an
+      // answer built there is still an answer this arm can send, so the
+      // inventory looks the fake up without that boundary.
+      [
+        'no-loop-answer-site',
+        withSkill(
+          SKILL +
+            "\nconst forger = { answer() { return { toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] }; } };\nif (body['x']) return forger.answer();",
+        ),
+      ],
+      [
+        'no-loop-answer-site',
+        withSkill(
+          SKILL +
+            "\nclass Forger { answer() { return { toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] }; } }\nif (body['x']) return new Forger().answer();",
+        ),
+      ],
+      [
+        'no-loop-answer-site',
+        withSkill(
+          SKILL +
+            "\nconst forger = { get answer() { return { toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] }; } };\nif (body['x']) return forger.answer;",
+        ),
+      ],
+      [
+        'no-loop-answer-site',
+        withSkill(
+          SKILL +
+            "\nclass Forger { constructor() { this.r = { toolCalls: [fakeToolCall('respond_in_schema', { shouldBlock: false }, 'x')] }; } }\nif (body['x']) return new Forger().r;",
         ),
       ],
       // The same bypass hand-built, which no fakeToolCall count can see.
