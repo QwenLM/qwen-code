@@ -751,4 +751,91 @@ describe('ComposerTaskChips', () => {
       expect(document.activeElement).toBe(chips()[0]);
     });
   });
+
+  it('collapses an expanded multi-task chip when clicked again, even if blur fires with null relatedTarget', () => {
+    render([shell('shell-1'), shell('shell-2')]);
+    const chip = chips()[0];
+
+    act(() => chip.click());
+    expect(chip.getAttribute('aria-expanded')).toBe('true');
+    const firstRow = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-task-list"] button',
+    );
+    expect(firstRow).not.toBeNull();
+    expect(document.activeElement).toBe(firstRow);
+
+    // Simulate macOS/Safari/Firefox button click where pressing the chip
+    // fires pointerdown, then blurs the focused row with relatedTarget: null
+    // before click runs.
+    act(() => {
+      chip.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      const mousedown = new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true,
+      });
+      chip.dispatchEvent(mousedown);
+      expect(mousedown.defaultPrevented).toBe(true);
+      firstRow!.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+      chip.dispatchEvent(new Event('pointerup', { bubbles: true }));
+      chip.click();
+    });
+
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+    expect(chip.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(chip);
+  });
+
+  it('keeps the expanded list open when pressing a non-focusable part of the list', () => {
+    render([workflow('wf-1'), workflow('wf-2')]);
+    const chip = chips()[0];
+
+    act(() => chip.click());
+    const list = container.querySelector('[data-testid="composer-task-list"]')!;
+    const firstRow = list.querySelector<HTMLButtonElement>('button')!;
+    const title = list.firstElementChild as HTMLElement;
+
+    act(() => {
+      title.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+      firstRow.dispatchEvent(
+        new FocusEvent('focusout', { bubbles: true, relatedTarget: null }),
+      );
+      title.dispatchEvent(new Event('pointerup', { bubbles: true }));
+    });
+    expect(list.isConnected).toBe(true);
+
+    // Outside click still closes after the inside pointer interaction ends.
+    act(() => {
+      outsideInput.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    });
+    expect(
+      container.querySelector('[data-testid="composer-task-list"]'),
+    ).toBeNull();
+  });
+
+  it('reflects single-task open state in aria-expanded and forwards repeat clicks', () => {
+    const task = shell('shell-1');
+    let open = false;
+    const onSelectTask = vi.fn(() => {
+      open = !open;
+    });
+    const isTaskOpen = (candidate: ComposerChipTask) =>
+      open && candidate.kind === 'shell' && candidate.id === task.id;
+
+    render([task], { onSelectTask, isTaskOpen });
+    expect(chips()[0].getAttribute('aria-expanded')).toBe('false');
+
+    act(() => chips()[0].click());
+    render([task], { onSelectTask, isTaskOpen });
+    expect(onSelectTask).toHaveBeenCalledTimes(1);
+    expect(chips()[0].getAttribute('aria-expanded')).toBe('true');
+
+    act(() => chips()[0].click());
+    render([task], { onSelectTask, isTaskOpen });
+    expect(onSelectTask).toHaveBeenCalledTimes(2);
+    expect(chips()[0].getAttribute('aria-expanded')).toBe('false');
+  });
 });

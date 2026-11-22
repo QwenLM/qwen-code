@@ -993,6 +993,9 @@ const {
       latestTaskChipsOnSelectTask: null as
         | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
         | null,
+      latestTaskChipsIsTaskOpen: null as
+        | ((task: DaemonSessionTaskWithWorkflowStatus) => boolean)
+        | null,
       latestTaskChipsOnExplainTask: null as
         | ((task: DaemonSessionTaskWithWorkflowStatus) => void)
         | null,
@@ -2483,11 +2486,13 @@ vi.doMock('./components/ComposerTaskChips', async () => {
       tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
       includeAgents: boolean;
       onSelectTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+      isTaskOpen?: (task: DaemonSessionTaskWithWorkflowStatus) => boolean;
       onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
     }) {
       testState.latestTaskChipsTasks = props.tasks;
       testState.latestTaskChipsIncludeAgents = props.includeAgents;
       testState.latestTaskChipsOnSelectTask = props.onSelectTask;
+      testState.latestTaskChipsIsTaskOpen = props.isTaskOpen ?? null;
       testState.latestTaskChipsOnExplainTask = props.onExplainTask ?? null;
       return React.createElement('div', {
         'data-testid': 'composer-task-chips',
@@ -13811,6 +13816,7 @@ beforeEach(() => {
   testState.latestTaskChipsTasks = null;
   testState.latestTaskChipsIncludeAgents = null;
   testState.latestTaskChipsOnSelectTask = null;
+  testState.latestTaskChipsIsTaskOpen = null;
   testState.latestTaskChipsOnExplainTask = null;
   testState.latestMessageListProps = null;
   testState.backgroundDetails = undefined;
@@ -21967,6 +21973,149 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(testState.latestTasksStatusProps).not.toBeNull();
+  });
+
+  it('collapses a shell or monitor right-panel tab when its chip is clicked again, and switches when another chip is clicked', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-toggle',
+      label: 'npm run dev',
+      description: 'npm run dev',
+      status: 'running',
+      startTime: 1,
+      runtimeMs: 10,
+      command: 'npm run dev',
+      cwd: '/tmp/project',
+    };
+    const monitor: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-toggle',
+      label: 'Watch server log',
+      description: 'Watch server log',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+    };
+    const { container } = renderApp();
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+
+    // First click opens the shell tab.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    // Clicking a different chip switches to its tab without closing the panel.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelectorAll('button[title="Close"]')).toHaveLength(2);
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(true);
+
+    // Clicking the currently active monitor chip collapses the right panel.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(monitor);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(monitor)).toBe(false);
+
+    // Clicking the shell chip opens it again cleanly, then clicking it again collapses.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="npm"]')).not.toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(true);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(container.querySelector('button[title="Close"]')).toBeNull();
+    expect(testState.latestTaskChipsIsTaskOpen?.(shell)).toBe(false);
+  });
+
+  it('toggles an unlinked workflow tasks dialog closed on repeat chip click and drops stale in-flight responses', async () => {
+    mockConnection.supportedCommands = { workflowsEnabled: true };
+    const { container } = renderApp();
+    await flush();
+
+    type WorkflowTasksSnapshot = Awaited<
+      ReturnType<typeof mockSessionActions.getWorkflowTasks>
+    >;
+    const first = deferred<WorkflowTasksSnapshot>();
+    const second = deferred<WorkflowTasksSnapshot>();
+    mockSessionActions.getWorkflowTasks
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+    });
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+    });
+    await act(async () => {
+      second.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 2,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      true,
+    );
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+
+    // Clicking the workflow chip again closes the tasks dialog without refetching.
+    await act(async () => {
+      testState.latestTaskChipsOnSelectTask?.(unlinkedWorkflowTask);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.getWorkflowTasks).toHaveBeenCalledTimes(2);
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    // Resolving the earlier in-flight request must not re-open the closed dialog.
+    await act(async () => {
+      first.resolve({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      });
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(testState.latestTaskChipsIsTaskOpen?.(unlinkedWorkflowTask)).toBe(
+      false,
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
   });
 
   it('passes agent tasks to a host-provided footer', () => {

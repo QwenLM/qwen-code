@@ -44,6 +44,8 @@ export interface ComposerTaskChipsProps {
   includeAgents: boolean;
   /** Open the task: locate a workflow in the transcript, open a shell's output, … */
   onSelectTask: (task: ComposerChipTask) => void;
+  /** Whether a single-task chip's target panel or dialog is currently open. */
+  isTaskOpen?: (task: ComposerChipTask) => boolean;
   /** Ask the model to explain the task as a side question, without opening it. */
   onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
@@ -123,7 +125,14 @@ export const ComposerTaskChips = forwardRef<
   ComposerTaskChipsHandle,
   ComposerTaskChipsProps
 >(function ComposerTaskChips(
-  { tasks, includeAgents, onSelectTask, onExplainTask, onReturnToInput },
+  {
+    tasks,
+    includeAgents,
+    onSelectTask,
+    isTaskOpen,
+    onExplainTask,
+    onReturnToInput,
+  },
   ref,
 ) {
   const { t } = useI18n();
@@ -141,6 +150,7 @@ export const ComposerTaskChips = forwardRef<
   const focusedElementRef = useRef<{ element: HTMLElement; root: Node } | null>(
     null,
   );
+  const pointerDownInsideRef = useRef(false);
   const now = useSharedNow(Boolean(openGroup));
 
   useImperativeHandle(
@@ -197,12 +207,26 @@ export const ComposerTaskChips = forwardRef<
       if (rootRef.current && event.composedPath().includes(rootRef.current)) {
         return;
       }
+      pointerDownInsideRef.current = false;
       focusedElementRef.current = null;
       setOpenKind(null);
     };
+    const clearInsidePointerDown = () => {
+      pointerDownInsideRef.current = false;
+    };
     document.addEventListener('pointerdown', closeOnOutsidePointerDown);
-    return () =>
+    document.addEventListener('pointerup', clearInsidePointerDown, true);
+    document.addEventListener('pointercancel', clearInsidePointerDown, true);
+    return () => {
+      pointerDownInsideRef.current = false;
       document.removeEventListener('pointerdown', closeOnOutsidePointerDown);
+      document.removeEventListener('pointerup', clearInsidePointerDown, true);
+      document.removeEventListener(
+        'pointercancel',
+        clearInsidePointerDown,
+        true,
+      );
+    };
   }, [openGroup]);
 
   if (groups.length === 0) return null;
@@ -250,7 +274,12 @@ export const ComposerTaskChips = forwardRef<
       selectTask(group.tasks[0]);
       return;
     }
-    setOpenKind((current) => (current === group.kind ? null : group.kind));
+    if (openKind === group.kind) {
+      setOpenKind(null);
+      chipRefs.current.get(group.kind)?.focus({ preventScroll: true });
+      return;
+    }
+    setOpenKind(group.kind);
   };
 
   const focusChipAt = (index: number) => {
@@ -325,6 +354,9 @@ export const ComposerTaskChips = forwardRef<
       className={styles.root}
       data-web-shell-composer-task-chips=""
       data-testid="composer-task-chips"
+      onPointerDown={() => {
+        if (openGroup) pointerDownInsideRef.current = true;
+      }}
       onFocus={(event) => {
         focusedElementRef.current = {
           element: event.target,
@@ -333,8 +365,9 @@ export const ComposerTaskChips = forwardRef<
       }}
       onBlur={(event) => {
         if (
-          event.relatedTarget instanceof Node &&
-          event.currentTarget.contains(event.relatedTarget)
+          pointerDownInsideRef.current ||
+          (event.relatedTarget instanceof Node &&
+            event.currentTarget.contains(event.relatedTarget))
         ) {
           return;
         }
@@ -410,11 +443,20 @@ export const ComposerTaskChips = forwardRef<
               className={styles.chip}
               data-kind={group.kind}
               data-waiting={waiting ? '' : undefined}
-              aria-expanded={multiple ? openGroup === group : undefined}
+              aria-expanded={
+                multiple
+                  ? openGroup === group
+                  : isTaskOpen
+                    ? isTaskOpen(group.tasks[0])
+                    : undefined
+              }
               aria-haspopup={multiple ? 'true' : undefined}
               title={
                 multiple ? undefined : taskLabel(group.tasks[0]) || undefined
               }
+              onMouseDown={(event) => {
+                if (openGroup) event.preventDefault();
+              }}
               onClick={() => activateChip(group)}
               onKeyDown={(event) => handleChipKeyDown(event, index)}
             >

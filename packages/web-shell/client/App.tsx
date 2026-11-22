@@ -12799,21 +12799,29 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const tasksDialogOpenRef = useRef(false);
+  tasksDialogOpenRef.current = tasksDialogMessage !== null;
+  const tasksPanelRequestIdRef = useRef(0);
+  const closeTasksPanel = useCallback(() => {
+    tasksPanelRequestIdRef.current += 1;
+    tasksDialogOpenRef.current = false;
+    setTasksDialogMessage(null);
+  }, []);
   const handleOpenMonitorDetails = useCallback(
     (task: DaemonSessionMonitorTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openMonitorPanel(task);
     },
-    [openMonitorPanel],
+    [closeTasksPanel, openMonitorPanel],
   );
   const handleOpenShellDetails = useCallback(
     (task: DaemonSessionShellTaskStatus) => {
-      setTasksDialogMessage(null);
+      closeTasksPanel();
       setBackgroundTasksRefreshTrigger((value) => value + 1);
       openShellPanel(task);
     },
-    [openShellPanel],
+    [closeTasksPanel, openShellPanel],
   );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
@@ -15038,9 +15046,9 @@ export function App({
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
     setBtwMessage(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     lastRecapBlockCountRef.current = 0;
-  }, [connection.sessionId, connection.workspaceCwd]);
+  }, [closeTasksPanel, connection.sessionId, connection.workspaceCwd]);
 
   useEffect(() => {
     const scope = {
@@ -19360,16 +19368,28 @@ export function App({
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
     const owner = sessionOwnerGuard.capture();
+    const requestId = ++tasksPanelRequestIdRef.current;
     const request = workflowsEnabled
       ? sessionActions.getWorkflowTasks()
       : sessionActions.getTasks();
     request
       .then((snapshot) => {
-        if (!owner.isCurrent()) return;
+        if (
+          !owner.isCurrent() ||
+          tasksPanelRequestIdRef.current !== requestId
+        ) {
+          return;
+        }
+        tasksDialogOpenRef.current = true;
         setTasksDialogMessage({ snapshot });
       })
       .catch((error: unknown) => {
-        if (!owner.isCurrent()) return;
+        if (
+          !owner.isCurrent() ||
+          tasksPanelRequestIdRef.current !== requestId
+        ) {
+          return;
+        }
         if (isSessionDisconnectedError(error)) return;
         reportError(error, 'Failed to load tasks');
       });
@@ -19385,11 +19405,12 @@ export function App({
     if (!requireActiveSessionForLocalCommand()) return false;
     if (!cockpitViewRequested()) updateCockpitLocation(true);
     setActivePanel(null);
-    setTasksDialogMessage(null);
+    closeTasksPanel();
     setMainView('cockpit');
     return true;
   }, [
     approvalOverlayActive,
+    closeTasksPanel,
     requireActiveSessionForLocalCommand,
     sessionWorkflowEnabled,
   ]);
@@ -19577,14 +19598,63 @@ export function App({
     },
     [messages, openTasksPanel, toolRevealStore],
   );
+  const isComposerTaskOpen = useCallback(
+    (task: ComposerChipTask): boolean => {
+      switch (task.kind) {
+        case 'workflow':
+          return tasksDialogMessage !== null;
+        case 'shell':
+          return (
+            artifactPanelOpen && activeArtifactPanelTabId === `shell:${task.id}`
+          );
+        case 'monitor':
+          return (
+            artifactPanelOpen &&
+            activeArtifactPanelTabId === `monitor:${task.id}`
+          );
+        case 'session':
+          return (
+            artifactPanelOpen &&
+            activeArtifactPanelTabId === `session:${task.sessionId}`
+          );
+        case 'agent': {
+          if (!artifactPanelOpen || !connection.sessionId) return false;
+          const byToolUseId = task.toolUseId
+            ? `subagent:${connection.sessionId}:${task.toolUseId}`
+            : null;
+          const byTaskId = `subagent:${connection.sessionId}:${task.id}`;
+          return (
+            activeArtifactPanelTabId === byTaskId ||
+            (byToolUseId !== null && activeArtifactPanelTabId === byToolUseId)
+          );
+        }
+      }
+    },
+    [
+      activeArtifactPanelTabId,
+      artifactPanelOpen,
+      connection.sessionId,
+      tasksDialogMessage,
+    ],
+  );
+
   const openComposerTask = useCallback(
     (task: ComposerChipTask) => {
+      if (task.kind === 'workflow') {
+        if (tasksDialogOpenRef.current) {
+          closeTasksPanel();
+          return;
+        }
+        locateWorkflowTask(task);
+        return;
+      }
+      if (isComposerTaskOpen(task)) {
+        closeArtifactPanel();
+        return;
+      }
       switch (task.kind) {
         case 'session':
           openSessionPanel(task);
-          return;
-        case 'workflow':
-          locateWorkflowTask(task);
           return;
         case 'shell':
           handleOpenShellDetails(task);
@@ -19607,10 +19677,13 @@ export function App({
       }
     },
     [
+      closeArtifactPanel,
+      closeTasksPanel,
       connection.sessionId,
       connection.workspaceCwd,
       handleOpenMonitorDetails,
       handleOpenShellDetails,
+      isComposerTaskOpen,
       locateWorkflowTask,
       messages,
       openSessionPanel,
@@ -24617,7 +24690,7 @@ export function App({
                   : t('tasks.title')
               }
               size="auto"
-              onClose={() => setTasksDialogMessage(null)}
+              onClose={closeTasksPanel}
             >
               <TasksStatusMessage
                 message={tasksDialogMessage}
@@ -24627,13 +24700,13 @@ export function App({
                 onWorkflowRunStarted={() =>
                   setBackgroundTasksRefreshTrigger((value) => value + 1)
                 }
-                onClose={() => setTasksDialogMessage(null)}
+                onClose={closeTasksPanel}
                 planTodos={sessionWorkflowEnabled ? floatingTodos : []}
                 agentTools={
                   sessionWorkflowEnabled ? tasksDialogAgentTools : []
                 }
                 onOpenSubagent={(tool, parentSessionId) => {
-                  setTasksDialogMessage(null);
+                  closeTasksPanel();
                   openSubagentPanel(tool, parentSessionId);
                 }}
                 onOpenMonitor={handleOpenMonitorDetails}
@@ -27376,6 +27449,7 @@ export function App({
                             // their task surfaces.
                             includeAgents={environmentTasksReplacementEnabled}
                             onSelectTask={openComposerTask}
+                            isTaskOpen={isComposerTaskOpen}
                             onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
                           />

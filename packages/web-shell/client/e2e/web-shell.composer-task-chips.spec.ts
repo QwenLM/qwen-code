@@ -210,6 +210,89 @@ test('a chip for several runs lists them to pick from', async ({
   ).toBeVisible();
 });
 
+test('clicking an expanded multi-task chip again collapses its list', async ({
+  page,
+}, testInfo) => {
+  await openSession(page, testInfo, [
+    workflowTask(),
+    workflowTask({
+      id: 'workflow-docs',
+      toolUseId: undefined,
+      label: 'Update the docs',
+      status: 'paused',
+    }),
+  ]);
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '2 workflows' });
+  const list = page.getByTestId('composer-task-list');
+
+  await chip.click();
+  await expect(list).toBeVisible();
+  await expect(chip).toHaveAttribute('aria-expanded', 'true');
+
+  await chip.click();
+  await expect(list).toHaveCount(0);
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+  await expect(chip).toBeFocused();
+});
+
+test('clicking an expanded single-task shell chip again collapses its detail panel', async ({
+  page,
+}, testInfo) => {
+  const shellTask: DaemonSessionShellTaskStatus = {
+    kind: 'shell',
+    id: 'shell-collapse',
+    label: 'npm run dev',
+    description: 'npm run dev',
+    status: 'running',
+    startTime: Date.now() - 20_000,
+    runtimeMs: 20_000,
+    command: 'npm run dev',
+    cwd: '/workspace',
+  };
+  const events: DaemonEvent[] = [
+    userTextEvent('Run the dev server in the background.', { id: 1 }),
+    toolCallEvent(
+      'shell-call',
+      'run_shell_command',
+      { command: 'npm run dev', is_background: true },
+      { id: 2 },
+    ),
+    turnCompleteEvent('shell-collapse', { id: 3 }),
+  ];
+  const scenario = createWebShellDaemonScenario({
+    workflowTasks: [shellTask],
+    events,
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.goto(`/session/${scenario.sessionId}?theme=dark`);
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({
+      sessionId: scenario.sessionId,
+      replayedCount: events.length,
+    }),
+  );
+
+  const chip = page
+    .getByTestId('composer-task-chips')
+    .getByRole('button', { name: '1 shell' });
+  const panelExplain = page.getByTestId('artifact-panel-explain');
+
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+  await chip.click();
+  await expect(panelExplain).toBeVisible();
+  await expect(chip).toHaveAttribute('aria-expanded', 'true');
+
+  await chip.click();
+  await expect(panelExplain).toHaveCount(0);
+  await expect(chip).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('a "?" on a task choice asks a side question for an explanation', async ({
   page,
 }, testInfo) => {
