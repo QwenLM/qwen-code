@@ -5382,6 +5382,13 @@ describe('WebShellSidebar session source switch', () => {
     expect(Boolean(row?.querySelector(scenario.selector))).toBe(
       scenario.activeWorkState === 'active',
     );
+    if (scenario.activeWorkState === 'active') {
+      expect(
+        row
+          ?.querySelector(scenario.selector)
+          ?.classList.contains(sidebarStyles.sessionStatusDotRunning),
+      ).toBe(true);
+    }
   });
 
   it('keeps the scheduled-task marker when a run is grouped by color', async () => {
