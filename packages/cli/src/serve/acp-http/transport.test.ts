@@ -12833,6 +12833,10 @@ describe('ACP WebSocket transport security', () => {
   let server: Server;
   let lanServer: Server | undefined;
   let acpHandle: AcpHttpHandle | undefined;
+  // When set, each upgrade consumes the next queued address, so a test can
+  // address N distinct throttle keys through one socket and then push any
+  // address again to replay it.
+  let remoteAddressQueue: string[] | undefined;
   let port: number;
   let lanPort: number;
   let bridge: FakeBridge;
@@ -12867,6 +12871,7 @@ describe('ACP WebSocket transport security', () => {
       hostname?: string;
       reportedLocalPort?: number;
       reportedRemoteAddress?: string;
+      reportedRemoteAddressQueue?: boolean;
       managedTerminalUpgrade?: MountAcpHttpOptions['managedTerminalUpgrade'];
       desktopRelaySessionId?: string;
     } = {},
@@ -12946,6 +12951,15 @@ describe('ACP WebSocket transport security', () => {
             Object.defineProperty(socket, 'remoteAddress', {
               configurable: true,
               value: opts.reportedRemoteAddress,
+            });
+          });
+        }
+        if (opts.reportedRemoteAddressQueue) {
+          remoteAddressQueue = [];
+          listeningServer.prependListener('upgrade', (_request, socket) => {
+            Object.defineProperty(socket, 'remoteAddress', {
+              configurable: true,
+              value: remoteAddressQueue?.shift() ?? '127.0.0.1',
             });
           });
         }
@@ -13532,6 +13546,90 @@ describe('ACP WebSocket transport security', () => {
       // what the next count carries — not one per attempt.
       expect(line).toMatch(/reasons=\d+ /);
       expect(Number(/reasons=(\d+)/.exec(line)![1])).toBeLessThanOrEqual(17);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('evicts the oldest key once the suppressed-key map is full', async () => {
+    // 256 distinct rejected peers fill the map exactly; the 257th overflows it
+    // and must evict the head of the insertion order. The replayed head then
+    // logs (it is gone). The surviving last key does not, even though the
+    // overflow removed exactly one entry.
+    await startServer({ reportedRemoteAddressQueue: true });
+    if (remoteAddressQueue === undefined) throw new Error('no queue');
+    const queue = remoteAddressQueue;
+    const origin = 'chrome-extension://abcdefghijklmnop';
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const reject = () => wsConnectRaw('127.0.0.1', origin);
+    const peer = (i: number) => `10.9.${i >> 8}.${i & 255}`;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const start = rejections().length;
+      for (let i = 0; i < 257; i++) queue.push(peer(i));
+      for (let i = 0; i < 257; i++) {
+        expect((await reject()).code).toBe(403);
+      }
+      // Every attempt had its own key, so every one logged.
+      expect(rejections().length - start).toBe(257);
+
+      // The head was evicted by the 257th insert: replaying it logs.
+      const before = rejections().length;
+      queue.push(peer(0));
+      expect((await reject()).code).toBe(403);
+      expect(rejections().length - before).toBe(1);
+      // The tail survived: replaying it inside the window is suppressed.
+      queue.push(peer(256));
+      expect((await reject()).code).toBe(403);
+      expect(rejections().length - before).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('re-keys a re-logged entry to the tail of the eviction order', async () => {
+    // A key that logs again must move to the end of the insertion order (the
+    // delete-before-set re-insert). Otherwise it stays at the head and the next
+    // overflow evicts the client that is retrying hardest, restarting its
+    // window on every attempt and bringing the #13966 flood back for exactly
+    // the retry loop this change targets.
+    await startServer({ reportedRemoteAddressQueue: true });
+    if (remoteAddressQueue === undefined) throw new Error('no queue');
+    const queue = remoteAddressQueue;
+    const origin = 'chrome-extension://abcdefghijklmnop';
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const reject = () => wsConnectRaw('127.0.0.1', origin);
+    const peer = (i: number) => `10.8.${i >> 8}.${i & 255}`;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // Fill the map and let the window pass.
+      for (let i = 0; i < 256; i++) queue.push(peer(i));
+      for (let i = 0; i < 256; i++) {
+        expect((await reject()).code).toBe(403);
+      }
+      vi.setSystemTime(Date.now() + 61_000);
+      // Re-log the head key; with the re-insert it moves to the tail.
+      queue.push(peer(0));
+      expect((await reject()).code).toBe(403);
+      // One overflow now evicts peer(1), the oldest, not peer(0).
+      queue.push(peer(256));
+      expect((await reject()).code).toBe(403);
+
+      // peer(0) is still present: a replay inside this window is suppressed.
+      const before = rejections().length;
+      queue.push(peer(0));
+      expect((await reject()).code).toBe(403);
+      expect(rejections().length - before).toBe(0);
+      // peer(1) was evicted: a replay logs.
+      queue.push(peer(1));
+      expect((await reject()).code).toBe(403);
+      expect(rejections().length - before).toBe(1);
     } finally {
       vi.useRealTimers();
     }
