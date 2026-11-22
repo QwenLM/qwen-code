@@ -272,7 +272,10 @@ reconstruction that survived normal identity and non-model coverage.
 Old runs without identities keep their earliest-run prefix for disjoint history
 while still allowing such explicitly identified late calls; missing identities
 or unusable times outside this rule remain a disclosed, bounded join ambiguity,
-not proof of a new request.
+not proof of a new request. An unparseable conversation-level start or end clock
+invalidates the cumulative transcript reconstruction, not already identified
+post-boundary supplements; those supplements must survive the null-record
+return instead of being lost with the invalid conversation clock.
 
 The minimum cache signature is the file's `(mtimeMs, size)`, exact `beforeMs`
 and `afterMs`, and the sorted known execution-id set. A new persisted run can
@@ -387,9 +390,10 @@ rule to both the table and the delta; it does not invent an independent coverage
 interpretation. `TokenUsageDayModelTotals` gained `apiDurationMs` so successful-
 response latency comes from the per-request ledger. Failed attempts stay in
 optional per-model run metadata (`errors`, `errorLatencyMs`), and the shared
-table supplements their count/duration only for a run covered by the successful
-ledger. It does not create an artificial zero-token ledger day that could
-otherwise authorize discarding older successful sessions. Failure day attribution
+table supplements their count/duration only for a model covered by the
+successful ledger. An uncovered sibling model must not discard those errors.
+It does not create an artificial zero-token ledger day that could otherwise
+authorize discarding older successful sessions. Failure day attribution
 remains session-record based; both surfaces use the same arithmetic. Each
 ledger day/model total is cloned before that supplementation, so rebuilding a
 dashboard repeatedly from cached sources cannot re-accumulate failure requests
@@ -506,9 +510,9 @@ than a fabricated attribution.
 - **Missing provider totals follow auth semantics.** When a provider omits
   `total_token_count`, `apiResponseEventToTokenUsageRecord` asks the shared
   `outputIncludesThoughts` helper instead of unconditionally adding reasoning.
-  OpenAI chat completions, OpenAI Responses and Qwen OAuth already include
-  reasoning in output; Gemini-style providers keep it separate. The generic
-  fallback for unrecognized conventions remains unchanged.
+  OpenAI chat completions, OpenAI Responses, Qwen OAuth and Qwen subscription
+  auth already include reasoning in output; Gemini-style providers keep it
+  separate. The generic fallback for unrecognized conventions remains unchanged.
 - **Legacy totals are normalized per persisted record.** A pre-upgrade writer
   could include reasoning in `totalTokens` even when `outputTokens` already did.
   The ledger reader uses `authType` while accumulating each row, then carries
@@ -516,6 +520,8 @@ than a fabricated attribution.
   The API and exported summaries preserve the provider-reported `outputTokens`,
   while `totalTokens` contains billing output with reasoning counted once. This
   changes only the read-side view; it neither rewrites nor migrates old rows.
+  A provider's positive total is retained when its normalized input/output
+  components are zero, so total-only responses are not suppressed.
 - **Legacy managed usage keeps its closed api shape.** Failure-latency tracking
   remains available to the usage statistics, but the non-diagnostics managed
   serializer strips that new counter from model and source `api` objects rather

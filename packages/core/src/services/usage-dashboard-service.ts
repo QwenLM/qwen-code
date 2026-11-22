@@ -254,7 +254,6 @@ export function buildUsageDayTable(
     }
   }
   for (const record of records) {
-    if (!recordTouchesLedgerDays(record, ledgerDaily, ledgerDays)) continue;
     const day = localDateKey(record.timestamp);
     for (const [model, metrics] of Object.entries(record.models)) {
       if (

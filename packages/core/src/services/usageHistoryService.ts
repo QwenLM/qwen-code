@@ -682,7 +682,11 @@ async function summarizeTranscriptFile(
   const startTime = new Date(header.timestamp).getTime();
   const endTime = endTs ? new Date(endTs).getTime() : NaN;
   if (isNaN(startTime) || isNaN(endTime)) {
-    return { sessionId, record: null };
+    return {
+      sessionId,
+      record: null,
+      ...(supplements.length > 0 ? { supplements } : {}),
+    };
   }
   return {
     sessionId,

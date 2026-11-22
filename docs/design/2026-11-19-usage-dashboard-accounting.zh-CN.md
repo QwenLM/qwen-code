@@ -179,6 +179,8 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 无身份的旧 run 继续使用最早运行起点恢复不相交历史，同时仍可保留这类有明确身份的迟到调用；超出这条规则的未知身份或不可用时间仍是有界且公开的连接歧义，
 不能用来证明一次新请求。缓存签名至少包含文件 `(mtimeMs, size)`、精确 `beforeMs`、`afterMs` 与排序后的已知执行 id 集合；
 新 run 落盘改变归属时，不能错误复用旧归属下的补充。内存缓存不会让边界补充变成持久化副本。
+无法解析的会话级起止时钟使整会话累计重建无效，但不能连带丢弃已经识别的边界后补充；
+即使返回 `record: null`，这些补充也必须保留，而不是随无效会话时钟一起丢失。
 
 来源标记、可选 `requestExecutionIds` 数组及可选失败次数/耗时元数据都是增量补充；所有按 `version === 1` 过滤的读取方继续可用，无需 schema 迁移或就地改写历史。
 
@@ -240,7 +242,7 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 `buildUsageDayTable(records, ledgerDaily)` 与 `sumUsageWindowByModel(table, startKey, endKey)`——
 两个表面共用，因此不可能漂移。`recordTouchesLedgerDays` 同时向日表与环比提供唯一运行跨度覆盖判定，
 不能各自另造口径。`TokenUsageDayModelTotals` 增加了 `apiDurationMs`，成功响应耗时来自逐请求台账。
-失败次数与耗时使用 run 中可选的 `errors`、`errorLatencyMs`，共享表只给被成功台账覆盖的 run 补入这些数值。
+失败次数与耗时使用 run 中可选的 `errors`、`errorLatencyMs`，共享表按模型只给被成功台账覆盖的模型补入这些数值，相邻模型未覆盖时也不能丢弃这些错误。
 它不生成虚假的零 token 台账日，因此失败不能授权丢弃更早的真实成功会话；失败归属日沿用 session 记录，两个表面采用同一套算术。
 补入前逐日 / 模型克隆台账合计，避免从缓存源反复构建面板时重复累加失败次数或耗时。
 
@@ -310,12 +312,13 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   这里的边界与少算是有意选择并已公开，而不是让各处暗中改口径。
 - **provider 不报 total 时遵循 auth 语义。** 缺少 `total_token_count` 时，
   `apiResponseEventToTokenUsageRecord` 改用共享的 `outputIncludesThoughts`，而不是无条件加推理。
-  OpenAI chat completions、OpenAI Responses 与 Qwen OAuth 的 output 已含推理；Gemini 类 provider 的推理另计。
-  未识别 provider 的通用回退保持不变。
+  OpenAI chat completions、OpenAI Responses、Qwen OAuth 与 Qwen subscription 的 output 已含推理；
+  Gemini 类 provider 的推理另计。未识别 provider 的通用回退保持不变。
 - **逐条读取时归一化旧合计。** 升级前的写入方可能在 `outputTokens` 已含推理时又把推理计入 `totalTokens`。
   台账读取在逐条聚合时依据 `authType` 采用只计一次推理的 output，并将 input 与该 output 之和带入按日 / 模型及查询合计。
   API 与导出摘要保留 provider 原样报告的 `outputTokens`；`totalTokens` 则使用只计一次推理的计费 output。
-  这只改变读取视图，不写回或迁移旧行。
+  这只改变读取视图，不写回或迁移旧行。provider 有正的总数、而 input / output 规范化分项之和为 0 时，
+  读取方保留原总数，不把只有总数的响应误判为零消耗。
 - **旧版托管用量保持封闭的 api 形状。** 失败耗时仍可供用量统计使用，但非 diagnostics 的托管序列化会移除
   model 与 source 的 `api` 对象里的这个新增计数，不扩展消费方恰好三个键的既有契约。
 - **覆盖须对齐模型与共享会话身份。** 台账读取把持久化的 `sessionId` 索引保存在私有 WeakMap 中，

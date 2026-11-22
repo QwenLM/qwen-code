@@ -1109,6 +1109,49 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(supplement?.models['qwen-max']?.totalTokens).toBe(500);
   });
 
+  it('retains identified supplements when the conversation clock is unparseable', async () => {
+    const sessionId = 'sess-corrupt-clock-and-late';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 100,
+      tokens: 50,
+      assistant: true,
+    });
+    const [header, ...remaining] = fs
+      .readFileSync(filePath, 'utf8')
+      .trimEnd()
+      .split('\n');
+    fs.writeFileSync(
+      filePath,
+      [
+        JSON.stringify({ ...JSON.parse(header), timestamp: 'not-a-date' }),
+        ...remaining,
+      ].join('\n') + '\n',
+    );
+    seedPersisted([
+      runRec(
+        sessionId,
+        100,
+        Date.parse('2026-06-11T00:02:00.000Z'),
+        Date.parse('2026-06-11T00:04:00.000Z'),
+      ),
+    ]);
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:05:00.000Z',
+      'late-identified-call',
+    );
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(600);
+    const supplement = records.find((r) => r.transcriptSupplement === true);
+    expect(supplement?.requestExecutionIds).toEqual(['late-identified-call']);
+    expect(supplement?.models['qwen-max']?.totalTokens).toBe(500);
+  });
+
   it('keeps a later native call beside an identified run instead of truncating or choosing the old snapshot', async () => {
     const sessionId = 'sess-native-after-run';
     const filePath = writeTranscript('repro-project', sessionId, {

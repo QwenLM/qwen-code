@@ -382,6 +382,51 @@ describe('loadUsageDashboard', () => {
     expect(summary.requests).toBe(2);
   });
 
+  it('keeps a covered model failures beside an uncovered sibling model', () => {
+    const timestamp = Date.now();
+    const record = rec({
+      sessionId: 'mixed-model-failure',
+      timestamp,
+      model: {
+        requests: 2,
+        inputTokens: 120,
+        totalTokens: 120,
+        totalLatencyMs: 200,
+        errors: 1,
+        errorLatencyMs: 150,
+      },
+    });
+    record.models['other-model'] = {
+      ...rec({
+        sessionId: record.sessionId,
+        timestamp,
+        model: { requests: 1, totalTokens: 500 },
+      }).models['qwen-max']!,
+    };
+    const ledger: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(timestamp),
+        ledgerDay('qwen-max', {
+          requests: 1,
+          inputTokens: 120,
+          apiDurationMs: 50,
+        }),
+      ],
+    ]);
+
+    const table = buildUsageDayTable([record], ledger);
+
+    expect(table.get(dayKey(timestamp))?.get('qwen-max')).toMatchObject({
+      requests: 2,
+      totalTokens: 120,
+      apiDurationMs: 200,
+    });
+    expect(table.get(dayKey(timestamp))?.get('other-model')).toMatchObject({
+      requests: 1,
+      totalTokens: 500,
+    });
+  });
+
   it('retains failed requests and their duration beside successful ledger usage', () => {
     const timestamp = Date.now();
     const records = [

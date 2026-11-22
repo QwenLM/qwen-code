@@ -419,6 +419,22 @@ describe('tokenUsageService', () => {
     ]);
   });
 
+  it('preserves a provider grand total when token components are absent', async () => {
+    await recordUsage(fakeConfig(), 'total-only', 'prompt-total-only', {
+      promptTokenCount: 0,
+      candidatesTokenCount: 0,
+      cachedContentTokenCount: 0,
+      thoughtsTokenCount: 0,
+      totalTokenCount: 1500,
+    });
+
+    const summary = await queryTokenUsage(may25);
+    const daily = await loadTokenUsageDailyByModel(may25.value);
+
+    expect(summary.totals.totalTokens).toBe(1500);
+    expect(daily.get(may25.value)?.get('total-only')?.totalTokens).toBe(1500);
+  });
+
   it('falls back to component totals when API total is missing', async () => {
     const config = fakeConfig();
 
@@ -439,6 +455,7 @@ describe('tokenUsageService', () => {
     AuthType.USE_OPENAI,
     AuthType.USE_OPENAI_RESPONSES,
     AuthType.QWEN_OAUTH,
+    AuthType.QWEN_SUBSCRIPTION,
   ])('does not add thoughts again for %s when total is missing', (authType) => {
     const event = createEvent(
       'model-a',
@@ -647,63 +664,70 @@ describe('tokenUsageService', () => {
     expect(fileContent).toContain('"model":"model-a"');
   });
 
-  it('reads pre-upgrade chat-completions reasoning only once', async () => {
-    // The old writer could store 1000 + 200 + 50 as total=1250 for openai.
-    const filePath = getTokenUsageFilePath('2026-05');
-    await mkdir(path.dirname(filePath), { recursive: true });
-    await writeFile(
-      filePath,
-      JSON.stringify({
-        schemaVersion: 1,
-        id: 'legacy-reasoning',
-        timestamp: '2026-05-25T10:00:00.000Z',
-        localDate: '2026-05-25',
-        localMonth: '2026-05',
-        sessionId: 'legacy-session',
-        model: 'qwen-model',
-        authType: 'openai',
-        source: 'main',
+  it.each([AuthType.USE_OPENAI, AuthType.QWEN_SUBSCRIPTION])(
+    'reads pre-upgrade chat-completions reasoning only once for %s',
+    async (authType) => {
+      // The old writer could store 1000 + 200 + 50 as total=1250 for openai.
+      const filePath = getTokenUsageFilePath('2026-05');
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(
+        filePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          id: 'legacy-reasoning',
+          timestamp: '2026-05-25T10:00:00.000Z',
+          localDate: '2026-05-25',
+          localMonth: '2026-05',
+          sessionId: 'legacy-session',
+          model: 'qwen-model',
+          authType,
+          source: 'main',
+          inputTokens: 1000,
+          outputTokens: 200,
+          cachedTokens: 0,
+          thoughtsTokens: 50,
+          totalTokens: 1250,
+          apiDurationMs: 50,
+        }) + '\n',
+      );
+
+      const ledgerDaily = await loadTokenUsageDailyByModel('2026-05-25');
+
+      expect(ledgerDaily.get('2026-05-25')?.get('qwen-model')).toMatchObject({
+        outputTokens: 200,
+        totalTokens: 1200,
+      });
+      const dashboard = buildUsageDashboard(
+        [],
+        { range: 'today' },
+        ledgerDaily,
+      );
+      expect(dashboard.summary).toMatchObject({
+        totalTokens: 1200,
         inputTokens: 1000,
         outputTokens: 200,
-        cachedTokens: 0,
         thoughtsTokens: 50,
-        totalTokens: 1250,
-        apiDurationMs: 50,
-      }) + '\n',
-    );
-
-    const ledgerDaily = await loadTokenUsageDailyByModel('2026-05-25');
-
-    expect(ledgerDaily.get('2026-05-25')?.get('qwen-model')).toMatchObject({
-      outputTokens: 200,
-      totalTokens: 1200,
-    });
-    const dashboard = buildUsageDashboard([], { range: 'today' }, ledgerDaily);
-    expect(dashboard.summary).toMatchObject({
-      totalTokens: 1200,
-      inputTokens: 1000,
-      outputTokens: 200,
-      thoughtsTokens: 50,
-      requests: 1,
-    });
-    const summary = await queryTokenUsage({
-      period: 'day',
-      value: '2026-05-25',
-    });
-    expect(summary.totals).toMatchObject({
-      totalTokens: 1200,
-      inputTokens: 1000,
-      outputTokens: 200,
-      thoughtsTokens: 50,
-      requests: 1,
-    });
-    expect(
-      JSON.parse(formatTokenUsageSummaryAsJson(summary)).totals.totalTokens,
-    ).toBe(1200);
-    expect(formatTokenUsageSummaryAsCsv(summary).split('\n')[1]).toBe(
-      'day,2026-05-25,total,total,,,,1,1000,200,0,50,1200,50',
-    );
-  });
+        requests: 1,
+      });
+      const summary = await queryTokenUsage({
+        period: 'day',
+        value: '2026-05-25',
+      });
+      expect(summary.totals).toMatchObject({
+        totalTokens: 1200,
+        inputTokens: 1000,
+        outputTokens: 200,
+        thoughtsTokens: 50,
+        requests: 1,
+      });
+      expect(
+        JSON.parse(formatTokenUsageSummaryAsJson(summary)).totals.totalTokens,
+      ).toBe(1200);
+      expect(formatTokenUsageSummaryAsCsv(summary).split('\n')[1]).toBe(
+        'day,2026-05-25,total,total,,,,1,1000,200,0,50,1200,50',
+      );
+    },
+  );
 
   it('aggregates the ledger per local day and model', async () => {
     const config = fakeConfig();

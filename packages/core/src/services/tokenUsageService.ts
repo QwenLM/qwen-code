@@ -109,13 +109,14 @@ function addRecordToTotals(
   totals: TokenUsageTotals,
   record: TokenUsageRecord,
 ): void {
-  const billingOutputTokens = normalizedOutputTokens(record);
+  const componentTotal = record.inputTokens + normalizedOutputTokens(record);
   totals.requests += 1;
   totals.inputTokens += record.inputTokens;
   totals.outputTokens += record.outputTokens;
   totals.cachedTokens += record.cachedTokens;
   totals.thoughtsTokens += record.thoughtsTokens;
-  totals.totalTokens += record.inputTokens + billingOutputTokens;
+  // Some providers report a grand total without its component counts.
+  totals.totalTokens += componentTotal || record.totalTokens;
   totals.apiDurationMs += record.apiDurationMs;
 }
 
@@ -447,7 +448,8 @@ async function accumulateMonthByDay(
         totals.outputTokens += normalizedOutput;
         totals.cachedTokens += record.cachedTokens;
         totals.thoughtsTokens += record.thoughtsTokens;
-        totals.totalTokens += record.inputTokens + normalizedOutput;
+        const componentTotal = record.inputTokens + normalizedOutput;
+        totals.totalTokens += componentTotal || record.totalTokens;
         totals.apiDurationMs += record.apiDurationMs;
       }
     }
