@@ -564,6 +564,7 @@ describe('model catalog', () => {
     ['deepseek-v3.2-exp'],
     ['deepseek-v3-1'],
     ['deepseek-v3-2'],
+    ['deepseek.v3.2'],
   ])('uses the dashed DeepSeek catalog entry for %s', (model) => {
     // The suffix normalizer collapses terminal dotted versions to `deepseek`.
     // Retry the original id's spelling alias so those ids retain the catalog

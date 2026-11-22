@@ -121,6 +121,13 @@ describe('defaultModalities', () => {
       ['openai/gpt-oss-20b', TEXT_ONLY],
       ['openai.gpt-oss-120b-1:0', TEXT_ONLY],
     ]);
+    casesFor('returns image + pdf for', [
+      [
+        'Bedrock Claude',
+        IMAGE_PDF,
+        'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+      ],
+    ]);
   });
 
   describe('Anthropic Claude', () => {

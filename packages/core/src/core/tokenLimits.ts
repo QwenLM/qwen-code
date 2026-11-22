@@ -160,7 +160,7 @@ export function normalize(model: string): string {
   // provider missing from the list below still keeps its model name.
   s = s.replace(/-(?:v\d+|\d+):\d+$/, '');
   const bedrock = s.match(
-    /^(?:[a-z]+(?:-[a-z]+)?\.)?(anthropic|meta|amazon|mistral|cohere|ai21|deepseek|qwen|openai|moonshotai|google|minimax|nvidia|writer)\.(.+)$/,
+    /^(?:[a-z]+(?:-[a-z]+)?\.)?(anthropic|meta|amazon|mistral|cohere|ai21|deepseek|qwen|openai|moonshotai|google|minimax|nvidia|writer|xai)\.(.+)$/,
   );
   if (bedrock) {
     const model = bedrock[2]!.replace(/-v\d+$/, '');
@@ -374,6 +374,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // OpenAI
   [/^gpt-5/, LIMITS['128k']], // GPT-5.x: 128K
+  [/^gpt-oss/, LIMITS['32k']], // gpt-oss: 32K
   [/^gpt-/, LIMITS['16k']], // GPT fallback: 16K
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
