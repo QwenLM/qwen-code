@@ -785,6 +785,20 @@ describe('local container recipe pins', () => {
         (!/[<>]/.test(unquoted) || /^<[^<>]+>$/.test(unquoted))
       );
     };
+    const validDocumentedPath = (token) => {
+      if (typeof token !== 'string') return false;
+      const path =
+        token.length >= 2 &&
+        ((token.startsWith('"') && token.endsWith('"')) ||
+          (token.startsWith("'") && token.endsWith("'")))
+          ? token.slice(1, -1)
+          : token;
+      return (
+        path.length > 0 &&
+        !path.split('/').includes('..') &&
+        !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path)
+      );
+    };
     const validCoordinate = (raw) => {
       let text = raw.replace(/\s+/g, ' ').trim();
       if (text.endsWith(logSuffix)) {
@@ -828,6 +842,10 @@ describe('local container recipe pins', () => {
         !options.has('--execution')
       ) {
         return false;
+      }
+      for (const option of ['--context-out', '--state-root']) {
+        const path = options.get(option);
+        if (path !== undefined && !validDocumentedPath(path)) return false;
       }
       const approval = options.get('--approval');
       if (
@@ -931,9 +949,17 @@ describe('local container recipe pins', () => {
         );
       }
       if (kind === 'check') {
-        return exact(
-          String.raw` --context ${value} --context-sha256 <digest>(?: --context-root ${value})? ${value}`,
-        ).test(text);
+        const match = text.match(
+          exact(
+            String.raw` --context (${value}) --context-sha256 <digest>(?: --context-root (${value}))? (${value})`,
+          ),
+        );
+        return (
+          match !== null &&
+          match
+            .slice(1)
+            .every((path) => path === undefined || validDocumentedPath(path))
+        );
       }
       if (kind === 'model-proxy') {
         return exact(String.raw` --listen ${value}`).test(text);
@@ -944,13 +970,19 @@ describe('local container recipe pins', () => {
           String.raw` <n> --start --head ${head} --round ${round} --repo ${repo}(?:${stateRoot})?`,
         );
         const complete = exact(
-          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${verdict}(?: --artifact-dir ${value})?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
+          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${verdict}(?: --artifact-dir (${value}))?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
         );
         const release = exact(
           String.raw` <n> --release --head ${head}(?: --round ${round})?(?: --registration-nonce <nonce>)? --repo ${repo}(?:${stateRoot})?`,
         );
         if (start.test(text)) return 'start';
-        if (complete.test(text)) return 'complete';
+        const completed = text.match(complete);
+        if (
+          completed &&
+          (completed[1] === undefined || validDocumentedPath(completed[1]))
+        ) {
+          return 'complete';
+        }
         if (release.test(text)) return 'release';
         return false;
       }
@@ -1005,6 +1037,41 @@ describe('local container recipe pins', () => {
       // program is parsed in full and every command must have a registered shape.
       const fragments = [];
       const foldContinuations = (text) => text.replace(/\\\r?\n[ \t]*/g, '');
+      const heredocDeclarations = (header) =>
+        [
+          ...foldContinuations(header).matchAll(
+            /<<(-?)(?!<)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|([A-Za-z_][A-Za-z0-9_]*))/g,
+          ),
+        ].map((match) => ({
+          stripTabs: match[1] === '-',
+          delimiter: match[2] ?? match[3] ?? match[4],
+        }));
+      const collectHeredocBodies = (lines, start, selected, inputAt) => {
+        const declarations = heredocDeclarations(selected.join('\n'));
+        let index = start;
+        let complete = true;
+        for (const { stripTabs, delimiter } of declarations) {
+          let terminated = false;
+          while (index + 1 < lines.length) {
+            const input = inputAt(index + 1);
+            index += 1;
+            selected.push(input);
+            const withoutCarriageReturn = input.replace(/\r$/, '');
+            const closing = stripTabs
+              ? withoutCarriageReturn.replace(/^\t*/, '')
+              : withoutCarriageReturn;
+            if (closing === delimiter) {
+              terminated = true;
+              break;
+            }
+          }
+          if (!terminated) {
+            complete = false;
+            break;
+          }
+        }
+        return { index, complete };
+      };
       const nodeProgramBoundary = (text) =>
         /^node\s+(?:-|["']?(?:\/|<|\$)|(?:\S+\/\S*|\S+\.[cm]?js)(?=\s|$)|[A-Za-z0-9_.-]+\s*$)/.test(
           text,
@@ -1042,6 +1109,7 @@ describe('local container recipe pins', () => {
         'bash setup.sh | tail -30',
         'chmod 444',
         'chmod 555',
+        'chown -R',
         'cp -a',
         'cp -al',
         'docker cp',
@@ -1062,6 +1130,7 @@ describe('local container recipe pins', () => {
         'qwencode=<n>',
         'ref=refs/heads/<branch>',
         'SANDBOX=sandbox-exec',
+        'yarn --cwd packages/cli build',
       ]);
       const citation = (match) => {
         const content = match[2].trim();
@@ -1127,10 +1196,20 @@ describe('local container recipe pins', () => {
       // such pre-filter: the complete block was already selected above.
       const executableBoundary = (source) => {
         const text = foldContinuations(source).trim();
+        const directProgram =
+          /^(?:"[^"\r\n]+"|'[^'\r\n]+'|(?![-@A-Z])[^\s;|&()]+)\s+(?:-|\/(?=\S)|\.\/)/.test(
+            text,
+          ) ||
+          /^(?:\/[^\s;|&()]+\.(?:sh|bash)|\.\/[^\s;|&()]+\.(?:sh|bash))(?=\s|$)/.test(
+            text,
+          );
+        const compoundControl =
+          /^(?:if|while|until)\s+[^;\r\n]+;\s*(?:then|do)(?=\s|$)/.test(text) ||
+          /^\{\s*[^{}\r\n]+;\s*\}/.test(text);
         const checks = [
           /^gate:/,
           /^(?:NODE_OPTIONS\s*=|alias\s|function\s|node\s*\(\s*\))/,
-          /^command\s+(?:-v(?:\s|$)|["'$/]|(?:node|qwen)(?=\s|$))/,
+          /^command\s+(?:-|["'$/]|(?:node|qwen)(?=\s|$))/,
           /^\/(?:[A-Za-z0-9_.-]+\/)+(?:env|nice|sudo)(?=\s|$)/,
           /^(?:env|nice|sudo|exec|eval|sh|cd|touch|cat|echo|grep|printf|sed|cp|rm|mkdir|chmod|kill|docker|python3?|true)(?=\s|$)/,
           /^read\s+(?:-|[A-Z_][A-Z0-9_]*(?:\s|$))/,
@@ -1138,9 +1217,11 @@ describe('local container recipe pins', () => {
           /^verify-pr-/,
           /^["']?(?:\/[A-Za-z0-9_.-]+)*\/(?:node|bash|sh|verify-pr-[a-z-]+\.mjs)(?=\s|$)/,
           /^qwen\s+-/,
+          /^["']?(?:\/[A-Za-z0-9_.-]+)*\/qwen["']?\s+-/,
+          /^["']?(?:[A-Za-z0-9_.-]+\/)*qwen["']?\s+-/,
           /^(?:bash|sh)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
           /^(?:if|while|until)\s+(?:(?:true|false|command|qwen|node|bash|sh|env|nice|sudo|docker|test)(?=\s|;|$)|\[)/,
-          /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|printf|python3?|true)(?=\s|$))/,
+          /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|echo|touch|printf|python3?|true)(?=\s|$))/,
           /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
           /^(?:export\s+[A-Za-z_][A-Za-z0-9_]*(?:=|\s|$)|unset(?:\s+[A-Za-z_][A-Za-z0-9_]*)+\s*$|[A-Za-z_][A-Za-z0-9_]*=)/,
           /(?:^|[;&|]\s*)(?:["']?(?:\/[A-Za-z0-9_.-]+)*\/node|node)\s+(?:-e|--eval)(?=\s|$)/,
@@ -1149,8 +1230,27 @@ describe('local container recipe pins', () => {
           /^(?=[A-Za-z_$/'"\\`])\S+\s+(?:(?:-e|--eval)(?=\s|$)|["']?\S+\.[cm]?js(?=\s|$))/,
         ];
         return (
-          nodeProgramBoundary(text) || checks.some((check) => check.test(text))
+          nodeProgramBoundary(text) ||
+          directProgram ||
+          compoundControl ||
+          checks.some((check) => check.test(text))
         );
+      };
+      const executableInlineTail = (trailing) => {
+        let remainder = trailing;
+        for (let count = 0; count < 8; count += 1) {
+          const withoutClosers = remainder.replace(/^[ \t]*[)\]}]+[ \t]*/, '');
+          const withoutLink = withoutClosers.replace(
+            /^[ \t]*\[[^\]\r\n]{0,200}\]\([^)\r\n]{0,1000}\)[ \t]*/,
+            '',
+          );
+          if (withoutLink === remainder) break;
+          remainder = withoutLink;
+        }
+        const tail = remainder.match(
+          /^[ \t]*(?:&&|\|\||\|&|[;|&])[ \t]*([\s\S]+)$/,
+        )?.[1];
+        return tail && executableBoundary(tail) ? tail : null;
       };
       for (const body of transcriptBodies) {
         const lines = body.split('\n');
@@ -1159,26 +1259,23 @@ describe('local container recipe pins', () => {
           const raw = lines[index].trim();
           if (prompted === undefined && !executableBoundary(raw)) continue;
           const selected = [prompted ?? raw];
-          const nextInput = () =>
-            lines[index + 1]?.replace(/^[ \t]*>[ \t]?/, '');
+          const inputAt = (line) => lines[line]?.replace(/^[ \t]*>[ \t]?/, '');
           while (
             index + 1 < lines.length &&
             /(?:\\|&&|\|\||\|&?)[ \t]*$/.test(selected.at(-1))
           ) {
-            selected.push(nextInput());
+            selected.push(inputAt(index + 1));
             index += 1;
           }
-          const heredoc = selected[0].match(
-            /<<(-?)[ \t]*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/,
-          );
-          if (heredoc) {
-            while (index + 1 < lines.length) {
-              const input = nextInput();
-              index += 1;
-              selected.push(input);
-              const delimiter = heredoc[1] ? input.trim() : input.trimEnd();
-              if (delimiter === heredoc[2]) break;
-            }
+          if (heredocDeclarations(selected.join('\n')).length > 0) {
+            const collected = collectHeredocBodies(
+              lines,
+              index,
+              selected,
+              inputAt,
+            );
+            index = collected.index;
+            if (!collected.complete) return false;
           }
           fragments.push({ source: selected.join('\n'), quotedGate: false });
         }
@@ -1192,18 +1289,18 @@ describe('local container recipe pins', () => {
       const inlineTailLines = new Set();
       for (const match of spans) {
         if (inFences(match.index)) continue;
+        const lineStart = document.lastIndexOf('\n', match.index - 1) + 1;
+        if (inlineTailLines.has(lineStart)) continue;
         const closing = match.index + match[0].length;
         const lineEnd = document.indexOf('\n', closing);
         const trailing = document.slice(
           closing,
           lineEnd < 0 ? document.length : lineEnd,
         );
-        const tail = trailing.match(
-          /^[ \t]*(?:&&|\|\||\|&|[;|&])[ \t]*([\s\S]+)$/,
-        )?.[1];
-        if (!tail || !executableBoundary(tail)) continue;
+        const tail = executableInlineTail(trailing);
+        if (!tail) continue;
         fragments.push({ source: tail, quotedGate: false });
-        inlineTailLines.add(document.lastIndexOf('\n', match.index - 1) + 1);
+        inlineTailLines.add(lineStart);
       }
       for (const match of spans) {
         if (inFences(match.index) || citation(match)) continue;
@@ -1237,9 +1334,24 @@ describe('local container recipe pins', () => {
           if (!/\\[ \t]*\r?$/.test(line) && !chainContinues) break;
           continuationEnd += 1;
         }
-        const source = rawLines
-          .slice(lineIndex, continuationEnd + 1)
-          .join('\n');
+        const selected = rawLines.slice(lineIndex, continuationEnd + 1);
+        const commandHeader = selected.join('\n');
+        if (
+          !inFence &&
+          !inSpan &&
+          heredocDeclarations(commandHeader).length > 0 &&
+          executableBoundary(commandHeader)
+        ) {
+          const collected = collectHeredocBodies(
+            rawLines,
+            continuationEnd,
+            selected,
+            (line) => rawLines[line],
+          );
+          continuationEnd = collected.index;
+          if (!collected.complete) return false;
+        }
+        const source = selected.join('\n');
         const trimmed = rawLines[lineIndex].trim();
         const plainCitation =
           /^[('"]*(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs[\s'")\],.:]*$/.test(
@@ -1255,7 +1367,7 @@ describe('local container recipe pins', () => {
         });
         const citationLineWithoutExecutableTrailer =
           leadingCitation &&
-          !executableBoundary(
+          !executableInlineTail(
             rawLines[lineIndex].slice(
               leadingCitation.index + leadingCitation[0].length - lineStart,
             ),
@@ -1285,7 +1397,10 @@ describe('local container recipe pins', () => {
           node.type === 'string' &&
           node.namedChildren.every((child) => child.type === 'string_content')
         ) {
-          return raw.slice(1, -1);
+          return raw
+            .slice(1, -1)
+            .replace(/\\(["\\$`])/g, '$1')
+            .replace(/\\\r?\n/g, '');
         }
         if (node.type === 'command_name' && node.namedChildCount === 1) {
           return staticText(node.namedChild(0), source);
@@ -1409,6 +1524,7 @@ describe('local container recipe pins', () => {
           quotedGate,
           trustedDockerExec = false,
           credentialFreeDockerExec = false,
+          protectedOutput = null,
         },
         depth = 0,
       ) => {
@@ -1444,6 +1560,101 @@ describe('local container recipe pins', () => {
               rawValues: commandArguments.map(rawArgument),
             };
           };
+          const protectedOutputTarget = (raw) => {
+            if (raw === '> "$rd/boundary.json"') return 'boundary';
+            if (raw === `> ${cacheRoot}/previous-report.md`) return 'previous';
+            return null;
+          };
+          const canonicalProtectedWriter = (command, target) => {
+            const { name, rawValues } = commandParts(command);
+            return (
+              name === 'printf' &&
+              rawValues.length === 2 &&
+              rawValues[0] === "'%s\\n'" &&
+              rawValues[1] ===
+                (target === 'boundary'
+                  ? '\'{"mode":"container","detail":"<image, network policy, credential-free mount>"}\''
+                  : '"$PREV"')
+            );
+          };
+          const protectedGroups = [];
+          const nestedProtectedOutputs = new Map();
+          const inheritedWriters = (root) => {
+            const writers = [];
+            const visit = (node) => {
+              if (node.type === 'command_substitution') return;
+              if (node.type === 'redirected_statement') {
+                const detached = node.namedChildren.some((child) => {
+                  if (child.type !== 'file_redirect') return false;
+                  const raw = foldContinuations(
+                    source.slice(child.startIndex, child.endIndex),
+                  );
+                  return /^(?:1?>|>&)/.test(raw) && !/^2>/.test(raw);
+                });
+                if (detached) return;
+              }
+              if (node.type === 'command') {
+                writers.push(node);
+                return;
+              }
+              for (const child of node.namedChildren) visit(child);
+            };
+            visit(root);
+            return writers;
+          };
+          walk(tree.rootNode, (node) => {
+            if (node.type !== 'redirected_statement') return;
+            const body = node.childForFieldName('body');
+            if (!body) return;
+            for (const redirect of node.namedChildren) {
+              if (redirect.type !== 'file_redirect') continue;
+              const target = protectedOutputTarget(
+                foldContinuations(
+                  source.slice(redirect.startIndex, redirect.endIndex),
+                ),
+              );
+              if (target) {
+                protectedGroups.push({
+                  target,
+                  writers: inheritedWriters(body),
+                });
+              }
+            }
+          });
+          if (protectedOutput) {
+            protectedGroups.push({
+              target: protectedOutput,
+              writers: inheritedWriters(tree.rootNode),
+            });
+          }
+          const silentControl = (command) => {
+            const { name, values } = commandParts(command);
+            return name === 'true' && values.length === 0;
+          };
+          const nestedShell = (command) => {
+            const { name, values } = commandParts(command);
+            return (
+              ['bash', 'sh', '/bin/bash', '/bin/sh'].includes(name) &&
+              values.length === 2 &&
+              ['-c', '-lc'].includes(values[0]) &&
+              typeof values[1] === 'string'
+            );
+          };
+          for (const { target, writers } of protectedGroups) {
+            const authorities = writers.filter(
+              (command) => !silentControl(command),
+            );
+            if (
+              authorities.length !== 1 ||
+              (!canonicalProtectedWriter(authorities[0], target) &&
+                !nestedShell(authorities[0]))
+            ) {
+              return false;
+            }
+            if (nestedShell(authorities[0])) {
+              nestedProtectedOutputs.set(authorities[0].startIndex, target);
+            }
+          }
           const validFileRedirect = (redirect) => {
             const raw = foldContinuations(
               source.slice(redirect.startIndex, redirect.endIndex),
@@ -1486,7 +1697,7 @@ describe('local container recipe pins', () => {
               return name === 'sed';
             }
             if (raw === `> ${cacheRoot}/previous-report.md`) {
-              return name === 'printf' && rawValues[1] === '"$PREV"';
+              return true;
             }
             if (
               raw === `> ${cacheRoot}/proxy.json` ||
@@ -1498,7 +1709,7 @@ describe('local container recipe pins', () => {
               return name === 'echo' && rawValues.join(' ') === '$!';
             }
             if (raw === '> "$rd/boundary.json"') {
-              return name === 'printf';
+              return true;
             }
             if (raw === '> "$HOME/.qwen/settings.json"') {
               return trustedDockerExec && name === 'cat' && values.length === 0;
@@ -1728,6 +1939,15 @@ describe('local container recipe pins', () => {
                 rawValues.join(' ') === '-r REVIEW_OPENAI_API_KEY'
               );
             }
+            if (name === 'readlink') {
+              return rawValues.length === 2 && rawValues[0] === '-f';
+            }
+            if (name === 'tail') {
+              return (
+                (rawValues.length === 1 && rawValues[0] === '-1') ||
+                rawValues.join(' ') === '-n 1'
+              );
+            }
             if (name === 'rm') {
               if (rawValues[0] === '-f') {
                 return (
@@ -1772,6 +1992,21 @@ describe('local container recipe pins', () => {
             if (!valid) return;
             if (visited > 20_000 || !allowedNodes.has(node.type)) {
               valid = false;
+              return;
+            }
+            if (node.type === 'heredoc_redirect') {
+              const start = node.namedChildren.find(
+                (child) => child.type === 'heredoc_start',
+              );
+              const end = node.namedChildren.find(
+                (child) => child.type === 'heredoc_end',
+              );
+              valid =
+                start !== undefined &&
+                end !== undefined &&
+                end.startIndex < end.endIndex &&
+                unquote(source.slice(start.startIndex, start.endIndex)) ===
+                  source.slice(end.startIndex, end.endIndex);
               return;
             }
             if (node.type === 'variable_assignment') {
@@ -1830,6 +2065,7 @@ describe('local container recipe pins', () => {
                 (values.length === 2 &&
                   values[0] === 'run' &&
                   ['build', 'bundle'].includes(values[1])) ||
+                values.join(' ') === '--workspace=packages/cli run build' ||
                 (values.length === 5 &&
                   values.slice(0, 3).join(' ') === 'install -g --prefix' &&
                   rawValues[3] === '"$HOME/.local"' &&
@@ -1847,13 +2083,19 @@ describe('local container recipe pins', () => {
             }
             if (name === 'git') {
               valid =
-                rawValues.length === 6 &&
-                rawValues[0] === '-C' &&
-                rawValues[1] === '<pr-clone>' &&
-                rawValues[2] === 'archive' &&
-                rawValues[3] === '"$BASE_OID"' &&
-                rawValues[4] === '--' &&
-                rawValues[5] === '.qwen';
+                (rawValues.length === 6 &&
+                  rawValues[0] === '-C' &&
+                  rawValues[1] === '<pr-clone>' &&
+                  rawValues[2] === 'archive' &&
+                  rawValues[3] === '"$BASE_OID"' &&
+                  rawValues[4] === '--' &&
+                  rawValues[5] === '.qwen') ||
+                (rawValues.length === 4 &&
+                  rawValues[0] === '-C' &&
+                  rawValues[1] === '<pr-clone>' &&
+                  rawValues[2] === 'rev-parse' &&
+                  rawValues[3] ===
+                    '"<baseRefOid>:.qwen/skills/verify-pr/SKILL.md"');
               return;
             }
             if (name === 'sed') {
@@ -1888,8 +2130,10 @@ describe('local container recipe pins', () => {
                 'mkdir',
                 'printf',
                 'read',
+                'readlink',
                 'rm',
                 'sleep',
+                'tail',
                 'test',
                 'true',
               ].includes(name)
@@ -1905,7 +2149,9 @@ describe('local container recipe pins', () => {
               return;
             }
             if (name === 'set') {
-              valid = values.length === 1 && values[0] === '-e';
+              valid =
+                (values.length === 1 && values[0] === '-e') ||
+                values.join(' ') === '-o pipefail';
               return;
             }
             if (name === 'qwen') {
@@ -1931,6 +2177,8 @@ describe('local container recipe pins', () => {
                   source: values[1],
                   trustedDockerExec,
                   credentialFreeDockerExec,
+                  protectedOutput:
+                    nestedProtectedOutputs.get(node.startIndex) ?? null,
                 });
               }
               return;
@@ -2300,6 +2548,83 @@ describe('local container recipe pins', () => {
         family,
       ).toBe(false);
     }
+    const checkerCall = helperCalls.find(([family]) => family === 'check')[1];
+    const completeCall = helperCalls.find(
+      ([family]) => family === 'watch-state complete',
+    )[1];
+    for (const [label, document] of [
+      [
+        'checker artifact parent traversal',
+        skill.replace(
+          checkerCall,
+          checkerCall.replace('<artifact dir>', '../../outside'),
+        ),
+      ],
+      [
+        'checker artifact URI',
+        skill.replace(
+          checkerCall,
+          checkerCall.replace(
+            '<artifact dir>',
+            'https://example.invalid/round',
+          ),
+        ),
+      ],
+      [
+        'checker context parent traversal',
+        skill.replace(
+          checkerCall,
+          checkerCall.replace('<host snapshot>', '../../forged.json'),
+        ),
+      ],
+      [
+        'watch artifact parent traversal',
+        skill.replace(
+          completeCall,
+          completeCall.replace(
+            '[--artifact-dir <dir>]',
+            '--artifact-dir ../../outside',
+          ),
+        ),
+      ],
+      [
+        'prepare context parent traversal',
+        skill.replace(
+          '--context-out ~/.cache/qwen-verify/pr<n>/pr.json',
+          '--context-out ../../forged.json',
+        ),
+      ],
+    ]) {
+      expect(await onlyDocumentedPrepareCalls(document), label).toBe(false);
+    }
+    for (const [label, document] of [
+      [
+        'absolute checker artifact path',
+        skill.replace(
+          checkerCall,
+          checkerCall.replace('<artifact dir>', '/tmp/pr1-verify-1'),
+        ),
+      ],
+      [
+        'absolute watch artifact path',
+        skill.replace(
+          completeCall,
+          completeCall.replace(
+            '[--artifact-dir <dir>]',
+            '--artifact-dir /tmp/pr1-verify-1',
+          ),
+        ),
+      ],
+      [
+        'a non-path option may contain two dots',
+        skill.replace(
+          basic.trim(),
+          '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason .. --context-out /tmp/pr.json',
+        ),
+      ],
+    ]) {
+      expect(await onlyDocumentedPrepareCalls(document), label).toBe(true);
+    }
     for (const verdict of [
       'merge-ready',
       'findings',
@@ -2649,6 +2974,48 @@ describe('local container recipe pins', () => {
       ),
       'continued text in a here-doc remains data',
     ).toBe(true);
+    for (const text of [
+      'plain text only',
+      'node /trusted-scripts/verify-pr-watch-state.mjs <n> --release',
+      'line \\\nnode -e "0 * 0"',
+    ]) {
+      const rawHeredoc = ["cat <<'TEXT'", text, 'TEXT'].join('\n');
+      for (const [shape, document] of [
+        ['raw', `${skill}\n${rawHeredoc}`],
+        ['fenced', `${skill}\n\`\`\`bash\n${rawHeredoc}\n\`\`\``],
+      ]) {
+        expect(
+          await onlyDocumentedPrepareCalls(document),
+          `raw here-doc body remains data: ${shape}: ${text}`,
+        ).toBe(true);
+      }
+    }
+    const tabbedHeredoc = ["cat <<-'TEXT'", '\tplain text', '\tTEXT'].join(
+      '\n',
+    );
+    for (const document of [
+      `${skill}\n${tabbedHeredoc}`,
+      `${skill}\n\`\`\`bash\n${tabbedHeredoc}\n\`\`\``,
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(document),
+        'a tab-stripped here-doc groups its exact delimiter body',
+      ).toBe(true);
+    }
+    for (const hostile of [
+      "cat <<'TEXT'\nunterminated body",
+      "python3 <<'PY'\nprint('not data')\nPY",
+    ]) {
+      for (const [shape, document] of [
+        ['raw', `${skill}\n${hostile}`],
+        ['fenced', `${skill}\n\`\`\`bash\n${hostile}\n\`\`\``],
+      ]) {
+        expect(
+          await onlyDocumentedPrepareCalls(document),
+          `the here-doc owner and terminator are validated: ${shape}: ${hostile}`,
+        ).toBe(false);
+      }
+    }
     const genuineGate =
       'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release';
     expect(
@@ -2721,36 +3088,71 @@ describe('local container recipe pins', () => {
         'qwen --auth-type openai --approval-mode=yolo --prompt "/verify-pr <n>"',
         'qwen --auth-type openai --yolo --prompt "/verify-pr <n>"',
         'qwen --auth-type openai -y --prompt "/verify-pr <n>"',
+        '"qwen" --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        '/usr/local/bin/qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        '"/usr/local/bin/qwen" --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
         'command qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        'command -p qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        'command -- qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        '/tmp/payload.sh --once',
+        './payload.sh --once',
+        'payload --once',
+        'payload /tmp/argument',
+        '/tmp/payload.sh \\\n  --once',
+        '"/tmp/payload.sh" --once',
         'node payload',
         'node scripts/payload',
         'bash payload.sh',
         'bash payload',
         'if true; then node /tmp/arbitrary.js; fi',
+        'if echo data; then qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"; fi',
+        'if touch /tmp/should-not-write; then true; fi',
         '{ node /tmp/arbitrary.js; }',
+        '{ touch /tmp/should-not-write; }',
         '(node /tmp/arbitrary.js)',
+        '(touch /tmp/should-not-write)',
       ],
       false,
       'raw managed commands, wrappers, extensionless scripts and compounds are selected',
     );
+    await expectInRawAndBash(
+      ['command -v qwen', 'set -o pipefail'],
+      true,
+      'recognized capability probes and safe shell controls remain valid',
+    );
     const containerDeclaration = String.raw`printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}'`;
+    const nestedContainerDeclaration = containerDeclaration.replaceAll(
+      '"',
+      '\\"',
+    );
     await expectInRawAndBash(
       [
         '{ printf \'%s\\n\' forged; } > "$rd/boundary.json"',
         '(printf \'%s\\n\' forged) > "$rd/boundary.json"',
         'if true; then printf \'%s\\n\' forged; fi > "$rd/boundary.json"',
+        `{ echo forged; ${containerDeclaration}; } > "$rd/boundary.json"`,
+        `{ echo forged 2>&1; ${containerDeclaration}; } > "$rd/boundary.json"`,
+        `(echo forged; ${containerDeclaration};) > "$rd/boundary.json"`,
+        `if true; then echo forged; ${containerDeclaration}; fi > "$rd/boundary.json"`,
+        `bash -c "{ echo forged; ${nestedContainerDeclaration}; }" > "$rd/boundary.json"`,
+        '{ echo forged; printf \'%s\\n\' "$PREV"; } > ~/.cache/qwen-verify/pr<n>/previous-report.md',
+        String.raw`bash -lc "echo forged; printf '%s\n' \"\$PREV\"" > ~/.cache/qwen-verify/pr<n>/previous-report.md`,
       ],
       false,
-      'grouped boundary redirects validate the declaration payload',
+      'every writer and nested writer of a protected redirection is constrained',
     );
     await expectInRawAndBash(
       [
         `{ ${containerDeclaration}; } > "$rd/boundary.json"`,
         `(${containerDeclaration}) > "$rd/boundary.json"`,
         `if true; then ${containerDeclaration}; fi > "$rd/boundary.json"`,
+        `{ echo diagnostic >&2; ${containerDeclaration}; } > "$rd/boundary.json"`,
+        `bash -c "{ ${nestedContainerDeclaration}; }" > "$rd/boundary.json"`,
+        'if true; then printf \'%s\\n\' "$PREV"; fi > ~/.cache/qwen-verify/pr<n>/previous-report.md',
+        String.raw`sh -lc "printf '%s\n' \"\$PREV\"" > ~/.cache/qwen-verify/pr<n>/previous-report.md`,
       ],
       true,
-      'canonical grouped boundary declarations remain valid',
+      'canonical direct grouped and nested protected declarations remain valid',
     );
     await expectInRawAndBash(
       [
@@ -2758,11 +3160,19 @@ describe('local container recipe pins', () => {
         '`cp -a`; touch /tmp/should-not-write',
         '`true`; node -e "0 * 0"',
         'For details see `cp -a`; touch /tmp/should-not-write',
+        'For details see `cp -a`[reference](https://example.invalid); touch /tmp/should-not-write',
+        'For details see (`cp -a`); touch /tmp/should-not-write',
         '`docker run; cp /tmp/replacement.js /trusted-scripts/verify-pr-prepare.mjs`',
       ],
       false,
-      'inline citations cannot hide an executable shell tail',
+      'inline citations links and grouping cannot hide an executable shell tail',
     );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\nFor details see (\`cat notes.txt\`)[reference](https://example.invalid); grep -e needle ./notes.txt`,
+      ),
+      'bounded links and grouping preserve an ordinary data-command tail',
+    ).toBe(true);
     for (const [language, invocation] of [
       [
         'Bash',
