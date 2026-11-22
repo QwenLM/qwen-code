@@ -39,7 +39,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { atomicWriteJSON } from './atomicFileWrite.js';
-import { readPidNamespaceId, readProcStartToken } from './process-liveness.js';
+import { isNodeError } from './errors.js';
+import {
+  isZombie,
+  readPidNamespaceId,
+  readProcStartToken,
+} from './process-liveness.js';
 
 export const RUNTIME_STATUS_SCHEMA_VERSION = 1;
 
@@ -242,6 +247,38 @@ export async function readRuntimeStatus(
     startedAt,
     qwenVersion,
   };
+}
+
+export type RuntimeStatusPathState = 'active' | 'dead' | 'unknown' | 'missing';
+
+/** Classify one runtime sidecar without judging a PID outside its namespace. */
+export async function getRuntimeStatusPathState(
+  statusPath: string,
+  sessionId: string,
+): Promise<RuntimeStatusPathState> {
+  const status = await readRuntimeStatus(statusPath);
+  if (!status || status.sessionId !== sessionId) return 'missing';
+  if (status.hostname !== os.hostname()) return 'unknown';
+  if (status.pidNs !== null && status.pidNs !== readPidNamespaceId()) {
+    return 'unknown';
+  }
+
+  const procStartMatches = (): boolean => {
+    if (status.procStart === null) return true;
+    const current = readProcStartToken(status.pid);
+    return current === null || current === status.procStart;
+  };
+
+  try {
+    process.kill(status.pid, 0);
+    return !procStartMatches() || isZombie(status.pid) ? 'dead' : 'active';
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ESRCH') return 'dead';
+    if (isNodeError(error) && error.code === 'EPERM') {
+      return !procStartMatches() || isZombie(status.pid) ? 'dead' : 'active';
+    }
+    return 'unknown';
+  }
 }
 
 /**
