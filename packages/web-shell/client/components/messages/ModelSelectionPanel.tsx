@@ -426,14 +426,15 @@ export function ModelSelectionPanel({
     for (const m of models) {
       modelMap.set(m.id, m);
     }
-    return ids.map((id) => {
-      const m = modelMap.get(id);
-      const cw = m?.maxTokens && m.maxTokens > 0 ? m.maxTokens : undefined;
-      return {
-        id,
-        ...(cw !== undefined ? { contextWindowSize: cw } : {}),
-      };
-    });
+    return ids
+      .map((id) => {
+        const m = modelMap.get(id);
+        const cw = m?.maxTokens && m.maxTokens > 0 ? m.maxTokens : undefined;
+        return cw !== undefined ? { id, contextWindowSize: cw } : null;
+      })
+      .filter(
+        (s): s is { id: string; contextWindowSize: number } => s !== null,
+      );
   }, [models, value]);
 
   useEffect(() => {
