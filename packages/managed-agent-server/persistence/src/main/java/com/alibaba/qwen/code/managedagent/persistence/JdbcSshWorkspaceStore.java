@@ -76,7 +76,7 @@ public class JdbcSshWorkspaceStore
                             + " request_digest, request_json, state, phase, gmt_create, gmt_modified)"
                             + " VALUES (?, 'TENANT', ?, ?, ?, ?, 'WORKSPACE', ?, ?, ?, ?, ?, ?, 'PENDING', 'PENDING', "
                             + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    bytes(operationKey(tenant, id)), bytes(tenant), OPERATION, bytes(id), tenant,
+                    bytes(operationKey(tenant, id)), bytes(tenant), OPERATION, id, tenant,
                     bytes(workspace), actor, bytes(key), ManagedSchemaKeys.key(key), digest, encode(request));
             return new Operation(id, "workspace_create", "pending", null, null, false);
         });

@@ -296,7 +296,7 @@ public class WorkspaceFileUploadStore {
                     + " target_kind, target_id, storage_id, physical_id, actor_id, request_digest, request_json, state, phase,"
                     + " available_at, gmt_create, gmt_modified) VALUES (?, 'TENANT', ?, ?, ?, ?, ?, ?, 'STORAGE', ?, ?, ?, ?, ?, ?, 'RUNNING', 'RUNNING', "
                     + ManagedSchemaTime.SQL_NOW + " + 60000, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.identity(key), ManagedSchemaKeys.identity(tenant), KIND, uploadId.getBytes(StandardCharsets.UTF_8), tenant,
+                    ManagedSchemaKeys.identity(key), ManagedSchemaKeys.identity(tenant), KIND, uploadId, tenant,
                     workspace, locator.sessionId(),
                     scope.binding().getStorageId().getBytes(StandardCharsets.UTF_8),
                     scope.binding().getStorageId(),

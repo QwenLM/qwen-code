@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.PrWatchInjectionRepository;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -163,7 +164,7 @@ public final class JdbcPrWatchInjectionRepository implements PrWatchInjectionRep
         }
         ChannelStoreSupport.requireId(candidate.tenantId(), "tenantId");
         ChannelStoreSupport.requireId(candidate.channelInstanceId(), "channelInstanceId");
-        ChannelStoreSupport.requireId(candidate.inputId(), "inputId");
+        BrokerValues.requireOperationId(candidate.inputId(), "inputId");
         ChannelStoreSupport.requireId(candidate.bindingId(), "bindingId");
         ChannelStoreSupport.requireId(candidate.sessionId(), "sessionId");
         ChannelStoreSupport.requireId(candidate.owner(), "owner");

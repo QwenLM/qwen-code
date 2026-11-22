@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
@@ -148,12 +149,14 @@ public final class RuntimeAdmissionFences {
                 }
             }
         }
+        boolean h2 = "H2".equals(connection.getMetaData().getDatabaseProductName());
         try (PreparedStatement statement =
                 connection.prepareStatement(
                         "SELECT o.lifecycle_protocol_version FROM ma_session_head f"
                             + " JOIN ma_operation o ON o.operation_kind IN ('CLOSE',"
                             + " 'ARCHIVE', 'DELETE') AND o.tenant_id = f.tenant_id AND"
-                            + " o.session_id = f.harness_session_id AND o.operation_id"
+                            + " o.session_id = f.harness_session_id AND "
+                            + ManagedSchemaJdbcTemplate.binaryIdentity("o.operation_id", h2)
                             + " = f.operation_id WHERE f.tenant_id = ? AND"
                             + " f.harness_session_id = ?")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
@@ -13,6 +14,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.stereotype.Repository;
@@ -71,7 +73,9 @@ public class JdbcChildResultRelayStore
      * parked ahead, never leased to another worker — the scanning worker's
      * own claim stays visible, so the heartbeat can fire on time. */
     public List<PendingChild> findPendingChildren(String workerId, long now, int limit) {
-        return jdbc.query(ChildResultRelayQueries.PENDING_SQL, (result, row) -> new PendingChild(
+        boolean h2 = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                "H2".equals(connection.getMetaData().getDatabaseProductName())));
+        return jdbc.query(ChildResultRelayQueries.pendingSql(h2), (result, row) -> new PendingChild(
                 result.getString("tenant_id"), result.getString("session_id"),
                 result.getString("record_id"), result.getLong("revision"),
                 result.getString("delivery_state"),
@@ -659,6 +663,9 @@ public class JdbcChildResultRelayStore
     }
 
     public RelayRow claim(String tenantId, String parentSessionId, String childRunId, String creationKey, String owner, long leaseUntil, long now) {
+        // The Harness supplies the run id; the operation column admits only
+        // a bounded identity, never a truncated INSERT IGNORE duplicate.
+        BrokerValues.requireOperationId(childRunId, "childRunId");
         String request = MAPPER.createObjectNode().put("version", 1).put("creationKey", creationKey).toString();
         jdbc.update("INSERT IGNORE INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id,"
                         + " tenant_id, session_id, target_kind, target_id, request_digest, request_json, state, phase,"
@@ -753,6 +760,7 @@ public class JdbcChildResultRelayStore
         if ("CHILD_SESSION_CLOSE".equals(row.operationKind())) {
             throw new IllegalArgumentException("A close-debt row cannot retain another close debt");
         }
+        BrokerValues.requireOperationId(row.childRunId(), "childRunId");
         transactions.executeWithoutResult(status -> {
             int changed = jdbc.update("UPDATE ma_operation SET state = ?, claim_owner = NULL, claim_until = NULL, result_json = ?, gmt_modified = ? WHERE operation_ref = ? AND claim_owner = ? AND claim_generation = ? AND claim_until > ?",
                     classification, resultBody(childSessionId, lastError), now, ManagedSchemaKeys.identity(operationKey(row.operationKind(),

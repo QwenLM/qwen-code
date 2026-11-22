@@ -568,11 +568,9 @@ final class AgentSessionAdmissions {
         }
         // The request is written once, when the row is admitted, so the
         // locked row's mode needs no lock of its own.
-        boolean h2 = Boolean.TRUE.equals(jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>)
-                connection -> "H2".equals(connection.getMetaData().getDatabaseProductName())));
         List<String> requests = jdbc.queryForList("SELECT o.request_json FROM ma_workspace w"
                         + " JOIN ma_operation o ON o.tenant_id = w.tenant_id"
-                        + " AND o.operation_id = " + ManagedSchemaJdbcTemplate.binaryIdentity("w.child_workspace_id", h2)
+                        + " AND o.operation_id = w.child_workspace_id"
                         + " AND o.operation_kind = 'CHILD_WORKSPACE'"
                         + " WHERE w.workspace_kind = 'CHILD_GIT' AND w.parent_session_id = ?"
                         + " AND w.child_run_id = ? AND w.tenant_id = ?",

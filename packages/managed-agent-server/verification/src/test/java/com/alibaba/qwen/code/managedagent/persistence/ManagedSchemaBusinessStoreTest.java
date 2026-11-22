@@ -372,7 +372,7 @@ public class ManagedSchemaBusinessStoreTest {
         seedSession(tenant, session, "PUBLIC", "ACTIVE");
         String root = "根!";
         String child = "子".repeat(80) + "Child!";
-        String grandchild = "孙".repeat(168) + "Tail!   ";
+        String grandchild = "孙".repeat(120) + "Tail!   ";
         List<String> workspaces = List.of(root, child, grandchild, "foreign");
         for (int index = 0; index < workspaces.size(); index++) {
             String workspace = workspaces.get(index);

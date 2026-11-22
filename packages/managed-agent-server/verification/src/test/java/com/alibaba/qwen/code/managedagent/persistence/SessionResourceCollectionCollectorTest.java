@@ -519,7 +519,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
         jdbc.update(
                 "UPDATE ma_operation SET state = ? WHERE operation_kind = 'WORKSPACE_RECOVERY' AND"
-                        + " operation_id = X'6f702d7265636f76657279'",
+                        + " operation_id = 'op-recovery'",
                 "CAPTURING".equals(state) ? "SEALED" : "VERIFIED");
         jdbc.update("UPDATE ma_operation SET available_at = 0"
                 + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?", tenant, session);
@@ -574,7 +574,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(deferred.get("gc_blocker")).isEqualTo("collection_retry");
         jdbc.update(
                 "UPDATE ma_operation SET state = 'SEALED' WHERE operation_kind ="
-                        + " 'WORKSPACE_RECOVERY' AND operation_id = X'6f702d6c617465'");
+                        + " 'WORKSPACE_RECOVERY' AND operation_id = 'op-late'");
         jdbc.update("UPDATE ma_operation SET available_at = 0"
                 + " WHERE operation_kind = 'SESSION_RESOURCE_GC' AND tenant_id = ? AND session_id = ?", tenant, session);
         assertThat(collector.runOnce()).isTrue();

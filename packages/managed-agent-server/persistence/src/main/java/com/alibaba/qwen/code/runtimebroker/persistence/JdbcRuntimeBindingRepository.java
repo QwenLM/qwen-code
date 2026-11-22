@@ -732,7 +732,7 @@ public final class JdbcRuntimeBindingRepository
     public void requestStorageFence(String tenantId, String storageId, String operationId) {
         BrokerValues.requireId(tenantId, "tenantId");
         BrokerValues.requireStorageId(storageId, "storageId");
-        BrokerValues.requireId(operationId, "operationId");
+        BrokerValues.requireOperationId(operationId, "operationId");
         JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {

@@ -520,11 +520,11 @@ class ToolPublicationStoreTest {
             try {
                 assertThat(written.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
                 jdbc.update(
-                        "UPDATE ma_operation SET deadline = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_id = X'6f726967696e616c'");
+                        "UPDATE ma_operation SET deadline = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_id = 'original'");
                 var originalDeadline = jdbc.queryForObject(
                                 "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                         + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                        + " operation_id = X'6f726967696e616c'", java.sql.Timestamp.class);
+                                        + " operation_id = 'original'", java.sql.Timestamp.class);
                 var before = jdbc.queryForMap(
                                 "SELECT capture_object_key AS object_key, resource_id, byte_length,"
                                     + " sha256, operation_id FROM ma_resource WHERE publication_id"
@@ -542,7 +542,7 @@ class ToolPublicationStoreTest {
                 var recoveryDeadline = jdbc.queryForObject(
                                 "SELECT recovery_deadline FROM ma_operation WHERE operation_kind IN"
                                         + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                        + " operation_id = X'6f726967696e616c'", java.sql.Timestamp.class);
+                                        + " operation_id = 'original'", java.sql.Timestamp.class);
                 long recoveryWindowMillis = Duration.ofMinutes(2)
                         .plusSeconds(terminal ? (bytes.length + 255L) / 256 : 0).toMillis();
                 assertThat(recoveryDeadline.getTime()).isBetween(
@@ -553,7 +553,7 @@ class ToolPublicationStoreTest {
                                         "SELECT recovery_deadline FROM ma_operation WHERE"
                                             + " operation_kind IN ('OUTPUT_UPLOAD',"
                                             + " 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id"
-                                            + " = X'6f726967696e616c'", java.sql.Timestamp.class)).isEqualTo(recoveryDeadline);
+                                            + " = 'original'", java.sql.Timestamp.class)).isEqualTo(recoveryDeadline);
                 assertThatThrownBy(() -> {
                     if (terminal) {
                         verified(replacement).finish(key, "pub-1", PUBLICATION_TOKEN, "other", bytes);
@@ -597,7 +597,7 @@ class ToolPublicationStoreTest {
                 assertThat(jdbc.queryForObject(
                                         "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                             + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                                            + " AND operation_id = X'6f726967696e616c'", java.sql.Timestamp.class)).isEqualTo(originalDeadline);
+                                            + " AND operation_id = 'original'", java.sql.Timestamp.class)).isEqualTo(originalDeadline);
                 assertThat(objects).hasSize(1);
                 String category = terminal ? "producer" : "capture";
                 assertThat(jdbc.queryForObject("SELECT " + category + "_used_bytes FROM ma_output_capture"
@@ -673,7 +673,7 @@ class ToolPublicationStoreTest {
                 assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
                 String column = expired ? "deadline" : "claim_until";
                 jdbc.update("UPDATE ma_operation SET " + column
-                        + " = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_id = X'68656c64'");
+                        + " = (" + ManagedSchemaTime.SQL_NOW + " + -1000) WHERE operation_id = 'held'");
                 assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "held").path("state").asText())
                         .isEqualTo(expired ? "EXPIRED" : "RETRYABLE");
                 var candidate = jdbc.queryForMap(
@@ -1517,9 +1517,9 @@ class ToolPublicationStoreTest {
         var deadline = jdbc.queryForObject(
                         "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                 + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                + " operation_id = X'66696e697368'", java.sql.Timestamp.class);
+                                + " operation_id = 'finish'", java.sql.Timestamp.class);
         var created = jdbc.queryForObject(
-                        "SELECT gmt_create FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = X'66696e697368'", Long.class);
+                        "SELECT gmt_create FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = 'finish'", Long.class);
         assertThat(deadline.getTime() - created).isEqualTo(3000);
         assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource"
                 + " WHERE slot_key = X'7365676d656e743a7374646f75743a30'", String.class)).isEqualTo("CANDIDATE");
@@ -1597,9 +1597,9 @@ class ToolPublicationStoreTest {
         var deadline = jdbc.queryForObject(
                         "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                 + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                + " operation_id = X'7365616c'", java.sql.Timestamp.class);
+                                + " operation_id = 'seal'", java.sql.Timestamp.class);
         var created = jdbc.queryForObject(
-                        "SELECT gmt_create FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = X'7365616c'", Long.class);
+                        "SELECT gmt_create FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = 'seal'", Long.class);
         assertThat(verificationTime[0] - created).isEqualTo(4000);
         assertThat(deadline.getTime() - created).isEqualTo(7000);
         assertThat(data.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "seal").path("state").asText())
@@ -1607,7 +1607,7 @@ class ToolPublicationStoreTest {
         assertThat(jdbc.queryForObject(
                                 "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                         + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND"
-                                        + " operation_id = X'7365616c'", java.sql.Timestamp.class)).isEqualTo(deadline);
+                                        + " operation_id = 'seal'", java.sql.Timestamp.class)).isEqualTo(deadline);
     }
 
     @Test
@@ -3086,7 +3086,7 @@ class ToolPublicationStoreTest {
                                                 + " ma_output_capture",
                 Boolean.class)).isTrue();
         fixture.jdbc().update(
-                        "UPDATE ma_session SET retirement_operation_id = X'64656c6574652d31',"
+                        "UPDATE ma_session SET retirement_operation_id = 'delete-1',"
                                 + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = 'tenant-1' AND session_id ="
                                 + " 'session-1'");
@@ -3211,7 +3211,7 @@ class ToolPublicationStoreTest {
                                 + " operation_kind = 'TOOL_RESULT_PROJECTION'");
         var claim = fixture.results().claim().orElseThrow();
         fixture.jdbc().update(
-                        "UPDATE ma_session SET retirement_operation_id = X'64656c6574652d31',"
+                        "UPDATE ma_session SET retirement_operation_id = 'delete-1',"
                                 + " retirement_generation = 1, retired_at = 1, is_recovery_protected ="
                                 + " FALSE WHERE tenant_id = 'tenant-1' AND session_id ="
                                 + " 'session-1'");

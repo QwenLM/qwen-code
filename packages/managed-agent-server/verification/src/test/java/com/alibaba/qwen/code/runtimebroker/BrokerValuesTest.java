@@ -36,6 +36,20 @@ class BrokerValuesTest {
     }
 
     @Test
+    void operationIdsUseThe128CharacterNoTrailingSpaceBudget() {
+        String operation = "o".repeat(128);
+        assertEquals(operation, BrokerValues.requireOperationId(operation, "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId("o".repeat(129), "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId("operation ", "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId("oper\ud800ation", "operationId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireOperationId(null, "operationId"));
+    }
+
+    @Test
     void workspaceIdsUseThe512CharacterNoTrailingSpaceBudget() {
         String workspace = "w".repeat(512);
         assertEquals(workspace, BrokerValues.requireWorkspaceId(workspace, "workspaceId"));

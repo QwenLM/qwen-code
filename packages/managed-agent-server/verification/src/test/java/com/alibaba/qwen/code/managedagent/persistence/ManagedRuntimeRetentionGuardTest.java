@@ -541,7 +541,7 @@ class ManagedRuntimeRetentionGuardTest {
                 connection.prepareStatement(
                         "INSERT INTO ma_operation (operation_ref, operation_id, scope_kind, scope_id, operation_kind, tenant_id, target_kind, target_id, target_revision, state, phase, request_digest, request_json, gmt_create, gmt_modified) VALUES (?, ?, 'TENANT', ?, ?, 'tenant', 'RUNTIME_BINDING', ?, ?, 'DRAINING', 'DRAINING', ?, '{}', 1, 1)")) {
             insert.setString(1, operationKey(kind, id));
-            insert.setBytes(2, id.getBytes(StandardCharsets.UTF_8));
+            insert.setString(2, id);
             insert.setString(3, "tenant");
             insert.setString(4, kind);
             insert.setBytes(5, binding.getBytes(StandardCharsets.UTF_8));

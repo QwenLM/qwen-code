@@ -137,10 +137,10 @@ public class ToolPublicationAsyncVerificationTest {
         publish("healthy", 0, "bytes");
         data.finish(key, "pub-1", PUBLICATION_TOKEN, "bad-inputs", terminal(10));
         fixture.jdbc.update("UPDATE ma_operation SET verification_request_json = ?,"
-                        + " verification_next_at = ? WHERE operation_id = X'6261642d696e70757473'",
+                        + " verification_next_at = ? WHERE operation_id = 'bad-inputs'",
                 encoded.equals("null") ? null : encoded, Timestamp.valueOf("2000-01-01 00:00:00"));
         fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = ?"
-                        + " WHERE operation_id = X'6865616c746879'",
+                        + " WHERE operation_id = 'healthy'",
                 Timestamp.valueOf("2000-01-02 00:00:00"));
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("bad-inputs").path("state").asText()).isEqualTo("FAILED");
@@ -178,7 +178,7 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("accepted").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.opens).hasValue(0);
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
-                + " AND operation_id = X'6163636570746564' AND capture_state = 'VERIFIED'", Integer.class)).isZero();
+                + " AND operation_id = 'accepted' AND capture_state = 'VERIFIED'", Integer.class)).isZero();
         data = replacement();
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -275,7 +275,7 @@ public class ToolPublicationAsyncVerificationTest {
             @Override
             public void commit(TransactionStatus transaction) {
                 var values = fixture.jdbc.queryForList("SELECT is_verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                        + " AND operation_id = X'636f6d6d6974'", Boolean.class);
+                        + " AND operation_id = 'commit'", Boolean.class);
                 if (values.size() == 1 && values.getFirst()) {
                     ready.countDown();
                     Bucket.await(release);
@@ -489,11 +489,11 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void lostSlotBeforeClaimCanRetryAfterTheSlotIsRestored() {
         publish("slot", 0, "bytes");
-        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = X'6f74686572'");
+        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = 'other'");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("slot").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.opens).hasValue(0);
-        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = X'736c6f74'");
+        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = 'slot'");
         due("slot");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("slot").path("state").asText()).isEqualTo("SUCCEEDED");
@@ -570,7 +570,7 @@ public class ToolPublicationAsyncVerificationTest {
     void expiredPrefixCannotRecoverAndSealRecoveryRejectsAddedSegments() {
         verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
         data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout");
-        fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'707265666978'",
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = 'prefix'",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         try (var verifier = manualVerifier(data)) {
             verifier.runOnce();
@@ -578,7 +578,7 @@ public class ToolPublicationAsyncVerificationTest {
                     .hasMessageContaining("prefix cannot be recovered");
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, 1,
                     ToolPublicationContract.sha256(new byte[] {1}));
-            fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'7365616c'",
+            fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = 'seal'",
                     Timestamp.valueOf("2000-01-01 00:00:00"));
             verifier.runOnce();
             verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "extra", "stdout", 1, new byte[] {2}, null);
@@ -675,15 +675,15 @@ public class ToolPublicationAsyncVerificationTest {
             try {
                 assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
                 long oldEpoch = fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                        + " AND operation_id = X'74616b656f766572'", Long.class);
+                        + " AND operation_id = 'takeover'", Long.class);
                 fixture.jdbc.update("UPDATE ma_operation SET claim_until = ?, verification_next_at = ?"
-                                + " WHERE operation_id = X'74616b656f766572'",
+                                + " WHERE operation_id = 'takeover'",
                         Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
                 var successor = workers.submit(second::runOnce);
                 try {
                     assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                            + " AND operation_id = X'74616b656f766572'", Long.class)).isEqualTo(oldEpoch + 1);
+                            + " AND operation_id = 'takeover'", Long.class)).isEqualTo(oldEpoch + 1);
                     bucket.readRelease.countDown();
                     assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
@@ -770,7 +770,7 @@ public class ToolPublicationAsyncVerificationTest {
         }
         assertThat(status("lapse").path("state").asText()).isEqualTo("PENDING");
         assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at IS NOT NULL"
-                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = X'6c61707365'", Boolean.class)).isTrue();
+                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = 'lapse'", Boolean.class)).isTrue();
         fixture.jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?",
                 expires.longValue());
         fixture.jdbc.update("UPDATE ma_output_capture SET expires_at = ?", grant.longValue());

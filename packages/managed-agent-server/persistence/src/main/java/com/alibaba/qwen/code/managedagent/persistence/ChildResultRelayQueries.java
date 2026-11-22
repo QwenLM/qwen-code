@@ -43,16 +43,19 @@ final class ChildResultRelayQueries {
     // finished child where close is unavailable, and ahead of the page
     // they would keep a newer launch from ever being reached.
     // H2 otherwise retains the first branch limit across repeated executions.
-    static final String PENDING_SQL =
-            "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
+    // The ledger's operation_id is VARCHAR while the record_id it mirrors is
+    // VARBINARY; H2 refuses that comparison without the byte coercion.
+    static String pendingSql(boolean h2) {
+        return "SELECT pending.tenant_id, pending.session_id, pending.record_id, pending.revision, pending.delivery_state, pending.record_resource_id FROM ("
                     + " SELECT tenant_id, session_id, record_id, revision, delivery_state, record_resource_id, priority, gmt_create"
                     + " FROM (SELECT r.tenant_id, r.session_id, r.record_id, r.revision, r.delivery_state, r.record_resource_id,"
                     + " 0 AS priority, r.gmt_create FROM ma_session_record r LEFT JOIN ma_operation l"
-                    + " ON l.tenant_id = r.tenant_id AND l.session_id = r.session_id AND l.operation_id = r.record_id"
+                    + " ON l.tenant_id = r.tenant_id AND l.session_id = r.session_id AND "
+                    + ManagedSchemaJdbcTemplate.binaryIdentity("l.operation_id", h2) + " = r.record_id"
                     + " AND l.operation_kind = 'CHILD_SESSION_START' WHERE r.domain = 'child_run'"
                     + " AND r.task_kind IN " + CHILD_SESSION_KINDS_SQL
                     + " AND NOT EXISTS (SELECT 1 FROM ma_operation c WHERE c.tenant_id = r.tenant_id AND c.session_id = r.session_id"
-                    + " AND c.operation_id = r.record_id AND c.operation_kind = 'CHILD_SESSION_CLOSE')"
+                    + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("c.operation_id", h2) + " = r.record_id AND c.operation_kind = 'CHILD_SESSION_CLOSE')"
                     + " AND ((r.delivery_state IN ('planned', 'accepting', 'unknown')"
                     + " AND (l.state IS NULL OR l.state NOT IN ('done', 'orphaned', 'unknown')))"
                     + " OR (r.delivery_state IN ('accepted', 'consumed', 'cancelled')"
@@ -65,10 +68,11 @@ final class ChildResultRelayQueries {
                     + " COALESCE(r.revision, 0) AS revision, COALESCE(r.delivery_state, 'accepted') AS delivery_state,"
                     + " r.record_resource_id, 1 AS priority, o.gmt_create FROM ma_operation o"
                     + " LEFT JOIN ma_session_record r ON r.tenant_id = o.tenant_id AND r.session_id = o.session_id"
-                    + " AND r.domain = 'child_run' AND r.record_id = o.operation_id"
+                    + " AND r.domain = 'child_run' AND r.record_id = " + ManagedSchemaJdbcTemplate.binaryIdentity("o.operation_id", h2)
                     + " WHERE o.operation_kind = 'CHILD_SESSION_CLOSE' AND o.state = 'close_debt'"
                     + " AND o.available_at <= ?"
                     + " AND (o.claim_until IS NULL OR o.claim_until <= ? OR o.claim_owner = ?)"
                     + " ORDER BY o.gmt_create, o.session_id, o.operation_id LIMIT ?) close_work"
                     + " ) pending ORDER BY pending.priority, pending.gmt_create, pending.session_id, pending.record_id LIMIT ?";
+    }
 }
