@@ -1495,6 +1495,94 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(matching.stdout).toContain('ok: verdict=merge-ready');
   });
 
+  it.each([{ source: 'comment' }, { source: 'local-trust' }])(
+    'binds a $source host approval to the actual PR directory across same-head branches',
+    ({ source }) => {
+      const approval =
+        source === 'comment'
+          ? commentApproval({
+              approval:
+                'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1234567890',
+            })
+          : localTrustApproval();
+      const setup = (directoryPr, artifactContext) => {
+        const base = mkdtempSync(join(tmpdir(), 'verify-pr-known-pr-'));
+        tmpDirs.push(base);
+        const clone = join(base, 'clone');
+        const dir = join(
+          clone,
+          'tmp',
+          `pr${directoryPr}-verify-20261123-000000`,
+        );
+        mkdirSync(join(dir, 'evidence'), { recursive: true });
+        writeFileSync(
+          join(dir, 'report.md'),
+          `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+        );
+        writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+        writeFileSync(
+          join(dir, 'assertions.json'),
+          JSON.stringify({ pass: 4, fail: 0, total: 4 }),
+        );
+        writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+        writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
+        if (artifactContext) {
+          writeFileSync(
+            join(dir, 'context.json'),
+            JSON.stringify({
+              repo: 'QwenLM/qwen-code',
+              pr: directoryPr,
+              baseRefName: 'main',
+              headRefName: 'shared-branch',
+              headRefOid: HEAD,
+            }),
+          );
+        }
+        const trustedText = JSON.stringify({
+          repo: 'QwenLM/qwen-code',
+          pr: 42,
+          baseRefName: 'main',
+          headRefName: 'shared-branch',
+          headRefOid: HEAD,
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+          executionApproval: approval,
+        });
+        const host = join(base, 'host.json');
+        writeFileSync(host, trustedText);
+        return { clone, dir, host, trustedText };
+      };
+      const check = ({ clone, dir, host, trustedText }) =>
+        spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--context',
+            host,
+            '--context-root',
+            clone,
+            '--context-sha256',
+            createHash('sha256').update(trustedText).digest('hex'),
+            dir,
+          ],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+          },
+        );
+
+      const control = check(setup(42, true));
+      expect(control.status, control.stdout).toBe(0);
+      for (const artifactContext of [false, true]) {
+        const cross = check(setup(43, artifactContext));
+        expect(cross.status, cross.stdout).toBe(1);
+        expect(cross.stdout).toMatch(
+          /pr43-verify-.* names PR 43, but the trusted host snapshot is for QwenLM\/qwen-code#42/,
+        );
+      }
+    },
+  );
+
   // prepare's snapshot carries `number` (gh's field name), not `pr`, and
   // the slug is added where prepare writes it: the documented invocation
   // must fire the coordinate check with that shape too.
@@ -2619,7 +2707,7 @@ describe('round-14 witnesses', () => {
   const setup = () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-r14-'));
     tmpDirs.push(root);
-    const dir = join(root, 'tmp', 'pr7-verify-20261115-000000');
+    const dir = join(root, 'tmp', 'pr17185-verify-20261115-000000');
     mkdirSync(join(dir, 'evidence'), { recursive: true });
     writeFileSync(join(dir, 'report.md'), validFiles({}).report);
     writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');

@@ -45,10 +45,16 @@ Two entry paths share the contract below.
 
 `/verify-pr <n>` proves the change and posts nothing. `--publish` adds the
 report comment and its image evidence; `--watch` installs a standing trigger.
-Before publishing a local round, run
+After a local verification round, whether it will publish or not, run
 `node <trusted-clone>/scripts/verify-pr-check.mjs --context <host snapshot> --context-sha256 "$(cat ~/.cache/qwen-verify/pr<n>/pr.sha256)" <artifact dir>`
 from a checkout the PR cannot write; it applies the
-consistency rules the publisher enforces in CI.
+consistency rules the publisher enforces in CI. After a published comment,
+complete the registration with that numeric comment ID. For a withheld or
+`--no-publish` report, once this checker succeeds still use `--complete` with
+the exact same head/round/nonce/state-root and artifact directory, but omit the
+optional comment ID. That successful branch preserves `commentId: null`, clears
+the in-flight marker and retains the verdict and local artifacts; do not release
+a successful round merely because no comment was posted.
 
 ## Environment contract (CI verify job)
 
@@ -293,11 +299,15 @@ requirement. The shapes:
   requesting that fresh marker — old approval markers are never silently
   migrated. Ordinary prose containing a head, duplicate or malformed
   markers, an approval for another PR or a previous registration, and a
-  synthetic/completed marker fail closed. Register completion with the
-  `--complete` form below only after publication succeeds, repeating this
-  start's value with `--registration-nonce <nonce>`. Reserve `--release` for
-  abandoning a failed setup, not for changing modes, and pass the same nonce
-  there too. New live registrations and completed verdicts both require
+  synthetic/completed marker fail closed. After a published comment, register
+  completion with the `--complete` form below and its numeric comment ID,
+  repeating this start's value with `--registration-nonce <nonce>`. After a
+  successful withheld/no-publish report passes the local checker, use that same
+  completion form with the same registration and artifact directory but omit
+  the optional comment ID; this preserves its null comment identity and leaves
+  no successful in-flight marker. Reserve `--release` for abandoning a failed
+  setup, never a successful no-publish round or a mode change, and pass the
+  same nonce there too. New live registrations and completed verdicts both require
   that identity; missing or stale nonces cannot consume a replacement. When the
   comment path used an explicit `--state-root`, pass that **identical trusted
   root** to every prepare retry and to the registration's `--complete` or
@@ -320,6 +330,24 @@ requirement. The shapes:
   sandboxed lane. Measured case: two local rounds on PR #16866 ran the whole
   battery on the host with no gate, no waiver, and no boundary line — the
   prose rule alone did not stop them.
+
+Prepare applies its hardened exact-HEAD, clean-status and index-flag check both
+before approval work and again after the last approval/review-state network
+response, before any authority write. For a comment approval it takes the
+watch-state lock only after those responses, rechecks the registration identity
+inside the lock, then repeats the exact clean-checkout check without another
+network request; local-trust uses the same final checkout recheck without a
+registration lock. A checkout dirtied by the paused final response therefore
+fails with exit 3 and preserves earlier authority records. The container path
+keeps its no-approval shape.
+
+An approval marker counts only as one direct full-line HTML comment at column
+zero. A blockquote, backtick/tilde fence or four-space-indented example is not
+an execution approval even when its JSON is otherwise valid; body hashing still
+covers the actual GitHub comment bytes. In the comment path, `--context-out`
+must also be a distinct external destination: if its canonical path or existing
+file identity resolves to the live watch state JSON or its `.lock`, prepare
+refuses before writing either authority file.
 
 The standard Docker recipe below is `node:22-bookworm` and carries no JDK or
 Maven, so a Java-heavy _local_ round has no ready container in this recipe.
@@ -965,7 +993,12 @@ Record the finished round with the same script's completion form:
 — `--artifact-dir <dir>` records the directory prepare printed (the `--start`
 registration ran before prepare and carried none); omit it on a replayed
 completion to inherit the directory already recorded for the head rather than
-overwriting it; `--verdict` is one of
+overwriting it. For a published comment, supply its numeric comment ID. For a
+withheld/no-publish report, after the local checker succeeds still complete the
+same registration with that exact artifact directory and omit the optional
+comment ID; the verified entry keeps `commentId: null`. Both successful branches
+clear the in-flight marker, so neither implicitly auto-completes nor uses
+`--release`, which is only for abandonment. `--verdict` is one of
 `merge-ready | findings | blocked | inconclusive`,
 verbatim; a completion without it exits 2 and leaves the head in flight
 forever. A completion whose `--round` differs from the in-flight marker, or
@@ -1236,7 +1269,13 @@ ambiguous rather than verify a guessed PR. Then, in order:
    the round completes, record it with
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
    (`<dir>` is the artifact directory prepare printed; omit it on a replayed
-   completion to inherit the directory already recorded for `H`).
+   completion to inherit the directory already recorded for `H`). Supply the
+   numeric comment ID after a published comment. For a successful
+   withheld/no-publish round, after the local checker succeeds use this same
+   completion with the same head/round/nonce/root and exact artifact directory
+   but no comment ID; it keeps `commentId: null`, retains the local artifacts
+   and clears the marker. A successful no-publish round is completed, never
+   released or left in flight.
    A completion whose `--round` differs from the marker, or from a round
    that already answered for `H`, is refused (exit 3).
    Measured case: two consecutive rounds skipped the hand-written completion

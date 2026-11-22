@@ -18,6 +18,7 @@ import {
   normalizeBasePath,
   parseArgs,
 } from '../../scripts/verify-pr-model-proxy.mjs';
+import { checkArtifacts } from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-model-proxy.mjs', import.meta.url),
@@ -821,8 +822,20 @@ describe('local container recipe pins', () => {
       }
       if (
         positional.join(' ') !== '<n>' ||
-        !options.has('--repo') ||
+        !/^(?:<owner>\/<repo>|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)$/.test(
+          options.get('--repo') ?? '',
+        ) ||
         !options.has('--execution')
+      ) {
+        return false;
+      }
+      const approval = options.get('--approval');
+      if (
+        approval !== undefined &&
+        approval !== '<url>' &&
+        !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/.test(
+          approval,
+        )
       ) {
         return false;
       }
@@ -854,6 +867,8 @@ describe('local container recipe pins', () => {
     const repo = String.raw`(?:<owner>/<repo>|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)`;
     const head = '(?:<headSha>|<40hex>|<H>)';
     const round = '(?:<r>|[1-9][0-9]*)';
+    const verdict =
+      '(?:merge-ready|findings|blocked|inconclusive|<word>|<verdict>)';
     const stateRoot = ' --state-root "<trusted-dir>"';
     const exact = (body) => new RegExp(`^${body.trim()}$`);
     const validHelperArguments = (kind, raw, quotedGate = false) => {
@@ -929,12 +944,15 @@ describe('local container recipe pins', () => {
           String.raw` <n> --start --head ${head} --round ${round} --repo ${repo}(?:${stateRoot})?`,
         );
         const complete = exact(
-          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${value}(?: --artifact-dir ${value})?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
+          String.raw` <n> --complete --head ${head} --round ${round}(?: --registration-nonce <nonce>)? --verdict ${verdict}(?: --artifact-dir ${value})?(?: --comment-id ${value})? --repo ${repo}(?:${stateRoot})?`,
         );
         const release = exact(
           String.raw` <n> --release --head ${head}(?: --round ${round})?(?: --registration-nonce <nonce>)? --repo ${repo}(?:${stateRoot})?`,
         );
-        return start.test(text) || complete.test(text) || release.test(text);
+        if (start.test(text)) return 'start';
+        if (complete.test(text)) return 'complete';
+        if (release.test(text)) return 'release';
+        return false;
       }
       if (kind === 'watch-gate') {
         return (
@@ -957,12 +975,41 @@ describe('local container recipe pins', () => {
       /^(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/)verify-pr-[a-z-]+\.mjs$/.test(
         path,
       );
+    const proxyJson = '~/.cache/qwen-verify/pr<n>/proxy.json';
+    const trustedNodeEvaluations = new Map([
+      [
+        'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const all=JSON.parse(d).flat();const hit=all.filter(c=>(/bot$/.test(c.user.login)||c.user.login===process.argv[1])&&c.body.split("\\n\\n")[0].includes("Verdict:")).pop();process.stdout.write(hit?hit.body+"\\n":"")})',
+        ['"$ME"'],
+      ],
+      [
+        'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).baseRefOid)',
+        ['~/.cache/qwen-verify/pr<n>/pr.json'],
+      ],
+      [
+        'const j=JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); if (!j.token) process.exit(1)',
+        [proxyJson],
+      ],
+      [
+        'const fs=require("node:fs"); const j=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const u=new URL(j.baseUrl); fetch(`http://${u.hostname}:${u.port}/__health`).then(r=>r.text()).then(t=>process.exit(t===j.nonce?0:1)).catch(()=>process.exit(1))',
+        [proxyJson],
+      ],
+      [
+        'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).token)',
+        [proxyJson],
+      ],
+    ]);
     const onlyDocumentedPrepareCalls = async (document) => {
       // This is a bounded grammar for this recipe's executable examples, not
       // a shell sandbox. Unknown executable shapes and every parse error fail.
       const fragments = [];
       const helperToken = (text) => /verify-pr(?:-|\\)/.test(text);
       const dynamicImport = (text) => /\bnode\s[\s\S]*\bimport\s*\(/.test(text);
+      const interpreterCommand = (text) =>
+        /(?:^|[\s;|&(`])["']?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:node|(?:\/[A-Za-z0-9_.-]+)*\/node)["']?(?=\s+(?:-|["']?\/|<|["']?\S+\.[cm]?js(?:\s|$)))/.test(
+          text,
+        );
+      const executableNode = (text) =>
+        helperToken(text) || dynamicImport(text) || interpreterCommand(text);
       const fencedRanges = [];
       const fence =
         /^([ \t]*)```(bash|sh|shell|text)[^\n]*\n([\s\S]*?)^\1```[^\n]*$/gm;
@@ -980,8 +1027,7 @@ describe('local container recipe pins', () => {
             body,
           );
         const relevant = (text) =>
-          helperToken(text) ||
-          dynamicImport(text) ||
+          executableNode(text) ||
           /NODE_OPTIONS|alias\s+node|function\s+node|node\s*\(\s*\)/.test(text);
         if (executableText && relevant(body)) {
           if (/bash\s+-[a-z]*c|<<-?\s*['"]?[A-Za-z_]/.test(body)) {
@@ -991,7 +1037,9 @@ describe('local container recipe pins', () => {
             let current = '';
             for (const line of body.split('\n')) {
               current += `${current ? '\n' : ''}${line}`;
-              if (/\\[ \t]*$/.test(line)) continue;
+              if (/\\[ \t]*$/.test(line) || /(?:&&|\|\|)[ \t]*$/.test(line)) {
+                continue;
+              }
               logicalLines.push(current);
               current = '';
             }
@@ -1008,6 +1056,9 @@ describe('local container recipe pins', () => {
         fencedRanges.some(([start, end]) => index >= start && index < end);
       const citation = (match) => {
         const content = match[2].trim();
+        // An inline `node` names the runtime in prose; it is not an example
+        // evaluation to whitelist or reject.
+        if (content === 'node') return true;
         if (
           !content.endsWith('.mjs') &&
           /^[A-Za-z0-9_.~/<>:-]+$/.test(content) &&
@@ -1055,10 +1106,7 @@ describe('local container recipe pins', () => {
             index >= match.index && index < match.index + match[0].length,
         );
       for (const match of spans) {
-        if (
-          inFences(match.index) ||
-          (!helperToken(match[2]) && !dynamicImport(match[2]))
-        ) {
+        if (inFences(match.index) || !executableNode(match[2])) {
           continue;
         }
         if (citation(match)) continue;
@@ -1086,7 +1134,7 @@ describe('local container recipe pins', () => {
         if (
           !inFence &&
           !inCodeSpan(lineStart) &&
-          (helperToken(line) || dynamicImport(line)) &&
+          executableNode(line) &&
           (!plainCitation || followsNode)
         ) {
           const executable =
@@ -1191,12 +1239,54 @@ describe('local container recipe pins', () => {
               }
               return;
             }
-            if (name === 'node') {
-              const modulePath = args[0] ? staticText(args[0], source) : null;
-              if (!modulePath || !helperToken(modulePath)) {
-                if (helperToken(node.text) || dynamicImport(node.text)) {
+            if (name && /^(?:node|(?:\/[A-Za-z0-9_.-]+)*\/node)$/.test(name)) {
+              const trustedInterpreter = [
+                'node',
+                '/bin/node',
+                '/usr/bin/node',
+                '/usr/local/bin/node',
+              ].includes(name);
+              if (!trustedInterpreter) {
+                valid = false;
+                return;
+              }
+              const values = args.map((arg) => staticText(arg, source));
+              const rawValues = args.map((arg) =>
+                source.slice(arg.startIndex, arg.endIndex),
+              );
+              const modulePath = values[0] ?? null;
+              if (modulePath === '-e' || modulePath === '--eval') {
+                const expected = trustedNodeEvaluations.get(values[1]);
+                if (
+                  !expected ||
+                  expected.length !== rawValues.length - 2 ||
+                  expected.some(
+                    (value, index) => rawValues[index + 2] !== value,
+                  )
+                ) {
                   valid = false;
                 }
+                return;
+              }
+              if (
+                modulePath === '-v' ||
+                modulePath === '--version' ||
+                modulePath === '--check'
+              ) {
+                if (values.length !== 1) valid = false;
+                return;
+              }
+              if (
+                [
+                  'scripts/lint.js',
+                  'scripts/verify-capture.mjs',
+                  'my-harness.mjs',
+                ].includes(modulePath)
+              ) {
+                return;
+              }
+              if (!modulePath || !helperToken(modulePath)) {
+                valid = false;
                 return;
               }
               const family = modulePath.match(
@@ -1255,11 +1345,19 @@ describe('local container recipe pins', () => {
                 ? source.indexOf('&', statement.endIndex) + 1
                 : statement.endIndex;
               const rawArguments = source.slice(args[0].endIndex, argumentEnd);
-              if (!validHelperArguments(family, rawArguments, quotedGate)) {
+              const approvedArguments = validHelperArguments(
+                family,
+                rawArguments,
+                quotedGate,
+              );
+              if (!approvedArguments) {
                 valid = false;
                 return;
               }
-              calls.push(family);
+              calls.push({
+                family,
+                action: family === 'watch-state' ? approvedArguments : null,
+              });
               return;
             }
             const shellIndex = args.findIndex(
@@ -1267,7 +1365,7 @@ describe('local container recipe pins', () => {
             );
             args.forEach((arg, index) => {
               const raw = source.slice(arg.startIndex, arg.endIndex);
-              if (!helperToken(raw)) return;
+              if (!executableNode(raw)) return;
               if (
                 ['bash', 'sh', 'docker'].includes(name) &&
                 shellIndex >= 0 &&
@@ -1280,6 +1378,16 @@ describe('local container recipe pins', () => {
                 valid = false;
               }
             });
+            // A generic wrapper does not make an otherwise rejected Node
+            // evaluation disappear. Only the explicitly nested shell shapes
+            // above get a second AST pass; the others fail closed here.
+            if (
+              name &&
+              interpreterCommand(node.text) &&
+              !['bash', 'sh', 'docker'].includes(name)
+            ) {
+              valid = false;
+            }
             if (
               nameNode &&
               helperToken(source.slice(nameNode.startIndex, nameNode.endIndex))
@@ -1299,14 +1407,20 @@ describe('local container recipe pins', () => {
       for (const fragment of fragments) {
         if (!(await inspect(fragment))) return false;
       }
+      const families = calls.map((call) => call.family);
+      const actions = calls.map((call) => call.action);
       return (
         calls.length === 24 &&
-        calls.filter((family) => family === 'prepare').length === 4 &&
-        calls.filter((family) => family === 'check').length === 3 &&
-        calls.filter((family) => family === 'watch-state').length === 12 &&
-        calls.filter((family) => family === 'watch-gate').length === 3 &&
-        calls.filter((family) => family === 'model-proxy').length === 1 &&
-        calls.filter((family) => family === 'credential-scan').length === 1
+        families.filter((family) => family === 'prepare').length === 4 &&
+        families.filter((family) => family === 'check').length === 3 &&
+        families.filter((family) => family === 'watch-state').length === 12 &&
+        families.filter((family) => family === 'watch-gate').length === 3 &&
+        families.filter((family) => family === 'model-proxy').length === 1 &&
+        families.filter((family) => family === 'credential-scan').length ===
+          1 &&
+        actions.filter((action) => action === 'start').length === 5 &&
+        actions.filter((action) => action === 'complete').length === 2 &&
+        actions.filter((action) => action === 'release').length === 5
       );
     };
     expect(await onlyDocumentedPrepareCalls(skill)).toBe(true);
@@ -1314,6 +1428,7 @@ describe('local container recipe pins', () => {
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
       '<n> --repo <owner>/<repo> --execution vm --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json --attestation no-host-mounts',
       '<n> --repo <owner>/<repo> --execution host --approval https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001 --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo <owner>/<repo> --execution host --approval <url> --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(skill.replace(basic.trim(), valid)),
@@ -1323,6 +1438,8 @@ describe('local container recipe pins', () => {
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json # --execution container',
       '<n> --repo <owner>/<repo> --execution host --round 2 --reason why --context-out /tmp/pr.json',
       '<n> --repo <owner>/<repo> --execution remote --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo QwenLM --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo <owner>/<repo> --execution host --approval not-a-url --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --approval https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001 --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json --unknown value',
       '<n> --repo <owner>/<repo> --execution container --trust-pr-head',
@@ -1451,6 +1568,36 @@ describe('local container recipe pins', () => {
         family,
       ).toBe(false);
     }
+    for (const verdict of [
+      'merge-ready',
+      'findings',
+      'blocked',
+      'inconclusive',
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(
+          skill.replace('--verdict <word>', `--verdict ${verdict}`),
+        ),
+        verdict,
+      ).toBe(true);
+    }
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace('--verdict <word>', '--verdict nonsense'),
+      ),
+    ).toBe(false);
+    const prepareFailureRelease =
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>';
+    const repeatedStart =
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>';
+    expect(skill).toContain(prepareFailureRelease);
+    expect(skill).toContain(repeatedStart);
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(prepareFailureRelease, repeatedStart),
+      ),
+      'a release-to-start substitution must fail the pinned action census',
+    ).toBe(false);
     expect(
       await onlyDocumentedPrepareCalls(
         skill.replace(
@@ -1594,6 +1741,36 @@ describe('local container recipe pins', () => {
         label,
       ).toBe(false);
     }
+    const interpreterHostiles = [
+      "node -e 'console.log(1)'",
+      'node --eval \'require("node:fs")\'',
+      'node -e \'import("/tmp/payload.mjs")\'',
+      'node /tmp/arbitrary.js',
+      'node --require=/tmp/setup.cjs /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+      "/usr/bin/node -e 'console.log(1)'",
+      '"/usr/bin/node" -e \'console.log(1)\'',
+      "env node -e 'console.log(1)'",
+      'sudo node /tmp/arbitrary.js',
+      '/tmp/node /trusted-scripts/verify-pr-watch-gate.mjs <n> --check --claim',
+    ];
+    for (const hostile of interpreterHostiles) {
+      for (const document of [
+        `${skill}\n${hostile}`,
+        `${skill}\n\`\`\`bash\n${hostile}\n\`\`\``,
+      ]) {
+        expect(await onlyDocumentedPrepareCalls(document), hostile).toBe(false);
+      }
+    }
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\nThe prose word node does not execute anything; arbitrary-helper.js is only a filename.`,
+      ),
+    ).toBe(true);
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`\`\`text\nA sentence containing node is not a command.\n\`\`\``,
+      ),
+    ).toBe(true);
     const heredoc = [
       "cat <<'TEXT'",
       'node /trusted-scripts/verify-pr-watch-state.mjs <n> --release',
@@ -1871,6 +2048,87 @@ describe('local container recipe pins', () => {
     );
   });
 
+  it('checks both documented waived boundary examples and separates gate acceptance', () => {
+    const read = (suffix) =>
+      readFileSync(
+        fileURLToPath(
+          new URL(
+            `../../docs/design/2026-11-14-verify-pr-java-container-recipe${suffix}`,
+            import.meta.url,
+          ),
+        ),
+        'utf8',
+      );
+    const english = read('.md');
+    const chinese = read('.zh-CN.md');
+    const examples = [
+      [
+        english,
+        '**Boundary.** host, maintainer-approved execution waiver recorded by prepare.',
+        'Execution facts: exact seed image with mirror-only egress; battery --network none; model via host proxy; no credential signals observed.',
+      ],
+      [
+        chinese,
+        '**Boundary.** 宿主运行，使用 prepare 记录的维护者执行豁免。',
+        '执行事实：预置按 digest 钉住镜像并仅镜像出网；电池 --network none；模型经宿主代理；无凭据信号。',
+      ],
+    ];
+    const head = 'b'.repeat(40);
+    const boundary = {
+      mode: 'waived',
+      source: 'local-trust',
+      by: 'maintainer',
+      basis: 'own-pr',
+      permission: 'admin',
+      head,
+      round: 1,
+      reason: 'independent Java battery with recorded waived executionApproval',
+    };
+    for (const [document, boundaryLine, executionFacts] of examples) {
+      expect(document).toContain(boundaryLine);
+      const result = checkArtifacts({
+        files: {
+          report: `merge-ready · 1 passed · 0 failed · 1 total · ${head}\n\n## Methodology\n\n${boundaryLine}\n${executionFacts}\n`,
+          verdict: 'merge-ready\n',
+          assertions: JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+          boundary: JSON.stringify(boundary),
+        },
+        evidence: ['01-ab.png'],
+        coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 42 },
+      });
+      expect(result.errors).toEqual([]);
+      expect(result.warnings).toEqual([]);
+    }
+    const flatEnglish = english.replace(/\s+/g, ' ');
+    expect(flatEnglish).toContain(
+      'For a deliberately gate-less seed, acceptance admits only concrete, credential-free observations supported by the operator or measured launcher.',
+    );
+    expect(flatEnglish).toContain('a rejected seed is never reused');
+    expect(flatEnglish).toContain(
+      'Independently, a positive gated case runs `verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>` in the exact Maven/JDK/Node seed image and requires exit 0.',
+    );
+    expect(flatEnglish).toContain(
+      "Deep-compare that exact seed's `seed.json.gate` with the complete `boundary-gate.json` produced by the same invocation, never a sibling arm's or another round's record.",
+    );
+    expect(flatEnglish).toContain('no such gated live battery is claimed here');
+    expect(flatEnglish).toContain(
+      'Deliberately gate-less seed by operator choice, no gate or seed nonce generated',
+    );
+    expect(flatEnglish).toContain(
+      'independent Maven/JDK battery cannot attest the seed boundary or return a seed nonce',
+    );
+    for (const text of [
+      '无支撑的无凭据声明或任一凭据信号都拒绝该预置，被拒的预置不得复用',
+      '在确切的 Maven/JDK/Node 预置镜像内运行 `verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>` 并要求 exit 0',
+      '把该确切预置的 `seed.json.gate` 与同一次调用产生的完整 `boundary-gate.json` 深度对账',
+      '本文不宣称已经执行过这样的 gated live battery',
+      '未选择门禁，因此根本没有生成预置 nonce',
+      '独立 Java 电池无法返回该可选门禁的预置 nonce',
+    ]) {
+      expect(chinese).toContain(text);
+    }
+  });
+
   it('pins locked registration rotation and exact publication reconciliation in both designs', () => {
     const readDesign = (suffix) =>
       readFileSync(
@@ -1897,6 +2155,21 @@ describe('local container recipe pins', () => {
     expect(flatEnglish).toContain(
       'a legacy entry without a nonce remains usable by the existing complete/release commands but must be released and restarted',
     );
+    expect(flatEnglish).toContain(
+      'repeats the exact HEAD/clean-status/index-flag check with the same hardened Git arguments and local-filter overrides used by the initial check',
+    );
+    expect(flatEnglish).toContain(
+      'without any new network request in the lock',
+    );
+    expect(flatEnglish).toContain(
+      'A withheld/no-publish round, after the local checker succeeds, uses that same command with the exact same head/round/nonce/state-root and artifact directory but omits the optional comment ID.',
+    );
+    expect(flatEnglish).toContain(
+      'The verified entry retains `commentId: null` and the artifact directory',
+    );
+    expect(flatEnglish).toContain(
+      'The marker is an instruction only when the complete HTML comment occupies one direct line at column zero',
+    );
     expect(chinese).not.toContain('--round <n>');
     expect(chinese).toContain('声名字段键必须完全一致');
     expect(chinese).not.toContain('检查器规则忽略声明中的额外字段');
@@ -1904,6 +2177,17 @@ describe('local container recipe pins', () => {
     expect(chinese).toContain('实际 release 后重新 start 会轮换 nonce');
     expect(chinese).toContain(
       '无 nonce 的 legacy 条目仍可由现有 complete/release 读取，但必须释放并重启',
+    );
+    expect(chinese).toContain(
+      '再用初始检查相同的 hardened Git 参数与 local-filter override 重复 exact HEAD、clean-status 和 index-flag 检查',
+    );
+    expect(chinese).toContain('锁内不发起新的网络请求');
+    expect(chinese).toContain(
+      'withheld/no-publish 轮次则在本地 checker 成功后，仍以完全相同的 head/round/nonce/state-root 与 artifact dir 执行该完成命令，只省略可选 comment ID',
+    );
+    expect(chinese).toContain('verified 条目保留 `commentId: null`');
+    expect(chinese).toContain(
+      '只有完整 HTML comment 在列零独占一行时，标记才是执行批准',
     );
   });
 

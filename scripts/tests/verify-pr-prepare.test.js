@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -146,6 +146,11 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
     comment,
     "import { appendFileSync, existsSync, readFileSync } from 'node:fs';\nconst gate = process.env.FAKE_GH_COMMENT_GATE;\nif (gate) {\n  appendFileSync(`${gate}.paused`, '');\n  const deadline = Date.now() + 15000;\n  while (!existsSync(`${gate}.release`)) {\n    if (Date.now() > deadline) { process.stderr.write('comment gate timeout\\n'); process.exit(2); }\n    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);\n  }\n}\nif (!existsSync(process.env.FAKE_GH_COMMENT)) { process.stderr.write('HTTP 502: Bad Gateway\\n'); process.exit(1); }\nprocess.stdout.write(readFileSync(process.env.FAKE_GH_COMMENT, 'utf8'));\n",
   );
+  const review = join(dir, 'review.mjs');
+  writeFileSync(
+    review,
+    "import { appendFileSync, existsSync, readFileSync } from 'node:fs';\nconst gate = process.env.FAKE_GH_REVIEW_GATE;\nif (gate) {\n  appendFileSync(`${gate}.paused`, '');\n  const deadline = Date.now() + 15000;\n  while (!existsSync(`${gate}.release`)) {\n    if (Date.now() > deadline) { process.stderr.write('review gate timeout\\n'); process.exit(2); }\n    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);\n  }\n}\nif (!existsSync(process.env.FAKE_GH_REVIEW)) { process.stderr.write('HTTP 502: Bad Gateway\\n'); process.exit(1); }\nprocess.stdout.write(readFileSync(process.env.FAKE_GH_REVIEW, 'utf8'));\n",
+  );
   writeFileSync(
     gh,
     [
@@ -154,7 +159,7 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
       'if [ "$1" = api ]; then',
       '  node "$FAKE_GH_LOG_ARGS" "$@"',
       '  if [ "$2" = user ] && [ -f "$FAKE_GH_USER" ]; then exec cat "$FAKE_GH_USER"; fi',
-      '  if [ "$2" = graphql ] && [ -f "$FAKE_GH_REVIEW" ]; then exec cat "$FAKE_GH_REVIEW"; fi',
+      '  if [ "$2" = graphql ]; then exec node "$FAKE_GH_REVIEW_SERVER" "$@"; fi',
       '  case "$2" in',
       '    */issues/comments/*)',
       '      exec node "$FAKE_GH_COMMENT_SERVER" "$@" ;;',
@@ -178,6 +183,7 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
     FAKE_GH_PERMISSIONS: paths.permissions,
     FAKE_GH_COMMENT: paths.comment,
     FAKE_GH_COMMENT_SERVER: comment,
+    FAKE_GH_REVIEW_SERVER: review,
     FAKE_GH_LOG_ARGS: logger,
     FAKE_GH_PR_VIEW: prView,
     FAKE_GH_PERMISSION: permission,
@@ -1232,6 +1238,128 @@ describe.skipIf(process.platform === 'win32')(
       expect(checked.status, checked.stdout).toBe(0);
     };
 
+    const lateDirtyWitness = async (trust) => {
+      const { dir, base, head } = makeRepo();
+      const prepared = command({
+        trust,
+        approval: trust ? null : permalink,
+        head,
+        round: 1,
+      });
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        trust
+          ? {
+              user: { login: 'maintainer' },
+              permissions: { maintainer: { permission: 'maintain' } },
+            }
+          : {
+              comment: {
+                id: 900001,
+                issue_url:
+                  'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+                body: marker({
+                  head,
+                  round: 1,
+                  registrationNonce: prepared.registrationNonce,
+                }),
+                user: { login: 'approver' },
+              },
+              permissions: { approver: { permission: 'admin' } },
+            },
+      );
+      const statePath = trust
+        ? null
+        : join(prepared.stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json');
+      const stateBefore = statePath ? readFileSync(statePath) : null;
+      const trackedPath = join(dir, 'head.txt');
+      const trackedBefore = readFileSync(trackedPath);
+      const gate = join(makeTmpDir(), 'review-gate');
+      const child = spawn(
+        process.execPath,
+        [SCRIPT, ...prepared.artifactArgs],
+        {
+          cwd: dir,
+          env: { ...env, FAKE_GH_REVIEW_GATE: gate },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8');
+      child.stderr.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk;
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      const closed = new Promise((resolve) => {
+        child.once('close', (code) => resolve({ code, stdout, stderr }));
+      });
+      const waitFor = async (path, deadline = Date.now() + 10000) => {
+        while (!existsSync(path)) {
+          if (Date.now() > deadline) {
+            throw new Error(`timed out waiting for ${path}; ${stderr}`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+      };
+      let rejected;
+      try {
+        await waitFor(`${gate}.paused`);
+        writeFileSync(
+          trackedPath,
+          'changed while review response was paused\n',
+        );
+        writeFileSync(`${gate}.release`, '');
+        rejected = await closed;
+      } finally {
+        writeFileSync(`${gate}.release`, '');
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL');
+        }
+        await closed;
+        writeFileSync(trackedPath, trackedBefore);
+      }
+      expect(rejected.code, rejected.stderr).toBe(3);
+      expect(rejected.stderr).toMatch(/working tree has uncommitted changes/);
+      expect(existsSync(join(prepared.hostDir, 'pr.json'))).toBe(false);
+      expect(existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json'))).toBe(
+        false,
+      );
+      const scratch = join(dir, 'tmp');
+      if (existsSync(scratch)) {
+        for (const entry of readdirSync(scratch)) {
+          if (!entry.startsWith('pr42-verify-')) continue;
+          expect(existsSync(join(scratch, entry, 'boundary.json'))).toBe(false);
+          expect(existsSync(join(scratch, entry, 'context.json'))).toBe(false);
+        }
+      }
+      if (statePath) {
+        expect(readFileSync(statePath)).toEqual(stateBefore);
+        expect(existsSync(`${statePath}.lock`)).toBe(false);
+      }
+
+      const control = runPrepare(dir, prepared.artifactArgs, env);
+      expect(control.status, control.stderr).toBe(0);
+      if (statePath) expect(existsSync(`${statePath}.lock`)).toBe(false);
+    };
+
+    it.each([
+      { name: 'local-trust', trust: true },
+      { name: 'comment', trust: false },
+    ])(
+      'revalidates the exact clean checkout after the last response for $name',
+      async ({ trust }) => lateDirtyWitness(trust),
+      20000,
+    );
+
     it.skipIf(process.getuid?.() === 0)(
       'restores an approved record when local-trust prepare fails after partial writes',
       () => failedRetryWitness(true),
@@ -1814,6 +1942,73 @@ describe.skipIf(process.platform === 'win32')(
       expect(readFileSync(lock, 'utf8')).toBe('someone-else\n');
     });
 
+    it.each([
+      { identity: 'state', alias: false },
+      { identity: 'lock', alias: false },
+      { identity: 'state', alias: true },
+      { identity: 'lock', alias: true },
+    ])(
+      'refuses --context-out at the $identity through parent alias=$alias',
+      ({ identity, alias }) => {
+        const { dir, base, head } = makeRepo();
+        const { artifactArgs, stateRoot, hostDir, registrationNonce } = command(
+          {
+            trust: false,
+            approval: permalink,
+            head,
+          },
+        );
+        const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+          comment: {
+            id: 900001,
+            issue_url:
+              'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+            body: marker({ head, registrationNonce }),
+            user: { login: 'approver' },
+          },
+          permissions: { approver: { permission: 'admin' } },
+        });
+        const statePath = join(
+          stateRoot,
+          '.qwen',
+          'tmp',
+          'verify-pr-watch-42.json',
+        );
+        const stateBefore = readFileSync(statePath);
+        const protectedPath =
+          identity === 'state' ? statePath : `${statePath}.lock`;
+        const legitimate = join(hostDir, 'pr.json');
+        if (alias) {
+          const parent = join(makeTmpDir(), 'state-parent-alias');
+          symlinkSync(dirname(protectedPath), parent, 'dir');
+          artifactArgs[artifactArgs.indexOf('--context-out') + 1] = join(
+            parent,
+            basename(protectedPath),
+          );
+        } else {
+          artifactArgs[artifactArgs.indexOf('--context-out') + 1] =
+            protectedPath;
+        }
+        const result = runPrepare(dir, artifactArgs, env);
+        expect(result.status, result.stderr).toBe(3);
+        expect(result.stderr).toMatch(
+          /--context-out must not overwrite the live watch state or its lock/,
+        );
+        expect(readFileSync(statePath)).toEqual(stateBefore);
+        expect(existsSync(`${statePath}.lock`)).toBe(false);
+        expect(existsSync(legitimate)).toBe(false);
+        expect(
+          existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json')),
+        ).toBe(false);
+
+        artifactArgs[artifactArgs.indexOf('--context-out') + 1] = legitimate;
+        const control = runPrepare(dir, artifactArgs, env);
+        expect(control.status, control.stderr).toBe(0);
+        expect(existsSync(legitimate)).toBe(true);
+        expect(existsSync(`${statePath}.lock`)).toBe(false);
+      },
+    );
+
     const refusalCases = [
       {
         name: 'another PR in the permalink',
@@ -1825,6 +2020,11 @@ describe.skipIf(process.platform === 'win32')(
         name: 'issue_url names another PR',
         issueUrl: 'https://api.github.com/repos/QwenLM/qwen-code/issues/43',
         expected: /approval comment does not belong to this PR/,
+      },
+      {
+        name: 'response id differs from the requested comment',
+        responseId: 900002,
+        expected: /approval API returned a different issue-comment id/,
       },
       {
         name: 'missing comment response',
@@ -1874,6 +2074,30 @@ describe.skipIf(process.platform === 'win32')(
           `${marker({ head, registrationNonce })}\n<!-- verify-pr-boundary-approval: bare prefix`,
         expected: /exactly one well-formed/,
       },
+      ...[
+        [
+          'blockquote marker is only an example',
+          (line) => `> ${line}\n> This is not approval.`,
+        ],
+        [
+          'backtick-fenced marker is only an example',
+          (line) =>
+            `\`\`\`text\n${line}\nDo not approve this example.\n\`\`\`\``,
+        ],
+        [
+          'tilde-fenced marker with a longer close is only an example',
+          (line) => `~~~text\n${line}\nDo not approve this example.\n~~~~`,
+        ],
+        [
+          'indented-code marker is only an example',
+          (line) => `    ${line}\n    This is not approval.`,
+        ],
+      ].map(([name, wrap]) => ({
+        name,
+        body: (head, registrationNonce) =>
+          wrap(marker({ head, registrationNonce }).split('\n')[0]),
+        expected: /exactly one well-formed/,
+      })),
       {
         name: 'read-only approver with an admin decoy',
         permission: 'read',
@@ -1900,7 +2124,7 @@ describe.skipIf(process.platform === 'win32')(
           testCase.comment === null
             ? undefined
             : {
-                id: 900001,
+                id: testCase.responseId ?? 900001,
                 issue_url:
                   testCase.issueUrl ??
                   'https://api.github.com/repos/QwenLM/qwen-code/issues/42',

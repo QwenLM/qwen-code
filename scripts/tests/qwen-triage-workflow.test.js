@@ -7000,6 +7000,31 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('not consent for this one');
   });
 
+  it('distinguishes published and successful no-publish completion from abandonment', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'After a published comment, complete the registration with that numeric comment ID',
+    );
+    expect(flat).toContain(
+      'For a withheld or `--no-publish` report, once this checker succeeds still use `--complete` with the exact same head/round/nonce/state-root and artifact directory, but omit the optional comment ID',
+    );
+    expect(flat).toContain(
+      'That successful branch preserves `commentId: null`, clears the in-flight marker and retains the verdict and local artifacts',
+    );
+    expect(flat).toContain(
+      'A successful no-publish round is completed, never released or left in flight',
+    );
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    const prompt = verifySkill
+      .slice(promptStart, promptEnd)
+      .replace(/\s+/g, ' ');
+    expect(prompt).toContain(
+      'For a withheld/no-publish report, after the local checker succeeds still complete the same registration with that exact artifact directory and omit the optional comment ID; the verified entry keeps `commentId: null`',
+    );
+    expect(prompt).toContain('`--release`, which is only for abandonment');
+  });
+
   // The watch prompt must spell out the completion form: a fire that follows
   // "the same script's --complete form" literally exits 2 (no --verdict) and
   // strands the head in flight forever. <headSha> is unique to the prompt —

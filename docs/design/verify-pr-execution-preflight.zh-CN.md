@@ -71,7 +71,7 @@ coordinate path 的 `--execution` 默认为 `container`，使旧 watch prompt �
 Approved host execution for this verify round.
 ```
 
-VM 的 `mode` 为 `vm`。prepare 在创建产物目录前，通过经过认证的 `gh` 验证以下全部条件：
+VM 的 `mode` 为 `vm`。只有完整 HTML comment 在列零独占一行时，标记才是执行批准；引用块、代码 fence 或缩进代码示例都不算批准，额外出现的字面 prefix 仍违反 exactly-once 规则。prepare 对 GitHub 实际评论正文计算哈希，而不是对抽取或归一化后的字符串计算。prepare 在创建产物目录前，通过经过认证的 `gh` 验证以下全部条件：
 
 - 永久链接符合现有允许形状，并指向本仓库和本 PR；
 - 指定编号的 issue comment 存在且属于该 PR；
@@ -81,7 +81,7 @@ VM 的 `mode` 为 `vm`。prepare 在创建产物目录前，通过经过认证�
 
 记录的 `by` 取评论作者 login。上一轮的标记、碰巧引用某个 head 的普通评论、以及其他 PR 的批准都不能满足本契约。本地信任与评论互斥，调用方不能组合两份可能分歧的批准声明。
 
-所有 GitHub、Git 调用与 review-state 拉取完成后，评论批准进入与 start、release、complete 相同的协作式 watch-state 锁。prepare 在锁内重新读取注册，复核 repo、PR、规范化 head/round 和精确 `registrationNonce`，然后写宿主 context 与产物声明。因此评论响应暂停期间发生 release 加新 start 时，旧 prepare 必须 exit 3 且不写批准字节。锁竞争同样 exit 3，绝不把旧批准当成仍然有效；不变的 in-flight 注册重试保留 nonce，可以正常签发。实际 release 后重新 start 会轮换 nonce，需要新评论；无 nonce 的 legacy 条目仍可由现有 complete/release 读取，但必须释放并重启后才能由新的评论批准授权执行。
+所有 GitHub 调用与 review-state 拉取完成后，评论批准进入与 start、release、complete 相同的协作式 watch-state 锁。prepare 先在锁内重新读取注册，复核 repo、PR、规范化 head/round 和精确 `registrationNonce`，再用初始检查相同的 hardened Git 参数与 local-filter override 重复 exact HEAD、clean-status 和 index-flag 检查；锁内不发起新的网络请求，随后才写宿主 context 与产物声明。本地信任不需要注册锁，但在 review 响应之后、写入前执行同一末次检出复核。因此最终 GraphQL 响应暂停期间变脏的检出必须 exit 3，且不写新的批准或宿主快照字节。锁竞争同样 exit 3，绝不把旧批准当成仍然有效；不变的 in-flight 注册重试保留 nonce，可以正常签发。实际 release 后重新 start 会轮换 nonce，需要新评论；无 nonce 的 legacy 条目仍可由现有 complete/release 读取，但必须释放并重启后才能由新的评论批准授权执行。这套协作式末次检查不是防御绕过 prepare 并执行 PR 代码之调用方的 OS 沙箱。
 
 ## 记录与发布
 
@@ -89,7 +89,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 
 产物中的 `boundary.json` 携带同一对象。发布使用与宿主 `executionApproval` 的深度严格对账，不是忽略额外字段的子集检查：声名字段键必须完全一致，评论批准还必须包括同一个 `registrationNonce`。prepare 打印的 context sha256 同时覆盖批准字节。
 
-`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。产物 `context.json` 同样必须不存在或是单链接普通文件，防止 symlink/hardlink 覆盖原物。`--context-out` containment 使用规范化 PR clone root 和父目录存在后的完整规范化父路径；不存在的新 leaf 不直接传给 `realpath`，真实父目录重定向回 clone 的 alias 在写批准字节前以 exit 3 拒绝。外部与树内 context、产物坐标与批准、review 快照属于同一写入组。prepare 在首次改变前保存其旧字节；稍后的失败恢复这些字节并移除本组新创建的文件。若某项恢复失败，prepare 以 exit 3 明确点名，不宣称已恢复。
+`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源，产物 `context.json` 也不能自行铸造坐标。可信 repo/PR 坐标已知时，`pr<N>-verify-*` 目录中的 N 不同即为拒绝，对评论和 local-trust 批准都一样；即使共享分支上的 head 相同、产物 context 缺失或它自行标识为另一个 PR，也不能改变宿主身份。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。产物 `context.json` 同样必须不存在或是单链接普通文件，防止 symlink/hardlink 覆盖原物。`--context-out` containment 使用规范化 PR clone root 和父目录存在后的完整规范化父路径；不存在的新 leaf 不直接传给 `realpath`，真实父目录重定向回 clone 的 alias 在写批准字节前以 exit 3 拒绝。评论路径还在 state-lock 临界区内比较规范化输出与 live watch state JSON 及其 `.lock`，覆盖父目录 alias 和已存在目标的 same-file identity；命中任一 identity 都在写 authority 前 exit 3，而合法的其他外部 context 仍成功。外部与树内 context、产物坐标与批准、review 快照属于同一写入组。prepare 在首次改变前保存其旧字节；稍后的失败恢复这些字节并移除本组新创建的文件。若某项恢复失败，prepare 以 exit 3 明确点名，不宣称已恢复。
 
 容器与 CI lane 行为不变。缺少宿主记录的旧宿主或 VM 产物会被有意拒绝，不再呈现为已经预检批准的轮次。
 
@@ -108,7 +108,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 
 等待批准不移到注册之前：watch cursor 已经交付 head，等待中被杀也必须留下可恢复的 in-flight 标记。从 container 切换到 host/VM 时，同一注册贯穿 prepare、电池、发布和 `--complete`，不得仅为切换模式而释放。注册也先于本地信任，但后者的 prepare 不需要公开标记或 `--state-root`。评论路径一旦使用显式 state root，后续每次 prepare 重试以及该注册的 `--complete`/`--release` 都必须沿用同一个可信 root；默认 container 路径仍不需要评论标记。
 
-新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。`registrationNonce` 是记录在 in-flight 并随产生的 verified 保留的注册身份，没有平行批准文件或新的 next-round 命令。`--complete` 与 `--release` 接受匹配的 nonce；verified 的 replay 也只接受同一 nonce。瞬时 prepare 失败保留注册和 nonce，所以其重试可以沿用匹配评论。实际释放后再 `--start` 总是分配新 nonce：即使 head/round 相同，也需要新的评论标记。非评论容器重试或后续轮次在 complete/release 时仍须匹配 head/round 以及该注册的 nonce，但不需要公共批准标记。
+新单次本地信任轮次没有标记时使用 round 1，因为每次调用都带新的显式信任决定。评论批准轮次（包括新轮次）也要注册：第一次注册可以用 round 1，后续执行需要另一个未使用的正整数轮次，而不是静默重放旧评论。`registrationNonce` 是记录在 in-flight 并随产生的 verified 保留的注册身份，没有平行批准文件或新的 next-round 命令。`--complete` 与 `--release` 接受匹配的 nonce；verified 的 replay 也只接受同一 nonce。瞬时 prepare 失败保留注册和 nonce，所以其重试可以沿用匹配评论。实际释放后再 `--start` 总是分配新 nonce：即使 head/round 相同，也需要新的评论标记。非评论容器重试或后续轮次在 complete/release 时仍须匹配 head/round 以及该注册的 nonce，但不需要公共批准标记。已发布轮次把数字 comment ID 交给现有 `--complete`。withheld/no-publish 轮次则在本地 checker 成功后，仍以完全相同的 head/round/nonce/state-root 与 artifact dir 执行该完成命令，只省略可选 comment ID；verified 条目保留 `commentId: null` 和产物目录，成功注册不留在 in-flight。两条成功分支都不隐式 auto-complete，也不使用 `--release`；手动与 watch recovery 中，release 仍只属于放弃路径。
 
 由旧保存 prompt 继续的 watch，不因其 prompt 旧而免于新注册的 nonce 要求。优先从该次 `--start` 的原始输出中取回 nonce。输出已丢失时，操作者可以只读可信 state 文件中的匹配 `inFlightHeads` 条目（完成或重放时则在 `verifiedHeads` 中查找），将读到的 nonce 显式填入 `--registration-nonce`，再执行 `--complete` 或 `--release`。命令不会替旧裸调用查询或静默补入当前值；只有真正无 nonce 的 legacy 条目可以省略。缺失或错误 nonce 仍拒绝，新旧注册不因此互相覆盖。
 

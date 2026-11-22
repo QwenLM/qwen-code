@@ -154,7 +154,11 @@ contains one exact marker and human-readable approval text:
 Approved host execution for this verify round.
 ```
 
-For a VM, `mode` is `vm`. Prepare validates all of the following through
+For a VM, `mode` is `vm`. The marker is an instruction only when the complete
+HTML comment occupies one direct line at column zero; blockquote, fenced or
+indented-code examples are not approvals, and additional literal prefixes still
+violate the exactly-once rule. Prepare hashes the actual GitHub body rather than
+a normalized extraction. Prepare validates all of the following through
 authenticated `gh` before creating the artifact directory:
 
 - the permalink has the existing accepted shape and names this repository and
@@ -173,18 +177,24 @@ an ordinary comment that happens to quote a head, and an approval for another
 PR cannot satisfy this contract. Local trust and a comment are mutually
 exclusive so a caller cannot combine two divergent approval claims.
 
-After all GitHub and Git calls and the review-state fetch finish, comment
-approval enters the same cooperative watch-state lock used by start, release
-and complete. Inside that lock prepare reads the registration again, rechecks
-its repo, PR, normalized head/round and exact `registrationNonce`, then writes
-the host context and artifact declaration. A release plus a new start while the
+After all GitHub calls and the review-state fetch finish, comment approval
+enters the same cooperative watch-state lock used by start, release and
+complete. Inside that lock prepare first reads the registration again and
+rechecks its repo, PR, normalized head/round and exact `registrationNonce`. It
+then repeats the exact HEAD/clean-status/index-flag check with the same hardened
+Git arguments and local-filter overrides used by the initial check, without any
+new network request in the lock, before writing the host context and artifact
+declaration. Local trust uses that same final checkout recheck after the review
+response but needs no registration lock. A release plus a new start while the
 comment response is paused therefore makes the old prepare exit 3 without
-writing approval bytes. Lock contention also exits 3; it never treats the old
-approval as live. A retry of the unchanged in-flight registration retains its
-nonce and can issue normally. An actual release followed by a new start rotates
-the nonce and needs a fresh comment; a legacy entry without a nonce remains
-usable by the existing complete/release commands but must be released and
-restarted before a new comment approval can authorize execution.
+writing approval bytes. A checkout dirtied while the final GraphQL response is
+paused likewise exits 3 without new approval or host snapshot bytes. Lock contention also exits 3; it never treats the old approval
+as live. A retry of the unchanged in-flight registration retains its nonce and
+can issue normally. An actual release followed by a new start rotates the nonce
+and needs a fresh comment; a legacy entry without a nonce remains usable by the
+existing complete/release commands but must be released and restarted before a
+new comment approval can authorize execution. This cooperative final check is
+not an OS sandbox against a caller that bypasses prepare and executes PR code.
 
 ## Recording and publication
 
@@ -212,8 +222,12 @@ trusted `headRefOid`. It also revalidates `basis` against the snapshot's
 author and `isCrossRepository`. Unlike the older optional context-digest
 warning, VM and host publication requires `--context-sha256` and a byte
 match. The existing outside-clone, non-symlink and single-link rules apply
-too. The PR-tree copy of the snapshot is never authoritative. Before any
-context or approval file is written, the time-stamped artifact directory must
+too. The PR-tree copy of the snapshot is never authoritative, and an artifact
+`context.json` cannot self-mint coordinates. When trusted repo/PR coordinates
+are known, a `pr<N>-verify-*` directory whose N differs is refused for both
+comment and local-trust approvals, even at the same head on a shared branch; a
+missing or cross-identifying artifact context cannot change that host identity.
+Before any context or approval file is written, the time-stamped artifact directory must
 be a real directory, not a symbolic link or other file, whose fully canonical
 path is exactly the expected direct child of the real `tmp/` directory. An
 ordinary same-second retry still reuses that existing real directory; a
@@ -223,8 +237,12 @@ symlink or hard link cannot overwrite its origin. `--context-out` containment
 uses the canonical PR-clone root and the canonical parent directory after that
 parent exists; a nonexistent new leaf is not passed to `realpath`, and an alias
 whose real parent leads back into the clone exits 3 before approval bytes are
-written. The external and in-tree contexts, artifact coordinates and approval,
-and the review snapshot form one write group. Prepare preserves their previous
+written. On the comment path, the state-lock critical section also compares the
+canonical output with the live watch state JSON and its `.lock`, including
+parent-directory aliases and same-file identity for an existing target; either
+identity exits 3 before authority writes, while a distinct external context
+still succeeds. The external and in-tree contexts, artifact coordinates and
+approval, and the review snapshot form one write group. Prepare preserves their previous
 bytes before the first mutation; a later failure restores those bytes and
 removes newly created members. It exits 3 and names any record it could not
 restore, rather than claiming a restored state.
@@ -270,7 +288,14 @@ matching comment. An actual release followed by `--start` always allocates a
 new nonce: even the same head/round then needs a fresh comment marker.
 Non-comment container retries or later rounds need matching head/round
 registration and the registration's nonce at completion/release, but no
-public approval marker.
+public approval marker. A published round supplies the resulting numeric
+comment ID to the existing `--complete` command. A withheld/no-publish round,
+after the local checker succeeds, uses that same command with the exact same
+head/round/nonce/state-root and artifact directory but omits the optional
+comment ID. The verified entry retains `commentId: null` and the artifact
+directory, and no successful registration remains in flight. Neither success
+branch implicitly auto-completes or uses `--release`, which remains the
+abandonment path in manual and watch recovery.
 
 An unattended watch must not invent host approval. It selects a container or
 stops for the maintainer rather than persisting `--trust-pr-head` for unknown

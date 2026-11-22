@@ -285,16 +285,42 @@ claim to mirror the gate's full trigger:
    a comment approval names that registration's nonce, and the same
    registration finishes at `--complete`.
 
+   The report's initial Methodology boundary line records only prepare's
+   authority decision, for example:
+
+   ```text
+   **Boundary.** host, maintainer-approved execution waiver recorded by prepare.
+   ```
+
+   Put every seed/battery/model image, exact network policy and credential
+   disclosure in the Methodology execution-facts prose immediately following
+   that line, not in the initial boundary line itself. The separate battery's
+   waived `executionApproval` does not turn those observations into a proven
+   OS boundary.
+
    The prepare `--reason` names **every** container the round uses — including
    the seed container, the only one with outbound egress and the one in which
    PR-authored Maven plugins execute: the seed container (mirror-only egress),
    the offline battery container, and, when the round uses a model, the
    proxy-connected container that runs the model turns, each with its image
-   and network policy. For example:
+   and network policy. When the seed gate is deliberately chosen, the
+   independent Java battery cannot return that optional gate's seed nonce;
+   for example:
 
    ```text
-   --reason 'Java battery cannot echo the seed gate nonce; seed: maven:3.9.11-eclipse-temurin-21, mirror-only egress; battery: same image, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free'
+   --reason 'Java battery cannot echo the seed gate nonce; seed: exact Maven/JDK/Node seed image, mirror-only egress, credential-free; battery: same Maven/JDK image, --network none, offline m2; model turns: node:22-bookworm via host proxy, credential-free'
    ```
+
+   A deliberately gate-less example has a different reason: no gate was chosen,
+   so no seed nonce was generated at all. Name the exact seed/battery/model
+   images and networks, and the concrete observations supporting the
+   credential-free disclosure, for example `--reason 'Deliberately gate-less
+seed by operator choice, no gate or seed nonce generated; exact Maven/JDK
+seed image, mirror-only egress, operator/measured credential-free facts;
+independent Maven/JDK battery cannot attest the seed boundary or return a
+seed nonce, same image with --network none; model turns, if any:
+node:22-bookworm via host proxy, no credential signals observed.'` The
+   independent battery still retains step 3's waived executionApproval.
 
    A round with no model turns names the seed and battery containers. Do not
    add a separate `detail` field or otherwise edit prepare's artifact
@@ -433,11 +459,26 @@ claim to mirror the gate's full trigger:
 
 - The skill carries the Java recipe with the same trusted-clone / PR-clone /
   proxy layout as the JS recipe.
-- A Java round can complete without any host execution of PR code, and its
-  report's `**Boundary.**` line names every container the round used, each
-  with its image and network policy.
+- For a deliberately gate-less seed, acceptance admits only concrete,
+  credential-free observations supported by the operator or measured launcher.
+  An unsupported credential-free claim or any credential signal rejects that
+  seed, and a rejected seed is never reused. Its `gate: null` and facts do not
+  claim that a gate or seed nonce existed.
+- Independently, a positive gated case runs
+  `verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>` in the
+  exact Maven/JDK/Node seed image and requires exit 0. Deep-compare that exact
+  seed's `seed.json.gate` with the complete `boundary-gate.json` produced by
+  the same invocation, never a sibling arm's or another round's record. These
+  are future acceptance runs; no such gated live battery is claimed here.
+- A Java round can complete without any host execution of PR code. Its initial
+  Methodology `**Boundary.**` line states only the prepare-recorded host/VM
+  waiver; immediately following execution-facts prose names every
+  seed/battery/model image, network policy and credential disclosure.
 - The prepare-authored waiver path remains available and recorded for rounds
-  that cannot use the recipe (e.g. a database-dependent repro).
+  that cannot use the recipe (e.g. a database-dependent repro). The independent
+  Java battery retains that waived executionApproval whether its optional seed
+  gate exists or not; it neither manufactures a battery nonce nor presents
+  gate-less observations as proof of an OS boundary.
 
 ## Open questions
 

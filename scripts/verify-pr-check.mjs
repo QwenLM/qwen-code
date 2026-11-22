@@ -1615,6 +1615,16 @@ function main(argv) {
     evidenceUnreadable,
     unreadableKeys,
   });
+  if (
+    contextPath &&
+    coordinates &&
+    dirPrNumber &&
+    Number(dirPrNumber) !== coordinates.number
+  ) {
+    result.errors.push(
+      `artifact directory ${basename(resolve(dir))} names PR ${dirPrNumber}, but the trusted host snapshot is for ${coordinates.owner}/${coordinates.repo}#${coordinates.number}; a host-held approval cannot be replayed into another PR's round directory`,
+    );
+  }
   result.errors.push(
     ...executionApprovalErrors(files.boundary, trustedSnapshot, {
       contextProvided: !!contextPath,

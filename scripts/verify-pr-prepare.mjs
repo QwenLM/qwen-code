@@ -59,6 +59,7 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -682,6 +683,51 @@ export function hasHostileInfoExclude(root) {
     });
 }
 
+function exactCheckoutError(root, context) {
+  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
+  if (treeHead.status !== 0) return 'could not read HEAD in this clone';
+  if (treeHead.stdout.trim() !== context.head) {
+    return `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`;
+  }
+  // The ignore channel is steerable from the same PR-controlled .git:
+  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
+  // has no `-c` override, so active patterns there are refused outright
+  // rather than read through.
+  if (hasHostileInfoExclude(root)) {
+    return '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare';
+  }
+  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
+  // hide the untracked files this check exists to refuse.
+  const dirty = run('git', gitStatusArgs(root));
+  if (dirty.status !== 0) {
+    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
+    return `could not read the working tree status: ${detail}`;
+  }
+  if (dirty.stdout.trim() !== '') {
+    // Name the entries and a remedy that actually clears them: a plain
+    // `git stash` leaves untracked files behind, so the advice would loop.
+    const entries = dirty.stdout.trim().split('\n');
+    const shown = entries.slice(0, 5).map(printable).join(', ');
+    return `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`;
+  }
+  // git status trusts the index: skip-worktree / assume-unchanged entries
+  // (a sparse checkout sets them en masse) hide tracked divergence from it,
+  // so refuse anything that is not a plain cached 'H' entry.
+  const flagged = runGit(['-C', root, 'ls-files', '-v']);
+  if (flagged.status !== 0) {
+    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
+    return `could not read the index flags: ${detail}`;
+  }
+  const opaque = flagged.stdout
+    .split('\n')
+    .filter((line) => line && !line.startsWith('H '));
+  if (opaque.length > 0) {
+    const shown = opaque.slice(0, 5).map(printable).join(', ');
+    return `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`;
+  }
+  return null;
+}
+
 function report(lines) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
@@ -790,6 +836,36 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
   };
 }
 
+function directApprovalMarkers(body) {
+  const markers = [];
+  let fence = null;
+  for (const line of body.replace(/\r\n?/g, '\n').split('\n')) {
+    const run = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      if (
+        run &&
+        run[1][0] === fence.char &&
+        run[1].length >= fence.length &&
+        run[2].trim() === ''
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    if (run) {
+      fence = { char: run[1][0], length: run[1].length };
+      continue;
+    }
+    // Only a direct, full-line HTML comment is an instruction. Blockquotes,
+    // indented code and fenced examples are prose, never execution approval.
+    const match = /^<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->$/.exec(
+      line,
+    );
+    if (match) markers.push(match[1]);
+  }
+  return markers;
+}
+
 function commentApproval(options, snapshot, owner, name, cloneRoot) {
   const match = APPROVAL_PERMALINK.exec(options.approval);
   if (
@@ -841,20 +917,16 @@ function commentApproval(options, snapshot, owner, name, cloneRoot) {
     return { error: 'the approval comment has no body or author login' };
   }
   const prefixCount = body.split(APPROVAL_PREFIX).length - 1;
-  const markers = [
-    ...body
-      .replace(/\r\n/g, '\n')
-      .matchAll(/<!-- verify-pr-boundary-approval: (\{[^\n]*\}) -->/g),
-  ];
+  const markers = directApprovalMarkers(body);
   if (prefixCount !== 1 || markers.length !== 1) {
     return {
       error:
-        'the approval comment needs exactly one well-formed verify-pr-boundary-approval marker',
+        'the approval comment needs exactly one well-formed verify-pr-boundary-approval marker as a direct full line outside quotes and code examples',
     };
   }
   let marker;
   try {
-    marker = JSON.parse(markers[0][1]);
+    marker = JSON.parse(markers[0]);
   } catch {
     return { error: 'the approval marker is not valid JSON' };
   }
@@ -1130,62 +1202,10 @@ function main(argv) {
   // The round runs the head side of its A/B in this tree, so a HEAD other
   // than the PR head or an uncommitted change would measure code the report
   // does not name. Checked before the artifact directory exists, so a refusal
-  // leaves nothing behind.
-  const treeHead = runGit(['-C', root, 'rev-parse', 'HEAD']);
-  if (treeHead.status !== 0) {
-    return fail(3, 'could not read HEAD in this clone');
-  }
-  if (treeHead.stdout.trim() !== context.head) {
-    return fail(
-      3,
-      `current tree is at ${treeHead.stdout.trim()}, not PR head ${context.head} — run: git checkout ${context.head}, then re-run prepare`,
-    );
-  }
-  // The ignore channel is steerable from the same PR-controlled .git:
-  // core.excludesFile is neutralized by GIT_HARDENING, but .git/info/exclude
-  // has no `-c` override, so active patterns there are refused outright
-  // rather than read through.
-  if (hasHostileInfoExclude(root)) {
-    return fail(
-      3,
-      '.git/info/exclude carries local exclude patterns, which can hide untracked files from the clean-tree check — re-clone (a fresh clone has only the commented default), or clear the file, then re-run prepare',
-    );
-  }
-  // Explicit mode: a maintainer's status.showUntrackedFiles=no would otherwise
-  // hide the untracked files this check exists to refuse.
-  const dirty = run('git', gitStatusArgs(root));
-  if (dirty.status !== 0) {
-    const detail = (dirty.stderr || '').trim() || `exit ${dirty.status}`;
-    return fail(3, `could not read the working tree status: ${detail}`);
-  }
-  if (dirty.stdout.trim() !== '') {
-    // Name the entries and a remedy that actually clears them: a plain
-    // `git stash` leaves untracked files behind, so the advice would loop.
-    const entries = dirty.stdout.trim().split('\n');
-    const shown = entries.slice(0, 5).map(printable).join(', ');
-    return fail(
-      3,
-      `working tree has uncommitted changes (${shown}${entries.length > 5 ? ', …' : ''}) — commit them, or run \`git stash push --include-untracked\` (a plain \`git stash\` leaves untracked files behind), or remove them, then re-run prepare; this script never stashes for you`,
-    );
-  }
-  // git status trusts the index: skip-worktree / assume-unchanged entries
-  // (a sparse checkout sets them en masse) hide tracked divergence from it,
-  // so refuse anything that is not a plain cached 'H' entry.
-  const flagged = runGit(['-C', root, 'ls-files', '-v']);
-  if (flagged.status !== 0) {
-    const detail = (flagged.stderr || '').trim() || `exit ${flagged.status}`;
-    return fail(3, `could not read the index flags: ${detail}`);
-  }
-  const opaque = flagged.stdout
-    .split('\n')
-    .filter((line) => line && !line.startsWith('H '));
-  if (opaque.length > 0) {
-    const shown = opaque.slice(0, 5).map(printable).join(', ');
-    return fail(
-      3,
-      `tracked entries hide their worktree state (${shown}${opaque.length > 5 ? ', …' : ''}) — re-clone without a sparse checkout, or clear the index flags, then re-run prepare`,
-    );
-  }
+  // leaves nothing behind. The same hardened check runs again after the last
+  // network response, immediately before authority writes.
+  const initialTreeError = exactCheckoutError(root, context);
+  if (initialTreeError) return fail(3, initialTreeError);
 
   let executionApproval = null;
   if (options.execution !== 'container') {
@@ -1291,6 +1311,12 @@ function main(argv) {
       }
     }
 
+    // The review-state GraphQL response was the final network activity. A
+    // checkout changed while that response was in flight must not supply an
+    // execution approval or a host snapshot under the earlier clean-tree OK.
+    const finalTreeError = exactCheckoutError(root, context);
+    if (finalTreeError) return fail(3, finalTreeError);
+
     // The snapshot dir/file live in the PR-controlled tree: a symlink at
     // either path redirects the host-side write, and a hard link at the
     // snapshot path would truncate a file the round does not own.
@@ -1343,6 +1369,33 @@ function main(argv) {
             3,
             `refusing to write the host snapshot inside the PR clone: ${outPath}`,
           );
+        }
+        if (executionApproval?.source === 'comment') {
+          const statePath = watchStatePath(options.stateRoot, context.pr);
+          const protectedPaths = [statePath, `${statePath}.lock`];
+          const canonicalOut = join(realParent, basename(outPath));
+          for (const protectedPath of protectedPaths) {
+            const canonicalProtected = join(
+              realpathSync(dirname(protectedPath)),
+              basename(protectedPath),
+            );
+            let sameFile = false;
+            try {
+              const outputStat = statSync(outPath);
+              const protectedStat = statSync(protectedPath);
+              sameFile =
+                outputStat.dev === protectedStat.dev &&
+                outputStat.ino === protectedStat.ino;
+            } catch (error) {
+              if (error.code !== 'ENOENT') throw error;
+            }
+            if (canonicalOut === canonicalProtected || sameFile) {
+              return fail(
+                3,
+                `--context-out must not overwrite the live watch state or its lock: ${outPath}`,
+              );
+            }
+          }
         }
       } catch (error) {
         return fail(

@@ -288,6 +288,33 @@ describe('registration identity', () => {
     ).toBe(2);
   });
 
+  it('completes a successful unpublished round with a null comment id', () => {
+    const root = makeRoot();
+    expect(run(root, START).status).toBe(0);
+    const registrationNonce = readState(root, 16866).inFlightHeads[0]
+      .registrationNonce;
+    const artifactDir = makeRoot();
+    const completed = run(root, [
+      ...COMPLETE,
+      '--registration-nonce',
+      registrationNonce,
+      '--artifact-dir',
+      artifactDir,
+    ]);
+    expect(completed.status, completed.stderr).toBe(0);
+    const state = readState(root, 16866);
+    expect(state.inFlightHeads).toEqual([]);
+    expect(state.verifiedHeads[0]).toMatchObject({
+      head: HEAD,
+      round: 11,
+      verdict: 'merge-ready',
+      commentId: null,
+      artifactDir,
+      registrationNonce,
+    });
+    expect(existsSync(artifactDir)).toBe(true);
+  });
+
   it('recovers a persisted snapshot without inferring a replacement identity', () => {
     const root = makeRoot();
     const started = run(root, START);
