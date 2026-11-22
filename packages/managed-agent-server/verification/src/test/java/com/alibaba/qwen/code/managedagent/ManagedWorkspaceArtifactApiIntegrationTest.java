@@ -539,15 +539,16 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
                 .orElseThrow().publicationId();
         String scope = DigestUtils.sha256Hex(
                 JSON.createArrayNode().add(TENANT).add(WORKSPACE).add("session-2").toString());
-        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        fixture.jdbc().update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, admission_resource_id,"
                 + " receipt_revision, receipt_sequence, is_quarantined)"
-                + " SELECT ?, tenant_key, tenant_id, workspace_id, ?, publication_id, execution_key, capture_id,"
+                + " SELECT ?, tenant_id, workspace_id, ?, publication_id, execution_key, capture_id,"
                 + " binding_json, binding_digest, token_hash, state, capture_bytes, producer_bytes, admission_bytes,"
                 + " producer_phase, admission_resource_id, receipt_revision, receipt_sequence, is_quarantined"
                 + " FROM ma_output_capture WHERE publication_id = ?",
-                scope, "session-2", publicationId);
+                scope, "session-2".getBytes(StandardCharsets.UTF_8),
+                publicationId.getBytes(StandardCharsets.UTF_8));
         var jdbc = spy(fixture.jdbc());
         ReflectionTestUtils.setField(fixture.publications(), "jdbc", jdbc);
 
