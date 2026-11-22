@@ -45,22 +45,7 @@ const job = (name) => {
 function inlineMavenCacheHelper(run) {
   const guard = 'if [ ! -f "${seed_helper}" ]; then';
   const guardStart = run.indexOf(guard);
-  if (guardStart < 0) {
-    const sourceStart = run.indexOf('source "${seed_helper}"');
-    if (sourceStart < 0) return run;
-    const lineStart = run.lastIndexOf('\n', sourceStart) + 1;
-    const indent = run.slice(lineStart, sourceStart);
-    const localRoot = run.includes('RUNNER_ENVIRONMENT')
-      ? '${repo}'
-      : '${RUNNER_TEMP}/m2-repo';
-    const helper = readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8')
-      .replaceAll('${repo}', localRoot)
-      .replace(/^/gm, indent);
-    return `${run.slice(0, sourceStart)}${helper}${run.slice(sourceStart + 'source "${seed_helper}"'.length)}`.replace(
-      `${indent}seed_helper="\${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"\n`,
-      '',
-    );
-  }
+  if (guardStart < 0) return run;
   const lineStart = run.lastIndexOf('\n', guardStart) + 1;
   const indent = run.slice(lineStart, guardStart);
   const end = run.indexOf(`\n${indent}fi`, guardStart);
@@ -80,6 +65,22 @@ function inlineMavenCacheHelper(run) {
   );
 }
 
+const canDenyRemoval = (() => {
+  const dir = mkdtempSync(join(tmpdir(), 'sdk-java-deny-removal-'));
+  const probe = join(dir, 'probe');
+  try {
+    writeFileSync(probe, 'probe');
+    chmodSync(dir, 0o555);
+    rmSync(probe);
+    return false;
+  } catch (error) {
+    return ['EACCES', 'EPERM'].includes(error?.code);
+  } finally {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 const step = (block, name) => {
   const marker = `      - name: '${name}'`;
   const start = block.indexOf(marker);
@@ -93,6 +94,10 @@ function writeDeviceProbe(
   root,
   {
     lockBackend = false,
+    cacheHelperContents = readFileSync(
+      '.github/scripts/maven-cache-seed.sh',
+      'utf8',
+    ),
     hostDevice = '17',
     jobDevice = '29',
     homeDevice = hostDevice,
@@ -145,10 +150,7 @@ exec /bin/cp "$@"
   );
   const scripts = join(root, 'workspace', '.github', 'scripts');
   mkdirSync(scripts, { recursive: true });
-  writeFileSync(
-    join(scripts, 'maven-cache-seed.sh'),
-    readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8'),
-  );
+  writeFileSync(join(scripts, 'maven-cache-seed.sh'), cacheHelperContents);
   writeFileSync(
     join(scripts, 'sdk-java-lock.sh'),
     lockBackend
@@ -1397,10 +1399,18 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(referenceSeeds).toHaveLength(1);
       // The release lane has no write-back and takes no lock; its isolation
       // is the any-depth removal of every in-house tree, so pin it explicitly.
+      const helper = readFileSync(
+        '.github/scripts/maven-cache-seed.sh',
+        'utf8',
+      );
       for (const candidate of referenceSeeds) {
-        const run = inlineMavenCacheHelper(candidate.run);
-        expect(run, candidate.name).toContain('find -P "${repo}" -xdev -depth');
-        expect(run, candidate.name).toContain(
+        expect(candidate.run, candidate.name).toContain(
+          'source "${seed_helper}"',
+        );
+        expect(helper, candidate.name).toContain(
+          'find -P "${repo}" -xdev -depth',
+        );
+        expect(helper, candidate.name).toContain(
           "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*'",
         );
       }
@@ -1416,15 +1426,29 @@ describe('SDK Java self-hosted workflow guards', () => {
             line.includes('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         );
         expect(seedAt, candidate.name).toBeGreaterThan(-1);
-        const cpAt = lines.findIndex(
-          (line, index) =>
-            index > seedAt && line.includes('cp -aln "${HOME}/.m2/repository'),
+        const sourceAt = lines.findIndex((line) =>
+          line.includes('source "${seed_helper}"'),
         );
-        expect(cpAt, candidate.name).toBeGreaterThan(seedAt);
+        const cpAt =
+          sourceAt >= 0
+            ? helper
+                .split('\n')
+                .findIndex((line) =>
+                  line.includes('cp -aln "${HOME}/.m2/repository'),
+                )
+            : lines.findIndex(
+                (line, index) =>
+                  index > seedAt &&
+                  line.includes('cp -aln "${HOME}/.m2/repository'),
+              );
+        expect(cpAt, candidate.name).toBeGreaterThan(
+          sourceAt >= 0 ? -1 : seedAt,
+        );
+        const mvnAfter = sourceAt >= 0 ? sourceAt : cpAt;
         const mvn = lines.findIndex(
-          (line, index) => index > cpAt && /^\s*mvn /.test(line),
+          (line, index) => index > mvnAfter && /^\s*mvn /.test(line),
         );
-        expect(mvn, candidate.name).toBeGreaterThan(cpAt);
+        expect(mvn, candidate.name).toBeGreaterThan(mvnAfter);
         const seedLines = lines.slice(seedAt, mvn);
         // The release lane's seed sits inside an `if` whose closing `fi`
         // precedes its first Maven run; the slice runs the body alone.
@@ -1433,6 +1457,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
+        const workspace = join(dir, 'workspace');
         const host = join(home, '.m2', 'repository');
         const local = join(runnerTemp, 'm2-repo');
         const metadata = [
@@ -1459,6 +1484,12 @@ describe('SDK Java self-hosted workflow guards', () => {
           // The Actions runner guarantees this directory before every step;
           // the extracted seed stanza assumes its parent already exists.
           mkdirSync(runnerTemp, { recursive: true });
+          const scripts = join(workspace, '.github', 'scripts');
+          mkdirSync(scripts, { recursive: true });
+          writeFileSync(
+            join(scripts, 'maven-cache-seed.sh'),
+            readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8'),
+          );
           for (const path of [...metadata, ...artifacts]) {
             mkdirSync(dirname(join(host, path)), { recursive: true });
             writeFileSync(join(host, path), path);
@@ -1470,6 +1501,7 @@ describe('SDK Java self-hosted workflow guards', () => {
               ...process.env,
               HOME: home,
               RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: workspace,
               repo: local,
             },
           });
@@ -2024,8 +2056,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           'rm-denied-nonzero',
           'rm-denied-closed-stdout-nonzero',
         ].includes(mutation);
-        // A privileged uid cannot exercise this permission failure.
-        if (cleanupDenied && process.getuid?.() === 0) continue;
+        if (cleanupDenied && !canDenyRemoval) continue;
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-helper-'));
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
@@ -2282,7 +2313,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
     },
   );
 
-  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
+  it.skipIf(process.platform !== 'linux' || !canDenyRemoval)(
     'preserves step status when the cleanup log pipe closes',
     async () => {
       const source = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
@@ -3894,31 +3925,33 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform !== 'linux').each(['metadata', 'coordinate'])(
     'stops release Maven after $0 cleanup failure',
     (kind) => {
-      const script = inlineMavenCacheHelper(
-        Object.values(
-          parse(
-            readFileSync(
-              '.github/workflows/release-managed-agent-reference.yml',
-              'utf8',
-            ),
-          ).jobs,
-        )
-          .flatMap((entry) => entry.steps ?? [])
-          .find((candidate) => candidate.name === 'Build Java components').run,
+      const script = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components').run;
+      const helper = readFileSync(
+        '.github/scripts/maven-cache-seed.sh',
+        'utf8',
       );
       const body = script.slice(
         script.indexOf('if [[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]'),
       );
-      const pruneStart = body.indexOf(
+      const pruneStart = helper.indexOf(
         kind === 'coordinate'
           ? 'find -P "${repo}" -xdev -depth'
           : 'find -P "${repo}" -xdev ! -type d \\( -name',
       );
       const pruneEnd =
-        body.indexOf(' || exit 1', pruneStart) + ' || exit 1'.length;
+        helper.indexOf(' || exit 1', pruneStart) + ' || exit 1'.length;
       expect(pruneStart, kind).toBeGreaterThan(0);
       expect(pruneEnd, kind).toBeGreaterThan(pruneStart);
-      const prune = body.slice(pruneStart, pruneEnd);
+      const prune = helper.slice(pruneStart, pruneEnd);
       expect(prune).toContain('-delete || exit 1');
       for (const tolerateFailure of [false, true]) {
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-prune-'));
@@ -3956,7 +3989,20 @@ exec /usr/bin/find "$@"
           writeFileSync(hostTracking, 'ORIGINAL_HOST_TRACKING=host\n');
           writeFileSync(hostJar, 'host-artifact\n', { mode: 0o444 });
           chmodSync(dirname(hostTracking), 0o555);
-          writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+          const cacheHelperContents = tolerateFailure
+            ? helper.replace(
+                prune,
+                prune.replace(
+                  '-delete || exit 1',
+                  '-delete 2>/dev/null || true',
+                ),
+              )
+            : helper;
+          writeDeviceProbe(dir, {
+            hostDevice: '17',
+            jobDevice: '17',
+            cacheHelperContents,
+          });
           writeFileSync(
             join(dir, 'bin', 'find'),
             `#!/bin/sh
@@ -3971,15 +4017,7 @@ exec /usr/bin/find "$@"
 `,
             { mode: 0o755 },
           );
-          const testBody = tolerateFailure
-            ? body.slice(0, pruneStart) +
-              prune.replace(
-                '-delete || exit 1',
-                '-delete 2>/dev/null || true',
-              ) +
-              body.slice(pruneEnd)
-            : body;
-          const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${testBody}`;
+          const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${body}`;
           const result = spawnSync('bash', ['-e', '-c', invocation], {
             encoding: 'utf8',
             timeout: 15000,
@@ -3993,13 +4031,13 @@ exec /usr/bin/find "$@"
               LC_ALL: 'C',
             },
           });
-          expect(result.error, testBody).toBeUndefined();
+          expect(result.error, body).toBeUndefined();
           if (!tolerateFailure) {
             expect(result.stderr).toContain(
               `injected reference ${kind} prune failure`,
             );
           }
-          expect(result.status, testBody + result.stderr).toBe(
+          expect(result.status, body + result.stderr).toBe(
             tolerateFailure ? 0 : 1,
           );
           const localTracking = join(
@@ -4058,17 +4096,19 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
     'removes inherited metadata and transfer residue from the reference seed',
     () => {
-      const source = inlineMavenCacheHelper(
-        Object.values(
-          parse(
-            readFileSync(
-              '.github/workflows/release-managed-agent-reference.yml',
-              'utf8',
-            ),
-          ).jobs,
-        )
-          .flatMap((entry) => entry.steps ?? [])
-          .find((candidate) => candidate.name === 'Build Java components').run,
+      const source = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components').run;
+      const helper = readFileSync(
+        '.github/scripts/maven-cache-seed.sh',
+        'utf8',
       );
       const relativeFiles = [
         'org/example/lib/maven-metadata-central.xml',
@@ -4100,20 +4140,24 @@ exec /usr/bin/find "$@"
         writeFileSync(validArtifact, 'jar\n');
         writeFileSync(validResolver, 'stale\n');
         const jobLocal = join(runnerTemp, 'm2-repo');
-        const body =
+        const cacheHelperContents =
           mode === 'dropPart'
-            ? source.replace("-o -name '*.part'", '')
+            ? helper.replace("-o -name '*.part'", '')
             : mode === 'dropDirGuard'
-              ? source.replace('-xdev ! -type d', '-xdev')
-              : source;
-        writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+              ? helper.replace('-xdev ! -type d', '-xdev')
+              : helper;
+        writeDeviceProbe(dir, {
+          hostDevice: '17',
+          jobDevice: '17',
+          cacheHelperContents,
+        });
         try {
           const result = spawnSync(
             'bash',
             [
               '-e',
               '-c',
-              `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${body}`,
+              `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${source}`,
             ],
             {
               encoding: 'utf8',
@@ -4130,8 +4174,8 @@ exec /usr/bin/find "$@"
             },
           );
 
-          expect(result.error, body).toBeUndefined();
-          expect(result.status, body + result.stderr).toBe(
+          expect(result.error, source).toBeUndefined();
+          expect(result.status, source + result.stderr).toBe(
             mode === 'dropDirGuard' ? 1 : 0,
           );
           if (mode === 'dropDirGuard') {
@@ -4199,18 +4243,16 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'keeps the reference Maven repository writable after a read-only seed',
     () => {
-      const source = inlineMavenCacheHelper(
-        Object.values(
-          parse(
-            readFileSync(
-              '.github/workflows/release-managed-agent-reference.yml',
-              'utf8',
-            ),
-          ).jobs,
-        )
-          .flatMap((entry) => entry.steps ?? [])
-          .find((candidate) => candidate.name === 'Build Java components').run,
-      );
+      const source = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components').run;
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-release-seed-'));
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'runner-temp');

@@ -359,10 +359,13 @@ order this section exists to prevent.
   head cannot loop and be overtaken.
 - The workflow pins move with the mechanism:
   `scripts/tests/sdk-java-workflow.test.js` keeps the four SDK source sites
-  byte-identical and normalizes the reference wrapper. It checks the real
+  byte-identical, and requires the reference build to source its checked-out
+  helper directly without a download fallback. It checks the real
   `maven-cache-seed.sh` including its guarded presence, directory permission
   and mount-boundary checks, retained and dangling quarantine links,
-  fallback cleanup, and required prune failures. A call stops before Maven only when neither a local nor a revision-pinned helper is available. A helper already in the workspace, or obtained from the workflow's revision, really sources a warm
+  fallback cleanup, and required prune failures. The call stops before Maven
+  when neither a local nor a revision-pinned helper is available, and also on
+  source or required seed/guard failures. A helper already in the workspace, or obtained from the workflow's revision, really sources a warm
   hardlinked cache in a private fixture. The immutable validation
   source revision does not change. Downloads use fresh `mktemp` regular files,
   leaving the targets of pre-existing symlinks or hardlinks untouched, and
@@ -372,6 +375,8 @@ order this section exists to prevent.
   writable. The warning subshell confines `SIGPIPE` from a closed log pipe
   to that diagnostic process, so it cannot abort restoration of the saved step
   status. Other cleanup and warning I/O failures do not replace that status.
+  Permission-denial cleanup cases are gated by an actual removal probe rather
+  than uid alone, so root CI lanes without DAC bypass still run them.
   The reference build directly sources its checked-out helper and never
   requires a fallback fetch. A
   host-source mount or mount-inspection failure skips the optional copy and
