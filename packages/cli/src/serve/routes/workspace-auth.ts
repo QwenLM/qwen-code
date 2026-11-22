@@ -136,6 +136,15 @@ function toDeviceFlowStateBody(
   return body;
 }
 
+let cachedDeepInfraModels: unknown[] | null = null;
+let cachedDeepInfraModelsAt = 0;
+const DEEPINFRA_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+export function resetDeepinfraModelsCacheForTest(): void {
+  cachedDeepInfraModels = null;
+  cachedDeepInfraModelsAt = 0;
+}
+
 export function registerWorkspaceAuthRoutes(
   app: Application,
   deps: RegisterWorkspaceAuthRoutesDeps,
@@ -298,6 +307,72 @@ export function registerWorkspaceAuthRoutes(
 
   app.get('/workspace/auth/providers', (_req, res) => {
     res.status(200).json(buildAuthProviderCatalog(boundWorkspace));
+  });
+
+  app.get('/workspace/auth/deepinfra-models', async (_req, res) => {
+    const now = Date.now();
+    if (
+      cachedDeepInfraModels &&
+      now - cachedDeepInfraModelsAt < DEEPINFRA_CACHE_TTL_MS
+    ) {
+      res.status(200).json(cachedDeepInfraModels);
+      return;
+    }
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      const response = await fetch('https://api.deepinfra.com/models/list', {
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'qwen-code',
+        },
+      });
+      clearTimeout(timer);
+
+      if (!response.ok) {
+        if (cachedDeepInfraModels) {
+          res.status(200).json(cachedDeepInfraModels);
+          return;
+        }
+        res.status(502).json({
+          error: `DeepInfra API returned HTTP ${response.status}`,
+          code: 'upstream_error',
+        });
+        return;
+      }
+
+      const data = await response.json();
+      if (Array.isArray(data)) {
+        const filtered = data.filter(
+          (m: { model_name?: string }) =>
+            !m.model_name ||
+            !m.model_name.toLowerCase().startsWith('anthropic/'),
+        );
+        cachedDeepInfraModels = filtered;
+        cachedDeepInfraModelsAt = now;
+        res.status(200).json(filtered);
+      } else {
+        if (cachedDeepInfraModels) {
+          res.status(200).json(cachedDeepInfraModels);
+          return;
+        }
+        res.status(502).json({
+          error: 'Invalid response from DeepInfra API',
+          code: 'upstream_error',
+        });
+      }
+    } catch (err) {
+      if (cachedDeepInfraModels) {
+        res.status(200).json(cachedDeepInfraModels);
+        return;
+      }
+      res.status(502).json({
+        error: err instanceof Error ? err.message : String(err),
+        code: 'upstream_error',
+      });
+    }
   });
 
   app.post(
