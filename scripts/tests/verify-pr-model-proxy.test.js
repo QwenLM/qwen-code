@@ -998,6 +998,7 @@ describe('local container recipe pins', () => {
         [proxyJson],
       ],
     ]);
+    const shellFragmentResults = new Map();
     const onlyDocumentedPrepareCalls = async (document) => {
       // This is a closed grammar for the recipe's executable examples, not an
       // OS-level shell sandbox. Data citations stay data; every selected shell
@@ -1017,18 +1018,51 @@ describe('local container recipe pins', () => {
             line.startsWith(match[1]) ? line.slice(match[1].length) : line,
           )
           .join('\n');
+        const language = match[2].toLowerCase();
         const textHelperExample =
-          match[2] === 'text' &&
+          language === 'text' &&
           nodeProgramBoundary(foldContinuations(body).trim());
-        if (!['bash', 'sh', 'shell'].includes(match[2]) && !textHelperExample) {
+        if (!['bash', 'sh', 'shell'].includes(language) && !textHelperExample) {
           continue;
         }
         fragments.push({ source: body, quotedGate: false });
       }
       const inFences = (index) =>
         fencedRanges.some(([start, end]) => index >= start && index < end);
+      const proseCommandFragments = new Set([
+        'chmod 444',
+        'chmod 555',
+        'cp -a',
+        'cp -al',
+        'docker cp',
+        'docker exec',
+        'docker run',
+        "printf '%s'",
+        'rm -rf',
+        'container=<name>',
+        'cwd=<pr-clone>',
+        'HARNESS_TURN_DEADLINE=600000',
+        'href=""',
+        'modelRequestsInFlightAtAbort=1',
+        'QWEN_SANDBOX_IMAGE=ghcr.io/qwenlm/qwen-code:<label>',
+        'QWEN_SANDBOX_IMAGE_TAG=<label>',
+        'QWEN_VERIFY_CREDENTIAL_FREE=1',
+        'QWEN_VERIFY_JAVA=1',
+        'qwencode=<n>',
+        'ref=refs/heads/<branch>',
+        'SANDBOX=sandbox-exec',
+      ]);
       const citation = (match) => {
         const content = match[2].trim();
+        if (proseCommandFragments.has(content)) return true;
+        const lineStart = document.lastIndexOf('\n', match.index - 1) + 1;
+        const linePrefix = document.slice(lineStart, match.index);
+        if (
+          content === 'node scripts/lint.js' &&
+          /Never run\s*$/.test(linePrefix)
+        ) {
+          return true;
+        }
         if (
           ['node', 'bash -e', 'bash --noprofile --norc', 'bash -n'].includes(
             content,
@@ -1082,33 +1116,27 @@ describe('local container recipe pins', () => {
       // such pre-filter: the complete block was already selected above.
       const executableBoundary = (source) => {
         const text = foldContinuations(source).trim();
-        if (/^gate:/.test(text)) return true;
-        if (
-          /^(?:NODE_OPTIONS\s*=|alias\s|function\s|node\s*\(\s*\))/.test(text)
-        ) {
-          return true;
-        }
-        if (nodeProgramBoundary(text)) return true;
-        if (/^command\s+(?:-v(?:\s|$)|["'$/]|node(?=\s|$))/.test(text)) {
-          return true;
-        }
-        if (
-          /^(?:(?:env|sudo|exec|eval|sh|cd|touch|cat|echo|grep|printf|sed|cp|rm|mkdir|chmod)(?=\s|$)|scripts\/\S+\s|verify-pr-)/.test(
-            text,
-          ) ||
-          /^["']?(?:\/[A-Za-z0-9_.-]+)*\/(?:node|bash|sh|verify-pr-[a-z-]+\.mjs)(?=\s|$)/.test(
-            text,
-          )
-        ) {
-          return true;
-        }
-        if (/^(?:bash|sh)\s+-[a-z]*c(?:\s|$)/.test(text)) return true;
-        if (/^docker\s+-c(?:\s|$)/.test(text)) return true;
-        if (/^(?:export\s|unset\s|[A-Za-z_][A-Za-z0-9_]*=)/.test(text)) {
-          return true;
-        }
-        return /^(?=[A-Za-z_$/'"\\])\S+\s+(?:(?:-e|--eval)(?=\s|$)|["']?\S+\.[cm]?js(?=\s|$))/.test(
-          text,
+        const checks = [
+          /^gate:/,
+          /^(?:NODE_OPTIONS\s*=|alias\s|function\s|node\s*\(\s*\))/,
+          /^command\s+(?:-v(?:\s|$)|["'$/]|node(?=\s|$))/,
+          /^\/(?:[A-Za-z0-9_.-]+\/)+(?:env|nice|sudo)(?=\s|$)/,
+          /^(?:env|nice|sudo|exec|eval|sh|cd|touch|cat|echo|grep|printf|sed|cp|rm|mkdir|chmod|kill|docker|python3|true)(?=\s|$)/,
+          /^read\s+(?:-|[A-Z_][A-Z0-9_]*(?:\s|$))/,
+          /^scripts\/\S+\s/,
+          /^verify-pr-/,
+          /^["']?(?:\/[A-Za-z0-9_.-]+)*\/(?:node|bash|sh|verify-pr-[a-z-]+\.mjs)(?=\s|$)/,
+          /^qwen\s+.*--approval-mode\s/,
+          /^(?:bash|sh)\s+-[a-z]*c(?:\s|$)/,
+          /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
+          /^(?:export\s+[A-Za-z_][A-Za-z0-9_]*(?:=|\s|$)|unset(?:\s+[A-Za-z_][A-Za-z0-9_]*)+\s*$|[A-Za-z_][A-Za-z0-9_]*=)/,
+          /(?:^|[;&|]\s*)(?:["']?(?:\/[A-Za-z0-9_.-]+)*\/node|node)\s+(?:-e|--eval)(?=\s|$)/,
+          /(?:^|[;&|]\s*)[^\s;|&]*\$\([^)]*\)[^\s;|&]*\s+(?:-e|--eval)(?=\s|$)/,
+          /(?:^|[;&|]\s*)python3(?=\s|$)/,
+          /^(?=[A-Za-z_$/'"\\`])\S+\s+(?:(?:-e|--eval)(?=\s|$)|["']?\S+\.[cm]?js(?=\s|$))/,
+        ];
+        return (
+          nodeProgramBoundary(text) || checks.some((check) => check.test(text))
         );
       };
       const spans = [...document.matchAll(/(`+)([\s\S]*?)\1/g)];
@@ -1136,10 +1164,17 @@ describe('local container recipe pins', () => {
         const inFence = inFences(lineStart);
         const inSpan = inCodeSpan(lineStart);
         let continuationEnd = lineIndex;
-        while (
-          continuationEnd + 1 < rawLines.length &&
-          /\\[ \t]*\r?$/.test(rawLines[continuationEnd])
-        ) {
+        let chainContinues = false;
+        while (continuationEnd + 1 < rawLines.length) {
+          const line = rawLines[continuationEnd];
+          if (chainContinues && /^\s*#/.test(line)) {
+            continuationEnd += 1;
+            continue;
+          }
+          chainContinues = /(?:&&|\|\||\|&?)[ \t]*(?:#[^\r\n]*)?\r?$/.test(
+            line,
+          );
+          if (!/\\[ \t]*\r?$/.test(line) && !chainContinues) break;
           continuationEnd += 1;
         }
         const source = rawLines
@@ -1150,11 +1185,26 @@ describe('local container recipe pins', () => {
           /^[('"]*(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs[\s'")\],.:]*$/.test(
             trimmed,
           );
+        const leadingCitation = spans.find((match) => {
+          const start = match.index - lineStart;
+          return (
+            start >= 0 &&
+            start + match[0].length <= rawLines[lineIndex].length &&
+            !rawLines[lineIndex].slice(0, start).trim()
+          );
+        });
+        const citationLineWithoutExecutableTrailer =
+          leadingCitation &&
+          !executableBoundary(
+            rawLines[lineIndex].slice(
+              leadingCitation.index + leadingCitation[0].length - lineStart,
+            ),
+          );
         if (
           !inFence &&
-          !inSpan &&
+          (!inSpan || leadingCitation) &&
           !plainCitation &&
-          !trimmed.startsWith('`') &&
+          !citationLineWithoutExecutableTrailer &&
           executableBoundary(source)
         ) {
           fragments.push({ source, quotedGate: false });
@@ -1168,7 +1218,7 @@ describe('local container recipe pins', () => {
       const calls = [];
       const staticText = (node, source) => {
         const raw = source.slice(node.startIndex, node.endIndex);
-        if (node.type === 'word') return raw;
+        if (node.type === 'word' || node.type === 'number') return raw;
         if (node.type === 'raw_string') return raw.slice(1, -1);
         if (
           node.type === 'string' &&
@@ -1210,43 +1260,78 @@ describe('local container recipe pins', () => {
           ' ',
         ),
       );
-      const dataCommands = new Set(
-        'break cat cd chmod cp dirname echo exit grep id kill mkdir printf read rm sleep test true'.split(
-          ' ',
-        ),
-      );
       const trustedInterpreters = new Set([
         'node',
         '/bin/node',
         '/usr/bin/node',
         '/usr/local/bin/node',
       ]);
+      const unquote = (raw) =>
+        raw.length >= 2 &&
+        ((raw.startsWith('"') && raw.endsWith('"')) ||
+          (raw.startsWith("'") && raw.endsWith("'")))
+          ? raw.slice(1, -1)
+          : raw;
+      const cacheRoot = '~/.cache/qwen-verify/pr<n>';
+      const cachePath = (raw, suffix) =>
+        unquote(raw) === `${cacheRoot}/${suffix}`;
+      const relativeDataPath = (raw) => {
+        const path = unquote(raw);
+        return (
+          /^(?:\.\/)?[A-Za-z0-9_-][A-Za-z0-9_./-]*$/.test(path) &&
+          !path.split('/').includes('..')
+        );
+      };
+      const captureOutputPath = (path) =>
+        /^(?:(?:tmp\/pr<n>-verify-<ts>\/)?evidence|…)\/[A-Za-z0-9][A-Za-z0-9._-]*\.png$/.test(
+          path,
+        );
       const validCaptureArguments = (values) => {
         let index = 1;
-        let output = false;
-        let title = false;
+        const seen = new Set();
         while (index < values.length && values[index] !== '--') {
           const option = values[index];
+          const argument = values[index + 1];
           if (
-            !['--out', '--title'].includes(option) ||
-            (option === '--out' ? output : title) ||
-            typeof values[index + 1] !== 'string'
+            !['--out', '--title', '--rows', '--cols'].includes(option) ||
+            seen.has(option) ||
+            typeof argument !== 'string' ||
+            argument.startsWith('--')
           ) {
             return false;
           }
-          if (option === '--out') output = true;
-          else title = true;
+          if (option === '--out' && !captureOutputPath(argument)) return false;
+          if (['--rows', '--cols'].includes(option)) {
+            const size = Number(argument);
+            if (
+              !/^\d+$/.test(argument) ||
+              !Number.isInteger(size) ||
+              size < 1 ||
+              size > 500
+            ) {
+              return false;
+            }
+          }
+          seen.add(option);
           index += 2;
         }
         const tail = values.slice(index + 1);
         return (
-          output &&
+          seen.has('--out') &&
           values[index] === '--' &&
           (tail.join(' ') === '<cmd>' ||
             tail.join(' ') === 'node my-harness.mjs')
         );
       };
-      const inspect = async ({ source, quotedGate }, depth = 0) => {
+      const inspect = async (
+        {
+          source,
+          quotedGate,
+          trustedDockerExec = false,
+          credentialFreeDockerExec = false,
+        },
+        depth = 0,
+      ) => {
         if (depth > 4 || source.length > 200_000) return false;
         // tree-sitter-bash 0.23.1 crashes on `!=` inside `[ ... ]` under the
         // current WASM runtime. Polarity is irrelevant to command validation;
@@ -1267,6 +1352,331 @@ describe('local container recipe pins', () => {
           let valid = true;
           let visited = 0;
           const nested = [];
+          const rawArgument = (arg) =>
+            foldContinuations(source.slice(arg.startIndex, arg.endIndex));
+          const commandParts = (command) => {
+            const nameNode = command.childForFieldName('name');
+            const commandArguments = argumentNodes(command);
+            return {
+              name: nameNode ? staticCommandName(nameNode, source) : null,
+              args: commandArguments,
+              values: commandArguments.map((arg) => staticText(arg, source)),
+              rawValues: commandArguments.map(rawArgument),
+            };
+          };
+          const validFileRedirect = (redirect) => {
+            const raw = foldContinuations(
+              source.slice(redirect.startIndex, redirect.endIndex),
+            );
+            let owner = null;
+            const findOwner = (candidate) => {
+              if (
+                candidate.type === 'command' &&
+                candidate.endIndex <= redirect.startIndex &&
+                (!owner || candidate.endIndex > owner.endIndex)
+              ) {
+                owner = candidate;
+              }
+              for (const child of candidate.namedChildren) findOwner(child);
+            };
+            if (redirect.parent) findOwner(redirect.parent);
+            if (!owner) return false;
+            if (['>&2', '2>&1'].includes(raw)) return true;
+            const { name, values, rawValues } = commandParts(owner);
+            const modulePath = trustedInterpreters.has(name) ? values[0] : null;
+            const helper = (family) =>
+              typeof modulePath === 'string' &&
+              modulePath.endsWith(`verify-pr-${family}.mjs`);
+            if (raw === '2>/dev/null') {
+              return name === 'kill' || modulePath === '-e';
+            }
+            if (
+              raw ===
+              '< "${REVIEW_OPENAI_KEY_FILE:-$HOME/.config/qwen-verify/review-openai-key}"'
+            ) {
+              return (
+                name === 'read' &&
+                rawValues.join(' ') === '-r REVIEW_OPENAI_API_KEY'
+              );
+            }
+            if (raw === `> ${cacheRoot}/prepare.log`) {
+              return helper('prepare');
+            }
+            if (raw === `> ${cacheRoot}/pr.sha256`) {
+              return name === 'sed';
+            }
+            if (raw === `> ${cacheRoot}/previous-report.md`) {
+              return name === 'printf' && rawValues[1] === '"$PREV"';
+            }
+            if (
+              raw === `> ${cacheRoot}/proxy.json` ||
+              raw === `2> ${cacheRoot}/proxy.err`
+            ) {
+              return helper('model-proxy');
+            }
+            if (raw === `> ${cacheRoot}/proxy.pid`) {
+              return name === 'echo' && rawValues.join(' ') === '$!';
+            }
+            if (raw === '> "$rd/boundary.json"') {
+              return name === 'printf';
+            }
+            if (raw === '> "$HOME/.qwen/settings.json"') {
+              return trustedDockerExec && name === 'cat' && values.length === 0;
+            }
+            return false;
+          };
+          const validVariableAssignment = (assignment) => {
+            const raw = foldContinuations(
+              source.slice(assignment.startIndex, assignment.endIndex),
+            );
+            const nameNode = assignment.namedChildren.find(
+              (child) => child.type === 'variable_name',
+            );
+            const name = nameNode
+              ? source.slice(nameNode.startIndex, nameNode.endIndex)
+              : null;
+            const assigned = raw.slice(raw.indexOf('=') + 1);
+            const parent = assignment.parent;
+            const parentName =
+              parent?.type === 'command'
+                ? staticCommandName(parent.childForFieldName('name'), source)
+                : null;
+            if (['ME', 'PREV', 'BASE_OID'].includes(name)) {
+              return (
+                parent?.type !== 'command' &&
+                parent?.type !== 'declaration_command' &&
+                assigned.startsWith('"$(') &&
+                assigned.endsWith(')"')
+              );
+            }
+            if (name === 'REVIEW_OPENAI_BASE_URL') {
+              return parentName === 'node' && assigned === '<upstream-url>';
+            }
+            if (name === 'IFS') {
+              return parentName === 'read' && assigned === '';
+            }
+            if (name === 'QWEN_VERIFY_PROXY_TOKEN') {
+              return (
+                parent?.type === 'declaration_command' &&
+                assigned.startsWith('"$(node -e ') &&
+                assigned.endsWith(')"') &&
+                assigned.includes('.token)') &&
+                assigned.includes(`${cacheRoot}/proxy.json`)
+              );
+            }
+            if (name === 'QWEN_VERIFY_CREDENTIAL_FREE') {
+              return (
+                trustedDockerExec &&
+                parent?.type === 'declaration_command' &&
+                assigned === '1'
+              );
+            }
+            if (name === 'PATH') {
+              return (
+                trustedDockerExec &&
+                parent?.type === 'declaration_command' &&
+                assigned === '"$HOME/.local/bin:$PATH"'
+              );
+            }
+            if (name === 'rc') {
+              return (
+                !['command', 'declaration_command'].includes(parent?.type) &&
+                ['0', '1', '$?'].includes(assigned)
+              );
+            }
+            if (name === 'rd') {
+              return (
+                !['command', 'declaration_command'].includes(parent?.type) &&
+                ['"<round-dir>"', '"${rd%/}"'].includes(assigned)
+              );
+            }
+            return false;
+          };
+          const validDataCommand = (name, command, values, rawValues) => {
+            let statement = command.parent;
+            while (
+              statement &&
+              ['list', 'pipeline', 'negated_command'].includes(statement.type)
+            ) {
+              statement = statement.parent;
+            }
+            const redirects =
+              statement?.type === 'redirected_statement'
+                ? statement.namedChildren.filter(
+                    (child) => child.type === 'file_redirect',
+                  )
+                : [];
+            const hasHeredoc =
+              statement?.type === 'redirected_statement' &&
+              statement.namedChildren.some(
+                (child) => child.type === 'heredoc_redirect',
+              );
+            if (name === 'break' || name === 'true') return values.length === 0;
+            if (name === 'cat') {
+              if (values.length === 0) {
+                return (
+                  hasHeredoc ||
+                  (trustedDockerExec &&
+                    redirects.some((redirect) => validFileRedirect(redirect)))
+                );
+              }
+              return (
+                values.length === 1 &&
+                (relativeDataPath(rawValues[0]) ||
+                  ['prepare.log', 'pr.sha256', 'proxy.pid'].some((suffix) =>
+                    cachePath(rawValues[0], suffix),
+                  ))
+              );
+            }
+            if (name === 'cd') {
+              return (
+                rawValues.length === 1 && unquote(rawValues[0]) === '<pr-clone>'
+              );
+            }
+            if (name === 'chmod') {
+              return (
+                rawValues.length === 2 &&
+                rawValues[0] === '600' &&
+                cachePath(rawValues[1], 'proxy.json')
+              );
+            }
+            if (name === 'cp') {
+              return (
+                rawValues.length === 2 &&
+                rawValues[0] ===
+                  '<pr-clone>/tmp/verify-context/pr<n>-review-threads.json' &&
+                cachePath(rawValues[1], 'review-threads.json')
+              );
+            }
+            if (name === 'dirname') {
+              return rawValues.length === 1 && rawValues[0] === '"$rd"';
+            }
+            if (name === 'echo') {
+              return (
+                values.every(
+                  (value) =>
+                    typeof value === 'string' && !value.startsWith('-'),
+                ) ||
+                (rawValues.length === 1 &&
+                  ['$!', '"$RUNNER_TEMP"'].includes(rawValues[0]))
+              );
+            }
+            if (name === 'exit') {
+              return (
+                rawValues.length === 1 && ['1', '"$rc"'].includes(rawValues[0])
+              );
+            }
+            if (name === 'grep') {
+              if (
+                rawValues.length === 3 &&
+                rawValues[0] === '-Eq' &&
+                values[1] === '^[0-9a-f]{64}$'
+              ) {
+                return cachePath(rawValues[2], 'pr.sha256');
+              }
+              if (
+                values.length >= 2 &&
+                values.length <= 3 &&
+                ['-E', '-e'].includes(values[0]) &&
+                typeof values[1] === 'string'
+              ) {
+                return values.length === 2 || relativeDataPath(rawValues[2]);
+              }
+              return false;
+            }
+            if (name === 'id') {
+              return values.length === 1 && ['-u', '-g'].includes(values[0]);
+            }
+            if (name === 'kill') {
+              return (
+                rawValues.length === 1 &&
+                rawValues[0] === `"$(cat ${cacheRoot}/proxy.pid)"`
+              );
+            }
+            if (name === 'mkdir') {
+              return (
+                rawValues.length === 2 &&
+                rawValues[0] === '-p' &&
+                (unquote(rawValues[1]) === cacheRoot ||
+                  cachePath(rawValues[1], 'qwen-base') ||
+                  (trustedDockerExec && rawValues[1] === '"$HOME/.qwen"'))
+              );
+            }
+            if (name === 'printf') {
+              const destinations = redirects.map((redirect) =>
+                foldContinuations(
+                  source.slice(redirect.startIndex, redirect.endIndex),
+                ),
+              );
+              if (destinations.includes(`> ${cacheRoot}/previous-report.md`)) {
+                return (
+                  rawValues.length === 2 &&
+                  rawValues[0] === "'%s\\n'" &&
+                  rawValues[1] === '"$PREV"'
+                );
+              }
+              if (destinations.includes('> "$rd/boundary.json"')) {
+                return (
+                  rawValues.length === 2 &&
+                  rawValues[0] === "'%s\\n'" &&
+                  rawValues[1] ===
+                    '\'{"mode":"container","detail":"<image, network policy, credential-free mount>"}\''
+                );
+              }
+              if (values.length === 1 && values[0] === '%s') return true;
+              if (values.length !== 2 || !['%s', '%s\\n'].includes(values[0])) {
+                return false;
+              }
+              return (
+                typeof values[1] === 'string' || rawValues[1] === '"$PREV"'
+              );
+            }
+            if (name === 'read') {
+              return (
+                rawValues.join(' ') ===
+                  "-rsp 'REVIEW_OPENAI_API_KEY: ' REVIEW_OPENAI_API_KEY" ||
+                rawValues.join(' ') === '-r REVIEW_OPENAI_API_KEY'
+              );
+            }
+            if (name === 'rm') {
+              if (rawValues[0] === '-f') {
+                return (
+                  rawValues.length >= 2 &&
+                  rawValues
+                    .slice(1)
+                    .every((raw) =>
+                      [
+                        'prepare.log',
+                        'review-threads.json',
+                        'previous-report.md',
+                        'proxy.json',
+                        'proxy.err',
+                        'proxy.pid',
+                      ].some((suffix) => cachePath(raw, suffix)),
+                    )
+                );
+              }
+              return (
+                (rawValues.length === 2 &&
+                  rawValues[0] === '-rf' &&
+                  cachePath(rawValues[1], 'qwen-base')) ||
+                (rawValues.length === 3 &&
+                  rawValues.slice(0, 2).join(' ') === '-rf --' &&
+                  rawValues[2] === '"$rd/boundary.json"')
+              );
+            }
+            if (name === 'sleep') {
+              return values.length === 1 && values[0] === '0.1';
+            }
+            if (name === 'test') {
+              return (
+                rawValues.length === 2 &&
+                rawValues[0] === '-n' &&
+                rawValues[1] === '"$QWEN_VERIFY_PROXY_TOKEN"'
+              );
+            }
+            return false;
+          };
           walk(tree.rootNode, (node) => {
             visited += 1;
             if (!valid) return;
@@ -1274,29 +1684,49 @@ describe('local container recipe pins', () => {
               valid = false;
               return;
             }
-            if (node.type === 'variable_name' && node.text === 'NODE_OPTIONS') {
-              valid = false;
+            if (node.type === 'variable_assignment') {
+              valid = validVariableAssignment(node);
               return;
             }
-            if (
-              node.type === 'declaration_command' &&
-              !node.text.startsWith('export ')
-            ) {
-              valid = false;
+            if (node.type === 'declaration_command') {
+              const raw = source.slice(node.startIndex, node.endIndex);
+              const assignments = node.namedChildren.filter(
+                (child) => child.type === 'variable_assignment',
+              );
+              valid =
+                raw === 'export REVIEW_OPENAI_API_KEY' ||
+                (assignments.length === 1 &&
+                  validVariableAssignment(assignments[0]));
+              return;
+            }
+            if (node.type === 'for_statement') {
+              const variable = node.namedChildren.find(
+                (child) => child.type === 'variable_name',
+              );
+              valid =
+                variable?.text === '_' &&
+                source
+                  .slice(node.startIndex, node.endIndex)
+                  .startsWith('for _ in {1..100}; do');
+              return;
+            }
+            if (node.type === 'unset_command') {
+              valid = /^unset(?: [A-Za-z_][A-Za-z0-9_]*)+$/.test(
+                source.slice(node.startIndex, node.endIndex),
+              );
               return;
             }
             if (node.type === 'file_redirect') {
-              const raw = source.slice(node.startIndex, node.endIndex);
-              if (!/^(?:\d*>(?![>&])|<(?!<)|>&\d|\d*>&\d)/.test(raw)) {
-                valid = false;
-                return;
-              }
+              const raw = foldContinuations(
+                source.slice(node.startIndex, node.endIndex),
+              );
+              valid =
+                /^(?:\d*>(?![>&])|<(?!<)|>&\d|\d*>&\d)/.test(raw) &&
+                validFileRedirect(node);
+              return;
             }
             if (node.type !== 'command') return;
-            const nameNode = node.childForFieldName('name');
-            const name = nameNode ? staticCommandName(nameNode, source) : null;
-            const args = argumentNodes(node);
-            const values = args.map((arg) => staticText(arg, source));
+            const { name, args, values, rawValues } = commandParts(node);
             if (!name) {
               valid = false;
               return;
@@ -1312,7 +1742,7 @@ describe('local container recipe pins', () => {
                   ['build', 'bundle'].includes(values[1])) ||
                 (values.length === 5 &&
                   values.slice(0, 3).join(' ') === 'install -g --prefix' &&
-                  args[3] &&
+                  rawValues[3] === '"$HOME/.local"' &&
                   ['@qwen-code/qwen-code', '/work'].includes(values[4]));
               return;
             }
@@ -1327,31 +1757,56 @@ describe('local container recipe pins', () => {
             }
             if (name === 'git') {
               valid =
-                values.length === 6 &&
-                values[0] === '-C' &&
-                typeof values[1] === 'string' &&
-                values[2] === 'archive' &&
-                values[4] === '--' &&
-                values[5] === '.qwen';
+                rawValues.length === 6 &&
+                rawValues[0] === '-C' &&
+                rawValues[1] === '<pr-clone>' &&
+                rawValues[2] === 'archive' &&
+                rawValues[3] === '"$BASE_OID"' &&
+                rawValues[4] === '--' &&
+                rawValues[5] === '.qwen';
               return;
             }
             if (name === 'sed') {
               valid =
-                values.length === 3 &&
-                values[0] === '-n' &&
-                values[1] === 's/^  context-sha256  //p' &&
-                typeof values[2] === 'string';
+                rawValues.length === 3 &&
+                rawValues[0] === '-n' &&
+                rawValues[1] === "'s/^  context-sha256  //p'" &&
+                cachePath(rawValues[2], 'prepare.log');
               return;
             }
             if (name === 'tar') {
               valid =
-                values.length === 3 &&
-                values[0] === '-x' &&
-                values[1] === '-C' &&
-                typeof values[2] === 'string';
+                rawValues.length === 3 &&
+                rawValues[0] === '-x' &&
+                rawValues[1] === '-C' &&
+                cachePath(rawValues[2], 'qwen-base');
               return;
             }
-            if (dataCommands.has(name)) return;
+            if (
+              [
+                'break',
+                'cat',
+                'cd',
+                'chmod',
+                'cp',
+                'dirname',
+                'echo',
+                'exit',
+                'grep',
+                'id',
+                'kill',
+                'mkdir',
+                'printf',
+                'read',
+                'rm',
+                'sleep',
+                'test',
+                'true',
+              ].includes(name)
+            ) {
+              valid = validDataCommand(name, node, values, rawValues);
+              return;
+            }
             if (name === 'command') {
               valid =
                 values.length === 2 &&
@@ -1366,6 +1821,7 @@ describe('local container recipe pins', () => {
             if (name === 'qwen') {
               const flags = values.filter((_, index) => index % 2 === 0);
               valid =
+                credentialFreeDockerExec &&
                 values.length === 6 &&
                 flags.join(' ') === '--auth-type --approval-mode --prompt' &&
                 values[1] === 'openai' &&
@@ -1381,18 +1837,12 @@ describe('local container recipe pins', () => {
               ) {
                 valid = false;
               } else {
-                nested.push(values[1]);
+                nested.push({
+                  source: values[1],
+                  trustedDockerExec,
+                  credentialFreeDockerExec,
+                });
               }
-              return;
-            }
-            if (name === 'python3') {
-              valid =
-                (values.length === 0 ||
-                  (values.length === 1 && values[0] === '-')) &&
-                node.parent?.type === 'redirected_statement' &&
-                node.parent.namedChildren.some(
-                  (child) => child.type === 'heredoc_redirect',
-                );
               return;
             }
             if (name === 'docker') {
@@ -1405,31 +1855,37 @@ describe('local container recipe pins', () => {
                 return;
               }
               if (subcommand === 'run') {
-                let index = 1;
-                let image = null;
-                while (index < values.length) {
-                  const value = values[index];
-                  if (['-d', '--rm'].includes(value)) index += 1;
-                  else if (
-                    [
-                      '--name',
-                      '--user',
-                      '-e',
-                      '-v',
-                      '-w',
-                      '--network',
-                    ].includes(value) &&
-                    args[index + 1]
-                  ) {
-                    index += 2;
-                  } else {
-                    image = value;
-                    break;
-                  }
-                }
+                const expected = [
+                  'run',
+                  '-d',
+                  '--rm',
+                  '--name',
+                  'qwen-verify-<n>',
+                  '--user',
+                  '"$(id -u):$(id -g)"',
+                  '-e',
+                  'HOME=/tmp/qwen-home',
+                  '-v',
+                  '<pr-clone>:/work',
+                  '-v',
+                  '<trusted-clone>/scripts:/trusted-scripts:ro',
+                  '-v',
+                  `${cacheRoot}/qwen-base/.qwen:/work/.qwen:ro`,
+                  '-v',
+                  `${cacheRoot}:/verify-context:ro`,
+                  '-e',
+                  'QWEN_VERIFY_CONTEXT=/verify-context/pr.json',
+                  '-e',
+                  'QWEN_VERIFY_PROXY_TOKEN',
+                  '-w',
+                  '/work',
+                  'node:22-bookworm',
+                  'sleep',
+                  'infinity',
+                ];
                 valid =
-                  image === 'node:22-bookworm' &&
-                  values.slice(index + 1).join(' ') === 'sleep infinity';
+                  rawValues.length === expected.length &&
+                  expected.every((value, index) => rawValues[index] === value);
                 return;
               }
               if (subcommand !== 'exec') {
@@ -1437,12 +1893,18 @@ describe('local container recipe pins', () => {
                 return;
               }
               let index = 1;
-              if (values[index] === '-i') index += 1;
+              if (values[index] !== '-i') {
+                valid = false;
+                return;
+              }
+              index += 1;
+              let credentialFree = false;
               if (values[index] === '-e') {
                 if (values[index + 1] !== 'QWEN_VERIFY_CREDENTIAL_FREE=1') {
                   valid = false;
                   return;
                 }
+                credentialFree = true;
                 index += 2;
               }
               if (values[index] !== 'qwen-verify-<n>') {
@@ -1458,7 +1920,11 @@ describe('local container recipe pins', () => {
               ) {
                 valid = false;
               } else {
-                nested.push(tail[2]);
+                nested.push({
+                  source: tail[2],
+                  trustedDockerExec: true,
+                  credentialFreeDockerExec: credentialFree,
+                });
               }
               return;
             }
@@ -1466,9 +1932,6 @@ describe('local container recipe pins', () => {
               valid = false;
               return;
             }
-            const rawValues = args.map((arg) =>
-              source.slice(arg.startIndex, arg.endIndex),
-            );
             const modulePath = values[0] ?? null;
             if (modulePath === '-e' || modulePath === '--eval') {
               const expected = trustedNodeEvaluations.get(values[1]);
@@ -1486,8 +1949,14 @@ describe('local container recipe pins', () => {
             }
             if (modulePath === 'scripts/lint.js') {
               valid =
-                values.length === 1 ||
-                (values.length === 2 && values[1] === '--setup');
+                values.length === 2 &&
+                [
+                  '--setup',
+                  '--actionlint',
+                  '--yamllint',
+                  '--eslint',
+                  '--prettier',
+                ].includes(values[1]);
               return;
             }
             if (modulePath === 'scripts/verify-capture.mjs') {
@@ -1553,10 +2022,7 @@ describe('local container recipe pins', () => {
           if (!valid) return false;
           for (const program of nested) {
             if (
-              !(await inspect(
-                { source: program, quotedGate: false },
-                depth + 1,
-              ))
+              !(await inspect({ ...program, quotedGate: false }, depth + 1))
             ) {
               return false;
             }
@@ -1567,7 +2033,21 @@ describe('local container recipe pins', () => {
         }
       };
       for (const fragment of fragments) {
-        if (!(await inspect(fragment))) return false;
+        const key = `${fragment.quotedGate}\0${fragment.source}`;
+        const cached = shellFragmentResults.get(key);
+        if (cached) {
+          calls.push(...cached.calls);
+          if (!cached.valid) return false;
+          continue;
+        }
+        const callStart = calls.length;
+        const fragmentValid = await inspect(fragment);
+        const fragmentCalls = calls.slice(callStart);
+        shellFragmentResults.set(key, {
+          valid: fragmentValid,
+          calls: fragmentCalls,
+        });
+        if (!fragmentValid) return false;
       }
       const families = calls.map((call) => call.family);
       const actions = calls.map((call) => call.action);
@@ -2049,11 +2529,11 @@ describe('local container recipe pins', () => {
       `${skill}\ngrep -e 'node -e "0 * 0"' ./notes.txt`,
       `${skill}\necho 'node -e "0 * 0"'`,
       `${skill}\nbash -lc 'grep -e needle ./notes.txt'`,
-      `${skill}\n\`\`\`bash\ngrep -e needle ./notes.txt\ngrep -e 'node -e "0 * 0"' ./notes.txt\necho 'node -e "0 * 0"'\ncat /tmp/notes.txt\n\`\`\``,
+      `${skill}\n\`\`\`bash\ngrep -e needle ./notes.txt\ngrep -e 'node -e "0 * 0"' ./notes.txt\necho 'node -e "0 * 0"'\ncat ./notes.txt\n\`\`\``,
     ]) {
       expect(
         await onlyDocumentedPrepareCalls(document),
-        'ordinary eval-flag and absolute-path arguments are not Node entry points',
+        'ordinary eval-flag and scoped data arguments are not Node entry points',
       ).toBe(true);
     }
     expect(
@@ -2072,9 +2552,7 @@ describe('local container recipe pins', () => {
       ),
       'here-doc body is not executable',
     ).toBe(true);
-    const continuedHeredoc = ["python3 - <<'PY'", continuedEval, 'PY'].join(
-      '\n',
-    );
+    const continuedHeredoc = ["cat <<'TEXT'", continuedEval, 'TEXT'].join('\n');
     expect(
       await onlyDocumentedPrepareCalls(
         `${skill}\n\`\`\`bash\n${continuedHeredoc}\n\`\`\``,
@@ -2101,13 +2579,223 @@ describe('local container recipe pins', () => {
         interpreter,
       ).toBe(false);
     }
+    const expectInRawAndBash = async (samples, expected, label) => {
+      for (const sample of samples) {
+        for (const [shape, document] of [
+          ['raw', `${skill}\n${sample}`],
+          ['fenced', `${skill}\n\`\`\`bash\n${sample}\n\`\`\``],
+        ]) {
+          expect(
+            await onlyDocumentedPrepareCalls(document),
+            `${label}: ${shape}: ${sample}`,
+          ).toBe(expected);
+        }
+      }
+    };
+    await expectInRawAndBash(
+      [
+        'cp /tmp/replacement.js /trusted-scripts/verify-pr-prepare.mjs',
+        'chmod 777 ~/.cache/qwen-verify/pr<n>/proxy.json',
+        'rm -f ~/.cache/qwen-verify/pr<n>/pr.json',
+        'rm -rf /tmp/host-snapshot',
+        "printf '%s\\n' forged > ~/.cache/qwen-verify/pr<n>/pr.json",
+        'echo forged > ~/.cache/qwen-verify/pr<n>/pr.json',
+        'echo forged > "$HOME/.qwen/settings.json"',
+        'printf \'%s\\n\' forged > "$rd/boundary.json"',
+        'cat /tmp/notes.txt',
+        'cat > "$HOME/.qwen/settings.json"',
+        'mkdir -p "$HOME/.qwen"',
+        'cd /tmp && true',
+        'docker cp',
+        'cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json /tmp/review-threads.json',
+        "sed -n 's/^  context-sha256  //p' ~/.cache/qwen-verify/pr<n>/prepare.log > /tmp/pr.sha256",
+        'kill 1',
+      ],
+      false,
+      'data command arguments and destinations are closed',
+    );
+    await expectInRawAndBash(
+      [
+        'PATH=/tmp node --version',
+        "BASH_ENV=/tmp/untrusted.sh bash -lc 'echo ok'",
+        'export LD_PRELOAD',
+        "bash -lc 'export LD_PRELOAD=/tmp/payload.so'",
+        'read PATH',
+        'for PATH in /tmp; do node --version; done',
+        'LD_LIBRARY_PATH=/tmp node --version',
+        'export PATH="$HOME/.local/bin:$PATH"',
+        'export QWEN_VERIFY_CREDENTIAL_FREE=1',
+      ],
+      false,
+      'environment assignment name value and scope are closed',
+    );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`BASH_ENV=/tmp/untrusted.sh\``,
+      ),
+      'an inline configuration assignment is not waved through as prose',
+    ).toBe(false);
+    await expectInRawAndBash(
+      [
+        'unset LD_PRELOAD',
+        'unset NODE_OPTIONS BASH_ENV PATH',
+        "bash -lc 'unset LD_PRELOAD BASH_ENV'",
+        "printf '%s\\n' 'node -e looks like data'",
+      ],
+      true,
+      'data and safe environment setup remain valid',
+    );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\nFor details see \`cp -a\` and \`docker cp\`; neither citation dereferences links.`,
+      ),
+      'Java non-dereferencing copy citations remain raw prose',
+    ).toBe(true);
+    await expectInRawAndBash(
+      [
+        "python3 - <<'PY'\nprint('not data')\nPY",
+        "true; python3 - <<'PY'\nprint('not data')\nPY",
+      ],
+      false,
+      'here-doc Python is not a data channel',
+    );
+    await expectInRawAndBash(
+      [
+        '/usr/bin/env node -e "0 * 0"',
+        '/usr/bin/env \\\n node -e "0 * 0"',
+        'nice node -e "0 * 0"',
+        'true; node -e "0 * 0"',
+        'true \\\n; node -e "0 * 0"',
+        'echo data; /usr/bin/env node -e "0 * 0"',
+        '$(printf node) -e "0 * 0"',
+        'true; $(printf node) -e "0 * 0"',
+        'no$(printf \'\')de -e "0 * 0"',
+        '`true`; node -e "0 * 0"',
+        '`node`; node -e "0 * 0"',
+      ],
+      false,
+      'wrapper substitution and complete-chain admission',
+    );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`\`\`Bash\n/usr/bin/env node -e "0 * 0"\n\`\`\``,
+      ),
+      'Bash fence tags are case-insensitive',
+    ).toBe(false);
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`\`\`Bash\ngrep -e needle ./notes.txt\n\`\`\``,
+      ),
+      'mixed-case Bash fence preserves supported data commands',
+    ).toBe(true);
+    const documentedDockerRun = skill.match(
+      /docker run -d[\s\S]*?sleep infinity/,
+    )?.[0];
+    expect(documentedDockerRun).toBeTruthy();
+    await expectInRawAndBash(
+      [
+        'docker run --user root -v /:/host -w /host --network host node:22-bookworm sleep infinity',
+        documentedDockerRun.replace(
+          '--user "$(id -u):$(id -g)"',
+          '--user root',
+        ),
+        documentedDockerRun.replace('-d --rm', '-d --rm --privileged'),
+        documentedDockerRun.replace('-d --rm', '-d --rm --network host'),
+        documentedDockerRun.replace('<pr-clone>:/work', '/:/host'),
+        documentedDockerRun.replace(
+          '<trusted-clone>/scripts:/trusted-scripts:ro',
+          '/var/run/docker.sock:/var/run/docker.sock',
+        ),
+        documentedDockerRun.replace(
+          '--user "$(id -u):$(id -g)"',
+          '--user "$(id -u):$(id -g)" --user 0:0',
+        ),
+        documentedDockerRun.replace('-d --rm', '--rm -d'),
+        documentedDockerRun.replace(
+          '-e QWEN_VERIFY_PROXY_TOKEN',
+          '-e OPENAI_API_KEY',
+        ),
+      ],
+      false,
+      'docker run binds every option user and mount',
+    );
+    await expectInRawAndBash(
+      [
+        'qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        'bash -lc \'qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"\'',
+        'docker exec -i qwen-verify-<n> bash -lc \'qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"\'',
+        'docker exec -i qwen-verify-<n> bash -lc \'node -e "0 * 0"\'',
+        'docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n> bash -lc \'node -e "0 * 0"\'',
+      ],
+      false,
+      'docker exec is recursive and yolo needs attested context',
+    );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(
+          '--prompt "/verify-pr <n> --repo <owner>/<repo>"',
+          '--prompt "Do not execute node -e or true; this is prose"',
+        ),
+      ),
+      'a hostile-looking prompt remains static data',
+    ).toBe(true);
+    await expectInRawAndBash(
+      ['node scripts/lint.js', 'node scripts/lint.js --setup --setup'],
+      false,
+      'lint helper no-argument and duplicate forms',
+    );
+    await expectInRawAndBash(
+      ['--setup', '--actionlint', '--yamllint', '--eslint', '--prettier'].map(
+        (flag) => `node scripts/lint.js ${flag}`,
+      ),
+      true,
+      'documented lint setup and non-mutating flags',
+    );
+    const capture =
+      "node scripts/verify-capture.mjs --rows 20 --cols 100 --out tmp/pr<n>-verify-<ts>/evidence/01-ab.png --title 'A/B matrix' -- node my-harness.mjs";
+    await expectInRawAndBash(
+      [capture],
+      true,
+      'documented capture out rows cols title and command',
+    );
+    await expectInRawAndBash(
+      [
+        capture.replace('--rows 20', '--rows 0'),
+        capture.replace('--rows 20', '--rows -1'),
+        capture.replace('--rows 20', '--rows 501'),
+        capture.replace('--rows 20', '--rows 1.5'),
+        capture.replace('--rows 20', '--rows nope'),
+        capture.replace('--rows 20 ', '--rows '),
+        capture.replace('--cols 100', '--cols 0'),
+        capture.replace('--cols 100', '--cols 501'),
+        capture.replace(
+          ' -- node my-harness.mjs',
+          ' --rows 20 -- node my-harness.mjs',
+        ),
+        capture.replace(
+          ' -- node my-harness.mjs',
+          ' --out evidence/other.png -- node my-harness.mjs',
+        ),
+        capture.replace(' -- node my-harness.mjs', ' node my-harness.mjs'),
+        capture.replace(
+          'tmp/pr<n>-verify-<ts>/evidence/01-ab.png',
+          '/tmp/ab.png',
+        ),
+        capture.replace(
+          ' -- node my-harness.mjs',
+          ' --unknown x -- node my-harness.mjs',
+        ),
+      ],
+      false,
+      'capture malformed duplicate and out-of-root arguments',
+    );
     expect(skill).not.toMatch(
       /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)/,
     );
     expect(skill).not.toMatch(
       /node scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)\.mjs/,
     );
-  });
+  }, 30_000);
 
   it('base-pins `.qwen` and states that root AGENTS/QWEN.md still come from the PR', () => {
     expect(skill).toContain('git -C <pr-clone> archive "$BASE_OID" -- .qwen');
