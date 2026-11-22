@@ -4,6 +4,7 @@ import {
   WEB_SHELL_LANGUAGES,
   LOCAL_FILES_MESSAGE_KEYS,
   RESTART_RECOVERY_MESSAGE_KEYS,
+  CHAT_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
@@ -485,6 +486,24 @@ describe('web-shell i18n catalog', () => {
     expect(enPort).toContain('http://localhost:8080');
     expect(zhPort).toContain('http://localhost:8080');
     expect(zhPort).not.toBe(enPort);
+  });
+
+  it('keeps the chat.* composer error strings localized in every catalog', () => {
+    const en = getTranslator('en');
+    // Derived from the EN catalog, not a hardcoded subset, so a new chat.* key
+    // enters the parity check automatically; pin one known key so the derivation
+    // cannot quietly be replaced by a subset.
+    expect(CHAT_MESSAGE_KEYS).toContain('chat.failedToSend');
+    // Compare against the EN value, not the raw key: the translator falls back
+    // to EN per key, so a deleted entry (or one pasted with the EN text) would
+    // otherwise silently degrade to English.
+    for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+      const translator = getTranslator(language);
+      for (const key of CHAT_MESSAGE_KEYS) {
+        expect(translator(key)).not.toBe(key);
+        expect(translator(key)).not.toBe(en(key));
+      }
+    }
   });
 
   it.each([
