@@ -355,4 +355,23 @@ describe('WorkspaceSelector', () => {
     expect(document.querySelector('[role="tooltip"]')).toBeNull();
     expect(document.activeElement).not.toBe(trigger);
   });
+
+  it.each([
+    { contentSide: undefined, expectedSide: 'top' },
+    { contentSide: 'bottom' as const, expectedSide: 'bottom' },
+  ])('places the menu $expectedSide', async ({ contentSide, expectedSide }) => {
+    const element = renderSelector({ contentSide });
+    await act(async () => {
+      element
+        .querySelector('button')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    expect(
+      document
+        .querySelector('[data-slot="dropdown-menu-content"]')
+        ?.getAttribute('data-side'),
+    ).toBe(expectedSide);
+  });
 });
