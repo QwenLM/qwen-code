@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { setImmediate } from 'node:timers/promises';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { PeerEndpoint } from '../../../src/peer/endpoint.js';
 import { startPeerInbox } from '../../../src/peer/inbox.js';
@@ -51,22 +52,31 @@ describe('concurrent peer endpoint close', () => {
       name: 'bridge',
       closeOnExit: false,
     });
-    const first = endpoint.close();
+    let firstFinished = false;
+    const first = endpoint.close().then(() => {
+      firstFinished = true;
+    });
     let secondFinished = false;
     const second = endpoint.close().then(() => {
       secondFinished = true;
     });
     try {
-      await Promise.resolve();
+      await setImmediate();
+      expect(firstFinished).toBe(false);
       expect(secondFinished).toBe(false);
+      expect(removeOwnRecord).not.toHaveBeenCalled();
       inbox.resolve();
       await recordStarted.promise;
+      await setImmediate();
+      expect(firstFinished).toBe(false);
       expect(secondFinished).toBe(false);
       expect(removeOwnRecord).toHaveBeenCalledOnce();
       record.resolve();
       await Promise.all([first, second]);
-      expect(close).toHaveBeenCalledOnce();
+      expect(firstFinished).toBe(true);
+      expect(secondFinished).toBe(true);
       await endpoint.close();
+      expect(close).toHaveBeenCalledOnce();
       expect(removeOwnRecord).toHaveBeenCalledOnce();
     } finally {
       inbox.resolve();
@@ -96,5 +106,29 @@ describe('concurrent peer endpoint close', () => {
       { status: 'rejected', reason: failure },
     ]);
     await expect(endpoint.close()).rejects.toBe(failure);
+  });
+
+  it('reports the same registry failure to concurrent and later callers', async () => {
+    const failure = new Error('registry cleanup failed');
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(startPeerInbox).mockResolvedValue({
+      socketPath: '/inbox.sock',
+      close,
+      closeSync: vi.fn(),
+    });
+    vi.mocked(removeOwnRecord).mockRejectedValue(failure);
+    const endpoint = await PeerEndpoint.start({
+      name: 'bridge',
+      closeOnExit: false,
+    });
+    const first = endpoint.close();
+    const second = endpoint.close();
+    await Promise.all([
+      expect(first).rejects.toBe(failure),
+      expect(second).rejects.toBe(failure),
+    ]);
+    await expect(endpoint.close()).rejects.toBe(failure);
+    expect(close).toHaveBeenCalledOnce();
+    expect(removeOwnRecord).toHaveBeenCalledOnce();
   });
 });
