@@ -121,12 +121,19 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   both states. A live-starting row swaps the dot for its own spinner, so the
   marker takes the name back there rather than leaving the state unnamed.
 - In `SessionDetailsTooltip`, append ` · background.running` to the approval,
-  question and running arms whenever background tasks are running. The
-  background-only arm already names it and is left alone, and blocked-state
-  precedence is unchanged.
+  question and running arms whenever background tasks are running, and to an
+  override label (`statusLabel`, e.g. the voice starting cue) for the same
+  hidden-background reason. The background-only arm
+  (`!hasActivePrompt && hasRunningBackgroundTasks`) already names it and is
+  left alone. The completed-unread arm mirrors the row's dot precedence: it
+  outranks the running, active-work and unknown arms, the background-only arm
+  outranks it, and blocked-state precedence is unchanged (#18070).
 
-The status dot precedence is unchanged: green while a turn runs, amber for
-background-only, blue for other active work.
+The status dot precedence mirrors that chain (#18070): the live-starting
+spinner replaces the dots; the background dot outranks the unread dot; the
+unread dot outranks the running and active-work dots. Tints: green while a
+turn runs or other work is active (#18072 unified the active-work tint with
+running), amber for background-only, blue for unread.
 
 ## Design decisions and rationale
 
@@ -224,16 +231,19 @@ row. No page errors.
 2. A row with a turn in flight and background work shows the amber marker with
    `Running` as its accessible name and the composed `title`.
 3. The details popover names both states whenever they coexist, including
-   behind an approval or a question, without reordering blocked-state
-   precedence.
+   behind an approval or a question and under an override label such as the
+   voice starting cue, without reordering blocked-state precedence; the
+   unread arm outranks running/active-work/unknown and sits below the
+   background-only arm.
 4. Archive and delete are not offered for a session with background work — on
    the project rows (whether or not it is the attached session), the recent
    rows, the Session Overview cards, and in the delete dialog. An idle attached
    session stays deletable. Bulk Archive follows the flag as it changes after a
    row is ticked; a row that turns busy after selection is unchecked, stops
    being counted, and is dropped from the request.
-5. Dot precedence, the touch layout, and the existing hover contracts are
-   unchanged.
+5. Dot precedence mirrors the hover chain (unread over running/active-work,
+   background over unread, starting spinner over all); the touch layout and
+   the existing hover contracts are unchanged.
 6. Every assertion above dies under the corresponding mutation.
 
 ## Open questions / follow-ups

@@ -94,10 +94,16 @@
   live 启动中的行会把圆点换成它自己的 spinner，此时标记要把名字接回来，而不是让
   这一格无人命名。
 - `SessionDetailsTooltip` 中，只要有后台任务在跑，就给「等待审批」「等待回答」
-  「回合进行中」三支追加 ` · background.running`。「仅后台」那一支已经命名过，
-  保持原样；等待态的优先级不变。
+  「回合进行中」三支追加 ` · background.running`；override 标签（`statusLabel`，
+  如语音启动提示）出于同样的「隐藏后台仍须命名」理由也带该后缀。「仅后台」支
+  （`!hasActivePrompt && hasRunningBackgroundTasks`）已经命名过，保持原样。
+  completed-unread 支与行圆点同序：优先于 running/active-work/unknown 支，
+  「仅后台」支优先于它；等待态的优先级不变（#18070）。
 
-状态圆点的优先级不变：回合在跑为绿色，仅后台任务为琥珀色，其他活跃工作为蓝色。
+状态圆点优先级与该链一致（#18070）：live 启动 Spinner 顶替圆点；background 圆点
+优先于 unread 圆点；unread 圆点优先于 running 与 active-work 圆点。配色：回合在跑
+或其他活跃工作为绿色（#18072 将 active-work 配色并入 running），仅后台为琥珀色，
+unread 为蓝色。
 
 ## 设计决策与理由
 
@@ -173,13 +179,15 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
 1. bg-only 行显示右侧琥珀忙标记，且整行只播报 `background.running` 一次。
 2. 回合进行中且有后台任务的行显示琥珀标记，可访问名为 `Running`，`title` 为组合
    文案。
-3. 两种状态并存时详情浮层都同时说出两者，包括在等待审批或等待回答之后，且不重排
-   等待态的优先级。
+3. 两种状态并存时详情浮层都同时说出两者，包括在等待审批或等待回答之后、以及
+   override 标签（如语音启动提示）之下，且不重排等待态的优先级；unread 支优先于
+   running/active-work/unknown，且位于「仅后台」支之下。
 4. 有后台工作的会话，在项目行（无论是否为本客户端所连接的那个）、recent 行、
    Session Overview 卡片上都不提供归档与删除，删除弹窗亦然。空闲的当前会话仍
    可删除。批量归档要跟随勾选之后标志的变化；勾选后才变忙的行要被取消勾选、
    不再计入计数，并从请求中剔除。
-5. 圆点优先级、触屏布局、既有悬停契约均不变。
+5. 圆点优先级与 hover 链一致（unread 优先于 running/active-work，background 优先
+   于 unread，启动 Spinner 优先于全部）；触屏布局、既有悬停契约不变。
 6. 上述每条断言在对应变异下都会失败。
 
 ## 待决问题 / 后续
