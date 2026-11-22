@@ -242,6 +242,56 @@ describe('session worktree snapshot restore', () => {
     }
   });
 
+  it('cleans its newly created target after an extraction failure and permits a later repair and retry', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'bad-archive-retry',
+        dirty: true,
+      }),
+    );
+    const archive = path.join(
+      path.dirname(state.sidecarPath),
+      state.archiveKey,
+    );
+    const originalBytes = fs.readFileSync(archive);
+    fs.writeFileSync(archive, Buffer.from('not a gzip archive'));
+
+    await expect(restore(target, state.id)).rejects.toMatchObject({
+      code: 'TAR_BAD_ARCHIVE',
+    });
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    expect(fs.existsSync(path.join(state.worktreePath, '.qwen-session'))).toBe(
+      false,
+    );
+
+    // A second failure must reach the archive again, not be blocked by an
+    // abandoned marker-less checkout from the first attempt.
+    await expect(restore(target, state.id)).rejects.toMatchObject({
+      code: 'TAR_BAD_ARCHIVE',
+    });
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+
+    fs.writeFileSync(archive, originalBytes);
+    expect(fs.readFileSync(archive)).toEqual(originalBytes);
+    const result = await restore(target, state.id);
+    expect(result.reconstructed).toBe(true);
+    expect(result.branch).toBe('');
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-bad-archive-retry\n');
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(state.id);
+    const binding = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(binding.state).toBe('valid');
+    if (binding.state === 'valid') {
+      expect(binding.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
   it('could finalise a fully matching partial restore without reconstructing it again', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 0);

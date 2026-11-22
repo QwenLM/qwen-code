@@ -141,12 +141,25 @@ export async function moveWorktreeSnapshotsWithSession(
       });
       await fs.unlink(source);
     }
-    await selectWorktreeSnapshot({
+    const moved = await selectWorktreeSnapshot({
       directory: destinationDirectory,
       sessionId,
       slug: record.session.slug,
       archiveKey: removal.archiveKey,
     });
+    const expectedTargets = new Set(
+      [selected.snapshotPath, selected.metaPath].map((source) =>
+        path.join(destinationDirectory, path.basename(source)),
+      ),
+    );
+    if (
+      !moved ||
+      ![moved.snapshotPath, moved.metaPath].every((candidate) =>
+        expectedTargets.has(candidate),
+      )
+    ) {
+      throw new Error('The moved snapshot pair is unavailable');
+    }
   } catch (error) {
     const rollbackErrors = await rollbackSnapshotLinks(links);
     if (rollbackErrors.length > 0) {

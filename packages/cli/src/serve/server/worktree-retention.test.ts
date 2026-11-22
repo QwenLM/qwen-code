@@ -17,6 +17,25 @@ import {
   writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
+import { worktreeHasPopulatedGitlink } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import {
+  selectWorktreeSnapshot,
+  verifyRestoredWorktreeSnapshot,
+} from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
+
+function git(cwd: string, home: string, ...args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    env: {
+      PATH: process.env['PATH'],
+      HOME: home,
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
+    },
+    stdio: 'pipe',
+  }).trim();
+}
 import { createWorkspaceRegistry } from '../workspace-registry.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
@@ -56,10 +75,63 @@ vi.mock(
   },
 );
 
+const captureInit = vi.hoisted(() => ({
+  worktreePath: undefined as string | undefined,
+  home: undefined as string | undefined,
+  sourceRepo: undefined as string | undefined,
+  objectStore: undefined as string | undefined,
+  initialized: false,
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
+      >();
+    return {
+      ...actual,
+      verifyRestoredWorktreeSnapshot: vi.fn(
+        async (
+          options: Parameters<typeof actual.verifyRestoredWorktreeSnapshot>[0],
+        ) => {
+          const matches = await actual.verifyRestoredWorktreeSnapshot(options);
+          if (
+            matches &&
+            captureInit.worktreePath !== undefined &&
+            !captureInit.initialized &&
+            path.resolve(options.worktreePath) ===
+              path.resolve(captureInit.worktreePath)
+          ) {
+            expect(captureInit.home).toBeDefined();
+            expect(captureInit.sourceRepo).toBeDefined();
+            expect(captureInit.objectStore).toBeDefined();
+            git(
+              options.worktreePath,
+              captureInit.home!,
+              'clone',
+              '--bare',
+              captureInit.sourceRepo!,
+              captureInit.objectStore!,
+            );
+            captureInit.initialized = true;
+          }
+          return matches;
+        },
+      ),
+    };
+  },
+);
+
 let root: string;
 let coordinator: SessionArchiveCoordinator;
 
 beforeEach(() => {
+  captureInit.worktreePath = undefined;
+  captureInit.home = undefined;
+  captureInit.sourceRepo = undefined;
+  captureInit.objectStore = undefined;
+  captureInit.initialized = false;
   failedJsonWrite.filePath = undefined;
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worktree-retention-'));
   coordinator = new SessionArchiveCoordinator();
@@ -69,6 +141,17 @@ afterEach(() => {
   vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+function snapshotFiles(directory: string, sessionId: string): string[] {
+  return fs
+    .readdirSync(directory)
+    .filter(
+      (file) =>
+        file.startsWith(`${sessionId}.`) &&
+        file.includes('.worktree-snapshot.'),
+    )
+    .sort();
+}
 
 async function sweep(
   runtime: RetentionTestRuntime,
@@ -418,6 +501,114 @@ describe('worktree retention with real repositories', () => {
     expect((await sweep(target)).removed).toEqual([old.id]);
 
     await expectRetainedSnapshot(target, old);
+  });
+
+  it('retains an attempt pair when a populated gitlink appears during removal cleanup', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'populated-gitlink',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const archiveDir = path.dirname(old.sidecarPath);
+    expect(snapshotFiles(archiveDir, old.id)).toEqual([]);
+    const emptyChild = path.join(root, 'empty-submodule');
+    fs.mkdirSync(emptyChild);
+    git(emptyChild, target.home, 'init', '-q');
+    git(emptyChild, target.home, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+    git(
+      emptyChild,
+      target.home,
+      '-c',
+      'user.name=Retention Test',
+      '-c',
+      'user.email=retention@example.invalid',
+      'commit',
+      '--allow-empty',
+      '-qm',
+      'Empty child',
+    );
+    // An empty child keeps archive content unchanged while the submodule
+    // object-store and populated state change independently.
+    git(
+      old.worktreePath,
+      target.home,
+      '-c',
+      'protocol.file.allow=always',
+      'submodule',
+      'add',
+      '--force',
+      emptyChild,
+      'vendor',
+    );
+    git(
+      old.worktreePath,
+      target.home,
+      '-c',
+      'user.name=Retention Test',
+      '-c',
+      'user.email=retention@example.invalid',
+      'commit',
+      '-qm',
+      'Record submodule',
+    );
+    git(old.worktreePath, target.home, 'submodule', 'deinit', '-f', 'vendor');
+    const commonGitDir = git(
+      old.worktreePath,
+      target.home,
+      'rev-parse',
+      '--git-dir',
+    );
+    const objectStore = path.resolve(
+      old.worktreePath,
+      commonGitDir,
+      'modules',
+      'vendor',
+    );
+    expect(objectStore.startsWith(root + path.sep)).toBe(true);
+    fs.rmSync(objectStore, { recursive: true, force: true });
+    await expect(worktreeHasPopulatedGitlink(old.worktreePath)).resolves.toBe(
+      false,
+    );
+    captureInit.worktreePath = old.worktreePath;
+    captureInit.home = target.home;
+    captureInit.sourceRepo = emptyChild;
+    captureInit.objectStore = objectStore;
+    const refusal = vi
+      .spyOn(GitWorktreeService.prototype, 'removeUserWorktree')
+      .mockResolvedValue({ success: false, error: 'injected refusal' });
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(refusal).toHaveBeenCalledOnce();
+    expect(captureInit.initialized).toBe(true);
+    await expect(worktreeHasPopulatedGitlink(old.worktreePath)).resolves.toBe(
+      true,
+    );
+    const snapshotNames = snapshotFiles(archiveDir, old.id);
+    expect(snapshotNames).toHaveLength(2);
+    const snapshotPath = snapshotNames.find((name) =>
+      name.endsWith('.worktree-snapshot.tar.gz'),
+    );
+    expect(snapshotPath).toBeDefined();
+    const selected = await selectWorktreeSnapshot({
+      directory: archiveDir,
+      sessionId: old.id,
+      slug: old.sidecar.slug,
+      archiveKey: path.basename(snapshotPath!),
+    });
+    expect(selected).toBeDefined();
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: old.worktreePath,
+        snapshotPath: selected!.snapshotPath,
+        meta: selected!.meta,
+      }),
+    ).resolves.toBe(true);
+    expect(fs.existsSync(old.worktreePath)).toBe(true);
   });
 
   it('does not accumulate snapshots for an already pending Git operation', async () => {

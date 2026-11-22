@@ -64,6 +64,7 @@ import {
   preclassifyWorktreeCleanup,
 } from './worktree-orphan-cleanup.js';
 import { restoreWorktreeFromSessionSnapshot } from './session-worktree-restore.js';
+import { moveWorktreeSnapshotsWithSession } from './worktree-snapshot-pairs.js';
 import {
   buildWorktreeSnapshotMeta,
   captureWorktreeSnapshot,
@@ -3889,6 +3890,53 @@ describe('retained snapshot archive lifecycle', () => {
     });
     await expect(selectOwnedPair(state, 'active')).resolves.toBeUndefined();
     await expectOwnedPair(state, 'archived');
+  });
+
+  it('fails when the freshly moved pair is no longer complete', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const destinationSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationMeta = path.join(
+      path.dirname(destinationSidecar),
+      path.basename(sourcePair.metaPath),
+    );
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') {
+      throw new Error('The migration fixture has no valid owner record');
+    }
+    // Model the record mutation being durable while the source pair has not
+    // yet moved. The directory and owner provenance remain real.
+    await writeWorktreeSession(destinationSidecar, record.session);
+    const unlink = fs.promises.unlink.bind(fs.promises);
+    let discardedDestination = false;
+    vi.spyOn(fs.promises, 'unlink').mockImplementation(async (file) => {
+      if (String(file) === sourcePair.metaPath) {
+        await unlink(destinationMeta);
+        discardedDestination = true;
+        return;
+      }
+      await unlink(file);
+    });
+
+    const failure = await moveWorktreeSnapshotsWithSession(
+      target.service,
+      state.id,
+      'archived',
+    ).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    if (!(failure instanceof AggregateError)) {
+      throw new Error('Expected the missing moved pair to fail');
+    }
+    expect(failure.errors[0]).toMatchObject({
+      message: 'The moved snapshot pair is unavailable',
+    });
+    expect(discardedDestination).toBe(true);
+    await expectOwnedPair(state, 'active');
   });
 
   it('rolls back an unlink failure, aggregates task failure, and retries both', async () => {

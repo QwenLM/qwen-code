@@ -263,11 +263,32 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
             })
             .catch(() => undefined);
         }
-        await restoreWorktreeSnapshot(
-          selected.snapshotPath,
-          expected,
-          selected.meta,
-        );
+        try {
+          await restoreWorktreeSnapshot(
+            selected.snapshotPath,
+            expected,
+            selected.meta,
+          );
+        } catch (error) {
+          // `expected` did not exist before this attempt created it. A failed
+          // extraction must not leave a marker-less directory that blocks all
+          // subsequent retries; this cleanup is not valid for a pre-existing
+          // checkout.
+          try {
+            await fs.rm(expected, { recursive: true, force: true });
+            await runGit(latest.sidecar.originalCwd, [
+              ...NO_EXEC_CONFIG,
+              'worktree',
+              'prune',
+            ]).catch(() => undefined);
+          } catch (cleanupError) {
+            throw new AggregateError(
+              [error, cleanupError],
+              'Could not clean up the newly created restore target',
+            );
+          }
+          throw error;
+        }
       }
       options.assertRuntimeGenerationOpen?.();
       if (!(await preservedMarkerMatches(sessionId, expected))) {
