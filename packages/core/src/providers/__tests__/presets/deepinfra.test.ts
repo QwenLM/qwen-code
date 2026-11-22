@@ -63,4 +63,16 @@ describe('deepinfraProvider', () => {
       'X-Title': 'Qwen Code',
     });
   });
+
+  it('declares active non-deprecated models with verified context lengths', () => {
+    expect(deepinfraProvider.models).toEqual([
+      { id: 'deepseek-ai/DeepSeek-V3', contextWindowSize: 163840 },
+      { id: 'deepseek-ai/DeepSeek-R1-0528', contextWindowSize: 163840 },
+      {
+        id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+        contextWindowSize: 131072,
+      },
+      { id: 'Qwen/Qwen2.5-72B-Instruct', contextWindowSize: 32768 },
+    ]);
+  });
 });
