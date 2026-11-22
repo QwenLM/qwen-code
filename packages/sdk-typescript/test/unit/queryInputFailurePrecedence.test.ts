@@ -45,44 +45,54 @@ class Transport {
 }
 
 describe('input failure precedence after asynchronous transport teardown', () => {
-  it.each(['fresh-error', 'transport-error', 'closed'] as const)(
-    '%s preserves the first terminal state',
-    async (kind) => {
-      const transport = new Transport();
-      const q = new Query(transport, { timeout: { streamClose: 5 } });
-      await q.initialized;
-      let release!: () => void;
-      const ready = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      async function* prompts() {
-        await ready;
-        yield userMessage;
-      }
-      const streaming = q
-        .streamInput(prompts())
-        .catch((error: unknown) => error);
+  it.each([
+    'fresh-error',
+    'transport-error',
+    'exit-only',
+    'earlier-error',
+    'closed',
+  ] as const)('%s preserves the first terminal state', async (kind) => {
+    const transport = new Transport();
+    const q = new Query(transport, { timeout: { streamClose: 5 } });
+    await q.initialized;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    async function* prompts() {
+      await ready;
+      yield userMessage;
+    }
+    const streaming = q.streamInput(prompts()).catch((error: unknown) => error);
+    await tick();
+    const writeError = new Error('Transport not ready for writing');
+    const exitError = new Error('CLI process exited with code 1: boom');
+    const earlierError = new Error('Message stream failed first');
+    if (kind === 'transport-error' || kind === 'earlier-error') {
+      transport.exitError = exitError;
+      transport.messages.error(
+        kind === 'earlier-error' ? earlierError : exitError,
+      );
       await tick();
-      const writeError = new Error('Transport not ready for writing');
-      const exitError = new Error('CLI process exited with code 1: boom');
-      if (kind === 'transport-error') {
-        transport.exitError = exitError;
-        transport.messages.error(exitError);
-        await tick();
-      } else if (kind === 'closed') await q.close();
-      transport.failure = writeError;
-      release();
-      await streaming;
-      try {
-        if (kind === 'closed')
-          await expect(q.next()).resolves.toMatchObject({ done: true });
-        else
-          await expect(q.next()).rejects.toBe(
-            kind === 'transport-error' ? exitError : writeError,
-          );
-      } finally {
-        await q.close();
-      }
-    },
-  );
+    } else if (kind === 'exit-only') {
+      transport.exitError = exitError;
+    } else if (kind === 'closed') await q.close();
+    transport.failure = writeError;
+    release();
+    try {
+      expect(await streaming).toBe(writeError);
+      if (kind === 'closed')
+        await expect(q.next()).resolves.toMatchObject({ done: true });
+      else
+        await expect(q.next()).rejects.toBe(
+          kind === 'earlier-error'
+            ? earlierError
+            : kind === 'transport-error' || kind === 'exit-only'
+              ? exitError
+              : writeError,
+        );
+    } finally {
+      await q.close();
+    }
+  });
 });
