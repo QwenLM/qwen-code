@@ -158,9 +158,13 @@ export function isHostedWorkspaceReadProfile(profile: unknown): boolean {
 }
 
 /**
- * The options neither external lane admits. The Shell lane differs on
- * `captureBytes` alone: the files lane refuses it, while the Shell lane
- * requires it, and that requirement is checked where the reservation is made.
+ * The options neither external lane admits. `sessionSkillsRef` is not one of
+ * them: both external lanes serve the skill catalog as turn content, so the
+ * worker accepts the reference while still refusing extensions, hooks, MCP,
+ * agent definitions and every other lane the profiles never negotiate. The
+ * Shell lane differs on `captureBytes` alone: the files lane refuses it, while
+ * the Shell lane requires it, and that requirement is checked where the
+ * reservation is made.
  */
 export function hasHostedExternalExcludedOptions(
   value: Record<string, unknown> | null | undefined,
@@ -168,7 +172,6 @@ export function hasHostedExternalExcludedOptions(
 ): boolean {
   const keys = [
     'agentDefinition',
-    'sessionSkillsRef',
     'hookCatalog',
     'mcpServers',
     'initialSelection',

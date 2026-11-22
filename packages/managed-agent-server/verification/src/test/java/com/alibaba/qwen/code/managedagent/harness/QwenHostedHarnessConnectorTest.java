@@ -35,6 +35,7 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinition
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -957,6 +958,65 @@ class QwenHostedHarnessConnectorTest {
         assertThat(connector.supportsSavedLifecycle(profile)).isFalse();
         verify(client, never()).createSession(any());
         verify(client, never()).loadSession(any());
+    }
+
+    @Test
+    void externalAttachAdmitsAPinnedSkillCatalogButStillRefusesAnInitialSelection() {
+        // Session skills are turn content, so a pinned catalog must reach the
+        // create request instead of failing the external guard. An initial
+        // selection still demands the extension/MCP lifecycle this profile never
+        // negotiates, so it stays refused.
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getLifecycleProtocolVersion()).thenReturn(1);
+        when(capabilities.getFeatures()).thenReturn(List.of(
+                "hosted-workspace-external-files/1", "session-skills/2"));
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.createSession(any())).thenReturn(attached);
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        settings.getSessionStore().setEnabled(true);
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "workspace-a", 1, "storage-a", ".",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "default", "hosted-workspace-external-files/1", null, 0);
+        var sessions = sessions();
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
+        when(execution.isExternal(any())).thenReturn(true);
+        var resources = mock(JdbcManagedSessionStore.class);
+        var skills = mock(ManagedSessionSkills.class);
+        List<Map<String, Object>> pinned =
+                List.of(Map.of("name", "review", "description", "d", "body", "b"));
+        when(skills.snapshot("tenant-a", SESSION_ID)).thenReturn(pinned);
+        when(skills.effective(session)).thenReturn(pinned);
+        when(skills.initialSelection("tenant-a", SESSION_ID)).thenReturn(null);
+        var connector = new QwenHostedHarnessConnector(settings, sessions, execution,
+                actions, mock(JdbcManagedAgentDefinitionStore.class), resources);
+        ReflectionTestUtils.setField(connector, "client", client);
+        ReflectionTestUtils.setField(connector, "sessionSkills", skills);
+
+        connector.createOrLoad("tenant-a", SESSION_ID, false);
+        ArgumentCaptor<CreateHarnessSession> create = ArgumentCaptor.forClass(CreateHarnessSession.class);
+        verify(client).createSession(create.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(create.getValue(), "toJson"))
+                .containsKey("sessionSkillsRef");
+
+        when(skills.initialSelection("tenant-a", SESSION_ID))
+                .thenReturn(Map.of("skills", List.of("review")));
+        var refused = new QwenHostedHarnessConnector(settings, sessions, execution,
+                actions, mock(JdbcManagedAgentDefinitionStore.class), resources);
+        ReflectionTestUtils.setField(refused, "client", client);
+        ReflectionTestUtils.setField(refused, "sessionSkills", skills);
+        assertThatThrownBy(() -> refused.createOrLoad("tenant-a", SESSION_ID, false))
+                .hasMessage("External Workspace profile is unavailable");
     }
 
     @Test

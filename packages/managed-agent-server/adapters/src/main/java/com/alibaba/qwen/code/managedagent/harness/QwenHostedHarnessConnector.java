@@ -2402,8 +2402,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
                     || session.publicChildAgentsVersion() != 0
                     || sessions.findChildLineage(session.tenantId(), session.sessionId()) != null
-                    || sessionSkills != null && (!sessionSkills.effective(session).isEmpty()
-                            || initialSelection(session) != null)) {
+                    || sessionSkills != null && initialSelection(session) != null) {
                 throw new IllegalStateException("External Workspace profile is unavailable");
             }
         }
