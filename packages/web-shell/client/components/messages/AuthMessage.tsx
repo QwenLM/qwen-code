@@ -258,6 +258,9 @@ export function AuthMessage({
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [models, setModels] = useState('');
+  const [modelSpecs, setModelSpecs] = useState<
+    Array<{ id: string; contextWindowSize?: number }>
+  >([]);
   const [thinking, setThinking] = useState(false);
   const [modality, setModality] = useState(false);
   const [modalityImage, setModalityImage] = useState(true);
@@ -392,6 +395,7 @@ export function AuthMessage({
       }
       setApiKey('');
       setModels(nextProvider.id === 'deepinfra' ? '' : modelIds(nextProvider));
+      setModelSpecs([]);
       setThinking(false);
       setModality(false);
       setModalityImage(true);
@@ -557,8 +561,9 @@ export function AuthMessage({
         baseUrl: baseUrl.trim(),
         apiKey: apiKey.trim(),
         modelIds: normalizeModelIds(models),
+        ...(modelSpecs.length > 0 ? { modelSpecs } : {}),
         advancedConfig,
-      })
+      } as Parameters<typeof workspaceActions.installAuthProvider>[0])
       .then(async (result) => {
         if (!isCurrent()) return;
         let syncFailed = result.runtimeSync?.status === 'failed';
@@ -596,6 +601,7 @@ export function AuthMessage({
     advancedConfig,
     validateAdvanced,
     models,
+    modelSpecs,
     onChatProviderConfigured,
     onClose,
     onMessage,
@@ -974,6 +980,8 @@ export function AuthMessage({
             setModels(newModels);
             setError(null);
           }}
+          onModelSpecsChange={setModelSpecs}
+          autoFocus
           disabled={saving}
           onEnterPress={goNext}
           defaultModelIds={defaultIds}
