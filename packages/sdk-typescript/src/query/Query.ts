@@ -1024,14 +1024,22 @@ export class Query implements AsyncIterable<SDKMessage> {
     } catch (error) {
       if (this.abortController.signal.aborted) {
         logger.info('Aborted during input streaming');
-        this.inputStream.error(
-          new AbortError('Query aborted during input streaming'),
-        );
+        if (!this.closed && this.inputStream.hasError === undefined) {
+          this.inputStream.error(
+            new AbortError('Query aborted during input streaming'),
+          );
+        }
         return;
       }
-      this.inputStream.error(
-        error instanceof Error ? error : new Error(String(error)),
-      );
+      if (this.closed) {
+        throw error;
+      }
+      if (this.inputStream.hasError === undefined) {
+        this.inputStream.error(
+          this.transport.exitError ??
+            (error instanceof Error ? error : new Error(String(error))),
+        );
+      }
       try {
         await this.close();
       } catch (cleanupError) {
