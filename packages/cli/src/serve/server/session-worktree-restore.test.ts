@@ -140,9 +140,11 @@ describe('session worktree snapshot restore', () => {
     expect(
       fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
     ).toBe('dirty-detached\n');
-    expect(
-      fs.statSync(path.join(state.worktreePath, 'tracked.txt')).mode & 0o777,
-    ).toBe(0o755);
+    if (process.platform !== 'win32') {
+      expect(
+        fs.statSync(path.join(state.worktreePath, 'tracked.txt')).mode & 0o777,
+      ).toBe(0o755);
+    }
     expect(
       fs.readFileSync(path.join(state.worktreePath, 'untracked.bin')),
     ).toEqual(Buffer.from([0, 1, 2, 255]));

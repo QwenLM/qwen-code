@@ -18,6 +18,8 @@ import express from 'express';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  APPROVAL_MODES,
+  SESSION_TRANSCRIPT_MAX_LIMIT,
   SessionService,
   createWorktreeSessionMarkerExclusive,
   writeWorktreeSession,
@@ -217,7 +219,79 @@ function mkdirTemp(): string {
   return mkdtempSync(path.join(root, 'workspace-'));
 }
 
+const invalidRestoreRequests = [
+  {
+    name: 'historyPageSize',
+    body: { historyPageSize: 0 },
+    response: {
+      error: `\`historyPageSize\` must be between 1 and ${SESSION_TRANSCRIPT_MAX_LIMIT}`,
+      code: 'invalid_transcript_limit',
+      maxLimit: SESSION_TRANSCRIPT_MAX_LIMIT,
+    },
+  },
+  {
+    name: 'approvalMode',
+    body: { approvalMode: 'invalid' },
+    response: {
+      error: '`approvalMode` must be a known approval mode when provided',
+      code: 'invalid_approval_mode',
+      allowed: APPROVAL_MODES,
+    },
+  },
+  {
+    name: 'liveReplayMode',
+    body: { liveReplayMode: 'invalid' },
+    response: {
+      error: '`liveReplayMode` must be `full` or `summary`',
+      code: 'invalid_live_replay_mode',
+    },
+  },
+  {
+    name: 'compactedReplayMode',
+    body: { compactedReplayMode: 'invalid' },
+    response: {
+      error: '`compactedReplayMode` must be `full` or `summary`',
+      code: 'invalid_compacted_replay_mode',
+    },
+  },
+  {
+    name: 'reserved source',
+    body: { sourceType: 'agent' },
+    response: {
+      error:
+        'The requested session source is reserved for daemon-owned agent sessions.',
+      code: 'reserved_session_source',
+    },
+  },
+] as const;
+
 describe('POST /session/:id/worktree-restore', () => {
+  it.each(invalidRestoreRequests)(
+    'rejects invalid $name before either worktree restoration or ordinary load',
+    async ({ body, response: expectedBody }) => {
+      for (const route of ['worktree-restore', 'load'] as const) {
+        const fixture = makeFixture();
+        const id = randomUUID();
+        const binding = await fixture.seed(id, false);
+        await fixture.markOwner(id);
+        restoreMocks.restore.mockImplementation(async () => ({
+          session: binding,
+          branch: '',
+          reconstructed: true,
+        }));
+
+        const response = await request(fixture.app)
+          .post(`/session/${id}/${route}`)
+          .send(body);
+
+        expect(response.status).toBe(400);
+        expect(response.body).toEqual(expectedBody);
+        expect(restoreMocks.restore).not.toHaveBeenCalled();
+        expect(fixture.loadSession).not.toHaveBeenCalled();
+      }
+    },
+  );
+
   it('rejects virtual-subagent and internal sessions before restoring', async () => {
     const fixture = makeFixture();
     const parentId = randomUUID();

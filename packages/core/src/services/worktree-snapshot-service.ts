@@ -395,7 +395,6 @@ async function checkoutMatchesCapture(
   snapshotPath: string,
   matcher: DisposableIgnoredMatcher,
   meta: CaptureWorktreeSnapshotOptions['meta'],
-  privateCapture = true,
 ): Promise<boolean> {
   const regularFiles: string[] = [];
   const symlinks = new Map<string, string>();
@@ -460,11 +459,6 @@ async function checkoutMatchesCapture(
   await tar.t({
     file: snapshotPath,
     strict: true,
-    // A capture is private process output; a later restore must keep the
-    // library's decompression limits for a file re-read from disk.
-    maxDecompressionRatio: privateCapture
-      ? Number.POSITIVE_INFINITY
-      : undefined,
     onReadEntry: (entry) => {
       const rel = normalizeRel(entry.path);
       if (!rel || rel === '.') return;
@@ -618,7 +612,6 @@ export async function verifyRestoredWorktreeSnapshot(options: {
     options.snapshotPath,
     matcher,
     options.meta,
-    false,
   );
 }
 
@@ -797,7 +790,7 @@ export async function selectWorktreeSnapshot(options: {
     return undefined;
   }
   const bases = new Set(
-    matchingNames.map((name) =>
+    (archiveKey === undefined ? matchingNames : [archiveKey]).map((name) =>
       name.endsWith(archiveSuffix)
         ? name.slice(0, -'.tar.gz'.length)
         : name.slice(0, -'.json'.length),

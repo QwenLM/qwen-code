@@ -68,6 +68,7 @@ import {
   buildWorktreeSnapshotMeta,
   captureWorktreeSnapshot,
   readWorktreeSessionStrict,
+  selectWorktreeSnapshot,
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core';
 
@@ -3682,6 +3683,7 @@ describe('retained snapshot archive lifecycle', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -3707,7 +3709,7 @@ describe('retained snapshot archive lifecycle', () => {
       ...session.sidecar,
       worktreeRemoved: { archiveKey },
     });
-    return { ...session, archiveKey };
+    return { ...session, archiveKey, service: target.service };
   }
 
   function snapshotFiles(directory: string, sessionId: string): string[] {
@@ -3720,6 +3722,32 @@ describe('retained snapshot archive lifecycle', () => {
           file.includes('.worktree-snapshot.'),
       )
       .sort();
+  }
+
+  function selectOwnedPair(
+    state: Awaited<ReturnType<typeof removedBinding>>,
+    archiveState: 'active' | 'archived',
+  ) {
+    return selectWorktreeSnapshot({
+      directory: path.dirname(
+        state.service.getWorktreeSessionPathForArchiveState(
+          state.id,
+          archiveState,
+        ),
+      ),
+      sessionId: state.id,
+      slug: state.sidecar.slug,
+      archiveKey: state.archiveKey,
+    });
+  }
+
+  async function expectOwnedPair(
+    state: Awaited<ReturnType<typeof removedBinding>>,
+    archiveState: 'active' | 'archived',
+  ) {
+    const selected = await selectOwnedPair(state, archiveState);
+    expect(selected).toBeDefined();
+    return selected!;
   }
 
   it('keeps a removed snapshot associated through archive/unarchive and restores it', async () => {
@@ -3752,6 +3780,9 @@ describe('retained snapshot archive lifecycle', () => {
       coordinator,
     });
     expect(again.alreadyArchived).toEqual([state.id]);
+    expect(again.errors).toEqual([]);
+    await expectOwnedPair(state, 'archived');
+    await expect(selectOwnedPair(state, 'active')).resolves.toBeUndefined();
     expect(snapshotFiles(path.dirname(archivedSidecar), state.id)).toHaveLength(
       2,
     );
@@ -3780,6 +3811,159 @@ describe('retained snapshot archive lifecycle', () => {
     expect(
       fs.statSync(path.join(state.worktreePath, 'tracked.txt')).mode & 0o777,
     ).toBe(0o755);
+  });
+
+  it('rolls back the first file when the second snapshot link fails and retries', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const targetMeta = path.join(
+      path.dirname(archivedSidecar),
+      path.basename(sourcePair.metaPath),
+    );
+    const originalBytes = fs.readFileSync(sourcePair.snapshotPath);
+    await updateCronTasks(target.repo, () => [
+      {
+        id: 'snapshot-retry',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: state.id,
+      },
+    ]);
+    const failure = Object.assign(new Error('injected second link failure'), {
+      code: 'EIO',
+    });
+    const link = fs.promises.link.bind(fs.promises);
+    let injected = false;
+    vi.spyOn(fs.promises, 'link').mockImplementation(
+      async (source, destination) => {
+        if (
+          !injected &&
+          String(source) === sourcePair.metaPath &&
+          String(destination) === targetMeta
+        ) {
+          injected = true;
+          throw failure;
+        }
+        return link(source, destination);
+      },
+    );
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+
+    expect(result.archived).toEqual([state.id]);
+    expect(result.errors).toEqual([{ sessionId: state.id, error: failure }]);
+    expect(injected).toBe(true);
+    expect(fs.readFileSync(sourcePair.snapshotPath)).toEqual(originalBytes);
+    await expectOwnedPair(state, 'active');
+    await expect(selectOwnedPair(state, 'archived')).resolves.toBeUndefined();
+    expect(
+      (await readCronTasks(target.repo)).find(
+        (task) => task.id === 'snapshot-retry',
+      )?.enabled,
+    ).toBe(false);
+
+    const retry = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+    expect(retry).toMatchObject({
+      archived: [],
+      alreadyArchived: [state.id],
+      errors: [],
+    });
+    await expect(selectOwnedPair(state, 'active')).resolves.toBeUndefined();
+    await expectOwnedPair(state, 'archived');
+  });
+
+  it('rolls back an unlink failure, aggregates task failure, and retries both', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const originalBytes = fs.readFileSync(sourcePair.snapshotPath);
+    await updateCronTasks(target.repo, () => [
+      {
+        id: 'double-maintenance-failure',
+        cron: '0 9 * * *',
+        prompt: 'p',
+        recurring: true,
+        createdAt: 1_700_000_000_000,
+        lastFiredAt: null,
+        sessionId: state.id,
+      },
+    ]);
+    const cronFile = getCronFilePath(target.repo);
+    const cronContents = fs.readFileSync(cronFile);
+    fs.rmSync(cronFile);
+    fs.mkdirSync(cronFile);
+    const failure = Object.assign(new Error('injected first unlink failure'), {
+      code: 'EIO',
+    });
+    const unlink = fs.promises.unlink.bind(fs.promises);
+    let injected = false;
+    vi.spyOn(fs.promises, 'unlink').mockImplementation(async (file) => {
+      if (!injected && String(file) === sourcePair.snapshotPath) {
+        injected = true;
+        throw failure;
+      }
+      return unlink(file);
+    });
+
+    const result = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+
+    expect(result.archived).toEqual([state.id]);
+    expect(result.errors).toHaveLength(1);
+    const maintenanceError = result.errors[0]!.error;
+    expect(maintenanceError).toBeInstanceOf(AggregateError);
+    const failures = (maintenanceError as AggregateError).errors as unknown[];
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toBe(failure);
+    expect(failures[1]).toBeInstanceOf(Error);
+    expect(injected).toBe(true);
+    expect(fs.readFileSync(sourcePair.snapshotPath)).toEqual(originalBytes);
+    await expectOwnedPair(state, 'active');
+    await expect(selectOwnedPair(state, 'archived')).resolves.toBeUndefined();
+
+    fs.rmSync(cronFile, { recursive: true, force: true });
+    fs.writeFileSync(cronFile, cronContents);
+    const retry = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+    expect(retry).toMatchObject({
+      archived: [],
+      alreadyArchived: [state.id],
+      errors: [],
+    });
+    await expect(selectOwnedPair(state, 'active')).resolves.toBeUndefined();
+    await expectOwnedPair(state, 'archived');
+    expect(
+      (await readCronTasks(target.repo)).find(
+        (task) => task.id === 'double-maintenance-failure',
+      )?.enabled,
+    ).toBe(false);
   });
 
   it('reports destination conflict without replacing its bytes and preserves the source', async () => {
@@ -3821,6 +4005,24 @@ describe('retained snapshot archive lifecycle', () => {
       ),
     );
     expect(binding.state).toBe('valid');
+    await expectOwnedPair(state, 'active');
+    await expect(selectOwnedPair(state, 'archived')).resolves.toBeUndefined();
+
+    const retry = await archiveDaemonSessions({
+      sessionIds: [state.id],
+      service: target.service,
+      bridge: { closeSession: async () => {} },
+      coordinator,
+    });
+    expect(retry.archived).toEqual([]);
+    expect(retry.alreadyArchived).toEqual([state.id]);
+    expect(retry.errors).not.toHaveLength(0);
+    expect(fs.readFileSync(conflict, 'utf8')).toBe('keep-existing-archive\n');
+    expect(
+      fs.readFileSync(
+        path.join(path.dirname(state.sidecarPath), state.archiveKey),
+      ),
+    ).toEqual(oldBytes);
   });
 
   it('preserves a normal checkout and does not claim an unassociated archive', async () => {

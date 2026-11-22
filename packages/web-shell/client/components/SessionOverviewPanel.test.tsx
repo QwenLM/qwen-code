@@ -5230,6 +5230,7 @@ describe('worktree snapshot restore in the session overview', () => {
     ).toHaveLength(1);
     expect(restore).toHaveBeenCalledOnce();
     expect(restoreButton().disabled).toBe(true);
+    expect(restoreButton().getAttribute('aria-busy')).toBe('true');
     expect(container!.textContent).toContain('Restoring…');
     await act(async () => {
       restoreButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -5254,6 +5255,54 @@ describe('worktree snapshot restore in the session overview', () => {
     );
     expect(sessionsReload).toHaveBeenCalled();
     expect(restoreButton().disabled).toBe(false);
+  });
+
+  it('does not present an unrelated export as worktree restoration', async () => {
+    connectionState.sessionId = 'removed-session';
+    connectionState.capabilities = {
+      ...connectionState.capabilities,
+      features: [
+        ...(connectionState.capabilities?.features ?? []),
+        'session_export',
+      ],
+    };
+    connectionState.capabilities.workspaces = [
+      { id: 'primary', cwd: '/w', primary: true, trusted: true },
+      { id: 'secondary', cwd, primary: false, trusted: true },
+    ];
+    connectionState.capabilities.features?.push('workspace_session_export');
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      exportSession: workspaceActions.exportSession,
+      listWorkspaceSessionsPage: vi.fn(async () => ({ sessions: [] })),
+    });
+    const exportResult = {
+      content: '<html></html>',
+      filename: 'session.html',
+      mimeType: 'text/html',
+      format: 'html' as const,
+    };
+    let finish: () => void = () => {};
+    const pending = new Promise<typeof exportResult>((resolve) => {
+      finish = () => resolve(exportResult);
+    });
+    workspaceActions.exportSession.mockReturnValueOnce(pending);
+    present();
+
+    await act(async () => {
+      rowActionButton(rows()[0]!, 'Export conversation record').dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+
+    expect(workspaceActions.exportSession).toHaveBeenCalledOnce();
+    expect(restoreButton().disabled).toBe(true);
+    expect(restoreButton().getAttribute('aria-busy')).toBeNull();
+    expect(restoreButton().textContent).not.toContain('Restoring…');
+    await act(async () => {
+      finish();
+      await pending;
+    });
+    await vi.waitFor(() => expect(restoreButton().disabled).toBe(false));
   });
 
   it('shows failure without claiming the session opened, and releases busy state', async () => {

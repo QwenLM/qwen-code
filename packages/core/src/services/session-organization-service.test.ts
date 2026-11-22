@@ -373,6 +373,10 @@ describe('SessionOrganizationService', () => {
     await expect(service.isSessionPinnedStrict(sessionIdA)).resolves.toBe(
       false,
     );
+    await seedStore([], {});
+    await expect(service.isSessionPinnedStrict(sessionIdA)).resolves.toBe(
+      false,
+    );
     await updateOrg(sessionIdA, { isPinned: true });
     await expect(service.isSessionPinnedStrict(sessionIdA)).resolves.toBe(true);
     await expect(service.isSessionPinnedStrict(sessionIdB)).resolves.toBe(
@@ -385,6 +389,11 @@ describe('SessionOrganizationService', () => {
   });
 
   it('does not treat damaged pin state as an unpinned session', async () => {
+    await writeStore(JSON.stringify({ schemaVersion: 1, groups: [] }));
+    await expect(service.isSessionPinnedStrict(sessionIdA)).rejects.toThrow(
+      'session organization store sessions is not an object',
+    );
+
     await seedStore([], { [sessionIdA]: { pinnedAt: null } });
     await expect(service.isSessionPinnedStrict(sessionIdA)).rejects.toThrow(
       `invalid session organization entry: ${sessionIdA}`,

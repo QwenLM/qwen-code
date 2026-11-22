@@ -15,6 +15,7 @@ import {
 import {
   selectWorktreeSnapshot,
   verifyRestoredWorktreeSnapshot,
+  type WorktreeSnapshotPaths,
 } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   readWorktreeSessionStrict,
@@ -177,6 +178,7 @@ async function candidateActivityNs(
 async function collectEligible(
   scope: RetentionScope,
   service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+  coordinator: SessionArchiveCoordinator,
 ): Promise<WorktreeCleanupPlan[]> {
   const candidates: Array<WorktreeCleanupPlan & { activityNs: bigint }> = [];
   const seen = new Set<string>();
@@ -219,6 +221,29 @@ async function collectEligible(
         )
       ) {
         continue;
+      }
+      const release = await acquireWorktreeCleanupLock(plan);
+      try {
+        const eligible = await coordinator.runExclusiveMany(
+          [sessionId],
+          async () => {
+            const ownership = await verifyWorktreeCleanupOwnership(plan, (id) =>
+              sessionLiveOnBridge(scope.runtime.bridge, id),
+            );
+            return (
+              ownership.ok &&
+              !(await organization.isSessionPinnedStrict(sessionId)) &&
+              !sessionLiveOnBridge(scope.runtime.bridge, sessionId)
+            );
+          },
+        );
+        if (!eligible) continue;
+      } catch {
+        // A moved sidecar or an archive transition only makes this advisory
+        // candidate ineligible; the locked deletion check remains decisive.
+        continue;
+      } finally {
+        release();
       }
       candidates.push({
         ...plan,
@@ -316,6 +341,97 @@ async function discardPreservedAttemptSnapshot(
   await fs.unlink(selected.snapshotPath);
 }
 
+async function persistRetainedAttemptBinding(
+  plan: WorktreeCleanupPlan,
+  snapshot: WorktreeSnapshotPaths,
+): Promise<void> {
+  const archiveKey = path.basename(snapshot.snapshotPath);
+  const selected = await selectWorktreeSnapshot({
+    directory: path.dirname(plan.sidecarPath),
+    sessionId: plan.sessionId,
+    slug: plan.sidecar.slug,
+    archiveKey,
+  });
+  if (
+    !selected ||
+    selected.snapshotPath !== snapshot.snapshotPath ||
+    selected.metaPath !== snapshot.metaPath
+  ) {
+    throw new Error('The retained snapshot pair is incomplete');
+  }
+  const current = await readWorktreeSessionStrict(plan.sidecarPath);
+  // This binding must be durable before the destructive operation. A failed
+  // write therefore abandons the removal rather than losing recovery state.
+  if (
+    current.state !== 'valid' ||
+    (current.session.worktreeRemoved !== undefined &&
+      current.session.worktreeRemoved.archiveKey !== archiveKey)
+  ) {
+    throw new Error('The worktree record changed before retention binding');
+  }
+  await writeWorktreeSession(plan.sidecarPath, {
+    ...current.session,
+    worktreeRemoved: { archiveKey },
+  });
+  const persisted = await readWorktreeSessionStrict(plan.sidecarPath);
+  if (
+    persisted.state !== 'valid' ||
+    persisted.session.worktreeRemoved?.archiveKey !== archiveKey
+  ) {
+    throw new Error('The retained snapshot binding could not be persisted');
+  }
+}
+
+async function clearRejectedAttemptBinding(
+  runtime: WorkspaceRuntime,
+  plan: WorktreeCleanupPlan,
+  snapshot: WorktreeSnapshotPaths,
+  removalAttempted: boolean,
+): Promise<boolean> {
+  const archiveKey = path.basename(snapshot.snapshotPath);
+  const current = await readWorktreeSessionStrict(plan.sidecarPath);
+  if (
+    current.state !== 'valid' ||
+    current.session.worktreeRemoved?.archiveKey !== archiveKey ||
+    !(
+      await verifyWorktreeCleanupOwnership(plan, (id) =>
+        sessionLiveOnBridge(runtime.bridge, id),
+      )
+    ).ok
+  ) {
+    return false;
+  }
+  // A late prune or branch cleanup might have partly removed the checkout.
+  if (removalAttempted) {
+    const selected = await selectWorktreeSnapshot({
+      directory: path.dirname(plan.sidecarPath),
+      sessionId: plan.sessionId,
+      slug: plan.sidecar.slug,
+      archiveKey,
+    });
+    if (
+      !selected ||
+      selected.snapshotPath !== snapshot.snapshotPath ||
+      selected.metaPath !== snapshot.metaPath ||
+      !(await verifyRestoredWorktreeSnapshot({
+        worktreePath: plan.lockKey,
+        snapshotPath: snapshot.snapshotPath,
+        meta: selected.meta,
+      }))
+    ) {
+      return false;
+    }
+  }
+  const restored = { ...current.session };
+  delete restored.worktreeRemoved;
+  await writeWorktreeSession(plan.sidecarPath, restored);
+  const persisted = await readWorktreeSessionStrict(plan.sidecarPath);
+  return (
+    persisted.state === 'valid' &&
+    persisted.session.worktreeRemoved === undefined
+  );
+}
+
 async function removeRetainedCheckout(
   runtime: WorkspaceRuntime,
   registry: WorkspaceRegistry,
@@ -334,20 +450,37 @@ async function removeRetainedCheckout(
       if (await organization.isSessionPinnedStrict(plan.sessionId)) {
         return false;
       }
+      let attemptSnapshot: WorktreeSnapshotPaths | undefined;
       const outcome = await executeWorktreeCleanup(plan, {
         requireSnapshot: true,
-        beforeRemoval: async () => {
+        beforeRemoval: async (snapshot) => {
           if (!assertCurrentRuntime(registry, runtime, canContinue)) {
             return false;
           }
           if (await organization.isSessionPinnedStrict(plan.sessionId)) {
             return false;
           }
-          return !sessionLiveOnBridge(runtime.bridge, plan.sessionId);
+          if (sessionLiveOnBridge(runtime.bridge, plan.sessionId)) return false;
+          if (snapshot) {
+            await persistRetainedAttemptBinding(plan, snapshot);
+            attemptSnapshot = snapshot;
+          }
+          return true;
         },
       });
+      if (outcome.removed) return outcome.snapshot !== undefined;
       if (
-        !outcome.removed &&
+        attemptSnapshot &&
+        !(await clearRejectedAttemptBinding(
+          runtime,
+          plan,
+          attemptSnapshot,
+          outcome.removal !== undefined,
+        ))
+      ) {
+        return false;
+      }
+      if (
         outcome.snapshot?.checkoutMatchesCapture &&
         assertCurrentRuntime(registry, runtime, canContinue)
       ) {
@@ -359,17 +492,7 @@ async function removeRetainedCheckout(
           canContinue,
         );
       }
-      if (!outcome.removed || !outcome.snapshot) return false;
-      const archiveKey = path.basename(outcome.snapshot.snapshotPath);
-      await writeWorktreeSession(plan.sidecarPath, {
-        ...plan.sidecar,
-        worktreeRemoved: { archiveKey },
-      });
-      const persisted = await readWorktreeSessionStrict(plan.sidecarPath);
-      return (
-        persisted.state === 'valid' &&
-        persisted.session.worktreeRemoved?.archiveKey === archiveKey
-      );
+      return false;
     });
   } finally {
     release();
@@ -410,7 +533,7 @@ export async function sweepWorktreeRetentionOnce(
   const service = createWorkspaceRuntimeSessionService(runtime);
   let candidates: WorktreeCleanupPlan[];
   try {
-    candidates = await collectEligible(scope, service);
+    candidates = await collectEligible(scope, service, coordinator);
   } catch (error) {
     report.issues.push(error instanceof Error ? error.message : String(error));
     return report;

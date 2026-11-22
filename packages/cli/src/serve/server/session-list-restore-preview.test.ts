@@ -13,6 +13,7 @@ import {
   captureWorktreeSnapshot,
   writeWorktreeSession,
   readWorktreeSession,
+  WorktreeSessionReadInconclusiveError,
 } from '@qwen-code/qwen-code-core';
 import type {
   AcpSessionBridge,
@@ -33,10 +34,27 @@ import {
   listWorkspaceSessionsForResponse,
 } from './session-list.js';
 
+const coreMocks = vi.hoisted(() => ({
+  realRead: undefined as
+    | typeof import('@qwen-code/qwen-code-core').readWorktreeSession
+    | undefined,
+  read: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  coreMocks.realRead = actual.readWorktreeSession;
+  coreMocks.read.mockImplementation(actual.readWorktreeSession);
+  return { ...actual, readWorktreeSession: coreMocks.read };
+});
+
 let root: string;
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-restore-preview-'));
+  coreMocks.read.mockReset();
+  coreMocks.read.mockImplementation(coreMocks.realRead!);
 });
 
 afterEach(() => {
@@ -124,6 +142,33 @@ describe('worktree restoration preview metadata', () => {
     expect(map.get(record.id)!.worktree?.canRestore).toBe(false);
   });
 
+  it('refuses availability when the original cwd is outside the selected runtime roots', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const other = makeRetentionRepo(root, 'secondary');
+    const record = await removedRecord(target);
+    await writeWorktreeSession(record.sidecarPath, {
+      ...record.sidecar,
+      originalCwd: other.repo,
+      worktreeRemoved: { archiveKey: record.archiveKey },
+    });
+    const map = summaries(target, record.id);
+    await enrichWorktreeSidecars(map, target.service, 'active');
+    expect(map.get(record.id)!.worktree?.canRestore).toBe(false);
+  });
+
+  it('refuses availability when the checkout belongs to a replacement session', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target);
+    await writeWorktreeSession(record.sidecarPath, {
+      ...record.sidecar,
+      supersededBy: 'replacement-session',
+      worktreeRemoved: { archiveKey: record.archiveKey },
+    });
+    const map = summaries(target, record.id);
+    await enrichWorktreeSidecars(map, target.service, 'active');
+    expect(map.get(record.id)!.worktree?.canRestore).toBe(false);
+  });
+
   it('preserves a normal marker-owned worktree without adopting an orphan archive', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const session = await makeRetainedSession(target, {
@@ -203,6 +248,37 @@ describe('worktree restoration preview metadata', () => {
       expect(reopened.worktree?.branch).toBe('current-live-branch');
     },
   );
+
+  it('keeps a cached removed record disabled when revalidation is inconclusive', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target);
+    const bridge = {
+      listWorkspaceSessions: () => [],
+    } as unknown as AcpSessionBridge;
+    const load = async () => {
+      const result = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+        listWorkspaceSessionsForResponse(
+          bridge,
+          target.repo,
+          { size: 100, view: 'organized' },
+          { runtimeBaseDir: target.runtime.sessionRuntimeBaseDir },
+        ),
+      );
+      return result.sessions.find((row) => row.sessionId === record.id)!;
+    };
+
+    expect((await load()).worktree?.canRestore).toBe(true);
+    coreMocks.read.mockImplementationOnce(async () => {
+      throw new WorktreeSessionReadInconclusiveError(record.sidecarPath);
+    });
+
+    const retained = await load();
+    expect(retained.worktree?.path).toBe(record.worktreePath);
+    expect(retained.worktree?.worktreeRemoved?.archiveKey).toBe(
+      record.archiveKey,
+    );
+    expect(retained.worktree?.canRestore).toBe(false);
+  });
 
   it('removes a cached projection when its current marker has a new owner', async () => {
     const target = makeRetentionRepo(root, 'primary');

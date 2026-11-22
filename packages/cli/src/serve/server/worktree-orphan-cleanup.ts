@@ -599,7 +599,7 @@ export interface WorktreeCleanupExecutionOptions {
   /** Retained chats always require an archive, unlike a bare carried delete. */
   requireSnapshot?: boolean;
   /** Last chance to protect a newly live/pinned chat before physical removal. */
-  beforeRemoval?: () => Promise<boolean>;
+  beforeRemoval?: (snapshot?: WorktreeSnapshotPaths) => Promise<boolean>;
 }
 
 export interface WorktreeCleanupExecution {
@@ -614,9 +614,12 @@ export async function executeWorktreeCleanup(
 ): Promise<WorktreeCleanupExecution> {
   const { sessionId, sidecar } = plan;
   let snapshot: WorktreeSnapshotPaths | undefined;
-  const preserved = (): WorktreeCleanupExecution => ({
+  const preserved = (
+    removal?: WorktreeCleanupExecution['removal'],
+  ): WorktreeCleanupExecution => ({
     removed: false,
     ...(snapshot ? { snapshot } : {}),
+    ...(removal ? { removal } : {}),
   });
   const marker = await readWorktreeSessionMarkerStrict(plan.lockKey);
   if (marker.state !== 'valid' || marker.sessionId !== sessionId) {
@@ -704,77 +707,87 @@ export async function executeWorktreeCleanup(
       return preserved();
     }
   }
-  // An editor autosave can land between the has-work gate and the end of the
-  // tar stream (P1 edits during capture). Removal is conditional on the
-  // checkout still matching the captured contents: any drift — a late file,
-  // a new edit, a staged change — preserves rather than deleting what the
-  // archive could not cover (fail-closed on a read failure too).
-  const afterDigest = await checkoutChangeDigest(plan.lockKey);
-  if (
-    beforeDigest === null ||
-    afterDigest === null ||
-    beforeDigest !== afterDigest
-  ) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'checkout changed during cleanup (or its change digest is unreadable)',
-    );
-    return preserved();
-  }
-  // An index bit set during capture can hide a tracked edit from every
-  // content digest. The shared probe keeps the clean-sparse carve-out.
-  if (await hasHiddenIndexBit(plan.lockKey)) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'hidden index bit appeared during cleanup',
-    );
-    return preserved();
-  }
-  // A bisect/rebase/revert can start AFTER the pre-capture check without
-  // changing file bytes or HEAD. Its private administrative state is not in
-  // the archive or content digest, so re-observe it immediately before removal.
-  if (await worktreeHasPendingGitOperation(plan.lockKey)) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'git operation became pending during cleanup',
-    );
-    return preserved();
-  }
-  if (
-    !needsSnapshot &&
-    sidecar.carriedEntries &&
-    sidecar.carriedEntries.length > 0 &&
-    !(await carriedOverlayStillHeldBySource(
-      sidecar.carriedFrom ?? sidecar.originalCwd,
-      sidecar.carriedEntries,
-      plan.lockKey,
-    ))
-  ) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'carried source changed during cleanup',
-    );
-    return preserved();
-  }
-  // A submodule initialized during capture keeps its object store outside
-  // the checkout root: neither the archive nor removal preserves that store.
-  if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'initialized submodule appeared during cleanup',
-    );
-    return preserved();
-  }
+  const checkoutRemovalGuardsPass = async (): Promise<boolean> => {
+    // An editor autosave can land between the has-work gate and the end of the
+    // tar stream (P1 edits during capture). Removal is conditional on the
+    // checkout still matching the captured contents: any drift — a late file,
+    // a new edit, a staged change — preserves rather than deleting what the
+    // archive could not cover (fail-closed on a read failure too).
+    const currentDigest = await checkoutChangeDigest(plan.lockKey);
+    if (
+      beforeDigest === null ||
+      currentDigest === null ||
+      beforeDigest !== currentDigest
+    ) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'checkout changed during cleanup (or its change digest is unreadable)',
+      );
+      return false;
+    }
+    // An index bit set during capture can hide a tracked edit from every
+    // content digest. The shared probe keeps the clean-sparse carve-out.
+    if (await hasHiddenIndexBit(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'hidden index bit appeared during cleanup',
+      );
+      return false;
+    }
+    // A bisect/rebase/revert can start AFTER the pre-capture check without
+    // changing file bytes or HEAD. Its private administrative state is not in
+    // the archive or content digest, so re-observe it immediately before removal.
+    if (await worktreeHasPendingGitOperation(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'git operation became pending during cleanup',
+      );
+      return false;
+    }
+    if (
+      !needsSnapshot &&
+      sidecar.carriedEntries &&
+      sidecar.carriedEntries.length > 0 &&
+      !(await carriedOverlayStillHeldBySource(
+        sidecar.carriedFrom ?? sidecar.originalCwd,
+        sidecar.carriedEntries,
+        plan.lockKey,
+      ))
+    ) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'carried source changed during cleanup',
+      );
+      return false;
+    }
+    // A submodule initialized during capture keeps its object store outside
+    // the checkout root: neither the archive nor removal preserves that store.
+    if (await worktreeHasPopulatedGitlink(plan.lockKey)) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'initialized submodule appeared during cleanup',
+      );
+      return false;
+    }
+    return true;
+  };
+  if (!(await checkoutRemovalGuardsPass())) return preserved();
   if (!checkoutMatchesCapture) {
     logWorktreeCleanupPreserve(sessionId, 'checkout changed during capture');
     return preserved();
   }
-  if (options.beforeRemoval && !(await options.beforeRemoval())) {
-    logWorktreeCleanupPreserve(
-      sessionId,
-      'retention eligibility changed before removal',
-    );
-    return preserved();
+  if (options.beforeRemoval) {
+    if (!(await options.beforeRemoval(snapshot))) {
+      logWorktreeCleanupPreserve(
+        sessionId,
+        'retention eligibility changed before removal',
+      );
+      return preserved();
+    }
+    // The eligibility callback may wait, but no new capture follows it. Close
+    // that ack-to-removal window with the same fail-closed guards; a rejected
+    // removal still preserves every new file and any non-content Git state.
+    if (!(await checkoutRemovalGuardsPass())) return preserved();
   }
   // originalCwd is the root the creating worktree service used; the
   // sidecar contract reserves it for exactly this resolution, and the
@@ -793,21 +806,44 @@ export async function executeWorktreeCleanup(
       sidecar.worktreeBranch === worktreeBranchForSlug(sidecar.slug),
     baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
   });
+  const remaining = await fsp
+    .lstat(plan.lockKey)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      return undefined;
+    });
+  if (remaining === undefined) {
+    logWorktreeCleanupPreserve(
+      sessionId,
+      'checkout presence could not be confirmed after removal',
+    );
+    return preserved(result);
+  }
   if (!result.success) {
     const errorText = result.error ?? 'unknown error';
-    if (await checkoutStillPopulated(plan.lockKey)) {
-      logWorktreeCleanupPreserve(
-        sessionId,
-        `checkout removal failed: ${errorText}`,
-      );
-    } else {
-      logWarning(
-        `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+    if (remaining !== null) {
+      if (await checkoutStillPopulated(plan.lockKey)) {
+        logWorktreeCleanupPreserve(
           sessionId,
-        )} reason=${safeLogValue(errorText)}`,
-      );
+          `checkout removal failed: ${errorText}`,
+        );
+      } else {
+        logWarning(
+          `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+            sessionId,
+          )} reason=${safeLogValue(errorText)}`,
+        );
+      }
+      return preserved(result);
     }
-    return preserved();
+    // A later prune or bookkeeping step can fail after the directory really
+    // disappeared. Keep that diagnostic, but use the observed ENOENT so the
+    // caller can persist the already-complete snapshot binding.
+    logWarning(
+      `worktree cleanup removal failed, checkout may be partially deleted action=delete session=${safeLogValue(
+        sessionId,
+      )} reason=${safeLogValue(errorText)}`,
+    );
   }
   if (result.branchPreserved || result.keptBranch) {
     logWarning(
@@ -818,18 +854,12 @@ export async function executeWorktreeCleanup(
       )} reason=${result.branchPreserved ? 'unmerged commits' : 'branch kept'}`,
     );
   }
-  const remaining = await fsp
-    .lstat(plan.lockKey)
-    .catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return null;
-      throw error;
-    });
   if (remaining !== null) {
     logWorktreeCleanupPreserve(
       sessionId,
       'checkout still present after removal',
     );
-    return preserved();
+    return preserved(result);
   }
   return {
     removed: true,

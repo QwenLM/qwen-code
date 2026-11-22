@@ -126,7 +126,7 @@ export interface WorktreeSession {
    * `originalCwd` and on sidecars written before the field existed.
    */
   carriedFrom?: string;
-  /** Set after the managed checkout is physically removed and snapshotted. */
+  /** Snapshot-backed removal binding for a pending or completed checkout removal. */
   worktreeRemoved?: WorktreeRemovalState;
 }
 

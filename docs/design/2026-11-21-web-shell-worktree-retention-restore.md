@@ -70,17 +70,25 @@ worktreeRemoved?: { archiveKey: string }
 
 `archiveKey` is the validated tar basename only, with no directory component, traversal, or platform separator substitution. Its JSON header filename is the corresponding `.json` basename. The stable key permits relocation of the pair during archive/unarchive instead of recording a path that goes stale when the location changes.
 
-The state is written only after the real removal result succeeds and the expected checkout directory is confirmed absent. Snapshot creation, an HTTP `removed` response, or `removeUserWorktree().success` alone is not proof. `branchPreserved`, `keptBranch`, and partial-removal diagnostics remain distinct and determine the subsequent branch policy. `removeUserWorktree`'s unmerged-commit and ref-ownership guards remain unchanged.
+For an eligible retention attempt, the exact validated snapshot pair is bound and the surviving sidecar is written and re-read before the destructive remove is called. If this persistence fails, the removal must not happen. The binding can therefore describe a removal already in progress, not only a completed historical removal; ordinary load must never turn it back into an active checkout by itself. Snapshot creation, an HTTP `removed` response, or `removeUserWorktree().success` alone still is not proof of physical removal. `branchPreserved`, `keptBranch`, and partial-removal diagnostics remain distinct and determine the subsequent branch policy. `removeUserWorktree`'s unmerged-commit and ref-ownership guards remain unchanged.
+
+A later refusal or non-removal clears that attempt binding only when no remove was attempted, or the checkout still strictly matches this snapshot including bytes, tracked deletions, HEAD/branch, and markers. An attempted partial or mismatched removal retains both the binding and pair for recovery; it is not treated as an intact active checkout nor is its archive silently discarded. Transcript activity read failures remain a conservative pause, not an instruction to delete unrelated healthy work.
 
 The 64 KiB sidecar cap still applies. Existing `fitSidecarToReadCap` may discard `carriedEntries` to preserve the binding, but it must preserve the removal record. A sidecar with a malformed removal record is invalid, not silently “clean.” Strict readers use the current `readWorktreeSessionStrict` contract; new state is not accepted through permissive parsing.
 
 Creation provenance such as `originalCwd`, `workspaceCwd`, `originalHeadCommit`, and `worktreeBase` is not rewritten to make later history look like the original creation. Capture-time `headCommit` and `branch` govern snapshot recovery; a mutable `worktreeBranch` reflects the reconstructed checkout, so a detached restoration cannot accidentally acquire ownership of the old slug-derived ref. Existing carry metadata is retained where valid, but restoration must not invent a new carry exemption.
+
+An accepted capture must also pass the same bounded decompression/readability checks that restoration uses. A created archive which cannot be read under those limits must fail before publication, rather than allow loss of the checkout with no usable recovery pair. Readable large payloads remain supported by real extraction and byte checks; this does not weaken archive or decompression limits.
 
 ### 5. Snapshot pairs follow archive/unarchive, with failure visibility
 
 Archive/unarchive must move every owned matching snapshot pair with its transcript and sidecar, across `chats/` and `chats/archive/`. Pair identity is checked against `sessionId`, `slug`, basename/header correspondence, and the removal record; arbitrary same-prefix files are not promoted to owned archives. Ordinary archive of a valid, existing checkout remains non-destructive and does not create a snapshot.
 
 A partial move, unreadable pair, duplicate/conflicting destination, or ambiguous active/archived location fails visibly and preserves recoverable artifacts. It must not make a reader silently select an unrelated older copy in the other directory. Reads use the pair belonging to the current validated archive state. The selector never follows a directory-level or file-level symlink to escape the owned location.
+
+A missing or unreadable legacy sidecar is not evidence of an owned pair and grants no move authority: neither it nor unassociated files are altered. Reconciliation only handles a strict valid removal binding. Mutated records and already-archived/already-active records share that reconciliation. Snapshot relocation and scheduled-task maintenance are attempted independently after a committed record mutation so a failure cannot silently skip the other one; multiple failures are reported as an aggregate without erasing the history of the applied mutation.
+
+Each destination link newly created by a move is recorded by path and `(dev, ino)`. On failure, only that invocation's proven targets are rolled back: a source with the same identity permits removal of its duplicate target alias; a missing source is first restored with a non-clobbering link and then that target is removed. Replaced entities and pre-existing destination conflicts are never overwritten. Any rollback failure is retained in an aggregate with the original failure; this is recoverable replay of these known links, not a claim that arbitrary process crashes or two directory merges are atomic.
 
 A restored chat whose worktree was removed must still have its archive operations coordinated with restoration. Existing archive coordination order is preserved; snapshots are never moved while a restore is selecting or extracting them without that coordination.
 
@@ -115,7 +123,7 @@ Relevant existing seams are `server.ts` per-runtime start/stop maps and `schedul
 3. classify only uniquely owned roots and eligible candidates, avoiding duplicate sweeps for one root;
 4. acquire `acquireWorktreeOwnershipOp` using its canonical-path/raw-fallback key rule and keep the existing ownership-lock → archive-coordinator ordering;
 5. revalidate ownership, strict liveness/pinned state, and all U3 conditions immediately before destructive steps;
-6. capture, remove, confirm the filesystem outcome, then atomically persist and re-read the surviving sidecar; and
+6. capture, validate and atomically persist/re-read its snapshot binding, then remove and confirm the filesystem outcome; and
 7. account for in-flight work so workspace stop/drain waits for the scheduled operation without killing a Git or metadata write halfway through.
 
 Cancellation between candidates is allowed. Cancellation after a Git/metadata mutation starts must follow the existing `removeUserWorktree` finish-preserving semantics rather than force-killing the writer. Recovery on restart follows the ownership rules above, not blind resumption of an old in-memory snapshot.
@@ -134,7 +142,7 @@ For each qualified pair in the validated current archive directory, it:
 - requires regular files and the established no-symlink/link-ownership constraints on its own inputs; and
 - orders by header `createdAt`, then archive `mtimeNs`, then the full archive path deterministically, never by directory enumeration order. Compare the filesystem `mtimeNs` as `bigint` without converting it to `Number`; serialize it to a decimal string if it must appear in JSON evidence.
 
-An unreadable or malformed competing header, an unknown version, or an unreadable directory rejects selection; it does not silently fall back to an older valid-looking archive. Unrelated files are not invented as session snapshots.
+An unreadable or malformed competing header, an unknown version, or an unreadable directory rejects selection; it does not silently fall back to an older valid-looking archive. Unrelated files are not invented as session snapshots. An explicitly bound `archiveKey` selects only that exact pair for lookup and validation; unrelated files or pairs cannot mask it or be adopted as alternate candidates. Unspecified/latest selection keeps the full competing-record fail-closed rules.
 
 The existing `checkoutMatchesCapture` is a capture-time result, not durable authentication embedded in the archive. Selection does not claim that the pair is signed or that a prior deletion was inevitably committed. It establishes structure, ownership binding, and a deterministic choice for a subsequent guarded restore.
 
@@ -222,7 +230,7 @@ Every added optional field requires an explicit producer, validator, projection,
 
 ## Catalog lifecycle freshness
 
-Persisted worktree sidecars are authoritative for `worktreeRemoved.archiveKey` and `canRestore`. When a live summary still carries an older checkout, its complete worktree object must not overwrite a newer removal or resurrect that removal after a successful restore. Other live worktree fields retain their existing merge behavior. Concurrent PR/artifact metadata de-duplication must not freeze this lifecycle state: each catalog view verifies the current sidecar and, when applicable, validates its keyed snapshot pair.
+Persisted worktree sidecars are authoritative for `worktreeRemoved.archiveKey` and `canRestore`. When a live summary still carries an older checkout, its complete worktree object must not overwrite a newer removal or resurrect that removal after a successful restore. Other live worktree fields retain their existing merge behavior. Concurrent PR/artifact metadata de-duplication must not freeze this lifecycle state: each catalog view verifies the current sidecar and, when applicable, validates its keyed snapshot pair. Preview uses the restore operation's actual ownership, original-CWD, and supersession classification rather than trusting only `workspaceCwd`. An inconclusive revalidation cannot convert a removal binding into an ordinary active checkout or confirm restorability: cached removal information may be retained, while `canRestore` is false until the current record is valid again.
 
 ## Acceptance and verification
 

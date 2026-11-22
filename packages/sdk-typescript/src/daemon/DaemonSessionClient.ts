@@ -541,8 +541,13 @@ export class DaemonSessionClient {
     client: DaemonClient,
     sessionId: string,
     req: RestoreWorktreeSessionRequest = {},
+    clientId?: string,
   ): Promise<DaemonSessionClient> {
-    const restored = await client.restoreWorktreeSession(sessionId, req);
+    const restored = await client.restoreWorktreeSession(
+      sessionId,
+      req,
+      clientId,
+    );
     return this.fromRestoredSession(client, restored, req.signal);
   }
 

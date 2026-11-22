@@ -413,9 +413,44 @@ describe('worktreeSnapshotService (P6 U1)', () => {
         slug: 'snap',
       }),
     ).rejects.toThrow(/ENOENT/);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: first,
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first),
+    });
     await fs.rm(
       path.join(snapshotDir, 'session-snap.alone.worktree-snapshot.json'),
     );
+    const malformed = path.join(
+      snapshotDir,
+      'session-snap.000-malformed.worktree-snapshot',
+    );
+    await fs.writeFile(`${malformed}.tar.gz`, 'unrelated-bytes');
+    await fs.writeFile(`${malformed}.json`, '{not-json');
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: first,
+      }),
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first),
+    });
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).rejects.toThrow();
+    await fs.rm(`${malformed}.tar.gz`);
+    await fs.rm(`${malformed}.json`);
     const wrongSlug = path.join(
       snapshotDir,
       'session-snap.wrong.worktree-snapshot',
@@ -751,27 +786,53 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect(result.checkoutMatchesCapture).toBe(false);
   });
 
-  it('accepts a large, highly compressible stable checkout', async () => {
+  it('does not return an archive that exceeds the bounded restore ratio', async () => {
     await fs.writeFile(
       path.join(worktree, 'zeros.bin'),
       Buffer.alloc(20 * 1024 * 1024),
     );
+    await expect(
+      captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      }),
+    ).rejects.toThrow(/ratio|decompress/i);
+    await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('captures and restores a large file within bounded decompression limits', async () => {
+    const payload = randomBytes(20 * 1024 * 1024);
+    await fs.writeFile(path.join(worktree, 'large.bin'), payload);
     const result = await captureWorktreeSnapshot({
       worktreePath: worktree,
       snapshotDir,
       meta: meta(),
     });
     expect(result.checkoutMatchesCapture).toBe(true);
-    expect((await fs.stat(result.snapshotPath)).size * 1000).toBeLessThan(
-      20 * 1024 * 1024,
+    const restored = await restoreOverHead(
+      result.snapshotPath,
+      result.metaPath,
+      'restored-large-bounded',
     );
+    expect(
+      (await fs.readFile(path.join(restored, 'large.bin'))).equals(payload),
+    ).toBe(true);
+    const header = await readWorktreeSnapshotMeta(result.metaPath);
     await expect(
       verifyRestoredWorktreeSnapshot({
-        worktreePath: worktree,
+        worktreePath: restored,
         snapshotPath: result.snapshotPath,
-        meta: await readWorktreeSnapshotMeta(result.metaPath),
+        meta: { ...header, branch: '' },
       }),
-    ).rejects.toThrow(/ratio|decompress/i);
+    ).resolves.toBe(true);
   });
 
   it('rejects oversized metadata before creating an archive', async () => {
@@ -785,7 +846,7 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, 'delete me\n');
     }
-    git(worktree, 'add', '--', ...files);
+    git(worktree, 'add', '--', 'vendor');
     git(worktree, 'commit', '-qm', 'mass-delete', '--no-verify');
     for (const relativePath of files) {
       await fs.unlink(path.join(worktree, relativePath));

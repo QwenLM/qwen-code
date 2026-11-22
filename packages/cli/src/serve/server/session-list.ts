@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
@@ -39,6 +38,7 @@ import type {
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { preclassifyWorktreeCleanup } from './worktree-orphan-cleanup.js';
 import {
   PersistedSessionListCache,
   waitForSessionListLoad,
@@ -504,6 +504,7 @@ export async function enrichWorktreeSidecars(
       archiveState,
     );
     let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
+    let readFailed = false;
     try {
       sidecar = signal
         ? await readWorktreeSession(sidecarPath, { signal })
@@ -511,8 +512,26 @@ export async function enrichWorktreeSidecars(
     } catch {
       signal?.throwIfAborted();
       sidecar = null;
+      readFailed = true;
     }
-    if (!sidecar) continue;
+    if (!sidecar) {
+      if (readFailed) {
+        if (summary.worktree?.worktreeRemoved) {
+          bySessionId.set(sessionId, {
+            ...summary,
+            worktree: { ...summary.worktree, canRestore: false },
+          });
+        }
+        continue;
+      }
+      if (summary.worktree) {
+        const worktree = { ...summary.worktree };
+        delete worktree.worktreeRemoved;
+        delete worktree.canRestore;
+        bySessionId.set(sessionId, { ...summary, worktree });
+      }
+      continue;
+    }
     const removed = sidecar.worktreeRemoved;
     if (
       !removed &&
@@ -526,20 +545,21 @@ export async function enrichWorktreeSidecars(
       continue;
     }
     let canRestore = false;
-    if (removed && sidecar.workspaceCwd) {
+    if (removed) {
       try {
-        if (
-          realpathSync(sidecar.workspaceCwd) ===
-          realpathSync(sessionService.getProjectRoot())
-        ) {
-          canRestore =
-            (await selectWorktreeSnapshot({
-              directory: path.dirname(sidecarPath),
-              sessionId,
-              slug: sidecar.slug,
-              archiveKey: removed.archiveKey,
-            })) !== undefined;
-        }
+        const candidate = await preclassifyWorktreeCleanup(
+          sessionService,
+          sessionId,
+          sessionService.getProjectRoot(),
+        );
+        canRestore =
+          candidate !== undefined &&
+          (await selectWorktreeSnapshot({
+            directory: path.dirname(sidecarPath),
+            sessionId,
+            slug: sidecar.slug,
+            archiveKey: removed.archiveKey,
+          })) !== undefined;
       } catch {
         // An unavailable pair is shown as such, never as a restore capability.
       }
@@ -1068,11 +1088,6 @@ function readPersistedSidecars(
             const rows = new Map([
               [session.sessionId, clonePersistedSummary(cached)],
             ]);
-            const summary = rows.get(session.sessionId)!;
-            if (summary.worktree) {
-              delete summary.worktree.worktreeRemoved;
-              delete summary.worktree.canRestore;
-            }
             await enrichWorktreeSidecars(
               rows,
               service,

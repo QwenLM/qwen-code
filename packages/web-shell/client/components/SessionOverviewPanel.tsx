@@ -633,6 +633,9 @@ function SessionOverviewPanelInner({
   const detailsOpenRef = useRef(detailsOpen);
   detailsOpenRef.current = detailsOpen;
   const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
+  const [restoringIds, setRestoringIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [actionError, setActionError] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<SessionCard[] | null>(
     null,
@@ -1088,9 +1091,11 @@ function SessionOverviewPanelInner({
       ) {
         return;
       }
-      const busy = busyIds.has(getSessionIdentity(card));
+      const identity = getSessionIdentity(card);
+      const busy = busyIds.has(identity) || restoringIds.has(identity);
       if (busy || batchBusy) return;
       setActionError(null);
+      setRestoringIds((prev) => new Set(prev).add(identity));
       void runBusy(card, async () => {
         try {
           await workspace.client
@@ -1111,6 +1116,12 @@ function SessionOverviewPanelInner({
             }`,
           );
         }
+      }).finally(() => {
+        setRestoringIds((prev) => {
+          const next = new Set(prev);
+          next.delete(identity);
+          return next;
+        });
       });
     },
     [
@@ -1119,6 +1130,7 @@ function SessionOverviewPanelInner({
       onOpenSession,
       reloadData,
       restoreWorktreeEnabled,
+      restoringIds,
       runBusy,
       t,
       workspace.client,
@@ -1672,17 +1684,18 @@ function SessionOverviewPanelInner({
                           : t('sessionsOverview.restoreWorktreeUnavailable')
                       }
                       aria-busy={
-                        busyIds.has(getSessionIdentity(card)) || undefined
+                        restoringIds.has(getSessionIdentity(card)) || undefined
                       }
                       disabled={
                         batchBusy ||
                         busyIds.has(getSessionIdentity(card)) ||
+                        restoringIds.has(getSessionIdentity(card)) ||
                         !restoreWorktreeEnabled ||
                         card.worktree.canRestore !== true
                       }
                       onClick={() => restoreWorktree(card)}
                     >
-                      {busyIds.has(getSessionIdentity(card))
+                      {restoringIds.has(getSessionIdentity(card))
                         ? t('sessionsOverview.restoringWorktree')
                         : t('sessionsOverview.restoreWorktree')}
                     </Button>
@@ -1922,6 +1935,7 @@ function SessionOverviewPanelInner({
       registeredWorkspaces,
       restoreWorktree,
       restoreWorktreeEnabled,
+      restoringIds,
       sessionMetadataEnabled,
       sessionDetailsProps,
       startBindPr,

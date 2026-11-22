@@ -904,6 +904,52 @@ function parseRequestedSessionSource(
   return source;
 }
 
+interface ParsedSessionRestoreFields {
+  approvalMode: ApprovalMode | undefined;
+  historyPageSize: number | undefined;
+  liveReplayMode: 'full' | 'summary' | undefined;
+  compactedReplayMode: 'full' | 'summary' | undefined;
+  restoreSource: { sourceType?: string; sourceId?: string };
+  clientId: string | undefined;
+}
+
+function parseSessionRestoreFields(
+  req: Request,
+  res: Response,
+  body: Record<string, unknown>,
+  action: 'load' | 'resume',
+): ParsedSessionRestoreFields | null {
+  const approvalMode = parseOptionalApprovalMode(body, res);
+  if (approvalMode === null) return null;
+  const historyPageSize =
+    action === 'load' ? parseHistoryPageSize(body, res) : undefined;
+  if (historyPageSize === null) return null;
+  // Resume restores the full journal and neither uses nor rejects load-only
+  // replay fields (see restore-request-fields.ts).
+  const liveReplayMode =
+    action === 'load'
+      ? parseReplayMode(body, res, 'liveReplayMode')
+      : undefined;
+  if (liveReplayMode === null) return null;
+  const compactedReplayMode =
+    action === 'load'
+      ? parseReplayMode(body, res, 'compactedReplayMode')
+      : undefined;
+  if (compactedReplayMode === null) return null;
+  const restoreSource = parseRequestedSessionSource(body, res);
+  if (restoreSource === null) return null;
+  const clientId = parseClientIdHeader(req, res);
+  if (clientId === null) return null;
+  return {
+    approvalMode,
+    historyPageSize,
+    liveReplayMode,
+    compactedReplayMode,
+    restoreSource,
+    clientId,
+  };
+}
+
 export type ResolveSubagentSessionRuntime = (
   res: Response,
   route: string,
@@ -4167,7 +4213,8 @@ export function registerSessionRoutes(
   });
 
   const restoreSessionHandler =
-    (action: 'load' | 'resume') => async (req: Request, res: Response) => {
+    (action: 'load' | 'resume', parsedFields?: ParsedSessionRestoreFields) =>
+    async (req: Request, res: Response) => {
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
@@ -4240,28 +4287,17 @@ export function registerSessionRoutes(
       const { runtime, workspaceCwd } = resolvedRuntime;
       const assertRuntimeGenerationOpen =
         captureRuntimeGenerationAssertion(runtime);
-      const approvalMode = parseOptionalApprovalMode(body, res);
-      if (approvalMode === null) return;
-      const historyPageSize =
-        action === 'load' ? parseHistoryPageSize(body ?? {}, res) : undefined;
-      if (historyPageSize === null) return;
-      // Load replays history; resume restores the full journal, so the
-      // load-only replay fields are parsed only for load — resume neither
-      // uses nor rejects them (see restore-request-fields.ts).
-      const liveReplayMode =
-        action === 'load'
-          ? parseReplayMode(body ?? {}, res, 'liveReplayMode')
-          : undefined;
-      if (liveReplayMode === null) return;
-      const compactedReplayMode =
-        action === 'load'
-          ? parseReplayMode(body ?? {}, res, 'compactedReplayMode')
-          : undefined;
-      if (compactedReplayMode === null) return;
-      const restoreSource = parseRequestedSessionSource(body, res);
-      if (restoreSource === null) return;
-      const clientId = parseClientIdHeader(req, res);
-      if (clientId === null) return;
+      const fields =
+        parsedFields ?? parseSessionRestoreFields(req, res, body, action);
+      if (fields === null) return;
+      const {
+        approvalMode,
+        historyPageSize,
+        liveReplayMode,
+        compactedReplayMode,
+        restoreSource,
+        clientId,
+      } = fields;
       if (
         isInternalWorkspaceRuntime(runtime) &&
         deps.standaloneSessionService &&
@@ -5168,6 +5204,8 @@ export function registerSessionRoutes(
       }
       const assertRuntimeGenerationOpen =
         captureRuntimeGenerationAssertion(runtime);
+      const fields = parseSessionRestoreFields(req, res, body, 'load');
+      if (fields === null) return;
       const service = createWorkspaceRuntimeSessionService(runtime);
       const storedSessionId = await resolveSessionIdForRestore(
         service,
@@ -5214,7 +5252,7 @@ export function registerSessionRoutes(
           explicitWorkspaceCwd: Object.hasOwn(body, 'cwd'),
         });
       });
-      await restoreSessionHandler('load')(req, res);
+      await restoreSessionHandler('load', fields)(req, res);
     } catch (err) {
       if (res.headersSent) return;
       if (err instanceof WorktreeRestoreUnavailableError) {

@@ -441,6 +441,44 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     ).toBe('saved-now\n');
   });
 
+  it('preserves a file written while beforeRemoval is pending', async () => {
+    const plan = await planFor('callback-late-file');
+    let notifyCallbackStarted!: () => void;
+    let releaseCallback!: () => void;
+    const callbackStarted = new Promise<void>((resolve) => {
+      notifyCallbackStarted = resolve;
+    });
+    const resumeCallback = new Promise<void>((resolve) => {
+      releaseCallback = resolve;
+    });
+    const cleanup = executeWorktreeCleanup(plan, {
+      requireSnapshot: true,
+      beforeRemoval: async () => {
+        notifyCallbackStarted();
+        await resumeCallback;
+        return true;
+      },
+    });
+    try {
+      await callbackStarted;
+      fs.writeFileSync(
+        path.join(plan.lockKey, 'late-callback.txt'),
+        'saved-after-ack\n',
+      );
+    } finally {
+      releaseCallback();
+    }
+
+    const outcome = await cleanup;
+
+    expect(outcome.removed).toBe(false);
+    expect(archives(plan.sessionId)).toHaveLength(1);
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(plan.lockKey, 'late-callback.txt'), 'utf8'),
+    ).toBe('saved-after-ack\n');
+  });
+
   it('preserves a hidden edit before a bare carried-only deletion', async () => {
     fs.writeFileSync(path.join(repoRoot, 'victim.txt'), 'clean-at-gate\n');
     git(repoRoot, 'add', 'victim.txt');

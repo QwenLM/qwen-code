@@ -70,11 +70,15 @@ worktreeRemoved?: { archiveKey: string }
 
 `archiveKey` 只能是经过校验的 tar 基本文件名，不得包含目录分量、路径穿越或平台分隔符替换。对应 JSON 头文件使用同基名的 `.json`。稳定的键使 archive/unarchive 可以同步搬移归档对，而不会记录随目录变更而失效的绝对路径。
 
-只有在真实移除结果成功，且确认目标 checkout 目录已经不存在后，才写入该状态。快照已创建、HTTP 返回 `removed`，或仅凭 `removeUserWorktree().success`，都不是证明。`branchPreserved`、`keptBranch` 与部分移除的诊断必须继续区分，并决定后续分支策略；`removeUserWorktree` 的未合并提交和 ref ownership 保护不变。
+对符合条件的保留清扫，在真正调用破坏性移除之前，先校验本次选取的归档对，写入并回读仍存活的 sidecar 及其恢复绑定。绑定持久化失败时不得执行移除。因此该绑定既可以表示已完成的移除，也可以表示正在进行的移除；普通 load 不能仅因 checkout 仍存在就自行把该绑定恢复成普通活跃 worktree。快照已创建、HTTP 返回 `removed`，或仅凭 `removeUserWorktree().success`，仍不足以证明物理移除。`branchPreserved`、`keptBranch` 与部分移除的诊断必须继续区分，并决定后续分支策略；`removeUserWorktree` 的未合并提交和 ref ownership 保护不变。
+
+后续拒绝移除或确认未移除时，只有在实际未尝试删除，或 checkout 仍与该快照的字节、tracked 删除项、HEAD/分支及 marker 严格匹配时，才清除本次尝试的恢复绑定。已尝试部分删除或内容不匹配的 checkout 必须同时保留绑定和归档对以供恢复，不能把它当作完整的活跃 checkout，也不能静默丢弃其归档。某个会话活动时间读取失败时仍采取保守暂停，不因此删除其它正常 checkout。
 
 sidecar 的 64 KiB 上限继续有效。既有 `fitSidecarToReadCap` 可以丢弃 `carriedEntries` 来保住绑定，但必须保留移除记录。移除记录畸形时，sidecar 视为损坏，而不是「干净」。严格读取继续沿用现有 `readWorktreeSessionStrict` 契约，不以宽松解析接受新状态。
 
 不得改写 `originalCwd`、`workspaceCwd`、`originalHeadCommit` 与 `worktreeBase` 等创建来源，使后续历史看起来像首次创建。恢复采用捕获时的 `headCommit` 和 `branch`；可变的 `worktreeBranch` 反映重建后的实际 checkout，因此 detached 恢复不会意外获得旧 slug 派生 ref 的 ownership。既有 carry 元数据在仍有效时保留，但恢复不能编造新的搬运豁免。
+
+被接受的捕获结果还必须通过恢复时使用的同一组有界解压与可读性校验。如果生成的归档无法在这些限制下读取，必须在发布给恢复选择器之前失败，不能先删除 checkout 再留下无法使用的恢复对。可读取的大文件仍通过真实解档与逐字节检查验证其恢复能力；没有放宽归档或解压限制。
 
 ### 5. 归档对必须随 archive/unarchive 搬移，并使失败可见
 
@@ -82,7 +86,11 @@ archive/unarchive 必须让全部归属明确的同名归档对随 transcript �
 
 搬移不完整、归档对不可读、目标重复/冲突或 active/archived 位置含义不明时，必须明确失败并保留可恢复产物。不能让读取方静默选用另一个目录中的无关旧副本。读取使用当前已验证 archive 状态对应的归档对。选择器不得跟随目录级或文件级 symlink 逃出所属位置。
 
-worktree 已移除的恢复会话在 archive 操作中仍须与恢复协调。沿用既有 archive coordination 与串行化顺序；在没有该协调时，不得于选择或解档期间搬移其快照。
+缺失或不可读的 legacy sidecar 不构成任何归档对的 ownership 证据或搬移授权：它本身和其它未关联文件均保持不变。只有严格有效的移除绑定才为这对归档提供来源。真实 mutation 与 alreadyArchived/alreadyActive 都执行同样的协调。记录 mutation 提交后，归档搬移与定时任务维护分别尝试，前者的失败不得跳过、改写或吞掉后者；两类失败汇总报告，但不得抹去 mutation 已应用的历史。
+
+搬移时，按路径与 `(dev, ino)` 记录本次调用新建的目标链接。失败时只回滚这些证明属于本次调用的目标：源仍为同一实体时，只删除重复目标别名；源已 unlink 且目标实体仍可确认时，先用不覆盖的 `link()` 恢复源别名，再删除目标别名。实体被替换或目标原先就存在冲突时不得覆盖。回滚错误与原始失败一起汇总报告。这是对这些已知链接的可恢复重放，不承诺任意进程崩溃或两个目录合并的原子性。
+
+恢复 worktree 的会话在 archive 操作中仍须与恢复协调。沿用既有 archive coordination 与串行化顺序；在没有该协调时，不得于选择或解档期间搬移其快照。
 
 ### 6. 目录缺失本身不是恢复许可
 
@@ -115,7 +123,7 @@ worktree 已移除的恢复会话在 archive 操作中仍须与恢复协调。�
 3. 仅分类唯一归属的根和合规候选，避免同一根的重复清扫；
 4. 按 canonical-path/raw-fallback 键规则取得 `acquireWorktreeOwnershipOp`，并保持既有 ownership-lock → archive-coordinator 顺序；
 5. 在破坏性操作前重新校验 ownership、严格 live/pin 状态以及全部 U3 条件；
-6. 捕获、移除、确认文件系统结果，再原子保存并回读仍存活的 sidecar；
+6. 捕获，校验并原子保存、回读快照绑定，然后移除并确认文件系统结果；
 7. 把在途工作纳入停止/drain 等待，不能在 Git 或元数据写入中途强杀任务。
 
 许可在候选之间取消。Git/元数据变更开始后，沿用 `removeUserWorktree` 的完成并保护语义，不得强杀写入方。重启后按上述 ownership 规则恢复，不盲从旧的内存快照继续执行。
@@ -134,7 +142,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 - 要求普通文件及已有 no-symlink/link ownership 输入约束；以及
 - 依次比较头部 `createdAt`、归档 `mtimeNs`、完整归档路径的确定性顺序，绝不依赖目录枚举顺序。文件系统的 `mtimeNs` 必须作为 `bigint` 比较，不得转成 `Number`；如需写进 JSON 证据，应序列化为十进制字符串。
 
-竞争头部不可读或畸形、版本未知或目录不可读时，拒绝选择；不能静默回退到一个看似有效的旧归档。无关文件不得被臆造为会话快照。
+竞争头部不可读或畸形、版本未知或目录不可读时，拒绝选择；不能静默回退到一个看似有效的旧归档。无关文件不得被臆造为会话快照。显式绑定的 `archiveKey` 只对对应的精确 pair 做查找和验证；其它文件或归档对既不能阻断这个有效目标，也不能被提升成备选。未显式指定 key 的最新选择仍遵守全部竞争记录的失败关闭规则。
 
 既有 `checkoutMatchesCapture` 是捕获时结果，而不是写入归档的持久认证。选择不代表归档有签名，也不证明过去的删除一定已提交。它只为后续受保护恢复建立结构、归属绑定和确定性选择。
 
@@ -199,7 +207,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 
 使用 `SessionOverviewPanel.tsx` 及其现有 busy/error/open 模型和 workspace-scoped 客户端调用。入口放在 Session Overview，不向仅枚举真实 Git worktree 的 `GitWorktreesDialog` 添加不存在的 worktree 行。
 
-- 对有记录的已移除 checkout，展示恢复入口，并区分加载、进行中、不可用和读取失败。
+- 对具有有效记录的已移除 checkout，展示恢复入口，并区分加载、进行中、不可用和读取失败。
 - 打开已移除记录时，不得静默回退到源 checkout。先完成明确的恢复流程，再调用正常 open 路径。
 - 自身恢复操作进行中，及其它不兼容生命周期操作进行中时禁用动作，沿用现有 busy/error 行为，不新增 watcher 子系统。
 - 失败时显示保守失败原因，不掩盖仍保留的归档或部分恢复目标。
@@ -222,7 +230,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 
 ## catalog 生命周期的新鲜度
 
-持久化 worktree sidecar 是 `worktreeRemoved.archiveKey` 与 `canRestore` 的权威来源。当 live 摘要仍携带旧的 checkout 状态时，不得让其完整 worktree 对象覆盖较新的移除状态，也不得在成功恢复后把该移除状态复活。其它 live worktree 字段继续保持原有合并行为。PR/artifact 元数据的并发读取去重不得冻结这些生命周期字段：每个 catalog 视图都要验证当前 sidecar，并在适用时验证与其精确绑定的快照对。
+持久化 worktree sidecar 是 `worktreeRemoved.archiveKey` 与 `canRestore` 的权威来源。当 live 摘要仍携带旧的 checkout 状态时，不得让其完整 worktree 对象覆盖较新的移除状态，也不得在成功恢复后把该移除状态复活。其它 live worktree 字段继续保持原有合并行为。PR/artifact 元数据的并发读取去重不得冻结这些生命周期字段：每个 catalog 视图都要验证当前 sidecar，并在适用时验证与其精确绑定的快照对。预览统一使用恢复操作的 ownership、originalCwd 及 supersession 分类，而不是只信任 `workspaceCwd`。无法确证的重新读取不得把移除绑定变成普通活跃 checkout，也不能确认可恢复性：可以保留已有的移除信息，但在当前记录重新有效之前必须令 `canRestore` 为 `false`。
 
 ## 验收与验证
 
@@ -232,7 +240,7 @@ live 判断中，只有明确 not-found 且不在 closing 的会话才算消失�
 2. 保留清扫恰好保留最近 N 个合规 worktree；`0` 禁用；active/pinned 独立保护。非法设置、pin store 状态未知、根冲突及 ownership 未知均保留。
 3. 保留清扫后 chat/transcript/sidecar 仍存活；文件系统确认 checkout 已移除；每个接受的移除都有可定位的归档对。普通 archive/unarchive 仍保留已有 checkout 内容与绑定。
 4. 恢复按捕获 HEAD 重建托管目标，保留真实 dirty/deleted/mode/link 内容。不得覆盖已有非空目标，也不得强制回退已前进的命名分支。
-5. 对象缺失、头部畸形、归档对不完整、恶意归档成员或错误 workspace 均失败关闭，不转移 ownership、不丢弃归档。
+5. 对象缺失、头部畸形、归档对不完整、恶意归档成员或陈旧、错误的 workspace 均失败关闭，不转移 ownership、不丢弃归档。
 6. 移除后 sidecar 写入失败要通过严格 ownership 与有效归档对修复；恢复后、绑定前失败只能通过严格匹配的验证完成，不能盲目重新解档。
 7. scheduled activity 防止 shutdown 遗留未完成工作；retention、archive、reset 和 restore 的 ownership 关键区段均串行。
 8. 既有响应保持兼容；SDK 方法实际调用正确的 scoped 路由；Session Overview 的真实恢复点击触发实际 HTTP 恢复，并能成功 load。

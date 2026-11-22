@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -12,6 +13,8 @@ import {
   GitWorktreeService,
   readWorktreeSnapshotMeta,
   readWorktreeSessionStrict,
+  WORKTREE_SESSION_FILE,
+  writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
 import { createWorkspaceRegistry } from '../workspace-registry.js';
@@ -25,10 +28,39 @@ import {
   type RetentionTestRuntime,
 } from '../../test-utils/worktree-session-retention-fixtures.js';
 
+const failedJsonWrite = vi.hoisted(() => ({
+  filePath: undefined as string | undefined,
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/atomicFileWrite.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/atomicFileWrite.js')
+      >();
+    return {
+      ...actual,
+      atomicWriteJSON: vi.fn(
+        async (
+          filePath: string,
+          data: unknown,
+          options?: Parameters<typeof actual.atomicWriteJSON>[2],
+        ) => {
+          if (filePath === failedJsonWrite.filePath) {
+            throw new Error('injected binding persistence failure');
+          }
+          return actual.atomicWriteJSON(filePath, data, options);
+        },
+      ),
+    };
+  },
+);
+
 let root: string;
 let coordinator: SessionArchiveCoordinator;
 
 beforeEach(() => {
+  failedJsonWrite.filePath = undefined;
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worktree-retention-'));
   coordinator = new SessionArchiveCoordinator();
 });
@@ -142,6 +174,50 @@ describe('worktree retention with real repositories', () => {
     expect(fs.existsSync(newest.worktreePath)).toBe(true);
   });
 
+  it.each(['another-session', 'missing'] as const)(
+    'does not let a newest checkout whose marker is %s displace a healthy retained checkout',
+    async (markerState) => {
+      const target = makeRetentionRepo(root, 'primary');
+      configureRetention(target, 1);
+      const evicted = await makeRetainedSession(target, {
+        slug: 'older-evicted',
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      const retained = await makeRetainedSession(target, {
+        slug: 'healthy-retained',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+      const invalidNewest = await makeRetainedSession(target, {
+        slug: 'invalid-newest',
+        activity: '2026-01-03T00:00:00.000Z',
+      });
+      const marker = path.join(
+        invalidNewest.worktreePath,
+        WORKTREE_SESSION_FILE,
+      );
+      if (markerState === 'missing') {
+        fs.rmSync(marker);
+      } else {
+        fs.rmSync(marker);
+        await writeWorktreeSessionMarker(
+          invalidNewest.worktreePath,
+          'another-session',
+        );
+      }
+
+      expect((await sweep(target)).removed).toEqual([evicted.id]);
+
+      await expectRetainedSnapshot(target, evicted);
+      expect(fs.existsSync(retained.worktreePath)).toBe(true);
+      expect(fs.existsSync(invalidNewest.worktreePath)).toBe(true);
+      const read = await readWorktreeSessionStrict(retained.sidecarPath);
+      expect(read.state).toBe('valid');
+      if (read.state === 'valid') {
+        expect(read.session.worktreeRemoved).toBeUndefined();
+      }
+    },
+  );
+
   it('discards only a failed attempt snapshot after proving the checkout intact', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 1);
@@ -233,6 +309,146 @@ describe('worktree retention with real repositories', () => {
         .readdirSync(path.dirname(old.sidecarPath))
         .some((entry) => entry.endsWith('.worktree-snapshot.tar.gz')),
     ).toBe(true);
+  });
+
+  it('persists the recovery binding before physical removal', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'binding-before-removal',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const removeUserWorktree = GitWorktreeService.prototype.removeUserWorktree;
+    const removal = vi
+      .spyOn(GitWorktreeService.prototype, 'removeUserWorktree')
+      .mockImplementation(async function (
+        this: GitWorktreeService,
+        ...args: Parameters<GitWorktreeService['removeUserWorktree']>
+      ) {
+        const current = await readWorktreeSessionStrict(old.sidecarPath);
+        expect(current.state).toBe('valid');
+        if (current.state !== 'valid')
+          throw new Error('invalid binding record');
+        const archiveKey = current.session.worktreeRemoved?.archiveKey;
+        expect(archiveKey).toBeDefined();
+        const archive = path.join(path.dirname(old.sidecarPath), archiveKey!);
+        await expect(fs.promises.lstat(archive)).resolves.toMatchObject({
+          nlink: 1,
+        });
+        await expect(
+          fs.promises.lstat(`${archive.slice(0, -'.tar.gz'.length)}.json`),
+        ).resolves.toMatchObject({
+          nlink: 1,
+        });
+        return removeUserWorktree.apply(this, args);
+      });
+
+    expect((await sweep(target)).removed).toEqual([old.id]);
+    expect(removal).toHaveBeenCalledOnce();
+    await expectRetainedSnapshot(target, old);
+  });
+
+  it('refuses physical removal when the recovery binding cannot be persisted', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'binding-write-refused',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const removal = vi.spyOn(
+      GitWorktreeService.prototype,
+      'removeUserWorktree',
+    );
+    failedJsonWrite.filePath = old.sidecarPath;
+
+    const outcome = await sweep(target);
+    expect(outcome.removed).toEqual([]);
+    expect(
+      outcome.issues.some((message) =>
+        message.includes('injected binding persistence failure'),
+      ),
+    ).toBe(true);
+    expect(removal).not.toHaveBeenCalled();
+    expect(fs.existsSync(old.worktreePath)).toBe(true);
+    const current = await readWorktreeSessionStrict(old.sidecarPath);
+    expect(current.state).toBe('valid');
+    if (current.state === 'valid') {
+      expect(current.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
+  it('persists the snapshot binding when removal fails after deleting the checkout', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'removed-before-prune-error',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const removeUserWorktree = GitWorktreeService.prototype.removeUserWorktree;
+    vi.spyOn(
+      GitWorktreeService.prototype,
+      'removeUserWorktree',
+    ).mockImplementation(async function (
+      this: GitWorktreeService,
+      ...args: Parameters<GitWorktreeService['removeUserWorktree']>
+    ) {
+      const actual = await removeUserWorktree.apply(this, args);
+      return {
+        ...actual,
+        success: false,
+        error: 'injected post-removal prune failure',
+      };
+    });
+
+    expect((await sweep(target)).removed).toEqual([old.id]);
+
+    await expectRetainedSnapshot(target, old);
+  });
+
+  it('does not accumulate snapshots for an already pending Git operation', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const old = await makeRetainedSession(target, {
+      slug: 'already-pending',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newest',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    execFileSync('git', ['bisect', 'start'], {
+      cwd: old.worktreePath,
+      stdio: 'pipe',
+    });
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect((await sweep(target)).removed).toEqual([]);
+
+    expect(fs.existsSync(old.worktreePath)).toBe(true);
+    expect(
+      fs
+        .readdirSync(path.dirname(old.sidecarPath))
+        .some(
+          (entry) =>
+            entry.startsWith(`${old.id}.`) &&
+            entry.includes('.worktree-snapshot.'),
+        ),
+    ).toBe(false);
   });
 
   it('protects live and pinned chats outside the eligible quota', async () => {

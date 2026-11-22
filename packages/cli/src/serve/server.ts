@@ -4226,6 +4226,7 @@ export function createServeApp(
       if (!controller) return;
       const stopped = controller.stop();
       retentionStops.add(stopped);
+      void stopped.finally(() => retentionStops.delete(stopped));
       const remove = () => {
         if (retentions.get(workspaceCwd) === controller) {
           retentions.delete(workspaceCwd);

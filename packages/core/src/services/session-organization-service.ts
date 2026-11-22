@@ -499,7 +499,6 @@ export class SessionOrganizationService {
         throw error;
       }
       const sessions = store['sessions'];
-      if (sessions === undefined) return false;
       if (!isPlainRecord(sessions)) {
         throw new Error('session organization store sessions is not an object');
       }

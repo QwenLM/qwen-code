@@ -257,9 +257,14 @@ describe('worktree snapshot restore', () => {
       }),
     );
     const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
-    const restored = await DaemonSessionClient.restoreWorktree(client, 's-1', {
-      workspaceCwd: '/work/secondary',
-    });
+    const restored = await DaemonSessionClient.restoreWorktree(
+      client,
+      's-1',
+      {
+        workspaceCwd: '/work/secondary',
+      },
+      'restore-client',
+    );
     expect(restored).toBeInstanceOf(DaemonSessionClient);
     expect(restored.workspaceCwd).toBe('/work/secondary');
     expect(restored.worktree?.branch).toBe('');
@@ -282,6 +287,7 @@ describe('worktree snapshot restore', () => {
     expect(restored.replaySnapshot.compactedReplay).toEqual([]);
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe('http://daemon/session/s-1/worktree-restore');
+    expect(calls[0]!.headers['x-qwen-client-id']).toBe('restore-client');
     expect(JSON.parse(calls[0]!.body!)).toEqual({
       cwd: '/work/secondary',
     });
