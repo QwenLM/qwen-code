@@ -337,6 +337,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     type: 'string' as const,
     description: 'OpenAI base URL (for custom endpoints)',
   },
+  'service-tier': {
+    type: 'string' as const,
+    description:
+      'Service tier to use for model requests (e.g. flex on DeepInfra, flex or priority on OpenAI)',
+  },
   'screen-reader': {
     type: 'boolean' as const,
     description: 'Enable screen reader mode for accessibility.',
