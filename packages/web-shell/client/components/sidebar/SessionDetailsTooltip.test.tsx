@@ -155,6 +155,7 @@ describe('SessionDetailsTooltip', () => {
     ],
     // Blocked states stay pinned above the unread dot.
     [{ isWaitingForPermission: true }, 'Needs approval', 'Finished'],
+    [{ isWaitingForUserQuestion: true }, 'User input needed', 'Finished'],
     [{}, 'Finished', 'Idle'],
   ])(
     'mirrors the row unread-dot precedence: %s',
@@ -214,6 +215,7 @@ describe('SessionDetailsTooltip', () => {
                 }}
                 label="Session"
                 time=""
+                completedUnread={false}
                 statusLabel="Custom"
               >
                 <button type="button">Session</button>
@@ -233,6 +235,40 @@ describe('SessionDetailsTooltip', () => {
       }
     },
   );
+
+  it('names the background-only arm exactly once', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'background-only',
+                workspaceCwd: '/workspace',
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('Background tasks running');
+      expect(details?.textContent).not.toContain('· Background tasks running');
+      expect(details?.textContent).not.toContain('Finished');
+    } finally {
+      act(() => root.unmount());
+    }
+  });
 
   it('names background work alongside a running turn', async () => {
     vi.useFakeTimers();
