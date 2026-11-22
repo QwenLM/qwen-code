@@ -16,6 +16,23 @@ export type SimpleGitModule = {
   simpleGit: SimpleGitFactory;
 };
 
+// gitEnv() (utils/git-branches.ts) scrubs ambient git variables and then
+// deliberately restores exactly these operator-set ones. simple-git v4's
+// environment guard throws when a task env names a guarded key the client
+// did not opt into, so every client from this loader names them — the
+// worktree service alone applies `.env(gitEnv())` at ~25 call sites.
+export const GIT_ENV_RESTORED_KEYS = [
+  'GIT_AUTHOR_NAME',
+  'GIT_AUTHOR_EMAIL',
+  'GIT_AUTHOR_DATE',
+  'GIT_COMMITTER_NAME',
+  'GIT_COMMITTER_EMAIL',
+  'GIT_COMMITTER_DATE',
+  'GIT_SSL_CAINFO',
+  'GIT_SSL_CAPATH',
+  'GIT_ALLOW_PROTOCOL',
+] as const;
+
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
 
 /**
@@ -58,6 +75,10 @@ function guardFsmonitor(factory: SimpleGitFactory): SimpleGitFactory {
       ...options,
       config: [...(options?.config ?? []), ...NO_EXEC_CONFIG_SETTINGS],
       unsafe: { ...options?.unsafe, allowUnsafeFsMonitor: true },
+      allowEnvironment: [
+        ...GIT_ENV_RESTORED_KEYS,
+        ...(options?.allowEnvironment ?? []),
+      ],
     };
     return baseDir === undefined ? factory(merged) : factory(baseDir, merged);
   };

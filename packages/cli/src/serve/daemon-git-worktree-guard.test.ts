@@ -201,14 +201,32 @@ describe('createDaemonToolGuard', () => {
 
   // `$'…'` ANSI-C quoting and `$(…)` substitution are bash spellings; the
   // Windows lanes deny them at the divergent-syntax gate before analysis.
+  // shell-quote >= 1.11 understands `$'…'`, so those forms arrive as the
+  // plain tokens bash would run and the denial is the ordinary outside-
+  // workspace relocation reason; `$(…)` still parses as a dynamic token.
   it
     .runIf(bashSemanticsLane)
     .each([
-      "git $'-C' /outside/repo reset --hard",
-      "$'git' -C /outside/repo reset --hard",
-      'git $(echo -C) /outside/repo reset --hard',
+      `git $'-C' ${cmdPath(outsideRepo)} reset --hard`,
+      `$'git' -C ${cmdPath(outsideRepo)} reset --hard`,
     ])(
-    'denies shell-expansion relocation forms on the bash lanes %#',
+    'denies ANSI-C-quoted relocation forms on the bash lanes %#',
+    async (command) => {
+      const guard = createDaemonToolGuard();
+
+      await expect(guard(request(command))).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each(['git $(echo -C) /outside/repo reset --hard'])(
+    'denies substitution relocation forms on the bash lanes %#',
     async (command) => {
       const guard = createDaemonToolGuard();
 

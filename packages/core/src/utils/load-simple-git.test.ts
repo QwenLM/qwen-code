@@ -5,11 +5,13 @@
  */
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { GIT_ENV_RESTORED_KEYS } from './load-simple-git.js';
 
 describe('loadSimpleGit', () => {
   afterEach(() => {
     vi.doUnmock('simple-git');
     vi.resetModules();
+    vi.unstubAllEnvs();
   });
 
   it('uses named exports and single-flights concurrent loads', async () => {
@@ -29,6 +31,7 @@ describe('loadSimpleGit', () => {
     expect(simpleGit).toHaveBeenCalledWith('/repo', {
       config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
+      allowEnvironment: GIT_ENV_RESTORED_KEYS,
     });
   });
 
@@ -55,6 +58,7 @@ describe('loadSimpleGit', () => {
         'log.showSignature=false',
       ],
       unsafe: { allowUnsafeHooksPath: true, allowUnsafeFsMonitor: true },
+      allowEnvironment: GIT_ENV_RESTORED_KEYS,
     });
   });
 
@@ -72,12 +76,14 @@ describe('loadSimpleGit', () => {
       baseDir: '/repo',
       config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
+      allowEnvironment: GIT_ENV_RESTORED_KEYS,
     });
 
     guarded();
     expect(simpleGit).toHaveBeenLastCalledWith({
       config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
+      allowEnvironment: GIT_ENV_RESTORED_KEYS,
     });
   });
 
@@ -99,6 +105,7 @@ describe('loadSimpleGit', () => {
     expect(simpleGit).toHaveBeenCalledWith('/repo', {
       config: ['core.fsmonitor=', 'log.showSignature=false'],
       unsafe: { allowUnsafeFsMonitor: true },
+      allowEnvironment: GIT_ENV_RESTORED_KEYS,
     });
   });
 
@@ -113,5 +120,21 @@ describe('loadSimpleGit', () => {
     await expect(loadSimpleGit()).rejects.toThrow(
       'simple-git module does not match the expected API',
     );
+  });
+
+  it('lets gitEnv-restored guarded variables through the v4 env guard', async () => {
+    // Unmocked: the real simple-git v4 client throws on a task env naming a
+    // guarded variable the client did not opt into. gitEnv() restores these
+    // operator-set variables by design, so the loader must name them.
+    vi.stubEnv('GIT_SSL_CAINFO', '/tmp/ci-test-ca.pem');
+    vi.stubEnv('GIT_AUTHOR_NAME', 'CI User');
+    const { loadSimpleGit } = await import('./load-simple-git.js');
+    const { gitEnv } = await import('./git-branches.js');
+    const { simpleGit: guarded } = await loadSimpleGit();
+
+    const git = guarded().env(gitEnv());
+    expect(gitEnv()['GIT_SSL_CAINFO']).toBe('/tmp/ci-test-ca.pem');
+    expect(gitEnv()['GIT_AUTHOR_NAME']).toBe('CI User');
+    await expect(git.version()).resolves.toBeDefined();
   });
 });

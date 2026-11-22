@@ -100,6 +100,39 @@ describe('createExtensionGitClient', () => {
       'credential helper',
       'https://git.example.com/owner/credential.helper.git',
     ],
+    // argv-parser 3.0.0 added these unanchored matchers; a URL containing one
+    // would fail the credentialed client pre-spawn unless the category is
+    // enabled for the product-generated extraHeader key.
+    ['include path', 'https://git.example.com/owner/include.path/repo.git'],
+    ['includeif', 'https://git.example.com/owner/includeif.x/repo.git'],
+    ['includeif without a dot', 'https://git.example.com/owner/includeifx'],
+    [
+      'submodule update',
+      'https://git.example.com/owner/submodule.update/repo.git',
+    ],
+    ['tar command', 'https://git.example.com/owner/tar.command/repo.git'],
+    ['trailer cmd', 'https://git.example.com/owner/trailer.cmd/repo.git'],
+    [
+      'trailer command',
+      'https://git.example.com/owner/trailer.command/repo.git',
+    ],
+    ['difftool cmd', 'https://git.example.com/owner/difftool.cmd/repo.git'],
+    ['difftool path', 'https://git.example.com/owner/difftool.path/repo.git'],
+    ['filter process', 'https://git.example.com/owner/filter.process/repo.git'],
+    [
+      'gpg default key command',
+      'https://git.example.com/owner/gpg.defaultkeycommand/repo.git',
+    ],
+    [
+      'interactive diff filter',
+      'https://git.example.com/owner/interactive.difffilter/repo.git',
+    ],
+    ['pager', 'https://git.example.com/owner/pagerx/repo.git'],
+    [
+      'uploadpack pack objects hook',
+      'https://git.example.com/owner/uploadpack.packobjectshook/repo.git',
+    ],
+    ['url insteadof', 'https://git.example.com/owner/urlxx.insteadof/repo.git'],
   ])(
     'runs authenticated Git commands when the URL contains %s text',
     async (_label, source) => {
