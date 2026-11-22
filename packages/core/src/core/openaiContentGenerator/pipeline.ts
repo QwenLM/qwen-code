@@ -25,6 +25,7 @@ import {
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
+import { getBuiltinKimiK3Reasoning } from '../kimi-reasoning.js';
 import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
@@ -83,6 +84,8 @@ import {
 } from './provider/utils.js';
 import {
   getEffectiveReasoning,
+  hasOpenRouterReasoningEffortOverride,
+  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
 
@@ -1433,10 +1436,23 @@ export class ContentGenerationPipeline {
       { ...this.contentGeneratorConfig, model: context.model },
       reasoningCapabilities,
     );
+    // An inferred nested default must not compete with an explicit flat tier.
+    // Undeclared DeepSeek still needs the default to emit its non-effort field;
+    // its profile flattener removes the temporary nested object.
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
       effectiveReasoning &&
+      (!this.hasExplicitOpenRouterEffort(context.model) ||
+        (resolveReasoningDeclaration(
+          this.config.cliConfig,
+          this.contentGeneratorConfig,
+          context.model,
+        ) === undefined &&
+          getBuiltinDeepSeekReasoning({
+            ...this.contentGeneratorConfig,
+            model: context.model,
+          }) !== undefined)) &&
       request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
@@ -1493,6 +1509,17 @@ export class ContentGenerationPipeline {
       userPromptId,
       trailingReattachPartCount(request.contents),
     );
+    if (
+      reasoningCapabilities?.profile === 'openai-reasoning' &&
+      getBuiltinKimiK3Reasoning({
+        ...this.contentGeneratorConfig,
+        model: context.model,
+      }) &&
+      'reasoning' in providerRequest &&
+      isReasoningEffortPlaceholder(providerRequest.reasoning_effort)
+    ) {
+      delete providerRequest.reasoning_effort;
+    }
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&
       isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
@@ -2018,6 +2045,14 @@ export class ContentGenerationPipeline {
     return params;
   }
 
+  private hasExplicitOpenRouterEffort(model?: string): boolean {
+    return hasOpenRouterReasoningEffortOverride(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      model || this.contentGeneratorConfig.model,
+    );
+  }
+
   private buildReasoningConfig(
     request: GenerateContentParameters,
   ): Record<string, unknown> {
@@ -2035,7 +2070,10 @@ export class ContentGenerationPipeline {
     // configured reasoning object when explicitly enabled. This keeps provider- and
     // model-specific semantics intact while honoring request-level opt-out.
 
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
+    if (
+      request.config?.thinkingConfig?.includeThoughts === false ||
+      this.hasExplicitOpenRouterEffort(request.model)
+    ) {
       return {};
     }
 
