@@ -40,12 +40,36 @@ const job = (name) => {
   return workflow.slice(start, next < 0 ? undefined : start + 1 + next);
 };
 
+function inlineMavenCacheHelper(run) {
+  const guard = 'if [ ! -f "${seed_helper}" ]; then';
+  const guardStart = run.indexOf(guard);
+  if (guardStart < 0) return run;
+  const lineStart = run.lastIndexOf('\n', guardStart) + 1;
+  const indent = run.slice(lineStart, guardStart);
+  const end = run.indexOf(`\n${indent}fi`, guardStart);
+  expect(end).toBeGreaterThan(guardStart);
+  const sourceStart = run.indexOf('source "${seed_helper}"', end);
+  expect(sourceStart).toBeGreaterThan(end);
+  const localRoot = run.includes('RUNNER_ENVIRONMENT')
+    ? '${repo}'
+    : '${RUNNER_TEMP}/m2-repo';
+  const helper = readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8')
+    .replaceAll('${repo}', localRoot)
+    .replace(/^/gm, indent);
+  const inlined = `${run.slice(0, guardStart)}${helper}${run.slice(sourceStart + 'source "${seed_helper}"'.length)}`;
+  return inlined.replace(
+    `${indent}seed_helper="\${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"\n`,
+    '',
+  );
+}
+
 const step = (block, name) => {
   const marker = `      - name: '${name}'`;
   const start = block.indexOf(marker);
   if (start < 0) throw new Error(`Missing workflow step: ${name}`);
   const next = block.slice(start + 1).search(/\n {6}- name:/);
-  return block.slice(start, next < 0 ? undefined : start + 1 + next);
+  const run = block.slice(start, next < 0 ? undefined : start + 1 + next);
+  return inlineMavenCacheHelper(run);
 };
 
 function writeDeviceProbe(
@@ -104,6 +128,10 @@ exec /bin/cp "$@"
   );
   const scripts = join(root, 'workspace', '.github', 'scripts');
   mkdirSync(scripts, { recursive: true });
+  writeFileSync(
+    join(scripts, 'maven-cache-seed.sh'),
+    readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8'),
+  );
   writeFileSync(
     join(scripts, 'sdk-java-lock.sh'),
     lockBackend
@@ -380,7 +408,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
       );
       expect(lockAt, locked.name).toBeGreaterThan(-1);
-      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository/."');
+      const seedAt = locked.run.indexOf('source "${seed_helper}"');
       expect(seedAt, locked.name).toBeGreaterThan(-1);
       expect(seedAt, locked.name).toBeLessThan(lockAt);
       // Assert on the region below the acquisition, not on first-occurrence
@@ -505,11 +533,15 @@ describe('SDK Java self-hosted workflow guards', () => {
       for (const candidate of job.steps ?? []) {
         const run = candidate.run;
         if (typeof run !== 'string') continue;
-        const seedAt = run.indexOf('cp -aln "${HOME}/.m2/repository/."');
+        const seedAt = run.indexOf('source "${seed_helper}"');
         if (seedAt !== -1) {
-          const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
-          expect(seedEnd, jobName).toBeGreaterThan(seedAt);
-          const seed = run.slice(seedAt, seedEnd);
+          expect(run.split('source "${seed_helper}"').length - 1, jobName).toBe(
+            1,
+          );
+          const seed = readFileSync(
+            '.github/scripts/maven-cache-seed.sh',
+            'utf8',
+          ).replaceAll('${repo}', '${RUNNER_TEMP}/m2-repo');
           expect(seed, jobName).toContain(
             'find -P "${RUNNER_TEMP}/m2-repo" -xdev -depth',
           );
@@ -580,25 +612,30 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('keeps every seed de-alias and write-back exclusion list in step', () => {
-    // Both lists are hand-spelled at six sites. A marker dropped from the
-    // write-back side is republished into the host cache, where `cp -n`
-    // freezes the first publisher's copy, while a marker dropped from the
-    // seed side lets the unlocked Maven runs rewrite the host file through
-    // the hardlink. Compare the name sets, not just the lists' lengths.
+    // Four SDK callers share this seed implementation. Validate its list
+    // directly, while still checking that each write-back excludes the same
+    // mutable resolver and transfer state.
     const names = (text, pattern) =>
       [...text.matchAll(pattern)].map((match) => match[1]).sort();
+    expect([...workflow.matchAll(/source "\$\{seed_helper\}"/g)]).toHaveLength(
+      4,
+    );
+    const helper = readFileSync(
+      '.github/scripts/maven-cache-seed.sh',
+      'utf8',
+    ).replaceAll('${repo}', '${RUNNER_TEMP}/m2-repo');
     const seeds = [
-      ...workflow.matchAll(/find -P "\$\{RUNNER_TEMP\}\/m2-repo" .*?-delete/g),
+      ...helper.matchAll(/find -P "\$\{RUNNER_TEMP\}\/m2-repo" .*?-delete/g),
     ].filter((match) => match[0].includes('*.lastUpdated'));
     expect([
-      ...workflow.matchAll(
+      ...helper.matchAll(
         /find -P "\$\{RUNNER_TEMP\}\/m2-repo" -xdev -mindepth 1 -delete/g,
       ),
-    ]).toHaveLength(4);
+    ]).toHaveLength(1);
     const writeBacks = [
       ...workflow.matchAll(/timeout 300 find \..*?write_back=\$\?/g),
     ];
-    expect(seeds).toHaveLength(4);
+    expect(seeds).toHaveLength(1);
     expect(writeBacks).toHaveLength(2);
     const expected = [
       '*.lastUpdated',
@@ -710,9 +747,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const jobs = parse(workflow).jobs;
       const seeds = Object.entries(jobs).flatMap(([name, job]) =>
         (job.steps ?? [])
-          .filter((candidate) =>
-            candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
-          )
+          .filter((candidate) => candidate.run?.includes('maven-cache-seed.sh'))
           .map((candidate) => [name, candidate.run]),
       );
       expect(seeds.map(([name]) => name).sort()).toEqual([
@@ -722,13 +757,14 @@ describe('SDK Java self-hosted workflow guards', () => {
         'test',
       ]);
       for (const [name, seedRun] of seeds) {
-        const start = seedRun.indexOf(
+        const expandedRun = inlineMavenCacheHelper(seedRun);
+        const start = expandedRun.indexOf(
           'if [ -L "${RUNNER_TEMP}/m2-repo" ]; then',
         );
-        const end = seedRun.indexOf('\nmvn --batch-mode', start);
+        const end = expandedRun.indexOf('\nmvn --batch-mode', start);
         expect(start, name).toBeGreaterThan(-1);
         expect(end, name).toBeGreaterThan(start);
-        const seed = seedRun.slice(start, end);
+        const seed = expandedRun.slice(start, end);
         expect(seed, name).toContain(
           'find -P "${RUNNER_TEMP}/m2-repo" -xdev -depth',
         );
@@ -1336,27 +1372,25 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       const sdkJavaSeeds = Object.values(parse(workflow).jobs)
         .flatMap((entry) => entry.steps ?? [])
-        .filter((candidate) =>
-          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
-        );
+        .filter((candidate) => candidate.run?.includes('maven-cache-seed.sh'));
       const referenceSeeds = Object.values(reference.jobs)
         .flatMap((entry) => entry.steps ?? [])
-        .filter((candidate) =>
-          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
-        );
+        .filter((candidate) => candidate.run?.includes('maven-cache-seed.sh'));
       expect(sdkJavaSeeds).toHaveLength(4);
       expect(referenceSeeds).toHaveLength(1);
       // The release lane has no write-back and takes no lock; its isolation
       // is the any-depth removal of every in-house tree, so pin it explicitly.
       for (const candidate of referenceSeeds) {
-        expect(candidate.run, candidate.name).toContain(
-          'find -P "${repo}" -xdev -depth',
-        );
-        expect(candidate.run, candidate.name).toContain(
+        const run = inlineMavenCacheHelper(candidate.run);
+        expect(run, candidate.name).toContain('find -P "${repo}" -xdev -depth');
+        expect(run, candidate.name).toContain(
           "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*'",
         );
       }
-      const seeding = [...sdkJavaSeeds, ...referenceSeeds];
+      const seeding = [...sdkJavaSeeds, ...referenceSeeds].map((candidate) => ({
+        ...candidate,
+        run: inlineMavenCacheHelper(candidate.run),
+      }));
       for (const candidate of seeding) {
         const lines = candidate.run.split('\n');
         const seedAt = lines.findIndex(
@@ -1733,10 +1767,11 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   it('keeps host cache copies best-effort and observable while guarding seed rebuilds', () => {
-    const seeds = workflow.match(
+    const helper = readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8');
+    const seeds = helper.match(
       /cp -aln "\$\{HOME\}\/\.m2\/repository\/\."[\s\S]*?echo "::warning::Maven cache seed failed[^\n]+/g,
     );
-    expect(seeds).toHaveLength(4);
+    expect(seeds).toHaveLength(1);
     for (const seed of seeds) {
       expect(seed).toContain('|| {');
       expect(seed).toContain('seed_cold_start=$?');
@@ -1747,7 +1782,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
     // A fresh host has no cache yet. That expected miss stays quiet, so the
     // warning keeps meaning the seed actually failed.
-    const guarded = workflow.matchAll(
+    const guarded = helper.matchAll(
       /seed_source_device="\$\(stat -Lc '%d' "\$\{HOME\}\/.m2\/repository"[^\n]+\n\s+seed_job_device=/g,
     );
     const homeGuard = 'if [ -d "${HOME}/.m2/repository" ]; then';
@@ -1755,35 +1790,36 @@ describe('SDK Java self-hosted workflow guards', () => {
     for (const match of guarded) {
       expect(Number.isInteger(match.index)).toBe(true);
       seedStarts.add(match.index);
-      const beforeCopy = workflow.slice(
+      const beforeCopy = helper.slice(
         match.index,
-        workflow.indexOf('cp -aln "', match.index),
+        helper.indexOf('cp -aln "', match.index),
       );
       expect(beforeCopy).toContain(
         '[ "${seed_source_device}" = "${seed_job_device}" ]',
       );
-      const guardAt = workflow.lastIndexOf(homeGuard, match.index);
+      const guardAt = helper.lastIndexOf(homeGuard, match.index);
       expect(guardAt).toBeGreaterThan(-1);
       expect(
-        workflow.slice(guardAt, match.index).trimEnd().endsWith(homeGuard),
+        helper.slice(guardAt, match.index).trimEnd().endsWith(homeGuard),
       ).toBe(true);
     }
-    expect(seedStarts.size).toBe(4);
+    expect(seedStarts.size).toBe(1);
+    expect([...workflow.matchAll(/source "\$\{seed_helper\}"/g)]).toHaveLength(
+      4,
+    );
     // Maven rewrites resolver tracking files and version metadata in place,
     // and a half-written transfer leaves *.tmp fragments, so every seed
     // needs the de-alias before that lane runs Maven against the job-local
     // copy. Residual hardlinks must never survive to an unlocked Maven run,
     // so a failed prune now stops the lane and reports its own diagnostic.
     const deAlias =
-      "find -P \"${RUNNER_TEMP}/m2-repo\" -xdev \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -delete || exit 1";
-    let from = 0;
-    for (const seed of seeds) {
-      const seedAt = workflow.indexOf(seed, from);
-      expect(seedAt, seed).toBeGreaterThan(-1);
-      const mvnAt = workflow.indexOf('mvn ', seedAt);
-      expect(mvnAt, seed).toBeGreaterThan(seedAt);
-      expect(workflow.slice(seedAt, mvnAt), seed).toContain(deAlias);
-      from = seedAt + seed.length;
+      "find -P \"${RUNNER_TEMP}/m2-repo\" -xdev ! -type d \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -delete || exit 1";
+    for (const match of workflow.matchAll(/source "\$\{seed_helper\}"/g)) {
+      const mvnAt = workflow.indexOf('mvn ', match.index);
+      expect(mvnAt).toBeGreaterThan(match.index);
+      expect(helper.replaceAll('${repo}', '${RUNNER_TEMP}/m2-repo')).toContain(
+        deAlias,
+      );
     }
   });
 
@@ -1827,10 +1863,15 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(existsSync(join(runnerTemp, 'stat-calls'))).toBe(false);
         expect(result.stdout + result.stderr).not.toContain('Maven cache seed');
         const unguarded = execute(
-          body.replaceAll(
-            'if [ -d "${HOME}/.m2/repository" ]; then',
-            'if :; then',
-          ),
+          body
+            .replaceAll(
+              'if [ -d "${HOME}/.m2/repository" ]; then',
+              'if :; then',
+            )
+            .replace(
+              'if seed_mount_guard "${HOME}/.m2/repository"; then',
+              'if :; then',
+            ),
         );
         expect(unguarded.stdout + unguarded.stderr).toContain(
           'Maven cache seed failed',
@@ -1845,21 +1886,42 @@ describe('SDK Java self-hosted workflow guards', () => {
     const steps = Object.values(parse(workflow).jobs).flatMap(
       (entry) => entry.steps ?? [],
     );
-    const seedGuards = steps
-      .filter((candidate) => candidate.run?.includes('seed_source_device='))
-      .map((candidate) => {
-        const start = candidate.run.indexOf(
-          'if [ -L "${RUNNER_TEMP}/m2-repo" ]; then',
-        );
-        const end = candidate.run.indexOf('# Drop resolver', start);
-        expect(start).toBeGreaterThanOrEqual(0);
-        expect(end).toBeGreaterThan(start);
-        return candidate.run.slice(start, end);
-      });
-    expect(seedGuards).toHaveLength(4);
-    for (const guard of seedGuards.slice(1)) {
-      expect(guard).toBe(seedGuards[0]);
+    const guardCall = (run) => {
+      const start = run.indexOf('if [ ! -f "${seed_helper}" ]; then');
+      const errorAt = run.indexOf(
+        `echo "::error::Maven cache seed helper is unavailable at workflow revision \${GITHUB_SHA}"`,
+        start,
+      );
+      const end = run.indexOf('source "${seed_helper}"', errorAt);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(errorAt).toBeGreaterThan(start);
+      expect(end).toBeGreaterThan(errorAt);
+      return run.slice(start, end + 'source "${seed_helper}"'.length);
+    };
+    const seedRuns = steps.filter((candidate) =>
+      candidate.run?.includes('seed_helper'),
+    );
+    expect(seedRuns).toHaveLength(4);
+    for (const { run } of seedRuns) {
+      const start = run.indexOf('repo="${RUNNER_TEMP}/m2-repo"');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const call = guardCall(run);
+      expect(call.startsWith('if [ ! -f "${seed_helper}" ]; then')).toBe(true);
+      expect(call).toContain('source "${seed_helper}"');
+      expect(call).toContain('exit 1');
+      expect(call).not.toContain('seed_mount_guard() {');
+      expect(call).not.toContain('cp -aln "${HOME}/.m2/repository/."');
     }
+    const sdkCalls = seedRuns.map(({ run }) => guardCall(run));
+    for (const call of sdkCalls.slice(1)) {
+      expect(call).toBe(sdkCalls[0]);
+    }
+    const helper = readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8');
+    expect(helper.match(/seed_mount_guard\(\) \{/g)).toHaveLength(1);
+    expect(helper.match(/seed_remove_quarantine\(\) \{/g)).toHaveLength(1);
+    expect(helper).toContain(
+      'if [ -e "${seed_previous_stale_repo}" ] || [ -L "${seed_previous_stale_repo}" ]; then',
+    );
     const referenceRun = parse(
       readFileSync(
         '.github/workflows/release-managed-agent-reference.yml',
@@ -1868,20 +1930,16 @@ describe('SDK Java self-hosted workflow guards', () => {
     ).jobs.build.steps.find(
       (candidate) => candidate.name === 'Build Java components',
     ).run;
-    const referenceStart = referenceRun.indexOf('if [ -L "${repo}" ]; then');
-    const referenceEnd = referenceRun.indexOf(
-      'if [ -d "${repo}" ]; then',
-      referenceStart,
+    expect(referenceRun).toContain('source "${seed_helper}"');
+    expect(referenceRun).not.toContain('seed_mount_guard() {');
+    const executableText = (text) =>
+      text.replace(/^[ \t]*#.*(?:\r?\n|$)/gm, '').replace(/^[ \t]+/gm, '');
+    expect(executableText(guardCall(referenceRun)).trimEnd()).toBe(
+      executableText(sdkCalls[0]).trimEnd(),
     );
-    expect(referenceStart).toBeGreaterThan(0);
-    expect(referenceEnd).toBeGreaterThan(referenceStart);
-    expect(
-      referenceRun
-        .slice(referenceStart, referenceEnd)
-        .replace(/^ {2}/gm, '')
-        .replaceAll('${repo}', '${RUNNER_TEMP}/m2-repo')
-        .trimEnd(),
-    ).toBe(seedGuards[0].trimEnd());
+    expect(referenceRun).toContain(
+      'MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"',
+    );
     expect(referenceRun).toContain('set -euo pipefail');
     expect(referenceRun).not.toContain('writeback_');
     expect(referenceRun).not.toContain('sdk_java_lock_acquire');
@@ -1896,6 +1954,212 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(writeBackGuards).toHaveLength(2);
     expect(writeBackGuards[1]).toBe(writeBackGuards[0]);
   });
+
+  it.skipIf(process.platform !== 'linux')(
+    'loads the shared Maven cache seed helper only when it exists',
+    () => {
+      const rawRun = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const body = `${rawRun
+        .slice(
+          rawRun.indexOf('repo="${RUNNER_TEMP}/m2-repo"'),
+          rawRun.indexOf('mvn_status=0'),
+        )
+        .replaceAll('${{ github.repository }}', '${GITHUB_REPOSITORY}')
+        .replaceAll(
+          '${{ github.sha }}',
+          '${GITHUB_SHA}',
+        )}\nmvn --batch-mode --no-transfer-progress clean test`;
+      expect(body).not.toContain('${{');
+      expect(body).toContain('source "${seed_helper}"');
+      expect(body).not.toContain('seed_mount_guard() {');
+      for (const [helperExists, curlFailure, removeFailFlag = false] of [
+        [true, 97],
+        [false, 0],
+        [false, 23],
+        [false, 404, true],
+        [false, 404],
+      ]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-helper-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        const workspace = join(dir, 'workspace');
+        const hostJar = join(
+          home,
+          '.m2',
+          'repository',
+          'org',
+          'example',
+          'host.jar',
+        );
+        mkdirSync(dirname(hostJar), { recursive: true });
+        mkdirSync(runnerTemp, { recursive: true });
+        writeFileSync(hostJar, 'host\n');
+        if (helperExists) {
+          const scripts = join(workspace, '.github', 'scripts');
+          mkdirSync(scripts, { recursive: true });
+          writeFileSync(
+            join(scripts, 'maven-cache-seed.sh'),
+            readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8'),
+          );
+        }
+        const downloadVictim = join(dir, 'download-target.sh');
+        if (!helperExists) {
+          writeFileSync(downloadVictim, 'original\n');
+          const legacyOutput = join(runnerTemp, 'maven-cache-seed.sh');
+          if (curlFailure === 0) {
+            linkSync(downloadVictim, legacyOutput);
+          } else {
+            symlinkSync(downloadVictim, legacyOutput);
+          }
+        }
+        const workflowRevision = '0123456789abcdef0123456789abcdef01234567';
+        const expectedUrl = `https://raw.githubusercontent.com/QwenLM/qwen-code/${workflowRevision}/.github/scripts/maven-cache-seed.sh`;
+        const downloadSource = join(dir, 'remote-maven-cache-seed.sh');
+        writeFileSync(
+          downloadSource,
+          readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8'),
+        );
+        mkdirSync(join(dir, 'bin'), { recursive: true });
+        writeFileSync(
+          join(dir, 'bin', 'curl'),
+          `#!/bin/sh
+url='${expectedUrl}'
+output=''
+has_fail=0
+for arg in "$@"; do
+  if [ "$arg" = '--fail' ]; then
+    has_fail=1
+  fi
+done
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = '-o' ]; then
+    output="$2"
+    shift 2
+  else
+    url="$1"
+    shift
+  fi
+done
+[ "$url" = "\${EXPECTED_URL}" ] || { printf 'unexpected helper URL: %s\\n' "$url" >&2; exit 64; }
+case "$output" in
+  "\${RUNNER_TEMP}"/maven-cache-seed.??????) ;;
+  *) printf 'unsafe helper output: %s\\n' "$output" >&2; exit 65 ;;
+esac
+[ -f "$output" ] && [ ! -L "$output" ] || { printf 'helper output is not a fresh regular file\\n' >&2; exit 65; }
+[ "$(stat -Lc '%h' "$output")" = "1" ] || { printf 'helper output has an extra link\\n' >&2; exit 65; }
+printf '%s' "$output" > "\${RUNNER_TEMP}/helper-output.log"
+if [ "\${FETCH_HTTP_STATUS:-200}" != "404" ] && [ "$has_fail" -ne 1 ]; then
+  printf 'missing --fail\\n' >&2
+  exit 66
+fi
+printf '%s\\n' "$url" >> "\${RUNNER_TEMP}/helper-url.log"
+if [ "\${FETCH_HTTP_STATUS:-200}" = "404" ]; then
+  printf '404: Not Found\\n' > "$output"
+  if [ "$has_fail" -eq 1 ]; then
+    printf 'stub: HTTP 404\\n' >&2
+    exit 22
+  fi
+  exit 0
+fi
+if [ "\${FETCH_FAILURE:-0}" -ne 0 ]; then
+  printf 'injected helper fetch failure\\n' >&2
+  exit "\${FETCH_FAILURE}"
+fi
+cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
+`,
+          { mode: 0o755 },
+        );
+        const stub = `
+          mvn() {
+            printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+          }
+        `;
+        const scriptBody =
+          curlFailure === 404 && removeFailFlag
+            ? body.replace('curl --fail', 'curl')
+            : body;
+        expect(scriptBody.includes('curl --fail')).toBe(!removeFailFlag);
+        try {
+          const result = spawnSync(
+            'bash',
+            ['-e', '-c', `${stub}\n${scriptBody}`],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env: {
+                ...process.env,
+                HOME: home,
+                PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+                RUNNER_TEMP: runnerTemp,
+                GITHUB_WORKSPACE: workspace,
+                HELPER_DOWNLOAD_SOURCE: downloadSource,
+                GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+                GITHUB_SHA: workflowRevision,
+                EXPECTED_URL: expectedUrl,
+                FETCH_FAILURE: `${curlFailure}`,
+                FETCH_HTTP_STATUS: curlFailure === 404 ? '404' : '200',
+                MATRIX_JAVA: '11',
+                TIER: 'fast',
+              },
+            },
+          );
+          expect(result.error, body).toBeUndefined();
+          const seedSucceeded = helperExists || curlFailure === 0;
+          expect(result.status, result.stderr).toBe(
+            seedSucceeded ? 0 : curlFailure === 404 && removeFailFlag ? 127 : 1,
+          );
+          expect(readFileSync(hostJar, 'utf8')).toBe('host\n');
+          if (!helperExists) {
+            expect(readFileSync(downloadVictim, 'utf8')).toBe('original\n');
+          }
+          const downloadPath = helperExists
+            ? null
+            : readFileSync(join(runnerTemp, 'helper-output.log'), 'utf8');
+          expect(existsSync(join(runnerTemp, 'm2-repo'))).toBe(seedSucceeded);
+          if (seedSucceeded) {
+            expect(
+              statSync(
+                join(runnerTemp, 'm2-repo', 'org', 'example', 'host.jar'),
+              ).nlink,
+            ).toBe(2);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+            expect(result.stderr).not.toContain(
+              'injected helper fetch failure',
+            );
+          } else if (curlFailure === 404) {
+            if (removeFailFlag) {
+              expect(result.stderr).toContain('404:: command not found');
+            } else {
+              expect(result.stderr).toContain('stub: HTTP 404');
+              expect(result.stdout).toContain(
+                'Maven cache seed helper is unavailable at workflow revision',
+              );
+              expect(result.stderr).not.toContain('404:: command not found');
+            }
+            expect(readFileSync(downloadPath, 'utf8')).toBe('404: Not Found\n');
+            expect(statSync(hostJar).nlink).toBe(1);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+          } else {
+            expect(statSync(hostJar).nlink).toBe(1);
+            expect(result.stderr).toContain('injected helper fetch failure');
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+          }
+          expect(existsSync(join(runnerTemp, 'helper-url.log'))).toBe(
+            !helperExists,
+          );
+          if (!helperExists) {
+            expect(
+              readFileSync(join(runnerTemp, 'helper-url.log'), 'utf8'),
+            ).toBe(`${expectedUrl}\n`);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32').each(
     [
@@ -1951,9 +2215,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       cleanupFailure = false,
       repairFailure = false,
     }) => {
-      const run = parse(workflow).jobs.test.steps.find(
-        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-      ).run;
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         run.indexOf(
@@ -2223,9 +2485,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   it.skipIf(process.platform === 'win32')(
     'keeps a quarantine deletion failure non-fatal and observable',
     () => {
-      const run = parse(workflow).jobs.test.steps.find(
-        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-      ).run;
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         run.indexOf(
@@ -2298,9 +2558,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   it.skipIf(process.platform === 'win32')(
     'bounds quarantine reclamation across jobs',
     () => {
-      const run = parse(workflow).jobs.test.steps.find(
-        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-      ).run;
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         run.indexOf(
@@ -2378,6 +2636,64 @@ describe('SDK Java self-hosted workflow guards', () => {
           if (existsSync(dirname(oldArtifact))) {
             chmodSync(dirname(oldArtifact), 0o755);
           }
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reclaims a dangling historical quarantine through the full seed loop',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const linkGuard = ' || [ -L "${seed_previous_stale_repo}" ]';
+      expect(body).toContain(linkGuard);
+      const stub = `
+        mvn() {
+          printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+        }
+      `;
+      for (const removeLinkGuard of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reclaim-link-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const stale = join(runnerTemp, 'm2-repo.stale.dangling');
+        mkdirSync(runnerTemp, { recursive: true });
+        symlinkSync(join(runnerTemp, 'missing-target'), stale, 'dir');
+        expect(existsSync(stale)).toBe(false);
+        expect(lstatSync(stale).isSymbolicLink()).toBe(true);
+        writeDeviceProbe(dir, { hostDevice: '', jobDevice: '' });
+        const testBody = removeLinkGuard ? body.replace(linkGuard, '') : body;
+        const env = {
+          ...process.env,
+          PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+          HOME: join(dir, 'home'),
+          RUNNER_TEMP: runnerTemp,
+          GITHUB_WORKSPACE: join(dir, 'workspace'),
+          MATRIX_JAVA: '11',
+          TIER: 'fast',
+        };
+        try {
+          const result = spawnSync(
+            'bash',
+            ['-e', '-c', `${stub}\n${testBody}`],
+            { encoding: 'utf8', timeout: 15000, env },
+          );
+          expect(result.error, testBody).toBeUndefined();
+          expect(result.status, testBody + result.stderr).toBe(0);
+          expect(
+            lstatSync(stale, { throwIfNoEntry: false })?.isSymbolicLink(),
+          ).toBe(removeLinkGuard ? true : undefined);
+          expect(globSync('m2-repo.stale.*', { cwd: runnerTemp })).toEqual(
+            removeLinkGuard ? ['m2-repo.stale.dangling'] : [],
+          );
+          expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+        } finally {
           rmSync(dir, { recursive: true, force: true });
         }
       }
@@ -2808,6 +3124,18 @@ exec /usr/bin/find "$@"
             ).toContain('-n -o TARGET');
           }
           const blocked = scenario !== 'sibling';
+          const sourceInspectionFailed =
+            stage === 'seed' &&
+            [
+              'unreadable',
+              'uname-failure',
+              'malformed',
+              'findmnt-missing',
+              'node-missing',
+            ].includes(scenario);
+          const preservedArtifact = sourceInspectionFailed
+            ? artifact
+            : jobArtifact;
           expect(
             result.status,
             JSON.stringify({
@@ -2819,11 +3147,20 @@ exec /usr/bin/find "$@"
           ).toBe(blocked ? 1 : 0);
           expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(!blocked);
           if (blocked) {
-            expect(statSync(dirname(jobArtifact)).mode & 0o777).toBe(0o555);
-            expect(readFileSync(jobArtifact, 'utf8')).toBe('host\n');
+            expect(statSync(dirname(preservedArtifact)).mode & 0o777).toBe(
+              0o555,
+            );
+            expect(readFileSync(preservedArtifact, 'utf8')).toBe('host\n');
+            if (sourceInspectionFailed) {
+              expect(existsSync(jobArtifact)).toBe(false);
+            }
             if (prior) {
               expect(existsSync(jobLocal)).toBe(false);
               expect(result.stdout).toContain('could not be reclaimed');
+            } else if (sourceInspectionFailed) {
+              expect(result.stdout).toContain(
+                'host cache mount boundaries are unsafe or uninspectable',
+              );
             } else if (scenario !== 'permission-scan-failure') {
               expect(result.stdout).toContain(
                 'filesystem boundaries could not be inspected',
@@ -2850,6 +3187,105 @@ exec /usr/bin/find "$@"
           { env: process.env, encoding: 'utf8' },
         );
         rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux')(
+    'cold-starts instead of hardlinking a mounted host source',
+    () => {
+      const run = inlineMavenCacheHelper(
+        parse(workflow).jobs.test.steps.find(
+          (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+        ).run,
+      );
+      const body = run.slice(
+        run.indexOf('repo="${RUNNER_TEMP}/m2-repo"'),
+        run.indexOf('mvn_status=0'),
+      );
+      const sourceGuard = 'if seed_mount_guard "${HOME}/.m2/repository"; then';
+      expect(body).toContain(sourceGuard);
+      const bypassedBody = body.replace(sourceGuard, 'if :; then');
+      expect(bypassedBody).not.toContain(sourceGuard);
+      for (const guarded of [true, false]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-source-mount-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const home = join(dir, 'home');
+        const sourceMount = join(home, '.m2', 'repository', 'vendor');
+        const hostJar = join(sourceMount, 'host.jar');
+        const localJar = join(runnerTemp, 'm2-repo', 'vendor', 'host.jar');
+        mkdirSync(runnerTemp, { recursive: true });
+        writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+        mkdirSync(sourceMount, { recursive: true });
+        writeFileSync(hostJar, 'host\n');
+        chmodSync(sourceMount, 0o555);
+        writeFileSync(
+          join(dir, 'bin', 'findmnt'),
+          '#!/bin/sh\nprintf \'%s\\n\' "${MOUNT_TABLE_JSON}"\n',
+          { mode: 0o755 },
+        );
+        const table = JSON.stringify({
+          filesystems: [{ target: sourceMount }],
+        });
+        try {
+          const result = spawnSync(
+            'bash',
+            [
+              '-e',
+              '-c',
+              `mvn() {
+                if [ -f "\${RUNNER_TEMP}/m2-repo/vendor/host.jar" ]; then
+                  printf 'rewritten by job\\n' > "\${RUNNER_TEMP}/m2-repo/vendor/host.jar"
+                fi
+                printf 'mvn\\n' >> "\${RUNNER_TEMP}/mvn-calls"
+              }
+              ${guarded ? body : bypassedBody}
+              mvn clean test`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env: {
+                ...process.env,
+                PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+                HOME: home,
+                RUNNER_TEMP: runnerTemp,
+                GITHUB_WORKSPACE: join(dir, 'workspace'),
+                MOUNT_TABLE_JSON: table,
+                LC_ALL: 'C',
+              },
+            },
+          );
+          expect(result.error).toBeUndefined();
+          expect(result.status, result.stdout + result.stderr).toBe(0);
+          expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+          expect(statSync(sourceMount).mode & 0o777).toBe(0o555);
+          if (guarded) {
+            expect(result.stdout).toContain(
+              'host cache mount boundaries are unsafe or uninspectable',
+            );
+            expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(false);
+            expect(existsSync(localJar)).toBe(false);
+            expect(statSync(hostJar).nlink).toBe(1);
+            expect(readFileSync(hostJar, 'utf8')).toBe('host\n');
+          } else {
+            expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(true);
+            expect(statSync(localJar).nlink).toBe(2);
+            expect(readFileSync(hostJar, 'utf8')).toBe('rewritten by job\n');
+          }
+        } finally {
+          spawnSync('find', [
+            dir,
+            '-type',
+            'd',
+            '-exec',
+            'chmod',
+            'u+rwx',
+            '{}',
+            ';',
+          ]);
+          rmSync(dir, { recursive: true, force: true });
+        }
       }
     },
   );
@@ -2931,9 +3367,7 @@ exec /usr/bin/find "$@"
     ])(
     'keeps nested repository aliases out of Maven writes: $scenario',
     ({ hostCache = true, hostSeedAlias = false }) => {
-      const run = parse(workflow).jobs.test.steps.find(
-        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-      ).run;
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         run.indexOf(
@@ -3022,9 +3456,7 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'keeps Maven writes possible after a read-only warm seed',
     () => {
-      const run = parse(workflow).jobs.test.steps.find(
-        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
-      ).run;
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
         run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         run.indexOf(
@@ -3235,21 +3667,32 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform !== 'linux').each(['metadata', 'coordinate'])(
     'stops release Maven after $0 cleanup failure',
     (kind) => {
-      const script = Object.values(
-        parse(
-          readFileSync(
-            '.github/workflows/release-managed-agent-reference.yml',
-            'utf8',
-          ),
-        ).jobs,
-      )
-        .flatMap((entry) => entry.steps ?? [])
-        .find((candidate) => candidate.name === 'Build Java components').run;
+      const script = inlineMavenCacheHelper(
+        Object.values(
+          parse(
+            readFileSync(
+              '.github/workflows/release-managed-agent-reference.yml',
+              'utf8',
+            ),
+          ).jobs,
+        )
+          .flatMap((entry) => entry.steps ?? [])
+          .find((candidate) => candidate.name === 'Build Java components').run,
+      );
       const body = script.slice(
         script.indexOf('if [[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]'),
       );
-      const pruneStart = body.indexOf('find -P "${repo}" -xdev -depth');
-      expect(pruneStart).toBeGreaterThan(0);
+      const pruneStart = body.indexOf(
+        kind === 'coordinate'
+          ? 'find -P "${repo}" -xdev -depth'
+          : 'find -P "${repo}" -xdev ! -type d \\( -name',
+      );
+      const pruneEnd =
+        body.indexOf(' || exit 1', pruneStart) + ' || exit 1'.length;
+      expect(pruneStart, kind).toBeGreaterThan(0);
+      expect(pruneEnd, kind).toBeGreaterThan(pruneStart);
+      const prune = body.slice(pruneStart, pruneEnd);
+      expect(prune).toContain('-delete || exit 1');
       for (const tolerateFailure of [false, true]) {
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-prune-'));
         const runnerTemp = join(dir, 'runner-temp');
@@ -3276,6 +3719,10 @@ exec /usr/bin/find "$@"
           kind === 'coordinate'
             ? '-path */com/alibaba/qwencode-sdk'
             : '_remote.repositories';
+        const probePath =
+          kind === 'coordinate'
+            ? 'com/alibaba/qwencode-sdk/1.0/qwencode-sdk-1.0.jar'
+            : `${trackerGroup}/1.0/_remote.repositories`;
         try {
           mkdirSync(dirname(hostTracking), { recursive: true });
           mkdirSync(dirname(hostJar), { recursive: true });
@@ -3288,7 +3735,7 @@ exec /usr/bin/find "$@"
             `#!/bin/sh
 case "$*" in
   *"${sentence}"*)
-    /usr/bin/stat -Lc '%h' "\${RUNNER_TEMP}/m2-repo/${trackerGroup}/1.0/_remote.repositories" > "\${RUNNER_TEMP}/fault-link-count"
+    /usr/bin/stat -Lc '%h' "\${RUNNER_TEMP}/m2-repo/${probePath}" > "\${RUNNER_TEMP}/fault-link-count"
     printf 'injected reference ${kind} prune failure\\n' >&2
     exit 31
     ;;
@@ -3299,9 +3746,11 @@ exec /usr/bin/find "$@"
           );
           const testBody = tolerateFailure
             ? body.slice(0, pruneStart) +
-              body
-                .slice(pruneStart)
-                .replaceAll('-delete || exit 1', '-delete 2>/dev/null || true')
+              prune.replace(
+                '-delete || exit 1',
+                '-delete 2>/dev/null || true',
+              ) +
+              body.slice(pruneEnd)
             : body;
           const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${testBody}`;
           const result = spawnSync('bash', ['-e', '-c', invocation], {
@@ -3325,18 +3774,26 @@ exec /usr/bin/find "$@"
           expect(result.status, testBody + result.stderr).toBe(
             tolerateFailure ? 0 : 1,
           );
+          const localTracking = join(
+            runnerTemp,
+            'm2-repo',
+            trackerGroup,
+            '1.0',
+            '_remote.repositories',
+          );
           if (!tolerateFailure) {
-            expect(
-              existsSync(
-                join(
-                  runnerTemp,
-                  'm2-repo',
-                  trackerGroup,
-                  '1.0',
-                  '_remote.repositories',
-                ),
-              ),
-            ).toBe(true);
+            if (kind === 'metadata') {
+              expect(existsSync(localTracking)).toBe(true);
+            } else {
+              expect(existsSync(localTracking)).toBe(false);
+              const localJar = join(
+                runnerTemp,
+                'm2-repo',
+                'com/alibaba/qwencode-sdk/1.0/qwencode-sdk-1.0.jar',
+              );
+              expect(existsSync(localJar)).toBe(true);
+              expect(statSync(localJar).nlink).toBe(2);
+            }
           }
           expect(
             readFileSync(join(runnerTemp, 'fault-link-count'), 'utf8').trim(),
@@ -3373,16 +3830,18 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
     'removes inherited metadata and transfer residue from the reference seed',
     () => {
-      const source = Object.values(
-        parse(
-          readFileSync(
-            '.github/workflows/release-managed-agent-reference.yml',
-            'utf8',
-          ),
-        ).jobs,
-      )
-        .flatMap((entry) => entry.steps ?? [])
-        .find((candidate) => candidate.name === 'Build Java components').run;
+      const source = inlineMavenCacheHelper(
+        Object.values(
+          parse(
+            readFileSync(
+              '.github/workflows/release-managed-agent-reference.yml',
+              'utf8',
+            ),
+          ).jobs,
+        )
+          .flatMap((entry) => entry.steps ?? [])
+          .find((candidate) => candidate.name === 'Build Java components').run,
+      );
       const relativeFiles = [
         'org/example/lib/maven-metadata-central.xml',
         'org/example/lib/maven-metadata-central.xml.sha1',
@@ -3392,7 +3851,7 @@ exec /usr/bin/find "$@"
         'org/example/lib/artifact.jar.part',
         'org/example/lib/artifact.jar.part.lock',
       ];
-      for (const dropPart of [false, true]) {
+      for (const mode of ['keep', 'dropPart', 'dropDirGuard']) {
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-residue-'));
         const runnerTemp = join(dir, 'runner-temp');
         const hostRepo = join(dir, 'home', '.m2', 'repository');
@@ -3401,10 +3860,24 @@ exec /usr/bin/find "$@"
           mkdirSync(dirname(join(hostRepo, relative)), { recursive: true });
           writeFileSync(join(hostRepo, relative), 'host\n');
         }
+        const validArtifact = join(
+          hostRepo,
+          'com/acme/artifact.tmp/1.0/artifact.tmp-1.0.jar',
+        );
+        const validResolver = join(
+          hostRepo,
+          'com/acme/artifact.tmp/1.0/resolver-status.properties',
+        );
+        mkdirSync(dirname(validArtifact), { recursive: true });
+        writeFileSync(validArtifact, 'jar\n');
+        writeFileSync(validResolver, 'stale\n');
         const jobLocal = join(runnerTemp, 'm2-repo');
-        const body = dropPart
-          ? source.replace("-o -name '*.part'", '')
-          : source;
+        const body =
+          mode === 'dropPart'
+            ? source.replace("-o -name '*.part'", '')
+            : mode === 'dropDirGuard'
+              ? source.replace('-xdev ! -type d', '-xdev')
+              : source;
         writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
         try {
           const result = spawnSync(
@@ -3427,23 +3900,66 @@ exec /usr/bin/find "$@"
               },
             },
           );
+
           expect(result.error, body).toBeUndefined();
-          expect(result.status, body + result.stderr).toBe(0);
-          for (const relative of relativeFiles) {
-            expect(existsSync(join(jobLocal, relative)), relative).toBe(
-              dropPart && relative.endsWith('.part'),
+          expect(result.status, body + result.stderr).toBe(
+            mode === 'dropDirGuard' ? 1 : 0,
+          );
+          if (mode === 'dropDirGuard') {
+            expect(result.stderr).toContain('Directory not empty');
+            expect(
+              existsSync(
+                join(
+                  jobLocal,
+                  'com/acme/artifact.tmp/1.0/artifact.tmp-1.0.jar',
+                ),
+              ),
+            ).toBe(true);
+            expect(
+              statSync(
+                join(
+                  jobLocal,
+                  'com/acme/artifact.tmp/1.0/artifact.tmp-1.0.jar',
+                ),
+              ).nlink,
+            ).toBe(2);
+          } else {
+            const jobArtifact = join(
+              jobLocal,
+              'com/acme/artifact.tmp/1.0/artifact.tmp-1.0.jar',
             );
+            const jobResolver = join(
+              jobLocal,
+              'com/acme/artifact.tmp/1.0/resolver-status.properties',
+            );
+            expect(existsSync(jobArtifact)).toBe(true);
+            expect(statSync(jobArtifact).nlink).toBe(2);
+            expect(existsSync(jobResolver)).toBe(false);
+            expect(readFileSync(validArtifact, 'utf8')).toBe('jar\n');
+            expect(statSync(validArtifact).nlink).toBe(2);
+            expect(readFileSync(validResolver, 'utf8')).toBe('stale\n');
+            expect(statSync(validResolver).nlink).toBe(1);
+          }
+          for (const relative of relativeFiles) {
+            expect(
+              existsSync(join(jobLocal, relative)),
+              `${mode}: ${relative}: ${result.stderr}`,
+            ).toBe(mode === 'dropPart' && relative.endsWith('.part'));
             const host = join(hostRepo, relative);
             expect(readFileSync(host, 'utf8')).toBe('host\n');
             expect(statSync(host).nlink).toBe(
-              dropPart && relative.endsWith('.part') ? 2 : 1,
+              mode === 'dropPart' && relative.endsWith('.part') ? 2 : 1,
             );
           }
-          expect(
-            readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
-              .trim()
-              .split('\n'),
-          ).toHaveLength(2);
+          if (mode === 'dropDirGuard') {
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+          } else {
+            expect(
+              readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
+                .trim()
+                .split('\n'),
+            ).toHaveLength(2);
+          }
         } finally {
           rmSync(dir, { recursive: true, force: true });
         }
@@ -3454,16 +3970,18 @@ exec /usr/bin/find "$@"
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'keeps the reference Maven repository writable after a read-only seed',
     () => {
-      const source = Object.values(
-        parse(
-          readFileSync(
-            '.github/workflows/release-managed-agent-reference.yml',
-            'utf8',
-          ),
-        ).jobs,
-      )
-        .flatMap((entry) => entry.steps ?? [])
-        .find((candidate) => candidate.name === 'Build Java components').run;
+      const source = inlineMavenCacheHelper(
+        Object.values(
+          parse(
+            readFileSync(
+              '.github/workflows/release-managed-agent-reference.yml',
+              'utf8',
+            ),
+          ).jobs,
+        )
+          .flatMap((entry) => entry.steps ?? [])
+          .find((candidate) => candidate.name === 'Build Java components').run,
+      );
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-release-seed-'));
       const home = join(dir, 'home');
       const runnerTemp = join(dir, 'runner-temp');
@@ -4053,13 +4571,22 @@ exec /usr/bin/find "$@"
 `,
             { mode: 0o755 },
           );
-          const pruneStart = body.indexOf('# Drop resolver');
+          const pruneStart = body.indexOf(
+            'find -P "${RUNNER_TEMP}/m2-repo" -xdev -depth',
+          );
+          const pruneEnd =
+            body.indexOf(' || exit 1', pruneStart) + ' || exit 1'.length;
           expect(pruneStart).toBeGreaterThan(0);
+          expect(pruneEnd).toBeGreaterThan(pruneStart);
+          const prune = body.slice(pruneStart, pruneEnd);
+          expect(prune).toContain('-delete || exit 1');
           const testBody = tolerateFailure
             ? body.slice(0, pruneStart) +
-              body
-                .slice(pruneStart)
-                .replaceAll('-delete || exit 1', '-delete 2>/dev/null || true')
+              prune.replace(
+                '-delete || exit 1',
+                '-delete 2>/dev/null || true',
+              ) +
+              body.slice(pruneEnd)
             : body;
           const result = spawnSync(
             'bash',
@@ -4153,7 +4680,7 @@ exec /usr/bin/find "$@"
       for (const skipSingleLinks of [false, true]) {
         const testBody = skipSingleLinks
           ? body.replace(
-              'find -P "${RUNNER_TEMP}/m2-repo" -xdev \\( -name',
+              'find -P "${RUNNER_TEMP}/m2-repo" -xdev ! -type d \\( -name',
               'find -P "${RUNNER_TEMP}/m2-repo" -xdev -links +1 \\( -name',
             )
           : body;
@@ -4738,7 +5265,11 @@ exec /usr/bin/find "$@"
     // turning a red suite green: the filesystem guard, fault handler, both
     // timeout arms, both write-back setup probes, and the end of the step.
     expect(block).not.toMatch(/^\s+exit 0$/m);
-    expect(block.match(/exit "\$\{mvn_status\}"/g)).toHaveLength(7);
+    const exitStatusPattern = /\bexit\s+"?\$\{mvn_status\}"?/g;
+    expect(block.match(exitStatusPattern)).toHaveLength(7);
+    expect(
+      `${block}\n  || exit \${mvn_status}\n`.match(exitStatusPattern),
+    ).toHaveLength(8);
     expect(block.trimEnd().endsWith('exit "${mvn_status}"')).toBe(true);
     // Each Maven run names its stage, and every exit that can end a red step
     // reports it through the one reporter: the write-back output is the log
@@ -4766,6 +5297,10 @@ exec /usr/bin/find "$@"
       mkdirSync(shims);
       // The Actions runner guarantees RUNNER_TEMP before the seed runs.
       mkdirSync(runnerTemp, { recursive: true });
+      writeFileSync(
+        join(workspace, '.github', 'scripts', 'maven-cache-seed.sh'),
+        readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8'),
+      );
       writeFileSync(
         join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
         'sdk_java_lock_acquire() {\n' +
@@ -5096,9 +5631,7 @@ exec /usr/bin/find "$@"
     );
     if (name.startsWith('event-transport-')) {
       expect(exact).toBeNull();
-      expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo"',
-      );
+      expect(block).toContain('source "${seed_helper}"');
     } else if (name === 'test') {
       // The self-hosted suite resolves from a job-local repository; only the
       // cache write-back takes the host lock. Bind the suffix to the step,
@@ -5111,9 +5644,7 @@ exec /usr/bin/find "$@"
       expect(selfHosted?.env?.MAVEN_ARGS).toContain(
         '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
       );
-      expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo"',
-      );
+      expect(block).toContain('source "${seed_helper}"');
     } else if (name !== 'mysql-integration') {
       expect(jobLocal).toBeNull();
     }
@@ -5885,9 +6416,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     expect(step?.env?.MAVEN_ARGS).toContain(
       '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
     );
-    expect(step.run).toContain(
-      'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo"',
-    );
+    expect(step.run).toContain('source "${seed_helper}"');
     // The write-back closes the host-shared ~/.m2 loop — the seed above only
     // reads that repository, so without it a pom key rotation leaves a
     // thin entry that never recaptures the managed-agent-server tree. The
@@ -5922,7 +6451,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // order the phases: the write-back runs against a directory the seed has
     // not created yet if hoisted above it, and its warning arm swallows the
     // failure instead of reddening the gate.
-    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository/."');
+    const seedAt = step.run.indexOf('source "${seed_helper}"');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
     const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');
