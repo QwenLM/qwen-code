@@ -13061,7 +13061,9 @@ export function App({
       workspacesRef.current.find((entry) => entry.primary)?.cwd
     );
   }, []);
-  const retainedSessionPreparationsRef = useRef(new WeakSet<object>());
+  const sessionPreparationOwnersRef = useRef(
+    new WeakMap<object, { retainOnNavigation: boolean }>(),
+  );
   const ensureSessionForPrompt = useCallback(
     (
       notify?: (id: string) => void,
@@ -13076,10 +13078,10 @@ export function App({
           composerSourceVersionRef.current ===
             preparingSessionSourceVersionRef.current
         ) {
-          if (retainOnNavigation)
-            retainedSessionPreparationsRef.current.add(
-              createSessionPromiseRef.current,
-            );
+          const owner = sessionPreparationOwnersRef.current.get(
+            createSessionPromiseRef.current,
+          );
+          if (owner && retainOnNavigation) owner.retainOnNavigation = true;
           return createSessionPromiseRef.current;
         }
         if (currentSessionId) return Promise.resolve(undefined);
@@ -13090,6 +13092,7 @@ export function App({
       }
       if (currentSessionId) return Promise.resolve(undefined);
       const pendingManualTitle = pendingManualTitleRef.current;
+      const preparationOwner = { retainOnNavigation };
       const promise: Promise<{
         sessionId: string;
         detachedSession?: DaemonSessionClient;
@@ -13332,7 +13335,7 @@ export function App({
         // sharing this preparation keeps the detached client for admission.
         if (
           detachedSessionResult &&
-          !retainedSessionPreparationsRef.current.has(promise)
+          !preparationOwner.retainOnNavigation
         ) {
           await detachedSessionResult.detach();
           throw new DOMException('The composer changed', 'AbortError');
@@ -13345,7 +13348,7 @@ export function App({
         };
       })();
       createSessionPromiseRef.current = promise;
-      if (retainOnNavigation) retainedSessionPreparationsRef.current.add(promise);
+      sessionPreparationOwnersRef.current.set(promise, preparationOwner);
       preparingSessionSourceVersionRef.current =
         composerSourceVersionRef.current;
       const clearPreparation = () => {
