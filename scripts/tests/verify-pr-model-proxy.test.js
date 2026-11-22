@@ -751,33 +751,155 @@ describe('local container recipe pins', () => {
     ].map((match) => match[1]);
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
-    // The coordinate calls are an exact closed set. Substring matching would
-    // accept --execution host with a trailing "# --execution container".
+    // The prepare calls are an exact closed set, but their arguments are not
+    // one exact line: host/VM modes are valid with their required approvals.
+    // This is deliberately not a shell parser; only the documented vocabulary
+    // and one known logging suffix are accepted.
     const basic = ' <n> --repo <owner>/<repo> --execution container';
-    const logged =
-      ' <n> --repo <owner>/<repo> --execution container --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }';
-    const onlyContainerCoordinates = (document) => {
+    const logSuffix =
+      '> ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }';
+    const logged = ` ${basic.trim()} --context-out ~/.cache/qwen-verify/pr<n>/pr.json ${logSuffix}`;
+    const script = '<trusted-clone>/scripts/verify-pr-prepare.mjs';
+    const valueFlags = new Set([
+      '--repo',
+      '--execution',
+      '--round',
+      '--reason',
+      '--context-out',
+      '--approval',
+      '--state-root',
+      '--attestation',
+    ]);
+    const validCoordinate = (raw) => {
+      let text = raw.replace(/\s+/g, ' ').trim();
+      if (text.endsWith(logSuffix)) {
+        text = text.slice(0, -logSuffix.length).trim();
+      }
+      const options = new Map();
+      const positional = [];
+      const tokens = text.split(' ').filter(Boolean);
+      for (let index = 0; index < tokens.length; index += 1) {
+        const token = tokens[index];
+        if (token === '--trust-pr-head') {
+          if (options.has(token)) return false;
+          options.set(token, true);
+        } else if (token.startsWith('--')) {
+          const value = tokens[index + 1];
+          if (
+            !valueFlags.has(token) ||
+            options.has(token) ||
+            !value ||
+            value.startsWith('--')
+          ) {
+            return false;
+          }
+          options.set(token, value);
+          index += 1;
+        } else {
+          positional.push(token);
+        }
+      }
+      if (
+        positional.join(' ') !== '<n>' ||
+        !options.has('--repo') ||
+        !options.has('--execution')
+      ) {
+        return false;
+      }
+      const execution = options.get('--execution');
+      if (execution === 'container') {
+        return [...options.keys()].every((key) =>
+          ['--repo', '--execution', '--context-out'].includes(key),
+        );
+      }
+      if (!['host', 'vm'].includes(execution)) return false;
+      if (
+        ['--round', '--reason', '--context-out'].some(
+          (key) => !options.has(key),
+        ) ||
+        options.has('--trust-pr-head') === options.has('--approval') ||
+        (options.has('--approval') && !options.has('--state-root')) ||
+        (options.has('--trust-pr-head') && options.has('--state-root')) ||
+        (execution === 'vm') !== options.has('--attestation')
+      ) {
+        return false;
+      }
+      return true;
+    };
+    const onlyDocumentedPrepareCalls = (document) => {
       const calls = [
         ...document.matchAll(
-          /node <trusted-clone>\/scripts\/verify-pr-prepare\.mjs([^`\n]*)/g,
+          /(?:^|&&)\s*(?:(\S+)\s+)?([^\s`]*verify-pr-prepare\.mjs)([^`\n]*)/gm,
         ),
-      ].map((match) => match[1].replace(/\s+/g, ' ').trim());
-      const expected = [basic.trim(), basic.trim(), logged.trim()].sort();
+      ];
+      const coordinates = calls.filter(
+        (match) => !match[3].trim().startsWith('--require-isolation'),
+      );
+      const gates = calls.filter((match) =>
+        match[3].trim().startsWith('--require-isolation'),
+      );
+      const trustedPaths = new Set([
+        script,
+        '/trusted-scripts/verify-pr-prepare.mjs',
+      ]);
       return (
-        calls.length === 3 &&
-        calls.sort().every((call, index) => call === expected[index])
+        calls.length === 4 &&
+        coordinates.length === 3 &&
+        gates.length === 1 &&
+        calls.every((match) => match[1] === 'node') &&
+        coordinates.every(
+          (match) => trustedPaths.has(match[2]) && validCoordinate(match[3]),
+        ) &&
+        gates.every(
+          (match) =>
+            match[2] === '/trusted-scripts/verify-pr-prepare.mjs' &&
+            match[3].replace(/\s+/g, ' ').trim() ===
+              '--require-isolation --artifact-dir <round-dir>',
+        )
       );
     };
-    expect(onlyContainerCoordinates(skill)).toBe(true);
+    expect(onlyDocumentedPrepareCalls(skill)).toBe(true);
+    for (const valid of [
+      '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo <owner>/<repo> --execution vm --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json --attestation no-host-mounts',
+      '<n> --repo <owner>/<repo> --execution host --approval https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001 --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
+    ]) {
+      expect(
+        onlyDocumentedPrepareCalls(skill.replace(basic.trim(), valid)),
+      ).toBe(true);
+    }
     for (const hostile of [
       '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json # --execution container',
+      '<n> --repo <owner>/<repo> --execution host --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo <owner>/<repo> --execution remote --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo <owner>/<repo> --execution host --trust-pr-head --approval https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001 --state-root /trusted --round 2 --reason why --context-out /tmp/pr.json',
+      '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json --unknown value',
+      '<n> --repo <owner>/<repo> --execution container --trust-pr-head',
       `${basic.trim()} # --execution container`,
-      `${basic.trim()} --trust-pr-head`,
       `${logged.trim()} ; echo unexpected`,
     ]) {
       expect(
-        onlyContainerCoordinates(skill.replace(basic.trim(), hostile)),
+        onlyDocumentedPrepareCalls(skill.replace(basic.trim(), hostile)),
       ).toBe(false);
+    }
+    const invocation = `node ${script}`;
+    const unsafeHost =
+      '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json # --execution container';
+    for (const [replacement, tail, valid] of [
+      [script, basic.trim(), false],
+      [`sh ${script}`, basic.trim(), false],
+      ['node /tmp/untrusted/verify-pr-prepare.mjs', basic.trim(), false],
+      ['node /trusted-scripts/verify-pr-prepare.mjs', unsafeHost, false],
+      [
+        'node /trusted-scripts/verify-pr-prepare.mjs',
+        '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json',
+        true,
+      ],
+    ]) {
+      const changed = skill.replace(invocation, replacement);
+      expect(
+        onlyDocumentedPrepareCalls(changed.replace(basic.trim(), tail)),
+      ).toBe(valid);
     }
     expect(skill).not.toMatch(
       /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)/,

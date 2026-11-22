@@ -250,11 +250,6 @@ export function inFlightRegistration(state, head, round) {
     : null;
 }
 
-/** Matches the one normalized in-flight registration used by approvals. */
-export function hasInFlightRegistration(state, head, round) {
-  return inFlightRegistration(state, head, round) !== null;
-}
-
 /** A list entry is usable only with a non-empty string head. */
 function hasHead(entry) {
   return entry && typeof entry.head === 'string' && entry.head !== '';

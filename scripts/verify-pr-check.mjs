@@ -314,7 +314,7 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
     const observed = Array.isArray(gate.observed) ? gate.observed : [];
     if (observed.length === 0) {
       return [
-        'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary — an attested VM uses mode:"vm" with the maintainer\'s approval',
+        'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary; for host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration',
       ];
     }
     if (gate.credentialFree !== true) {

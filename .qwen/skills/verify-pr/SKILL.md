@@ -214,8 +214,9 @@ credential-free attestation (`QWEN_VERIFY_CREDENTIAL_FREE=1`) is the
 afterwards: unset it when the round ends. The VM path runs **no
 `--require-isolation` gate**: a VM carries no observed container marker, so
 the gate would refuse on the absent marker (exit 4) before any home or
-credential check, and a `mode:"vm"` declaration needs no gate record — only
-the maintainer's approval and the operator's attestation. The VM round still
+credential check, and a `mode:"vm"` declaration needs no gate record — prepare
+writes its approved declaration from the maintainer's approval and the
+operator's attestation before PR code runs. The VM round still
 runs under a **scratch `HOME`** and a scrubbed environment so the round
 itself sees no host credentials: in the shell that starts the round unset
 `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`, `OPENAI_API_KEY`,

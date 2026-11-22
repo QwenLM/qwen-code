@@ -24,7 +24,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   completeRound,
   duplicateHead,
-  hasInFlightRegistration,
   inFlightRegistration,
   readState,
   releaseRound,
@@ -1143,6 +1142,35 @@ describe('withStateLock', () => {
     expect(existsSync(statePath(root, 1))).toBe(false);
   });
 
+  it('recovers a killed holder only by explicitly removing its stale lock', () => {
+    const root = makeRoot();
+    const state = statePath(root, 1);
+    const lock = `${state}.lock`;
+    const stateBytes = '{"pr":1,"inFlightHeads":[]}\n';
+    const owner = '99999:01234567-89ab-4cde-8fab-0123456789ab\n';
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(state, stateBytes);
+    writeFileSync(lock, owner);
+    let calls = 0;
+    const attempt = () =>
+      withStateLock(root, 1, () => {
+        calls += 1;
+        return 'ran';
+      });
+
+    expect(attempt()).toEqual({ locked: true });
+    expect(attempt()).toEqual({ locked: true });
+    expect(calls).toBe(0);
+    expect(readFileSync(lock, 'utf8')).toBe(owner);
+    expect(readFileSync(state, 'utf8')).toBe(stateBytes);
+
+    unlinkSync(lock);
+    expect(attempt()).toBe('ran');
+    expect(calls).toBe(1);
+    expect(existsSync(lock)).toBe(false);
+    expect(readFileSync(state, 'utf8')).toBe(stateBytes);
+  });
+
   // A real I/O fault on the lock must surface as itself, not be retried into
   // a misleading "another invocation holds the lock" that retrying cannot fix.
   // Probe the kernel rather than checking uid 0: ci.yml runs unit tests as
@@ -1438,48 +1466,38 @@ describe('readState', () => {
   });
 });
 
-describe('hasInFlightRegistration', () => {
-  it('uses normalized legacy entries, commit prefixes and exact current rounds', () => {
+describe('inFlightRegistration approval normalization', () => {
+  it('returns the one legacy/prefixed registration and reuses it for its nonce', () => {
+    const prefixed = {
+      head: HEAD.slice(0, 12),
+      round: 2,
+      registrationNonce: 'registration-nonce',
+    };
     expect(
-      hasInFlightRegistration(
-        { inFlightHeads: [{ head: HEAD.slice(0, 12), round: 2 }] },
-        HEAD,
-        2,
-      ),
-    ).toBe(true);
-    expect(
-      hasInFlightRegistration({ inFlightHead: HEAD, round: 2 }, HEAD, 2),
-    ).toBe(true);
-    expect(
-      inFlightRegistration({ inFlightHead: HEAD, round: 2 }, HEAD, 2)
-        .registrationNonce,
-    ).toBeUndefined();
-    expect(
-      hasInFlightRegistration(
-        { inFlightHeads: [{ head: HEAD, round: 1 }] },
-        HEAD,
-        2,
-      ),
-    ).toBe(false);
-    expect(
-      hasInFlightRegistration(
-        { inFlightHeads: [{ head: HEAD, round: 2 }] },
-        PREV,
-        2,
-      ),
-    ).toBe(false);
-    expect(
-      hasInFlightRegistration(
-        {
-          inFlightHeads: [
-            { head: HEAD, round: 2 },
-            { head: PREV, round: 2 },
-          ],
-        },
-        HEAD,
-        2,
-      ),
-    ).toBe(false);
+      inFlightRegistration({ inFlightHeads: [prefixed] }, HEAD, 2),
+    ).toEqual(prefixed);
+    const legacy = inFlightRegistration(
+      { inFlightHead: HEAD, round: 2 },
+      HEAD,
+      2,
+    );
+    expect(legacy).toMatchObject({ head: HEAD, round: null });
+    expect(legacy.registrationNonce).toBeUndefined();
+  });
+
+  it('rejects another round or head and more than one registration', () => {
+    for (const state of [
+      { inFlightHeads: [{ head: HEAD, round: 1 }] },
+      { inFlightHeads: [{ head: PREV, round: 2 }] },
+      {
+        inFlightHeads: [
+          { head: HEAD, round: 2 },
+          { head: PREV, round: 2 },
+        ],
+      },
+    ]) {
+      expect(inFlightRegistration(state, HEAD, 2)).toBeNull();
+    }
   });
 });
 

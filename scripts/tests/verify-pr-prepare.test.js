@@ -22,7 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GIT_HARDENING,
   REVIEW_STATE_QUERY,
@@ -1783,7 +1783,9 @@ describe.skipIf(process.platform === 'win32')(
       });
       const result = runPrepare(dir, artifactArgs, env);
       expect(result.status).toBe(3);
-      expect(result.stderr).toMatch(/watch-state lock is held/);
+      expect(result.stderr).toBe(
+        'verify-pr prepare: execution approval: the watch-state lock is held by another invocation; while that holder may be active, retry shortly. If the holder is confirmed killed, verify the owner token in the .lock file beside the state JSON and manually remove only that stale .lock file — never the state JSON itself; do not treat the previous approval as current\n',
+      );
       expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
       expect(existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json'))).toBe(
         false,
@@ -2225,7 +2227,7 @@ describe.skipIf(process.platform === 'win32')(
       { name: 'local-trust', trust: true },
       { name: 'comment', trust: false },
     ])(
-      'completes the original delivery after a $name mode fallback',
+      'keeps the original head and round bound across a $name mode fallback',
       ({ trust }) => {
         const { dir, base, head } = makeRepo();
         const prepared = command({
@@ -2234,17 +2236,16 @@ describe.skipIf(process.platform === 'win32')(
           head,
           round: 1,
         });
-        const stateRoot = trust ? makeTmpDir() : prepared.stateRoot;
-        if (trust) {
-          const started = watchState(stateRoot, head, 1);
-          expect(started.status).toBe(0);
-        }
-        const before = JSON.parse(
-          readFileSync(
-            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
-            'utf8',
-          ),
-        ).inFlightHeads[0];
+        const stateRoot = prepared.stateRoot;
+        const trustHome = trust ? makeTmpDir() : null;
+        const before = trust
+          ? null
+          : JSON.parse(
+              readFileSync(
+                join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+                'utf8',
+              ),
+            ).inFlightHeads[0];
         const env = installFakeGh(
           {
             ...snapshotFor({ base, head }),
@@ -2272,6 +2273,7 @@ describe.skipIf(process.platform === 'win32')(
                 permissions: { approver: { permission: 'admin' } },
               },
         );
+        const executionEnv = trust ? { ...env, HOME: trustHome } : env;
         const container = runPrepare(
           dir,
           [
@@ -2283,31 +2285,95 @@ describe.skipIf(process.platform === 'win32')(
             '--context-out',
             join(makeTmpDir(), 'container-context.json'),
           ],
-          env,
+          executionEnv,
         );
         expect(container.status).toBe(0);
         expect(container.stdout).toContain(
           'Do not release a registration merely to change modes',
         );
 
-        const host = runPrepare(dir, prepared.artifactArgs, env);
+        const host = runPrepare(dir, prepared.artifactArgs, executionEnv);
         expect(host.status).toBe(0);
-        expect(
-          JSON.parse(
-            readFileSync(
-              join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
-              'utf8',
+        let finalPrepare = host;
+        if (trust) {
+          const contextPath =
+            prepared.artifactArgs[
+              prepared.artifactArgs.indexOf('--context-out') + 1
+            ];
+          const firstContext = JSON.parse(readFileSync(contextPath, 'utf8'));
+          const firstDeclaration = JSON.parse(
+            readFileSync(join(artifactsFrom(host), 'boundary.json'), 'utf8'),
+          );
+          expect(firstContext).toMatchObject({
+            baseRefOid: base,
+            headRefOid: head,
+          });
+          expect(firstContext.executionApproval).toEqual(firstDeclaration);
+          expect(firstDeclaration).toEqual({
+            mode: 'waived',
+            source: 'local-trust',
+            by: 'maintainer',
+            basis: 'own-pr',
+            permission: 'maintain',
+            head,
+            round: 1,
+            reason: 'fixture needs a host runtime',
+          });
+          expect(firstDeclaration).not.toHaveProperty('approval');
+          expect(head).toMatch(/^[0-9a-f]{40}$/);
+          expect(
+            execFileSync('git', ['rev-parse', head.slice(0, 12)], {
+              cwd: dir,
+              env: gitEnv,
+              encoding: 'utf8',
+            }).trim(),
+          ).toBe(head);
+          expect(
+            execFileSync('git', ['rev-parse', 'HEAD^'], {
+              cwd: dir,
+              env: gitEnv,
+              encoding: 'utf8',
+            }).trim(),
+          ).toBe(base);
+
+          finalPrepare = runPrepare(dir, prepared.artifactArgs, executionEnv);
+          expect(finalPrepare.status, finalPrepare.stderr).toBe(0);
+          expect(JSON.parse(readFileSync(contextPath, 'utf8'))).toEqual(
+            firstContext,
+          );
+          expect(
+            JSON.parse(
+              readFileSync(
+                join(artifactsFrom(finalPrepare), 'boundary.json'),
+                'utf8',
+              ),
             ),
-          ).inFlightHeads[0],
-        ).toEqual(before);
+          ).toEqual(firstDeclaration);
+          expect(
+            existsSync(
+              join(trustHome, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+            ),
+          ).toBe(false);
+          expect(ghApiArgs(env)).not.toContain('/issues/comments/');
+        } else {
+          expect(
+            JSON.parse(
+              readFileSync(
+                join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+                'utf8',
+              ),
+            ).inFlightHeads[0],
+          ).toEqual(before);
+        }
         const { artifacts, checked, noContext, noDigest } = checkPrepared(
-          host,
+          finalPrepare,
           head,
           prepared.artifactArgs,
         );
         expect(checked.status, checked.stdout).toBe(0);
         expect(noContext.status).toBe(1);
         expect(noDigest.status).toBe(1);
+        if (trust) return;
 
         const completed = spawnSync(
           process.execPath,
@@ -2952,6 +3018,29 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     } finally {
       process.chdir(cwd);
     }
+  });
+
+  it('prints the prepare-first recovery for a declared-only marker', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    let rc;
+    let writes;
+    try {
+      rc = requireBoundary(null, {
+        env: { container: 'my-laptop' },
+        exists: () => false,
+        home: makeTmpDir(),
+      });
+      writes = stderr.mock.calls.map((call) => call[0]);
+    } finally {
+      stderr.mockRestore();
+    }
+    expect(rc).toBe(4);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toBe(
+      'verify-pr boundary: only a declared marker (container=my-laptop) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container. For host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration\n',
+    );
   });
 
   // R10-20: a self-chosen container= string is a declaration, not an observed

@@ -1440,7 +1440,7 @@ function main(argv) {
   if (written.locked) {
     return fail(
       3,
-      'execution approval: the watch-state lock is held by another invocation; retry shortly instead of treating the old approval as current',
+      'execution approval: the watch-state lock is held by another invocation; while that holder may be active, retry shortly. If the holder is confirmed killed, verify the owner token in the .lock file beside the state JSON and manually remove only that stale .lock file — never the state JSON itself; do not treat the previous approval as current',
     );
   }
   if (typeof written === 'number') return written;
@@ -1586,11 +1586,11 @@ export function requireBoundary(artifactDir = null, options = {}) {
   // would mint a container claim with no isolation, and the checker refuses
   // every non-ci-lane record whose observed list is empty, so such a pass
   // could never be published anyway (R11-1). The gate needs an OBSERVED
-  // filesystem marker; a launcher container always carries one. An attested
-  // VM uses mode:"vm" with approval, not this path.
+  // filesystem marker; a launcher container always carries one. Host/VM
+  // execution instead needs prepare's approved declaration before the battery.
   if (isolation.observed.length === 0) {
     process.stderr.write(
-      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container. For host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration\n`,
     );
     return 4;
   }

@@ -627,7 +627,7 @@ describe('checkBoundary', () => {
 
   // R10-20: a gate record whose only marker is a self-chosen container=
   // string carries no observed boundary, so it cannot back a container claim.
-  it('refuses a container declaration backed by a declared-only record', () => {
+  it('refuses a declared-only record with the prepare-first recovery', () => {
     const declaredOnly = JSON.stringify({
       gate: 'require-isolation',
       passed: true,
@@ -639,8 +639,10 @@ describe('checkBoundary', () => {
       checkBoundary(
         JSON.stringify({ mode: 'container', detail: 'my-laptop' }),
         declaredOnly,
-      ).errors.join('\n'),
-    ).toMatch(/no observed boundary marker/);
+      ).errors,
+    ).toEqual([
+      'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary; for host/VM execution keep the delivered head/round registration, choose --execution host|vm explicitly, and rerun prepare with its approved approval arguments BEFORE the battery; never hand-write the declaration',
+    ]);
     // A record with no observed field at all is refused too.
     expect(
       checkBoundary(

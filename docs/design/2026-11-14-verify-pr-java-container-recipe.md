@@ -159,11 +159,23 @@ claim to mirror the gate's full trigger:
    host-seeded `m2repo-head`/`m2repo-prev`: a host-seeded directory is NOT a
    valid seed (it was filled by PR code on the maintainer's machine) and
    must be removed before the first boundary seed; each boundary seed
-   writes a `seed.json` marker (`credentialFree: true` plus the seed run's
-   gate record as provenance), and a directory without it is treated as
-   absent. That record documents the seed container only; publication uses
-   step 4's prepare-authored `waived` declaration and does not ask the
-   independent offline battery for a container nonce or gate record. The head
+   writes a `seed.json` marker, and a directory without it is treated as
+   absent. When the optional seed gate ran, the marker records
+   `credentialFree: true` and `gate` containing that same seed run's complete
+   `boundary-gate.json` object. Never copy an earlier seed's or another arm's
+   gate output merely to make that field present. Without the gate, the marker
+   instead records the explicit no-gate value and the facts the operator or
+   measured launcher actually observed, for example
+   `{"credentialFree":true,"gate":null,"attestation":{"container":"<image@digest>","boundary":"<operator/measured-launcher observation>","mirror":"<mirror and enforced allowlist>"}}`.
+   A gate-less seed may write `credentialFree: true` only when that observation
+   supports the credential-free claim; otherwise it is not a valid boundary
+   seed. Its operator/measured-launcher attestation documents the container,
+   marker or launcher measurement, and mirror enforcement — it is not proof of
+   the container boundary, and the optional gate is not a license to claim
+   credential-free unconditionally. Either form documents the seed container
+   only; publication uses step 4's prepare-authored `waived` declaration and
+   does not ask the independent offline battery for a container nonce or gate
+   record. The head
    seed installs the head's SDK jar, the base seed the base's, each built
    from that side's sanitized copy — a single shared seed would let the
    trusted base arm resolve the head-built jar and hide any regression the
