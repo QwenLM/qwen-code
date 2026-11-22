@@ -305,13 +305,17 @@ The `context` argument includes `cancel_event`, `suggestions`, and
 with an async `__call__` method accepting `(tool_name, tool_input, context)`.
 It may be wrapped in `functools.partial`; validation checks the remaining
 arguments after binding.
-`stderr` must be a synchronous callable accepting a single `str`. Neither
+`stderr` must be a synchronous callable accepting a single `str`; async-generator
+functions and async-generator callable instances are rejected. Neither
 callback may require additional keyword-only arguments. An inspectable
 decorated callback is checked against the wrapper that the SDK calls. When a
 `stderr` wrapper has no inspectable signature, validation checks the first
-inspectable wrapped callback instead.
+inspectable wrapped callback instead, retaining any partial's bound arguments.
 If a stderr callback returns an awaitable or async generator, the SDK writes
-the original line to standard error without executing the asynchronous result.
+the original line to standard error. It does not await or iterate the result,
+and closes native coroutine objects. Already scheduled tasks or futures remain
+owned by the caller: the SDK does not cancel them, and they can continue
+independently. Ordinary synchronous return values are ignored.
 
 ### Handling `ask_user_question`
 

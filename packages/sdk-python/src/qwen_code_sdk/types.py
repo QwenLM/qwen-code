@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from functools import partial
-from inspect import Signature, iscoroutinefunction, signature
+from inspect import Signature, isasyncgenfunction, iscoroutinefunction, signature
 from typing import (
     Any,
     Literal,
@@ -127,7 +127,7 @@ class QueryOptionsDict(TypedDict, total=False):
     session_id: str
     timeout: TimeoutOptionsDict
     mcp_servers: dict[str, dict[str, Any]]
-    stderr: Callable[[str], None]
+    stderr: Callable[[str], object]
     fork_session: bool
     max_tool_calls: int
     max_subagent_depth: int
@@ -168,7 +168,7 @@ class QueryOptions:
     session_id: str | None = None
     timeout: TimeoutOptions = TimeoutOptions()
     mcp_servers: dict[str, dict[str, Any]] | None = None
-    stderr: Callable[[str], None] | None = None
+    stderr: Callable[[str], object] | None = None
     fork_session: bool = False
     max_tool_calls: int | None = None
     max_subagent_depth: int | None = None
@@ -226,7 +226,7 @@ class QueryOptions:
             timeout=timeout,
             mcp_servers=_as_optional_nested_dict(data, "mcp_servers"),
             stderr=cast(
-                Callable[[str], None] | None,
+                Callable[[str], object] | None,
                 _as_optional_callable(data, "stderr"),
             ),
             fork_session=_as_optional_bool(data, "fork_session") or False,
@@ -320,18 +320,22 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
     if not callable(value):
         raise error_type("stderr must be callable")
 
-    inspected: set[int] = set()
-    while callable(value) and id(value) not in inspected:
-        inspected.add(id(value))
-        if _is_async_callable(value):
+    inspected: dict[int, object] = {}
+    while callable(value):
+        target: object = value
+        while isinstance(target, partial):
+            target = target.func
+        if (
+            _is_async_callable(target)
+            or isasyncgenfunction(target)
+            or isasyncgenfunction(type(target).__call__)
+        ):
             raise error_type("stderr must be a sync callable")
 
         try:
             sig = signature(value, follow_wrapped=False)
         except (TypeError, ValueError):
-            value = getattr(value, "__wrapped__", None)
-            if value is None:
-                return
+            value = _unwrap_stderr_callable(value, inspected)
             continue
 
         if not _supports_argument_count(sig, 1):
@@ -340,6 +344,19 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
                 "and no required keyword-only arguments"
             )
         return
+
+
+def _unwrap_stderr_callable(value: object, inspected: dict[int, object]) -> object:
+    if id(value) in inspected:
+        return None
+    # Keep reconstructed partials alive so their IDs cannot be reused.
+    inspected[id(value)] = value
+    if isinstance(value, partial):
+        wrapped = _unwrap_stderr_callable(value.func, inspected)
+        if callable(wrapped):
+            return partial(wrapped, *value.args, **value.keywords)
+        return None
+    return getattr(value, "__wrapped__", None)
 
 
 def _is_async_callable(value: object) -> bool:

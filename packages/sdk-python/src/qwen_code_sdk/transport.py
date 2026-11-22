@@ -9,11 +9,11 @@ import ntpath
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from inspect import isasyncgen, isawaitable, iscoroutine
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from .errors import ProcessExitError
 from .json_lines import parse_json_line
@@ -139,7 +139,7 @@ class ProcessTransport:
             text = chunk.decode("utf-8", errors="replace").rstrip("\n")
             try:
                 if self._options.stderr is not None:
-                    result = cast(Callable[[str], object], self._options.stderr)(text)
+                    result = self._options.stderr(text)
                     if isawaitable(result) or isasyncgen(result):
                         if iscoroutine(result):
                             result.close()

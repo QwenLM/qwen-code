@@ -673,7 +673,8 @@ async def test_read_messages_skips_malformed_json_lines() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "failure_kind", ["raises", "coroutine", "future", "async_generator"]
+    "failure_kind",
+    ["raises", "coroutine", "future", "task", "failing_task", "async_generator"],
 )
 async def test_stderr_callback_exceptions_do_not_fail_transport(
     capsys: pytest.CaptureFixture[str], failure_kind: str
@@ -696,6 +697,7 @@ async def test_stderr_callback_exceptions_do_not_fail_transport(
 
     callback_calls = 0
     async_results: list[Any] = []
+    scheduled_calls: list[str] = []
 
     async def async_sink() -> None:
         pytest.fail("stderr callbacks must not be awaited")
@@ -703,6 +705,11 @@ async def test_stderr_callback_exceptions_do_not_fail_transport(
     async def async_generator() -> Any:
         pytest.fail("stderr generators must not be iterated")
         yield None
+
+    async def scheduled_sink() -> None:
+        scheduled_calls.append("error message")
+        if failure_kind == "failing_task":
+            raise RuntimeError("scheduled sink failed")
 
     def stderr_callback(text: str) -> Any:
         nonlocal callback_calls
@@ -714,6 +721,8 @@ async def test_stderr_callback_exceptions_do_not_fail_transport(
             result: Any = async_sink()
         elif failure_kind == "future":
             result = asyncio.get_running_loop().create_future()
+        elif failure_kind in {"task", "failing_task"}:
+            result = asyncio.create_task(scheduled_sink())
         else:
             result = async_generator()
         async_results.append(result)
@@ -748,6 +757,16 @@ async def test_stderr_callback_exceptions_do_not_fail_transport(
         for result in async_results:
             if inspect.iscoroutine(result):
                 assert inspect.getcoroutinestate(result) == inspect.CORO_CLOSED
+            elif isinstance(result, asyncio.Future):
+                assert not result.cancelled()
+                if failure_kind == "failing_task":
+                    with pytest.raises(RuntimeError, match="scheduled sink failed"):
+                        await result
+                elif failure_kind == "task":
+                    await result
+        assert scheduled_calls == (
+            ["error message"] if failure_kind in {"task", "failing_task"} else []
+        )
     finally:
         for result in async_results:
             if inspect.iscoroutine(result):
