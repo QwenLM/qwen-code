@@ -2564,6 +2564,8 @@ export const ZH: Messages = {
   'sidebar.openWorkspaceTerminalFailed': '打开终端失败',
   'sidebar.openWorkspaceTerminalOpened': '已在工作区打开终端',
   'sidebar.manageWorkspace': '管理',
+  'sidebar.trustWorkspace': '信任工作区',
+  'sidebar.trustingWorkspace': '正在信任…',
   'sidebar.reloadWorkspace': '重新加载运行时',
   'sidebar.reloadWorkspaceFailed': '重新加载工作区运行时失败',
   'sidebar.workspaceCount': (v) => `${v?.count ?? 0} 个工作区`,
@@ -2596,6 +2598,13 @@ export const ZH: Messages = {
   'sidebar.overview.hooksDisabled': (v) => `${v?.count ?? 0} 个 hook（已禁用）`,
   'sidebar.overview.hooksUntrusted': (v) =>
     `${v?.count ?? 0} 个 hook，${v?.untrusted ?? 0} 个未加载（目录未受信任）。请启用 security.folderTrust.enabled 并信任该目录，或在交互式终端中运行 qwen 审查。`,
+  'sidebar.overview.openFacet': (v) =>
+    `管理 ${v?.workspace ?? ''} 的${v?.facet ?? ''}：${v?.detail ?? ''}`,
+  'workspaceHooks.title': 'Hooks',
+  'workspaceHooks.loading': '正在加载 hooks…',
+  'workspaceHooks.empty': '此工作区尚未配置任何 hook。',
+  'workspaceHooks.enabled': '已启用',
+  'workspaceHooks.disabled': '已禁用',
   'sidebar.forceRemoveWorkspace': '强制移除',
   'sidebar.removeWorkspaceTitle': '移除工作区',
   'sidebar.removeWorkspaceConfirm': (v) =>

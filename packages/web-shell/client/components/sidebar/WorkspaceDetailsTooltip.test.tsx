@@ -855,3 +855,40 @@ describe('WorkspaceDetailsTooltip git branch row', () => {
     expect(details.textContent).toContain('Working tree clean');
   });
 });
+
+describe('WorkspaceDetailsTooltip interactive overview facets', () => {
+  it('renders manageable facets as buttons, closes without stealing focus, and keeps non-manageable facets read-only', async () => {
+    const onOpenOverviewItem = vi.fn();
+    const details = await openDetails(
+      <WorkspaceDetailsTooltip
+        label="qwen-code"
+        cwd="/work/qwen-code"
+        overview={snapshot}
+        items={['mcp', 'skills', 'context']}
+        onOpenOverviewItem={onOpenOverviewItem}
+        manageableItems={new Set(['mcp', 'context'])}
+      >
+        <button type="button">qwen-code</button>
+      </WorkspaceDetailsTooltip>,
+    );
+
+    const mcpRow = facetRow(details, 'mcp')!;
+    const skillsRow = facetRow(details, 'skills')!;
+    const contextRow = facetRow(details, 'context')!;
+    expect(mcpRow.tagName).toBe('BUTTON');
+    expect(mcpRow.getAttribute('aria-label')).toBe(
+      'Manage MCP for qwen-code: 1 of 3 connected, 1 failed, 1 disabled',
+    );
+    expect(skillsRow.tagName).toBe('DIV');
+    expect(contextRow.tagName).toBe('BUTTON');
+
+    const trigger = container.querySelector<HTMLButtonElement>('button')!;
+    mcpRow.focus();
+    await act(async () => {
+      mcpRow.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenOverviewItem).toHaveBeenCalledWith('mcp');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).not.toBe(trigger);
+  });
+});

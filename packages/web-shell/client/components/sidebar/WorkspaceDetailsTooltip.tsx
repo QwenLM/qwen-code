@@ -91,6 +91,17 @@ interface WorkspaceDetailsTooltipProps {
     onBranchChanged: () => void;
   };
   onOpenChange?: (open: boolean) => void;
+  /**
+   * Optional handler invoked when the user clicks a manageable overview row
+   * (MCP, skills, extensions, channels, context, hooks). Rows without a
+   * handler or excluded by `manageableItems` stay read-only.
+   */
+  onOpenOverviewItem?: (item: WorkspaceOverviewItem) => void;
+  /**
+   * Subset of overview facets that render as clickable management rows when
+   * `onOpenOverviewItem` is provided. Defaults to all items when omitted.
+   */
+  manageableItems?: ReadonlySet<WorkspaceOverviewItem>;
   children: ReactElement;
 }
 
@@ -175,6 +186,8 @@ export function WorkspaceDetailsTooltip({
   onOpenTerminalLocally,
   gitActions,
   onOpenChange,
+  onOpenOverviewItem,
+  manageableItems,
   children,
 }: WorkspaceDetailsTooltipProps) {
   const { t } = useI18n();
@@ -248,7 +261,7 @@ export function WorkspaceDetailsTooltip({
     window.clearTimeout(openTimerRef.current);
     openTimerRef.current = window.setTimeout(() => setOpen(true), 300);
   };
-  const close = () => {
+  const close = (options?: { restoreFocus?: boolean }) => {
     window.clearTimeout(openTimerRef.current);
     cancelClose();
     // This popover is anchored, not triggered, so Radix has no triggerRef to
@@ -256,7 +269,8 @@ export function WorkspaceDetailsTooltip({
     // inside either layer — the row, or the picker's own field — is about to
     // unmount with the content, so hand focus to the folder row rather than
     // let it fall to <body>. Focus anywhere else (a pointer user's composer)
-    // is left alone.
+    // is left alone, and explicit panel navigations skip restore so focus
+    // lands in the destination panel.
     const active = document.activeElement;
     const focusInsideLayers =
       active instanceof HTMLElement &&
@@ -266,7 +280,7 @@ export function WorkspaceDetailsTooltip({
     rowHoverRef.current = false;
     setPickerOpen(false);
     setOpen(false);
-    if (focusInsideLayers) {
+    if (options?.restoreFocus !== false && focusInsideLayers) {
       anchorRef.current?.querySelector<HTMLElement>('button')?.focus();
     }
   };
@@ -356,7 +370,7 @@ export function WorkspaceDetailsTooltip({
             closeAfterDelay();
           }
         }}
-        onPointerDownCapture={close}
+        onPointerDownCapture={() => close()}
         onClick={() => close()}
       >
         {children}
@@ -531,6 +545,45 @@ export function WorkspaceDetailsTooltip({
             const facetLabel = t(`sidebar.overview.${item}`);
             const detail = overviewDetail(t, overview, item);
             const title = `${facetLabel}: ${detail}`;
+            const interactive =
+              Boolean(onOpenOverviewItem) &&
+              (!manageableItems || manageableItems.has(item));
+            const rowContent = (
+              <>
+                <Icon size={14} aria-hidden="true" />
+                <span>{facetLabel}</span>
+                <span className={sidebarStyles.sessionDetailsRowValue}>
+                  {value}
+                </span>
+                {interactive && <ChevronRightIcon aria-hidden="true" />}
+              </>
+            );
+            if (interactive) {
+              return (
+                <button
+                  key={item}
+                  type="button"
+                  className={cx(
+                    sidebarStyles.sessionDetailsRow,
+                    sidebarStyles.sessionDetailsRowButton,
+                    issue && sidebarStyles.sessionDetailsRowIssue,
+                  )}
+                  title={title}
+                  aria-label={t('sidebar.overview.openFacet', {
+                    facet: facetLabel,
+                    workspace: label,
+                    detail,
+                  })}
+                  data-web-shell-workspace-overview={item}
+                  onClick={() => {
+                    close({ restoreFocus: false });
+                    onOpenOverviewItem?.(item);
+                  }}
+                >
+                  {rowContent}
+                </button>
+              );
+            }
             return (
               <div
                 key={item}
@@ -542,11 +595,7 @@ export function WorkspaceDetailsTooltip({
                 aria-label={title}
                 data-web-shell-workspace-overview={item}
               >
-                <Icon size={14} aria-hidden="true" />
-                <span>{facetLabel}</span>
-                <span className={sidebarStyles.sessionDetailsRowValue}>
-                  {value}
-                </span>
+                {rowContent}
               </div>
             );
           })}

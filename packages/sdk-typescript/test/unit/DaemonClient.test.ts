@@ -11759,6 +11759,44 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('forwards content=true on workspace-qualified memory reads', async () => {
+      const snapshot = {
+        v: 1,
+        workspaceCwd: '/work/b',
+        initialized: true,
+        files: [
+          {
+            kind: 'memory_file' as const,
+            path: '/work/b/QWEN.md',
+            scope: 'workspace' as const,
+            bytes: 12,
+            content: '# Secondary\n',
+          },
+        ],
+        totalBytes: 12,
+        fileCount: 1,
+        ruleCount: 0,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.workspaceByCwd('/work/b').workspaceMemory({
+          includeContent: true,
+        }),
+      ).resolves.toEqual(snapshot);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Fwork%2Fb/memory?content=true',
+      });
+      await client.workspaceByCwd('/work/b').workspaceMemory();
+      expect(calls[1]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspaces/%2Fwork%2Fb/memory',
+      });
+    });
+
     it('POSTs /workspace/memory and forwards X-Qwen-Client-Id', async () => {
       const reply = {
         ok: true,

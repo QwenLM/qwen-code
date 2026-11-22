@@ -283,6 +283,7 @@ import {
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
+import { WorkspaceHooksDialog } from './components/dialogs/WorkspaceHooksDialog';
 import { ManagedSessionsPage } from './components/managed/ManagedSessionsPage';
 import type {
   ManagedAgentProvider,
@@ -290,6 +291,13 @@ import type {
 } from './components/managed/managed-agent-provider';
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from './components/ui/select';
 import {
   managedSelectionFromRoute,
   managedSelectionFromUrl,
@@ -4349,8 +4357,29 @@ export function App({
     cwd: string;
   }>();
   const [pluginInitialTab, setPluginInitialTab] = useState<
-    'extensions' | 'skills'
+    'extensions' | 'mcp' | 'skills'
   >('extensions');
+  const [pluginWorkspaceCwd, setPluginWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [pluginNavigationRequest, setPluginNavigationRequest] = useState<
+    number | undefined
+  >(undefined);
+  const [channelsWorkspaceCwd, setChannelsWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [channelsNavigationRequest, setChannelsNavigationRequest] = useState<
+    number | undefined
+  >(undefined);
+  const [settingsWorkspaceCwd, setSettingsWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [memoryDialogWorkspaceCwd, setMemoryDialogWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
+  const [hooksDialogWorkspaceCwd, setHooksDialogWorkspaceCwd] = useState<
+    string | undefined
+  >(undefined);
   const skillsSourceCwd =
     skillsSource?.client === workspace.client
       ? skillsSource.cwd
@@ -11259,8 +11288,17 @@ export function App({
   useEffect(() => {
     if (activePanel !== 'settings') {
       setSettingsInitialCategory(undefined);
+      setSettingsWorkspaceCwd(undefined);
     }
-    if (activePanel !== 'plugins') setPluginInitialTab('extensions');
+    if (activePanel !== 'plugins') {
+      setPluginInitialTab('extensions');
+      setPluginWorkspaceCwd(undefined);
+      setPluginNavigationRequest(undefined);
+    }
+    if (activePanel !== 'channels') {
+      setChannelsWorkspaceCwd(undefined);
+      setChannelsNavigationRequest(undefined);
+    }
   }, [activePanel]);
   const closePanel = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -11296,7 +11334,11 @@ export function App({
     setShowResumeDialog(false);
     setShowDeleteDialog(false);
     setShowReleaseDialog(false);
-    if (!projectFeaturesAvailable) setShowMemoryDialog(false);
+    if (!projectFeaturesAvailable) {
+      setShowMemoryDialog(false);
+      setMemoryDialogWorkspaceCwd(undefined);
+      setHooksDialogWorkspaceCwd(undefined);
+    }
     if (!workspaceBrowseActiveRef.current) {
       setShowAddWorkspaceDialog(false);
     }
@@ -14413,6 +14455,7 @@ export function App({
     // mcpDialogMessage survives closing the Plugins panel; MCP surfaces are
     // already blocked by activePanel below, so including it would lock chat.
     showMemoryDialog ||
+    hooksDialogWorkspaceCwd !== undefined ||
     (modelManagementPolicy.allowAdd && showAuthDialog) ||
     showAddWorkspaceDialog ||
     managedWorkspaceCreationOpen ||
@@ -15475,6 +15518,63 @@ export function App({
     autoLoad: projectFeaturesAvailable,
     enabled: projectFeaturesAvailable,
   });
+  const primaryRegisteredWorkspaceCwd =
+    ordinaryWorkspaces.find((entry) => entry.primary)?.cwd ??
+    workspace.workspaceCwd;
+  const secondarySettingsWorkspaceCwd =
+    settingsWorkspaceCwd &&
+    settingsWorkspaceCwd !== primaryRegisteredWorkspaceCwd &&
+    ordinaryWorkspaces.some(
+      (entry) => entry.cwd === settingsWorkspaceCwd && entry.trusted,
+    )
+      ? settingsWorkspaceCwd
+      : undefined;
+  const secondaryWorkspaceSettingsState = useSettings({
+    workspaceCwd: secondarySettingsWorkspaceCwd,
+    autoLoad:
+      projectFeaturesAvailable &&
+      activePanel === 'settings' &&
+      Boolean(secondarySettingsWorkspaceCwd),
+    enabled:
+      projectFeaturesAvailable &&
+      activePanel === 'settings' &&
+      Boolean(secondarySettingsWorkspaceCwd),
+  });
+  const reloadSecondaryWorkspaceSettings =
+    secondaryWorkspaceSettingsState.reload;
+  useEffect(() => {
+    const isKnownTrustedWorkspace = (cwd: string) =>
+      ordinaryWorkspaces.length > 0
+        ? ordinaryWorkspaces.some((entry) => entry.cwd === cwd && entry.trusted)
+        : cwd === workspace.workspaceCwd;
+    if (
+      settingsWorkspaceCwd &&
+      !isKnownTrustedWorkspace(settingsWorkspaceCwd)
+    ) {
+      setSettingsWorkspaceCwd(undefined);
+    }
+    if (
+      hooksDialogWorkspaceCwd &&
+      !isKnownTrustedWorkspace(hooksDialogWorkspaceCwd)
+    ) {
+      setHooksDialogWorkspaceCwd(undefined);
+    }
+    if (
+      showMemoryDialog &&
+      memoryDialogWorkspaceCwd &&
+      !isKnownTrustedWorkspace(memoryDialogWorkspaceCwd)
+    ) {
+      setShowMemoryDialog(false);
+      setMemoryDialogWorkspaceCwd(undefined);
+    }
+  }, [
+    hooksDialogWorkspaceCwd,
+    memoryDialogWorkspaceCwd,
+    ordinaryWorkspaces,
+    settingsWorkspaceCwd,
+    showMemoryDialog,
+    workspace.workspaceCwd,
+  ]);
   const providersEnabled =
     projectFeaturesAvailable &&
     (activePanel === 'settings' || modelDialogMode === 'fast');
@@ -16219,7 +16319,11 @@ export function App({
       ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
       : getComposerWorkspaceCwd();
   const handleSettingsLanguageChange = useCallback(
-    (nextLanguage: WebShellLanguage, scope: 'user' | 'workspace' = 'user') => {
+    (
+      nextLanguage: WebShellLanguage,
+      scope: 'user' | 'workspace' = 'user',
+      targetWorkspaceCwd?: string,
+    ) => {
       if (sessionWriteBlocked) return;
       const owner = { current: sessionOwnerGuard.capture() };
       const previousLanguage = selectedLanguage;
@@ -16228,6 +16332,14 @@ export function App({
       // row on the Workspace tab there; keep this guard for a scope that was
       // picked before the session context settled.
       const effectiveScope = sessionIsStandalone ? 'user' : scope;
+      const resolvedWorkspaceCwd =
+        effectiveScope === 'workspace' && targetWorkspaceCwd
+          ? targetWorkspaceCwd
+          : uiLanguageWorkspaceCwd;
+      const targetsDifferentWorkspace =
+        effectiveScope === 'workspace' &&
+        Boolean(targetWorkspaceCwd) &&
+        targetWorkspaceCwd !== uiLanguageWorkspaceCwd;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
         await Promise.all([
@@ -16235,6 +16347,9 @@ export function App({
             ? [sessionActions.refreshCommands()]
             : []),
           reloadWorkspaceSettings(),
+          ...(secondarySettingsWorkspaceCwd
+            ? [reloadSecondaryWorkspaceSettings()]
+            : []),
         ]);
       };
       if (
@@ -16251,7 +16366,7 @@ export function App({
       // opinion; the observe-only channel keeps settings-derived values from
       // shadowing later settings.json edits (#11955).
       const hostControlsLanguage = providedLanguage !== undefined;
-      if (!hostControlsLanguage) {
+      if (!hostControlsLanguage && !targetsDifferentWorkspace) {
         setSelectedLanguage(nextLanguage);
         onLanguageResolvedRef.current?.(nextLanguage);
       }
@@ -16259,14 +16374,18 @@ export function App({
         .setUiLanguage(
           nextLanguage === 'zh-CN' ? 'zh' : nextLanguage,
           effectiveScope,
-          uiLanguageWorkspaceCwd,
+          resolvedWorkspaceCwd,
         )
         .then((result) => {
           if (!owner.current.isCurrent()) return;
           const appliedLanguage =
             languageSettingToWebShellLanguage(result.language) ??
             normalizeLanguage(result.language);
-          if (!hostControlsLanguage && appliedLanguage !== nextLanguage) {
+          if (
+            !hostControlsLanguage &&
+            !targetsDifferentWorkspace &&
+            appliedLanguage !== nextLanguage
+          ) {
             setSelectedLanguage(appliedLanguage);
             onLanguageResolvedRef.current?.(appliedLanguage);
           }
@@ -16285,7 +16404,7 @@ export function App({
         })
         .catch((error: unknown) => {
           if (!owner.current.isCurrent()) return;
-          if (!hostControlsLanguage) {
+          if (!hostControlsLanguage && !targetsDifferentWorkspace) {
             setSelectedLanguage(previousLanguage);
             onLanguageResolvedRef.current?.(previousLanguage);
           }
@@ -16295,9 +16414,11 @@ export function App({
     [
       blockCommand,
       handleLanguageChange,
+      reloadSecondaryWorkspaceSettings,
       reloadWorkspaceSettings,
       reportError,
       providedLanguage,
+      secondarySettingsWorkspaceCwd,
       sessionWriteBlocked,
       workspaceActions,
       uiLanguageWorkspaceCwd,
@@ -16339,7 +16460,12 @@ export function App({
       }
       if (!owner.current.isCurrent()) return true;
       try {
-        await reloadWorkspaceSettings();
+        await Promise.all([
+          reloadWorkspaceSettings(),
+          ...(secondarySettingsWorkspaceCwd
+            ? [reloadSecondaryWorkspaceSettings()]
+            : []),
+        ]);
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(
@@ -16352,8 +16478,10 @@ export function App({
     },
     [
       blockCommand,
+      reloadSecondaryWorkspaceSettings,
       reloadWorkspaceSettings,
       reportError,
+      secondarySettingsWorkspaceCwd,
       sessionWriteBlocked,
       sendPrompt,
       sessionOwnerGuard,
@@ -21086,6 +21214,7 @@ export function App({
               );
               setMemoryAddSignal((signal) => signal + 1);
             }
+            setMemoryDialogWorkspaceCwd(undefined);
             setShowMemoryDialog(true);
             return true;
           }
@@ -24642,16 +24771,37 @@ export function App({
           )}
           {workspaceContextActive && showMemoryDialog && (
             <DialogShell
-              title={t('memory.menu')}
+              title={
+                memoryDialogWorkspaceCwd
+                  ? `${t('memory.menu')} · ${workspaceLabelForCwd(memoryDialogWorkspaceCwd, ordinaryWorkspaces)}`
+                  : t('memory.menu')
+              }
               size="lg"
-              onClose={() => setShowMemoryDialog(false)}
+              onClose={() => {
+                setShowMemoryDialog(false);
+                setMemoryDialogWorkspaceCwd(undefined);
+              }}
             >
               <MemoryMessage
+                key={memoryDialogWorkspaceCwd ?? 'default'}
+                workspaceCwd={memoryDialogWorkspaceCwd}
                 addSignal={memoryAddSignal}
                 addScope={memoryAddScope}
                 onMessage={(text, type = 'status') => {
                   store.dispatch([{ type, text }]);
                 }}
+              />
+            </DialogShell>
+          )}
+          {workspaceContextActive && hooksDialogWorkspaceCwd && (
+            <DialogShell
+              title={`${t('workspaceHooks.title')} · ${workspaceLabelForCwd(hooksDialogWorkspaceCwd, ordinaryWorkspaces)}`}
+              size="lg"
+              onClose={() => setHooksDialogWorkspaceCwd(undefined)}
+            >
+              <WorkspaceHooksDialog
+                key={hooksDialogWorkspaceCwd}
+                workspaceCwd={hooksDialogWorkspaceCwd}
               />
             </DialogShell>
           )}
@@ -25300,9 +25450,38 @@ export function App({
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   workspaceOverview={sidebarOptions.workspaceOverview}
-                  onOpenWorkspaceManagement={(target) => {
+                  onOpenWorkspaceManagement={(target, workspaceCwd) => {
                     closeMobileDrawer();
-                    openPanel(target);
+                    if (
+                      target === 'mcp' ||
+                      target === 'skills' ||
+                      target === 'extensions'
+                    ) {
+                      setPluginInitialTab(target);
+                      setPluginWorkspaceCwd(workspaceCwd);
+                      setPluginNavigationRequest((n) => (n ?? 0) + 1);
+                      openPanel('plugins');
+                      return;
+                    }
+                    if (target === 'channels') {
+                      setChannelsWorkspaceCwd(workspaceCwd);
+                      setChannelsNavigationRequest((n) => (n ?? 0) + 1);
+                      openPanel('channels');
+                      return;
+                    }
+                    if (target === 'settings') {
+                      setSettingsWorkspaceCwd(workspaceCwd);
+                      openPanel('settings');
+                      return;
+                    }
+                    if (target === 'context') {
+                      setMemoryDialogWorkspaceCwd(workspaceCwd);
+                      setShowMemoryDialog(true);
+                      return;
+                    }
+                    if (target === 'hooks') {
+                      setHooksDialogWorkspaceCwd(workspaceCwd);
+                    }
                   }}
                   onOpenWorkspacesOverview={() => {
                     closeMobileDrawer();
@@ -25733,11 +25912,22 @@ export function App({
                     >
                       {activePanel === 'settings' ? (
                       <SettingsMessage
-                        settingsState={targetedWorkspaceSettingsState}
+                        settingsState={
+                          secondarySettingsWorkspaceCwd
+                            ? secondaryWorkspaceSettingsState
+                            : targetedWorkspaceSettingsState
+                        }
                         presentation={settingsPresentation}
                         embedded
                         initialCategory={settingsInitialCategory}
-                        onLanguageChange={handleSettingsLanguageChange}
+                        onLanguageChange={(nextLanguage, scope) =>
+                          handleSettingsLanguageChange(
+                            nextLanguage,
+                            scope,
+                            secondarySettingsWorkspaceCwd ??
+                              primaryRegisteredWorkspaceCwd,
+                          )
+                        }
                         onOutputLanguageChange={
                           handleSettingsOutputLanguageChange
                         }
@@ -25753,9 +25943,45 @@ export function App({
                             <div ref={setArchivedSessionsTarget} data-web-shell-archived-sessions />
                           ) : undefined
                         }
+                        workspaceControl={
+                          !sessionIsStandalone && ordinaryWorkspaces.length > 1 ? (
+                            <Select
+                              value={
+                                secondarySettingsWorkspaceCwd ??
+                                primaryRegisteredWorkspaceCwd
+                              }
+                              onValueChange={(cwd) =>
+                                setSettingsWorkspaceCwd(cwd)
+                              }
+                            >
+                              <SelectTrigger
+                                className="h-8 w-48"
+                                aria-label={t('sidebar.workspaceSelectLabel')}
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {ordinaryWorkspaces.map((entry) => (
+                                  <SelectItem
+                                    key={entry.id}
+                                    value={entry.cwd}
+                                    disabled={!entry.trusted}
+                                  >
+                                    {workspaceLabel(entry)}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          ) : undefined
+                        }
                         workspaceDirectoriesSection={
                           workspaceDirectoriesSupported ? (
-                            <WorkspaceDirectoriesSection />
+                            <WorkspaceDirectoriesSection
+                              workspaceCwd={
+                                secondarySettingsWorkspaceCwd ??
+                                primaryRegisteredWorkspaceCwd
+                              }
+                            />
                           ) : undefined
                         }
                         modelManagementSectionProps={projectFeaturesAvailable ? {
@@ -25877,6 +26103,8 @@ export function App({
                         showBackButton={!navigationRailVisible}
                         initialFocusRef={pluginTabRef}
                         initialTab={pluginInitialTab}
+                        initialWorkspaceCwd={pluginWorkspaceCwd}
+                        navigationRequest={pluginNavigationRequest}
                         skillsWorkspaceCwd={skillsSourceCwd}
                         onSkillsWorkspaceChange={selectSkillsWorkspace}
                         managedSkills={managedAgentProvider !== undefined}
@@ -25906,6 +26134,8 @@ export function App({
                           connection.sessionId ? connection.clientId : undefined
                         }
                         sessionWorkspaceCwd={connection.workspaceCwd}
+                        initialWorkspaceCwd={channelsWorkspaceCwd}
+                        navigationRequest={channelsNavigationRequest}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
