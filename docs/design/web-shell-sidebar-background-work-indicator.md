@@ -121,9 +121,9 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   both states. A live-starting row swaps the dot for its own spinner, so the
   marker takes the name back there rather than leaving the state unnamed.
 - In `SessionDetailsTooltip`, append ` · background.running` to the approval,
-  question and running arms whenever background tasks are running, and to an
-  override label (`statusLabel`, e.g. the voice starting cue) for the same
-  hidden-background reason. The background-only arm
+  question, running and completed-unread arms whenever background tasks are
+  running, and to an override label (`statusLabel`, e.g. the voice starting
+  cue) for the same hidden-background reason. The background-only arm
   (`!hasActivePrompt && hasRunningBackgroundTasks`) already names it and is
   left alone. The completed-unread arm mirrors the row's dot precedence: it
   outranks the running, active-work and unknown arms, the background-only arm

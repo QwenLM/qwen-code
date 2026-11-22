@@ -94,8 +94,8 @@
   live 启动中的行会把圆点换成它自己的 spinner，此时标记要把名字接回来，而不是让
   这一格无人命名。
 - `SessionDetailsTooltip` 中，只要有后台任务在跑，就给「等待审批」「等待回答」
-  「回合进行中」三支追加 ` · background.running`；override 标签（`statusLabel`，
-  如语音启动提示）出于同样的「隐藏后台仍须命名」理由也带该后缀。「仅后台」支
+  「回合进行中」「completed-unread」四支追加 ` · background.running`；override
+  标签（`statusLabel`，如语音启动提示）出于同样的「隐藏后台仍须命名」理由也带该后缀。「仅后台」支
   （`!hasActivePrompt && hasRunningBackgroundTasks`）已经命名过，保持原样。
   completed-unread 支与行圆点同序：优先于 running/active-work/unknown 支，
   「仅后台」支优先于它；等待态的优先级不变（#18070）。
