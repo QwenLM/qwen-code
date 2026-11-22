@@ -25,6 +25,14 @@ export const DEFAULT_LSP_WARMUP_DELAY_MS = 150;
 /** Default delay after opening a document to allow the LSP server to process it */
 export const DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS = 200;
 
+/**
+ * Default wait for a push-only server's `textDocument/publishDiagnostics`
+ * after opening or changing a document. Servers that push only on problems may
+ * never answer for a clean document; the query stops waiting at this bound and
+ * keeps the existing unsupported-pull refusal when no report arrived.
+ */
+export const DEFAULT_LSP_PUSH_DIAGNOSTICS_TIMEOUT_MS = 2000;
+
 /** Default timeout for command existence check in milliseconds */
 export const DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS = 2000;
 

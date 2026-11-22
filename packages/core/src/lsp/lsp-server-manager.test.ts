@@ -258,6 +258,22 @@ describe('LspServerManager', () => {
     vi.useRealTimers();
   });
 
+  it('initializes and clears pushed diagnostics with the handle lifetime', async () => {
+    const manager = createTrustedManager();
+    const handle = registerHandle(manager);
+    expect(handle.pushedDiagnostics).toBeInstanceOf(Map);
+    handle.pushedDiagnostics!.set('file:///workspace/main.cpp', {
+      diagnostics: [],
+    });
+
+    await (manager as unknown as ReconcilePrivateView).stopServer(
+      'clangd',
+      handle,
+    );
+
+    expect(handle.pushedDiagnostics?.size).toBe(0);
+  });
+
   it('contains TypeScript warmup callback failures without marking the handle warm', async () => {
     const manager = createTrustedManager();
     const warmupFile = path.resolve('main.ts');
@@ -391,6 +407,13 @@ describe('LspServerManager', () => {
                 references: { dynamicRegistration: false },
                 documentSymbol: { dynamicRegistration: false },
                 codeAction: { dynamicRegistration: false },
+                publishDiagnostics: {
+                  relatedInformation: true,
+                  tagSupport: { valueSet: [1, 2] },
+                  versionSupport: true,
+                  codeDescriptionSupport: true,
+                  dataSupport: true,
+                },
               },
               workspace: { workspaceFolders: true },
             },

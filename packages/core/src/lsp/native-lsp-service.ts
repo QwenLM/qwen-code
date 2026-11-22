@@ -21,6 +21,7 @@ import type {
   LspHoverResult,
   LspLocation,
   LspRange,
+  LspPushedDiagnostics,
   LspReference,
   LspSymbolInformation,
   LspTextEdit,
@@ -30,6 +31,7 @@ import type { EventEmitter } from 'events';
 import {
   DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS,
   DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS,
+  DEFAULT_LSP_PUSH_DIAGNOSTICS_TIMEOUT_MS,
   DEFAULT_LSP_WORKSPACE_SYMBOL_WARMUP_DELAY_MS,
 } from './constants.js';
 import { LspConfigLoader } from './LspConfigLoader.js';
@@ -37,7 +39,10 @@ import { LspJsonRpcError } from './LspConnectionFactory.js';
 import { LspResponseNormalizer } from './LspResponseNormalizer.js';
 import { LspServerManager } from './lsp-server-manager.js';
 import { sortJsonValue } from './sort-json-value.js';
-import { resolveTextDocumentSync } from './types.js';
+import {
+  isPublishDiagnosticsParams,
+  resolveTextDocumentSync,
+} from './types.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
@@ -365,6 +370,14 @@ export class NativeLspService {
   private snapshotDigests = new WeakMap<DocumentSnapshot, string>();
   private callHierarchySecrets = new WeakMap<LspConnectionInterface, Buffer>();
   private lastConnections = new Map<string, LspConnectionInterface>();
+  private pushedDiagnosticsConnections = new Map<
+    string,
+    LspConnectionInterface
+  >();
+  private pushedDiagnosticsWaiters = new WeakMap<
+    LspConnectionInterface,
+    Map<string, Set<(entry: LspPushedDiagnostics) => void>>
+  >();
   // URIs to re-deliver after a connection swap or synchronization failure.
   // openedDocuments selects didOpen/didChange and is wiped on connection changes; this
   // set survives that wipe so a later workspaceDiagnostics can still replay them.
@@ -579,6 +592,7 @@ export class NativeLspService {
       this.documentLifecycles.delete(name);
       this.lastConnections.delete(name);
       this.replayUris.delete(name);
+      this.pushedDiagnosticsConnections.delete(name);
     }
   }
 
@@ -688,6 +702,7 @@ export class NativeLspService {
     this.documentLifecycles.clear();
     this.lastConnections.clear();
     this.replayUris.clear();
+    this.pushedDiagnosticsConnections.clear();
   }
 
   /**
@@ -1077,6 +1092,7 @@ export class NativeLspService {
       this.parkTrackedUris(serverName);
       this.lastConnections.set(serverName, handle.connection);
     }
+    this.ensurePushedDiagnosticsTracking(serverName, handle);
 
     const documents =
       this.openedDocuments.get(serverName) ??
@@ -1134,6 +1150,7 @@ export class NativeLspService {
       return { sent: false, opened: false };
     }
     const version = (previous?.version ?? lifecycle?.version ?? 0) + 1;
+    this.clearPushedDiagnostics(handle, uri);
     if (!previous && openClose) {
       handle.connection.send({
         jsonrpc: '2.0',
@@ -1212,6 +1229,7 @@ export class NativeLspService {
       throw originalError;
     }
     try {
+      this.clearPushedDiagnostics(handle, uri);
       connection.send({
         jsonrpc: '2.0',
         method: 'textDocument/didClose',
@@ -2254,6 +2272,128 @@ export class NativeLspService {
   }
 
   /**
+   * Subscribe to push diagnostics for the active connection and keep the
+   * handle's cache current. A connection swap drops the old cache: a report
+   * pushed by one server process must never answer a query against its
+   * replacement.
+   */
+  private ensurePushedDiagnosticsTracking(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+  ): Map<string, LspPushedDiagnostics> {
+    const connection = handle.connection;
+    const pushed =
+      handle.pushedDiagnostics ?? new Map<string, LspPushedDiagnostics>();
+    handle.pushedDiagnostics = pushed;
+    if (this.pushedDiagnosticsConnections.get(serverName) === connection) {
+      return pushed;
+    }
+    pushed.clear();
+    this.pushedDiagnosticsConnections.set(serverName, connection);
+    connection.onNotification((notification) => {
+      if (
+        this.pushedDiagnosticsConnections.get(serverName) !== connection ||
+        handle.connection !== connection ||
+        notification.method !== 'textDocument/publishDiagnostics' ||
+        !isPublishDiagnosticsParams(notification.params)
+      ) {
+        return;
+      }
+      const params = notification.params;
+      const currentVersion = this.documentLifecycles
+        .get(serverName)
+        ?.get(params.uri)?.version;
+      if (
+        params.version !== undefined &&
+        params.version !== null &&
+        currentVersion !== undefined &&
+        params.version !== currentVersion
+      ) {
+        return;
+      }
+      const entry: LspPushedDiagnostics = {
+        diagnostics: params.diagnostics,
+        version: params.version,
+      };
+      pushed.set(params.uri, entry);
+      const waiters = this.pushedDiagnosticsWaiters
+        .get(connection)
+        ?.get(params.uri);
+      if (!waiters) {
+        return;
+      }
+      for (const resolve of [...waiters]) {
+        resolve(entry);
+      }
+    });
+    return pushed;
+  }
+
+  /** Drop a cached report whose document is about to change or close. */
+  private clearPushedDiagnostics(handle: LspServerHandle, uri: string): void {
+    handle.pushedDiagnostics?.delete(uri);
+  }
+
+  /**
+   * Wait for a push report for `uri`, bounded so a server that stays silent
+   * for a clean document cannot hang the query. The cache is read before and
+   * after waiter registration so a notification landing in between is not
+   * lost.
+   */
+  private waitForPushedDiagnostics(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): Promise<LspPushedDiagnostics | undefined> {
+    const pushed = this.ensurePushedDiagnosticsTracking(serverName, handle);
+    const cached = pushed.get(uri);
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+    const connection = handle.connection;
+    const perConnection =
+      this.pushedDiagnosticsWaiters.get(connection) ??
+      new Map<string, Set<(entry: LspPushedDiagnostics) => void>>();
+    this.pushedDiagnosticsWaiters.set(connection, perConnection);
+    const waiters =
+      perConnection.get(uri) ??
+      new Set<(entry: LspPushedDiagnostics) => void>();
+    perConnection.set(uri, waiters);
+
+    return new Promise((resolve) => {
+      let active = true;
+      let timer: ReturnType<typeof setTimeout> | undefined = undefined;
+      const finish = (entry?: LspPushedDiagnostics) => {
+        if (!active) {
+          return;
+        }
+        active = false;
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        waiters.delete(finish);
+        if (waiters.size === 0) {
+          perConnection.delete(uri);
+        }
+        resolve(entry);
+      };
+      waiters.add(finish);
+      const registered = pushed.get(uri);
+      if (registered) {
+        finish(registered);
+        return;
+      }
+      timer = setTimeout(
+        () => finish(undefined),
+        DEFAULT_LSP_PUSH_DIAGNOSTICS_TIMEOUT_MS,
+      );
+      if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+        timer.unref();
+      }
+    });
+  }
+
+  /**
    * Get diagnostics for a document
    */
   async diagnostics(
@@ -2386,11 +2526,63 @@ export class NativeLspService {
           error,
         );
         if (pullUnsupported(error)) {
-          unsupported.push({
-            name,
-            handle,
-            error: new Error(PULL_UNSUPPORTED_REASON),
-          });
+          const connection = handle.connection;
+          const pushed = await this.waitForPushedDiagnostics(name, handle, uri);
+          if (!pushed) {
+            // A silent server is indistinguishable from one that never
+            // analyzed the file; an empty cache must not certify it clean.
+            unsupported.push({
+              name,
+              handle,
+              error: new Error(PULL_UNSUPPORTED_REASON),
+            });
+          } else if (
+            handle.connection !== connection ||
+            handle.status !== 'READY' ||
+            this.serverManager.getHandles().get(name) !== handle
+          ) {
+            failures.push({
+              name,
+              handle,
+              error: new Error(
+                'server connection is no longer active while waiting for pushed diagnostics',
+              ),
+            });
+          } else {
+            // The server pushed a complete report for this document. An empty
+            // array is an authoritative clean answer from that server.
+            let kept = 0;
+            for (const item of pushed.diagnostics) {
+              const normalized = this.normalizer.normalizeDiagnostic(
+                item,
+                name,
+              );
+              if (normalized) {
+                allDiagnostics.push(normalized);
+                kept++;
+              }
+            }
+            if (pushed.diagnostics.length > 0 && kept === 0) {
+              failures.push({
+                name,
+                handle,
+                error: new Error('server returned only unusable diagnostics'),
+              });
+            } else {
+              answeredAny++;
+              if (
+                !this.serverDeclaredIrrelevant(handle, extension, serverName)
+              ) {
+                answeredRelevant++;
+                if (
+                  extension !== undefined &&
+                  this.declaredOwnerExtensions(handle, true).has(extension)
+                ) {
+                  answeredOwner++;
+                }
+              }
+            }
+          }
         } else {
           failures.push({ name, handle, error });
         }
@@ -2488,6 +2680,7 @@ export class NativeLspService {
       const [name, handle] = pending[index]!;
       queried.push([name, handle]);
       const connection = handle.connection;
+      this.ensurePushedDiagnosticsTracking(name, handle);
       // Capture the tracked set before warmup: for a TypeScript server the warmup's
       // own connection-change reset would otherwise wipe it first, including the
       // durable URIs parked by a swap triggered by an earlier query.
@@ -2631,7 +2824,52 @@ export class NativeLspService {
         // bucket, on a query with no extension to attribute it to.
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
         if (pullUnsupported(error)) {
-          unsupported.push({ name, error: new Error(PULL_UNSUPPORTED_REASON) });
+          // A push-only server cannot enumerate the workspace. Replay what it
+          // has actually pushed for documents this session opened; a report
+          // from outside the workspace must never leak through a string
+          // prefix match on the raw URI.
+          let replayed = 0;
+          const pushed = handle.pushedDiagnostics;
+          if (pushed) {
+            for (const [pushedUri, entry] of pushed) {
+              if (results.length >= limit) {
+                break;
+              }
+              let filePath: string;
+              try {
+                filePath = fileURLToPath(pushedUri);
+              } catch {
+                continue;
+              }
+              if (!this.workspaceContext.isPathWithinWorkspace(filePath)) {
+                continue;
+              }
+              const normalized: LspDiagnostic[] = [];
+              for (const item of entry.diagnostics) {
+                const diagnostic = this.normalizer.normalizeDiagnostic(
+                  item,
+                  name,
+                );
+                if (diagnostic) {
+                  normalized.push(diagnostic);
+                }
+              }
+              if (normalized.length > 0) {
+                results.push({
+                  uri: pushedUri,
+                  diagnostics: normalized,
+                  serverName: name,
+                });
+                replayed++;
+              }
+            }
+          }
+          if (replayed === 0) {
+            unsupported.push({
+              name,
+              error: new Error(PULL_UNSUPPORTED_REASON),
+            });
+          }
         } else {
           failures.push({ name, error });
         }

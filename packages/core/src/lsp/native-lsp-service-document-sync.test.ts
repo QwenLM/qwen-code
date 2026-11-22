@@ -107,6 +107,26 @@ function createConnection() {
   };
 }
 
+function pushDiagnostics(
+  target: ReturnType<typeof createConnection>,
+  uri: string,
+  diagnostics: unknown[],
+  version?: number,
+) {
+  const handler = target.onNotification.mock.calls.at(-1)?.[0] as
+    | ((notification: JsonRpcMessage) => void)
+    | undefined;
+  handler?.({
+    jsonrpc: '2.0',
+    method: 'textDocument/publishDiagnostics',
+    params: {
+      uri,
+      diagnostics,
+      ...(version === undefined ? {} : { version }),
+    },
+  });
+}
+
 describe('NativeLspService disk document synchronization', () => {
   let directory: string;
   let file: string;
@@ -129,7 +149,11 @@ describe('NativeLspService disk document synchronization', () => {
         isTrustedFolder: () => true,
         isExplicitlyTrustedFolder: () => true,
       } as unknown as Config,
-      { getDirectories: () => [directory] } as unknown as WorkspaceContext,
+      {
+        getDirectories: () => [directory],
+        isPathWithinWorkspace: (candidate: string) =>
+          candidate === directory || candidate.startsWith(directory + path.sep),
+      } as unknown as WorkspaceContext,
       new EventEmitter(),
       { shouldIgnoreFile: () => false } as unknown as FileDiscoveryService,
       {} as IdeContextStore,
@@ -1822,6 +1846,8 @@ describe('NativeLspService disk document synchronization', () => {
       service as unknown as { workspaceContext: WorkspaceContext }
     ).workspaceContext = {
       getDirectories: () => [secondRoot],
+      isPathWithinWorkspace: (candidate: string) =>
+        candidate === secondRoot || candidate.startsWith(secondRoot + path.sep),
     } as unknown as WorkspaceContext;
     discovery.mockClear();
     await run(service.workspaceSymbols('fn'));
@@ -3986,5 +4012,156 @@ describe('NativeLspService disk document synchronization', () => {
         expect(result.llmContent).not.toContain('No diagnostics found');
       },
     );
+
+    it('falls back to a pushed report when the pull is unsupported', async () => {
+      const [targetPath, targetUri] = addFile(
+        'pushed.ts',
+        'const value: number = "";\n',
+      );
+      const target = createConnection();
+      target.request.mockRejectedValue(
+        new LspJsonRpcError('Unhandled method textDocument/diagnostic', -32601),
+      );
+      const send = target.send.getMockImplementation()!;
+      target.send.mockImplementation((message) => {
+        send(message);
+        if (
+          message.method === 'textDocument/didOpen' &&
+          docUri(message) === targetUri
+        ) {
+          setTimeout(
+            () =>
+              pushDiagnostics(target, targetUri, [
+                { range, severity: 1, message: 'Pushed type error' },
+              ]),
+            500,
+          );
+        }
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: targetPath,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Pushed type error');
+    });
+
+    it('treats a pushed empty report as a clean answer', async () => {
+      const [targetPath, targetUri] = addFile(
+        'clean.ts',
+        'export const x = 1;\n',
+      );
+      const target = createConnection();
+      target.request.mockRejectedValue(
+        new LspJsonRpcError('Unhandled method textDocument/diagnostic', -32601),
+      );
+      const send = target.send.getMockImplementation()!;
+      target.send.mockImplementation((message) => {
+        send(message);
+        if (
+          message.method === 'textDocument/didOpen' &&
+          docUri(message) === targetUri
+        ) {
+          pushDiagnostics(target, targetUri, []);
+        }
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: targetPath,
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it('drops a pushed report when the document changes before the next query', async () => {
+      const [targetPath, targetUri] = addFile(
+        'pushed.ts',
+        'const value: number = "";\n',
+      );
+      const target = createConnection();
+      target.request.mockRejectedValue(
+        new LspJsonRpcError('Unhandled method textDocument/diagnostic', -32601),
+      );
+      const send = target.send.getMockImplementation()!;
+      target.send.mockImplementation((message) => {
+        send(message);
+        if (
+          message.method === 'textDocument/didOpen' &&
+          docUri(message) === targetUri
+        ) {
+          pushDiagnostics(target, targetUri, [
+            { range, severity: 1, message: 'Stale type error' },
+          ]);
+        }
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      await expect(run(service.diagnostics(targetUri))).resolves.toHaveLength(
+        1,
+      );
+      fs.writeFileSync(targetPath, 'export const value: number = 1;\n');
+      await expect(run(service.diagnostics(targetUri))).rejects.toThrow(
+        'does not support pull diagnostics',
+      );
+    });
+
+    it('keeps cached push diagnostics out of a real pull failure', async () => {
+      const [, targetUri] = addFile('pushed.ts', 'const value: number = "";\n');
+      const target = createConnection();
+      target.request.mockRejectedValue(new Error('server exploded'));
+      const send = target.send.getMockImplementation()!;
+      target.send.mockImplementation((message) => {
+        send(message);
+        if (
+          message.method === 'textDocument/didOpen' &&
+          docUri(message) === targetUri
+        ) {
+          pushDiagnostics(target, targetUri, [
+            { range, severity: 1, message: 'Pushed type error' },
+          ]);
+        }
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      await expect(run(service.diagnostics(targetUri))).rejects.toThrow(
+        'server exploded',
+      );
+    });
+
+    it('replays only in-workspace pushed reports for workspace diagnostics', async () => {
+      const [, insideUri] = addFile('inside.ts', 'const x = 1;\n');
+      const outsideUri = pathToFileURL(
+        path.join(directory + '-other', 'outside.ts'),
+      ).toString();
+      const target = createConnection();
+      target.request.mockImplementation(async (method: string) => {
+        if (method !== 'workspace/diagnostic') {
+          return { kind: 'full', items: [] };
+        }
+        pushDiagnostics(target, insideUri, [
+          { range, severity: 1, message: 'Inside error' },
+        ]);
+        pushDiagnostics(target, outsideUri, [
+          { range, severity: 1, message: 'Outside error' },
+        ]);
+        throw new LspJsonRpcError(
+          'Unhandled method workspace/diagnostic',
+          -32601,
+        );
+      });
+      withServers([['tsls', serverOn('tsls', ['typescript'], target)]]);
+
+      const result = await run(service.workspaceDiagnostics());
+
+      expect(result).toHaveLength(1);
+      expect(result[0]?.uri).toBe(insideUri);
+      expect(result[0]?.diagnostics[0]?.message).toBe('Inside error');
+    });
   });
 });

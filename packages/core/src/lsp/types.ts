@@ -620,6 +620,37 @@ export function resolveTextDocumentSync(
 }
 
 /**
+ * The latest diagnostics a server pushed for one document on the active
+ * connection. `version` is the document version the server reported, when it
+ * reports one; servers may omit it.
+ */
+export interface LspPushedDiagnostics {
+  diagnostics: unknown[];
+  version?: number | null;
+}
+
+export interface LspPublishDiagnosticsParams extends LspPushedDiagnostics {
+  uri: string;
+}
+
+/** Validate the shape of a `textDocument/publishDiagnostics` notification. */
+export function isPublishDiagnosticsParams(
+  value: unknown,
+): value is LspPublishDiagnosticsParams {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const params = value as Record<string, unknown>;
+  return (
+    typeof params['uri'] === 'string' &&
+    Array.isArray(params['diagnostics']) &&
+    (params['version'] === undefined ||
+      params['version'] === null ||
+      typeof params['version'] === 'number')
+  );
+}
+
+/**
  * Handle for managing an LSP server instance.
  */
 export interface LspServerHandle {
@@ -631,6 +662,13 @@ export interface LspServerHandle {
   connection?: LspConnectionInterface;
   /** Synchronization capability from this connection's initialize response. */
   textDocumentSync?: LspTextDocumentSync;
+  /**
+   * Diagnostics pushed on the active connection, keyed by document URI. The
+   * service owns the notification subscription; the manager owns the map's
+   * lifetime so a stopped or restarted server never serves an old connection's
+   * report.
+   */
+  pushedDiagnostics?: Map<string, LspPushedDiagnostics>;
   /** Server process (for stdio transport) */
   process?: ChildProcess;
   /** Error that caused failure */
