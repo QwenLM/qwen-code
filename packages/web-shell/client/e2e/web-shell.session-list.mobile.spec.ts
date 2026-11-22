@@ -9,7 +9,11 @@ import {
   resolveBaseURL,
 } from './visuals/harness';
 
-import { rectanglesAreDisjoint, type Rectangle } from '../utils/rectangles';
+import {
+  BROWSER_LAYOUT_TOLERANCE_PX,
+  rectanglesAreDisjoint,
+  type Rectangle,
+} from '../utils/rectangles';
 
 function expectWrappedMetadataLayout(
   boxes: readonly Rectangle[],
@@ -21,24 +25,28 @@ function expectWrappedMetadataLayout(
   for (const box of [...boxes, more]) {
     expect(box.x, label).toBeGreaterThanOrEqual(row.x - 0.5);
     expect(box.x + box.width, label).toBeLessThanOrEqual(
-      row.x + row.width + 0.5,
+      row.x + row.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     expect(box.y, label).toBeGreaterThanOrEqual(row.y - 0.5);
     expect(box.y + box.height, label).toBeLessThanOrEqual(
-      row.y + row.height + 0.5,
+      row.y + row.height + BROWSER_LAYOUT_TOLERANCE_PX,
     );
   }
   for (let index = 0; index < boxes.length; index++) {
     const box = boxes[index]!;
     expect(
-      rectanglesAreDisjoint(box, more),
+      rectanglesAreDisjoint(box, more, BROWSER_LAYOUT_TOLERANCE_PX),
       `${label}[${index}]: ${JSON.stringify(box)} vs More ${JSON.stringify(more)}`,
     ).toBe(true);
   }
   for (let first = 0; first < boxes.length; first++) {
     for (let second = first + 1; second < boxes.length; second++) {
       expect(
-        rectanglesAreDisjoint(boxes[first]!, boxes[second]!),
+        rectanglesAreDisjoint(
+          boxes[first]!,
+          boxes[second]!,
+          BROWSER_LAYOUT_TOLERANCE_PX,
+        ),
         `${label}: metadata overlaps at ${first}:${second}`,
       ).toBe(true);
     }
@@ -271,8 +279,9 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       },
       branch: { name: 'feature/density', baseBranch: 'main' },
     });
+    const embeddedMetadata = scenario.sessions.at(-1)!;
     scenario.sessions.push({
-      ...scenario.sessions.at(-1)!,
+      ...embeddedMetadata,
       sessionId: 'embedded-crowded-density',
       displayName: 'Run',
       sourceType: 'default',
@@ -283,13 +292,42 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       needsContinuation: false,
     });
     scenario.sessions.push({
-      ...scenario.sessions.at(-1)!,
+      ...embeddedMetadata,
       sessionId: 'embedded-continuation-density',
       displayName: 'Embedded continuation row with PR and goal metadata',
       hasActivePrompt: false,
       needsContinuation: true,
       isWaitingForUserQuestion: false,
       isWaitingForPermission: false,
+    });
+    scenario.sessions.push({
+      ...embeddedMetadata,
+      sessionId: 'embedded-loading-only-density',
+      displayName: 'Loading only',
+      sourceId: '',
+      hasActivePrompt: true,
+      isWaitingForUserQuestion: false,
+      isWaitingForPermission: false,
+      needsContinuation: false,
+    });
+    scenario.sessions.push({
+      ...embeddedMetadata,
+      sessionId: 'embedded-status-only-density',
+      displayName: 'Loading without PR or goal',
+      prs: [],
+      goal: undefined,
+      sourceId: '',
+      hasActivePrompt: true,
+    });
+    scenario.sessions.push({
+      ...embeddedMetadata,
+      sessionId: 'embedded-single-line-density',
+      displayName: 'A',
+      prs: [
+        { number: 1, state: 'merged', url: 'https://github.com/o/r/pull/1' },
+      ],
+      goal: undefined,
+      hasActivePrompt: true,
     });
     await installScenario(page, scenario, baseURL);
     await page.goto('/e2e/navigation-rail-harness.html?narrow');
@@ -328,10 +366,10 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
       contentType: 'application/json',
     });
     expect(moreBox.x + moreBox.width).toBeLessThanOrEqual(
-      rowBox.x + rowBox.width + 0.5,
+      rowBox.x + rowBox.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     expect(moreBox.x + moreBox.width).toBeLessThanOrEqual(
-      sidebarBox.x + sidebarBox.width + 0.5,
+      sidebarBox.x + sidebarBox.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     await more.tap();
     await expect(
@@ -568,6 +606,192 @@ test('A touch embedded host sizes dense rows by its own width @smoke', async ({
     await closeMenuWithEscape(menu);
     await expect(menu).toHaveCount(0);
     await expect(continuationMore).toBeFocused();
+    const recent = sidebar.getByTestId('recent-sessions');
+    await expect(recent.locator('[data-web-shell-session-title]')).toHaveCount(
+      5,
+    );
+
+    const loadingOnlyRow = recent
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: /^Loading only$/ })
+      .locator('..');
+    const loadingOnlyMarker = loadingOnlyRow.locator(
+      '[class*="sessionLoading"]',
+    );
+    await expect(loadingOnlyMarker).toBeVisible();
+    await expect(
+      loadingOnlyRow.locator('[class*="sessionAttention"]'),
+    ).toHaveCount(0);
+    await expect(
+      loadingOnlyRow.locator('[class*="sessionContinuation"]'),
+    ).toHaveCount(0);
+    await expect(
+      loadingOnlyRow.locator('[class*="sessionMetaSlotReserved"]'),
+    ).toHaveCSS('display', 'contents');
+    await expect(loadingOnlyRow).toHaveCSS('flex-wrap', 'wrap');
+    await loadingOnlyRow.scrollIntoViewIfNeeded();
+    const loneLoadingPr = loadingOnlyRow.getByRole('link', {
+      name: /Pull Request/,
+    });
+    const loneLoadingGoal = loadingOnlyRow.getByTestId('session-goal-marker');
+    await expect(loneLoadingPr).toHaveText('#52484 +1');
+    await expect(loneLoadingGoal).toBeVisible();
+    const [
+      loadingOnlyBox,
+      loadingOnlyTitle,
+      loneLoadingPrBox,
+      loneLoadingGoalBox,
+      loneLoadingMarkerBox,
+      loneLoadingMoreBox,
+    ] = await Promise.all([
+      loadingOnlyRow.boundingBox(),
+      loadingOnlyRow.locator('[data-web-shell-session-title]').boundingBox(),
+      loneLoadingPr.boundingBox(),
+      loneLoadingGoal.boundingBox(),
+      loadingOnlyMarker.boundingBox(),
+      loadingOnlyRow
+        .getByRole('button', { name: 'More actions', exact: true })
+        .boundingBox(),
+    ]);
+    if (
+      !loadingOnlyBox ||
+      !loadingOnlyTitle ||
+      !loneLoadingPrBox ||
+      !loneLoadingGoalBox ||
+      !loneLoadingMarkerBox ||
+      !loneLoadingMoreBox
+    )
+      throw new Error('The loading-only row is not fully laid out.');
+    expectWrappedMetadataLayout(
+      [
+        loadingOnlyTitle,
+        loneLoadingPrBox,
+        loneLoadingGoalBox,
+        loneLoadingMarkerBox,
+      ],
+      loadingOnlyBox,
+      loneLoadingMoreBox,
+      'embedded-loading-only-density',
+    );
+
+    const statusOnlyTitle = recent
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: 'Loading without PR or goal' });
+    await expect(statusOnlyTitle).toHaveCount(0);
+    await recent
+      .getByRole('button', { name: 'Show 2 more', exact: true })
+      .tap();
+    await expect(recent.locator('[data-web-shell-session-title]')).toHaveCount(
+      7,
+    );
+    const statusOnlyRow = statusOnlyTitle.locator('..');
+    await expect(statusOnlyRow).toBeVisible();
+    await expect(
+      statusOnlyRow.locator('[class*="sessionLoading"]'),
+    ).toBeVisible();
+    await expect(
+      statusOnlyRow.locator('[class*="sessionAttention"]'),
+    ).toHaveCount(0);
+    await expect(
+      statusOnlyRow.locator('[class*="sessionContinuation"]'),
+    ).toHaveCount(0);
+    await expect(
+      statusOnlyRow.getByRole('link', { name: /Pull Request/ }),
+    ).toHaveCount(0);
+    await expect(statusOnlyRow.getByTestId('session-goal-marker')).toHaveCount(
+      0,
+    );
+    await expect(
+      statusOnlyRow.locator('[class*="sessionMetaSlotReserved"]'),
+    ).toHaveCount(0);
+    await expect(statusOnlyRow).toHaveCSS('flex-wrap', 'nowrap');
+    await statusOnlyRow.scrollIntoViewIfNeeded();
+    const [statusOnlyBox, statusOnlyActions, statusOnlyMore] =
+      await Promise.all([
+        statusOnlyRow.boundingBox(),
+        statusOnlyRow.locator('[class*="sessionActions"]').boundingBox(),
+        statusOnlyRow
+          .getByRole('button', { name: 'More actions', exact: true })
+          .boundingBox(),
+      ]);
+    if (!statusOnlyBox || !statusOnlyActions || !statusOnlyMore)
+      throw new Error('The status-only row is not laid out.');
+    expect(statusOnlyActions.height).toBeCloseTo(statusOnlyBox.height - 4, 1);
+    expect(statusOnlyActions.y).toBeCloseTo(statusOnlyBox.y + 2, 1);
+    expect(statusOnlyMore.height).toBeCloseTo(26, 1);
+    expect(statusOnlyMore.y + statusOnlyMore.height / 2).toBeCloseTo(
+      statusOnlyBox.y + statusOnlyBox.height / 2,
+      1,
+    );
+
+    await page.getByTestId('host-shell').evaluate((host) => {
+      host.style.width = '280px';
+    });
+    await expect(sidebar).toHaveAttribute('data-narrow', '');
+    const fitRow = sidebar
+      .getByTestId('recent-sessions')
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: /^A$/ })
+      .locator('..');
+    const fitPr = fitRow.getByRole('link', { name: /Pull Request/ });
+    const fitRunning = fitRow.locator('[class*="sessionLoading"]');
+    await expect(fitPr).toHaveText('#1');
+    await expect(fitRow.getByTestId('session-goal-marker')).toHaveCount(0);
+    await expect(fitRunning).toBeVisible();
+    await expect(
+      fitRow.locator('[class*="sessionMetaSlotReserved"]'),
+    ).toHaveCSS('display', 'contents');
+    const fitMore = fitRow.getByRole('button', {
+      name: 'More actions',
+      exact: true,
+    });
+    await fitRow.scrollIntoViewIfNeeded();
+    const [
+      fitRowBox,
+      fitTitleBox,
+      fitPrBox,
+      fitRunningBox,
+      fitMoreBox,
+      fitActionBox,
+    ] = await Promise.all([
+      fitRow.boundingBox(),
+      fitRow.locator('[data-web-shell-session-title]').boundingBox(),
+      fitPr.boundingBox(),
+      fitRunning.boundingBox(),
+      fitMore.boundingBox(),
+      fitRow.locator('[class*="sessionActions"]').boundingBox(),
+    ]);
+    if (
+      !fitRowBox ||
+      !fitTitleBox ||
+      !fitPrBox ||
+      !fitRunningBox ||
+      !fitMoreBox ||
+      !fitActionBox
+    )
+      throw new Error('The single-line marked row is not fully laid out.');
+    const firstLineCenters = [fitTitleBox, fitPrBox, fitRunningBox].map(
+      (box) => box.y + box.height / 2,
+    );
+    expect(
+      Math.max(...firstLineCenters) - Math.min(...firstLineCenters),
+      'fixture must remain a genuinely single-line row',
+    ).toBeLessThanOrEqual(1);
+    for (const box of [fitTitleBox, fitPrBox, fitRunningBox]) {
+      expect(
+        rectanglesAreDisjoint(box, fitMoreBox, BROWSER_LAYOUT_TOLERANCE_PX),
+      ).toBe(true);
+    }
+    expect(fitActionBox.height).toBeCloseTo(fitRowBox.height - 4, 1);
+    expect(fitActionBox.y).toBeCloseTo(fitRowBox.y + 2, 1);
+    expect(fitMoreBox.height).toBeCloseTo(26, 1);
+    expect(fitMoreBox.y + fitMoreBox.height / 2).toBeCloseTo(
+      fitRowBox.y + fitRowBox.height / 2,
+      1,
+    );
+    expect(fitActionBox.y + fitActionBox.height).toBeLessThanOrEqual(
+      fitRowBox.y + fitRowBox.height + BROWSER_LAYOUT_TOLERANCE_PX,
+    );
   } finally {
     await context.close();
   }
@@ -753,20 +977,20 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       contentType: 'application/json',
     });
     expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
-      rowBox.x + rowBox.width + 0.5,
+      rowBox.x + rowBox.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
-      sidebarBox.x + sidebarBox.width + 0.5,
+      sidebarBox.x + sidebarBox.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     expect(buttonBox.y + buttonBox.height / 2).toBeCloseTo(
       rowBox.y + rowBox.height / 2,
       1,
     );
     expect(buttonBox.y + buttonBox.height).toBeLessThanOrEqual(
-      runningRowBox.y + 0.5,
+      runningRowBox.y + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     expect(actionBox.y + actionBox.height).toBeLessThanOrEqual(
-      runningRowBox.y + 0.5,
+      runningRowBox.y + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     expect(
       runningStatusSlotBox.y + runningStatusSlotBox.height / 2,
@@ -778,7 +1002,7 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
     if (!runningGoalBox || !runningSpinnerBox)
       throw new Error('The running Recent row is not laid out.');
     expect(runningMore.x + runningMore.width).toBeLessThanOrEqual(
-      runningRowBox.x + runningRowBox.width + 0.5,
+      runningRowBox.x + runningRowBox.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
     await testInfo.attach('narrow-running-recent-geometry', {
       body: JSON.stringify({
@@ -790,7 +1014,11 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
       contentType: 'application/json',
     });
     expect(
-      rectanglesAreDisjoint(runningSpinnerBox, runningGoalBox),
+      rectanglesAreDisjoint(
+        runningSpinnerBox,
+        runningGoalBox,
+        BROWSER_LAYOUT_TOLERANCE_PX,
+      ),
       'running and goal must not overlap in either dimension',
     ).toBe(true);
     await runningGoal.click({ trial: true });

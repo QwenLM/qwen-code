@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -35,6 +36,7 @@ import {
 import { openableSessionPrs } from '../SessionPrBadge';
 import styles from './WebShellSidebar.module.css';
 import { resolveSessionDetailsCollisionBoundary } from './sessionDetailsCollisionBoundary';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 interface SessionDetailsTooltipProps {
   session: DaemonSessionSummary;
@@ -85,8 +87,10 @@ export function SessionDetailsTooltip({
   const contentRef = useRef<HTMLDivElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
-  const hoverSuppressedRef = useRef(hoverSuppressed);
-  hoverSuppressedRef.current = hoverSuppressed;
+  const sidebarSuppressed = useContext(SidebarHoverSuppressionContext);
+  const hoverSuppressionActive = hoverSuppressed || sidebarSuppressed;
+  const hoverSuppressedRef = useRef(hoverSuppressionActive);
+  hoverSuppressedRef.current = hoverSuppressionActive;
   // The overview shares one token so its own entry points replace each
   // other; every other instance keeps its own, so a hover elsewhere (e.g.
   // the sidebar) never moves focus out of this popover.
@@ -216,12 +220,12 @@ export function SessionDetailsTooltip({
   }, [cancelClose, setOpen]);
 
   useEffect(() => {
-    if (hoverSuppressed) {
+    if (hoverSuppressionActive) {
       window.clearTimeout(openTimerRef.current);
     }
-    if (!hoverSuppressed || openOnClick || !open) return;
+    if (!hoverSuppressionActive || openOnClick || !open) return;
     close();
-  }, [close, hoverSuppressed, open, openOnClick]);
+  }, [close, hoverSuppressionActive, open, openOnClick]);
 
   const closeAfterDelay = () => {
     window.clearTimeout(openTimerRef.current);

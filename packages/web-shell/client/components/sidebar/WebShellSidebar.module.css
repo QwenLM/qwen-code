@@ -1661,6 +1661,13 @@ button.livePendingSession:hover {
 
   .sidebar.mobileOpen[data-narrow]
     .sessionRow
+    .sessionMetaSlot:not(.sessionMetaSlotReserved)
+    .sessionActions {
+    align-self: stretch;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
     .sessionMetaSlotReserved
     .sessionActions {
     position: absolute;
@@ -1677,6 +1684,7 @@ button.livePendingSession:hover {
     .sessionMetaSlotReserved
     .sessionActions {
     inset: 2px 0 auto auto;
+    max-height: calc(100% - 4px);
   }
 }
 

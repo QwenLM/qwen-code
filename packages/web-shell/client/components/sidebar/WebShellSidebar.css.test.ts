@@ -139,8 +139,11 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
     expect(touchMedia).toMatch(
       new RegExp(
-        `${wrappedNarrowRow}\\s*\\.sessionMetaSlotReserved\\s*\\.sessionActions\\s*\\{\\s*inset:\\s*2px 0 auto auto;`,
+        `${wrappedNarrowRow}\\s*\\.sessionMetaSlotReserved\\s*\\.sessionActions\\s*\\{\\s*inset:\\s*2px 0 auto auto;[^}]*max-height:\\s*calc\\(100% - 4px\\);`,
       ),
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\][^}]*\.sessionMetaSlot:not\(\.sessionMetaSlotReserved\)\s+\.sessionActions\s*\{[^}]*align-self:\s*stretch;/s,
     );
     expect(touchMedia).toMatch(
       new RegExp(

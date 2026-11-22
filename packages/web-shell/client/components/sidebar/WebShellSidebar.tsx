@@ -175,6 +175,7 @@ import {
 } from './workspaceExpansion';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionRenameEditor } from './SessionRenameEditor';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import {
@@ -7624,7 +7625,7 @@ export function WebShellSidebar({
       </div>
     </div>
   );
-  return (
+  const sidebarTree = (
     <>
       {searchOpen && searchEnabled && (
         <SessionSearchDialog
@@ -9590,5 +9591,12 @@ export function WebShellSidebar({
       </aside>
       {archivedSection}
     </>
+  );
+  return (
+    <SidebarHoverSuppressionContext.Provider
+      value={sessionMenuOpen || groupMenu !== null}
+    >
+      {sidebarTree}
+    </SidebarHoverSuppressionContext.Provider>
   );
 }

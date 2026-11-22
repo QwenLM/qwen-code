@@ -1,3 +1,5 @@
+export const BROWSER_LAYOUT_TOLERANCE_PX = 0.5;
+
 export type Rectangle = {
   x: number;
   y: number;
@@ -5,14 +7,16 @@ export type Rectangle = {
   height: number;
 };
 
+// The default is strict disjointness; browser tests name their pixel allowance.
 export function rectanglesAreDisjoint(
   first: Rectangle,
   second: Rectangle,
+  epsilonPx = 0,
 ): boolean {
   return (
-    first.x + first.width <= second.x + 0.5 ||
-    second.x + second.width <= first.x + 0.5 ||
-    first.y + first.height <= second.y + 0.5 ||
-    second.y + second.height <= first.y + 0.5
+    first.x + first.width <= second.x + epsilonPx ||
+    second.x + second.width <= first.x + epsilonPx ||
+    first.y + first.height <= second.y + epsilonPx ||
+    second.y + second.height <= first.y + epsilonPx
   );
 }

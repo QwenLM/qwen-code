@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
 import { WorkspaceDetailsTooltip } from './WorkspaceDetailsTooltip';
 import type { WorkspaceOverviewSnapshot } from './workspaceOverviewModel';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 // The real picker reads the daemon workspace context and portals its own
 // layer; the branch row only needs to prove it wires the trigger and the
@@ -621,6 +622,72 @@ function gitDot(details: HTMLElement): HTMLElement | null {
 function picker(details: HTMLElement): HTMLElement | null {
   return details.querySelector<HTMLElement>('[data-testid="branch-picker"]');
 }
+
+describe('WorkspaceDetailsTooltip menu suppression', () => {
+  it('closes and cancels hover without stealing focus, then restores hover and focus opening', async () => {
+    let suppressed = true;
+    const content = (suppressed: boolean) => (
+      <SidebarHoverSuppressionContext.Provider value={suppressed}>
+        <I18nProvider language="en">
+          <WorkspaceDetailsTooltip
+            label="workspace"
+            cwd="/workspace"
+            overview={undefined}
+            items={[]}
+          >
+            <button type="button">Workspace</button>
+          </WorkspaceDetailsTooltip>
+        </I18nProvider>
+      </SidebarHoverSuppressionContext.Provider>
+    );
+    vi.useFakeTimers();
+    await act(async () => {
+      root.render(content(suppressed));
+    });
+    const trigger = () => container.querySelector<HTMLButtonElement>('button')!;
+    const hover = async () => {
+      await act(async () => {
+        trigger().dispatchEvent(new Event('pointerover', { bubbles: true }));
+        await vi.advanceTimersByTimeAsync(300);
+        await Promise.resolve();
+      });
+    };
+    await hover();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+
+    await act(async () => {
+      suppressed = false;
+      root.render(content(suppressed));
+    });
+    await hover();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+
+    const menuFocus = document.createElement('button');
+    document.body.appendChild(menuFocus);
+    await act(async () => {
+      menuFocus.focus();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    await act(async () => {
+      suppressed = true;
+      root.render(content(suppressed));
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(menuFocus);
+
+    await act(async () => {
+      suppressed = false;
+      root.render(content(suppressed));
+    });
+    await act(async () => {
+      expect(trigger().isConnected).toBe(true);
+      trigger().dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(300);
+      await Promise.resolve();
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+  });
+});
 
 describe('WorkspaceDetailsTooltip git branch row', () => {
   it('stays a plain summary when no git actions are wired', async () => {
