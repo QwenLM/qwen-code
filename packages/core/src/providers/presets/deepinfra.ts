@@ -19,10 +19,13 @@ export const deepinfraProvider: ProviderConfig = {
   baseUrl: DEEPINFRA_BASE_URL,
   envKey: DEEPINFRA_ENV_KEY,
   models: [
-    { id: 'deepseek-ai/DeepSeek-V3', contextWindowSize: 128000 },
-    { id: 'deepseek-ai/DeepSeek-R1', contextWindowSize: 128000 },
-    { id: 'meta-llama/Llama-3.3-70B-Instruct', contextWindowSize: 128000 },
-    { id: 'Qwen/Qwen2.5-Coder-32B-Instruct', contextWindowSize: 131072 },
+    { id: 'deepseek-ai/DeepSeek-V3', contextWindowSize: 163840 },
+    { id: 'deepseek-ai/DeepSeek-R1-0528', contextWindowSize: 163840 },
+    {
+      id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+      contextWindowSize: 131072,
+    },
+    { id: 'Qwen/Qwen2.5-72B-Instruct', contextWindowSize: 32768 },
   ],
   modelsEditable: true,
   modelNamePrefix: 'DeepInfra',
