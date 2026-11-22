@@ -230,6 +230,9 @@ function buildModelConfigs(
   } else if (config.models && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
     const specMap = new Map(config.models.map((s) => [s.id.toLowerCase(), s]));
+    const inputSpecMap = new Map(
+      inputs.modelSpecs?.map((s) => [s.id.toLowerCase(), s]) ?? [],
+    );
     models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id.toLowerCase());
       if (spec) {
@@ -241,6 +244,7 @@ function buildModelConfigs(
           protocol,
         );
       }
+      const inputSpec = inputSpecMap.get(id.toLowerCase());
       const genConfig = buildAdvancedGenerationConfig(
         inputs.advancedConfig,
         protocol,
@@ -250,15 +254,28 @@ function buildModelConfigs(
         name: prefix ? `[${prefix}] ${id}` : id,
         baseUrl: inputs.baseUrl,
         envKey,
-        ...(genConfig ? { generationConfig: genConfig } : {}),
+        ...(genConfig || inputSpec?.contextWindowSize
+          ? {
+              generationConfig: {
+                ...genConfig,
+                ...(inputSpec?.contextWindowSize
+                  ? { contextWindowSize: inputSpec.contextWindowSize }
+                  : {}),
+              },
+            }
+          : {}),
       };
     });
   } else {
     // No predefined models (custom provider) — use advancedConfig
     const advCfg = inputs.advancedConfig;
+    const inputSpecMap = new Map(
+      inputs.modelSpecs?.map((s) => [s.id.toLowerCase(), s]) ?? [],
+    );
     const displayName = (id: string) => (prefix ? `[${prefix}] ${id}` : id);
     models = inputs.modelIds.map((id) => {
       const genConfig = buildAdvancedGenerationConfig(advCfg, protocol);
+      const inputSpec = inputSpecMap.get(id.toLowerCase());
       return {
         id,
         name: displayName(id),
@@ -269,7 +286,16 @@ function buildModelConfigs(
           : advCfg?.purpose === 'voice'
             ? { voiceOnly: true }
             : {}),
-        ...(genConfig ? { generationConfig: genConfig } : {}),
+        ...(genConfig || inputSpec?.contextWindowSize
+          ? {
+              generationConfig: {
+                ...genConfig,
+                ...(inputSpec?.contextWindowSize
+                  ? { contextWindowSize: inputSpec.contextWindowSize }
+                  : {}),
+              },
+            }
+          : {}),
       };
     });
   }
@@ -441,6 +467,11 @@ export function buildInstallPlan(
       if (!existing) return model;
       const preservedGeneration = { ...existing.generationConfig };
       const advanced = inputs.advancedConfig;
+      if (advanced) {
+        if (advanced.replaceExisting || advanced.service_tier !== undefined) {
+          delete preservedGeneration.service_tier;
+        }
+      }
       if (!config.models && advanced) {
         if (advanced.replaceExisting) {
           delete preservedGeneration.contextWindowSize;
@@ -508,6 +539,19 @@ export function buildInstallPlan(
                 : {}),
             }
           : undefined;
+      if (
+        generationConfig &&
+        preservedGeneration.service_tier !== undefined &&
+        inputs.advancedConfig?.service_tier === undefined
+      ) {
+        generationConfig.service_tier = preservedGeneration.service_tier;
+      } else if (
+        generationConfig &&
+        inputs.advancedConfig?.replaceExisting &&
+        inputs.advancedConfig?.service_tier === undefined
+      ) {
+        delete generationConfig.service_tier;
+      }
       return {
         ...existing,
         ...model,
