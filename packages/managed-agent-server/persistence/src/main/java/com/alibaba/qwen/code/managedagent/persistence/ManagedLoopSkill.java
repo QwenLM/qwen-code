@@ -127,9 +127,12 @@ final class ManagedLoopSkill {
             List<Map<String, Object>> callerSkills, String profile,
             boolean sessionSkillsSupported, List<StandaloneSkill> packageSkills) {
         int definitionCount = merged.size();
-        // External Workspace 的 creationPin 已把 caller skills 放进 pin；再 addAll 会 double 导致
-        // names.add() 全部 false。仅在 merged 为空（非 external 形态）时追加 caller skills。
-        if (merged.isEmpty()) {
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+            // External creationPin already carried the caller skills into the pin;
+            // appending them again duplicates every name and the catalog validation
+            // refuses the creation. The pin slice is the whole caller catalog here.
+            definitionCount = 0;
+        } else {
             merged.addAll(callerSkills);
         }
         if (!sessionSkillsSupported) {

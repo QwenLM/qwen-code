@@ -1016,7 +1016,7 @@ class QwenHostedHarnessConnectorTest {
         ReflectionTestUtils.setField(refused, "client", client);
         ReflectionTestUtils.setField(refused, "sessionSkills", skills);
         assertThatThrownBy(() -> refused.createOrLoad("tenant-a", SESSION_ID, false))
-                .hasMessage("External Workspace profile is unavailable");
+                .hasMessage("External Workspace files profile is unavailable");
     }
 
     @Test
