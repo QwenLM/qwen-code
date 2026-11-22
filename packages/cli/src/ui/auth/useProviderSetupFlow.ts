@@ -199,7 +199,8 @@ export function useProviderSetupFlow(
 
       setApiKeyError(null);
       // Keep saved choices distinguishable from defaults when discovery omits an ID.
-      const defaultIds = getDefaultModelIds(config);
+      const defaultIds =
+        config.id === 'deepinfra' ? [] : getDefaultModelIds(config);
       const customIds = existingModelIds ?? [];
       setExplicitModelIds(customIds);
       setModelIds([...new Set([...defaultIds, ...customIds])].join(', '));
