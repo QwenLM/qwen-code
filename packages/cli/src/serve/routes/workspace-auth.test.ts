@@ -6,12 +6,22 @@
 
 import express from 'express';
 import request from 'supertest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   registerWorkspaceAuthRoutes,
   resetDeepinfraModelsCacheForTest,
 } from './workspace-auth.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
+
+const mockUndiciFetch = vi.hoisted(() => vi.fn());
+const mockEnvHttpProxyAgent = vi.hoisted(() => vi.fn());
+
+vi.mock('../../utils/load-undici.js', () => ({
+  loadUndici: async () => ({
+    fetch: mockUndiciFetch,
+    EnvHttpProxyAgent: mockEnvHttpProxyAgent,
+  }),
+}));
 
 function makeApp() {
   const app = express();
@@ -38,10 +48,16 @@ describe('workspace-auth routes', () => {
   beforeEach(() => {
     resetDeepinfraModelsCacheForTest();
     vi.restoreAllMocks();
+    mockUndiciFetch.mockReset();
+    mockEnvHttpProxyAgent.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   describe('GET /workspace/auth/deepinfra-models', () => {
-    it('fetches models from DeepInfra and returns 200 with data', async () => {
+    it('fetches models from DeepInfra with proxy dispatcher and returns 200 with data (R1-32)', async () => {
       const app = makeApp();
       const mockModels = [
         {
@@ -57,32 +73,52 @@ describe('workspace-auth routes', () => {
         },
       ];
 
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      mockUndiciFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockModels,
-      } as Response);
+      });
 
       const res = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res.status).toBe(200);
       expect(res.body).toEqual(mockModels);
-      expect(fetchSpy).toHaveBeenCalledWith(
+      expect(mockEnvHttpProxyAgent).toHaveBeenCalled();
+      expect(mockUndiciFetch).toHaveBeenCalledWith(
         'https://api.deepinfra.com/models/list',
-        expect.any(Object),
+        expect.objectContaining({
+          dispatcher: expect.any(Object),
+          headers: expect.objectContaining({
+            Accept: 'application/json',
+            'User-Agent': 'qwen-code',
+          }),
+        }),
       );
     });
 
-    it('filters out any anthropic/* models from DeepInfra response', async () => {
+    it('filters out non-chat, anthropic/*, and deprecated models from DeepInfra response', async () => {
       const app = makeApp();
       const mockModels = [
         { model_name: 'deepseek-ai/DeepSeek-V3', type: 'text-generation' },
         { model_name: 'anthropic/claude-3-5-sonnet', type: 'text-generation' },
-        { model_name: 'anthropic/claude-haiku-4-5', type: 'text-generation' },
+        {
+          model_name: 'meta-llama/Llama-Guard-3-8B',
+          type: 'text-classification',
+        },
+        {
+          model_name: 'old-model',
+          type: 'text-generation',
+          deprecated: 1700000000, // in the past
+        },
+        {
+          model_name: 'deprecated-bool-model',
+          type: 'text-generation',
+          deprecated: true,
+        },
       ];
 
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      mockUndiciFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockModels,
-      } as Response);
+      });
 
       const res = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res.status).toBe(200);
@@ -91,7 +127,7 @@ describe('workspace-auth routes', () => {
       ]);
     });
 
-    it('uses in-memory cache for subsequent requests', async () => {
+    it('uses in-memory cache for subsequent requests within TTL', async () => {
       const app = makeApp();
       const mockModels = [
         {
@@ -100,55 +136,116 @@ describe('workspace-auth routes', () => {
         },
       ];
 
-      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      mockUndiciFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockModels,
-      } as Response);
+      });
 
       const res1 = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res1.status).toBe(200);
       expect(res1.body).toEqual(mockModels);
 
-      // Second call should return cached data without fetching again
+      // Second call within TTL should return cached data without fetching again
       const res2 = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res2.status).toBe(200);
       expect(res2.body).toEqual(mockModels);
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(mockUndiciFetch).toHaveBeenCalledTimes(1);
     });
 
-    it('returns 502 upstream_error when DeepInfra API fails and no cache exists', async () => {
+    it('deduplicates concurrent requests with single-flight (R1-18)', async () => {
       const app = makeApp();
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-      } as Response);
+      const mockModels = [
+        {
+          model_name: 'single-flight-model',
+          type: 'text-generation',
+        },
+      ];
+
+      let resolveFetch!: (value: unknown) => void;
+      mockUndiciFetch.mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveFetch = resolve;
+        }),
+      );
+
+      const p1 = request(app).get('/workspace/auth/deepinfra-models');
+      const p2 = request(app).get('/workspace/auth/deepinfra-models');
+      const p3 = request(app).get('/workspace/auth/deepinfra-models');
+
+      resolveFetch({
+        ok: true,
+        json: async () => mockModels,
+      });
+
+      const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+      expect(r1.status).toBe(200);
+      expect(r2.status).toBe(200);
+      expect(r3.status).toBe(200);
+      expect(r1.body).toEqual(mockModels);
+      expect(r2.body).toEqual(mockModels);
+      expect(r3.body).toEqual(mockModels);
+      expect(mockUndiciFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('aborts and returns 502 when response body hangs past timeout (R1-1)', async () => {
+      const app = makeApp();
+      mockUndiciFetch.mockImplementationOnce(
+        async (_url: string, _opts: { signal: AbortSignal }) => ({
+            ok: true,
+            json: async () => {
+              const abortErr = new Error('This operation was aborted');
+              abortErr.name = 'AbortError';
+              throw abortErr;
+            },
+          }),
+      );
 
       const res = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res.status).toBe(502);
       expect(res.body.code).toBe('upstream_error');
     });
 
-    it('falls back to stale cache when upstream fetch fails', async () => {
+    it('returns 502 upstream_error when DeepInfra API fails and no cache exists', async () => {
       const app = makeApp();
-      const mockModels = [{ model_name: 'cached-model' }];
+      mockUndiciFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+      });
+
+      const res = await request(app).get('/workspace/auth/deepinfra-models');
+      expect(res.status).toBe(502);
+      expect(res.body.code).toBe('upstream_error');
+    });
+
+    it('falls back to stale cache when upstream fetch fails past TTL (R1-2)', async () => {
+      const app = makeApp();
+      const mockModels = [
+        { model_name: 'cached-model', type: 'text-generation' },
+      ];
+
+      vi.useFakeTimers({ toFake: ['Date'] });
 
       // Prime cache
-      vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      mockUndiciFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => mockModels,
-      } as Response);
+      });
 
       await request(app).get('/workspace/auth/deepinfra-models');
+      expect(mockUndiciFetch).toHaveBeenCalledTimes(1);
+
+      // Advance clock past 1 hour TTL
+      vi.setSystemTime(Date.now() + 60 * 60 * 1000 + 1000);
 
       // Next request fails, but stale cache should be returned
-      vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(
-        new Error('Network error'),
-      );
+      mockUndiciFetch.mockRejectedValueOnce(new Error('Network error'));
 
-      // Artificially simulate error by bypassing cache TTL or testing error branch
       const res = await request(app).get('/workspace/auth/deepinfra-models');
       expect(res.status).toBe(200);
       expect(res.body).toEqual(mockModels);
+      expect(mockUndiciFetch).toHaveBeenCalledTimes(2);
+
+      vi.useRealTimers();
     });
   });
 });
