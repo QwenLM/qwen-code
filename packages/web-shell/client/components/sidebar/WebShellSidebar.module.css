@@ -2654,3 +2654,17 @@ button.livePendingSession:hover {
   padding: 12px;
   border-right: 0;
 }
+
+/* Paused creation controls must look disabled: the shared header-action
+   class only styles hover/focus, so without this a paused button keeps a
+   pointer cursor and hover highlight while silently swallowing clicks. */
+.workspaceHeaderAction:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.workspaceHeaderAction:disabled:hover,
+.workspaceHeaderAction:disabled:focus-visible {
+  background: none;
+  color: inherit;
+}

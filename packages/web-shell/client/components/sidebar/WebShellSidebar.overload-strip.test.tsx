@@ -100,6 +100,41 @@ vi.mock('./StandaloneRecents', () => ({
   },
 }));
 
+const capturedChrome = vi.hoisted(() => ({
+  menu: undefined as { actions?: Record<string, unknown> } | undefined,
+  section: undefined as { gitBranchWanted?: boolean } | undefined,
+}));
+
+vi.mock('./WorkspaceMenu', () => ({
+  WorkspaceMenu: (props: { actions?: Record<string, unknown> }) => {
+    capturedChrome.menu = props;
+    return null;
+  },
+}));
+
+vi.mock('./WorkspaceSection', async () => {
+  const React = await import('react');
+  return {
+    WorkspaceSection: (props: {
+      gitBranchWanted?: boolean;
+      headerActions?: (
+        visible: boolean,
+        extras: Record<string, unknown>,
+      ) => unknown;
+    }) => {
+      capturedChrome.section = props;
+      // The workspace menu is rendered through the section's header-actions
+      // render prop; invoke it so the menu capture sees the real actions.
+      return React.createElement(
+        React.Fragment,
+        null,
+        props.headerActions?.(true, {}) as never,
+      );
+    },
+    isAbsolutePath: (value: string) => value.startsWith('/'),
+  };
+});
+
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
@@ -111,7 +146,13 @@ const onNewSession = vi.fn(() => false);
 const onError = vi.fn();
 
 function renderSidebar(
-  props: { overloadPaused?: boolean; overloadDetail?: string } = {},
+  props: {
+    overloadPaused?: boolean;
+    overloadDetail?: string;
+    onNewWorktreeSession?: (cwd?: string) => void;
+    onLoadStandaloneSession?: (id: string) => void;
+    onStandaloneNotice?: (message: string) => void;
+  } = {},
   language: 'en' | 'zh-CN' = 'en',
 ) {
   const sidebar = (
@@ -179,6 +220,8 @@ beforeEach(() => {
   onError.mockClear();
   capturedEntries.recent = undefined;
   capturedEntries.standalone = undefined;
+  capturedChrome.section = undefined;
+  capturedChrome.menu = undefined;
 });
 
 afterEach(() => {
@@ -268,5 +311,104 @@ describe('WebShellSidebar overload strip', () => {
       }),
       'System overloaded — new tasks paused',
     );
+  });
+
+  it('omits workspace-menu creation actions and the git poll while paused', async () => {
+    connection.capabilities = {
+      features: ['workspace_qualified_rest_core'],
+      workspaces: [
+        {
+          id: 'ws-1',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'ws-2',
+          cwd: '/tmp/second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof connection.capabilities;
+    renderSidebar({ overloadPaused: true, onNewWorktreeSession: () => {} });
+    await flushSidebar();
+    expect(capturedChrome.section).toBeDefined();
+    expect(capturedChrome.menu!.actions?.['newSession']).toBeUndefined();
+    expect(
+      capturedChrome.menu!.actions?.['newWorktreeSession'],
+    ).toBeUndefined();
+    // The blocking git poll's only consumer is hidden while paused.
+    expect(capturedChrome.section!.gitBranchWanted).toBe(false);
+  });
+
+  it('keeps menu creation actions and the git poll when not paused', async () => {
+    connection.capabilities = {
+      features: ['workspace_qualified_rest_core'],
+      workspaces: [
+        {
+          id: 'ws-1',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'ws-2',
+          cwd: '/tmp/second',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof connection.capabilities;
+    renderSidebar({ onNewWorktreeSession: () => {} });
+    await flushSidebar();
+    expect(capturedChrome.menu!.actions?.['newSession']).toBeTypeOf('function');
+    expect(capturedChrome.section!.gitBranchWanted).toBe(true);
+  });
+
+  it('honors newSessionDisabled on the standalone header button', async () => {
+    const { StandaloneRecents: RealStandaloneRecents } = await vi.importActual<
+      typeof import('./StandaloneRecents')
+    >('./StandaloneRecents');
+    workspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+    } as typeof workspace.capabilities;
+    // The clean-empty state renders no header at all; a load error mounts
+    // the error-state header with the New session button.
+    workspace.client.listStandaloneSessionsPage.mockRejectedValue(
+      new Error('status unavailable'),
+    );
+    const standaloneNew = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <RealStandaloneRecents
+            archiveState="active"
+            currentSessionId={undefined}
+            refreshKey={0}
+            onNewSession={standaloneNew}
+            newSessionDisabled
+            onLoadSession={() => {}}
+            onRenameSession={() => {}}
+            onMutated={() => {}}
+            onStatusChange={() => {}}
+            onError={() => {}}
+            onNotice={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New session"]',
+    );
+    expect(button).not.toBeNull();
+    expect(button!.disabled).toBe(true);
+    act(() => {
+      button!.click();
+    });
+    expect(standaloneNew).not.toHaveBeenCalled();
   });
 });

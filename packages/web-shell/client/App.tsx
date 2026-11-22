@@ -13099,6 +13099,16 @@ export function App({
         // its own submitter.
       }
       if (currentSessionId) return Promise.resolve(undefined);
+      // Chokepoint for !ls / control commands / @-mention runs: refuse the
+      // allocation up front while paused instead of paying a doomed create
+      // round-trip on a saturated host.
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return Promise.resolve(undefined);
+      }
       const pendingManualTitle = pendingManualTitleRef.current;
       const promise = (async () => {
         let allocatedSessionId: string | undefined;
@@ -13358,10 +13368,12 @@ export function App({
     [
       getComposerWorkspaceCwd,
       lockedWorkspaceCwd,
+      pushToast,
       sessionActions,
       sessionCatalogController,
       setPendingSessionContext,
       setPendingReasoningIntent,
+      t,
     ],
   );
   const onSubmitBeforeRef = useRef(onSubmitBefore);
@@ -13656,6 +13668,8 @@ export function App({
     ) => {
       // A first prompt in a fresh draft would allocate a daemon session;
       // refuse it up front while paused instead of failing after submit.
+      // `false` is the refusal contract: awaited callers (composer submit,
+      // settings language sync) must not treat it as an accepted submission.
       if (
         overloadPausedRef.current &&
         !managedModeRef.current &&
@@ -13666,7 +13680,7 @@ export function App({
           'warning',
           overloadDetailRef.current ?? t('sidebar.overloadPaused'),
         );
-        return;
+        return false;
       }
       if (sessionWriteBlockedRef.current) {
         throw new DOMException(
@@ -14124,13 +14138,6 @@ export function App({
 
   const resolveSessionForWorkspace = useCallback(
     async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
-      if (overloadPausedRef.current && !managedModeRef.current) {
-        pushToast(
-          'warning',
-          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
-        );
-        return undefined;
-      }
       try {
         if (!forceCreate) {
           // Reuse the connected session only when it owns the target checkout.
@@ -14152,6 +14159,15 @@ export function App({
             { fresh: true },
           );
           if (page.sessions.length > 0) return page.sessions[0].sessionId;
+        }
+        // Only allocation is paused: reuse above must keep working while
+        // overloaded (GitDialog commit/PR generation allocates nothing).
+        if (overloadPausedRef.current && !managedModeRef.current) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return undefined;
         }
         // No session exists or forced: create one. Creating binds the chat
         // connection — session navigation that must discard an armed
@@ -16306,10 +16322,11 @@ export function App({
       // running sessions; a plain settings write would leave both stale.
       const command = `/language output ${language.trim() || 'auto'}`;
       try {
-        await sendPrompt(command, undefined, undefined, {
+        const admitted = await sendPrompt(command, undefined, undefined, {
           ownerRef: owner,
           suppressSessionTitle: true,
         });
+        if (admitted === false) return false;
       } catch (error) {
         if (owner.current.isCurrent()) {
           reportError(error, 'Failed to sync /language output command');
@@ -17387,7 +17404,7 @@ export function App({
         carryManualTitle?: string;
       },
     ) => {
-      if (overloadPausedRef.current) {
+      if (overloadPausedRef.current && !managedModeRef.current) {
         pushToast(
           'warning',
           overloadDetailRef.current ?? t('sidebar.overloadPaused'),
@@ -19807,7 +19824,7 @@ export function App({
       let admitted = false;
       let admissionUnknown = false;
       try {
-        await sendPrompt(trimmed, images, files, {
+        const submission = await sendPrompt(trimmed, images, files, {
           submittedPrompt: trimmed,
           inputAnnotations,
           clearComposerOnPromptStart: false,
@@ -19875,6 +19892,7 @@ export function App({
             admitted = true;
           },
         });
+        if (submission === false) return false;
       } catch (error) {
         if (!isCurrent()) return false;
         if (

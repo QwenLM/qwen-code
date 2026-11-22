@@ -9045,7 +9045,8 @@ export function WebShellSidebar({
                             gitBranchWanted={
                               !sectionView &&
                               Boolean(onNewWorktreeSession) &&
-                              !lockedWorkspaceCwd
+                              !lockedWorkspaceCwd &&
+                              !overloadPaused
                             }
                             sessionStats={
                               ws.primary

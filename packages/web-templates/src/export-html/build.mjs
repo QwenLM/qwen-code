@@ -76,7 +76,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // The schema-version narrowing capture adds a further 8 bytes.
 // Including the merged ChatSurface inputs, local builds and the CI merge tree
 // both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_151;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -214,14 +214,16 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
 // has no importer, so no component code reaches the document entry; the
 // forbidden-input guard passes and the third-party input mix is unchanged.
 // Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
-// Merged-tree re-measure (#18054 x #18067): with the web-shell transcript
-// lib rebuilt on the merged source, the renderer measures 2,152,292 JS bytes
-// (CSS unchanged at 2,427,365) — the ChatSurface copy (+633 over 2,151,214)
-// plus the overload-indicator catalog entries (+445) together. Recent trees
-// measure identically on CI and locally, so the 713/1,713 margins sit above
-// this measurement: warning 2,153,005, ceiling 2,154,005. The forbidden-input
-// guard passes and the third-party input mix is unchanged.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_154_005;
+// Merged-tree re-measure (#18054 x #18067 x current main): with the
+// web-shell transcript lib rebuilt on the merged source (main adfed6ef43
+// merge plus the overload-indicator slice), the renderer measures 2,155,468
+// JS bytes. Both thresholds derive from that single measurement with the
+// lane's current caliber: warning = measured + 683 = 2,156,151, ceiling =
+// warning + 430 = 2,156,581. The overload-indicator catalog entries (four
+// locales, detail as interpolating functions) contribute +445 over the
+// pre-slice base; the remainder is upstream Web Shell copy carried by the
+// merge. The forbidden-input guard passes and the third-party input mix is
+// unchanged.
 //
 // A normal build at the measured size below is not warned; only further
 // growth is warned. The identity placeholder can change byte length when it

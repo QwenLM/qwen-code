@@ -187,4 +187,41 @@ describe('useDaemonOverloadPause', () => {
     await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
     expect(loadDaemonStatus).not.toHaveBeenCalled();
   });
+
+  it('drops a stale overloaded verdict once status polls keep failing', async () => {
+    loadDaemonStatus.mockResolvedValueOnce(reportWith(true));
+    const { view } = renderPause();
+    await flush();
+    expect(view.result.current.paused).toBe(true);
+    loadDaemonStatus.mockRejectedValue(new Error('502 from proxy'));
+    await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    await flush();
+    expect(view.result.current.paused).toBe(false);
+  });
+
+  it('does not stack an interval request on a pending mount request', async () => {
+    loadDaemonStatus.mockImplementationOnce(() => new Promise(() => {}));
+    renderPause();
+    await flush();
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('issues no mount request while hidden and loads once visible', async () => {
+    Object.defineProperty(document, 'hidden', {
+      value: true,
+      configurable: true,
+    });
+    renderPause();
+    await flush();
+    expect(loadDaemonStatus).not.toHaveBeenCalled();
+    Object.defineProperty(document, 'hidden', {
+      value: false,
+      configurable: true,
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await flush();
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(1);
+  });
 });

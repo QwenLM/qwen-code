@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useOptionalDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import { useDaemonResource } from './useDaemonResource.js';
 
@@ -37,14 +37,32 @@ export function useDaemonOverloadPause(options: {
   const { enabled, refusal, onRefusalExpired } = options;
   const workspace = useOptionalDaemonWorkspace();
   const actions = workspace?.actions;
-  const load = useCallback(
-    () => actions!.loadDaemonStatus('summary'),
-    [actions],
-  );
+  // A backgrounded tab must not issue the mount request either; becoming
+  // visible re-enables the resource and its autoLoad effect.
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const onVisibility = () => setVisible(!document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+  // Track the mount/autoLoad request too: the interval guard alone would
+  // stack a second summary on top of a mount request the daemon holds for
+  // the full 30 s client timeout.
+  const pendingRef = useRef(0);
+  const load = useCallback(() => {
+    pendingRef.current += 1;
+    return actions!.loadDaemonStatus('summary').finally(() => {
+      pendingRef.current -= 1;
+    });
+  }, [actions]);
   // autoLoad so an already-overloaded daemon is visible before the first
   // interval tick (and again after every reconnect, which re-creates load).
-  const { data: report, reload } = useDaemonResource(load, {
-    enabled: enabled && actions !== undefined,
+  const {
+    data: report,
+    error,
+    reload,
+  } = useDaemonResource(load, {
+    enabled: enabled && actions !== undefined && visible,
     autoLoad: true,
   });
   const inFlightRef = useRef(false);
@@ -55,7 +73,8 @@ export function useDaemonOverloadPause(options: {
       // Same guards as the status dialog poller: a saturated daemon can hold
       // a summary request for the full 30 s client timeout, and a hidden tab
       // should not add load to the condition being reported.
-      if (document.hidden || inFlightRef.current) return;
+      if (document.hidden || inFlightRef.current || pendingRef.current > 0)
+        return;
       inFlightRef.current = true;
       void reload().finally(() => {
         inFlightRef.current = false;
@@ -74,7 +93,11 @@ export function useDaemonOverloadPause(options: {
   }, [refusal, onRefusalExpired]);
 
   const loadAdmission = report?.runtime.loadAdmission;
-  const pollOverloaded = loadAdmission?.overloaded === true;
+  // Freshness bound: useDaemonResource keeps the last payload across poll
+  // failures, so a stale overloaded sample must not keep creation disabled
+  // while status stops answering.
+  const pollOverloaded =
+    error === undefined && loadAdmission?.overloaded === true;
   const reactiveActive = refusal !== null && Date.now() < refusal.expiresAt;
   return {
     paused: pollOverloaded || reactiveActive,
