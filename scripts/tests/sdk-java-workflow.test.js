@@ -3,10 +3,13 @@ import {
   chmodSync,
   existsSync,
   linkSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -44,6 +47,70 @@ const step = (block, name) => {
   const next = block.slice(start + 1).search(/\n {6}- name:/);
   return block.slice(start, next < 0 ? undefined : start + 1 + next);
 };
+
+function writeDeviceProbe(
+  root,
+  {
+    lockBackend = false,
+    hostDevice = '17',
+    jobDevice = '29',
+    homeDevice = hostDevice,
+    cpExit = 0,
+    statExit = 0,
+    hostStatExit = statExit,
+    jobStatExit = statExit,
+  } = {},
+) {
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, 'stat'),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/stat-calls"
+case "$3" in
+  "\${HOME}/.m2/repository"|"\${HOME}/.m2")
+    [ ${hostStatExit} -eq 0 ] || printf 'injected stat failure\\n' >&2
+    [ ${hostStatExit} -eq 0 ] && printf '%s\\n' '${hostDevice}'
+    exit ${hostStatExit}
+    ;;
+  "\${HOME}")
+    [ ${hostStatExit} -eq 0 ] || printf 'injected stat failure\\n' >&2
+    [ ${hostStatExit} -eq 0 ] && printf '%s\\n' '${homeDevice}'
+    exit ${hostStatExit}
+    ;;
+  "\${RUNNER_TEMP}/m2-repo")
+    [ ${jobStatExit} -eq 0 ] || printf 'injected stat failure\\n' >&2
+    [ ${jobStatExit} -eq 0 ] && printf '%s\\n' '${jobDevice}'
+    exit ${jobStatExit}
+    ;;
+  *) printf 'unexpected stat path: %s\\n' "$3" >&2; exit 1 ;;
+esac
+`,
+    { mode: 0o755 },
+  );
+  // `find -exec` cannot see a shell function; record its real cp children.
+  writeFileSync(
+    join(bin, 'cp'),
+    `#!/bin/sh
+printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/cp-calls"
+if [ ${cpExit} -ne 0 ]; then
+  mkdir -p "\${RUNNER_TEMP}/m2-repo/com/acme" || exit ${cpExit}
+  printf 'partial-copy\\n' > "\${RUNNER_TEMP}/m2-repo/com/acme/cp-partial.jar" || exit ${cpExit}
+  exit ${cpExit}
+fi
+exec /bin/cp "$@"
+`,
+    { mode: 0o755 },
+  );
+  const scripts = join(root, 'workspace', '.github', 'scripts');
+  mkdirSync(scripts, { recursive: true });
+  writeFileSync(
+    join(scripts, 'sdk-java-lock.sh'),
+    lockBackend
+      ? 'sdk_java_lock_acquire() { printf "lock\\n" >> "${RUNNER_TEMP}/lock-calls"; return 0; }\n'
+      : 'sdk_java_lock_acquire() { return 0; }\n',
+  );
+}
 
 describe('SDK Java self-hosted workflow guards', () => {
   it('runs both ordinary dependency host modes from the verified local reactor', () => {
@@ -313,7 +380,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         'source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"',
       );
       expect(lockAt, locked.name).toBeGreaterThan(-1);
-      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+      const seedAt = locked.run.indexOf('cp -aln "${HOME}/.m2/repository/."');
       expect(seedAt, locked.name).toBeGreaterThan(-1);
       expect(seedAt, locked.name).toBeLessThan(lockAt);
       // Assert on the region below the acquisition, not on first-occurrence
@@ -438,29 +505,27 @@ describe('SDK Java self-hosted workflow guards', () => {
       for (const candidate of job.steps ?? []) {
         const run = candidate.run;
         if (typeof run !== 'string') continue;
-        const seedAt = run.indexOf('cp -aln "${HOME}/.m2/repository"');
+        const seedAt = run.indexOf('cp -aln "${HOME}/.m2/repository/."');
         if (seedAt !== -1) {
           const seedEnd = run.indexOf('\nmvn --batch-mode', seedAt);
           expect(seedEnd, jobName).toBeGreaterThan(seedAt);
           const seed = run.slice(seedAt, seedEnd);
           expect(seed, jobName).toContain(
-            'find "${RUNNER_TEMP}/m2-repo" -depth -type d',
+            'find -P "${RUNNER_TEMP}/m2-repo" -xdev -depth',
           );
-          expect(seed, jobName).toContain(
-            '-exec rm -rf {} + 2>/dev/null || true',
-          );
+          expect(seed, jobName).toContain('-delete || exit 1');
           drops.push([jobName, pathsOf(seed)]);
           seedMarkers.push([jobName, markersOf(seed)]);
         }
         const pruneAt = run.indexOf('timeout 300 find .');
         if (pruneAt === -1) continue;
         const hostPurgeAt = run.indexOf(
-          'find "${HOME}/.m2/repository" -depth -type d',
+          'find -P "${HOME}/.m2/repository" -xdev -depth',
         );
         expect(hostPurgeAt, jobName).toBeGreaterThan(-1);
         expect(hostPurgeAt, jobName).toBeLessThan(pruneAt);
         const hostPurge = run.slice(hostPurgeAt, pruneAt);
-        expect(hostPurge, jobName).toContain('-exec rm -rf {} + 9>&-');
+        expect(hostPurge, jobName).toContain('-delete 9>&- || write_back=$?');
         hostPurges.push([jobName, pathsOf(hostPurge)]);
         const prune = run.slice(pruneAt, run.indexOf('\n', pruneAt));
         prunes.push([jobName, pathsOf(prune)]);
@@ -484,7 +549,9 @@ describe('SDK Java self-hosted workflow guards', () => {
       'qwen-managed-agent-verification',
       'qwencode-sdk',
     ];
-    const expectedFamilies = ['qwen-managed-agent-*', 'qwencode-sdk'];
+    const expectedFamilies = ['qwen-managed-agent-*', 'qwencode-sdk']
+      .flatMap((name) => [name, `${name}/*`])
+      .sort();
     expect(drops.length).toBeGreaterThan(0);
     expect(hostPurges).toHaveLength(prunes.length);
     expect(prunes.length).toBeGreaterThan(0);
@@ -521,8 +588,13 @@ describe('SDK Java self-hosted workflow guards', () => {
     const names = (text, pattern) =>
       [...text.matchAll(pattern)].map((match) => match[1]).sort();
     const seeds = [
-      ...workflow.matchAll(/find "\$\{RUNNER_TEMP\}\/m2-repo" .*?-delete/g),
-    ];
+      ...workflow.matchAll(/find -P "\$\{RUNNER_TEMP\}\/m2-repo" .*?-delete/g),
+    ].filter((match) => match[0].includes('*.lastUpdated'));
+    expect([
+      ...workflow.matchAll(
+        /find -P "\$\{RUNNER_TEMP\}\/m2-repo" -xdev -mindepth 1 -delete/g,
+      ),
+    ]).toHaveLength(4);
     const writeBacks = [
       ...workflow.matchAll(/timeout 300 find \..*?write_back=\$\?/g),
     ];
@@ -576,12 +648,11 @@ describe('SDK Java self-hosted workflow guards', () => {
   });
 
   // The deferred-status reporter is defined above the lock block it is called
-  // from, so a slice that starts at `lock_setup_fault()` (or lower) must carry
-  // the definition: without it every tolerated-skip arm dies with 127 and the
-  // failure reads as a code defect rather than a missing prelude.
+  // from. Carry only its definition, not the filesystem probe between the
+  // definition and the lock block, into a probe's prelude.
   const deferredReporter = (run) => {
     const at = run.indexOf('mvn_report_failed_suite() {');
-    const end = run.indexOf('lock_setup_fault() {');
+    const end = run.indexOf('writeback_host_root=', at);
     return at === -1 || end === -1 ? '' : run.slice(at, end);
   };
 
@@ -640,7 +711,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const seeds = Object.entries(jobs).flatMap(([name, job]) =>
         (job.steps ?? [])
           .filter((candidate) =>
-            candidate.run?.includes('cp -aln "${HOME}/.m2/repository"'),
+            candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
           )
           .map((candidate) => [name, candidate.run]),
       );
@@ -652,17 +723,17 @@ describe('SDK Java self-hosted workflow guards', () => {
       ]);
       for (const [name, seedRun] of seeds) {
         const start = seedRun.indexOf(
-          'if [ -d "${HOME}/.m2/repository" ]; then',
+          'if [ -L "${RUNNER_TEMP}/m2-repo" ]; then',
         );
         const end = seedRun.indexOf('\nmvn --batch-mode', start);
         expect(start, name).toBeGreaterThan(-1);
         expect(end, name).toBeGreaterThan(start);
         const seed = seedRun.slice(start, end);
         expect(seed, name).toContain(
-          'find "${RUNNER_TEMP}/m2-repo" -depth -type d',
+          'find -P "${RUNNER_TEMP}/m2-repo" -xdev -depth',
         );
         expect(seed, name).toContain(
-          "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*'",
+          "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*'",
         );
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-'));
         const home = join(dir, 'home');
@@ -822,13 +893,12 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(stanza, step.name).toBeTruthy();
         // Both lanes defer their Maven status, so each stanza needs the
         // reporter and status definition even though this probe ends at `fi`.
-        const reporterAt = step.run.indexOf('mvn_report_failed_suite() {');
+        // The stanza begins after the device probe, which has its own full-step
+        // matrix below. A known-compatible pair keeps this lock-release probe
+        // on the publication path it was built to test.
         const writeBack = step.run.includes('mvn_report_failed_suite() {')
-          ? `mvn_status=0\n${step.run.slice(
-              reporterAt,
-              step.run.indexOf('lock_setup_fault() {', reporterAt),
-            )}${stanza}`
-          : stanza;
+          ? `mvn_status=0\nwriteback_device_host=probe\nwriteback_device_job=probe\n${deferredReporter(step.run)}${stanza}`
+          : `writeback_device_host=probe\nwriteback_device_job=probe\n${stanza}`;
         // Derive the children from the write-back itself: a command added
         // without a fd 9 close must get its own survivor, or this guard
         // stays green while a cancelled job's child keeps the host lock.
@@ -1101,7 +1171,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const mkdirAt = locked.run.indexOf('mkdir -p "${HOME}/.m2/repository"');
         expect(mkdirAt, locked.name).toBeGreaterThan(start);
         const purgeAt = locked.run.indexOf(
-          'find "${HOME}/.m2/repository" -depth -type d',
+          'find -P "${HOME}/.m2/repository" -xdev -depth',
         );
         expect(purgeAt, locked.name).toBeGreaterThan(mkdirAt);
         const writeBack = locked.run
@@ -1173,11 +1243,19 @@ describe('SDK Java self-hosted workflow guards', () => {
           ]) {
             writeFileSync(join(repo, 'org/example/lib/1.0', name), name);
           }
-          const result = spawnSync('bash', ['-e', '-c', writeBack], {
-            encoding: 'utf8',
-            timeout: 10000,
-            env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
-          });
+          const result = spawnSync(
+            'bash',
+            [
+              '-e',
+              '-c',
+              `mvn_report_failed_suite() { :; }\nwriteback_device_host=probe\nwriteback_device_job=probe\nmvn_status=0\nmvn_stage='sdk-java test'\n${writeBack}`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 10000,
+              env: { ...process.env, HOME: home, RUNNER_TEMP: runnerTemp },
+            },
+          );
           expect(result.status, locked.name + result.stderr).toBe(0);
           // The stanza starts at write_back=0; without that initialization
           // both status checks compare an empty string and pass on the `[`
@@ -1259,7 +1337,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const sdkJavaSeeds = Object.values(parse(workflow).jobs)
         .flatMap((entry) => entry.steps ?? [])
         .filter((candidate) =>
-          candidate.run?.includes('cp -aln "${HOME}/.m2/repository"'),
+          candidate.run?.includes('cp -aln "${HOME}/.m2/repository/."'),
         );
       const referenceSeeds = Object.values(reference.jobs)
         .flatMap((entry) => entry.steps ?? [])
@@ -1272,10 +1350,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       // is the any-depth removal of every in-house tree, so pin it explicitly.
       for (const candidate of referenceSeeds) {
         expect(candidate.run, candidate.name).toContain(
-          'find "${repo}" -depth -type d',
+          'find -P "${repo}" -xdev -depth',
         );
         expect(candidate.run, candidate.name).toContain(
-          "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*'",
+          "-path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*'",
         );
       }
       const seeding = [...sdkJavaSeeds, ...referenceSeeds];
@@ -1284,7 +1362,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const seedAt = lines.findIndex(
           (line) =>
             line.includes('repo="${RUNNER_TEMP}/m2-repo"') ||
-            line.includes('if [ -d "${HOME}/.m2/repository" ]; then'),
+            line.includes('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
         );
         expect(seedAt, candidate.name).toBeGreaterThan(-1);
         const cpAt = lines.findIndex(
@@ -1527,9 +1605,9 @@ describe('SDK Java self-hosted workflow guards', () => {
             });
           }
           if (noFlock) {
-            // Keep mkdir and sed available so the queue and rewrite paths
-            // still run; flock is the only missing command this arm tests.
-            for (const command of ['mkdir', 'sed']) {
+            // Keep the device probe, mkdir and sed available; flock is the
+            // only missing command this arm tests.
+            for (const command of ['mkdir', 'sed', 'stat']) {
               writeFileSync(
                 join(shims, command),
                 `#!/bin/sh\nexec /bin/${command} "$@"\n`,
@@ -1654,28 +1732,50 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it('keeps every Maven cache seed in sdk-java.yml best-effort but observable', () => {
-    const seeds = workflow.match(/cp -aln "\$\{HOME\}\/\.m2\/repository".*$/gm);
+  it('keeps host cache copies best-effort and observable while guarding seed rebuilds', () => {
+    const seeds = workflow.match(
+      /cp -aln "\$\{HOME\}\/\.m2\/repository\/\."[\s\S]*?echo "::warning::Maven cache seed failed[^\n]+/g,
+    );
     expect(seeds).toHaveLength(4);
     for (const seed of seeds) {
-      expect(seed).toContain('|| echo "::warning::Maven cache seed failed');
+      expect(seed).toContain('|| {');
+      expect(seed).toContain('seed_cold_start=$?');
+      expect(seed).toContain('echo "::warning::Maven cache seed failed');
       // cp's own EACCES/ENOSPC/EXDEV diagnosis must reach the log; the
       // warning alone would point every seed failure at Maven and the net.
       expect(seed).not.toContain('2>/dev/null');
     }
     // A fresh host has no cache yet. That expected miss stays quiet, so the
     // warning keeps meaning the seed actually failed.
-    const guarded = workflow.match(
-      /if \[ -d "\$\{HOME\}\/\.m2\/repository" \]; then\n\s+cp -aln "\$\{HOME\}\/\.m2\/repository"/g,
+    const guarded = workflow.matchAll(
+      /seed_source_device="\$\(stat -Lc '%d' "\$\{HOME\}\/.m2\/repository"[^\n]+\n\s+seed_job_device=/g,
     );
-    expect(guarded).toHaveLength(4);
+    const homeGuard = 'if [ -d "${HOME}/.m2/repository" ]; then';
+    const seedStarts = new Set();
+    for (const match of guarded) {
+      expect(Number.isInteger(match.index)).toBe(true);
+      seedStarts.add(match.index);
+      const beforeCopy = workflow.slice(
+        match.index,
+        workflow.indexOf('cp -aln "', match.index),
+      );
+      expect(beforeCopy).toContain(
+        '[ "${seed_source_device}" = "${seed_job_device}" ]',
+      );
+      const guardAt = workflow.lastIndexOf(homeGuard, match.index);
+      expect(guardAt).toBeGreaterThan(-1);
+      expect(
+        workflow.slice(guardAt, match.index).trimEnd().endsWith(homeGuard),
+      ).toBe(true);
+    }
+    expect(seedStarts.size).toBe(4);
     // Maven rewrites resolver tracking files and version metadata in place,
     // and a half-written transfer leaves *.tmp fragments, so every seed
     // needs the de-alias before that lane runs Maven against the job-local
-    // copy. The prune stays best-effort: `bash -e` would otherwise abort the
-    // leg before Maven on an entry it cannot delete.
+    // copy. Residual hardlinks must never survive to an unlocked Maven run,
+    // so a failed prune now stops the lane and reports its own diagnostic.
     const deAlias =
-      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -delete 2>/dev/null || true";
+      "find -P \"${RUNNER_TEMP}/m2-repo\" -xdev \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -delete || exit 1";
     let from = 0;
     for (const seed of seeds) {
       const seedAt = workflow.indexOf(seed, from);
@@ -1687,14 +1787,2100 @@ describe('SDK Java self-hosted workflow guards', () => {
     }
   });
 
-  // The fault needs a directory mode the runner cannot delete through,
-  // which root ignores.
-  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
-    'reaches Maven when the seed de-alias cannot delete an entry',
+  it.skipIf(process.platform !== 'linux')(
+    'keeps a missing host cache quiet without probing devices',
     () => {
       const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
       const body = run.slice(
-        run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf('# The suite resolves from the job-local copy above'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-fresh-host-'));
+      const runnerTemp = join(dir, 'runner-temp');
+      mkdirSync(runnerTemp, { recursive: true });
+      writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+      const execute = (script) =>
+        spawnSync(
+          'bash',
+          [
+            '-e',
+            '-c',
+            `mvn() { printf 'mvn\\n' >> "\${RUNNER_TEMP}/mvn-calls"; }\n${script}\nmvn --batch-mode --no-transfer-progress clean test`,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 15000,
+            env: {
+              ...process.env,
+              PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+              HOME: join(dir, 'home'),
+              RUNNER_TEMP: runnerTemp,
+              LC_ALL: 'C',
+            },
+          },
+        );
+      try {
+        const result = execute(body);
+        expect(result.error, result.stderr).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+        expect(existsSync(join(runnerTemp, 'stat-calls'))).toBe(false);
+        expect(result.stdout + result.stderr).not.toContain('Maven cache seed');
+        const unguarded = execute(
+          body.replaceAll(
+            'if [ -d "${HOME}/.m2/repository" ]; then',
+            'if :; then',
+          ),
+        );
+        expect(unguarded.stdout + unguarded.stderr).toContain(
+          'Maven cache seed failed',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the seed and write-back filesystem guards byte-identical', () => {
+    const steps = Object.values(parse(workflow).jobs).flatMap(
+      (entry) => entry.steps ?? [],
+    );
+    const seedGuards = steps
+      .filter((candidate) => candidate.run?.includes('seed_source_device='))
+      .map((candidate) => {
+        const start = candidate.run.indexOf(
+          'if [ -L "${RUNNER_TEMP}/m2-repo" ]; then',
+        );
+        const end = candidate.run.indexOf('# Drop resolver', start);
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(end).toBeGreaterThan(start);
+        return candidate.run.slice(start, end);
+      });
+    expect(seedGuards).toHaveLength(4);
+    for (const guard of seedGuards.slice(1)) {
+      expect(guard).toBe(seedGuards[0]);
+    }
+    const referenceRun = parse(
+      readFileSync(
+        '.github/workflows/release-managed-agent-reference.yml',
+        'utf8',
+      ),
+    ).jobs.build.steps.find(
+      (candidate) => candidate.name === 'Build Java components',
+    ).run;
+    const referenceStart = referenceRun.indexOf('if [ -L "${repo}" ]; then');
+    const referenceEnd = referenceRun.indexOf(
+      'if [ -d "${repo}" ]; then',
+      referenceStart,
+    );
+    expect(referenceStart).toBeGreaterThan(0);
+    expect(referenceEnd).toBeGreaterThan(referenceStart);
+    expect(
+      referenceRun
+        .slice(referenceStart, referenceEnd)
+        .replace(/^ {2}/gm, '')
+        .replaceAll('${repo}', '${RUNNER_TEMP}/m2-repo')
+        .trimEnd(),
+    ).toBe(seedGuards[0].trimEnd());
+    expect(referenceRun).toContain('set -euo pipefail');
+    expect(referenceRun).not.toContain('writeback_');
+    expect(referenceRun).not.toContain('sdk_java_lock_acquire');
+    const writeBackGuards = steps
+      .filter((candidate) => candidate.run?.includes('writeback_device_host='))
+      .map((candidate) =>
+        candidate.run.slice(
+          candidate.run.indexOf('writeback_host_root='),
+          candidate.run.indexOf('lock_setup_fault() {'),
+        ),
+      );
+    expect(writeBackGuards).toHaveLength(2);
+    expect(writeBackGuards[1]).toBe(writeBackGuards[0]);
+  });
+
+  it.skipIf(process.platform === 'win32').each(
+    [
+      { scenario: 'device mismatch', hostDevice: '17', jobDevice: '29' },
+      { scenario: 'unknown devices', hostDevice: '', jobDevice: '' },
+      {
+        scenario: 'copy failure on the same device',
+        hostDevice: '17',
+        jobDevice: '17',
+        cpExit: 1,
+      },
+      {
+        scenario: 'read-only inherited directories',
+        hostDevice: '17',
+        jobDevice: '29',
+        readOnly: true,
+      },
+      {
+        scenario: 'repository root symlink',
+        hostDevice: '17',
+        jobDevice: '29',
+        rootSymlink: true,
+      },
+      {
+        scenario: 'cleanup failure',
+        hostDevice: '17',
+        jobDevice: '29',
+        cleanupFailure: true,
+      },
+      {
+        scenario: 'permission repair failure',
+        hostDevice: '17',
+        jobDevice: '17',
+        repairFailure: true,
+      },
+      {
+        scenario: 'repository root dangling symlink',
+        hostDevice: '17',
+        jobDevice: '29',
+        danglingRootSymlink: true,
+      },
+    ].filter(({ readOnly }) => !readOnly || process.getuid?.() !== 0),
+  )(
+    'cold-starts safely after $scenario',
+    ({
+      scenario,
+      hostDevice,
+      jobDevice,
+      cpExit = 0,
+      readOnly = false,
+      rootSymlink = false,
+      danglingRootSymlink = false,
+      cleanupFailure = false,
+      repairFailure = false,
+    }) => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-cold-seed-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const jobLocal = join(runnerTemp, 'm2-repo');
+      const repoContents =
+        rootSymlink || danglingRootSymlink
+          ? join(runnerTemp, 'aliased-job-cache')
+          : jobLocal;
+      const hostMarker = join(
+        home,
+        '.m2',
+        'repository',
+        'com',
+        'acme',
+        'host.jar',
+      );
+      const partial = join(repoContents, 'com', 'acme', 'incomplete.jar');
+      mkdirSync(dirname(hostMarker), { recursive: true });
+      mkdirSync(dirname(partial), { recursive: true });
+      writeFileSync(hostMarker, 'host\n');
+      writeFileSync(partial, 'partial\n');
+      symlinkSync(hostMarker, join(dirname(partial), 'host-alias.jar'));
+      if (rootSymlink) {
+        symlinkSync(repoContents, jobLocal, 'dir');
+      }
+      if (danglingRootSymlink) {
+        symlinkSync(join(runnerTemp, 'dangling-job-cache'), jobLocal, 'dir');
+      }
+      if (readOnly) {
+        chmodSync(jobLocal, 0o555);
+        chmodSync(dirname(partial), 0o000);
+      }
+      if (repairFailure) {
+        chmodSync(dirname(hostMarker), 0o555);
+      }
+      writeDeviceProbe(dir, {
+        hostDevice,
+        jobDevice,
+        cpExit,
+        statExit: scenario === 'unknown devices' ? 47 : 0,
+      });
+      if (cleanupFailure) {
+        writeFileSync(
+          join(dir, 'bin', 'find'),
+          '#!/bin/sh\ncase "$*" in\n  *" -mindepth 1 -delete") exit 7 ;;\n  *) exec /usr/bin/find "$@" ;;\nesac\n',
+          { mode: 0o755 },
+        );
+      }
+      if (repairFailure) {
+        writeFileSync(
+          join(dir, 'bin', 'chmod'),
+          '#!/bin/sh\nif [ "$1" = "u+rwx" ] && [ "$2" = "${QWEN_TEST_UNREPAIRABLE}" ]; then\n  printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/repair-failed.log"\n  printf \'chmod: injected permission repair failure\\n\' >&2\n  exit 42\nfi\nexec /bin/chmod "$@"\n',
+          { mode: 0o755 },
+        );
+        writeFileSync(
+          join(dir, 'bin', 'find'),
+          '#!/bin/sh\ncase "$*" in\n  *" -mindepth 1 -delete"*) printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/cleanup-calls" ;;\nesac\nexec /usr/bin/find "$@"\n',
+          { mode: 0o755 },
+        );
+        writeFileSync(
+          join(dir, 'bin', 'touch'),
+          '#!/bin/sh\nprintf \'touch attempted\\n\' >> "${RUNNER_TEMP}/touch-calls"\nexit 17\n',
+          { mode: 0o755 },
+        );
+      }
+      const hostMode = statSync(hostMarker).mode;
+      const env = {
+        ...process.env,
+        PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+        HOME: home,
+        RUNNER_TEMP: runnerTemp,
+        GITHUB_WORKSPACE: join(dir, 'workspace'),
+        QWEN_TEST_UNREPAIRABLE: dirname(partial),
+        MATRIX_JAVA: '11',
+        TIER: 'fast',
+      };
+      const stubs = `
+      mvn() {
+        printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+        return 0
+      }
+    `;
+      const guardStart = body.indexOf(
+        'if [ -L "${RUNNER_TEMP}/m2-repo" ]; then',
+      );
+      const guardEnd = body.indexOf('# Drop resolver', guardStart);
+      expect(guardStart).toBeGreaterThanOrEqual(0);
+      expect(guardEnd).toBeGreaterThan(guardStart);
+      const legacyBody =
+        body.slice(0, guardStart) +
+        'seed_stale_repo=""\n' +
+        'if [ -d "${HOME}/.m2/repository" ]; then\n' +
+        '  cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"\nfi\n' +
+        body
+          .slice(guardEnd)
+          .replaceAll('-delete || exit 1', '-delete 2>/dev/null || true');
+      expect(legacyBody).toContain(
+        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+      );
+      const legacySyntax = spawnSync('bash', ['-n', '-c', legacyBody], {
+        encoding: 'utf8',
+      });
+      expect(legacySyntax.status, legacySyntax.stderr).toBe(0);
+      try {
+        const legacyResult = spawnSync(
+          'bash',
+          ['-e', '-c', `${stubs}\n${legacyBody}`],
+          { encoding: 'utf8', timeout: 15000, env },
+        );
+        expect(legacyResult.status, legacyResult.stderr).toBe(0);
+        expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(true);
+        if (readOnly) {
+          // Inaccessible traversal makes existsSync false even for a real file.
+          chmodSync(dirname(partial), 0o700);
+          expect(readFileSync(partial, 'utf8')).toBe('partial\n');
+          chmodSync(dirname(partial), 0o000);
+        } else if (danglingRootSymlink) {
+          expect(lstatSync(jobLocal).isSymbolicLink()).toBe(true);
+        } else {
+          expect(existsSync(partial)).toBe(true);
+        }
+        rmSync(join(runnerTemp, 'cp-calls'));
+        const mvnCalls = join(runnerTemp, 'mvn-calls');
+        const priorCalls = readFileSync(mvnCalls, 'utf8')
+          .trim()
+          .split('\n').length;
+        if (cleanupFailure || repairFailure) {
+          rmSync(mvnCalls);
+        }
+
+        if (rootSymlink || danglingRootSymlink) {
+          if (existsSync(jobLocal)) {
+            renameSync(
+              jobLocal,
+              join(runnerTemp, 'legacy-cache-before-current'),
+            );
+          } else {
+            rmSync(jobLocal, { force: true });
+          }
+          if (danglingRootSymlink) {
+            rmSync(join(runnerTemp, 'dangling-job-cache'), {
+              recursive: true,
+              force: true,
+            });
+          }
+          symlinkSync(
+            rootSymlink ? repoContents : join(runnerTemp, 'dangling-job-cache'),
+            jobLocal,
+            'dir',
+          );
+          expect(lstatSync(jobLocal).isSymbolicLink()).toBe(true);
+          if (danglingRootSymlink) {
+            expect(existsSync(jobLocal)).toBe(false);
+          }
+        }
+        const result = spawnSync('bash', ['-e', '-c', `${stubs}\n${body}`], {
+          encoding: 'utf8',
+          timeout: 15000,
+          env,
+        });
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(
+          cleanupFailure || repairFailure ? 1 : 0,
+        );
+        expect(readFileSync(hostMarker, 'utf8')).toBe('host\n');
+        expect(statSync(hostMarker).mode).toBe(hostMode);
+        expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(
+          hostDevice !== '' && hostDevice === jobDevice,
+        );
+        if (cleanupFailure || repairFailure) {
+          expect(existsSync(partial)).toBe(false);
+          const quarantinedPartial = globSync(
+            'm2-repo.stale.*/com/acme/incomplete.jar',
+            { cwd: runnerTemp },
+          );
+          expect(quarantinedPartial).toHaveLength(1);
+          expect(
+            readFileSync(join(runnerTemp, quarantinedPartial[0]), 'utf8'),
+          ).toBe('partial\n');
+          expect(existsSync(mvnCalls)).toBe(false);
+          if (repairFailure) {
+            expect(result.stderr).toContain(
+              'injected permission repair failure',
+            );
+            expect(
+              readFileSync(join(runnerTemp, 'repair-failed.log'), 'utf8'),
+            ).toContain('u+rwx');
+            expect(result.stdout).toContain('could not be repaired');
+            expect(existsSync(join(runnerTemp, 'cleanup-calls'))).toBe(false);
+            expect(existsSync(join(runnerTemp, 'touch-calls'))).toBe(false);
+          }
+        } else {
+          expect(existsSync(partial)).toBe(rootSymlink || danglingRootSymlink);
+          if (rootSymlink || danglingRootSymlink) {
+            expect(lstatSync(jobLocal).isSymbolicLink()).toBe(false);
+          }
+          if (danglingRootSymlink) {
+            expect(
+              readFileSync(
+                join(repoContents, 'com', 'acme', 'incomplete.jar'),
+                'utf8',
+              ),
+            ).toBe('partial\n');
+          }
+          expect(readdirSync(jobLocal)).toHaveLength(0);
+          expect(globSync('m2-repo.stale.*', { cwd: runnerTemp })).toHaveLength(
+            0,
+          );
+          expect(result.stdout).toContain('using a clean job-local repository');
+          expect(result.stdout).toContain(
+            cpExit === 0
+              ? 'hard links are unavailable'
+              : `Maven cache seed failed (cp exit ${cpExit})`,
+          );
+          if (cpExit !== 0) {
+            expect(result.stdout).not.toContain('hard links are unavailable');
+            expect(
+              existsSync(join(jobLocal, 'com', 'acme', 'cp-partial.jar')),
+            ).toBe(false);
+          }
+          expect(
+            readFileSync(mvnCalls, 'utf8').trim().split('\n'),
+          ).toHaveLength(priorCalls + 1);
+        }
+        if (scenario === 'unknown devices') {
+          rmSync(mvnCalls);
+          for (const assignment of [
+            'seed_source_device="$(stat -Lc \'%d\' "${HOME}/.m2/repository" || true)"',
+            'seed_job_device="$(stat -Lc \'%d\' "${RUNNER_TEMP}/m2-repo" || true)"',
+          ]) {
+            expect(body).toContain(assignment);
+            const mutant = body.replace(
+              assignment,
+              assignment.replace(' || true', ''),
+            );
+            const failedProbe = spawnSync(
+              'bash',
+              ['-e', '-c', `${stubs}\n${mutant}`],
+              { encoding: 'utf8', timeout: 15000, env },
+            );
+            expect(failedProbe.status, failedProbe.stderr).toBe(47);
+            expect(failedProbe.stderr).toContain('injected stat failure');
+            expect(existsSync(mvnCalls)).toBe(false);
+            expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(false);
+          }
+        }
+      } finally {
+        if (readOnly || repairFailure) {
+          const repaired = spawnSync(
+            'find',
+            [dir, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+            { encoding: 'utf8', timeout: 5000, env: process.env },
+          );
+          expect(repaired.status, repaired.stderr).toBe(0);
+        }
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'keeps a quarantine deletion failure non-fatal and observable',
+    () => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-quarantine-delete-'));
+      const runnerTemp = join(dir, 'runner-temp');
+      const jobLocal = join(runnerTemp, 'm2-repo');
+      const partial = join(jobLocal, 'com', 'acme', 'incomplete.jar');
+      mkdirSync(dirname(partial), { recursive: true });
+      writeFileSync(partial, 'partial\n');
+      writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+      writeFileSync(
+        join(dir, 'bin', 'rm'),
+        '#!/bin/sh\nif [ "$1" = "--help" ]; then\n  printf \'rm [options] [--one-file-system]\\n\'\n  exit 0\nfi\nfor target in "$@"; do\n  case "$target" in\n    "${RUNNER_TEMP}/m2-repo.stale."*)\n      printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/quarantine-delete.log"\n      printf \'rm: injected quarantine deletion failure\\n\' >&2\n      exit 23\n      ;;\n  esac\ndone\nexec /bin/rm "$@"\n',
+        { mode: 0o755 },
+      );
+      expect(existsSync(join(dir, 'home', '.m2', 'repository'))).toBe(false);
+      const stub = `
+        mvn() {
+          printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+        }
+      `;
+      try {
+        const result = spawnSync('bash', ['-e', '-c', `${stub}\n${body}`], {
+          encoding: 'utf8',
+          timeout: 15000,
+          env: {
+            ...process.env,
+            LC_ALL: 'C',
+            PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+            HOME: join(dir, 'home'),
+            RUNNER_TEMP: runnerTemp,
+            MATRIX_JAVA: '11',
+            TIER: 'fast',
+          },
+        });
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        const retained = globSync('m2-repo.stale.*', { cwd: runnerTemp });
+        expect(retained).toHaveLength(1);
+        expect(
+          readFileSync(
+            join(runnerTemp, retained[0], 'com', 'acme', 'incomplete.jar'),
+            'utf8',
+          ),
+        ).toBe('partial\n');
+        expect(result.stdout).toContain(
+          `Maven cache was left in quarantine at ${join(runnerTemp, retained[0])}`,
+        );
+        expect(result.stderr).toContain('injected quarantine deletion failure');
+        expect(
+          readFileSync(
+            join(runnerTemp, 'quarantine-delete.log'),
+            'utf8',
+          ).trim(),
+        ).toBe(`-rf --one-file-system -- ${join(runnerTemp, retained[0])}`);
+        expect(
+          readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
+            .trim()
+            .split('\n'),
+        ).toHaveLength(1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'bounds quarantine reclamation across jobs',
+    () => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const stub = `
+        mvn() {
+          printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+        }
+      `;
+      for (const reclaimFails of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reclaim-old-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const oldStale = join(runnerTemp, 'm2-repo.stale.previous');
+        const oldArtifact = join(oldStale, 'com', 'acme', 'old.jar');
+        mkdirSync(dirname(oldArtifact), { recursive: true });
+        writeFileSync(oldArtifact, 'previous\n');
+        if (!reclaimFails) {
+          chmodSync(oldStale, 0o555);
+          chmodSync(dirname(oldArtifact), 0o000);
+        }
+        writeDeviceProbe(dir, { hostDevice: '', jobDevice: '' });
+        if (reclaimFails) {
+          writeFileSync(
+            join(dir, 'bin', 'rm'),
+            '#!/bin/sh\nif [ "$1" = "--help" ]; then\n  printf \'rm [options] [--one-file-system]\\n\'\n  exit 0\nfi\nfor target in "$@"; do\n  if [ "$target" = "${QWEN_TEST_STALE}" ]; then\n    printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/quarantine-delete.log"\n    printf \'rm: injected historical quarantine failure\\n\' >&2\n    exit 19\n  fi\ndone\nexec /bin/rm "$@"\n',
+            { mode: 0o755 },
+          );
+        }
+        const env = {
+          ...process.env,
+          PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+          HOME: join(dir, 'home'),
+          RUNNER_TEMP: runnerTemp,
+          QWEN_TEST_STALE: oldStale,
+          MATRIX_JAVA: '11',
+          TIER: 'fast',
+        };
+        try {
+          const result = spawnSync('bash', ['-e', '-c', `${stub}\n${body}`], {
+            encoding: 'utf8',
+            timeout: 15000,
+            env,
+          });
+          expect(result.error, body).toBeUndefined();
+          const remaining = globSync('m2-repo.stale.*', { cwd: runnerTemp });
+          if (reclaimFails) {
+            expect(result.status, result.stderr).toBe(1);
+            expect(remaining).toEqual(['m2-repo.stale.previous']);
+            expect(
+              readFileSync(
+                join(runnerTemp, 'quarantine-delete.log'),
+                'utf8',
+              ).trim(),
+            ).toBe(`-rf --one-file-system -- ${oldStale}`);
+            expect(result.stdout).toContain('could not be reclaimed');
+            expect(result.stderr).toContain(
+              'injected historical quarantine failure',
+            );
+            expect(existsSync(join(runnerTemp, 'm2-repo'))).toBe(false);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+            expect(readFileSync(oldArtifact, 'utf8')).toBe('previous\n');
+          } else {
+            expect(result.status, result.stderr).toBe(0);
+            expect(remaining).toHaveLength(0);
+            expect(existsSync(oldArtifact)).toBe(false);
+            expect(readdirSync(join(runnerTemp, 'm2-repo'))).toHaveLength(0);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+          }
+        } finally {
+          if (existsSync(oldStale)) {
+            chmodSync(oldStale, 0o755);
+          }
+          if (existsSync(dirname(oldArtifact))) {
+            chmodSync(dirname(oldArtifact), 0o755);
+          }
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stops Maven when the old repository cannot be quarantined',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const moveGuard =
+        'mv "${RUNNER_TEMP}/m2-repo" "${seed_stale_repo}" || exit 1';
+      expect(body).toContain(moveGuard);
+      for (const tolerateMoveFailure of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-move-failure-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const jobLocal = join(runnerTemp, 'm2-repo');
+        const outside = join(dir, 'outside');
+        const partial = join(jobLocal, 'partial.txt');
+        const outsidePartial = join(outside, 'partial.txt');
+        mkdirSync(jobLocal, { recursive: true });
+        mkdirSync(outside, { recursive: true });
+        writeFileSync(partial, 'partial\n');
+        writeFileSync(outsidePartial, 'outside unchanged\n');
+        symlinkSync(outside, join(jobLocal, 'vendor'), 'dir');
+        mkdirSync(join(dir, 'bin'));
+        writeFileSync(
+          join(dir, 'bin', 'mv'),
+          '#!/bin/sh\nif [ "$1" = "${RUNNER_TEMP}/m2-repo" ]; then\n  printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/move-failure.log"\n  printf \'mv: injected quarantine failure\\n\' >&2\n  exit 19\nfi\nexec /bin/mv "$@"\n',
+          { mode: 0o755 },
+        );
+        const testBody = tolerateMoveFailure
+          ? body.replace(moveGuard, `${moveGuard.replace('exit 1', 'true')}`)
+          : body;
+        expect(testBody).toContain(
+          tolerateMoveFailure
+            ? '-repo" "${seed_stale_repo}" || true'
+            : '-repo" "${seed_stale_repo}" || exit 1',
+        );
+        const env = {
+          ...process.env,
+          PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+          HOME: join(dir, 'home'),
+          RUNNER_TEMP: runnerTemp,
+          MATRIX_JAVA: '11',
+          TIER: 'fast',
+        };
+        const stub = `
+          mvn() {
+            mkdir -p "\${RUNNER_TEMP}/m2-repo/vendor/acme/new-dependency" || return "$?"
+            printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+          }
+        `;
+        try {
+          const result = spawnSync(
+            'bash',
+            ['-e', '-c', `${stub}\n${testBody}`],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env,
+            },
+          );
+          expect(result.error, testBody).toBeUndefined();
+          expect(result.status, testBody).toBe(tolerateMoveFailure ? 0 : 1);
+          expect(result.stderr).toContain('injected quarantine failure');
+          expect(
+            readFileSync(join(runnerTemp, 'move-failure.log'), 'utf8'),
+          ).toContain(jobLocal);
+          expect(readFileSync(partial, 'utf8')).toBe('partial\n');
+          expect(readFileSync(outsidePartial, 'utf8')).toBe(
+            'outside unchanged\n',
+          );
+          const newDependency = join(outside, 'acme', 'new-dependency');
+          if (tolerateMoveFailure) {
+            expect(existsSync(newDependency)).toBe(true);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+          } else {
+            expect(existsSync(newDependency)).toBe(false);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+            expect(
+              globSync('m2-repo.stale.*', { cwd: runnerTemp }),
+            ).toHaveLength(0);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'preserves intended semantics when quarantine permission repair fails',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const repairScan =
+        'find -P "$1" -xdev -type d ! -perm -u=rwx ! -exec chmod u+rwx {} \\; -print -quit';
+      const unrepairableGuard = '[ -z "${unrepairable}" ] || return 1';
+      expect(body).toContain(repairScan);
+      expect(body).toContain(unrepairableGuard);
+      for (const prior of [true, false]) {
+        for (const ignoreRepairFailure of [false, true]) {
+          const dir = mkdtempSync(join(tmpdir(), 'sdk-java-repair-stale-'));
+          const runnerTemp = join(dir, 'runner-temp');
+          const jobLocal = join(runnerTemp, 'm2-repo');
+          const quarantineRoot = prior
+            ? join(runnerTemp, 'm2-repo.stale.injected')
+            : jobLocal;
+          const targetDir = join(quarantineRoot, 'com', 'acme');
+          const artifact = join(targetDir, 'host.jar');
+          mkdirSync(targetDir, { recursive: true });
+          writeFileSync(artifact, 'host\n', { mode: 0o444 });
+          // Keep the target itself removable so dropping the guard has an
+          // observable consequence distinct from a raw filesystem failure.
+          chmodSync(targetDir, 0o555);
+          writeDeviceProbe(dir, { hostDevice: '', jobDevice: '' });
+          writeFileSync(
+            join(dir, 'bin', 'chmod'),
+            '#!/bin/sh\ncase "$1:$2" in\n  u+rwx:"${RUNNER_TEMP}/m2-repo"*/com/acme)\n    /bin/chmod "$@" || exit "$?"\n    printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/repair-failed.log"\n    printf \'chmod: injected permission repair failure\\n\' >&2\n    exit 39\n    ;;\nesac\nexec /bin/chmod "$@"\n',
+            { mode: 0o755 },
+          );
+          const testBody = ignoreRepairFailure
+            ? body.replace(unrepairableGuard, ': "${unrepairable}"')
+            : body;
+          expect(testBody).toContain(repairScan);
+          expect(testBody).toContain(
+            ignoreRepairFailure ? ': "${unrepairable}"' : unrepairableGuard,
+          );
+          const env = {
+            ...process.env,
+            LC_ALL: 'C',
+            PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+            HOME: join(dir, 'home'),
+            RUNNER_TEMP: runnerTemp,
+            MATRIX_JAVA: '11',
+            TIER: 'fast',
+          };
+          const stub = `
+            mvn() {
+              printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+            }
+          `;
+          try {
+            const result = spawnSync(
+              'bash',
+              ['-e', '-c', `${stub}\n${testBody}`],
+              { encoding: 'utf8', timeout: 15000, env },
+            );
+            expect(result.error, testBody).toBeUndefined();
+            expect(result.stderr, testBody).toContain(
+              'injected permission repair failure',
+            );
+            expect(
+              readFileSync(join(runnerTemp, 'repair-failed.log'), 'utf8'),
+            ).toContain('u+rwx');
+            expect(
+              existsSync(join(runnerTemp, 'mvn-calls')),
+              JSON.stringify({
+                prior,
+                ignoreRepairFailure,
+                status: result.status,
+                stdout: result.stdout,
+                stderr: result.stderr,
+              }),
+            ).toBe(!prior || ignoreRepairFailure);
+            if (prior) {
+              expect(result.status).toBe(ignoreRepairFailure ? 0 : 1);
+              expect(existsSync(jobLocal)).toBe(ignoreRepairFailure);
+              expect(existsSync(artifact)).toBe(!ignoreRepairFailure);
+              if (!ignoreRepairFailure) {
+                expect(result.stdout).toContain('could not be reclaimed');
+              }
+            } else {
+              expect(result.status).toBe(0);
+              const retained = globSync('m2-repo.stale.*/com/acme/host.jar', {
+                cwd: runnerTemp,
+              });
+              expect(retained).toHaveLength(ignoreRepairFailure ? 0 : 1);
+              if (!ignoreRepairFailure) {
+                expect(
+                  readFileSync(join(runnerTemp, retained[0]), 'utf8'),
+                ).toBe('host\n');
+                expect(result.stdout).toContain(
+                  'Maven cache was left in quarantine at',
+                );
+              }
+            }
+          } finally {
+            const repair = spawnSync(
+              'find',
+              [dir, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+              { env: process.env, encoding: 'utf8', timeout: 5000 },
+            );
+            expect(repair.status, repair.stderr).toBe(0);
+            rmSync(dir, { recursive: true, force: true });
+          }
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0).each([
+    ...['history', 'seed'].flatMap((stage) =>
+      [
+        'unreadable',
+        'nested',
+        'root',
+        'sibling',
+        'space',
+        'alias',
+        'uname-failure',
+        'permission-scan-failure',
+        'malformed',
+        'findmnt-missing',
+        'node-missing',
+        'grandchild',
+      ].map((scenario) => ({
+        stage,
+        scenario,
+      })),
+    ),
+  ])(
+    'checks mount boundaries before changing $stage cache ($scenario)',
+    ({ stage, scenario }) => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      expect(body).toContain('kernel_name="$(uname -s)" || return "$?"');
+      expect(body).toContain(
+        'mount_table="$(findmnt -J -n -o TARGET)" || return "$?"',
+      );
+      expect(body).toContain('fs.realpathSync.native');
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-mount-guard-'));
+      const realRunnerTemp = join(
+        dir,
+        scenario === 'space' ? 'runner temp' : 'runner-temp',
+      );
+      mkdirSync(realRunnerTemp, { recursive: true });
+      const runnerTemp =
+        scenario === 'alias' ? join(dir, 'runner-alias') : realRunnerTemp;
+      if (scenario === 'alias') {
+        symlinkSync(realRunnerTemp, runnerTemp, 'dir');
+      }
+      const jobLocal = join(runnerTemp, 'm2-repo');
+      const prior = stage === 'history';
+      const quarantine = join(runnerTemp, 'm2-repo.stale.injected');
+      const cache = prior ? quarantine : join(dir, 'home', '.m2', 'repository');
+      const targetDir = join(cache, 'mounted');
+      const artifact = join(targetDir, 'host.jar');
+      mkdirSync(targetDir, { recursive: true });
+      writeFileSync(artifact, 'host\n', { mode: 0o444 });
+      chmodSync(targetDir, 0o555);
+      writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+      const unavailable = new Set(['findmnt-missing', 'node-missing']);
+      const isolatedPath = unavailable.has(scenario);
+      if (isolatedPath) {
+        for (const command of [
+          'mkdir',
+          'mktemp',
+          'find',
+          'mv',
+          'cp',
+          'rm',
+          'chmod',
+          'grep',
+          'sed',
+          'rmdir',
+        ]) {
+          if (command !== 'cp') {
+            symlinkSync(`/usr/bin/${command}`, join(dir, 'bin', command));
+          }
+        }
+        if (scenario === 'findmnt-missing') {
+          symlinkSync(process.execPath, join(dir, 'bin', 'node'));
+        }
+      }
+      writeFileSync(
+        join(dir, 'bin', 'uname'),
+        scenario === 'uname-failure'
+          ? "#!/bin/sh\nprintf 'injected uname failure\\n' >&2\nexit 47"
+          : '#!/bin/sh\nprintf Linux\n',
+        { mode: 0o755 },
+      );
+      const physicalMountRoot = join(
+        realpathSync(realRunnerTemp),
+        prior ? 'm2-repo.stale.injected' : 'm2-repo',
+      );
+      const mountRoot = physicalMountRoot;
+      const siblingMount = `${mountRoot}-other/mounted`;
+      const mountTableTarget = [
+        'unreadable',
+        'permission-scan-failure',
+        'malformed',
+      ].includes(scenario)
+        ? null
+        : scenario === 'sibling'
+          ? siblingMount
+          : scenario === 'root'
+            ? mountRoot
+            : join(mountRoot, 'mounted');
+      const tableTargetJson = mountTableTarget
+        ? JSON.stringify(mountTableTarget).replace(/ /g, '\\u0020')
+        : null;
+      const mountTableJson =
+        scenario === 'malformed'
+          ? 'not json'
+          : !tableTargetJson
+            ? '{"filesystems":[]}'
+            : scenario === 'grandchild'
+              ? `{"filesystems":[{"target":"/","children":[{"target":"/mnt","children":[{"target":${tableTargetJson}}]}]}]}`
+              : `{"filesystems":[{"target":"/","children":[{"target":${tableTargetJson}}]}]}`;
+      if (scenario !== 'findmnt-missing') {
+        writeFileSync(
+          join(dir, 'bin', 'findmnt'),
+          `#!/bin/sh
+printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/findmnt-calls"
+${scenario === 'unreadable' ? "printf 'injected mount table failure\\n' >&2\nexit 47" : 'printf \'%s\\n\' "${MOUNT_TABLE_JSON}"'}
+`,
+          { mode: 0o755 },
+        );
+      }
+      if (scenario === 'permission-scan-failure') {
+        writeFileSync(
+          join(dir, 'bin', 'find'),
+          `#!/bin/sh
+case "$*" in
+  *"-type d ! -perm -u=rwx"*) printf 'injected permission scan failure\\n' >&2; exit 41 ;;
+esac
+exec /usr/bin/find "$@"
+`,
+          { mode: 0o755 },
+        );
+      }
+      const jobArtifact = prior
+        ? artifact
+        : join(jobLocal, 'mounted', 'host.jar');
+      const testBodies = [body];
+      if (isolatedPath) {
+        testBodies.push(
+          body.replace(
+            'local kernel_name mount_table',
+            'local kernel_name mount_table\n return 0',
+          ),
+        );
+      } else if (scenario === 'grandchild') {
+        testBodies.push(
+          body.replace(
+            'pending.push(...(entry.children ?? []));',
+            'if (entry.target === "/") { pending.push(...(entry.children ?? [])); }',
+          ),
+        );
+      }
+      try {
+        for (const [arm, testBody] of testBodies.entries()) {
+          const result = spawnSync(
+            isolatedPath ? '/bin/bash' : 'bash',
+            [
+              '-e',
+              '-c',
+              `mvn() { printf 'mvn\\n' >> "\${RUNNER_TEMP}/mvn-calls"; }\n${testBody}`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env: {
+                ...process.env,
+                PATH: isolatedPath
+                  ? join(dir, 'bin')
+                  : `${join(dir, 'bin')}:${process.env.PATH}`,
+                HOME: join(dir, 'home'),
+                RUNNER_TEMP: runnerTemp,
+                MOUNT_TABLE_JSON: mountTableJson,
+                LC_ALL: 'C',
+              },
+            },
+          );
+          expect(result.error, result.stderr).toBeUndefined();
+          if (unavailable.has(scenario)) {
+            const missingTool =
+              scenario === 'node-missing' ? 'node' : 'findmnt';
+            const lookup = spawnSync(
+              '/bin/sh',
+              ['-c', `command -v ${missingTool}`],
+              {
+                encoding: 'utf8',
+                timeout: 5000,
+                env: { ...process.env, PATH: join(dir, 'bin') },
+              },
+            );
+            expect(lookup.status).not.toBe(0);
+          }
+          if (arm > 0) {
+            expect(result.status, result.stdout + result.stderr).toBe(0);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+            if (prior) {
+              expect(existsSync(jobArtifact)).toBe(false);
+            } else {
+              expect(statSync(dirname(jobArtifact)).mode & 0o777).not.toBe(
+                0o555,
+              );
+            }
+            continue;
+          }
+          if (scenario === 'uname-failure' || unavailable.has(scenario)) {
+            expect(existsSync(join(runnerTemp, 'findmnt-calls'))).toBe(false);
+            if (scenario === 'uname-failure') {
+              expect(result.stderr).toContain('injected uname failure');
+            }
+          } else {
+            expect(
+              readFileSync(join(runnerTemp, 'findmnt-calls'), 'utf8'),
+            ).toContain('-n -o TARGET');
+          }
+          const blocked = scenario !== 'sibling';
+          expect(
+            result.status,
+            JSON.stringify({
+              scenario,
+              stage,
+              stdout: result.stdout,
+              stderr: result.stderr,
+            }),
+          ).toBe(blocked ? 1 : 0);
+          expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(!blocked);
+          if (blocked) {
+            expect(statSync(dirname(jobArtifact)).mode & 0o777).toBe(0o555);
+            expect(readFileSync(jobArtifact, 'utf8')).toBe('host\n');
+            if (prior) {
+              expect(existsSync(jobLocal)).toBe(false);
+              expect(result.stdout).toContain('could not be reclaimed');
+            } else if (scenario !== 'permission-scan-failure') {
+              expect(result.stdout).toContain(
+                'filesystem boundaries could not be inspected',
+              );
+            }
+          } else if (prior) {
+            expect(existsSync(artifact)).toBe(false);
+          } else {
+            expect(statSync(dirname(jobArtifact)).mode & 0o777).toBe(0o755);
+            expect(statSync(dirname(artifact)).mode & 0o777).toBe(0o555);
+            expect(statSync(jobArtifact).nlink).toBe(2);
+          }
+          if (scenario === 'unreadable') {
+            expect(result.stderr).toContain('injected mount table failure');
+          }
+          if (scenario === 'permission-scan-failure') {
+            expect(result.stderr).toContain('injected permission scan failure');
+          }
+        }
+      } finally {
+        spawnSync(
+          'find',
+          [dir, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+          { env: process.env, encoding: 'utf8' },
+        );
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it
+    .skipIf(process.platform === 'win32')
+    .each(['plain file', 'directory symlink', 'dangling symlink', 'directory'])(
+    'reclaims a non-GNU quarantine root: $0',
+    (kind) => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const helpers = run.slice(
+        run.indexOf('seed_mount_guard() {'),
+        run.indexOf('# Retry any reclaimed prior-job quarantine'),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-quarantine-kind-'));
+      const root = join(dir, 'm2-repo.stale.injected');
+      const outside = join(dir, 'outside');
+      mkdirSync(outside, { recursive: true });
+      writeFileSync(join(outside, 'sentinel'), 'preserve\n', { mode: 0o444 });
+      chmodSync(outside, 0o555);
+      if (kind === 'plain file') {
+        writeFileSync(root, 'partial\n');
+      } else if (kind === 'directory symlink') {
+        symlinkSync(outside, root, 'dir');
+      } else if (kind === 'dangling symlink') {
+        symlinkSync(join(dir, 'missing'), root, 'dir');
+      } else {
+        mkdirSync(root);
+        writeFileSync(join(root, 'artifact'), 'discard\n');
+        chmodSync(root, 0o555);
+      }
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'rm'),
+        '#!/bin/sh\nif [ "$1" = "--help" ]; then exit 64; fi\nexec /bin/rm "$@"\n',
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `${helpers}\nseed_remove_quarantine "${root}"`],
+          {
+            encoding: 'utf8',
+            timeout: 15000,
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              HOME: join(dir, 'home'),
+              RUNNER_TEMP: dir,
+              LC_ALL: 'C',
+            },
+          },
+        );
+        expect(result.error, helpers + result.stderr).toBeUndefined();
+        expect(result.status, helpers + result.stderr).toBe(0);
+        expect(lstatSync(root, { throwIfNoEntry: false })).toBeUndefined();
+        expect(readFileSync(join(outside, 'sentinel'), 'utf8')).toBe(
+          'preserve\n',
+        );
+        expect(statSync(outside).mode & 0o777).toBe(0o555);
+      } finally {
+        spawnSync(
+          'find',
+          [dir, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+          { encoding: 'utf8', env: process.env },
+        );
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it
+    .skipIf(process.platform === 'win32')
+    .each([
+      { scenario: 'inherited alias without host cache', hostCache: false },
+      { scenario: 'inherited alias with host cache' },
+      { scenario: 'alias copied from host cache', hostSeedAlias: true },
+    ])(
+    'keeps nested repository aliases out of Maven writes: $scenario',
+    ({ hostCache = true, hostSeedAlias = false }) => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-nested-alias-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const jobLocal = join(runnerTemp, 'm2-repo');
+      const externalCom = join(dir, 'external', 'com');
+      const hostRepo = join(home, '.m2', 'repository');
+      const hostArtifact = join(hostRepo, 'com', 'acme', 'host.jar');
+      const outsidePartial = join(externalCom, 'acme', 'incomplete.txt');
+      if (hostCache) {
+        mkdirSync(dirname(hostArtifact), { recursive: true });
+        writeFileSync(hostArtifact, 'host\n', { mode: 0o444 });
+        if (hostSeedAlias) {
+          symlinkSync(externalCom, join(hostRepo, 'com', 'vendor'), 'dir');
+        }
+      }
+      mkdirSync(dirname(outsidePartial), { recursive: true });
+      mkdirSync(jobLocal, { recursive: true });
+      writeFileSync(outsidePartial, 'partial keep\n');
+      if (!hostSeedAlias) {
+        symlinkSync(externalCom, join(jobLocal, 'com'), 'dir');
+      }
+      writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+      const env = {
+        ...process.env,
+        LC_ALL: 'C',
+        PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+        HOME: home,
+        RUNNER_TEMP: runnerTemp,
+        MATRIX_JAVA: '11',
+        TIER: 'fast',
+      };
+      const relativeDependency = hostSeedAlias
+        ? 'com/vendor/acme/new-dependency'
+        : 'com/acme/new-dependency';
+      const stubs = `
+        mvn() {
+          mkdir -p "\${RUNNER_TEMP}/m2-repo/${relativeDependency}" || return "$?"
+          printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+        }
+      `;
+      if (hostSeedAlias) {
+        expect(
+          lstatSync(join(hostRepo, 'com', 'vendor')).isSymbolicLink(),
+        ).toBe(true);
+      } else {
+        expect(lstatSync(join(jobLocal, 'com')).isSymbolicLink()).toBe(true);
+      }
+      try {
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `${stubs}\n${body}\nexit "\${mvn_status}"`],
+          { encoding: 'utf8', timeout: 15000, env },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        expect(lstatSync(join(jobLocal, 'com')).isSymbolicLink()).toBe(false);
+        expect(existsSync(join(jobLocal, relativeDependency))).toBe(true);
+        expect(existsSync(hostRepo)).toBe(hostCache);
+        if (hostCache) {
+          expect(
+            readFileSync(join(jobLocal, 'com', 'acme', 'host.jar'), 'utf8'),
+          ).toBe('host\n');
+        }
+        if (hostSeedAlias) {
+          expect(
+            lstatSync(join(jobLocal, 'com', 'vendor')).isSymbolicLink(),
+          ).toBe(false);
+        }
+        expect(existsSync(join(externalCom, 'acme', 'host.jar'))).toBe(false);
+        expect(existsSync(join(externalCom, 'acme', 'new-dependency'))).toBe(
+          false,
+        );
+        expect(readFileSync(outsidePartial, 'utf8')).toBe('partial keep\n');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps Maven writes possible after a read-only warm seed',
+    () => {
+      const run = parse(workflow).jobs.test.steps.find(
+        (candidate) => candidate.name === 'Run Java SDK tests (self-hosted)',
+      ).run;
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const guardStart = body.indexOf(
+        'if [ -L "${RUNNER_TEMP}/m2-repo" ]; then',
+      );
+      const guardEnd = body.indexOf('# Drop resolver', guardStart);
+      expect(guardStart).toBeGreaterThanOrEqual(0);
+      expect(guardEnd).toBeGreaterThan(guardStart);
+      const legacyBody =
+        body.slice(0, guardStart) +
+        'seed_stale_repo=""\n' +
+        'if [ -d "${HOME}/.m2/repository" ]; then\n' +
+        '  cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?)"\nfi\n' +
+        body.slice(guardEnd);
+      expect(
+        spawnSync('bash', ['-n', '-c', legacyBody], { encoding: 'utf8' })
+          .status,
+      ).toBe(0);
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-warm-ro-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const hostRepo = join(home, '.m2', 'repository');
+      const hostArtifact = join(hostRepo, 'com', 'acme', 'host.jar');
+      const jobLocal = join(runnerTemp, 'm2-repo');
+      mkdirSync(jobLocal, { recursive: true });
+      chmodSync(jobLocal, 0o755);
+      writeDeviceProbe(runnerTemp, {
+        hostDevice: '17',
+        jobDevice: '17',
+      });
+      mkdirSync(dirname(hostArtifact), { recursive: true });
+      writeFileSync(hostArtifact, 'host\n', { mode: 0o444 });
+      chmodSync(hostRepo, 0o555);
+      chmodSync(dirname(hostArtifact), 0o555);
+      const env = {
+        ...process.env,
+        LC_ALL: 'C',
+        PATH: `${join(runnerTemp, 'bin')}:${process.env.PATH}`,
+        HOME: home,
+        RUNNER_TEMP: runnerTemp,
+        MATRIX_JAVA: '11',
+        TIER: 'fast',
+      };
+      const stubs = `
+      mvn() {
+        mkdir "\${RUNNER_TEMP}/m2-repo/new-dependency" || return "$?"
+        printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+      }
+    `;
+      const execute = (script) =>
+        spawnSync(
+          'bash',
+          ['-e', '-c', `${stubs}\n${script}\nexit "\${mvn_status}"`],
+          { encoding: 'utf8', timeout: 15000, env },
+        );
+      const initialLinks = statSync(hostArtifact).nlink;
+      try {
+        const legacy = execute(legacyBody);
+        expect(legacy.status, legacy.stderr).toBe(0);
+        expect(
+          readFileSync(
+            join(jobLocal, 'repository', 'com', 'acme', 'host.jar'),
+            'utf8',
+          ),
+        ).toBe('host\n');
+        expect(statSync(jobLocal).mode & 0o777).toBe(0o755);
+        expect(statSync(hostArtifact).nlink).toBe(initialLinks + 1);
+        renameSync(jobLocal, join(runnerTemp, 'legacy-job-cache'));
+        mkdirSync(jobLocal);
+        chmodSync(jobLocal, 0o755);
+
+        const beforeLinks = statSync(hostArtifact).nlink;
+        const result = execute(body);
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(0);
+        expect(
+          readFileSync(join(jobLocal, 'com', 'acme', 'host.jar'), 'utf8'),
+        ).toBe('host\n');
+        expect(statSync(hostArtifact).nlink).toBe(beforeLinks + 1);
+        expect(statSync(jobLocal).mode & 0o777).toBe(0o755);
+        expect(statSync(join(jobLocal, 'com', 'acme')).mode & 0o777).toBe(
+          0o755,
+        );
+        expect(result.stdout).not.toContain(
+          'using a clean job-local repository',
+        );
+        expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+        expect(existsSync(join(jobLocal, 'new-dependency'))).toBe(true);
+        expect(statSync(hostRepo).mode & 0o777).toBe(0o555);
+        expect(statSync(dirname(hostArtifact)).mode & 0o777).toBe(0o555);
+        expect(statSync(hostArtifact).mode & 0o777).toBe(0o444);
+      } finally {
+        const repaired = spawnSync(
+          'find',
+          [runnerTemp, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+          {
+            env: process.env,
+            encoding: 'utf8',
+            timeout: 5000,
+          },
+        );
+        chmodSync(home, 0o755);
+        if (existsSync(join(dir, 'home'))) {
+          const hostRepair = spawnSync(
+            'find',
+            [home, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+            { env: process.env, encoding: 'utf8', timeout: 5000 },
+          );
+          expect(hostRepair.status, hostRepair.stderr).toBe(0);
+        }
+        expect(repaired.status, repaired.stderr).toBe(0);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stops Maven when a seeded alias cannot be deleted',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      const aliasCommand =
+        'find -P "${RUNNER_TEMP}/m2-repo" -xdev -type l -delete || exit 1';
+      expect(body).toContain(aliasCommand);
+      for (const tolerateFailure of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-alias-delete-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const hostCache = join(dir, 'home', '.m2', 'repository');
+        const outside = join(dir, 'outside');
+        const outsidePartial = join(outside, 'partial.txt');
+        mkdirSync(join(hostCache, 'com'), { recursive: true });
+        mkdirSync(outside, { recursive: true });
+        writeFileSync(outsidePartial, 'outside unchanged\n');
+        symlinkSync(outside, join(hostCache, 'com', 'vendor'), 'dir');
+        writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+        writeFileSync(
+          join(dir, 'bin', 'find'),
+          '#!/bin/sh\ncase "$*" in\n  *"-type l -delete"*)\n    printf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/alias-delete.log"\n    printf \'find: injected alias deletion failure\\n\' >&2\n    exit 19\n    ;;\nesac\nexec /usr/bin/find "$@"\n',
+          { mode: 0o755 },
+        );
+        const testBody = tolerateFailure
+          ? body.replace(
+              aliasCommand,
+              `${aliasCommand.replace('exit 1', 'true')}`,
+            )
+          : body;
+        expect(testBody).toContain(
+          tolerateFailure ? '-delete || true' : '-delete || exit 1',
+        );
+        const stubs = `
+          mvn() {
+            mkdir -p "\${RUNNER_TEMP}/m2-repo/com/vendor/acme/new-dependency" || return "$?"
+            printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+          }
+        `;
+        const env = {
+          ...process.env,
+          LC_ALL: 'C',
+          PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+          HOME: join(dir, 'home'),
+          RUNNER_TEMP: runnerTemp,
+          MATRIX_JAVA: '11',
+          TIER: 'fast',
+        };
+        try {
+          const result = spawnSync(
+            'bash',
+            ['-e', '-c', `${stubs}\n${testBody}\nexit "\${mvn_status}"`],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env,
+            },
+          );
+          expect(result.error, testBody).toBeUndefined();
+          expect(result.status, testBody).toBe(tolerateFailure ? 0 : 1);
+          expect(result.stderr).toContain('injected alias deletion failure');
+          expect(
+            readFileSync(join(runnerTemp, 'alias-delete.log'), 'utf8'),
+          ).toContain('-type l -delete');
+          expect(readFileSync(outsidePartial, 'utf8')).toBe(
+            'outside unchanged\n',
+          );
+          const newDependency = join(outside, 'acme', 'new-dependency');
+          if (tolerateFailure) {
+            expect(existsSync(newDependency)).toBe(true);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(true);
+          } else {
+            expect(existsSync(newDependency)).toBe(false);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each(['metadata', 'coordinate'])(
+    'stops release Maven after $0 cleanup failure',
+    (kind) => {
+      const script = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components').run;
+      const body = script.slice(
+        script.indexOf('if [[ "${RUNNER_ENVIRONMENT}" == \'self-hosted\' ]]'),
+      );
+      const pruneStart = body.indexOf('find -P "${repo}" -xdev -depth');
+      expect(pruneStart).toBeGreaterThan(0);
+      for (const tolerateFailure of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-prune-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const hostRepo = join(dir, 'home', '.m2', 'repository');
+        const trackerGroup =
+          kind === 'coordinate'
+            ? 'com/alibaba/qwencode-sdk'
+            : 'com/example/tracking';
+        const hostTracking = join(
+          hostRepo,
+          trackerGroup,
+          '1.0',
+          '_remote.repositories',
+        );
+        const hostJar = join(
+          hostRepo,
+          'com',
+          'alibaba',
+          'qwencode-sdk',
+          '1.0',
+          'qwencode-sdk-1.0.jar',
+        );
+        const sentence =
+          kind === 'coordinate'
+            ? '-path */com/alibaba/qwencode-sdk'
+            : '_remote.repositories';
+        try {
+          mkdirSync(dirname(hostTracking), { recursive: true });
+          mkdirSync(dirname(hostJar), { recursive: true });
+          writeFileSync(hostTracking, 'ORIGINAL_HOST_TRACKING=host\n');
+          writeFileSync(hostJar, 'host-artifact\n', { mode: 0o444 });
+          chmodSync(dirname(hostTracking), 0o555);
+          writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+          writeFileSync(
+            join(dir, 'bin', 'find'),
+            `#!/bin/sh
+case "$*" in
+  *"${sentence}"*)
+    /usr/bin/stat -Lc '%h' "\${RUNNER_TEMP}/m2-repo/${trackerGroup}/1.0/_remote.repositories" > "\${RUNNER_TEMP}/fault-link-count"
+    printf 'injected reference ${kind} prune failure\\n' >&2
+    exit 31
+    ;;
+esac
+exec /usr/bin/find "$@"
+`,
+            { mode: 0o755 },
+          );
+          const testBody = tolerateFailure
+            ? body.slice(0, pruneStart) +
+              body
+                .slice(pruneStart)
+                .replaceAll('-delete || exit 1', '-delete 2>/dev/null || true')
+            : body;
+          const invocation = `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${testBody}`;
+          const result = spawnSync('bash', ['-e', '-c', invocation], {
+            encoding: 'utf8',
+            timeout: 15000,
+            env: {
+              ...process.env,
+              PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+              HOME: join(dir, 'home'),
+              RUNNER_TEMP: runnerTemp,
+              RUNNER_ENVIRONMENT: 'self-hosted',
+              LC_ALL: 'C',
+            },
+          });
+          expect(result.error, testBody).toBeUndefined();
+          if (!tolerateFailure) {
+            expect(result.stderr).toContain(
+              `injected reference ${kind} prune failure`,
+            );
+          }
+          expect(result.status, testBody + result.stderr).toBe(
+            tolerateFailure ? 0 : 1,
+          );
+          if (!tolerateFailure) {
+            expect(
+              existsSync(
+                join(
+                  runnerTemp,
+                  'm2-repo',
+                  trackerGroup,
+                  '1.0',
+                  '_remote.repositories',
+                ),
+              ),
+            ).toBe(true);
+          }
+          expect(
+            readFileSync(join(runnerTemp, 'fault-link-count'), 'utf8').trim(),
+            result.stdout + result.stderr,
+          ).toBe('2');
+          expect(readFileSync(hostTracking, 'utf8')).toBe(
+            'ORIGINAL_HOST_TRACKING=host\n',
+          );
+          expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(
+            tolerateFailure,
+          );
+          if (tolerateFailure) {
+            expect(
+              readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
+                .trim()
+                .split('\n'),
+            ).toHaveLength(2);
+          }
+        } finally {
+          spawnSync(
+            'find',
+            [dir, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+            {
+              env: process.env,
+              encoding: 'utf8',
+            },
+          );
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
+    'removes inherited metadata and transfer residue from the reference seed',
+    () => {
+      const source = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components').run;
+      const relativeFiles = [
+        'org/example/lib/maven-metadata-central.xml',
+        'org/example/lib/maven-metadata-central.xml.sha1',
+        'org/example/lib/maven-metadata-central.xml.sha256',
+        'org/example/lib/maven-metadata-central.xml.sha512',
+        'org/example/lib/maven-metadata-central.xml.md5',
+        'org/example/lib/artifact.jar.part',
+        'org/example/lib/artifact.jar.part.lock',
+      ];
+      for (const dropPart of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-reference-residue-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const hostRepo = join(dir, 'home', '.m2', 'repository');
+        mkdirSync(runnerTemp, { recursive: true });
+        for (const relative of relativeFiles) {
+          mkdirSync(dirname(join(hostRepo, relative)), { recursive: true });
+          writeFileSync(join(hostRepo, relative), 'host\n');
+        }
+        const jobLocal = join(runnerTemp, 'm2-repo');
+        const body = dropPart
+          ? source.replace("-o -name '*.part'", '')
+          : source;
+        writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+        try {
+          const result = spawnSync(
+            'bash',
+            [
+              '-e',
+              '-c',
+              `mvn() { printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"; }\n${body}`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env: {
+                ...process.env,
+                PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+                HOME: join(dir, 'home'),
+                RUNNER_TEMP: runnerTemp,
+                RUNNER_ENVIRONMENT: 'self-hosted',
+                LC_ALL: 'C',
+              },
+            },
+          );
+          expect(result.error, body).toBeUndefined();
+          expect(result.status, body + result.stderr).toBe(0);
+          for (const relative of relativeFiles) {
+            expect(existsSync(join(jobLocal, relative)), relative).toBe(
+              dropPart && relative.endsWith('.part'),
+            );
+            const host = join(hostRepo, relative);
+            expect(readFileSync(host, 'utf8')).toBe('host\n');
+            expect(statSync(host).nlink).toBe(
+              dropPart && relative.endsWith('.part') ? 2 : 1,
+            );
+          }
+          expect(
+            readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
+              .trim()
+              .split('\n'),
+          ).toHaveLength(2);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'keeps the reference Maven repository writable after a read-only seed',
+    () => {
+      const source = Object.values(
+        parse(
+          readFileSync(
+            '.github/workflows/release-managed-agent-reference.yml',
+            'utf8',
+          ),
+        ).jobs,
+      )
+        .flatMap((entry) => entry.steps ?? [])
+        .find((candidate) => candidate.name === 'Build Java components').run;
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-release-seed-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const hostRepo = join(home, '.m2', 'repository');
+      const hostArtifact = join(hostRepo, 'com', 'acme', 'host.jar');
+      const repo = join(runnerTemp, 'm2-repo');
+      mkdirSync(dirname(hostArtifact), { recursive: true });
+      writeFileSync(hostArtifact, 'host\n', { mode: 0o444 });
+      chmodSync(join(hostRepo, 'com'), 0o755);
+      chmodSync(hostRepo, 0o555);
+      chmodSync(dirname(hostArtifact), 0o555);
+      writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+      writeFileSync(
+        join(dir, 'bin', 'chmod'),
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "${RUNNER_TEMP}/chmod-calls"\nexec /bin/chmod "$@"\n',
+        { mode: 0o755 },
+      );
+      const stub = `
+        mvn() {
+          mkdir -p "${repo}/com/acme/new-dependency" || return "$?"
+          printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+        }
+      `;
+      try {
+        const result = spawnSync('bash', ['-e', '-c', `${stub}\n${source}`], {
+          encoding: 'utf8',
+          timeout: 15000,
+          env: {
+            ...process.env,
+            LC_ALL: 'C',
+            PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+            HOME: home,
+            RUNNER_TEMP: runnerTemp,
+            RUNNER_ENVIRONMENT: 'self-hosted',
+          },
+        });
+        expect(result.error, source).toBeUndefined();
+        expect(result.status, source + result.stderr).toBe(0);
+        expect(
+          existsSync(join(repo, 'com', 'acme', 'new-dependency')),
+          result.stderr,
+        ).toBe(true);
+        expect(
+          readFileSync(join(repo, 'com', 'acme', 'host.jar'), 'utf8'),
+        ).toBe('host\n');
+        expect(statSync(repo).mode & 0o777).toBe(0o755);
+        expect(statSync(join(repo, 'com', 'acme')).mode & 0o777).toBe(0o755);
+        expect(statSync(join(repo, 'com', 'acme', 'host.jar')).nlink).toBe(
+          statSync(hostArtifact).nlink,
+        );
+        expect(statSync(hostArtifact).nlink).toBeGreaterThan(1);
+        expect(statSync(hostRepo).mode & 0o777).toBe(0o555);
+        expect(statSync(hostArtifact).mode & 0o777).toBe(0o444);
+        expect(
+          readFileSync(join(runnerTemp, 'chmod-calls'), 'utf8')
+            .trim()
+            .split('\n'),
+        ).toEqual([`u+rwx ${repo}`, `u+rwx ${join(repo, 'com', 'acme')}`]);
+        expect(
+          readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
+            .trim()
+            .split('\n'),
+        ).toHaveLength(2);
+      } finally {
+        const repair = spawnSync(
+          'find',
+          [dir, '-type', 'd', '-exec', 'chmod', 'u+rwx', '{}', ';'],
+          { env: process.env, encoding: 'utf8', timeout: 5000 },
+        );
+        expect(repair.status, repair.stderr).toBe(0);
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each([
+    ...['test', 'mysql-integration'].flatMap((jobName) => [
+      { jobName, suiteStatus: 0, hostDevice: '17', jobDevice: '29' },
+      { jobName, suiteStatus: 1, hostDevice: '17', jobDevice: '29' },
+      { jobName, suiteStatus: 0, hostDevice: '', jobDevice: '29' },
+      { jobName, suiteStatus: 1, hostDevice: '17', jobDevice: '' },
+      { jobName, suiteStatus: 0, hostDevice: '', jobDevice: '' },
+      { jobName, suiteStatus: 1, hostDevice: '', jobDevice: '' },
+    ]),
+    {
+      jobName: 'test',
+      suiteStatus: 0,
+      hostDevice: '29',
+      jobDevice: '17',
+      withoutRepository: true,
+    },
+    {
+      jobName: 'test',
+      suiteStatus: 0,
+      hostDevice: '29',
+      jobDevice: '29',
+      withoutRepository: true,
+      publishes: true,
+    },
+  ])(
+    'enforces write-back safety in $jobName with status $suiteStatus, host "$hostDevice" and job "$jobDevice"',
+    ({
+      jobName,
+      suiteStatus,
+      hostDevice,
+      jobDevice,
+      withoutRepository = false,
+      publishes = false,
+    }) => {
+      const step = parse(workflow).jobs[jobName].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      );
+      const body = step.run.slice(
+        step.run.indexOf('mvn_report_failed_suite() {'),
+      );
+      const declarationsAt = body.indexOf('writeback_host_root=');
+      const lockAt = body.indexOf('lock_setup_fault() {', declarationsAt);
+      const hostPrune = 'find -P "${HOME}/.m2/repository" -xdev -depth';
+      const deviceGuardAt = body.indexOf(
+        'if [ -z "${writeback_device_host}" ]',
+      );
+      const publishAt = body.indexOf(
+        'cd "${RUNNER_TEMP}/m2-repo"',
+        deviceGuardAt,
+      );
+      expect(declarationsAt).toBeGreaterThanOrEqual(0);
+      expect(lockAt).toBeGreaterThan(declarationsAt);
+      expect(deviceGuardAt).toBeGreaterThan(body.indexOf(hostPrune));
+      expect(publishAt).toBeGreaterThan(deviceGuardAt);
+      const declarations = body.slice(declarationsAt, lockAt);
+      const deviceGuard = body.slice(deviceGuardAt, publishAt);
+      expect(declarations).toContain('writeback_device_host=');
+      expect(declarations).toContain('writeback_device_job=');
+      expect(deviceGuard).toContain('hard links are unavailable');
+      expect(deviceGuard).toContain('exit "${mvn_status}"');
+      const legacyBody = body
+        .replace(declarations, '')
+        .replace(deviceGuard, '');
+      expect(legacyBody).not.toContain('writeback_device_host=');
+      expect(legacyBody).not.toContain('writeback_device_job=');
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-cross-write-back-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const targetArtifact = join(home, '.m2', 'repository', 'delta.jar');
+      const sourceArtifact = join(runnerTemp, 'm2-repo', 'delta.jar');
+      const staleCoordinate = join(
+        home,
+        '.m2',
+        'repository',
+        'com',
+        'alibaba',
+        'qwencode-sdk',
+        'stale.jar',
+      );
+      mkdirSync(
+        withoutRepository ? join(home, '.m2') : dirname(targetArtifact),
+        { recursive: true },
+      );
+      if (!withoutRepository) {
+        mkdirSync(dirname(staleCoordinate), { recursive: true });
+        writeFileSync(staleCoordinate, 'stale\n');
+      }
+      mkdirSync(dirname(sourceArtifact), { recursive: true });
+      writeFileSync(sourceArtifact, 'downloaded\n');
+      writeDeviceProbe(dir, {
+        lockBackend: true,
+        hostDevice,
+        jobDevice,
+        homeDevice: '17',
+      });
+      const invocation = `
+        mvn_status=${suiteStatus}
+        mvn_stage='sdk-java test'
+      `;
+      const sharedOptions = {
+        encoding: 'utf8',
+        timeout: 10000,
+        env: {
+          ...process.env,
+          PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+          HOME: home,
+          RUNNER_TEMP: runnerTemp,
+          GITHUB_WORKSPACE: join(dir, 'workspace'),
+        },
+      };
+      try {
+        if (suiteStatus === 0 && hostDevice && jobDevice) {
+          const legacy = spawnSync(
+            'bash',
+            ['-e', '-c', `${invocation}\n${legacyBody}`],
+            sharedOptions,
+          );
+          expect(legacy.status, legacy.stderr).toBe(0);
+          expect(readFileSync(targetArtifact, 'utf8')).toBe('downloaded\n');
+          expect(existsSync(join(runnerTemp, 'lock-calls'))).toBe(true);
+          rmSync(targetArtifact, { force: true });
+          rmSync(join(runnerTemp, 'lock-calls'));
+          expect(statSync(sourceArtifact).nlink).toBe(1);
+        }
+        if (withoutRepository) {
+          // The legacy arm creates it; restore the fallback's precondition.
+          rmSync(dirname(targetArtifact), { recursive: true, force: true });
+        }
+        if (existsSync(join(runnerTemp, 'cp-calls'))) {
+          rmSync(join(runnerTemp, 'cp-calls'));
+        }
+        const result = spawnSync(
+          'bash',
+          ['-e', '-c', `${invocation}\n${body}`],
+          {
+            ...sharedOptions,
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(suiteStatus);
+        const hostProbe = withoutRepository
+          ? join(home, '.m2')
+          : join(home, '.m2', 'repository');
+        expect(readFileSync(join(runnerTemp, 'stat-calls'), 'utf8')).toBe(
+          `-Lc %d ${hostProbe}\n` + `-Lc %d ${join(runnerTemp, 'm2-repo')}\n`,
+        );
+        expect(existsSync(staleCoordinate)).toBe(false);
+        expect(existsSync(join(runnerTemp, 'lock-calls'))).toBe(true);
+        if (publishes) {
+          expect(readFileSync(targetArtifact, 'utf8')).toBe('downloaded\n');
+          expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(true);
+          expect(result.stdout).not.toContain('write-back skipped');
+        } else {
+          expect(existsSync(targetArtifact)).toBe(false);
+          expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(false);
+          expect(result.stdout).toContain('Maven cache write-back skipped');
+        }
+        if (suiteStatus === 1) {
+          expect(result.stdout).toContain('failed with status 1');
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  // A partially cleaned tree must not reach Maven through residual links.
+  it.skipIf(process.platform !== 'linux').each([
+    { suiteStatus: 0, pruneExit: 31 },
+    { suiteStatus: 1, pruneExit: 41 },
+    { suiteStatus: 0, pruneExit: 124 },
+  ])(
+    'reports a host prune failure before skipping publication (suite $suiteStatus, prune $pruneExit)',
+    ({ suiteStatus, pruneExit }) => {
+      const source = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = source.slice(source.indexOf('mvn_report_failed_suite() {'));
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-prune-writeback-'));
+      const home = join(dir, 'home');
+      const runnerTemp = join(dir, 'runner-temp');
+      const hostRepo = join(home, '.m2', 'repository');
+      mkdirSync(hostRepo, { recursive: true });
+      mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+      writeDeviceProbe(dir, {
+        lockBackend: true,
+        hostDevice: '17',
+        jobDevice: '29',
+      });
+      writeFileSync(
+        join(dir, 'bin', 'find'),
+        `#!/bin/sh
+case "$*" in
+  *"-depth"*"-delete"*)
+    printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/host-prune-calls"
+    printf 'injected host prune failure\\n' >&2
+    exit ${pruneExit}
+    ;;
+esac
+exec /usr/bin/find "$@"
+`,
+        { mode: 0o755 },
+      );
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-c',
+            `mvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${body}`,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 15000,
+            env: {
+              ...process.env,
+              PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: join(dir, 'workspace'),
+              LC_ALL: 'C',
+            },
+          },
+        );
+        expect(result.error, result.stderr).toBeUndefined();
+        expect(result.status, result.stdout + result.stderr).toBe(suiteStatus);
+        expect(result.stderr).toContain('injected host prune failure');
+        expect(
+          readFileSync(join(runnerTemp, 'host-prune-calls'), 'utf8'),
+        ).toContain('-depth');
+        expect(result.stdout).toContain('Maven cache write-back failed');
+        expect(result.stdout).toContain(
+          'hard links are unavailable between the job and host filesystems',
+        );
+        expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(false);
+        expect(readFileSync(join(runnerTemp, 'lock-calls'), 'utf8')).toContain(
+          'lock',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each([
+    { jobName: 'test', suiteStatus: 0, device: 'host' },
+    { jobName: 'test', suiteStatus: 1, device: 'job' },
+    { jobName: 'mysql-integration', suiteStatus: 1, device: 'host' },
+    { jobName: 'mysql-integration', suiteStatus: 0, device: 'job' },
+  ])(
+    'preserves the suite status when the $device device probe fails in $jobName (suite $suiteStatus)',
+    ({ jobName, suiteStatus, device }) => {
+      const source = parse(workflow).jobs[jobName].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const body = source.slice(source.indexOf('mvn_report_failed_suite() {'));
+      const assignment =
+        device === 'host'
+          ? 'writeback_device_host="$(stat -Lc \'%d\' "${writeback_host_root}" || true)"'
+          : 'writeback_device_job="$(stat -Lc \'%d\' "${RUNNER_TEMP}/m2-repo" || true)"';
+      expect(body).toContain(assignment);
+      for (const tolerateFailure of [true, false]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-writeback-stat-'));
+        const home = join(dir, 'home');
+        const runnerTemp = join(dir, 'runner-temp');
+        const staleCoordinate = join(
+          home,
+          '.m2',
+          'repository',
+          'com',
+          'alibaba',
+          'qwencode-sdk',
+          '1.0',
+          'stale.jar',
+        );
+        try {
+          mkdirSync(dirname(staleCoordinate), { recursive: true });
+          mkdirSync(join(runnerTemp, 'm2-repo'), { recursive: true });
+          writeFileSync(staleCoordinate, 'stale\n');
+          writeDeviceProbe(dir, {
+            lockBackend: true,
+            hostDevice: '17',
+            jobDevice: '17',
+            hostStatExit: device === 'host' ? 47 : 0,
+            jobStatExit: device === 'job' ? 47 : 0,
+          });
+          mkdirSync(join(runnerTemp, 'm2-repo', 'com', 'example'), {
+            recursive: true,
+          });
+          writeFileSync(
+            join(runnerTemp, 'm2-repo', 'com', 'example', 'new.jar'),
+            'new\n',
+          );
+          const testBody = tolerateFailure
+            ? body
+            : body.replace(assignment, assignment.replace(' || true', ''));
+          const result = spawnSync(
+            'bash',
+            [
+              '-e',
+              '-c',
+              `mvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${testBody}`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env: {
+                ...process.env,
+                PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+                HOME: home,
+                RUNNER_TEMP: runnerTemp,
+                GITHUB_WORKSPACE: join(dir, 'workspace'),
+                LC_ALL: 'C',
+              },
+            },
+          );
+          expect(result.error, result.stderr).toBeUndefined();
+          expect(result.stderr).toContain('injected stat failure');
+          expect(result.status, result.stdout + result.stderr).toBe(
+            tolerateFailure ? suiteStatus : 47,
+          );
+          expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(false);
+          if (tolerateFailure) {
+            expect(result.stdout).toContain(
+              'hard links are unavailable between the job and host filesystems',
+            );
+            expect(existsSync(staleCoordinate)).toBe(false);
+            expect(
+              readFileSync(join(runnerTemp, 'lock-calls'), 'utf8'),
+            ).toContain('lock');
+          }
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
+    'blocks Maven when seeded resolver metadata cannot be removed',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
       );
       const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-prune-'));
       const workspace = join(dir, 'workspace');
@@ -1706,9 +3892,8 @@ describe('SDK Java self-hosted workflow guards', () => {
       mkdirSync(join(workspace, '.github', 'scripts'), { recursive: true });
       mkdirSync(shims);
       mkdirSync(runnerTemp, { recursive: true });
-      // `cp -a` keeps the mode, so the de-alias find fails to delete this
-      // marker in the job-local copy. The seed is best-effort: the leg must
-      // still reach Maven, which re-resolves from the network.
+      // `cp -a` keeps the source mode; the targeted find failure, rather than
+      // the repaired job-local mode, leaves this exact marker behind.
       const locked = join(hostCache, 'com', 'example', 'locked');
       mkdirSync(locked, { recursive: true });
       writeFileSync(join(locked, '_remote.repositories'), 'central\n');
@@ -1733,6 +3918,36 @@ describe('SDK Java self-hosted workflow guards', () => {
         '#!/bin/sh\nprintf "%s\\n" "$*" >> "${RUNNER_TEMP}/mvn-calls"\n',
         { mode: 0o755 },
       );
+      writeFileSync(
+        join(shims, 'find'),
+        [
+          '#!/bin/bash',
+          'args=("$@")',
+          'if [[ "$*" == *"-name *.lastUpdated"* ]] && [ "${args[${#args[@]}-1]}" = "-delete" ]; then',
+          "  unset 'args[${#args[@]}-1]'",
+          '  printf \'%s\\n\' "$*" >> "${QWEN_TEST_FIND_CALLS}"',
+          '  /usr/bin/find "${args[@]}" -exec "${QWEN_TEST_SHIMS}/delete-rest" \'{}\' \';\' || exit "$?"',
+          '  exit 23',
+          'fi',
+          'exec /usr/bin/find "$@"',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      writeFileSync(
+        join(shims, 'delete-rest'),
+        [
+          '#!/bin/bash',
+          'case "$1" in',
+          '  */com/example/locked/_remote.repositories)',
+          '    printf \'find: cannot delete %s: injected fault\\n\' "$1" >&2',
+          '    ;;',
+          '  *) rm -f -- "$1" ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
       try {
         const result = spawnSync('bash', ['-e', '-c', body], {
           encoding: 'utf8',
@@ -1740,6 +3955,8 @@ describe('SDK Java self-hosted workflow guards', () => {
           env: {
             ...process.env,
             PATH: `${shims}:${process.env.PATH}`,
+            QWEN_TEST_SHIMS: shims,
+            QWEN_TEST_FIND_CALLS: join(runnerTemp, 'injected-find.log'),
             GITHUB_WORKSPACE: workspace,
             HOME: home,
             RUNNER_TEMP: runnerTemp,
@@ -1748,24 +3965,33 @@ describe('SDK Java self-hosted workflow guards', () => {
           },
         });
         expect(result.error, body).toBeUndefined();
-        // The failed deletion must not abort the leg before Maven: the copy
-        // still succeeds, so no other warning can carry the exit.
-        expect(result.status, body + result.stderr).toBe(0);
+        expect(result.status, body + result.stderr).toBe(1);
+        expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
+        expect(result.stderr).toContain('injected fault');
+        // The guarded target, and only that target, survives the prune.
         expect(
-          readFileSync(join(runnerTemp, 'mvn-calls'), 'utf8')
-            .trim()
-            .split('\n'),
-          body + result.stderr,
-        ).toHaveLength(1);
-        // The fixture faulted: the marker survived the prune because its
-        // copied directory kept the unwritable mode.
+          readFileSync(join(runnerTemp, 'injected-find.log'), 'utf8'),
+        ).toContain('-name *.lastUpdated');
         expect(
           existsSync(
             join(jobLocal, 'com', 'example', 'locked', '_remote.repositories'),
           ),
           body + result.stderr,
         ).toBe(true);
-        // The prune still dropped the de-alias it could reach.
+        const marker = join(
+          jobLocal,
+          'com',
+          'example',
+          'locked',
+          '_remote.repositories',
+        );
+        expect(statSync(marker).nlink).toBe(2);
+        expect(readFileSync(join(locked, '_remote.repositories'), 'utf8')).toBe(
+          'central\n',
+        );
+        expect(readFileSync(marker, 'utf8')).toBe('central\n');
+        // The failed marker remains hardlinked, but cannot reach Maven.
+        // Other reachable aliases are still removed before the reported error.
         expect(
           existsSync(
             join(
@@ -1778,7 +4004,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           ),
         ).toBe(false);
       } finally {
-        // `cp -a` gave the job-local copy the same unwritable mode.
+        // Restore the fixture-owned directories before recursive cleanup.
         for (const path of [
           locked,
           join(jobLocal, 'com', 'example', 'locked'),
@@ -1786,6 +4012,90 @@ describe('SDK Java self-hosted workflow guards', () => {
           if (existsSync(path)) chmodSync(path, 0o755);
         }
         rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
+    'stops Maven when the in-house coordinate prune fails',
+    () => {
+      const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+      const body = run.slice(
+        run.indexOf('if [ -L "${RUNNER_TEMP}/m2-repo" ]; then'),
+        run.indexOf(
+          'if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]',
+        ),
+      );
+      for (const tolerateFailure of [false, true]) {
+        const dir = mkdtempSync(join(tmpdir(), 'sdk-java-coordinate-fault-'));
+        const runnerTemp = join(dir, 'runner-temp');
+        const hostCache = join(dir, 'home', '.m2', 'repository');
+        const coordinate = 'com/alibaba/qwencode-sdk/1.0';
+        const hostJar = join(hostCache, coordinate, 'qwencode-sdk-1.0.jar');
+        const jobJar = join(
+          runnerTemp,
+          'm2-repo',
+          coordinate,
+          'qwencode-sdk-1.0.jar',
+        );
+        try {
+          mkdirSync(dirname(hostJar), { recursive: true });
+          mkdirSync(runnerTemp, { recursive: true });
+          writeFileSync(hostJar, 'host-artifact\n', { mode: 0o444 });
+          writeDeviceProbe(dir, { hostDevice: '17', jobDevice: '17' });
+          writeFileSync(
+            join(dir, 'bin', 'find'),
+            `#!/bin/sh
+case "$*" in
+  *"-path */com/alibaba/qwencode-sdk"*) printf 'injected in-house prune failure\\n' >&2; exit 31 ;;
+esac
+exec /usr/bin/find "$@"
+`,
+            { mode: 0o755 },
+          );
+          const pruneStart = body.indexOf('# Drop resolver');
+          expect(pruneStart).toBeGreaterThan(0);
+          const testBody = tolerateFailure
+            ? body.slice(0, pruneStart) +
+              body
+                .slice(pruneStart)
+                .replaceAll('-delete || exit 1', '-delete 2>/dev/null || true')
+            : body;
+          const result = spawnSync(
+            'bash',
+            [
+              '-e',
+              '-c',
+              `mvn() { printf 'mvn\\n' >> "\${RUNNER_TEMP}/mvn-calls"; }\n${testBody}`,
+            ],
+            {
+              encoding: 'utf8',
+              timeout: 15000,
+              env: {
+                ...process.env,
+                PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+                HOME: join(dir, 'home'),
+                RUNNER_TEMP: runnerTemp,
+                LC_ALL: 'C',
+              },
+            },
+          );
+          expect(result.error, testBody).toBeUndefined();
+          if (!tolerateFailure) {
+            expect(result.stderr).toContain('injected in-house prune failure');
+          }
+          expect(result.status, testBody + result.stderr).toBe(
+            tolerateFailure ? 0 : 1,
+          );
+          expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(
+            tolerateFailure,
+          );
+          expect(readFileSync(jobJar, 'utf8')).toBe('host-artifact\n');
+          expect(statSync(jobJar).nlink).toBe(2);
+          expect(readFileSync(hostJar, 'utf8')).toBe('host-artifact\n');
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
       }
     },
   );
@@ -1798,28 +4108,32 @@ describe('SDK Java self-hosted workflow guards', () => {
   // anything. A `-links +1` filter would skip every inherited entry.
   it('clears inherited single-link resolver state from the job-local repository', () => {
     const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
-    const body = run.slice(
-      run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
-      run.indexOf('# The suite resolves from the job-local copy above'),
-    );
+    const body = run
+      .slice(
+        run.indexOf('seed_mount_guard() {'),
+        run.indexOf('# The suite resolves from the job-local copy above'),
+      )
+      .replace(
+        '# Drop resolver tracking markers',
+        `mkdir -p "\${RUNNER_TEMP}/m2-repo/com/acme/lib/1.0"
+          printf '%s\\n' 'stale-prior-job' > "\${RUNNER_TEMP}/m2-repo/com/acme/lib/1.0/resolver-status.properties"
+          printf '%s\\n' 'stale-prior-job' > "\${RUNNER_TEMP}/m2-repo/com/acme/lib/1.0/x.jar.lastUpdated"
+          # Drop resolver tracking markers`,
+      );
     const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-inherited-'));
     const home = join(dir, 'home');
     const runnerTemp = join(dir, 'runner-temp');
     const hostCache = join(home, '.m2', 'repository');
     const jobLocal = join(runnerTemp, 'm2-repo');
-    // A previous job's failed resolution left these markers directly in the
-    // job-local repository, plain files at nlink 1 — not seed hardlinks.
+    mkdirSync(runnerTemp, { recursive: true });
+    // These are planted after quarantine, so the test measures resolver
+    // pruning rather than the old repository being moved and deleted.
     const inherited = [
       join(jobLocal, 'com', 'acme', 'lib', '1.0', 'resolver-status.properties'),
       join(jobLocal, 'com', 'acme', 'lib', '1.0', 'x.jar.lastUpdated'),
     ];
-    for (const path of inherited) {
-      mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, 'stale-prior-job\n');
-      expect(statSync(path).nlink, path).toBe(1);
-    }
-    // The host cache seeds a marker of its own; after `cp -aln` into the
-    // existing destination it is an nlink-2 alias nested under m2-repo/.
+    // The host cache seeds a marker of its own at the canonical job-local
+    // path; the de-alias removes that alias without removing the host peer.
     const hostMarker = join(
       hostCache,
       'com',
@@ -1830,36 +4144,42 @@ describe('SDK Java self-hosted workflow guards', () => {
     mkdirSync(dirname(hostMarker), { recursive: true });
     writeFileSync(hostMarker, 'host\n');
     writeFileSync(hostJar, 'jar\n');
+    expect(statSync(home).dev).toBe(statSync(runnerTemp).dev);
+    writeDeviceProbe(dir, {
+      hostDevice: String(statSync(home).dev),
+      jobDevice: String(statSync(runnerTemp).dev),
+    });
     try {
-      const result = spawnSync('bash', ['-e', '-c', body], {
-        encoding: 'utf8',
-        timeout: 15_000,
-        env: {
-          ...process.env,
-          HOME: home,
-          RUNNER_TEMP: runnerTemp,
-        },
-      });
-      expect(result.error, body).toBeUndefined();
-      expect(result.status, body + result.stderr).toBe(0);
-      for (const path of inherited) {
-        expect(
-          existsSync(path),
-          `${path}: inherited single-link marker survived the seed prune`,
-        ).toBe(false);
+      for (const skipSingleLinks of [false, true]) {
+        const testBody = skipSingleLinks
+          ? body.replace(
+              'find -P "${RUNNER_TEMP}/m2-repo" -xdev \\( -name',
+              'find -P "${RUNNER_TEMP}/m2-repo" -xdev -links +1 \\( -name',
+            )
+          : body;
+        const result = spawnSync('bash', ['-e', '-c', testBody], {
+          encoding: 'utf8',
+          timeout: 15_000,
+          env: {
+            ...process.env,
+            PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+            HOME: home,
+            RUNNER_TEMP: runnerTemp,
+          },
+        });
+        expect(result.error, testBody).toBeUndefined();
+        expect(result.status, testBody + result.stderr).toBe(0);
+        for (const path of inherited) {
+          expect(existsSync(path), path).toBe(skipSingleLinks);
+          if (skipSingleLinks) {
+            expect(statSync(path).nlink, path).toBe(1);
+          }
+        }
       }
       // The seeded alias is de-aliased in the same pass, and deleting a
       // job-local link never removes the host peer.
       expect(
-        existsSync(
-          join(
-            jobLocal,
-            'repository',
-            'com',
-            'example',
-            'lib-1.0.jar.lastUpdated',
-          ),
-        ),
+        existsSync(join(jobLocal, 'com', 'example', 'lib-1.0.jar.lastUpdated')),
       ).toBe(false);
       expect(existsSync(hostMarker)).toBe(true);
       expect(existsSync(hostJar)).toBe(true);
@@ -1899,7 +4219,7 @@ describe('SDK Java self-hosted workflow guards', () => {
           [
             '-e',
             '-c',
-            `${deferredReporter(run)}\nmvn_status=0\nmvn_stage='sdk-java test'\n${body}`,
+            `writeback_device_host=probe\nwriteback_device_job=probe\n${deferredReporter(run)}\nmvn_status=0\nmvn_stage='sdk-java test'\n${body}`,
           ],
           {
             encoding: 'utf8',
@@ -1944,6 +4264,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       const published = join(home, '.m2', 'repository', 'marker.txt');
       mkdirSync(dirname(planted), { recursive: true });
       writeFileSync(planted, 'downloaded\n');
+      mkdirSync(home, { recursive: true });
       try {
         const result = spawnSync(
           'bash',
@@ -2103,8 +4424,77 @@ describe('SDK Java self-hosted workflow guards', () => {
         expect(result.error, body).toBeUndefined();
         expect(result.status, body + result.stderr).toBe(suiteStatus);
         expect(result.stdout).toContain(
+          '::warning::Maven cache write-back skipped: hard links are unavailable between the job and host filesystems',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux').each(
+    ['test', 'mysql-integration'].flatMap((jobName) => [
+      { jobName, suiteStatus: 0 },
+      { jobName, suiteStatus: 1 },
+    ]),
+  )(
+    'demotes a non-directory job-local repository in $jobName (suite exit $suiteStatus)',
+    ({ jobName, suiteStatus }) => {
+      const source = parse(workflow).jobs[jobName].steps.find((candidate) =>
+        candidate.run?.includes('sdk-java-tests.lock'),
+      ).run;
+      const body = source.slice(source.indexOf('mvn_report_failed_suite() {'));
+      const dir = mkdtempSync(join(tmpdir(), 'sdk-java-file-repo-'));
+      const home = join(dir, 'home');
+      const hostRepo = join(home, '.m2', 'repository');
+      const runnerTemp = join(dir, 'runner-temp');
+      const jobRepo = join(runnerTemp, 'm2-repo');
+      mkdirSync(hostRepo, { recursive: true });
+      mkdirSync(runnerTemp, { recursive: true });
+      writeFileSync(jobRepo, 'not a directory\n');
+      writeDeviceProbe(dir, {
+        lockBackend: true,
+        hostDevice: '17',
+        jobDevice: '17',
+      });
+      try {
+        const result = spawnSync(
+          'bash',
+          [
+            '-e',
+            '-c',
+            `mvn_status=${suiteStatus}\nmvn_stage='sdk-java test'\n${body}`,
+          ],
+          {
+            encoding: 'utf8',
+            timeout: 5000,
+            env: {
+              ...process.env,
+              LC_ALL: 'C',
+              PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
+              HOME: home,
+              RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: join(dir, 'workspace'),
+            },
+          },
+        );
+        expect(result.error, body).toBeUndefined();
+        expect(result.status, body + result.stderr).toBe(suiteStatus);
+        expect(result.stderr).toContain('Not a directory');
+        expect(readFileSync(join(runnerTemp, 'lock-calls'), 'utf8')).toContain(
+          'lock',
+        );
+        expect(readFileSync(join(runnerTemp, 'stat-calls'), 'utf8')).toBe(
+          `-Lc %d ${hostRepo}\n-Lc %d ${jobRepo}\n`,
+        );
+        expect(result.stdout).toContain(
           '::warning::Maven cache write-back skipped; the gate result above is unaffected',
         );
+        expect(result.stdout).not.toContain('hard links are unavailable');
+        expect(existsSync(join(runnerTemp, 'cp-calls'))).toBe(false);
+        if (suiteStatus === 1) {
+          expect(result.stdout).toContain('failed with status 1');
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -2133,6 +4523,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       );
       mkdirSync(dirname(planted), { recursive: true });
       writeFileSync(planted, 'downloaded\n');
+      mkdirSync(home, { recursive: true });
       try {
         const result = spawnSync(
           'bash',
@@ -2344,16 +4735,16 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(line).toMatch(/ \|\| mvn_status=\$\?$/);
     }
     // Every tolerated skip reports the deferred suite status instead of
-    // turning a red suite green: the fault handler, both timeout arms, both
-    // write-back setup probes, and the end of the step.
+    // turning a red suite green: the filesystem guard, fault handler, both
+    // timeout arms, both write-back setup probes, and the end of the step.
     expect(block).not.toMatch(/^\s+exit 0$/m);
-    expect(block.match(/exit "\$\{mvn_status\}"/g)).toHaveLength(6);
+    expect(block.match(/exit "\$\{mvn_status\}"/g)).toHaveLength(7);
     expect(block.trimEnd().endsWith('exit "${mvn_status}"')).toBe(true);
     // Each Maven run names its stage, and every exit that can end a red step
     // reports it through the one reporter: the write-back output is the log
     // tail, so the tail alone cannot tell three suites apart.
     expect(block.match(/mvn_stage='[^']+'/g)).toHaveLength(4);
-    expect(block.match(/mvn_report_failed_suite/g)).toHaveLength(8);
+    expect(block.match(/mvn_report_failed_suite/g)).toHaveLength(9);
     expect(block).toContain(
       "echo \"::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}",
     );
@@ -2373,9 +4764,7 @@ describe('SDK Java self-hosted workflow guards', () => {
       mkdirSync(join(home, '.m2', 'repository'), { recursive: true });
       mkdirSync(cwd, { recursive: true });
       mkdirSync(shims);
-      // Create the directory itself, not `m2-repo`: with the copy target
-      // already present the seed would copy *into* it and bypass the path
-      // the write-back publishes from.
+      // The Actions runner guarantees RUNNER_TEMP before the seed runs.
       mkdirSync(runnerTemp, { recursive: true });
       writeFileSync(
         join(workspace, '.github', 'scripts', 'sdk-java-lock.sh'),
@@ -2708,7 +5097,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     if (name.startsWith('event-transport-')) {
       expect(exact).toBeNull();
       expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo"',
       );
     } else if (name === 'test') {
       // The self-hosted suite resolves from a job-local repository; only the
@@ -2723,7 +5112,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
       );
       expect(block).toContain(
-        'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+        'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo"',
       );
     } else if (name !== 'mysql-integration') {
       expect(jobLocal).toBeNull();
@@ -3497,7 +5886,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
       '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
     );
     expect(step.run).toContain(
-      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+      'cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo"',
     );
     // The write-back closes the host-shared ~/.m2 loop — the seed above only
     // reads that repository, so without it a pom key rotation leaves a
@@ -3533,7 +5922,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // order the phases: the write-back runs against a directory the seed has
     // not created yet if hoisted above it, and its warning arm swallows the
     // failure instead of reddening the gate.
-    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository"');
+    const seedAt = step.run.indexOf('cp -aln "${HOME}/.m2/repository/."');
     const installAt = step.run.indexOf('-f packages/sdk-java/qwencode/pom.xml');
     const verifyAt = step.run.indexOf('-Pmysql-integration');
     const writeBackAt = step.run.indexOf('cd "${RUNNER_TEMP}/m2-repo"');
