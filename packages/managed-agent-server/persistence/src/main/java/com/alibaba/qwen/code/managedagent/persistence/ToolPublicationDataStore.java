@@ -42,6 +42,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.ossScope;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.require;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.text;
 
@@ -2383,10 +2384,6 @@ public final class ToolPublicationDataStore {
 
     static String scope(String tenant, String workspace, String session) {
         return hash(JSON.createArrayNode().add(tenant).add(workspace).add(session).toString());
-    }
-
-    private static String ossScope(JsonNode key) {
-        return text(key, "tenantId") + "/" + text(key, "workspaceId") + "/" + text(key, "sessionId");
     }
 
     private static String requestDigest(String slot, long length, String digest) {

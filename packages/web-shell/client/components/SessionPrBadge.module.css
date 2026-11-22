@@ -33,6 +33,13 @@
   );
 }
 
+.sessionPrBadgeCompact,
+.sessionPrBadgeCompact:hover {
+  margin-left: 2px;
+  padding: 0 2px;
+  background: transparent;
+}
+
 /* State is carried by the GitHub-style icon, not the pill background. */
 .sessionPrBadge svg {
   width: 12px;

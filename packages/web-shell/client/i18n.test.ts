@@ -1090,6 +1090,7 @@ describe('web-shell zh-TW locale', () => {
 
   it('translates the surfaces that would otherwise stay English', () => {
     const tw = getTranslator('zh-TW');
+    const ru = getTranslator('ru');
     const en = getTranslator('en');
     for (const key of [
       'sidebar.gitCloneJobGone',
@@ -1108,9 +1109,17 @@ describe('web-shell zh-TW locale', () => {
       'managed.artifactLibrary.sessionFallback',
       'managed.artifactLibrary.refresh',
       'managed.artifactLibrary.close',
+      'userMessage.automatic.title',
     ]) {
       expect(tw(key, { path: '/w' })).not.toBe(en(key, { path: '/w' }));
     }
+    expect(getTranslator('zh-CN')('userMessage.automatic.title')).toBe(
+      '自动触发',
+    );
+    expect(ru('userMessage.automatic.title')).toBe(
+      'Автоматическое срабатывание',
+    );
+    expect(tw('userMessage.automatic.title')).toBe('自動觸發');
     expect(tw('sidebar.liveVoicePending')).toBe('語音通話');
     expect(tw('memory.savedIn', { path: '/w' })).toBe('已儲存於 /w');
   });
@@ -1153,5 +1162,31 @@ describe('web-shell zh-TW locale', () => {
         omittedColumns: 2,
       }),
     ).toBe('顯示 5/10 行，3/3 欄');
+  });
+});
+
+// The catalog checks above pin named key lists, so newly added keys are not
+// swept automatically. The touch follow-up keys are pinned here across every
+// shipped catalog: a missing entry would silently fall back to EN in the UI.
+const TOUCH_FOLLOWUP_KEYS = [
+  'composerMobile.acceptFollowup',
+  'composerMobile.dismissFollowup',
+  'composerMobile.caretUp',
+  'composerMobile.caretDown',
+  'composerMobile.caretRight',
+  'composerMobile.insertSlash',
+] as const;
+
+describe('touch follow-up catalog parity', () => {
+  it('carries the six touch follow-up keys in every shipped catalog', () => {
+    for (const key of TOUCH_FOLLOWUP_KEYS) {
+      const en = getTranslator('en')(key);
+      expect(en).not.toBe(key);
+      for (const language of ['zh-CN', 'zh-TW', 'ru'] as const) {
+        const translated = getTranslator(language)(key);
+        expect(translated).not.toBe(key);
+        expect(translated).not.toBe(en);
+      }
+    }
   });
 });

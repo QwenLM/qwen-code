@@ -5,6 +5,7 @@
  */
 import {
   QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_MANAGED_RUNTIME_ENV,
   QWEN_CODE_SERVE_ENV,
 } from './acp-channel-fallback.js';
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
@@ -71,6 +72,7 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `.env` must not spoof client channel telemetry.
   QWEN_CODE_SERVE_ENV,
   QWEN_CODE_DESKTOP_ENV,
+  QWEN_CODE_MANAGED_RUNTIME_ENV,
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
   // This is an operator rollout policy. A project must not be able to promote

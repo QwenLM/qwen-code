@@ -218,6 +218,25 @@
   word-break: break-word;
 }
 
+.automaticTriggerBubble {
+  width: min(560px, 100%);
+}
+
+.automaticTriggerHeader {
+  flex-wrap: nowrap;
+}
+
+.automaticTriggerHeader .automaticTriggerToggle {
+  margin-top: 0;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.automaticEchoSummary {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .sendFailure {
   display: flex;
   align-items: center;

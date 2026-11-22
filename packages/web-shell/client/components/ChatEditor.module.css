@@ -1303,6 +1303,61 @@
   overflow-y: auto;
 }
 
+/* Touch follow-up suggestion bar: tap fills the textarea without submitting
+   (desktop Tab semantics). Rendered only while the input is empty, so it
+   never competes with a draft for room. */
+.mobileFollowup {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 44px;
+}
+
+/* Chip styling so the bar reads as a tappable button on touch (no hover to
+   discover it): the suggestion content is the label, the insert icon and
+   container carry the affordance. */
+.mobileFollowupAccept {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid var(--chat-editor-border-color);
+  border-radius: 8px;
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 1.4;
+  text-align: start;
+  cursor: pointer;
+}
+
+.mobileFollowupAccept > svg {
+  flex: 0 0 auto;
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowupText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mobileFollowupAccept:not(:disabled):hover {
+  background: var(--chat-editor-bg-primary);
+  border-color: var(--chat-editor-text-dimmed, #666);
+}
+
+.mobileFollowup .toolBtn > svg {
+  width: 18px;
+  height: 18px;
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -1481,9 +1536,10 @@
   flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
-/* Compact (icon-only) chip: a single severity dot on the branch icon so the
-   working-tree state is still glanceable without the text + inline indicators. */
+/* Reserve a visible severity dot for icon-only and detail-collapsed branch
+   chips, without duplicating the detailed indicators on wider layouts. */
 .gitBranchBadgeDot {
+  display: none;
   position: absolute;
   top: var(--git-branch-badge-offset, -2px);
   inset-inline-end: var(--git-branch-badge-offset, -3px);
@@ -1492,6 +1548,10 @@
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchChipCompact .gitBranchBadgeDot {
+  display: block;
 }
 
 .gitBranchBadgeDot[data-tone='warning'] {
@@ -3222,9 +3282,47 @@
   flex-shrink: 1;
 }
 
+@supports (container-type: inline-size) {
+  @container (max-width: 320px) {
+    .mobileContextRow [data-slot='select-value'],
+    .mobileContextRow [data-web-shell-git-branch-label],
+    .mobileContextRow .gitBranchText,
+    .mobileContextRow .workspaceChipText {
+      display: none;
+    }
+    .mobileContextRow .gitBranchIndicators {
+      display: none;
+    }
+    .mobileContextRow .gitBranchBadgeDot {
+      display: block;
+    }
+  }
+}
+
 .mobileEditingActions {
   flex-wrap: wrap;
   margin-top: -8px;
+}
+
+/* Keep the controls together so hide-keyboard/expand stay an adjacent tail.
+   Group-internal wrapping preserves 44px targets and keeps them right aligned. */
+.mobileEditingKeys {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.mobileEditingTail {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-inline-start: auto;
+}
+
+.mobileKeyboardPlaceholder {
+  visibility: hidden;
 }
 
 .mobileEditingActions:has(.mobileContextRow) {
@@ -3233,6 +3331,13 @@
 }
 
 .mobileEditingActions > button > svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* Direction, hide-keyboard and expand buttons share this group's 18px icon
+   geometry, including when the keyboard button appears and disappears. */
+:is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
   height: 18px;
 }
