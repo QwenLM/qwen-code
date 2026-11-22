@@ -91,6 +91,18 @@ class ToolPublicationContractTest {
     }
 
     @Test
+    void joinsPublicationScopeSegmentsForOssObjectKeys() {
+        ObjectNode key = JSON.createObjectNode();
+        key.put("tenantId", "tenant-a");
+        key.put("workspaceId", "workspace-b");
+        key.put("sessionId", "session-c");
+        assertThat(ToolPublicationContract.ossScope(key))
+                .isEqualTo("tenant-a/workspace-b/session-c");
+        assertThat(ToolPublicationContract.ossScope(JSON.createObjectNode()))
+                .isEqualTo("//");
+    }
+
+    @Test
     void rejectsAmbiguousOrUnboundedWireBytes() {
         assertThatThrownBy(() -> ToolPublicationContract.parseBytes("binding",
                 new byte[] {(byte) 0xff})).isInstanceOf(IllegalArgumentException.class);
