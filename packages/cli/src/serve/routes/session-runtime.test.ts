@@ -10,7 +10,11 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { createWorkspaceRegistry } from '../workspace-registry.js';
+import {
+  createWorkspaceRegistry,
+  createWorkspaceSessionOwnerIndex,
+} from '../workspace-registry.js';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
 
 const telemetryMocks = vi.hoisted(() => ({
   setDaemonTelemetryWorkspace: vi.fn(),
@@ -70,6 +74,70 @@ function registry(opts: {
 describe('requireSessionRuntime telemetry attribution', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('reports unavailable during ordinary owner teardown and not found only after completion', () => {
+    const ownerIndex = createWorkspaceSessionOwnerIndex();
+    const primary = runtime('/workspace/primary', { primary: true });
+    const secondary = runtime('/workspace/secondary');
+    const unaffected = runtime('/workspace/other');
+    for (const candidate of [primary, secondary, unaffected]) {
+      Object.assign(candidate, {
+        bridge: {
+          getSessionSummary: (sessionId: string) => {
+            if (sessionId !== candidate.workspaceId)
+              throw new SessionNotFoundError(sessionId);
+            return { sessionId, workspaceCwd: candidate.workspaceCwd };
+          },
+        },
+      });
+      ownerIndex.register(candidate.workspaceId, candidate.workspaceCwd);
+    }
+    const workspaceRegistry = createWorkspaceRegistry(
+      [primary, secondary, unaffected],
+      {
+        sessionOwnerIndex: ownerIndex,
+        scanUnindexedOwners: false,
+      },
+    );
+    const route = (sessionId = 'secondary') => {
+      const res = response();
+      const resolved = requireSessionRuntime({
+        sessionId,
+        route: 'DELETE /session/:id',
+        res,
+        workspaceRegistry,
+      });
+      return { res, resolved };
+    };
+    expect(route().resolved).toBe(secondary);
+    workspaceRegistry.beginDrain(secondary);
+    expect(route().res.statusCode).toBe(503);
+    workspaceRegistry.cancelDrain(secondary);
+    expect(route().resolved).toBe(secondary);
+
+    workspaceRegistry.beginDrain(secondary);
+    workspaceRegistry.commitDrain(secondary);
+    ownerIndex.handleBridgeSessionLifecycle({
+      type: 'removed',
+      sessionId: 'secondary',
+      workspaceCwd: secondary.workspaceCwd,
+    });
+    const closing = route();
+    expect(closing.resolved).toBeUndefined();
+    expect(closing.res.statusCode).toBe(503);
+    expect(closing.res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'workspace_runtime_unavailable' }),
+    );
+    expect(route('other').resolved).toBe(unaffected);
+
+    workspaceRegistry.completeDrain(secondary);
+    const stopped = route();
+    expect(stopped.resolved).toBeUndefined();
+    expect(stopped.res.statusCode).toBe(404);
+    expect(stopped.res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'session_not_found' }),
+    );
   });
 
   it('publishes the primary runtime without scanning in single-workspace mode', () => {
