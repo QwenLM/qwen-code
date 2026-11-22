@@ -1,6 +1,7 @@
-import type {
-  DaemonSessionArtifact,
-  DaemonWorkspaceFileBytes,
+import {
+  DaemonHttpError,
+  type DaemonSessionArtifact,
+  type DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/web-shell/daemon-react-sdk';
 import { escapeAttribute } from '../preview/web-preview.js';
@@ -598,4 +599,138 @@ function stripUnsafePreviewMarkup(html: string) {
       /<meta\b(?=[^>]*\bhttp-equiv\s*=\s*["']?Content-Security-Policy["']?)[^>]*>/gi,
       '',
     );
+}
+
+export function isWebPreviewSnapshotArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'metadata'>,
+): boolean {
+  return artifact.metadata?.['artifactType'] === 'web_preview_snapshot';
+}
+
+export function isCodeReviewArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'metadata'>,
+): boolean {
+  return artifact.metadata?.['artifactType'] === 'code_review';
+}
+
+export function isAutomationSnapshotArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'metadata'>,
+): boolean {
+  return artifact.metadata?.['artifactType'] === 'automation_snapshot';
+}
+
+export function canPreviewWorkspaceArtifact(
+  artifact: Pick<DaemonSessionArtifact, 'storage' | 'workspacePath'>,
+): boolean {
+  return artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+}
+
+export type WorkspaceArtifactDispatchAction =
+  | { kind: 'workspace_preview' }
+  | { kind: 'live_web_preview_snapshot' }
+  | { kind: 'jump_web_preview_snapshot' }
+  | { kind: 'metadata_detail' };
+
+/**
+ * Shared dispatch classification for session and workspace artifact views.
+ * Saved web-preview snapshots (`metadata.artifactType === 'web_preview_snapshot'`,
+ * stored with `storage: 'published'`) require a live attached session for the
+ * snapshot content route; cold/archived sessions must jump to the session
+ * first. Metadata-only `storage: 'managed'` artifacts render straight from the
+ * envelope descriptor without loading a session or hitting the content route.
+ */
+export function classifyWorkspaceArtifactDispatch(
+  artifact: DaemonSessionArtifact,
+  isSessionLive: boolean,
+): WorkspaceArtifactDispatchAction {
+  if (isWebPreviewSnapshotArtifact(artifact)) {
+    return isSessionLive
+      ? { kind: 'live_web_preview_snapshot' }
+      : { kind: 'jump_web_preview_snapshot' };
+  }
+  if (canPreviewWorkspaceArtifact(artifact) || isCodeReviewArtifact(artifact)) {
+    return { kind: 'workspace_preview' };
+  }
+  return { kind: 'metadata_detail' };
+}
+
+function readDaemonHttpErrorField(
+  error: unknown,
+  field: 'code' | 'error',
+): string | undefined {
+  if (!(error instanceof DaemonHttpError)) return undefined;
+  if (
+    typeof error.body !== 'object' ||
+    error.body === null ||
+    Array.isArray(error.body)
+  ) {
+    return undefined;
+  }
+  const value = (error.body as Record<string, unknown>)[field];
+  return typeof value === 'string' ? value : undefined;
+}
+
+export function isSessionNotFoundArtifactError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
+  return (
+    readDaemonHttpErrorField(error, 'code') === 'session_not_found' ||
+    readDaemonHttpErrorField(error, 'error') === 'session_not_found'
+  );
+}
+
+export function isArtifactSnapshotUnavailableError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
+  return (
+    readDaemonHttpErrorField(error, 'error') ===
+      'artifact_snapshot_unavailable' ||
+    readDaemonHttpErrorField(error, 'code') === 'artifact_snapshot_unavailable'
+  );
+}
+
+export interface PendingArtifactJumpOpenRequest {
+  readonly sessionId: string;
+  readonly artifactId: string;
+}
+
+/**
+ * Decides whether a session-keyed post-jump artifact open request should wait,
+ * open now, or be canceled because the user switched to another session
+ * mid-load. Opening before the target session's right-panel restore commits
+ * would have its tab wiped by the restore effect's reset.
+ */
+export function resolvePendingArtifactJumpOpen(
+  pending: PendingArtifactJumpOpenRequest | undefined,
+  state: {
+    currentSessionId: string | undefined;
+    switchingSessionId: string | null | undefined;
+    panelStateKey: string | undefined;
+    restoredSessionKey: string | undefined;
+    panelRestoring: boolean;
+    loadingTranscript: boolean | undefined;
+    artifactsLoading: boolean;
+    connected: boolean;
+  },
+): 'none' | 'wait' | 'open' | 'cancel' {
+  if (!pending) return 'none';
+  if (
+    state.switchingSessionId !== undefined &&
+    state.switchingSessionId !== null &&
+    state.switchingSessionId !== pending.sessionId
+  ) {
+    return 'cancel';
+  }
+  if (state.currentSessionId !== pending.sessionId) {
+    return state.switchingSessionId === pending.sessionId ? 'wait' : 'cancel';
+  }
+  if (
+    !state.connected ||
+    state.loadingTranscript ||
+    state.artifactsLoading ||
+    state.panelRestoring ||
+    !state.panelStateKey ||
+    state.restoredSessionKey !== state.panelStateKey
+  ) {
+    return 'wait';
+  }
+  return 'open';
 }

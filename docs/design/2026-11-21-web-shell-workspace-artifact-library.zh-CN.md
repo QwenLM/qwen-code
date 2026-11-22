@@ -2,7 +2,7 @@
 
 [English](2026-11-21-web-shell-workspace-artifact-library.md) | [简体中文](2026-11-21-web-shell-workspace-artifact-library.zh-CN.md)
 
-状态：已采纳（经 #18036 合入）；尚未实现。
+状态：已实现。
 
 ## 问题陈述
 

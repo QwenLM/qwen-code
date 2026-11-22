@@ -405,6 +405,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'artifacts'
   | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
@@ -455,6 +456,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'prWatches',
     'workflows',
     'goals',
+    'artifacts',
     'managed',
   ];
 
@@ -596,6 +598,9 @@ interface WebShellSidebarProps {
   onOpenPrWatches?: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
+  /** Opens the workspace artifact library page; absent when the daemon does
+   * not advertise `workspace_artifact_library`. */
+  onOpenArtifacts?: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. The table handles
@@ -1278,6 +1283,7 @@ export function WebShellSidebar({
   onOpenPrWatches,
   onOpenWorkflows,
   onOpenGoals,
+  onOpenArtifacts,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenWorkspacesOverview,
@@ -1435,7 +1441,8 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
         primaryNavItems.has('workflows') ||
-        primaryNavItems.has('goals'))) ||
+        primaryNavItems.has('goals') ||
+        (primaryNavItems.has('artifacts') && Boolean(onOpenArtifacts)))) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
@@ -7334,6 +7341,28 @@ export function WebShellSidebar({
           {!collapsed && !railLayout && <span>{t('sidebar.goals')}</span>}
         </button>
       )}
+      {projectFeaturesEnabled &&
+        primaryNavItems.has('artifacts') &&
+        onOpenArtifacts && (
+          <button
+            className={styles.pluginButton}
+            type="button"
+            data-testid="sidebar-artifacts-nav"
+            title={railLayout ? undefined : t('workspaceArtifactLibrary.title')}
+            aria-label={t('workspaceArtifactLibrary.title')}
+            aria-current={
+              railLayout && activePage === 'artifacts' ? 'page' : undefined
+            }
+            onClick={() => openNavigation(onOpenArtifacts)}
+          >
+            <span className={styles.navIcon}>
+              <FolderKanbanIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && !railLayout && (
+              <span>{t('workspaceArtifactLibrary.title')}</span>
+            )}
+          </button>
+        )}
       {primaryNavItems.has('managed') && onOpenManagedSessions && (
         <button
           className={styles.pluginButton}

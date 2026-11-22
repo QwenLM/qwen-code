@@ -276,6 +276,10 @@ import type {
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
   SessionSourceInput,
   SessionSourcesResult,
   SessionSourceUpsertResult,
@@ -336,7 +340,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
-import { parseSseStream, SseFramingError } from './sse.js';
+import { parseNamedSseStream, parseSseStream, SseFramingError } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
@@ -373,6 +377,121 @@ import {
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
 const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
+
+function parseArtifactLibraryStreamEvent(
+  eventName: string | undefined,
+  data: Record<string, unknown>,
+): DaemonWorkspaceArtifactLibraryStreamEvent | undefined {
+  if (data['v'] !== 1) return undefined;
+  switch (eventName) {
+    case 'start':
+      if (
+        typeof data['total'] !== 'number' ||
+        !Number.isSafeInteger(data['total']) ||
+        data['total'] < 0
+      ) {
+        return undefined;
+      }
+      return { type: 'start', v: 1, total: data['total'] };
+    case 'session': {
+      const session = data['session'];
+      const limits = data['limits'];
+      if (
+        typeof data['sessionId'] !== 'string' ||
+        !Array.isArray(data['artifacts']) ||
+        typeof data['generatedAt'] !== 'string' ||
+        typeof session !== 'object' ||
+        session === null ||
+        Array.isArray(session) ||
+        typeof limits !== 'object' ||
+        limits === null
+      ) {
+        return undefined;
+      }
+      const meta = session as Record<string, unknown>;
+      if (
+        typeof meta['createdAt'] !== 'string' ||
+        (meta['archiveState'] !== 'active' &&
+          meta['archiveState'] !== 'archived') ||
+        typeof meta['sourceType'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'session',
+        v: 1,
+        sessionId: data['sessionId'],
+        artifacts: data[
+          'artifacts'
+        ] as DaemonArtifactLibrarySessionEnvelope['artifacts'],
+        generatedAt: data['generatedAt'],
+        limits: limits as DaemonArtifactLibrarySessionEnvelope['limits'],
+        session: meta as unknown as DaemonArtifactLibrarySessionMetadata,
+        ...(Array.isArray(data['warnings'])
+          ? { warnings: data['warnings'] as string[] }
+          : {}),
+        ...(Array.isArray(data['warningDetails'])
+          ? {
+              warningDetails: data[
+                'warningDetails'
+              ] as DaemonArtifactLibrarySessionEnvelope['warningDetails'],
+            }
+          : {}),
+      };
+    }
+    case 'session_error':
+      if (
+        typeof data['sessionId'] !== 'string' ||
+        typeof data['status'] !== 'number' ||
+        typeof data['code'] !== 'string' ||
+        typeof data['message'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'session_error',
+        v: 1,
+        sessionId: data['sessionId'],
+        status: data['status'],
+        code: data['code'],
+        message: data['message'],
+      };
+    case 'complete':
+      if (
+        typeof data['total'] !== 'number' ||
+        typeof data['succeeded'] !== 'number' ||
+        typeof data['failed'] !== 'number' ||
+        typeof data['skipped'] !== 'number'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'complete',
+        v: 1,
+        total: data['total'],
+        succeeded: data['succeeded'],
+        failed: data['failed'],
+        skipped: data['skipped'],
+      };
+    case 'error':
+      if (
+        typeof data['status'] !== 'number' ||
+        typeof data['code'] !== 'string' ||
+        typeof data['message'] !== 'string'
+      ) {
+        return undefined;
+      }
+      return {
+        type: 'error',
+        v: 1,
+        status: data['status'],
+        code: data['code'],
+        message: data['message'],
+      };
+    default:
+      return undefined;
+  }
+}
 
 function parseSessionGenerationEvent(
   value: unknown,
@@ -1285,6 +1404,29 @@ export class DaemonClient {
       label,
       opts,
     );
+  }
+
+  /** @internal */
+  async *workspaceArtifactLibraryStream(
+    workspaceSelector: string,
+    opts: { signal?: AbortSignal; clientId?: string } = {},
+  ): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+    const label = 'GET /workspaces/:workspace/artifact-library';
+    const res = await this._fetch(
+      `${this.baseUrl}/workspaces/${workspaceSelector}/artifact-library`,
+      {
+        headers: this.headers({ Accept: 'text/event-stream' }, opts.clientId),
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      },
+    );
+    if (!res.ok) throw await this.failOnError(res, label);
+    if (!res.body) {
+      throw new SseFramingError(`${label}: response body is missing`);
+    }
+    for await (const frame of parseNamedSseStream(res.body, opts.signal)) {
+      const event = parseArtifactLibraryStreamEvent(frame.event, frame.data);
+      if (event) yield event;
+    }
   }
 
   /** @internal */
@@ -10451,6 +10593,28 @@ export class WorkspaceDaemonClient {
       '/file/delete',
       'POST /workspaces/:workspace/file/delete',
       { method: 'POST', body: { path: filePath }, clientId, mode: 'rest' },
+    );
+  }
+
+  artifactLibrary(opts?: {
+    signal?: AbortSignal;
+    clientId?: string;
+  }): Promise<DaemonWorkspaceArtifactLibraryResult> {
+    return this.client.workspaceJsonRequest<DaemonWorkspaceArtifactLibraryResult>(
+      this.workspaceSelector,
+      '/artifact-library',
+      'GET /workspaces/:workspace/artifact-library',
+      { mode: 'rest', signal: opts?.signal, clientId: opts?.clientId },
+    );
+  }
+
+  artifactLibraryStream(opts?: {
+    signal?: AbortSignal;
+    clientId?: string;
+  }): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+    return this.client.workspaceArtifactLibraryStream(
+      this.workspaceSelector,
+      opts,
     );
   }
 
