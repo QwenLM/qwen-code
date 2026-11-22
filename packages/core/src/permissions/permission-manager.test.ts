@@ -2986,6 +2986,7 @@ describe('buildPermissionRules', () => {
       ['grep_search', '/external/dir', 'Read(//external/dir/**)'],
       ['glob', '/tmp/data', 'Read(//tmp/data/**)'],
       ['glob', '/tmp/data/', 'Read(//tmp/data/**)'],
+      ['glob', 'D:\\proj\\', 'Read(//D:/proj/**)'],
       ['list_directory', '/home/user/docs', 'Read(//home/user/docs/**)'],
     ])(
       'generates Read rule with directory as-is for %s',
@@ -3104,12 +3105,60 @@ describe('buildPermissionRules', () => {
         expect(readsUnder('/tmp/data/')('/tmp/data/a.txt')).toBe(true);
       });
 
-      it('does not widen a drive root to the whole drive', async () => {
+      it.each(['D:\\', 'D:/', 'D://', 'D:\\\\', '//D:/'])(
+        'does not widen a drive root (%s) to the whole drive',
+        async (root) => {
+          setPlatform('win32');
+          const reads = readsUnder(root);
+          expect(reads('D:\\Windows\\System32\\config\\SAM')).toBe(false);
+          expect(reads('D:\\backups\\credentials.txt')).toBe(false);
+        },
+      );
+
+      it('a drive directory with a trailing separator matches files in it', async () => {
         setPlatform('win32');
-        const reads = readsUnder('D:\\');
-        expect(reads('D:\\Windows\\System32\\config\\SAM')).toBe(false);
-        expect(reads('D:\\backups\\credentials.txt')).toBe(false);
+        const reads = readsUnder('D:\\proj\\');
+        expect(reads('D:\\proj\\a.txt')).toBe(true);
+        expect(reads('D:\\other\\a.txt')).toBe(false);
       });
+
+      it.each([
+        ['///server/share/proj', 'win32'],
+        ['\\\\\\\\server\\share\\proj', 'linux'],
+      ] as const)(
+        'reads extra leading separators (%s on %s) as the same UNC share',
+        async (dir, platform) => {
+          setPlatform(platform);
+          const reads = readsUnder(dir);
+          expect(reads('//server/share/proj/a.txt')).toBe(true);
+          expect(reads('/server/share/proj/a.txt')).toBe(false);
+        },
+      );
+
+      it.each([
+        [
+          '\\\\server\\share[1]\\proj',
+          '//server/share[1]/proj/a.txt',
+          '//server/share1/proj/a.txt',
+        ],
+        [
+          '\\\\nas\\media\\Photos [2024]',
+          '//nas/media/Photos [2024]/a.txt',
+          '//nas/media/Photos 2/a.txt',
+        ],
+        ['/data/{a,b}', '/data/{a,b}/x.txt', '/data/a/x.txt'],
+        ['/data/q?', '/data/q?/x.txt', '/data/qz/x.txt'],
+        ['/data/s*', '/data/s*/x.txt', '/data/sz/x.txt'],
+        ['/data/+(x)', '/data/+(x)/f.txt', '/data/x/f.txt'],
+      ] as const)(
+        'treats glob characters in %s as literal',
+        async (dir, inside, sibling) => {
+          setPlatform('linux');
+          const reads = readsUnder(dir);
+          expect(reads(inside)).toBe(true);
+          expect(reads(sibling)).toBe(false);
+        },
+      );
 
       it('treats a doubled leading slash as a plain absolute path on POSIX', async () => {
         setPlatform('linux');

@@ -46,6 +46,16 @@ function isWindowsAbsolutePath(p: string): boolean {
 }
 
 /**
+ * Escapes the glob metacharacters picomatch would read in a literal path, so a
+ * directory named `Photos [2024]` or `share[1]` matches only itself. Each one
+ * goes in a one-character class: `resolvePathPattern` turns backslashes into
+ * separators, so a backslash escape would not survive.
+ */
+function escapeGlobLiteral(p: string): string {
+  return p.replace(/[[\]?*{}()!+@]/g, (c) => `[${c}]`);
+}
+
+/**
  * No Windows file path starts with `/D:/` — drive paths begin at the drive
  * letter — so the separator the `//` grammar prefix leaves in front of one has
  * to go as well. POSIX roots (`/Users/alice`) are returned unchanged.
@@ -753,27 +763,38 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // slashes: persisting the bare `D:\proj/**` form left every "Always
         // Allow" rule unmatchable and re-prompted for the same directory
         // forever (#17802).
-        // A UNC root (`\\server\share`, or `//server/share` on Windows)
-        // keeps both of its own separators: `///server/share/**` resolves
-        // back to `//server/share/**`. On POSIX `//tmp` is just `/tmp`.
-        // A trailing separator (`dirname` keeps it on a share root) is
-        // dropped so the rule doesn't end in `//**`. A drive root (`D:/`)
-        // keeps it: trimmed, the rule would cover the whole drive. A loop,
-        // not a regex, so a long run of separators stays linear.
-        let posixDir = toPosixPath(dirPath);
-        if (!/^[A-Za-z]:\/$/.test(posixDir)) {
-          while (posixDir.length > 1 && posixDir.endsWith('/')) {
-            posixDir = posixDir.slice(0, -1);
-          }
-        }
-        const isUncRoot =
-          /^\\\\[^\\]/.test(dirPath) ||
-          (process.platform === 'win32' && /^\/\/[^/]/.test(posixDir));
-        const specifier = isUncRoot
-          ? `/${posixDir}/**`
-          : posixDir.startsWith('/') || isWindowsAbsolutePath(dirPath)
-            ? `//${posixDir.replace(/^\/+/, '')}/**`
-            : `${posixDir}/**`;
+        // The root is classified from the whole leading separator run, so
+        // every spelling of the same directory persists the same rule:
+        //  - A drive path (`D:\proj`, `D://proj`, `//D:/proj`) becomes
+        //    `//D:/proj/**`. A drive root keeps its separator (`//D://**`):
+        //    trimmed to `//D:/**`, the rule would cover the whole drive.
+        //  - A UNC path (`\\server\share`, or `//server/share` on Windows,
+        //    with any number of leading separators) keeps two of them:
+        //    `///server/share/**` resolves back to `//server/share/**`.
+        //  - Any other absolute path gets the `//` prefix. On POSIX `//tmp`
+        //    is just `/tmp`.
+        // Trailing separators (`dirname` keeps one on a share root) are
+        // dropped so the rule doesn't end in `//**`; a loop, not a regex, so
+        // a long run of separators stays linear. Glob metacharacters in the
+        // directory name are escaped so the rule covers only that directory.
+        const posixDir = toPosixPath(dirPath);
+        let lead = 0;
+        while (posixDir[lead] === '/') lead++;
+        let body = posixDir.slice(lead);
+        while (body.endsWith('/')) body = body.slice(0, -1);
+        const isDrive = /^[A-Za-z]:(\/|$)/.test(body);
+        if (isDrive && body.length === 2) body = `${body}/`;
+        const isUnc =
+          !isDrive &&
+          lead >= 2 &&
+          body !== '' &&
+          (dirPath.startsWith('\\\\') || process.platform === 'win32');
+        const glob = escapeGlobLiteral(body);
+        const specifier = isUnc
+          ? `///${glob}/**`
+          : isDrive || lead > 0
+            ? `//${glob}/**`
+            : `${glob}/**`;
         return [`${displayName}(${specifier})`];
       }
       return [displayName];
