@@ -16,6 +16,7 @@
  */
 
 import type { DaemonClient } from '../../daemon/DaemonClient.js';
+import type { DaemonEvent, PromptResult } from '../../daemon/types.js';
 
 /**
  * Options for creating a serve-bridge MCP server.
@@ -33,14 +34,23 @@ export interface ServeBridgeMcpServerOptions {
 
 /**
  * Tracks a per-prompt message collection cycle.
- * Created before sending a prompt, resolved when _meta arrives or prompt returns.
+ * The promise signals collected metadata or termination; metadata can arrive
+ * between model rounds and does not itself mean the prompt has completed.
  */
 export interface PromptCollector {
   texts: string[];
   resolve: () => void;
   promise: Promise<void>;
   resolved: boolean;
-  /** Set when the collector is resolved due to SSE disconnect or stopEventStream, not _meta. */
+  /** Events received before the prompt response identifies its turn. */
+  pendingEvents?: Array<DaemonEvent | null>;
+  /** Present for a nonblocking daemon response; terminals must match it. */
+  promptId?: string;
+  result?: PromptResult;
+  error?: Error;
+  /** Set only by a terminal event or a successful, fully collected prompt reply. */
+  completed?: boolean;
+  /** Set when collection ends before the prompt completes. */
   interrupted?: boolean;
 }
 
@@ -51,6 +61,8 @@ export interface PromptCollector {
 export interface SessionEventStream {
   sessionId: string;
   abortCtrl: AbortController;
+  /** Settles when the REST subscription is accepted or the stream closes. */
+  ready?: Promise<void>;
   /** Current active prompt collector (null when idle). */
   activeCollector: PromptCollector | null;
   /** Timestamp of last activity (prompt sent or chunk received). */

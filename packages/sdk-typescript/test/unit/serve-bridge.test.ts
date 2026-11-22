@@ -21,7 +21,10 @@ import type {
   BridgeState,
   SessionEventStream,
 } from '../../src/daemon-mcp/serve-bridge/types.js';
-import { DaemonClient } from '../../src/daemon/DaemonClient.js';
+import {
+  DaemonClient,
+  type SubscribeOptions,
+} from '../../src/daemon/DaemonClient.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 // --- Helpers ---
@@ -495,7 +498,8 @@ describe('serve-bridge', () => {
         // The collector is installed by the prompt tool just before the
         // prompt RPC; hold the stream until it exists so every frame lands
         // inside the collection window.
-        async function* (_sessionId: string, opts?: { signal?: AbortSignal }) {
+        async function* (_sessionId: string, opts?: SubscribeOptions) {
+          opts?.onSseStreamAccepted?.('test-stream');
           const stream = state.eventStreams.get('test-session');
           while (stream && !stream.activeCollector) {
             await new Promise((resolve) => setImmediate(resolve));
@@ -561,6 +565,7 @@ describe('serve-bridge', () => {
         );
         vi.spyOn(state.client, 'subscribeEvents').mockImplementation(
           async function* (_sessionId, opts) {
+            opts?.onSseStreamAccepted?.('test-stream');
             while (!state.eventStreams.get('test-session')?.activeCollector) {
               await new Promise((resolve) => setImmediate(resolve));
             }

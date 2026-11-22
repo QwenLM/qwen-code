@@ -8,7 +8,13 @@ import { z } from 'zod';
 import { tool } from '../../tool.js';
 import { formatJsonResult } from '../../formatters.js';
 import type { BridgeState } from '../types.js';
-import { createPromptCollector, interruptPromptCollector } from '../sse.js';
+import type { PromptResult } from '../../../daemon/types.js';
+import {
+  bindPromptCollector,
+  completePromptCollector,
+  createPromptCollector,
+  interruptPromptCollector,
+} from '../sse.js';
 import { handler, resolveSessionId } from '../helpers.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -16,7 +22,7 @@ export function agentTools(state: BridgeState): any[] {
   return [
     tool(
       'prompt',
-      'Send a prompt to the qwen-code agent and wait for the full response. This tool blocks until the agent completes processing, which may take minutes for complex tasks. After the HTTP response returns, a 30s collection timeout guards against missing completion signals — if the SSE completion event is not received within 30s, partial text is returned with an error. Do not set a short client-side timeout.',
+      'Send a prompt to the qwen-code agent and wait for the full response. This tool blocks until the agent completes processing, which may take minutes for complex tasks. After a legacy blocking reply returns, a 30s collection timeout guards against missing output — if the collection signal is not received within 30s, partial text is returned with an error. Do not set a short client-side timeout.',
       {
         prompt: z.string().describe('The prompt text to send to the agent.'),
         session_id: z
@@ -34,6 +40,15 @@ export function agentTools(state: BridgeState): any[] {
             'No SSE stream for session. Was the session created via session_create?',
           );
         }
+        // The daemon's subscription is live before its accepted SSE headers.
+        // Wait for those headers so a fast prompt cannot finish before we listen.
+        await stream.ready;
+        if (
+          stream.abortCtrl.signal.aborted ||
+          state.eventStreams.get(sessionId) !== stream
+        ) {
+          throw new Error('SSE stream closed before the prompt could start.');
+        }
 
         // Guard against concurrent prompts on the same session
         if (stream.activeCollector) {
@@ -43,33 +58,49 @@ export function agentTools(state: BridgeState): any[] {
         }
 
         // Install a new collector to capture this prompt's response chunks.
+        const releasePromptSlot = state.client.reservePromptSlot(sessionId);
         stream.lastActivityMs = Date.now();
-        const collector = createPromptCollector();
+        const collector = createPromptCollector(true);
         stream.activeCollector = collector;
 
         try {
           // Send prompt — response text arrives via the persistent SSE stream.
-          const result = await state.client.prompt(sessionId, {
+          const response = await state.client.promptNonBlocking(sessionId, {
             prompt: [{ type: 'text', text: args.prompt }],
           });
+          const nonblocking =
+            typeof response.promptId === 'string' &&
+            typeof response.lastEventId === 'number';
+          bindPromptCollector(
+            collector,
+            nonblocking ? (response.promptId as string) : undefined,
+          );
 
-          // Wait for the collector to be resolved by _meta event (with timeout).
+          // Use this same persistent stream for a nonblocking turn's text and
+          // matching terminal. A second subscription could complete first and
+          // discard text still in flight on this one.
           const COLLECT_TIMEOUT_MS = 30000;
           let timedOut = false;
-          let timeoutId: ReturnType<typeof setTimeout>;
-          await Promise.race([
-            collector.promise,
-            new Promise<void>((r) => {
-              timeoutId = setTimeout(() => {
-                timedOut = true;
-                r();
-              }, COLLECT_TIMEOUT_MS);
-            }),
-          ]);
-          clearTimeout(timeoutId!);
+          if (nonblocking) {
+            await collector.promise;
+          } else {
+            let timeoutId: ReturnType<typeof setTimeout>;
+            await Promise.race([
+              collector.promise,
+              new Promise<void>((r) => {
+                timeoutId = setTimeout(() => {
+                  timedOut = true;
+                  r();
+                }, COLLECT_TIMEOUT_MS);
+              }),
+            ]);
+            clearTimeout(timeoutId!);
+          }
+
+          if (collector.error) throw collector.error;
 
           // Guard against Promise.race microtask race: only treat as timeout
-          // if collector was NOT already resolved by _meta
+          // if the collector was not already resolved.
           if (timedOut && !collector.resolved) {
             try {
               await state.client.cancel(sessionId);
@@ -124,12 +155,17 @@ export function agentTools(state: BridgeState): any[] {
 
           const responseText =
             collector.texts.join('') || '(task completed, no text output)';
+          completePromptCollector(collector);
+          const result = nonblocking
+            ? collector.result!
+            : (response as PromptResult);
           return formatJsonResult({
             session_id: sessionId,
             stop_reason: result.stopReason,
             response: responseText,
           });
         } finally {
+          releasePromptSlot();
           // Clear the collector regardless of outcome.
           stream.activeCollector = null;
         }
