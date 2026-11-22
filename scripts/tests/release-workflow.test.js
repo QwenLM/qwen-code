@@ -780,6 +780,15 @@ describe('release workflow', () => {
       failure: '0',
       cliPublished: '0',
     },
+    // null, not undefined: the destructuring default would fill undefined
+    // with optional. Leaving the variable unset pins the fail-closed default.
+    {
+      dryRun: 'false',
+      optional: 'true',
+      msteams: null,
+      failure: '0',
+      cliPublished: '0',
+    },
   ])(
     'publishes the selected workspaces and CLI safely: %j',
     ({ dryRun, optional, msteams = optional, failure, cliPublished }) => {
@@ -820,7 +829,7 @@ describe('release workflow', () => {
               NPM_TAG: 'preview',
               PUBLISH_AUDIO_CAPTURE: optional,
               PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
-              PUBLISH_CHANNEL_MSTEAMS: msteams,
+              ...(msteams === null ? {} : { PUBLISH_CHANNEL_MSTEAMS: msteams }),
               PUBLISH_FAILURE: failure,
               CLI_PUBLISHED: cliPublished,
               PUBLISH_LOG: publishLog,
