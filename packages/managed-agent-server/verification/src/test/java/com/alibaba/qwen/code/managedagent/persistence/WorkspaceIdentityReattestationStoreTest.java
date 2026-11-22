@@ -161,8 +161,8 @@ class WorkspaceIdentityReattestationStoreTest {
 
     @Test
     void copiedMarkerOnOverlappingOwnerDoesNotAuthorizeMerge() throws Exception {
-        jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, mount_host_id, mount_root, storage_kind)"
-                + " VALUES (?, ?, 'host', ?, 'LOCAL')", "b".repeat(64), "b".repeat(64), root.toString());
+        jdbc.update("INSERT INTO ma_storage_owner (storage_key, mount_host_id, mount_root, storage_kind)"
+                + " VALUES (?, 'host', ?, 'LOCAL')", "b".repeat(64), root.toString());
         assertThatThrownBy(() -> store.plan(input)).hasMessageContaining("overlapping_owner");
     }
 

@@ -11,6 +11,7 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
+  ToolGroupMessage,
 } from '../adapters/types';
 import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { CompactModeContext } from '../WebShellContexts';
@@ -30,10 +31,10 @@ import {
   isCompletedAskUserQuestion,
 } from './messages/toolFormatting';
 import {
-  AssistantMessage,
   ThinkingMessage,
   type SessionContentGenerator,
 } from './messages/AssistantMessage';
+import { AssistantMessageRow } from './messages/AssistantMessageRow';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
@@ -238,7 +239,8 @@ export const MessageItem = memo(function MessageItem({
         );
       case 'assistant':
         return (
-          <AssistantMessage
+          <AssistantMessageRow
+            messageId={message.id}
             hookTurn={hookTurn}
             content={message.content}
             author={message.author}
@@ -264,6 +266,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             author={message.author}
             isStreaming={message.isStreaming}
+            fromSubagent={message.parentToolCallId !== undefined}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
             generateContent={generateContent}
@@ -625,7 +628,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'thinking' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        prev.parentToolCallId === next.parentToolCallId
       );
     case 'system':
       return (
@@ -720,28 +724,18 @@ function areToolCallsEqual(
 }
 
 function areToolGroupThoughtsEqual(
-  prev:
-    | Array<{
-        content: string;
-        isStreaming?: boolean;
-        beforeToolCallId?: string;
-      }>
-    | undefined,
-  next:
-    | Array<{
-        content: string;
-        isStreaming?: boolean;
-        beforeToolCallId?: string;
-      }>
-    | undefined,
+  prev: ToolGroupMessage['thoughts'],
+  next: ToolGroupMessage['thoughts'],
 ): boolean {
   if (prev === next) return true;
   if (!prev || !next || prev.length !== next.length) return false;
   return prev.every(
     (thought, index) =>
+      thought.id === next[index]?.id &&
       thought.content === next[index]?.content &&
       thought.isStreaming === next[index]?.isStreaming &&
-      thought.beforeToolCallId === next[index]?.beforeToolCallId,
+      thought.beforeToolCallId === next[index]?.beforeToolCallId &&
+      thought.parentToolCallId === next[index]?.parentToolCallId,
   );
 }
 

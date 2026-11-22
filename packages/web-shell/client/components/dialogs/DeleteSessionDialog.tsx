@@ -10,7 +10,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { useFilterInput } from '../../hooks/useFilterInput';
 import { SessionRow } from './SessionRow';
 import { useScopedSessions } from '../../hooks/useScopedSessions';
-import { hasLiveWork } from '../../session-catalog/session-live-work';
+import { sessionBlocksDelete } from '../../session-catalog/session-live-work';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../../daemon/availability.js';
 
@@ -72,12 +72,21 @@ export function DeleteSessionDialog({
     setSelectedIdx(-1);
     setSelectedIds(new Set());
   });
+  // One owner per slot: `message` mirrors the load error, `outcome` holds what
+  // a delete reported. Sharing them let error recovery wipe a delete failure.
   const [message, setMessage] = useState<string | null>(null);
+  const [outcome, setOutcome] = useState<string | null>(null);
+  // An id, not rendered text and not a remembered reason: the refusal is about
+  // a row's live state, so it has to expire with that state, and the reason has
+  // to be re-read from the row instead of frozen at click time.
+  const [refusalId, setRefusalId] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Mirror the load error rather than latch it: the list refetches every
+  // second, so one failed poll must not mute the hint for the dialog's life.
   useEffect(() => {
-    if (sessionsError) setMessage(sessionsError.message);
+    setMessage(sessionsError ? sessionsError.message : null);
   }, [sessionsError]);
 
   const filtered = useMemo(
@@ -97,16 +106,30 @@ export function DeleteSessionDialog({
 
   // The current session is deletable (issue #12619), but deleting the session
   // the client is attached to tears its runtime down, so it is only offered
-  // once nothing is running — the same predicate the sidebar row reads.
-  const blocksCurrentDelete = useCallback(
+  // once nothing is running. Background work blocks any row, attached or not:
+  // the delete route has no idle guard, so confirming would kill work the
+  // sidebar row advertises and already refuses to delete.
+  const blocksDelete = useCallback(
     (session: DaemonSessionSummary) =>
-      session.sessionId === currentSessionId && hasLiveWork(session),
+      sessionBlocksDelete(session, session.sessionId === currentSessionId),
     [currentSessionId],
   );
 
   const toggleSelection = useCallback(
     (session: DaemonSessionSummary) => {
-      if (blocksCurrentDelete(session)) return;
+      if (blocksDelete(session)) {
+        // The danger button is disabled in this state, so this click is the
+        // only place the user can be told why the row will not tick. Arming is
+        // skipped while a delete runs or a load error holds the hint, so the
+        // refusal cannot resurface once they clear; a delete outcome outranks
+        // it in the hint and is only cleared by the next confirm, which drops
+        // the refusal too.
+        if (!deleting && !message) setRefusalId(session.sessionId);
+        return;
+      }
+      // A refusal is not an error: clearing it leaves any load or delete error
+      // sharing the hint untouched.
+      setRefusalId(null);
       const sessionId = session.sessionId;
       setSelectedIds((prev) => {
         const next = new Set(prev);
@@ -118,7 +141,7 @@ export function DeleteSessionDialog({
         return next;
       });
     },
-    [blocksCurrentDelete],
+    [blocksDelete, deleting, message],
   );
 
   useEffect(() => {
@@ -127,13 +150,22 @@ export function DeleteSessionDialog({
     // ticked. A blocked row cannot be unchecked by hand, so leaving it in the
     // set would show a checked, counted row that the request silently omits.
     const keep = new Set(
-      filtered.filter((s) => !blocksCurrentDelete(s)).map((s) => s.sessionId),
+      filtered.filter((s) => !blocksDelete(s)).map((s) => s.sessionId),
     );
     setSelectedIds((prev) => {
       const pruned = new Set([...prev].filter((id) => keep.has(id)));
       return pruned.size === prev.size ? prev : pruned;
     });
-  }, [blocksCurrentDelete, filtered, selectedIds.size]);
+  }, [blocksDelete, filtered, selectedIds.size]);
+
+  // Expire the refusal with the condition that produced it: once the row
+  // leaves the list or stops being blocked, the hint must stop asserting it
+  // and let the selection count through again.
+  useEffect(() => {
+    if (!refusalId) return;
+    const row = filtered.find((s) => s.sessionId === refusalId);
+    if (!row || !blocksDelete(row)) setRefusalId(null);
+  }, [blocksDelete, filtered, refusalId]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -170,13 +202,17 @@ export function DeleteSessionDialog({
   const deletableSelectedIds = useMemo(
     () =>
       filtered
-        .filter((s) => selectedIds.has(s.sessionId) && !blocksCurrentDelete(s))
+        .filter((s) => selectedIds.has(s.sessionId) && !blocksDelete(s))
         .map((s) => s.sessionId),
-    [blocksCurrentDelete, filtered, selectedIds],
+    [blocksDelete, filtered, selectedIds],
   );
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
+    // Confirming supersedes both: the hint now belongs to this delete's
+    // progress and outcome, not an older row's rule or an earlier result.
+    setRefusalId(null);
+    setOutcome(null);
     // Captured before the request: the daemon's terminal `session_closed`
     // frame clears `connection.sessionId` before the delete resolves, so this
     // is the last point where the attachment is still readable (#12619).
@@ -206,7 +242,7 @@ export function DeleteSessionDialog({
           }
 
           if (failed > 0) {
-            setMessage(
+            setOutcome(
               t('delete.allFailed', {
                 count: failed,
                 reason: res.errors[0].error,
@@ -218,7 +254,7 @@ export function DeleteSessionDialog({
           }
 
           if (succeeded === 0) {
-            setMessage(t('delete.nonRemoved'));
+            setOutcome(t('delete.nonRemoved'));
             setDeleting(false);
             setSelectedIds(new Set());
             return;
@@ -240,15 +276,14 @@ export function DeleteSessionDialog({
 
     const session = filtered[selectedIdx];
     if (!session) return;
-    if (blocksCurrentDelete(session)) {
-      setMessage(t('delete.cannotCurrent'));
-      return;
-    }
+    // Unreachable from the button, which is disabled with an empty selection;
+    // kept as a guard. The reason is reported by toggleSelection instead.
+    if (blocksDelete(session)) return;
     setDeleting(true);
     deleteSession(session.sessionId)
       .then((removed) => {
         if (!removed) {
-          setMessage(t('delete.notFound'));
+          setOutcome(t('delete.notFound'));
           setDeleting(false);
           return;
         }
@@ -264,7 +299,7 @@ export function DeleteSessionDialog({
         setDeleting(false);
       });
   }, [
-    blocksCurrentDelete,
+    blocksDelete,
     currentSessionId,
     deletableSelectedIds,
     deleteSession,
@@ -280,6 +315,17 @@ export function DeleteSessionDialog({
     t,
   ]);
 
+  const refusedRow = refusalId
+    ? filtered.find((s) => s.sessionId === refusalId)
+    : undefined;
+  // Re-checked here as well as in the expiry effect: that effect runs after
+  // paint, so without this the hint could assert a rule the row no longer meets.
+  const refusalText =
+    refusedRow && blocksDelete(refusedRow)
+      ? refusedRow.sessionId === currentSessionId
+        ? t('delete.cannotCurrent')
+        : t('sidebar.deleteRunningDisabled')
+      : null;
   const hasSelection = selectedIds.size > 0;
   const canDelete = !deleting && !loading && deletableSelectedIds.length > 0;
 
@@ -307,7 +353,9 @@ export function DeleteSessionDialog({
         />
         <span className={dp('picker-search-hint')}>
           {outageMessage ||
+            outcome ||
             message ||
+            refusalText ||
             (deleting
               ? t('delete.deleting')
               : loading
@@ -349,7 +397,7 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
-            const deleteBlocked = blocksCurrentDelete(s);
+            const deleteBlocked = blocksDelete(s);
             return (
               <SessionRow
                 key={s.sessionId}

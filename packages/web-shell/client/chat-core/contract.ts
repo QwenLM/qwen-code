@@ -1,4 +1,4 @@
-import type { Message } from '../adapters/types.js';
+import type { Message, PermissionRequest } from '../adapters/types.js';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes.js';
 import type { ComposerSubmitMetadata } from '../hooks/useComposerCore.js';
 
@@ -57,10 +57,15 @@ export interface PendingApproval {
   // this list only when the backend confirms the decision against the
   // still-current request.
   readonly status: 'pending' | 'superseded';
+  // Render-ready request for the shared ToolApproval input. Backend-neutral
+  // (the shared adapters/types model), so the surface never branches on kind.
+  readonly request: PermissionRequest;
 }
 
 export interface PendingQuestion {
   readonly id: string;
+  // Render-ready request for the shared AskUserQuestion input.
+  readonly request: PermissionRequest;
 }
 
 export interface QuestionAnswer {

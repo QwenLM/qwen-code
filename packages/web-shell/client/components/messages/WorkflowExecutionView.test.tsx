@@ -131,6 +131,88 @@ describe('WorkflowExecutionView', () => {
     ).not.toBeNull();
   });
 
+  it('adds declared phases the run has not reached as planned lanes', () => {
+    const task = workflowTask({
+      plannedPhases: [
+        { title: 'Inspect' },
+        { title: 'Review', detail: 'One reviewer per dimension' },
+        { title: 'Fix', detail: 'Apply the confirmed findings' },
+        { title: 'Report' },
+      ],
+    });
+
+    const layout = buildWorkflowGraphLayout(task);
+
+    expect(
+      layout.lanes.map((lane) => [lane.title, lane.planned ?? null]),
+    ).toEqual([
+      ['Inspect', null],
+      ['Review', null],
+      ['Fix', { detail: 'Apply the confirmed findings' }],
+      ['Report', {}],
+    ]);
+    expect(layout.lanes.map((lane) => lane.index)).toEqual([0, 1, 2, 3]);
+    expect(layout.omittedLanes).toBe(0);
+  });
+
+  it('drops planned lanes once the run can no longer reach them', () => {
+    const plannedPhases = [{ title: 'Fix' }];
+    for (const task of [
+      workflowTask({ plannedPhases, status: 'completed' }),
+      workflowTask({ plannedPhases, status: 'failed' }),
+      workflowTask({ plannedPhases, status: 'paused', isHistorical: true }),
+    ]) {
+      expect(
+        buildWorkflowGraphLayout(task).lanes.some((lane) => lane.planned),
+      ).toBe(false);
+    }
+    expect(
+      buildWorkflowGraphLayout(
+        workflowTask({ plannedPhases, status: 'paused' }),
+      ).lanes.some((lane) => lane.planned),
+    ).toBe(true);
+  });
+
+  it('shows the declared phases before the first agent is dispatched', () => {
+    const task = workflowTask({
+      currentPhase: null,
+      phaseVisits: [],
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      plannedPhases: [
+        { title: 'Review', detail: 'One reviewer per dimension' },
+        { title: 'Verify' },
+      ],
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkflowExecutionView task={task} />
+        </I18nProvider>,
+      );
+    });
+
+    const lanes = [...container.querySelectorAll('[data-planned="true"]')];
+    expect(
+      lanes.map((lane) => lane.getAttribute('data-workflow-lane')),
+    ).toEqual(['planned:0', 'planned:1']);
+    expect(lanes[0]?.textContent).toContain('Review');
+    expect(lanes[0]?.textContent).toContain('Not started');
+    expect(lanes[0]?.textContent).toContain('One reviewer per dimension');
+    expect(
+      container.querySelector('[data-workflow-lane="no-phase"]'),
+    ).toBeNull();
+    expect(container.textContent).not.toContain(
+      'Waiting for the first agent dispatch',
+    );
+  });
+
   it('builds edges only from recorded dispatch dependencies', () => {
     const task = workflowTask();
     task.dispatches[2]!.dependsOn = ['dispatch-1', 'missing'];

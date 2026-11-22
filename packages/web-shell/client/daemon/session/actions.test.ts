@@ -3065,6 +3065,10 @@ describe('createDaemonSessionActions', () => {
       expect(onSessionCreated).toHaveBeenCalledExactlyOnceWith(
         'session-b',
         undefined,
+        expect.objectContaining({
+          sessionId: 'session-b',
+          updateMetadata: expect.any(Function),
+        }),
       );
       expect(attachSession).toHaveBeenCalledOnce();
       expect(submitPrompt).toHaveBeenCalledOnce();
@@ -3346,7 +3350,11 @@ describe('createDaemonSessionActions', () => {
     });
     expect(nextSession.detach).not.toHaveBeenCalled();
     expect(onSessionAllocated).toHaveBeenCalledWith('session-b');
-    expect(onSessionCreated).toHaveBeenCalledWith('session-b', nextSession);
+    expect(onSessionCreated).toHaveBeenCalledWith(
+      'session-b',
+      nextSession,
+      nextSession,
+    );
     expect(attachSession).not.toHaveBeenCalled();
     expect(clearSession).not.toHaveBeenCalled();
     expect(sessionRef.current).toBeUndefined();
@@ -7811,6 +7819,39 @@ describe('createDaemonSessionActions', () => {
   });
 });
 
+describe('rateAssistantTurn', () => {
+  it('forwards the mark to the session client', async () => {
+    const session = createMockSession('session-a');
+    const h = createActionsHarness({ session });
+
+    await h.actions.rateAssistantTurn('prompt-1', 'up');
+
+    expect(session.rateSessionTurn).toHaveBeenCalledWith('prompt-1', 'up');
+  });
+
+  it('is a no-op without a live session', async () => {
+    const h = createActionsHarness();
+
+    await expect(
+      h.actions.rateAssistantTurn('prompt-1', 'up'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('swallows failures so the local mark never depends on telemetry', async () => {
+    const session = createMockSession('session-a');
+    session.rateSessionTurn.mockRejectedValue(new Error('daemon down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const h = createActionsHarness({ session });
+
+    await expect(
+      h.actions.rateAssistantTurn('prompt-1', 'down'),
+    ).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
@@ -8042,6 +8083,7 @@ function createMockSession(
     context: vi.fn(async () => contextStatus(sessionId)),
     detach: vi.fn(async () => undefined),
     setModel: vi.fn(async () => ({})),
+    rateSessionTurn: vi.fn(async () => ({ recorded: true })),
     setConfigOption: vi.fn(async (_configId: string, value: string) => ({
       configOptions: reasoningConfigOptions(value),
       persisted: false,

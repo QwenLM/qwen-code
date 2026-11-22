@@ -793,6 +793,7 @@ export function useAtMentionMenu({
             builtinCacheRef.current.mcpResources,
             serverName,
             () => loadMcpResources(serverName, { signal: abort.signal }),
+            abort.signal,
           );
         })
         .then((status) => {

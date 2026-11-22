@@ -31,6 +31,7 @@ import {
   type ModRenderElement,
   type ModRenderInput,
   type ModRenderSite,
+  type ModRenderSurface,
 } from './render-tree.js';
 import type {
   ModToolCallInput,
@@ -146,7 +147,7 @@ export class ModRuntime {
     private readonly log: (entry: ModLog, plugin: string) => void,
     private readonly facts: () => ModSessionFacts,
     private readonly resolveTool?: ModToolResolver,
-    private readonly surface: 'terminal' | null = null,
+    private readonly surface: ModRenderSurface | null = null,
     private readonly abortTurn?: (turnId: string) => void,
     private readonly renderHost?: ModRenderHost,
     private readonly queuePrompt?: ModPromptQueue,
@@ -248,7 +249,7 @@ export class ModRuntime {
     log: (entry: ModLog, plugin: string) => void,
     signal: AbortSignal,
     resolveTool?: ModToolResolver,
-    surface: 'terminal' | null = null,
+    surface: ModRenderSurface | null = null,
     version = 'unknown',
     facts?: () => ModSessionFacts,
     abortTurn?: (turnId: string) => void,

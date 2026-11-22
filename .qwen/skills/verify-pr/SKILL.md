@@ -2024,10 +2024,11 @@ inconclusive.
   example: a readiness check sent no bearer token to a server that
   requires auth, so it never saw 200 and always ran to its timeout; that
   timeout was reported as a "~40 s restart" of a server that listens
-  within about a second. Decide "the model replied" or "the turn finished"
-  from backend events or usage records, never from page text that may
-  echo the prompt. Match wait conditions only against lines produced in
-  the current phase. Bound every call to the system under test in time
+  within about a second. Verify the model's reply from backend assistant
+  output, never from page text that may echo the prompt. Confirm turn
+  completion from the backend terminal state for the prompt. Per-round
+  usage can corroborate the model used. Match wait conditions only against
+  lines produced in the current phase. Bound every call to the system under test in time
   and record a timeout as "no answer within N s": one commit turned a
   refusal after 0.1 s into a start that never answered while the worker
   was polled for status 4,549 times, and a probe without a limit waited
@@ -2326,6 +2327,7 @@ or contract version too.
   finding. Probe the **default** path of manual dispatch/config combinations
   (what happens when an operator submits the pre-filled form as-is), not
   just the documented happy path.
+- **Web Shell**: read [the Web Shell verification recipes](references/web-shell.md) for daemon capability fallbacks, partial settings writes, channel sessions, and model turns.
 - **Native Android (`packages/mobile-shell/`)** and changes to the
   daemon-served Web Shell it renders (`packages/web-shell/` and the serve
   routes it calls): read

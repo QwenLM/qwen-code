@@ -122,6 +122,7 @@ final class RuntimeExecutionDispatcher {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null

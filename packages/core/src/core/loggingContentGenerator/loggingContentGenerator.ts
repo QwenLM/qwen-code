@@ -69,6 +69,7 @@ import {
   API_CALL_FAILED_SPAN_STATUS_MESSAGE,
 } from '../../telemetry/tracer.js';
 import { hasUserVisibleContent } from './streamContentDetection.js';
+import { observeRequestDispatch } from './request-dispatch.js';
 import {
   retryContext,
   type RetryAttemptContext,
@@ -109,6 +110,14 @@ function snapshotRetryMetadata(): {
   };
 }
 
+function withStreamContext<T>(scopedContext: Context, run: () => T): T {
+  // Dispatch timing is settled before iteration. Clear the consumer's
+  // observer so later retries stay scoped to this stream.
+  return context.with(scopedContext, () =>
+    observeRequestDispatch(undefined, run),
+  );
+}
+
 function bindAsyncGeneratorToContext<TYield, TReturn, TNext>(
   stream: AsyncGenerator<TYield, TReturn, TNext>,
   scopedContext: Context,
@@ -118,11 +127,11 @@ function bindAsyncGeneratorToContext<TYield, TReturn, TNext>(
   // provider iteration and wrapper-side telemetry retain the request context.
   return {
     next: (...args: [] | [TNext]) =>
-      context.with(scopedContext, () => stream.next(...args)),
+      withStreamContext(scopedContext, () => stream.next(...args)),
     return: (value: TReturn | PromiseLike<TReturn>) =>
-      context.with(scopedContext, () => stream.return(value)),
+      withStreamContext(scopedContext, () => stream.return(value)),
     throw: (error: unknown) =>
-      context.with(scopedContext, () => stream.throw(error)),
+      withStreamContext(scopedContext, () => stream.throw(error)),
     [Symbol.asyncIterator]() {
       return this;
     },
@@ -266,6 +275,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     responseText?: string,
     ttftMs?: number,
     generationMs?: number,
+    firstVisibleOffsetMs?: number,
   ): void {
     const identity = subagentIdentityContext.getStore();
     logApiResponse(
@@ -282,6 +292,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         ttftMs,
         executionId,
         generationMs,
+        firstVisibleOffsetMs,
       ),
       sessionId,
       identity
@@ -382,6 +393,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     responseText?: string,
     ttftMs?: number,
     generationMs?: number,
+    firstVisibleOffsetMs?: number,
   ): void {
     try {
       this._logApiResponse(
@@ -395,6 +407,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         responseText,
         ttftMs,
         generationMs,
+        firstVisibleOffsetMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -476,8 +489,11 @@ export class LoggingContentGenerator implements ContentGenerator {
             requestSessionId,
           );
         }
+        // A nested call must not report dispatch to the enclosing stream.
         const result = await session.wrap(() =>
-          this.wrapped.generateContent(req, userPromptId),
+          observeRequestDispatch(undefined, () =>
+            this.wrapped.generateContent(req, userPromptId),
+          ),
         );
         responseCompleted = true;
         observation?.update(result.usageMetadata, result.modelVersion);
@@ -653,6 +669,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let streamRequest: {
       stream: AsyncGenerator<GenerateContentResponse>;
       requestIssuedAtMs: number;
+      dispatchedAt: number;
     };
     try {
       runtimeDiagnostics.recordGenerateContentRequest(req, {
@@ -670,12 +687,21 @@ export class LoggingContentGenerator implements ContentGenerator {
           );
         }
         return session.wrap(async () => {
-          const requestIssuedAtMs = performance.now();
-          const stream = await this.wrapped.generateContentStream(
-            req,
-            userPromptId,
+          let requestIssuedAtMs = performance.now();
+          let dispatchedAt: number | undefined;
+          const stream = await observeRequestDispatch(
+            () => {
+              if (dispatchedAt !== undefined) return;
+              dispatchedAt = Date.now();
+              requestIssuedAtMs = performance.now();
+            },
+            () => this.wrapped.generateContentStream(req, userPromptId),
           );
-          return { stream, requestIssuedAtMs };
+          return {
+            stream,
+            requestIssuedAtMs,
+            dispatchedAt: dispatchedAt ?? startTime,
+          };
         });
       });
     } catch (error) {
@@ -723,7 +749,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       }
       throw error;
     }
-    const { stream, requestIssuedAtMs } = streamRequest;
+    const { stream, requestIssuedAtMs, dispatchedAt } = streamRequest;
     observation?.touchStream();
 
     const openaiRequestPromise = this.openaiLogger
@@ -739,6 +765,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         lifecycle,
         stream,
         startTime,
+        dispatchedAt,
         requestIssuedAtMs,
         userPromptId,
         req.model,
@@ -761,7 +788,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       return: async (value) => {
         try {
           if (!iterated)
-            await context.with(spanContext, () => stream.return(value));
+            await withStreamContext(spanContext, () => stream.return(value));
           return await wrapped.return(value);
         } catch (error) {
           lifecycle.finish('error');
@@ -779,7 +806,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       throw: async (error) => {
         try {
           if (!iterated) {
-            await context.with(spanContext, () => stream.return(undefined));
+            await withStreamContext(spanContext, () =>
+              stream.return(undefined),
+            );
           }
           return await wrapped.throw(error);
         } catch (actualError) {
@@ -843,6 +872,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     lifecycle: ReturnType<typeof startRequestLifecycle>,
     stream: AsyncGenerator<GenerateContentResponse>,
     startTime: number,
+    dispatchedAt: number,
     requestIssuedAtMs: number,
     userPromptId: string,
     model: string,
@@ -890,10 +920,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
 
-    // Internal first-visible-output timing: wall-clock from the existing
-    // generateContentStream startTime to the first chunk containing
-    // user-visible content. This is distinct from the standard first-chunk
-    // timer above.
+    // Internal first-visible-output timing: wall-clock from the provider's
+    // first request dispatch (startTime when the provider reports none) to
+    // the first chunk containing user-visible content, so request building
+    // is not counted. This is distinct from the standard first-chunk timer
+    // above.
     // Method-local closure variable — NEVER an instance field — because
     // LoggingContentGenerator is shared across concurrent generateContentStream
     // calls (one per ContentGenerator, see contentGenerator.ts:createContentGenerator).
@@ -903,6 +934,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     // over this window rather than up to stream end, which also includes the
     // time the consumer spends on the final chunk.
     let generationMs: number | undefined;
+    let firstVisibleAt: number | undefined;
     let firstChunkObserved = false;
     // Tracks whether the idle timeout fired and ended the span. If so,
     // a resumed-after-timeout consumer must not call endLLMRequestSpan
@@ -1022,9 +1054,10 @@ export class LoggingContentGenerator implements ContentGenerator {
         // chunks, so TTFT reflects "model produced something the operator can
         // attribute to user-perceived latency."
         if (hasUserVisibleContent(response)) {
-          const elapsedMs = Date.now() - startTime;
-          ttftMs ??= elapsedMs;
-          generationMs = elapsedMs - ttftMs;
+          const now = Date.now();
+          firstVisibleAt ??= now;
+          ttftMs ??= firstVisibleAt - dispatchedAt;
+          generationMs = now - firstVisibleAt;
         }
         resetSpanTimeout?.();
         observation?.update(lastUsageMetadata, firstModelVersion, {
@@ -1086,6 +1119,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           streamResponseText,
           ttftMs,
           generationMs,
+          firstVisibleAt === undefined ? undefined : firstVisibleAt - startTime,
         );
         const openaiRequest = await openaiRequestPromise;
         await this.safelyLogOpenAIInteraction(
@@ -1187,6 +1221,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           cancelled,
           ...usageSpanMetadata(lastUsageMetadata),
           ttftMs,
+          requestBuildMs: dispatchedAt - startTime,
           durationMs: Date.now() - startTime,
           error: cancelled
             ? API_CALL_ABORTED_SPAN_STATUS_MESSAGE

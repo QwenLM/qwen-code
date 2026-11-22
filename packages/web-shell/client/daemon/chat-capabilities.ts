@@ -31,6 +31,9 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   session_sub_session_send: [],
   session_prompt: [],
   session_turn_status: [],
+  // The marks gate on the capability directly in the app wiring; they are
+  // not a chat region, so no region flips with this tag.
+  session_turn_feedback: [],
   session_attachments: [],
   session_attachment_chunk_upload: [],
   session_attachment_list: [],
@@ -140,6 +143,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   workspace_git_check_ignore: [],
   workspace_mcp_restart: [],
   session_recap: [],
+  session_mod_rows: [],
   session_generation: [],
   workspace_generation: [],
   session_btw: [],
@@ -201,6 +205,7 @@ export const DAEMON_CHAT_CAPABILITY_MAP: Record<
   workspace_archived_session_export: ['sessionOps'],
   workspace_session_live_state: [],
   workspace_session_live_state_batch: [],
+  restart_recovery: [],
   workspace_session_metadata: ['sessionOps'],
   session_worktree_persistence_v1: [],
   session_worktree_reset_v1: [],

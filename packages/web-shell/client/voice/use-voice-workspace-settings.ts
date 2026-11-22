@@ -17,6 +17,7 @@ import {
 
 interface VoiceWorkspaceSettingsState {
   descriptor: DaemonSettingDescriptor | undefined;
+  status: DaemonWorkspaceSettingsStatus | undefined;
   reload: () => Promise<DaemonWorkspaceSettingsStatus | undefined>;
 }
 
@@ -93,6 +94,7 @@ export function useVoiceWorkspaceSettings(
 
   const current = state.ownerKey === ownerKey ? state : undefined;
   return {
+    status: current?.status,
     descriptor: current?.status?.settings.find(
       (setting) => setting.key === 'voiceModel',
     ),

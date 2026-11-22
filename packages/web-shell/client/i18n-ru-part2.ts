@@ -334,6 +334,30 @@ export const RU_PART2: Record<
     'Эта старая сессия отменена, но причина не записана. Подтвердите, прежде чем продолжать.',
   'session.recovery.confirmCancellation':
     'Этот ход, возможно, остановили намеренно. Продолжить его?',
+  'restartRecovery.title': (v) =>
+    `После перезапуска прервано задач: ${v?.['count'] ?? 0}`,
+  'restartRecovery.review': 'Просмотреть',
+  'restartRecovery.hide': 'Скрыть',
+  'restartRecovery.continue': 'Продолжить',
+  'restartRecovery.continueAll': 'Продолжить все',
+  'restartRecovery.confirmToolTurn': 'Подтвердить и продолжить',
+  'restartRecovery.toolTurnHint':
+    'Задача прервана во время вызова инструмента. Продолжение сначала закроет незавершённый вызов как ошибку.',
+  'restartRecovery.inFlight': 'Процесс прерван',
+  'restartRecovery.daemonShutdown': 'Перезапуск daemon',
+  'restartRecovery.interrupted': 'Прервано',
+  'restartRecovery.cancellationNeedsConversation':
+    'Откройте разговор, чтобы подтвердить отмену.',
+  'restartRecovery.notContinuable': 'Задача больше не ждёт восстановления.',
+  'restartRecovery.failed': 'Не удалось продолжить',
+  'restartRecovery.batchStopped':
+    'Нет ответа daemon. Предыдущие сессии могут уже выполняться; проверьте их состояние перед повторной попыткой.',
+  'restartRecovery.loadFailed': 'Не удалось прочитать прерванные задачи',
+  'restartRecovery.retry': 'Повторить',
+  'restartRecovery.truncated':
+    'Возможно, есть ещё прерванные задачи сверх лимита сканирования. Повторите сканирование.',
+  'restartRecovery.scanFailedWorkspaces': (v) =>
+    `Не удалось просканировать: ${v?.workspaces ?? ''}`,
   'session.archived': 'Этот разговор в архиве',
   'session.archivedDescription':
     'Сначала разархивируйте его, чтобы открыть разговор.',
@@ -417,6 +441,12 @@ export const RU_PART2: Record<
     `${v?.current ?? 0}/${v?.total ?? 0} ${ruPlural(v?.total, 'вопрос', 'вопроса', 'вопросов')}`,
   'askUser.selectAnswer': 'Выберите ответ',
   'askUser.typePlaceholder': 'Введите текст...',
+  'chat.promptNotConfirmed': 'Запрос не подтверждён',
+  'chat.promptNotAdmitted': 'Запрос не принят',
+  'chat.failedToSend': 'Не удалось отправить сообщение',
+  'chat.approvalNotAccepted': 'Одобрение не принято',
+  'chat.acknowledgeUnknown': 'Я проверил сессию',
+  'chat.stopNotConfirmed': 'Запрос на остановку не подтверждён',
   'askUser.shortcuts.previous': '← назад',
   'askUser.shortcuts.optionsSingle': '↑↓ выбрать · Enter отправить',
   'askUser.shortcuts.optionsNext': '↑↓ выбрать · Enter далее',

@@ -2,9 +2,19 @@
 
 [English](2026-11-17-web-shell-sidebar-goal-markers.md) | [简体中文](2026-11-17-web-shell-sidebar-goal-markers.zh-CN.md)
 
-Status: proposed (2026-11-17). Follow-up to the Goal display enhancement
-(#17349, merged as 2b4ce375d2), whose Non-goals section explicitly deferred
-this feature.
+Status: landed (2026-11-18, merged as c98108ee13 via #17515). The sections below
+describe the design as written on 2026-11-17, except for the validation plan,
+which is corrected to match what the tests actually exercise. Two things
+changed during review and are recorded here so the status line does not
+mislead: the completed-goals-hidden rule now lives in one shared
+`hasVisibleGoal` predicate read by the strip, the sidebar and the marker; and
+the goal sidecar coexists with main's separate artifact-count sidecar rather
+than being merged into it.
+One bounded candidate from the final review is tracked in #17731 — the
+objective is length-bounded only on the `propose_goal` path.
+
+Follow-up to the Goal display enhancement (#17349, merged as 2b4ce375d2), whose
+Non-goals section explicitly deferred this feature.
 
 ## Problem
 
@@ -256,7 +266,9 @@ moves; each is resolvable in the file named.
 - Unit: sidecar write/read/move/delete (core), journal-hook upsert/delete
   incl. best-effort failure isolation, restore-time write, session-list
   merge (present/absent/archived), bridge notification validation
-  (bad v/sessionId/status rejected, good marks the clock), SDK type
+  (bad v/sessionId rejected and unresolvable sessions ignored, good marks
+  the clock — the payload carries no status, per the decision above; the
+  handler's additional ownership clause has no test witness today), SDK type
   surface, sidebar marker render (tone per status, tooltip, accessible
   name, click opens session, complete hidden, absent without goal).
 - E2E (mockDaemon): catalog fixture with goal sidecars → markers render
