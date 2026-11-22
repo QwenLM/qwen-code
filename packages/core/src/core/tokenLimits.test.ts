@@ -904,6 +904,21 @@ describe('Bedrock model ids', () => {
     expect(tokenLimit('deepseek.deepseek-r1-v1:0', 'output')).toBe(65_536);
   });
 
+  it.each([
+    ['meta.llama3-3-70b-instruct-v1:0', 'llama3-3-70b-instruct'],
+    ['amazon.nova-pro-v1:0', 'nova-pro'],
+    ['mistral.mistral-large-2407-v1:0', 'mistral-large'],
+    ['cohere.command-r-plus-v1:0', 'command-r-plus'],
+    ['ai21.jamba-1-5-large-v1:0', 'jamba-1-5-large'],
+    ['google.gemma-3-27b-it', 'gemma-3-27b-it'],
+    ['minimax.minimax-m2-v1:0', 'minimax-m2'],
+    ['nvidia.nemotron-nano-12b-v2-v1:0', 'nemotron-nano-12b'],
+    ['writer.palmyra-x5-v1:0', 'palmyra-x5'],
+  ])('drops the %s publisher prefix', (id, bare) => {
+    expect(normalize(id)).toBe(bare);
+    expect(normalize(id)).toBe(normalize(bare));
+  });
+
   it('gives Bedrock gpt-oss the gpt-oss output limit, not the GPT fallback', () => {
     expect(tokenLimit('openai.gpt-oss-120b-1:0', 'output')).toBe(32_768);
     expect(tokenLimit('gpt-oss-120b', 'output')).toBe(32_768);
