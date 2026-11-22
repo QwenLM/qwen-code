@@ -549,6 +549,12 @@ describe('specToModelConfig (via buildProviderTemplate)', () => {
     ).toEqual({ contextWindowSize: 4096 });
   });
 
+  it('includes service_tier in generationConfig when spec defines it', () => {
+    expect(
+      templateFor({ id: 'm', service_tier: 'flex' })?.generationConfig,
+    ).toEqual({ service_tier: 'flex' });
+  });
+
   it('includes description when spec has one', () => {
     expect(templateFor({ id: 'm', description: 'A model' })?.description).toBe(
       'A model',
@@ -941,6 +947,7 @@ describe('getAllProviderBaseUrls', () => {
     expect(urls.length).toBeGreaterThan(0);
     expect(urls).toContain('https://api.deepseek.com');
     expect(urls).toContain('https://openrouter.ai/api/v1');
+    expect(urls).toContain('https://api.deepinfra.com/v1/openai');
   });
 
   it('expands BaseUrlOption[] presets into each option URL', () => {
@@ -1124,6 +1131,20 @@ describe('customHeaders in ProviderConfig', () => {
     expect(
       buildProviderTemplate(config)[0]?.generationConfig?.customHeaders,
     ).toEqual({ 'X-Template': 'val' });
+  });
+
+  it('applies provider-level service_tier to installed models when not set on the model', () => {
+    const config = makeConfig({
+      models: [{ id: 'fixed-1' }, { id: 'fixed-2', service_tier: 'priority' }],
+      service_tier: 'flex',
+    });
+    const installed = installModels(config, {
+      baseUrl: 'https://example.com/v1',
+      apiKey: 'k',
+      modelIds: ['fixed-1', 'fixed-2'],
+    });
+    expect(installed[0]?.generationConfig?.service_tier).toBe('flex');
+    expect(installed[1]?.generationConfig?.service_tier).toBe('priority');
   });
 });
 
