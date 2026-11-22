@@ -183,35 +183,6 @@ describe('useDaemonChatController', () => {
     }
   });
 
-  it('exposes allocatedSessionId only while an unallocated new-chat submit spans its session allocation', async () => {
-    harness.connection.sessionId = '';
-    mountReact(<Probe />);
-    expect(controller!.allocatedSessionId).toBeUndefined();
-    let resolvePrompt: ((value: { promptId: string }) => void) | undefined;
-    harness.submitPrompt.mockImplementationOnce(
-      (_text: string, options?: { onAdmissionStarted?: () => void }) =>
-        new Promise<{ promptId: string }>((resolve) => {
-          resolvePrompt = resolve;
-          // Simulate session creation allocating 's1' before admission starts.
-          harness.connection.sessionId = 's1';
-          options?.onAdmissionStarted?.();
-        }),
-    );
-    const pendingSubmit = controller!.submit({ text: 'first prompt' });
-    forceRerender!();
-    // The rebuilt controller for 's1' identifies 's1' as the id allocated by
-    // the in-flight submit; switching to an unrelated 's2' clears it.
-    expect(controller!.sessionId).toBe('s1');
-    expect(controller!.allocatedSessionId).toBe('s1');
-    harness.connection.sessionId = 's2';
-    forceRerender!();
-    expect(controller!.sessionId).toBe('s2');
-    expect(controller!.allocatedSessionId).toBeUndefined();
-    resolvePrompt!({ promptId: 'p1' });
-    await pendingSubmit;
-    expect(controller!.allocatedSessionId).toBeUndefined();
-  });
-
   it('splits question permissions from tool approvals', () => {
     harness.pendingPermissions = [
       permissionBlock('q1', { questions: true }),

@@ -56,14 +56,16 @@ session's latches:
 - The **one change that is not a switch** is the `'' -> id` allocation a new
   chat's first submit spans **while that submit is still in flight and the
   controller identifies `controller.sessionId` as the id that submit allocated**
-  (`lockOwner === '' && controller.sessionId !== '' && submitInFlight && allocatedId === controller.sessionId`,
-  where `allocatedId` reads `controller.allocatedSessionId` or the submitting
-  controller's `allocatedSessionId`): the submit begins with no session id, the
-  daemon allocates one mid-submit, and the controller is rebuilt under the new
-  id with `allocatedSessionId` matching it. That is the same logical chat, so
-  the in-flight latch and the owner token stay armed across it (so the
-  settlement still commits the draft and no duplicate send can slip through
-  mid-submit).
+  (`lockOwner === '' && controller.sessionId !== '' && submitInFlight && controller.allocatedSessionId === controller.sessionId`):
+  for a controller whose `submit` allocates a session before rendering the new
+  id, the controller exposes that id on `allocatedSessionId`. That is the same
+  logical chat, so the in-flight latch and the owner token stay armed across it
+  (so the settlement still commits the draft and no duplicate send can slip
+  through mid-submit). On the daemon path, `actions.submitPrompt` requires an
+  already-created session (`requireSessionForAction`) and session creation
+  (`ensureSessionForPrompt` / `createSession`) completes before `submitPrompt`
+  is dispatched, so `useDaemonChatController` leaves `allocatedSessionId` unset
+  and treats every `'' -> id` transition as a session switch.
 - **Accepted settlement commits the submitting session's own draft across a
   switch.** `commitAccepted` in `useComposerCore` is already identity-scoped (on
   `sourceChanged` it clears only the submitting draft key and pushes history
@@ -104,11 +106,13 @@ full retry parity.
   `allocatedSessionId`.** `sessionId` alone cannot distinguish a mid-submit
   session allocation (`'' -> allocated s1`) from a user clicking an existing
   session in the sidebar (`'' -> existing s2`) during the session-creation round
-  trip. The contract therefore exposes an optional `allocatedSessionId`
-  (populated by `useDaemonChatController` from `onAdmissionStarted` when an
-  unallocated submit allocates its session id, and cleared on settlement or on a
-  switch to a different id), and `ChatSurface` preserves the latch and owner
-  token only when the new `controller.sessionId` matches it.
+  trip. The contract therefore exposes an optional `allocatedSessionId` for
+  controllers that allocate a session inside `submit` before rendering the new
+  id, and `ChatSurface` preserves the latch and owner token only when the new
+  `controller.sessionId` matches `controller.allocatedSessionId`. The daemon
+  adapter (`useDaemonChatController`) allocates sessions before `submitPrompt`
+  and leaves `allocatedSessionId` unset, so any `'' -> id` transition on the
+  daemon controller takes the switch branch.
 - **Per-session parking + owner token guards late settlement.** Each submit
   captures the current `ownerTokenRef`; parking `{ token, inFlight, admissionLocked }`
   under the outgoing durable session id and restoring the incoming session's
@@ -135,20 +139,21 @@ full retry parity.
 
 - `ChatSurface` suite adds six session-scoping cases: the admission lock clears
   on a session switch (including an idle `'' -> id` sidebar switch out of a
-  locked new chat), the in-flight latch and owner token survive a mid-submit
-  `'' -> id` allocation identified by `allocatedSessionId`, a mid-submit switch
-  from an unallocated new chat into an unrelated existing session clears the
-  in-flight latch and ignores the abandoned `unknown` settlement, a session
-  switch between allocated sessions clears the in-flight latch (without letting
-  the inactive settlement clear the new session's own in-flight latch), an
-  accepted settlement after a switch still commits the submitting session's
-  draft while a rejected settlement stays silent on the new session, and a
-  round-trip switch (`A -> B -> A`) restores both the admission lock and an
+  locked new chat and returning to a brand-new `''` chat), the in-flight latch
+  and owner token survive a mid-submit `'' -> id` allocation identified by
+  `allocatedSessionId`, a mid-submit switch from an unallocated new chat into an
+  unrelated existing session clears the in-flight latch and ignores the
+  abandoned `unknown` settlement, a session switch between allocated sessions
+  clears the in-flight latch (without letting the inactive settlement clear the
+  new session's own in-flight latch), an accepted settlement after a switch
+  still commits the submitting session's draft while a rejected settlement stays
+  silent on the new session, and a round-trip switch (`A -> B -> A`) restores
+  both the admission lock (including when `unknown` settles while parked) and an
   in-flight submit latch. Verified red under each named mutation and restored
   byte-identical.
-- The binding suite adds `loadOlder` (including `{ force: true }` forwarding)
-  and `allocatedSessionId` lifecycle cases, each verified red under its named
-  mutation and restored byte-identical.
+- The binding suite adds a `loadOlder` case (including `{ force: true }`
+  forwarding and per-render history handle refresh), verified red under its
+  named mutations and restored byte-identical.
 - Full migration suite green; both web-shell type projects (`tsconfig.lib.json`,
   `tsconfig.json`) exit 0; ESLint and Prettier clean.
 

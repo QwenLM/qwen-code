@@ -42,11 +42,14 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
   同时往返切回（`A -> B -> A`）能够恢复 `A` 的在飞守卫、归属令牌与 unknown 准入锁。
 - **唯一不算切换的变更**是新聊天首次提交**在该提交仍在飞、且控制器将 `controller.sessionId`
   标识为该次提交所分配的 id 时**跨越的 `'' -> id` 分配
-  （`lockOwner === '' && controller.sessionId !== '' && submitInFlight && allocatedId === controller.sessionId`，
-  其中 `allocatedId` 读取 `controller.allocatedSessionId` 或发起提交的控制器的
-  `allocatedSessionId`）：提交开始时无会话 id，daemon 在提交中途分配一个，控制器在新 id
-  下重建且 `allocatedSessionId` 与之匹配。那是同一个逻辑聊天，故在飞闩与归属令牌在其间
-  保持武装（使结算仍能 commit 草稿、提交中途也不会让重复发送溜过去）。
+  （`lockOwner === '' && controller.sessionId !== '' && submitInFlight && controller.allocatedSessionId === controller.sessionId`）：
+  对于在 `submit` 内部并在渲染新 id 前完成会话分配的控制器，该控制器在
+  `allocatedSessionId` 上暴露所分配的 id。那是同一个逻辑聊天，故在飞闩与归属令牌在其间
+  保持武装（使结算仍能 commit 草稿、提交中途也不会让重复发送溜过去）。在 daemon 路径上，
+  `actions.submitPrompt` 要求会话已存在（`requireSessionForAction`），会话创建
+  （`ensureSessionForPrompt` / `createSession`）在派发 `submitPrompt` 之前完成，因此
+  `useDaemonChatController` 不设置 `allocatedSessionId`，并将所有 `'' -> id` 转换作为会话
+  切换处理。
 - **跨切换的 accepted 结算仍提交发起会话自身的草稿。** `useComposerCore` 中的
   `commitAccepted` 本身已按身份作用域（`sourceChanged` 时只清除提交方草稿 key 并按提交
   方 key 写入历史，不触碰当前活动会话），因此 `.then` 在陈旧归属返回之前先对
@@ -74,10 +77,11 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
   已匹配），并在新会话能派发之前清除闩。
 - **分配例外要求同时满足有提交在飞且 `allocatedSessionId` 匹配。** 仅凭 `sessionId`
   无法区分会话创建往返期间的「提交中途会话分配（`'' -> 已分配 s1`）」与「用户点击侧边栏
-  已有会话（`'' -> 已有 s2`）」。因此契约暴露可选的 `allocatedSessionId`（由
-  `useDaemonChatController` 在未分配新聊天提交分配出会话 id 时从 `onAdmissionStarted`
-  填入，并在结算或切换到其他 id 时清除），`ChatSurface` 仅当新的 `controller.sessionId`
-  与之匹配时才保留在飞闩与归属令牌。
+  已有会话（`'' -> 已有 s2`）」。因此契约向在 `submit` 内部并在渲染新 id 前分配会话的控制
+  器暴露可选的 `allocatedSessionId`，`ChatSurface` 仅当新的 `controller.sessionId` 与
+  `controller.allocatedSessionId` 匹配时才保留在飞闩与归属令牌。daemon 适配器
+  （`useDaemonChatController`）在调用 `submitPrompt` 前完成会话分配，不设置
+  `allocatedSessionId`，因此 daemon 控制器上的任何 `'' -> id` 转换均走切换分支。
 - **按会话暂存 + 归属令牌守卫迟到结算。** 每次提交捕获当前 `ownerTokenRef`；在离开的持久
   会话 id 下暂存 `{ token, inFlight, admissionLocked }` 并恢复进入会话的条目，既防止跨会
   话阻塞，又在往返切换（`A -> B -> A`）间保留归属会话的在飞与 unknown 准入锁。在非活动
@@ -97,14 +101,14 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
 ## 验证
 
 - `ChatSurface` 套件新增六个会话作用域用例：准入锁在会话切换时清除（包括从已锁定新
-  聊天侧边栏切换出去的空闲 `'' -> id`）、在飞闩与归属令牌在由 `allocatedSessionId` 标识
-  的提交中途 `'' -> id` 分配间存活、首次提交在飞期间从未分配新聊天切到无关已有会话时清
-  除在飞闩并忽略已放弃的 `unknown` 结算、已分配会话之间的切换清除在飞闩（且非活动结算不
-  会清除新会话自身的在飞闩）、切换后的 accepted 结算仍提交发起会话的草稿同时拒绝结算对新
-  会话保持静默、以及往返切换（`A -> B -> A`）恢复准入锁与在飞提交闩。在各命名变异下验证
-  转红并逐字节还原。
-- 绑定套件新增 `loadOlder`（含 `{ force: true }` 转发）与 `allocatedSessionId` 生命周期
-  用例，各在其命名变异下验证转红并逐字节还原。
+  聊天侧边栏切换出去的空闲 `'' -> id` 以及再回到全新 `''` 聊天）、在飞闩与归属令牌在由
+  `allocatedSessionId` 标识的提交中途 `'' -> id` 分配间存活、首次提交在飞期间从未分配新
+  聊天切到无关已有会话时清除在飞闩并忽略已放弃的 `unknown` 结算、已分配会话之间的切换清除
+  在飞闩（且非活动结算不会清除新会话自身的在飞闩）、切换后的 accepted 结算仍提交发起会话的
+  草稿同时拒绝结算对新会话保持静默、以及往返切换（`A -> B -> A`）恢复准入锁（包括暂存期间以
+  `unknown` 结算的场景）与在飞提交闩。在各命名变异下验证转红并逐字节还原。
+- 绑定套件新增 `loadOlder`（含 `{ force: true }` 转发与每次渲染历史句柄刷新）用例，在其
+  命名变异下验证转红并逐字节还原。
 - 全套迁移套件绿；web-shell 两个类型项目（`tsconfig.lib.json`、`tsconfig.json`）
   均退出 0；ESLint 与 Prettier 干净。
 

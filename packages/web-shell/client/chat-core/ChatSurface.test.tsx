@@ -838,6 +838,18 @@ describe('ChatSurface', () => {
       );
     });
     expect(second.submit).toHaveBeenCalledTimes(1);
+    // An unallocated '' new chat has no durable session id and must never be
+    // parked: returning to a brand-new '' chat renders clean and unlocked
+    // (parking '' on switch-out turns this red — M7 / cell P4).
+    const freshNewChat = fakeController({ sessionId: '' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={freshNewChat} onError={onError} />,
+    );
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
   });
 
   it('preserves the in-flight latch and owner across a mid-submit session id allocation', async () => {
@@ -1174,5 +1186,45 @@ describe('ChatSurface', () => {
     });
     expect(s2Commit).toHaveBeenCalledTimes(1);
     expect(captured.editor?.submitDisabled).toBe(false);
+    // N3 / M6 / cell P2: start another in-flight submit in s2, switch to s3 so
+    // s2 is parked, settle s2's submit as 'unknown' while s3 is visible, then
+    // return to s2 — the parked entry must have recorded admissionLocked = true
+    // so s2 restores the banner and lock (and acknowledging clears it durably).
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'second in s2',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    expect(captured.editor?.submitDisabled).toBe(true);
+    const s3 = fakeController({ sessionId: 's3' });
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    expect(captured.editor?.submitDisabled).toBe(false);
+    await act(async () => {
+      resolveS2?.({ admission: 'unknown' });
+    });
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    expect(captured.editor?.submitDisabled).toBe(true);
+    const bannerButton = container.querySelector(
+      '[data-testid="admission-locked-banner"] button',
+    ) as HTMLButtonElement | null;
+    expect(bannerButton).not.toBeNull();
+    await act(async () => {
+      bannerButton?.click();
+    });
+    expect(captured.editor?.submitDisabled).toBe(false);
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
   });
 });

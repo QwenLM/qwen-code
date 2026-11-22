@@ -128,20 +128,16 @@ export function ChatSurface({
   // unallocated '' new chat into an unrelated existing session has no durable
   // '' session to return to and abandons the unallocated latches.
   const ownerTokenRef = useRef({});
-  const submittingControllerRef = useRef<SessionChatController | null>(null);
   const parkedLatchesRef = useRef<
     Map<string, { token: object; inFlight: boolean; admissionLocked: boolean }>
   >(new Map());
   const [lockOwner, setLockOwner] = useState(controller.sessionId);
   if (lockOwner !== controller.sessionId) {
-    const allocatedId =
-      controller.allocatedSessionId ??
-      submittingControllerRef.current?.allocatedSessionId;
     const allocatedMidSubmit =
       lockOwner === '' &&
       controller.sessionId !== '' &&
       submitInFlight &&
-      allocatedId === controller.sessionId;
+      controller.allocatedSessionId === controller.sessionId;
     setLockOwner(controller.sessionId);
     if (!allocatedMidSubmit) {
       if (lockOwner !== '') {
@@ -155,12 +151,8 @@ export function ChatSurface({
           parkedLatchesRef.current.delete(lockOwner);
         }
       }
-      const restored =
-        controller.sessionId !== ''
-          ? parkedLatchesRef.current.get(controller.sessionId)
-          : undefined;
+      const restored = parkedLatchesRef.current.get(controller.sessionId);
       ownerTokenRef.current = restored?.token ?? {};
-      submittingControllerRef.current = null;
       submitInFlightRef.current = restored?.inFlight ?? false;
       setSubmitInFlight(restored?.inFlight ?? false);
       admissionLockedRef.current = restored?.admissionLocked ?? false;
@@ -274,9 +266,7 @@ export function ChatSurface({
             onClick={() => {
               admissionLockedRef.current = false;
               setAdmissionLocked(false);
-              if (controller.sessionId !== '') {
-                parkedLatchesRef.current.delete(controller.sessionId);
-              }
+              parkedLatchesRef.current.delete(controller.sessionId);
             }}
           >
             {t('chat.acknowledgeUnknown')}
@@ -333,7 +323,6 @@ export function ChatSurface({
               return false;
             }
             const token = ownerTokenRef.current;
-            submittingControllerRef.current = controller;
             submitInFlightRef.current = true;
             setSubmitInFlight(true);
             void controller
@@ -389,7 +378,6 @@ export function ChatSurface({
                   }
                 }
                 if (ownerTokenRef.current !== token) return;
-                submittingControllerRef.current = null;
                 submitInFlightRef.current = false;
                 setSubmitInFlight(false);
               });
