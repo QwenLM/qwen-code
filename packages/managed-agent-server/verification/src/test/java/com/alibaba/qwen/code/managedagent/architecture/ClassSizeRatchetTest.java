@@ -43,7 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 class ClassSizeRatchetTest {
     private static final int LARGE_CLASS_THRESHOLD = 800;
     // 2026-11-11: lowered from 2662 after the JdbcRuntimeBindingRepository
-    // admission/fence extraction. #15512 lowers it again to 2483 after the
+    // admission/fence extraction. #17478 lowers it again to 2483 after the
     // publication seal-manifest extraction. #18085 moved ossScope to
     // ToolPublicationContract and lowered the maximum to 2482. This change
     // replaces three calls with ToolPublicationObjectKeys and removes the

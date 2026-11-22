@@ -11,13 +11,13 @@
 
 本文解决[结构评审](2026-10-31-managed-agent-structure-review.zh-CN.md)留下的开放问题：类体量棘轮门禁是在 P1 之前引入（阻止再长），还是在拆分落地之后才引入。引入门禁时，两个头号上帝类已经分解——`ManagedAgentStore` 是 1,170 行门面、`ManagedSessionStore` 是 357 行门面，`RuntimeBrokerService` 是九个协作者之上的 4,270 行门面——因此门禁在**拆分落地之后**引入，以锁住这些成果。结构评审的验收标准早已点名此门禁："P1 完成＝`persistence` 或 `runtime-broker` 中没有任何类超过约定的体量棘轮"。
 
-合并上游运行时供给失败处理逻辑的提取与已有 `sameReceipt` 纯比较函数向 `RuntimeBrokerSupport` 的迁移后，broker 门面为十个协作者之上的 4,216 行。回执比较函数体和两个确认调用位置保持不变；全局和 broker 专属上限都收紧为 4,216。
+在原始基线上，合并上游运行时供给失败处理逻辑的提取与已有 `sameReceipt` 纯比较函数向 `RuntimeBrokerSupport` 的迁移后，broker 门面为十个协作者之上的 4,216 行。当时回执比较函数体和两个确认调用位置保持不变；全局和 broker 专属上限也下调至 4,216。
 
 ## 当前落地状态（2026-11-22）
 
-门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,481 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。次大 pin 为 `JdbcRuntimeBindingRepository` 的 2,319 行。
+门禁覆盖 `persistence/src/main/java` 与 `runtime-broker/src/main/java` 两个源码根。当前全局上限为 **2,481 行**，与当前最大类 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致。当前次大类是 `JdbcManagedExtensionRecordStore`，实际 2,095 行、保守 pin 为 2,170 行。`JdbcRuntimeBindingRepository` 实际为 2,087 行，另保留独立的旧保守 pin 2,319 行。
 
-新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过 #15512 当时建立的 2,483 行上限。main 上 #18085 将该 scope helper 移入 `ToolPublicationContract`，使该类减到 2,482 行，并把全局上限与该类 pin 从 2,483 下调至 2,482。在本 PR 中，把三处内联表达式替换为 `ToolPublicationObjectKeys` 调用并不减少行数；删除因此不再使用的 `ossScope` import 才使该类从 2,482 降为 2,481，两个上限随之再降一步，持久化 key 布局不变。下文 4,216 行及其他类体量均描述原始设计基线，而非当前上限。
+新增私有 `ossScope` helper 曾把 `ToolPublicationDataStore` 从 2,481 行增长到 2,485 行，超过 #17478 当时建立的 2,483 行上限。main 上 #18085 将该 scope helper 移入 `ToolPublicationContract`，使该类减到 2,482 行，并把全局上限与该类 pin 从 2,483 下调至 2,482。在本 PR 中，把三处内联表达式替换为 `ToolPublicationObjectKeys` 调用并不减少行数；删除因此不再使用的 `ossScope` import 才使该类从 2,482 降为 2,481，两个上限随之再降一步，持久化 key 布局不变。上文历史叙述中的 4,216 行及其他类体量描述原始设计基线，而非当前上限。
 
 ## 问题
 
@@ -36,8 +36,8 @@
 
 ### 阈值及其理由
 
-- **`LARGE_CLASS_THRESHOLD = 800`。** 一个略低于当前最小大类（802 行）的整数行界。它覆盖当前每个聚合与门面，并把"达到 800 行"视为一个类大到值得拥有一个显式、经评审的上限的临界点。低于它的类可自由改动，故对小 helper 的普通编辑不会触发门禁。
-- **`GLOBAL_MAX_LINES = 2481`。** 这是当前最大值，与 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致；次大 pin 为 `JdbcRuntimeBindingRepository` 的 2,319 行。它仍是所有类（无论是否入 pin）的兜底，并随类分解而下调。
+- **`LARGE_CLASS_THRESHOLD = 800`。** 覆盖当前所有大聚合与门面的整数阈值，用于显式审视类增长。达到 800 行意味着需要评审该类的大小与职责，并非说 800 行本身就是架构缺陷。低于它的类可自由改动，故对小 helper 的普通编辑不会触发门禁。
+- **`GLOBAL_MAX_LINES = 2481`。** 这是当前最大值，与 `ToolPublicationDataStore` 的实际行数及其按类 pin 一致；当前次大类是 `JdbcManagedExtensionRecordStore` 的 2,095 行。它仍是所有类（无论是否入 pin）的兜底，并随类分解而下调。
 - **范围恰为 `persistence` + `runtime-broker`。** 这是验收标准点名的两个模块。`runtime-*` provider 模块（`runtime-http`/`host`/`local`/`external`/`kubernetes`/`ssh`/`static`）是独立顶层模块、不在范围；`contracts`、`control-plane`、`adapters`、`server` 同样不在此棘轮之列。
 
 ### 棘轮纪律
