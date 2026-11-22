@@ -665,6 +665,11 @@ describe('ResponsesPipeline', () => {
       { service_tier: 'flex' },
       { service_tier: 'flex', model: 'gpt-5' },
     ],
+    [
+      'prioritizes extra_body.service_tier over config.service_tier (R1-6)',
+      { service_tier: 'flex', extra_body: { service_tier: 'priority' } },
+      { service_tier: 'priority', model: 'gpt-5' },
+    ],
     // textRequest() has no config.tools, so apiRequest.tools is present as a
     // key with value undefined — extra_body must still be able to set it.
     [
