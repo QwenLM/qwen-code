@@ -1,14 +1,20 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader.Identity;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import java.io.IOException;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
 import java.util.Map;
 
 final class LocalStorageOwners {
@@ -25,16 +31,85 @@ final class LocalStorageOwners {
                     JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED, JdbcChildWorkspaceStore.DISCARDING,
                     JdbcChildWorkspaceStore.CONFLICTED, JdbcChildWorkspaceStore.BLOCKED, JdbcChildWorkspaceStore.FAILED) + "'))) LIMIT 1";
     static final String HEAD_AUTHORITY_SQL = "SELECT /*! STRAIGHT_JOIN */ 1 FROM ma_session s USE INDEX (idx_ma_session_storage_scope)"
-            + " JOIN ma_session_head h ON h.tenant_key = s.tenant_key AND h.harness_key = s.session_key"
+            + " JOIN ma_session_head h ON h.tenant_id = s.tenant_id AND h.harness_session_id = s.session_id"
+            + " AND s.session_scope_key IS NOT NULL"
             + " JOIN ma_workspace w ON w.tenant_id = s.tenant_id AND w.workspace_id = h.workspace_id"
             + " WHERE s.tenant_id = ? AND s.workspace_storage_id IS NULL AND s.is_resource_gc_completed = FALSE"
-            + " AND h.tenant_key = ? AND h.head_kind = 'MANAGED_SESSION' AND w.tenant_id = ? AND w.storage_id = ? LIMIT 1";
+            + " AND h.head_kind = 'MANAGED_SESSION' AND w.tenant_id = ? AND w.storage_id = ? LIMIT 1";
 
     private LocalStorageOwners() {
     }
 
     static String physicalKey(StorageIdentityReader.Identity identity) {
-        return ManagedSchemaKeys.key("local-storage/1", identity.hostId(), identity.device(), identity.inode(), identity.birthTime());
+        return ManagedSchemaKeys.key(identity.device().matches("[0-9a-f]{32}") ? "local-storage/2" : "local-storage/1",
+                identity.hostId(), identity.device(), identity.inode(), identity.birthTime());
+    }
+
+    static Identity identity(JdbcTemplate jdbc, StorageIdentityReader identities, Path root) {
+        try {
+            Identity current = identities.read(root);
+            if (current.device().matches("[0-9a-f]{32}")) {
+                Identity legacy = identities.readLegacy(root);
+                if (current.hostId().equals(legacy.hostId()) && current.inode().equals(legacy.inode())
+                        && current.birthTime().equals(legacy.birthTime())
+                        && !jdbc.queryForList("SELECT 1 FROM ma_storage_owner WHERE storage_key = ?"
+                                + " AND mount_root = ? AND mount_host_id = ? AND mount_device = ?"
+                                + " AND mount_inode = ? AND mount_birth_time = ?", Integer.class,
+                                physicalKey(legacy), legacy.root(), legacy.hostId(), legacy.device(),
+                                legacy.inode(), legacy.birthTime()).isEmpty()) {
+                    return legacy;
+                }
+            }
+            return current;
+        } catch (IOException | RuntimeException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
+    }
+
+    static Identity identity(StorageIdentityReader identities, Path root, Identity expected) {
+        try {
+            return expected.device().matches("[0-9]{1,20}") ? identities.readLegacy(root) : identities.read(root);
+        } catch (IOException | RuntimeException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
+    }
+
+    static void verifyHistory(JdbcTemplate jdbc, ObjectMapper json, StorageIdentityReader identities,
+            String tenantId, String storageId, boolean probe) {
+        var migrations = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
+                + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED'"
+                + " AND (phase IS NULL OR phase <> 'IDENTITY_REATTESTATION') ORDER BY gmt_modified DESC LIMIT 1",
+                (row, index) -> WorkspaceOperations.operation(row), tenantId,
+                RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
+        if (!migrations.isEmpty()) {
+            Identity expected;
+            try {
+                expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            String home = System.getenv("QWEN_HOME");
+            if (home == null || !Path.of(home).isAbsolute()
+                    || !Path.of(home).resolve("file-history").toString().equals(expected.root())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            try {
+                if (!Path.of(home).toRealPath().equals(Path.of(home))
+                        || !expected.equals(expected.device().matches("[0-9]{1,20}")
+                                ? identities.readLegacy(Path.of(expected.root())) : identities.read(Path.of(expected.root())))) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            } catch (NoSuchFileException | AccessDeniedException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            } catch (IOException error) {
+                if (probe) {
+                    throw WorkspaceExecutionStore.unavailableTransient(error);
+                }
+                throw WorkspaceExecutionStore.unavailable();
+            } catch (RuntimeException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        }
     }
 
     static void requireNonOverlapping(JdbcTemplate jdbc, StorageIdentityReader.Identity identity) {
@@ -91,9 +166,9 @@ final class LocalStorageOwners {
                 || !(alias.get("physical_key") instanceof String physical)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, physical_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
+        var owners = WorkspaceOperations.rows(jdbc, "SELECT storage_key, storage_kind, mount_state FROM ma_storage_owner WHERE storage_key = ?"
                 + lock, physical);
-        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("physical_key"))
+        if (owners.size() != 1 || !physical.equals(owners.getFirst().get("storage_key"))
                 || !"LOCAL".equals(owners.getFirst().get("storage_kind"))) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -163,8 +238,7 @@ final class LocalStorageOwners {
                         || exists(current, OPERATION_AUTHORITY_SQL, candidate[0])) {
                     throw uncovered();
                 }
-                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], RuntimeAdmissionFences.harnessDrainKey(candidate[1]),
-                        candidate[1], candidate[2])) {
+                if (exists(current, HEAD_AUTHORITY_SQL, candidate[1], candidate[1], candidate[2])) {
                     throw uncovered();
                 }
             }

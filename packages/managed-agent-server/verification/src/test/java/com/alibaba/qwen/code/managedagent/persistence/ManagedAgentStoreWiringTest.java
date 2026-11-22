@@ -80,7 +80,7 @@ class ManagedAgentStoreWiringTest {
                     .isSameAs(context.getBean(ExtensionPackages.class));
             assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "modelConfigs"))
                     .isSameAs(context.getBean(ManagedSessionModelConfigs.class));
-            for (String name : List.of("lifecycle", "definitions", "sessionWorktrees", "journalEventTransport")) {
+            for (String name : List.of("lifecycle", "definitions", "sessionWorktrees")) {
                 assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, name)).as(name).isNull();
             }
             assertThat(AopUtils.isAopProxy(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "configRecords"))).isTrue();
@@ -125,7 +125,7 @@ class ManagedAgentStoreWiringTest {
                 Clock.systemUTC(), events -> {}, mock(JdbcManagedWorkspaceRegistry.class),
                 new ManagedAgentProperties(), mock(HarnessRules.class));
         for (String name : List.of("worktreeFiles", "creationSkills", "extensionPackages", "lifecycle",
-                "definitions", "sessionWorktrees", "journalEventTransport", "configRecords", "modelConfigs")) {
+                "definitions", "sessionWorktrees", "configRecords", "modelConfigs")) {
             for (Object owner : com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreOwners(store, name)) {
                 var field = owner.getClass().getDeclaredField(name);
                 assertThat(Modifier.isFinal(field.getModifiers())).as(name).isTrue();

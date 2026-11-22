@@ -63,7 +63,6 @@ final class AgentSessionPolicies {
     private final JdbcManagedSessionSkills creationSkills;
     private final boolean workspaceFilesEnabled;
     private final boolean workspaceShellEnabled;
-    private final ResidentWorkspaces residentWorkspaces;
 
     AgentSessionPolicies(AgentEventJournal eventJournal,
             AgentSessionQueries sessionQueries,
@@ -83,8 +82,7 @@ final class AgentSessionPolicies {
             JdbcManagedAgentDefinitionStore definitions,
             JdbcManagedSessionSkills creationSkills,
             boolean workspaceFilesEnabled,
-            boolean workspaceShellEnabled,
-            ResidentWorkspaces residentWorkspaces) {
+            boolean workspaceShellEnabled) {
         this.eventJournal = eventJournal;
         this.sessionQueries = sessionQueries;
         this.storeRows = storeRows;
@@ -104,7 +102,6 @@ final class AgentSessionPolicies {
         this.creationSkills = creationSkills;
         this.workspaceFilesEnabled = workspaceFilesEnabled;
         this.workspaceShellEnabled = workspaceShellEnabled;
-        this.residentWorkspaces = residentWorkspaces;
     }
 
     static final Pattern DEFINITION_REVISION = Pattern.compile(
@@ -122,7 +119,8 @@ final class AgentSessionPolicies {
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
      */
     record AgentPin(String revision, String digest,
-            String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
+            String approvalMode, String toolProfile, boolean hooks, boolean mcp,
+            List<Map<String, Object>> skills) {
     }
 
     boolean isSshWorkspace(ContextBinding binding) {
@@ -165,19 +163,6 @@ final class AgentSessionPolicies {
                 || !definitions.pinnedContent(session).containsKey("hook_catalog"));
     }
 
-    static AgentPin selectApprovalMode(AgentPin pin, String requested, boolean supported) {
-        if (requested == null) {
-            return pin;
-        }
-        if (!availableApprovalModes(pin).contains(requested)
-                && !(supported && pin.digest() == null && "yolo".equals(requested)
-                        && WorkspaceToolProfiles.isPublicShell(pin.toolProfile()))) {
-            throw new ManagedAgentException(400, "unsupported_approval_mode",
-                    "The selected approval mode is not available for this Agent.");
-        }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp());
-    }
-
     // Called only for a new admission; a retry has already replayed and
     // never resolves a definition again.
     AgentPin resolveAgentPin(String tenantId, String agentId,
@@ -192,7 +177,7 @@ final class AgentSessionPolicies {
                     ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
                             : WorkspaceToolProfiles.FILES)
                     : null;
-            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false);
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false, List.of());
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -207,7 +192,8 @@ final class AgentSessionPolicies {
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
                 compiled.toolProfile(), content.containsKey("hook_catalog"),
-                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty());
+                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty(),
+                AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
     boolean hasMcpServers(SessionRecord session) {
@@ -220,7 +206,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -236,7 +222,7 @@ final class AgentSessionPolicies {
         }
         if (!WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || !workspaceFilesEnabled || !workspaceShellEnabled && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
-                || isSshWorkspace(session.workspace()) || residentWorkspaces.find(session.workspace()) != null
+                || isSshWorkspace(session.workspace())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }
@@ -254,7 +240,7 @@ final class AgentSessionPolicies {
     }
 
     void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())
                 || !WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
@@ -265,7 +251,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -308,7 +294,7 @@ final class AgentSessionPolicies {
     }
 
     void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
@@ -395,15 +381,14 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
         }
         if (!jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE record_kind='DOMAIN'"
-                + " AND session_scope_key=? AND tenant_id=? AND session_id=? AND domain='child_run'"
-                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId).isEmpty()) {
+                + " AND tenant_id=? AND session_id=? AND domain='child_run'"
+                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session has an unsettled child run.");
         }
         long now = storeRows.lifecycleDatabaseTime();
-        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
-                + " AND record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
-                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)) {
+        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE"
+                + " record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
+                String.class, tenantId, sessionId)) {
             Object expiresAt = storeRows.readMap(options).get("expiresAt");
             if (expiresAt instanceof Number expiration && now < expiration.longValue()) {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
@@ -519,7 +504,7 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -592,7 +577,7 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -639,6 +624,9 @@ final class AgentSessionPolicies {
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
+                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        && (!ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
+                                || sessionQueries.findChildLineage(tenantId, sessionId) != null)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Approval selection is unavailable");
         }
@@ -698,6 +686,22 @@ final class AgentSessionPolicies {
         }
     }
 
+    void requireExternalTurnAllowed(String tenantId, String actorId, String sessionId,
+            SessionRecord session, List<Map<String, Object>> input) {
+        if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                || !ExternalWorkspaceSessionPolicies.externalFilesAllowedOrRefuse(workspaces, session.workspace())
+                || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
+                || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
+                || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
+                || hasMcpServers(session) || !creationSkills.effective(session).isEmpty()
+                || creationSkills.initialSelection(tenantId, sessionId) != null
+                || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                        Boolean.class, tenantId, sessionId))
+                || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
+            throw workspaceExecutionUnavailable();
+        }
+    }
+
     void requirePolicyChange(SessionRecord session, boolean live) {
         requirePublicChildImmutable(session);
         String tenantId = session.tenantId();
@@ -733,10 +737,9 @@ final class AgentSessionPolicies {
     boolean hasDecidableAction(SessionRecord session) {
         long now = storeRows.lifecycleDatabaseTime();
         for (String options : jdbc.queryForList(
-                        "SELECT options_json FROM ma_session_record WHERE session_scope_key = ? AND"
+                        "SELECT options_json FROM ma_session_record WHERE"
                             + " record_kind = 'ACTION' AND state = 'requested' AND tenant_id = ?"
                             + " AND session_id = ?", String.class,
-                ManagedSessionStore.sessionScopeKey(session.tenantId(), session.sessionId()),
                 session.tenantId(), session.sessionId())) {
             try {
                 if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {

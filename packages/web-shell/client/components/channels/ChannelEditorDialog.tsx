@@ -68,7 +68,7 @@ import { Switch } from '../ui/switch';
 import styles from './ChannelEditorDialog.module.css';
 import { ChannelPairingRequests } from './ChannelPairingRequests';
 import { ChannelQrLogin } from './ChannelQrLogin';
-import type { DaemonChannelQrLoginActions } from '../../daemon/workspace/types';
+import type { DaemonChannelQrLoginHandlers } from '../../daemon/workspace/types';
 import { WeixinLoginPanel, type WeixinLoginApi } from './WeixinLoginPanel';
 import {
   buildChannelUpsertRequest,
@@ -117,6 +117,9 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     secret: 'channels.editor.field.wecom.secret',
     wsUrl: 'channels.editor.field.wecom.wsUrl',
   },
+  'wecom-webhook': {
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+  },
   feishu: {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
@@ -124,6 +127,12 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   'feishu-webhook': {
     webhookUrl: 'channels.editor.field.webhook.webhookUrl',
     signingSecret: 'channels.editor.field.webhook.signingSecret',
+  },
+  'generic-webhook': {
+    webhookUrl: 'channels.editor.field.genericWebhook.webhookUrl',
+    bearerToken: 'channels.editor.field.genericWebhook.bearerToken',
+    allowPrivateNetwork:
+      'channels.editor.field.genericWebhook.allowPrivateNetwork',
   },
   dws: {
     privatePolicy: 'channels.editor.field.dws.privatePolicy',
@@ -142,8 +151,6 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     requireBoundWatch: 'channels.editor.field.github.requireBoundWatch',
     prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
-    prWatchLimit: 'channels.editor.field.github.prWatchLimit',
-    prWatchBudgetReserve: 'channels.editor.field.github.prWatchBudgetReserve',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -198,8 +205,6 @@ const BOUND_SESSION_FIELD_KEYS = new Set([
   'requireBoundWatch',
   'prCommentWatch',
   'prWatchEvents',
-  'prWatchLimit',
-  'prWatchBudgetReserve',
   'boundSessionActions',
 ]);
 
@@ -250,6 +255,7 @@ const CONNECTION_FIELD_KEYS = new Set([
  * panel, quietly undoing the slim default view.
  */
 const ADVANCED_FIELD_KEYS = new Set([
+  'allowPrivateNetwork',
   'pollInterval',
   'reasonFilter',
   'messageRoutes',
@@ -296,7 +302,7 @@ export interface ChannelEditorDialogProps {
     request: DaemonChannelUpsertRequest,
   ) => Promise<unknown>;
   onReload: () => Promise<unknown>;
-  qrLoginActions?: DaemonChannelQrLoginActions;
+  qrLoginActions?: DaemonChannelQrLoginHandlers;
   listPairingRequests: (
     name: string,
   ) => Promise<DaemonChannelPairingRequestsSnapshot>;
@@ -584,8 +590,6 @@ export function ChannelEditorDialog({
       );
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
-    if (code === 'requiresBoundDelivery')
-      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'requiresBoundDeliveryForWatchGate')
       return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');
@@ -1563,7 +1567,12 @@ export function ChannelEditorDialog({
                   instance
                     ? 'channels.editor.editTitle'
                     : 'channels.editor.addTitle',
-                  { platform: descriptor.displayName },
+                  {
+                    platform:
+                      descriptor.type === 'generic-webhook'
+                        ? t('channels.platform.name.generic-webhook')
+                        : descriptor.displayName,
+                  },
                 )}
               </DialogTitle>
               <DialogDescription className="mt-1">
@@ -2103,7 +2112,11 @@ export function ChannelEditorDialog({
                 </h3>
                 <CollapsibleContent className={styles.advancedContent}>
                   <p className={styles.settingsPanelDescription}>
-                    {t('channels.editor.section.advanced.description')}
+                    {t(
+                      descriptor.type === 'generic-webhook'
+                        ? 'channels.editor.field.genericWebhook.networkDescription'
+                        : 'channels.editor.section.advanced.description',
+                    )}
                   </p>
                   {advancedFields.filter(isFieldVisible).map(renderField)}
                 </CollapsibleContent>

@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.adapter;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
-import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -146,7 +145,7 @@ class HttpRuntimeToolV4TransportTest {
         value.put(
                 "resultDigest",
                 DigestUtils.sha256Hex(
-                        CsiNativeActivationProof.canonical(JSON.valueToTree(signed))));
+                        RuntimeToolMeasurements.canonical(JSON.valueToTree(signed))));
         return value;
     }
 

@@ -29,7 +29,7 @@ class RuntimeProviderRegistryTest {
     }
 
     @Test
-    void rejectsMissingDuplicateAndReservedKindsWithoutCreatingProviders() {
+    void rejectsMissingAndDuplicateKindsWithoutCreatingProviders() {
         assertThatThrownBy(() -> new RuntimeProviderRegistry(List.of()).require("missing"))
                 .hasMessageContaining("not installed: missing");
         var first = mock(RuntimeProviderFactory.class);
@@ -37,11 +37,8 @@ class RuntimeProviderRegistryTest {
         when(first.kinds()).thenReturn(Set.of("same"));
         when(second.kinds()).thenReturn(Set.of("same"));
         assertThatThrownBy(() -> new RuntimeProviderRegistry(List.of(first, second)))
-                .hasMessageContaining("Duplicate or reserved Runtime provider kind: same");
-        when(first.kinds()).thenReturn(Set.of("kubernetes"));
-        assertThatThrownBy(() -> new RuntimeProviderRegistry(List.of(first)))
-                .hasMessageContaining("reserved Runtime provider kind: kubernetes");
-        org.mockito.Mockito.verify(first, org.mockito.Mockito.times(2)).kinds();
+                .hasMessageContaining("Duplicate Runtime provider kind: same");
+        org.mockito.Mockito.verify(first).kinds();
         org.mockito.Mockito.verify(second).kinds();
         verifyNoMoreInteractions(first, second);
     }

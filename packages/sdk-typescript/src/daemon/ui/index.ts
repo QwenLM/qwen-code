@@ -88,6 +88,7 @@ export type {
   DaemonInputAnnotation,
   DaemonInputReference,
   DaemonInputReferenceAnnotation,
+  DaemonInputSourceAnnotation,
   DaemonResourceLink,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
@@ -130,6 +131,7 @@ export type {
   // Session-meta events
   DaemonUiSessionMetadataChangedEvent,
   DaemonUiSessionSourceChangedEvent,
+  DaemonUiSessionSubSessionTaskChangedEvent,
   DaemonUiSessionApprovalModeChangedEvent,
   DaemonUiSessionAvailableCommandsEvent,
   DaemonUiStateResyncRequiredEvent,

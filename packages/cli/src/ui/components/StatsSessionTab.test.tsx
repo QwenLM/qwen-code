@@ -49,10 +49,12 @@ function renderSessionTab(metrics: SessionMetrics) {
       metrics,
       lastPromptTokenCount: 0,
       promptCount: 1,
+      userPromptCount: 1,
     },
     startNewSession: vi.fn(),
     getPromptCount: () => 1,
     startNewPrompt: vi.fn(),
+    recordUserPrompt: vi.fn(),
     seedPromptCount: vi.fn(),
   });
 

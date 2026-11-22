@@ -4,9 +4,10 @@ import java.util.List;
 import java.util.Optional;
 
 public interface WakeRecoveryStore {
+    /** {@code stamped}: a clean suspension certified a due deliverable input at this revision. */
     public record Candidate(String tenantId, String workspaceId, String sessionId,
             long journalRevision, long committedSequence, long compactedThroughRevision,
-            String parentSessionId, String parentChildRunId) {
+            String parentSessionId, String parentChildRunId, boolean stamped) {
     }
 
     public List<Candidate> findPending(String defaultWorkspace, int limit);

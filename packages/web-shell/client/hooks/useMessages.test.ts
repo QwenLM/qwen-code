@@ -4,7 +4,9 @@ import { act, createElement, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  createDaemonTranscriptStore,
   DaemonHttpError,
+  normalizeDaemonEvent,
   type DaemonStatusTranscriptBlock,
   type DaemonTranscriptBlock,
   type DaemonTranscriptBlockChangeSummary,
@@ -419,6 +421,70 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('does not append a top-level reply to a streaming orphaned subagent row', () => {
+    const t = (key: string) => key;
+    const store = createDaemonTranscriptStore();
+    store.dispatch({
+      type: 'assistant.text.delta',
+      text: 'Subagent output',
+      parentToolCallId: 'missing-call',
+    });
+    store.dispatch({ type: 'assistant.text.delta', text: ' ' });
+    const { blocks } = store.getSnapshot();
+    const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+    expect(messages).toMatchObject([{ content: 'Subagent output' }]);
+
+    store.dispatch({ type: 'assistant.text.delta', text: 'Model reply' });
+    const nextBlocks = store.getSnapshot().blocks;
+    expect(
+      projectStreamingTailMessages({ blocks, messages, t }, nextBlocks, t),
+    ).toBeUndefined();
+    expect(transcriptBlocksToLocalizedMessages(nextBlocks, t)).toMatchObject([
+      { content: 'Subagent output', parentToolCallId: 'missing-call' },
+      { content: ' Model reply' },
+    ]);
+  });
+
+  it.each(['assistant', 'thought'] as const)(
+    'updates streaming %s before trailing Mod logs and preserves row identities',
+    (kind) => {
+      const t = (key: string) => key;
+      const store = createDaemonTranscriptStore();
+      const type = `${kind}.text.delta` as const;
+      store.appendLocalUserMessage('prompt');
+      store.dispatch({ type, text: 'one' });
+      for (const text of ['started', 'finished']) {
+        store.dispatch(
+          normalizeDaemonEvent({
+            v: 1,
+            type: 'mod_log',
+            data: { sessionId: 'session', plugin: 'translator', text },
+          }),
+        );
+      }
+      const { blocks } = store.getSnapshot();
+      const messages = transcriptBlocksToLocalizedMessages(blocks, t);
+      const blockChangeSummary = store.getBlockChangeSummary?.();
+
+      store.dispatch({ type, text: ' two' });
+      const nextBlocks = store.getSnapshot().blocks;
+      const projected = projectStreamingTailMessages(
+        { blocks, messages, t, blockChangeSummary },
+        nextBlocks,
+        t,
+        store.getBlockChangeSummary?.(),
+      );
+
+      expect(projected).toEqual(
+        transcriptBlocksToLocalizedMessages(nextBlocks, t),
+      );
+      expect(projected?.[1]).toMatchObject({ content: 'one two' });
+      for (const index of [0, 2, 3]) {
+        expect(projected?.[index]).toBe(messages[index]);
+      }
+    },
+  );
 
   it('projects an insight marker that spans the appended-text boundary', async () => {
     const container = document.createElement('div');

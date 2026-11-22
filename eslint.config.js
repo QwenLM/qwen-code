@@ -81,6 +81,7 @@ export default tseslint.config(
       'packages/core/src/skills/bundled/browser-use/runtime/**',
       'packages/desktop/src-tauri/target/**',
       'packages/managed-agent-server/**/target/**',
+      'packages/sdk-java/**/target/**',
       'packages/live-host/**', // standalone Electron app with its own Node test conventions
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
       'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
@@ -510,6 +511,8 @@ export default tseslint.config(
       'packages/*/scripts/**/*.mjs',
       'packages/*/build.mjs',
       'packages/managed-agent-server/verification/src/test/resources/**/*.mjs',
+      // The same CSI fixtures cold-archived under sdk-java keep the node globals.
+      'packages/sdk-java/managed-kubernetes-archive/verification/src/test/resources/**/*.mjs',
       // web-templates' export-html template build scripts also run with `node`.
       'packages/*/src/export-html/*.mjs',
       // Verification reproducer scripts under docs/ also run with `node`.

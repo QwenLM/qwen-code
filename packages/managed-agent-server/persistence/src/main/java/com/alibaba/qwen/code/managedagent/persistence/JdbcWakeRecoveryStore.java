@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -27,10 +26,10 @@ import java.util.Set;
 public class JdbcWakeRecoveryStore
         implements WakeRecoveryStore {
     private static final Set<String> SOURCES = Set.of("monitor", "channel", "child_agent",
-            "workflow", "automation", "session_message", "loop");
+            "workflow", "automation", "session_message", "loop", "pr_event");
     private static final int JOURNAL_PAGE = 1;
     private static final int PROOF_PAGES = 32;
-    private static final long RETRY_MS = 30_000;
+    static final long RETRY_MS = 30_000;
     private static final String UNOWNED = " (h.state = 'SEALED' OR (h.state = 'ACTIVE'"
             + " AND (h.writer_lease_until IS NULL OR h.writer_lease_until <= " + ManagedSchemaTime.SQL_NOW + ")))";
     private final JdbcTemplate jdbc;
@@ -72,8 +71,11 @@ public class JdbcWakeRecoveryStore
          * progress itself is cacheable — refusing the answer, not the pages
          * read, is what keeps a wake input past the page window reachable. */
         private boolean deferred;
-        /** The earliest deferred notBefore. At or past it the cached proof is
-         * discarded so the input is re-read as due (counted), not skipped. */
+        /** The earliest deferred notBefore. At or past it a cached proof that
+         * certifies nothing is discarded so the input is re-read as due
+         * (counted), not skipped. A proof that is also complete answers true
+         * from the complete shortcut before this expiry is consulted; it is
+         * invalidated by the journal revision advancing, not by the fire time. */
         private long deferredUntil = Long.MAX_VALUE;
     }
 
@@ -88,19 +90,21 @@ public class JdbcWakeRecoveryStore
     private List<Candidate> findPending(String defaultWorkspace, int limit, boolean hinted) {
         return jdbc.query("SELECT h.tenant_id, h.workspace_id, h.session_id, h.journal_revision,"
                         + " h.committed_sequence, h.compacted_through_revision, s.parent_session_id,"
-                        + " s.parent_child_run_id FROM ma_session_head h JOIN ma_session s ON"
+                        + " s.parent_child_run_id, h.wake_seal_revision FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id WHERE"
                         + " h.head_kind = 'MANAGED_SESSION' AND h.is_wake_scan_pending = TRUE"
                         + " AND h.compacted_through_revision = 0"
                         + " AND h.is_wake_pending = ? AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " AND s.retired_at IS NULL AND s.is_csi_guard = FALSE"
+                        + " AND s.retired_at IS NULL"
                         + " AND h.workspace_id = COALESCE(s.workspace_id, ?)"
-                        + " ORDER BY h.wake_retry_at, h.tenant_key, h.harness_key LIMIT ?",
+                        + " ORDER BY h.wake_retry_at, h.tenant_id, h.harness_session_id LIMIT ?",
                 (row, index) -> new Candidate(row.getString("tenant_id"), row.getString("workspace_id"),
                         row.getString("session_id"), row.getLong("journal_revision"),
                         row.getLong("committed_sequence"), row.getLong("compacted_through_revision"),
-                        row.getString("parent_session_id"), row.getString("parent_child_run_id")),
+                        row.getString("parent_session_id"), row.getString("parent_child_run_id"),
+                        Long.valueOf(row.getLong("journal_revision"))
+                                .equals(row.getObject("wake_seal_revision", Long.class))),
                 hinted, defaultWorkspace, limit);
     }
 
@@ -111,20 +115,19 @@ public class JdbcWakeRecoveryStore
             // subquery would first lock the head, then wait for a shared Session lock.
             var session = jdbc.queryForList("SELECT session_id FROM ma_session WHERE tenant_id = ?"
                             + " AND session_id = ? AND session_kind = 'PUBLIC' AND status = 'ACTIVE'"
-                            + " AND retired_at IS NULL AND is_csi_guard = FALSE"
+                            + " AND retired_at IS NULL"
                             + " AND (workspace_id IS NULL OR workspace_id = ?) FOR UPDATE",
                     String.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId());
             if (session.isEmpty() || ManagedConfigStore.blocked(jdbc, candidate.tenantId(), candidate.sessionId())) {
                 return false;
             }
             return jdbc.update("UPDATE ma_session_head h SET wake_retry_at = " + ManagedSchemaTime.SQL_NOW + " + " + RETRY_MS + " WHERE"
-                        + " h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
-                        + " AND h.session_id = ? AND h.workspace_id = ?"
+                        + " h.tenant_id = ? AND"
+                        + " h.harness_session_id = ? AND h.workspace_id = ?"
                         + " AND h.head_kind = 'MANAGED_SESSION' AND h.journal_revision = ?"
                         + " AND h.compacted_through_revision = 0"
                         + " AND h.is_wake_scan_pending = TRUE AND h.wake_retry_at <= " + ManagedSchemaTime.SQL_NOW + " AND" + UNOWNED,
-                ManagedSchemaKeys.key(candidate.tenantId()),
-                ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
         }));
     }
@@ -264,10 +267,9 @@ public class JdbcWakeRecoveryStore
             }
         }
         // A complete proof attaches even beside a deferred wakeup: its pending
-        // input needs recovery now, regardless of the wakeup's fire time.
-        if (proof.deferred && proof.complete) {
-            return Optional.of(true);
-        }
+        // input needs recovery now, regardless of the wakeup's fire time. It
+        // falls through to the put below so the proven prefix is memoized —
+        // returning here would re-prove from revision zero on every scan.
         // The complete Candidate fences every continuation to the same immutable
         // prefix. Losing it restarts proof at zero; it never clears a durable hint.
         if (pendingProofs.size() == 128) {
@@ -294,26 +296,24 @@ public class JdbcWakeRecoveryStore
     private boolean canResume(Candidate candidate) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head h JOIN ma_session s ON"
                         + " s.tenant_id = h.tenant_id AND s.session_id = h.session_id"
-                        + " WHERE h.tenant_key = ? AND h.harness_key = ? AND h.tenant_id = ?"
-                        + " AND h.session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
+                        + " WHERE h.tenant_id = ? AND"
+                        + " h.harness_session_id = ? AND h.workspace_id = ? AND h.head_kind = 'MANAGED_SESSION'"
                         + " AND h.journal_revision = ? AND h.committed_sequence = ?"
                         + " AND h.compacted_through_revision = 0 AND h.is_wake_scan_pending = TRUE AND" + UNOWNED
                         + " AND s.session_kind = 'PUBLIC' AND s.status = 'ACTIVE'"
-                        + " AND s.retired_at IS NULL AND s.is_csi_guard = FALSE"
+                        + " AND s.retired_at IS NULL"
                         + " AND (s.workspace_id IS NULL OR s.workspace_id = ?)",
-                Long.class, ManagedSchemaKeys.key(candidate.tenantId()), ManagedSchemaKeys.key(candidate.sessionId()),
-                candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
+                Long.class, candidate.tenantId(), candidate.sessionId(), candidate.workspaceId(), candidate.journalRevision(),
                 candidate.committedSequence(), candidate.workspaceId()) == 1;
     }
 
     /** Only a full prefix at this exact revision may clear the hint. */
     public boolean recordPending(Candidate candidate, boolean pending) {
         return jdbc.update("UPDATE ma_session_head SET is_wake_pending = ?, wake_head_revision = ?"
-                        + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                        + " AND session_id = ? AND workspace_id = ? AND journal_revision = ?"
+                        + " WHERE tenant_id = ? AND"
+                        + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
                         + " AND compacted_through_revision = 0",
-                pending, candidate.journalRevision(), ManagedSchemaKeys.key(candidate.tenantId()),
-                ManagedSchemaKeys.key(candidate.sessionId()), candidate.tenantId(), candidate.sessionId(),
+                pending, candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
     }
 
@@ -326,9 +326,11 @@ public class JdbcWakeRecoveryStore
      * A loop wakeup whose fire time is still in the future is deferred, not
      * parked: it must not make wake recovery attach the Harness. A due or
      * immediate loop input (no notBefore, or one already past) still counts.
-     * A deferred proof keeps its progress cached but never answers false; the
-     * cache expires at the earliest deferred fire time so the input is
-     * re-read as due, and a settlement drops it from the deferred latch.
+     * A deferred proof keeps its progress cached but never answers false; a
+     * proof that certifies nothing expires at the earliest deferred fire time
+     * so the input is re-read as due, while one that is also complete answers
+     * true from the complete shortcut and stays memoized until the journal
+     * advances. A settlement drops it from the deferred latch.
      */
     private boolean isDeferredLoopInput(JsonNode event) {
         JsonNode payload = event.path("payload");
