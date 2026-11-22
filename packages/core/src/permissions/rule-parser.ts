@@ -753,11 +753,16 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // slashes: persisting the bare `D:\proj/**` form left every "Always
         // Allow" rule unmatchable and re-prompted for the same directory
         // forever (#17802).
-        // A UNC root (`\\server\share` or `//server/share`) keeps both of
-        // its own separators: `///server/share/**` resolves back to
-        // `//server/share/**`.
-        const posixDir = toPosixPath(dirPath);
-        const specifier = /^\/\/[^/]/.test(posixDir)
+        // A UNC root (`\\server\share`, or `//server/share` on Windows)
+        // keeps both of its own separators: `///server/share/**` resolves
+        // back to `//server/share/**`. On POSIX `//tmp` is just `/tmp`.
+        // A trailing separator (`dirname` keeps it on a share root) is
+        // dropped so the rule doesn't end in `//**`.
+        const posixDir = toPosixPath(dirPath).replace(/(.)\/+$/, '$1');
+        const isUncRoot =
+          /^\\\\[^\\]/.test(dirPath) ||
+          (process.platform === 'win32' && /^\/\/[^/]/.test(posixDir));
+        const specifier = isUncRoot
           ? `/${posixDir}/**`
           : posixDir.startsWith('/') || isWindowsAbsolutePath(dirPath)
             ? `//${posixDir.replace(/^\/+/, '')}/**`
@@ -1478,6 +1483,9 @@ function stripLeadingVariableAssignments(command: string): string {
  *
  * On Windows an absolute path keeps its drive letter: `D:/dir/**`,
  * `D:\dir/**` and `//D:/dir/**` all resolve to `D:/dir/**`.
+ * A UNC root keeps both of its own separators after the prefix:
+ * `///server/share/**` resolves to `//server/share/**`, while
+ * `//server/share/**` still means `/server/share/**`.
  */
 export function resolvePathPattern(
   specifier: string,

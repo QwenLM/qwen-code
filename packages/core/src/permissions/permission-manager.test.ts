@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -3048,32 +3048,69 @@ describe('buildPermissionRules', () => {
     // A UNC root already starts with two separators; stripping them and
     // re-adding only the `//` grammar prefix persisted `//server/share/...`,
     // which resolves to `/server/share/...` and never matches again.
-    it.each([
-      ['a network share', '\\\\server\\share'],
-      ['a WSL folder', '\\\\wsl.localhost\\Ubuntu'],
-      ['a forward-slash share', '//server/share'],
-      ['a forward-slash WSL folder', '//wsl.localhost/Ubuntu'],
-    ])(
-      'Read rule for a UNC directory on %s matches files in it',
-      async (_label, root) => {
-        const rules = build({
-          toolName: 'glob',
-          filePath: `${root}\\proj`,
-        });
+    describe('UNC directories', () => {
+      const realPlatform = process.platform;
+      const setPlatform = (platform: NodeJS.Platform) =>
+        Object.defineProperty(process, 'platform', { value: platform });
+      afterEach(() => setPlatform(realPlatform));
+
+      const readsUnder = (dir: string) => {
+        const rules = build({ toolName: 'glob', filePath: dir });
         const parsed = parseRule(rules[0]!);
-        const reads = (filePath: string) =>
+        return (filePath: string) =>
           matchesPath(parsed, 'read_file', filePath, {
             projectRoot: 'C:\\work',
             cwd: 'C:\\work',
           });
-        expect(reads(`${root}\\proj\\a.txt`)).toBe(true);
-        expect(reads(`${root}\\proj\\nested\\b.txt`)).toBe(true);
-        expect(reads(`${root}\\other\\a.txt`)).toBe(false);
-        expect(reads(`${root.replaceAll('\\', '/').slice(1)}/proj/a.txt`)).toBe(
-          false,
-        );
-      },
-    );
+      };
+
+      it.each([
+        ['a network share', '\\\\server\\share', 'linux'],
+        ['a WSL folder', '\\\\wsl.localhost\\Ubuntu', 'linux'],
+        ['a network share', '\\\\server\\share', 'win32'],
+        ['a forward-slash share', '//server/share', 'win32'],
+        ['a forward-slash WSL folder', '//wsl.localhost/Ubuntu', 'win32'],
+      ] as const)(
+        'Read rule for %s (%s) matches files in it',
+        async (_label, root, platform) => {
+          setPlatform(platform);
+          const reads = readsUnder(`${root}\\proj`);
+          expect(reads(`${root}\\proj\\a.txt`)).toBe(true);
+          expect(reads(`${root}\\proj\\nested\\b.txt`)).toBe(true);
+          expect(reads(`${root}\\other\\a.txt`)).toBe(false);
+          expect(
+            reads(`${root.replaceAll('\\', '/').slice(1)}/proj/a.txt`),
+          ).toBe(false);
+        },
+      );
+
+      it.each([
+        ['\\\\server\\share\\', 'linux'],
+        ['//server/share/', 'win32'],
+      ] as const)(
+        'Read rule for a share root with a trailing separator (%s on %s) matches files in it',
+        async (root, platform) => {
+          setPlatform(platform);
+          const reads = readsUnder(root);
+          expect(reads('//server/share/README.md')).toBe(true);
+          expect(reads('//server/share/proj/a.txt')).toBe(true);
+          expect(reads('//server/other/a.txt')).toBe(false);
+        },
+      );
+
+      it('treats a doubled leading slash as a plain absolute path on POSIX', async () => {
+        setPlatform('linux');
+        const rules = build({ toolName: 'glob', filePath: '//tmp/data' });
+        expect(rules).toEqual(['Read(//tmp/data/**)']);
+        const parsed = parseRule(rules[0]!);
+        expect(
+          matchesPath(parsed, 'read_file', '/tmp/data/a.txt', {
+            projectRoot: '/work',
+            cwd: '/work',
+          }),
+        ).toBe(true);
+      });
+    });
 
     it('Read rule also matches other read-family tools on the same path', async () => {
       const rules = build({
