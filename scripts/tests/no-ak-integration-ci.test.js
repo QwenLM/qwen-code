@@ -725,6 +725,7 @@ describe('no-AK integration CI wiring', () => {
       'BAILIAN_TOKEN_PLAN_API_KEY',
       'DASHSCOPE_API_KEY',
       'DEEPSEEK_API_KEY',
+      'DEEPINFRA_API_KEY',
       'GEMINI_API_KEY',
       'GEMINI_MODEL',
       'GOOGLE_API_KEY',
