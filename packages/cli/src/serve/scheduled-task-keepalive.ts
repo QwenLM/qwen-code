@@ -41,6 +41,7 @@ import {
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import { SystemOverloadedError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
@@ -400,23 +401,37 @@ export function startScheduledTaskKeepalive(
           log.debug('keepalive: revived non-resident session', sessionId);
           reviveState.delete(sessionId);
         } catch (loadErr) {
-          // Back off exponentially so a permanently-gone transcript isn't
-          // retried every interval for the daemon's lifetime.
-          const failures = (state?.failures ?? 0) + 1;
-          const backoff = Math.min(
-            intervalMs * 2 ** Math.min(failures - 1, 6),
-            MAX_REVIVE_BACKOFF_MS,
-          );
-          reviveState.set(sessionId, {
-            failures,
-            nextAttemptAt: Date.now() + backoff,
-          });
-          log.debug(
-            'keepalive: failed to revive session',
-            sessionId,
-            `(failure ${failures}, next retry in ${backoff}ms)`,
-            loadErr,
-          );
+          if (loadErr instanceof SystemOverloadedError) {
+            // Load backpressure drains on its own; exponential backoff would
+            // park bound cron tasks for up to 30 min after the host recovers.
+            // Keep the failure count and retry at the next interval.
+            reviveState.set(sessionId, {
+              failures: state?.failures ?? 0,
+              nextAttemptAt: Date.now() + intervalMs,
+            });
+            log.debug(
+              'keepalive: revive refused by load admission, retry next interval',
+              sessionId,
+            );
+          } else {
+            // Back off exponentially so a permanently-gone transcript isn't
+            // retried every interval for the daemon's lifetime.
+            const failures = (state?.failures ?? 0) + 1;
+            const backoff = Math.min(
+              intervalMs * 2 ** Math.min(failures - 1, 6),
+              MAX_REVIVE_BACKOFF_MS,
+            );
+            reviveState.set(sessionId, {
+              failures,
+              nextAttemptAt: Date.now() + backoff,
+            });
+            log.debug(
+              'keepalive: failed to revive session',
+              sessionId,
+              `(failure ${failures}, next retry in ${backoff}ms)`,
+              loadErr,
+            );
+          }
         }
       }
     }

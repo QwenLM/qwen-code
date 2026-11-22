@@ -172,6 +172,30 @@ describe('createLoadAdmissionMonitor', () => {
     expect(monitor.snapshot()).toEqual(frozen);
   });
 
+  it('cross-resets both streaks so a re-engage or re-release needs full sustain', () => {
+    const monitor = makeMonitor();
+    // Engage, then release: leaves stale enter/exit streaks behind unless
+    // each flip clears the opposite counter.
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 5 };
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES);
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    // One high reading must not re-engage immediately (stale enter streak).
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    tick(1);
+    expect(monitor.snapshot().overloaded).toBe(false);
+    tick(LOAD_ADMISSION_SUSTAIN_SAMPLES - 1);
+    expect(monitor.snapshot().overloaded).toBe(true);
+
+    // One low reading must not release immediately (stale exit streak).
+    signals = { loadRatio: LOAD_RATIO_EXIT - 0.1, eventLoopLagP99Ms: 5 };
+    tick(1);
+    expect(monitor.snapshot().overloaded).toBe(true);
+    monitor.dispose();
+  });
+
   it('honors a custom sample cadence', () => {
     const monitor = createLoadAdmissionMonitor({
       readSignals: () => signals,

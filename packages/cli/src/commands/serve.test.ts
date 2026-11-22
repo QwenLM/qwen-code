@@ -668,6 +668,24 @@ describe('serve rate limit env parsing', () => {
     },
   );
 
+  it.each([
+    ['', true],
+    ['--no-load-admission', false],
+    ['--load-admission', true],
+  ] as const)(
+    'forwards the load-admission flag %s to the daemon',
+    async (args, expected) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
+      await startServeHandlerWithArgs(`--no-web ${args}`);
+      expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+        loadAdmission: expected,
+      });
+    },
+  );
+
   it('applies authenticated open before the yargs path starts the daemon', async () => {
     let tokenAtBoot: string | undefined;
     mockRunQwenServe.mockImplementationOnce(

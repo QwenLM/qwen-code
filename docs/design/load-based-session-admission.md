@@ -22,7 +22,7 @@ Today every admission gate is count-based:
   `packages/acp-bridge/src/session-control-plane.ts`).
 - Daemon-wide `maxTotalSessions`, derived from workspace count
   (`packages/cli/src/serve/run-qwen-serve.ts`,
-  `deriveDefaultMaxTotalSessions`); unset for a single workspace.
+  `deriveDefaultMaxTotalSessions`): fixed at 800 once the registration capacity exceeds 25 (the default 256 included), even with a single workspace; at capacities of 25 or less it derives from the per-workspace cap and the workspace count, and a single such workspace is unlimited.
 - Per-session pending-prompt cap (`maxPendingPromptsPerSession`, default 5).
 
 Counts say nothing about what the machine can actually run: 32 sessions per
@@ -66,7 +66,7 @@ interface LoadAdmissionSnapshot {
   enabled: boolean;
   overloaded: boolean;
   reason: 'cpu_load' | 'event_loop_lag' | null;
-  loadRatio: number; // os.loadavg()[0] / os.availableParallelism()
+  loadRatio: number; // os.loadavg()[0] / os.cpus().length (host scope both sides)
   eventLoopLagP99Ms: number; // window-scoped p99, histogram reset each tick
   sampledAtMs: number;
 }
@@ -76,7 +76,7 @@ Two signals, each with enter/exit thresholds (hysteresis):
 
 | Signal         | Source                                                                 | Enter         | Exit         |
 | -------------- | ---------------------------------------------------------------------- | ------------- | ------------ |
-| CPU load       | `os.loadavg()[0] / os.availableParallelism()`                          | ratio ≥ 2.0   | ratio < 1.0  |
+| CPU load       | `os.loadavg()[0] / os.cpus().length`                                   | ratio ≥ 2.0   | ratio < 1.0  |
 | Event-loop lag | `monitorEventLoopDelay({ resolution: 20 })`, percentile(99) per window | p99 ≥ 1000 ms | p99 < 250 ms |
 
 A signal flips state only after the flip condition holds for 3 consecutive
@@ -140,6 +140,12 @@ lookups.
   measured fields.
 - SDK: no new error class in this change; the condition surfaces as
   `DaemonHttpError` with status and body, like the other 503 capacity shapes.
+  The standalone creation path (`POST /standalone/sessions`) rethrows the
+  refusal from its pre-dispatch rollback catch, so it answers the same 503
+  contract instead of a 500 `standalone_creation_rolled_back`.
+- The monitor is only created when admission is actually wired: an injected
+  bridge never receives `freshSessionAdmission`, so that path reports the
+  disabled snapshot rather than `enabled: true` for a gate that never runs.
 
 `Retry-After` is 15 seconds rather than the count gates' 5: host load drains
 more slowly than a session slot frees.
@@ -173,6 +179,13 @@ as today.
   including pressure from processes outside the daemon. Event-loop lag
   captures daemon starvation directly, and still works on Windows where
   `os.loadavg()` is always zero.
+- **Host scope on both sides of the ratio.** `/proc/loadavg` is not
+  namespaced, while `os.availableParallelism()` honours cgroup quota and
+  affinity masks; dividing one by the other latched a CPU-limited daemon
+  into permanent refusals while idle. The denominator is therefore
+  `os.cpus().length`, and container-level starvation is the lag signal's
+  job. `availableParallelism()` keeps its container scope where it
+  normalizes this process's own CPU (memory-pressure monitor).
 - **Hysteresis plus 3-sample debounce.** A single heavy JSON parse or a brief
   spawn burst must not block creation, and the gate must not flap. Six
   seconds to engage is acceptable because the overload this guards against
@@ -181,7 +194,11 @@ as today.
 - **Gate `load`/`resume` as well as `spawn`.** They spawn children too.
   Runaway work lives in already-live sessions, which need no admission and
   stay cancellable; a cold session has no running work, so refusing its
-  restore does not impair controllability.
+  restore does not impair controllability. The scheduled-task keepalive is
+  the exception that proves the rule: its revive is a `resume`, so a load
+  refusal there is classified as transient — the failure count and the
+  exponential backoff stay untouched and the next interval retries, instead
+  of parking a bound cron task for up to 30 minutes after load drains.
 - **Conservative defaults, enabled by default.** A load ratio of 2.0 means
   the run queue is twice the core count; a 1-second p99 lag means the daemon
   is visibly unresponsive. Healthy hosts never engage the gate, so the

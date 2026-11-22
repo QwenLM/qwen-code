@@ -20,7 +20,7 @@
   `packages/acp-bridge/src/session-control-plane.ts`）。
 - daemon 全局 `maxTotalSessions`，按 workspace 数量推导
   （`packages/cli/src/serve/run-qwen-serve.ts`，
-  `deriveDefaultMaxTotalSessions`）；单 workspace 时不设上限。
+  `deriveDefaultMaxTotalSessions`）；注册容量超过 25（含默认 256）时固定为 800，即使只有一个 workspace；容量 ≤ 25 时按每 workspace 上限与 workspace 数推导，单个这样的 workspace 不设上限。
 - 每会话待处理 prompt 上限（`maxPendingPromptsPerSession`，默认 5）。
 
 计数无法反映机器实际能运行多少：每 workspace 32 个会话可以远超主机容量。
@@ -60,7 +60,7 @@ interface LoadAdmissionSnapshot {
   enabled: boolean;
   overloaded: boolean;
   reason: 'cpu_load' | 'event_loop_lag' | null;
-  loadRatio: number; // os.loadavg()[0] / os.availableParallelism()
+  loadRatio: number; // os.loadavg()[0] / os.cpus().length（分子分母同为主机作用域）
   eventLoopLagP99Ms: number; // 窗口内 p99，直方图每 tick 重置
   sampledAtMs: number;
 }
@@ -70,7 +70,7 @@ interface LoadAdmissionSnapshot {
 
 | 信号         | 来源                                                               | 进入          | 退出         |
 | ------------ | ------------------------------------------------------------------ | ------------- | ------------ |
-| CPU 负荷     | `os.loadavg()[0] / os.availableParallelism()`                      | ratio ≥ 2.0   | ratio < 1.0  |
+| CPU 负荷     | `os.loadavg()[0] / os.cpus().length`                               | ratio ≥ 2.0   | ratio < 1.0  |
 | 事件循环延迟 | `monitorEventLoopDelay({ resolution: 20 })`，每窗口 percentile(99) | p99 ≥ 1000 ms | p99 < 250 ms |
 
 信号只有在翻转条件连续 3 次采样（6 秒）成立后才翻转状态。每个信号各自维护
@@ -123,7 +123,12 @@ runtime 重建时 dispose，跟随 metrics sampler 的生命周期。
 'system_overloaded'`、`httpStatus: 503`、`retryable: true`，附同样的实测
   字段。
 - SDK：本次不新增错误类；该状态以 `DaemonHttpError` 的 status 与 body 呈现，
-  与其他 503 容量形态一致。
+  与其他 503 容量形态一致。独立会话创建路径（`POST /standalone/sessions`）
+  在其 pre-dispatch 回滚 catch 中重抛该拒绝，因此回答同一 503 契约，而不是
+  500 `standalone_creation_rolled_back`。
+- 监视器只在准入真正接线时创建：注入 bridge 从不接收
+  `freshSessionAdmission`，该路径报告 disabled 快照，而不是为永不运行的闸门
+  报告 `enabled: true`。
 
 `Retry-After` 取 15 秒而非计数闸门的 5 秒：主机负荷的消退比会话名额的释放
 更慢。
@@ -151,12 +156,20 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 - **两个信号。** 主机 load average 捕捉整机饱和，包括 daemon 之外进程的
   压力。事件循环延迟直接捕捉 daemon 被饿死，且在 `os.loadavg()` 恒为零的
   Windows 上仍然有效。
+- **比值分子分母同为主机作用域。** `/proc/loadavg` 不做命名空间隔离，而
+  `os.availableParallelism()` 遵守 cgroup 配额与亲和性掩码；两者相除曾让
+  受限 CPU 的 daemon 在空闲时永久闩锁拒绝。分母因此取 `os.cpus().length`，
+  容器级饥饿交给延迟信号。`availableParallelism()` 在归一化本进程自身 CPU
+  的用途上（内存压力监视器）保留其容器作用域。
 - **滞回加 3 次采样去抖。** 一次重 JSON 解析或短暂 spawn 突发不应挡住新建，
   闸门也不能抖动。6 秒才进入是可接受的，因为本闸门防范的过载以数十秒计
   发展；退出侧同样去抖，避免负荷瞬间回落就放行一波新建。
 - **`load`/`resume` 与 `spawn` 一样设闸。** 它们同样 spawn 子进程。失控的
   工作存在于已存活的会话中——那些会话无需准入、始终可 cancel；冷会话没有
-  在跑的工作，拒绝其恢复不损害可控性。
+  在跑的工作，拒绝其恢复不损害可控性。计划任务 keepalive 是例外：它的 revive
+  走 `resume`，因此那里的负荷拒绝被归类为瞬态——失败计数与指数退避保持
+  不变、下一间隔继续重试，而不是在负荷消退后把绑定 cron 任务停放至多 30
+  分钟。
 - **保守默认值，默认启用。** load ratio 2.0 意味着运行队列是核数的两倍；
   p99 延迟 1 秒意味着 daemon 已明显无响应。健康主机永远不会触闸，因此
   默认启用的行为变更是安全的；运维可退出。

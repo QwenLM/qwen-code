@@ -15,6 +15,7 @@ import {
   updateCronTasks,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
+import { SystemOverloadedError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
@@ -513,6 +514,61 @@ describe('scheduled-task keepalive', () => {
       expect(resumeSession).not.toHaveBeenCalled();
     } finally {
       ka.stop();
+    }
+  });
+
+  it('retries at the next interval after load-admission refusals instead of backing off', async () => {
+    vi.useFakeTimers();
+    try {
+      await updateCronTasks(workspace, () => [
+        task({ id: 'a', sessionId: 'sess-1', sessionOwnedByTask: false }),
+      ]);
+      // Record attempt timestamps: the internal interval and the tasks-file
+      // watcher can add extra ticks, but every attempt still respects the
+      // backoff gate, so the GAP between the second refusal and the next
+      // attempt is what discriminates one interval from doubled backoff.
+      const attemptTimes: number[] = [];
+      let refusalsLeft = 2;
+      const restoreSession = vi.fn(async () => {
+        attemptTimes.push(Date.now());
+        if (refusalsLeft > 0) {
+          refusalsLeft -= 1;
+          throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        }
+        return undefined;
+      });
+      const ka = startScheduledTaskKeepalive({
+        bridge: {
+          ...bridge,
+          recordHeartbeat: () => {
+            throw new Error('not resident');
+          },
+        },
+        restoreSession,
+        boundWorkspace: workspace,
+        intervalMs: 10_000,
+      });
+      // Silence the internal interval and the tasks-file watcher so manual
+      // ticks are the only passes; stop() leaves tick() callable.
+      ka.stop();
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(10_001);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes.length).toBeGreaterThanOrEqual(2);
+      const secondRefusalAt = attemptTimes[1];
+      await vi.advanceTimersByTimeAsync(10_001);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes.length).toBeGreaterThanOrEqual(3);
+      // Load refusal keeps the failure count: the next attempt lands one
+      // interval after the second refusal, not two (exponential backoff).
+      expect(attemptTimes[2] - secondRefusalAt).toBeLessThanOrEqual(10_001);
+      ka.stop();
+    } finally {
+      vi.useRealTimers();
     }
   });
 

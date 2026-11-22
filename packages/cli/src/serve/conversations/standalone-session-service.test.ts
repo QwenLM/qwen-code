@@ -14,6 +14,7 @@ import {
   AcpChildCapacityExceededError,
   RequestedSessionIdRejectedError,
   StandaloneSessionSpawnError,
+  SystemOverloadedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   AcpSessionBridge,
@@ -4102,6 +4103,26 @@ describe('StandaloneSessionService', () => {
       code: 'standalone_creation_rolled_back',
       retryable: true,
     });
+
+    expect(harness.bridge.killSession).not.toHaveBeenCalled();
+    expect(harness.quarantineRuntime).not.toHaveBeenCalled();
+    expect(harness.reservation.release).toHaveBeenCalledOnce();
+  });
+
+  it('rethrows a load-admission refusal instead of a rolled-back 500', async () => {
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(undefined);
+    const harness = createHarness();
+    const refusal = new SystemOverloadedError('cpu_load', 2.5, 20);
+    harness.bridge.spawnStandaloneSession.mockRejectedValueOnce(
+      new StandaloneSessionSpawnError(false, refusal),
+    );
+
+    await expect(
+      harness.service.createWithInitialPrompt({ sessionId }, 'do the task'),
+    ).rejects.toBe(refusal);
 
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
     expect(harness.quarantineRuntime).not.toHaveBeenCalled();

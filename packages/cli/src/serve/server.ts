@@ -271,6 +271,7 @@ import {
 import {
   createLoadAdmissionMonitor,
   DISABLED_LOAD_ADMISSION_SNAPSHOT,
+  type LoadAdmissionMonitor,
   type LoadAdmissionSnapshot,
 } from './load-admission.js';
 import {
@@ -579,6 +580,11 @@ export interface ServeAppDeps {
   restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /**
+   * Load-monitor factory; tests inject a stub so constructing an app does
+   * not leak a real host sampler (histogram + interval) per test app.
+   */
+  createLoadAdmissionMonitor?: () => LoadAdmissionMonitor;
   /**
    * Enables resident management of scheduled-task-owned sessions: a periodic
    * keepalive (so their schedulers aren't idle-reaped) and a boot-time
@@ -1375,7 +1381,7 @@ export function createServeApp(
   let defaultBridgeForAdmission: AcpSessionBridge | undefined;
   const loadAdmissionMonitor =
     !deps.bridge && !injectedWorkspaceRegistry && opts.loadAdmission !== false
-      ? createLoadAdmissionMonitor()
+      ? (deps.createLoadAdmissionMonitor ?? createLoadAdmissionMonitor)()
       : undefined;
   const totalSessionAdmission =
     !deps.bridge && !injectedWorkspaceRegistry

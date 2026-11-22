@@ -6035,8 +6035,10 @@ async function runQwenServeImpl(
     // rebuild (buildRuntime re-entry) can't leak the old interval +
     // histogram — symmetric with the metrics sampler below.
     loadAdmissionMonitor?.dispose();
+    // An injected bridge never receives freshSessionAdmission, so a monitor
+    // there would report enabled:true for a gate that never runs.
     loadAdmissionMonitor =
-      opts.loadAdmission !== false
+      opts.loadAdmission !== false && deps.bridge === undefined
         ? runtime.createLoadAdmissionMonitor()
         : undefined;
     const totalSessionAdmission = runtime.createTotalSessionAdmissionController(

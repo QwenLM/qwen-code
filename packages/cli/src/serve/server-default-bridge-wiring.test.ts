@@ -71,6 +71,8 @@ function makeBridge(
     }),
     activePromptCount: 0,
     lastActivityAt: null,
+    isChannelLive: () => true,
+    spawnOrAttach: vi.fn(),
     async shutdown() {},
     killAllSync() {},
   } as unknown as AcpSessionBridge;
@@ -692,5 +694,67 @@ describe('createServeApp default bridge wiring', () => {
       }),
     ).rejects.toMatchObject({ code: 'workspace_generation_closed' });
     expect(restoreSessionCore).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('createServeApp load admission factory injection', () => {
+  it('uses the injected monitor factory and wires its verdict into admission', async () => {
+    const factory = vi.fn(() => ({
+      snapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load' as const,
+        loadRatio: 3,
+        eventLoopLagP99Ms: 1,
+        sampledAtMs: 1,
+      }),
+      dispose: vi.fn(),
+    }));
+    let captured: Record<string, unknown> | undefined;
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn((opts: Record<string, unknown>) => {
+          captured = opts;
+          return makeBridge();
+        }),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { createLoadAdmissionMonitor: factory },
+    );
+    expect(factory).toHaveBeenCalledTimes(1);
+
+    const admission = captured?.['freshSessionAdmission'] as
+      | ((ctx: { operation: string; workspaceCwd: string }) => unknown)
+      | undefined;
+    expect(admission).toBeTypeOf('function');
+    expect(() =>
+      admission!({ operation: 'spawn', workspaceCwd: WS_BOUND }),
+    ).toThrow('System overloaded');
+
+    // The fake bridge does not enforce admission internally, so the HTTP
+    // refusal is pinned by the real-bridge E2E rig; here the status verdict
+    // proves the injected monitor reaches the app's status projection.
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toMatchObject({
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+    });
   });
 });

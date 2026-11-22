@@ -108,7 +108,11 @@ export function createLoadAdmissionMonitor(
     const loopDelay = monitorEventLoopDelay({ resolution: 20 });
     loopDelay.enable();
     histogram = loopDelay;
-    const cores = os.availableParallelism();
+    // Host scope on both sides: /proc/loadavg is not namespaced, while
+    // availableParallelism() honours cgroup quota/affinity — dividing one by
+    // the other latches a CPU-limited daemon into permanent refusals.
+    // Container-level starvation is the event-loop-lag signal's job.
+    const cores = os.cpus().length;
     readSignals = () => {
       const loadRatio = os.loadavg()[0] / cores;
       // Window-scoped p99: reset after each read so the figure describes

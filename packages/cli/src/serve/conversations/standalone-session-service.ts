@@ -55,6 +55,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   AcpChildCapacityExceededError,
+  SystemOverloadedError,
   type AcpChildCapacity,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
@@ -2875,6 +2876,11 @@ export class StandaloneSessionService {
           } catch {
             this.beginTerminalQuarantine(runtime);
           }
+        }
+        if (error.cause instanceof SystemOverloadedError) {
+          // Load backpressure is a retryable refusal, not a creation defect:
+          // keep the 503 system_overloaded contract instead of a 500 rollback.
+          throw error.cause;
         }
         const outcome = conflict
           ? serviceError('standalone_session_conflict', sessionId, false, error)
