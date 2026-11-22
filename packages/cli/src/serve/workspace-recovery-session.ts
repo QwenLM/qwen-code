@@ -321,6 +321,21 @@ function settledCheckpoint(checkpoint: HarnessCheckpointV1): boolean {
   );
 }
 
+/**
+ * Whether the definition's Session Skills reference passes the same parse the
+ * resident load applies. A malformed reference rejects through the gate's own
+ * vocabulary instead of escaping with the parser's message.
+ */
+function admitsSessionSkillsRef(ref: unknown): boolean {
+  if (ref === undefined) return true;
+  try {
+    parseSessionSkillsRef(ref);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function verifyRecoverySession(
   source: RecoverySessionSource,
   io: RecoverySessionIO,
@@ -861,8 +876,7 @@ export async function verifyRecoverySession(
           // The external lanes admit a Session skill catalog, so the malformed
           // reference the exclusion list used to reject needs its own check:
           // the resident load parses the same field and would fail every turn.
-          (definition['sessionSkillsRef'] === undefined ||
-            Boolean(parseSessionSkillsRef(definition['sessionSkillsRef']))) &&
+          admitsSessionSkillsRef(definition['sessionSkillsRef']) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',

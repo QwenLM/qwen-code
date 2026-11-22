@@ -1992,7 +1992,9 @@ describe('verifyRecoverySession', () => {
         toolProfile: 'hosted-workspace-external-files/1',
         sessionSkillsRef,
       });
-      await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow();
+      await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+        'unsupported Hosted profile',
+      );
     },
   );
 
