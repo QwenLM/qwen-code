@@ -92,6 +92,27 @@ describe('reachableEntries', () => {
     expect(peers).toHaveLength(1);
     expect(peers[0]?.ipcPath).toBe('/tmp/new.sock');
   });
+
+  it('keeps a surviving twin at the first twin position among unsorted records', async () => {
+    const peers = await reachableEntries(
+      [
+        record({ ipcPath: '/tmp/old.sock', startedAt: 1 }),
+        record({
+          sessionId: 'session-other',
+          name: 'other',
+          ipcPath: '/tmp/other.sock',
+          startedAt: 9,
+        }),
+        record({ ipcPath: '/tmp/new.sock', startedAt: 2 }),
+      ],
+      async () => 'alive',
+    );
+    expect(peers.map((peer) => peer.ipcPath)).toEqual([
+      '/tmp/new.sock',
+      '/tmp/other.sock',
+    ]);
+    expect(peers[0]?.startedAt).toBe(2);
+  });
 });
 
 describe('resolvePeerTarget', () => {
