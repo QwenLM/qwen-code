@@ -346,6 +346,38 @@ describe('usage-stats route (real loader against seeded history)', () => {
       expect(res.body.summary.totalTokens).toBe(600);
       expect(res.body.summary.sessions).toBe(1);
     });
+
+    it('does not replace records with the ledger of a different runtime', async () => {
+      const ownedRoot = path.join(roots, 'owned');
+      process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
+      seedLedger(ownedRoot, ledgerRow('owned-session', 500, 100));
+      const timestamp = Date.parse('2026-05-25T10:00:00.000Z');
+      const records = [
+        rec({
+          sessionId: 'owned-session',
+          timestamp,
+          totalTokens: 600,
+          inputTokens: 500,
+        }),
+        rec({
+          sessionId: 'session-without-known-runtime',
+          timestamp: timestamp - 10_000,
+          totalTokens: 900,
+          inputTokens: 900,
+        }),
+      ];
+      fs.writeFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+
+      const app = mount({ getLedgerRuntimeBaseDirs: () => [ownedRoot] });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary.totalTokens).toBe(1500);
+      expect(res.body.summary.sessions).toBe(2);
+    });
   });
 
   it('returns real aggregated totals from usage_record.jsonl', async () => {

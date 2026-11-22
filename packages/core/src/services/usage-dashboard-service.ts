@@ -12,7 +12,9 @@ import {
   type UsageSummaryRecord,
 } from './usageHistoryService.js';
 import {
+  getTokenUsageSessionIds,
   loadTokenUsageDailyByModel,
+  mergeTokenUsageSessionIds,
   type TokenUsageCompletedMonthCache,
   type TokenUsageDailyByModel,
   type TokenUsageDayModelTotals,
@@ -141,9 +143,29 @@ function startOfLocalDay(ms: number): Date {
 /** Local day -> model -> counters. Every token-bearing output derives from it. */
 export type UsageDayModelTable = TokenUsageDailyByModel;
 
+function ledgerCoversModel(
+  record: UsageSummaryRecord,
+  model: string,
+  ledgerDaily: TokenUsageDailyByModel | undefined,
+  sortedLedgerDays?: readonly string[],
+): boolean {
+  if (!ledgerDaily) return false;
+  const startDay = localDateKey(record.startTime);
+  const endDay = localDateKey(record.timestamp);
+  for (const day of sortedLedgerDays ?? [...ledgerDaily.keys()].sort()) {
+    if (day > endDay) return false;
+    if (day < startDay || !ledgerDaily.get(day)?.has(model)) continue;
+    const sessionIds = getTokenUsageSessionIds(ledgerDaily, day, model);
+    if (!sessionIds || sessionIds.has(record.sessionId)) return true;
+  }
+  return false;
+}
+
 /**
- * Whether a ledger covers at least one local day in a record's complete span.
- * This is the same replacement predicate used by the token day table.
+ * Whether every positive-count model in a record has ledger coverage in its
+ * span. A full-window comparison must not treat a different model's ledger as
+ * coverage for this record. Where session evidence is available, the match
+ * must also refer to this session rather than another runtime's activity.
  * `sortedLedgerDays` lets callers processing many records share one sort.
  */
 export function recordTouchesLedgerDays(
@@ -151,30 +173,34 @@ export function recordTouchesLedgerDays(
   ledgerDaily: TokenUsageDailyByModel | undefined,
   sortedLedgerDays?: readonly string[],
 ): boolean {
-  if (!ledgerDaily) return false;
-  const startDay = localDateKey(record.startTime);
-  const endDay = localDateKey(record.timestamp);
-  const ledgerDays = sortedLedgerDays ?? [...ledgerDaily.keys()].sort();
-  for (const day of ledgerDays) {
-    if (day > endDay) return false;
-    if (day >= startDay) return true;
-  }
-  return false;
+  const models = Object.entries(record.models).filter(
+    ([, model]) =>
+      model.requests > 0 ||
+      model.inputTokens > 0 ||
+      model.outputTokens > 0 ||
+      model.cachedTokens > 0 ||
+      model.thoughtsTokens > 0 ||
+      model.totalTokens > 0 ||
+      (model.totalLatencyMs ?? 0) > 0,
+  );
+  return (
+    models.length > 0 &&
+    models.every(([model]) =>
+      ledgerCoversModel(record, model, ledgerDaily, sortedLedgerDays),
+    )
+  );
 }
 
 /**
  * The shared accounting table for every cross-session usage surface: session
- * records bucketed by the day the session ended, with each day the per-request
- * ledger covers **replaced** by the ledger's counters.
+ * records bucketed by the day the session ended, with covered model/session
+ * entries replaced by the ledger's counters rather than replacing entire days.
  *
- * Replacing rather than adding is what keeps one run from being counted twice —
- * the same requests exist in both sources. A record is dropped when its run's
- * day span touches ANY ledger-covered day, not just its end day: a run that
- * spends on D and exits after midnight on D+1 would otherwise leave a full-run
- * copy on D+1 while the ledger already counted those responses on D. Records
- * with no ledger overlap at all keep the session-record attribution, which
- * preserves history from before the ledger existed and the behavior of a user
- * with usage statistics disabled.
+ * A model from one run is omitted only where it is actually covered by the
+ * ledger, so the shared request is not added twice. Uncovered models and
+ * sessions remain, including when only part of a record has coverage. Ledger
+ * days are then summed with the remaining record rows rather than replacing an
+ * entire day and deleting those genuine unmatched costs.
  */
 export function buildUsageDayTable(
   records: UsageSummaryRecord[],
@@ -188,13 +214,13 @@ export function buildUsageDayTable(
   for (const r of records) {
     if (!r.models) continue;
     const day = localDateKey(r.timestamp);
-    if (recordTouchesLedgerDays(r, ledgerDaily, ledgerDays)) continue;
-    let byModel = table.get(day);
-    if (!byModel) {
-      byModel = new Map();
-      table.set(day, byModel);
-    }
     for (const [model, m] of Object.entries(r.models)) {
+      if (ledgerCoversModel(r, model, ledgerDaily, ledgerDays)) continue;
+      let byModel = table.get(day);
+      if (!byModel) {
+        byModel = new Map();
+        table.set(day, byModel);
+      }
       const totals = byModel.get(model) ?? emptyDayModelTotals();
       totals.requests += m.requests;
       totals.inputTokens += m.inputTokens;
@@ -208,17 +234,34 @@ export function buildUsageDayTable(
   }
   if (ledgerDaily) {
     for (const [day, byModel] of ledgerDaily) {
-      table.set(
-        day,
-        new Map([...byModel].map(([model, totals]) => [model, { ...totals }])),
-      );
+      const targetModels = table.get(day) ?? new Map();
+      table.set(day, targetModels);
+      for (const [model, totals] of byModel) {
+        const existing = targetModels.get(model);
+        if (!existing) {
+          targetModels.set(model, { ...totals });
+          continue;
+        }
+        existing.requests += totals.requests;
+        existing.inputTokens += totals.inputTokens;
+        existing.outputTokens += totals.outputTokens;
+        existing.cachedTokens += totals.cachedTokens;
+        existing.thoughtsTokens += totals.thoughtsTokens;
+        existing.totalTokens += totals.totalTokens;
+        existing.apiDurationMs += totals.apiDurationMs;
+      }
     }
   }
   for (const record of records) {
     if (!recordTouchesLedgerDays(record, ledgerDaily, ledgerDays)) continue;
     const day = localDateKey(record.timestamp);
     for (const [model, metrics] of Object.entries(record.models)) {
-      if (!metrics.errors) continue;
+      if (
+        !metrics.errors ||
+        !ledgerCoversModel(record, model, ledgerDaily, ledgerDays)
+      ) {
+        continue;
+      }
       let byModel = table.get(day);
       if (!byModel) {
         byModel = new Map();
@@ -528,6 +571,7 @@ export async function loadUsageDashboardSources(
   ]);
   const ledgerDaily: TokenUsageDailyByModel = new Map();
   for (const table of ledgerTables) {
+    mergeTokenUsageSessionIds(ledgerDaily, table);
     for (const [day, models] of table) {
       const targetModels = ledgerDaily.get(day) ?? new Map();
       ledgerDaily.set(day, targetModels);

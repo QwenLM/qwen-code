@@ -495,7 +495,12 @@ describe('loadStatsData — per-request ledger accounting', () => {
     const ledgerDaily: TokenUsageDailyByModel = new Map([
       [dayKey(timestamp), new Map([['__proto__', modelUsage]])],
     ]);
-    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp })]);
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        timestamp,
+        models: Object.fromEntries([['__proto__', modelUsage]]),
+      }),
+    ]);
     vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledgerDaily);
 
     const data = await loadStatsData('today');
@@ -503,6 +508,38 @@ describe('loadStatsData — per-request ledger accounting', () => {
     expect(reportTokens(data.report)).toBe(500);
     expect(data.report.models['__proto__']?.totalTokens).toBe(500);
     expect(data.report.totalRequests).toBe(1);
+  });
+
+  it('retains a different model beside a "__proto__" ledger key', async () => {
+    const timestamp = Date.now();
+    const ledgerDaily: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(timestamp),
+        new Map([
+          [
+            '__proto__',
+            {
+              requests: 1,
+              inputTokens: 400,
+              outputTokens: 100,
+              cachedTokens: 0,
+              thoughtsTokens: 0,
+              totalTokens: 500,
+              apiDurationMs: 50,
+            },
+          ],
+        ]),
+      ],
+    ]);
+    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp })]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledgerDaily);
+
+    const data = await loadStatsData('today');
+
+    expect(reportTokens(data.report)).toBe(2050);
+    expect(data.report.totalRequests).toBe(4);
+    expect(data.report.models['qwen-max']?.totalTokens).toBe(1550);
+    expect(data.report.models['__proto__']?.totalTokens).toBe(500);
   });
 
   const weekdaysWithSparseWeekends = () => {

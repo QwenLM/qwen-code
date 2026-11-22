@@ -317,6 +317,10 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   这只改变读取视图，不写回或迁移旧行。
 - **旧版托管用量保持封闭的 api 形状。** 失败耗时仍可供用量统计使用，但非 diagnostics 的托管序列化会移除
   model 与 source 的 `api` 对象里的这个新增计数，不扩展消费方恰好三个键的既有契约。
+- **覆盖须对齐模型与共享会话身份。** 台账读取把持久化的 `sessionId` 索引保存在私有 WeakMap 中，
+  在已完成月份缓存和已知 root 合流时保留。日表仅剔除实际覆盖的模型 / 运行条目，再与未匹配的真实历史求和，
+  而不是覆盖整日。日期与模型相同本身不证明另一个 session 的活动可以替代记录。缺少该元数据的输入保留旧的有界行为，
+  不宣称全局事件连接；ledger 的 `id` 与 telemetry 的 `execution_id` 仍是不同身份。
 - 台账写入受 `config.getUsageStatisticsEnabled()` 门控，且跳过 internal prompt id
   （见 `loggers.ts`），因此台账覆盖并不保证。
 - 不得向台账记录加入 project 路径或内容。

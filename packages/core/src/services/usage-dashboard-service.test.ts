@@ -12,6 +12,7 @@ import {
   buildUsageDashboard,
   buildUsageDayTable,
   loadUsageDashboard,
+  recordTouchesLedgerDays,
 } from './usage-dashboard-service.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
 import type {
@@ -354,6 +355,31 @@ describe('loadUsageDashboard', () => {
     // Session-granular tiles the ledger cannot supply stay on the records.
     expect(dash.summary.sessions).toBe(1);
     expect(dash.summary.toolCalls).toBe(7);
+  });
+
+  it('preserves other models whose records are not covered by the ledger', () => {
+    const timestamp = Date.now();
+    const record = rec({
+      sessionId: 'mixed-models',
+      timestamp,
+      model: { requests: 1, inputTokens: 500, totalTokens: 500 },
+    });
+    record.models['other-model'] = { ...record.models['qwen-max']! };
+    const ledgerDaily: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(timestamp),
+        ledgerDay('qwen-max', { requests: 1, inputTokens: 100 }),
+      ],
+    ]);
+
+    expect(recordTouchesLedgerDays(record, ledgerDaily)).toBe(false);
+    const summary = buildUsageDashboard(
+      [record],
+      { range: 'today' },
+      ledgerDaily,
+    ).summary;
+    expect(summary.totalTokens).toBe(600);
+    expect(summary.requests).toBe(2);
   });
 
   it('retains failed requests and their duration beside successful ledger usage', () => {

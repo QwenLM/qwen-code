@@ -22,7 +22,9 @@ import {
   exportTokenUsageSummary,
   formatTokenUsageSummaryAsCsv,
   getTokenUsageFilePath,
+  getTokenUsageSessionIds,
   loadTokenUsageDailyByModel,
+  mergeTokenUsageSessionIds,
   queryTokenUsage,
   recordTokenUsageFromApiResponse,
   recordTokenUsageFromApiResponseBestEffort,
@@ -711,6 +713,53 @@ describe('tokenUsageService', () => {
     expect(table.get('2026-05-24')?.get('model-a')?.totalTokens).toBe(10);
   });
 
+  it('merges session evidence across runtime roots without mutating the source', async () => {
+    const day = '2026-05-25';
+    const roots = [path.join(tempDir, 'root-a'), path.join(tempDir, 'root-b')];
+    for (const root of roots) {
+      const sessionId = path.basename(root);
+      Storage.runWithResolvedRuntimeBaseDir(root, () => {
+        const filePath = getTokenUsageFilePath('2026-05');
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
+        fs.writeFileSync(
+          filePath,
+          JSON.stringify({
+            schemaVersion: 1,
+            id: `${sessionId}-request`,
+            timestamp: `${day}T10:00:00.000Z`,
+            localDate: day,
+            localMonth: '2026-05',
+            sessionId,
+            model: 'qwen-max',
+            authType: 'openai',
+            source: 'main',
+            inputTokens: 10,
+            outputTokens: 1,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 11,
+            apiDurationMs: 1,
+          }) + '\n',
+        );
+      });
+    }
+    const [first, second] = await Promise.all(
+      roots.map((root) =>
+        Storage.runWithResolvedRuntimeBaseDir(root, () =>
+          loadTokenUsageDailyByModel(day),
+        ),
+      ),
+    );
+
+    mergeTokenUsageSessionIds(first, second);
+    expect(getTokenUsageSessionIds(first, day, 'qwen-max')).toEqual(
+      new Set(['root-a', 'root-b']),
+    );
+    expect(getTokenUsageSessionIds(second, day, 'qwen-max')).toEqual(
+      new Set(['root-b']),
+    );
+  });
+
   it('reuses completed-month aggregates across different start days', async () => {
     const config = fakeConfig();
     await recordUsage(config, 'past', 'p1', usage(100, 10, 110), {
@@ -739,6 +788,13 @@ describe('tokenUsageService', () => {
     ).toBe(158);
     expect(readStream).toHaveBeenCalledOnce();
     expect(completedMonths.has(getTokenUsageFilePath('2026-04'))).toBe(true);
+    const cached = await loadTokenUsageDailyByModel(
+      '2026-04-20',
+      completedMonths,
+    );
+    expect(getTokenUsageSessionIds(cached, '2026-04-20', 'past')).toEqual(
+      new Set([config.getSessionId()]),
+    );
 
     await recordUsage(config, 'past', 'late', usage(200, 20, 220), {
       timestamp: '2026-04-20T12:00:00.000Z',

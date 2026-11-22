@@ -337,6 +337,62 @@ const completedMonthSignatures = new WeakMap<
   Map<string, fs.Stats>
 >();
 
+type LedgerSessionIds = Map<string, Map<string, Set<string>>>;
+const ledgerSessionIds = new WeakMap<
+  TokenUsageDailyByModel,
+  LedgerSessionIds
+>();
+
+function mutableLedgerSessionIds(
+  table: TokenUsageDailyByModel,
+): LedgerSessionIds {
+  let metadata = ledgerSessionIds.get(table);
+  if (!metadata) {
+    metadata = new Map();
+    ledgerSessionIds.set(table, metadata);
+  }
+  return metadata;
+}
+
+/** Session evidence behind the aggregate counters, never serialized to JSON. */
+export function getTokenUsageSessionIds(
+  table: TokenUsageDailyByModel,
+  day: string,
+  model: string,
+): ReadonlySet<string> | undefined {
+  return ledgerSessionIds.get(table)?.get(day)?.get(model);
+}
+
+export function mergeTokenUsageSessionIds(
+  destination: TokenUsageDailyByModel,
+  source: TokenUsageDailyByModel,
+): void {
+  const sourceMetadata = ledgerSessionIds.get(source);
+  if (!sourceMetadata) return;
+  const destinationMetadata = mutableLedgerSessionIds(destination);
+  for (const [day, models] of sourceMetadata) {
+    const destinationModels = destinationMetadata.get(day) ?? new Map();
+    destinationMetadata.set(day, destinationModels);
+    for (const [model, sessionIds] of models) {
+      const merged = new Set(destinationModels.get(model));
+      for (const sessionId of sessionIds) merged.add(sessionId);
+      destinationModels.set(model, merged);
+    }
+  }
+}
+
+function rememberLedgerSession(
+  table: TokenUsageDailyByModel,
+  record: TokenUsageRecord,
+): void {
+  const metadata = mutableLedgerSessionIds(table);
+  const models = metadata.get(record.localDate) ?? new Map();
+  metadata.set(record.localDate, models);
+  const sessionIds = models.get(record.model) ?? new Set<string>();
+  if (record.sessionId) sessionIds.add(record.sessionId);
+  models.set(record.model, sessionIds);
+}
+
 async function accumulateMonthByDay(
   filePath: string,
   sinceLocalDate: string,
@@ -357,6 +413,7 @@ async function accumulateMonthByDay(
           continue;
         }
         if (record.localDate < sinceLocalDate) continue;
+        rememberLedgerSession(table, record);
         let byModel = table.get(record.localDate);
         if (!byModel) {
           byModel = new Map();
@@ -465,6 +522,7 @@ export async function loadTokenUsageDailyByModel(
         signatures.set(filePath, stats);
         completedMonthSignatures.set(completedMonthCache, signatures);
       }
+      mergeTokenUsageSessionIds(table, monthTable);
       for (const [day, byModel] of monthTable) {
         if (day < sinceLocalDate) continue;
         let destination = table.get(day);

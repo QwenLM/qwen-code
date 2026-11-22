@@ -518,6 +518,14 @@ than a fabricated attribution.
   remains available to the usage statistics, but the non-diagnostics managed
   serializer strips that new counter from model and source `api` objects rather
   than extending the consumers' exact three-key contract.
+- **Coverage is scoped to model and shared session identity.** The ledger
+  reader keeps persisted `sessionId` values in a private WeakMap across
+  completed-month caching and known-root merging. The day table skips only the
+  covered model/run entries, then sums genuine unmatched history rather than
+  replacing an entire day. A day and model alone are not proof that another
+  session's activity can replace a record. Inputs without that metadata retain
+  the bounded legacy behaviour, not a claim of a universal event join. Ledger
+  `id` and telemetry `execution_id` remain separate identities.
 - Ledger writes are gated by `config.getUsageStatisticsEnabled()` and skip internal
   prompt ids (`loggers.ts`), so ledger coverage is not guaranteed.
 - Do not add project paths or content to ledger records.
