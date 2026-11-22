@@ -658,19 +658,22 @@ describe('WorkspaceDetailsTooltip menu suppression', () => {
     await act(async () => {
       suppressed = false;
       root.render(content(suppressed));
+      trigger().focus();
     });
     await hover();
     expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.activeElement).toBe(trigger());
 
+    const menuLayer = document.createElement('div');
+    menuLayer.dataset.slot = 'popover-content';
+    document.body.appendChild(menuLayer);
     const menuFocus = document.createElement('button');
-    document.body.appendChild(menuFocus);
+    menuLayer.appendChild(menuFocus);
     await act(async () => {
       menuFocus.focus();
-      await vi.advanceTimersByTimeAsync(100);
-    });
-    await act(async () => {
       suppressed = true;
       root.render(content(suppressed));
+      await vi.advanceTimersByTimeAsync(100);
     });
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(menuFocus);

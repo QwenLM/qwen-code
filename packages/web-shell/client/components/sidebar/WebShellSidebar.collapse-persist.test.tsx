@@ -3576,6 +3576,8 @@ describe('Recent sessions shared rows', () => {
         row.dispatchEvent(new Event('pointerover', { bubbles: true }));
         await new Promise((resolve) => setTimeout(resolve, 350));
       });
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(menu!.contains(document.activeElement)).toBe(true);
       for (const target of otherHoverTargets) {
         await hover(target);
         expect(document.querySelector('[role="dialog"]')).toBeNull();
