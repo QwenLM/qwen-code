@@ -10,6 +10,7 @@ import {
   ProviderInstallError,
   resolveModelProtocol,
 } from '@qwen-code/qwen-code-core';
+import { loadUndici } from '../../utils/load-undici.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -138,11 +139,78 @@ function toDeviceFlowStateBody(
 
 let cachedDeepInfraModels: unknown[] | null = null;
 let cachedDeepInfraModelsAt = 0;
-const DEEPINFRA_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+let inFlightDeepInfraFetch: Promise<unknown[]> | null = null;
+const DEEPINFRA_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 export function resetDeepinfraModelsCacheForTest(): void {
   cachedDeepInfraModels = null;
   cachedDeepInfraModelsAt = 0;
+  inFlightDeepInfraFetch = null;
+}
+
+async function fetchDeepInfraModelsFromUpstream(): Promise<unknown[]> {
+  if (inFlightDeepInfraFetch) {
+    return inFlightDeepInfraFetch;
+  }
+
+  inFlightDeepInfraFetch = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    try {
+      const { fetch: undiciFetch, EnvHttpProxyAgent } = await loadUndici();
+      const dispatcher = new EnvHttpProxyAgent();
+      const response = await undiciFetch(
+        'https://api.deepinfra.com/models/list',
+        {
+          signal: controller.signal,
+          dispatcher,
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'qwen-code',
+          },
+        },
+      );
+
+      if (!response.ok) {
+        throw new Error(`DeepInfra API returned HTTP ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data)) {
+        throw new Error('Invalid response from DeepInfra API');
+      }
+
+      const now = Date.now();
+      const filtered = data.filter(
+        (m: {
+          model_name?: string;
+          type?: string;
+          deprecated?: boolean | number | null;
+        }) => {
+          if (!m || typeof m.model_name !== 'string') return false;
+          if (m.model_name.toLowerCase().startsWith('anthropic/')) return false;
+          if (m.type && m.type !== 'text-generation') return false;
+          if (m.deprecated === true) return false;
+          if (
+            typeof m.deprecated === 'number' &&
+            (m.deprecated < 1e11 ? m.deprecated * 1000 : m.deprecated) <= now
+          ) {
+            return false;
+          }
+          return true;
+        },
+      );
+
+      cachedDeepInfraModels = filtered;
+      cachedDeepInfraModelsAt = Date.now();
+      return filtered;
+    } finally {
+      clearTimeout(timer);
+      inFlightDeepInfraFetch = null;
+    }
+  })();
+
+  return inFlightDeepInfraFetch;
 }
 
 export function registerWorkspaceAuthRoutes(
@@ -320,49 +388,8 @@ export function registerWorkspaceAuthRoutes(
     }
 
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10000);
-      const response = await fetch('https://api.deepinfra.com/models/list', {
-        signal: controller.signal,
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': 'qwen-code',
-        },
-      });
-      clearTimeout(timer);
-
-      if (!response.ok) {
-        if (cachedDeepInfraModels) {
-          res.status(200).json(cachedDeepInfraModels);
-          return;
-        }
-        res.status(502).json({
-          error: `DeepInfra API returned HTTP ${response.status}`,
-          code: 'upstream_error',
-        });
-        return;
-      }
-
-      const data = await response.json();
-      if (Array.isArray(data)) {
-        const filtered = data.filter(
-          (m: { model_name?: string }) =>
-            !m.model_name ||
-            !m.model_name.toLowerCase().startsWith('anthropic/'),
-        );
-        cachedDeepInfraModels = filtered;
-        cachedDeepInfraModelsAt = now;
-        res.status(200).json(filtered);
-      } else {
-        if (cachedDeepInfraModels) {
-          res.status(200).json(cachedDeepInfraModels);
-          return;
-        }
-        res.status(502).json({
-          error: 'Invalid response from DeepInfra API',
-          code: 'upstream_error',
-        });
-      }
+      const models = await fetchDeepInfraModelsFromUpstream();
+      res.status(200).json(models);
     } catch (err) {
       if (cachedDeepInfraModels) {
         res.status(200).json(cachedDeepInfraModels);
