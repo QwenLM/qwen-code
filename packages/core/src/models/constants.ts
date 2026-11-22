@@ -54,6 +54,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'imageDetail',
   'splitToolMedia',
   'toolResultContentFormat',
+  'service_tier',
 ] as const satisfies ReadonlyArray<keyof ContentGeneratorConfig>;
 
 /**
