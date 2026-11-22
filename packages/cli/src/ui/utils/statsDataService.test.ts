@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   UsageSummaryRecord,
   AggregatedReport,
@@ -444,6 +444,9 @@ describe('loadStatsData - new fields', () => {
 });
 
 describe('loadStatsData — per-request ledger accounting', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     _resetStatsLedgerCacheForTest();
@@ -477,6 +480,116 @@ describe('loadStatsData — per-request ledger accounting', () => {
     ]);
   const reportTokens = (r: AggregatedReport) =>
     Object.values(r.models).reduce((s, m) => s + m.totalTokens, 0);
+
+  const weekdaysWithSparseWeekends = () => {
+    vi.setSystemTime(new Date('2026-11-22T12:00:00Z'));
+    const at = (day: string) => Date.parse(`${day}T12:00:00Z`);
+    const previous = ['09', '10', '11', '12', '13'].map(
+      (day) => `2026-11-${day}`,
+    );
+    const current = ['16', '17', '18', '19', '20'].map(
+      (day) => `2026-11-${day}`,
+    );
+    const records = [...previous, ...current].map((day) =>
+      makeRecord({
+        sessionId: day,
+        timestamp: at(day),
+        startTime: at(day) - 60_000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 100,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 100,
+          },
+        },
+      }),
+    );
+    const ledgerDaily: TokenUsageDailyByModel = new Map([
+      ...previous.map(
+        (day) =>
+          [
+            dayKey(at(day)),
+            ledgerDay({ requests: 1, inputTokens: 100 }),
+          ] as const,
+      ),
+      ...current.map(
+        (day) =>
+          [
+            dayKey(at(day)),
+            ledgerDay({ requests: 1, inputTokens: 200 }),
+          ] as const,
+      ),
+    ]);
+    return { records, ledgerDaily, at };
+  };
+
+  it('uses the ledger when a weekend is merely inactive', async () => {
+    const { records, ledgerDaily } = weekdaysWithSparseWeekends();
+    mockedLoadUsageHistory.mockResolvedValue(records);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledgerDaily);
+
+    const result = await loadStatsData('week');
+
+    expect(reportTokens(result.report)).toBe(1000);
+    expect(result.delta?.tokens).toBeCloseTo(100);
+  });
+
+  it('uses the record basis for both sides when a model record is genuinely uncovered', async () => {
+    const { records, ledgerDaily, at } = weekdaysWithSparseWeekends();
+    records.push(
+      makeRecord({
+        sessionId: 'uncovered-saturday',
+        timestamp: at('2026-11-21'),
+        startTime: at('2026-11-21') - 60_000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 50,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 50,
+          },
+        },
+      }),
+    );
+    mockedLoadUsageHistory.mockResolvedValue(records);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledgerDaily);
+
+    const result = await loadStatsData('week');
+
+    expect(result.delta?.tokens).toBeCloseTo(10);
+  });
+
+  it('enumerates ledger days once across both comparison windows', async () => {
+    const records = [];
+    const daily: TokenUsageDailyByModel = new Map();
+    for (let daysAgo = 1; daysAgo <= 21; daysAgo++) {
+      const timestamp = Date.now() - daysAgo * DAY;
+      daily.set(
+        dayKey(timestamp),
+        ledgerDay({ requests: 1, inputTokens: 100 }),
+      );
+      if (daysAgo === 1 || daysAgo === 14) {
+        records.push(
+          makeRecord({ sessionId: `covered-${daysAgo}`, timestamp }),
+        );
+      }
+    }
+    mockedLoadUsageHistory.mockResolvedValue(records);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(daily);
+    const keys = vi.spyOn(daily, 'keys');
+    try {
+      const result = await loadStatsData('week');
+      expect(result.delta?.tokens).toBe(0);
+      expect(keys).toHaveBeenCalledTimes(1);
+    } finally {
+      keys.mockRestore();
+    }
+  });
 
   it('replaces a ledger-covered day instead of adding the record copy', async () => {
     const now = Date.now();
@@ -977,8 +1090,8 @@ describe('loadStatsData — per-request ledger accounting', () => {
         },
       }),
       makeRecord({
-        sessionId: 'yesterday',
-        timestamp: now - DAY,
+        sessionId: 'current-uncovered',
+        timestamp: now - 2 * DAY,
         durationMs: 30_000,
         models: {
           'qwen-max': {

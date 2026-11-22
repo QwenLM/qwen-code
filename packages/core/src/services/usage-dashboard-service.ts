@@ -141,6 +141,27 @@ function startOfLocalDay(ms: number): Date {
 export type UsageDayModelTable = TokenUsageDailyByModel;
 
 /**
+ * Whether a ledger covers at least one local day in a record's complete span.
+ * This is the same replacement predicate used by the token day table.
+ * `sortedLedgerDays` lets callers processing many records share one sort.
+ */
+export function recordTouchesLedgerDays(
+  record: UsageSummaryRecord,
+  ledgerDaily: TokenUsageDailyByModel | undefined,
+  sortedLedgerDays?: readonly string[],
+): boolean {
+  if (!ledgerDaily) return false;
+  const startDay = localDateKey(record.startTime);
+  const endDay = localDateKey(record.timestamp);
+  const ledgerDays = sortedLedgerDays ?? [...ledgerDaily.keys()].sort();
+  for (const day of ledgerDays) {
+    if (day > endDay) return false;
+    if (day >= startDay) return true;
+  }
+  return false;
+}
+
+/**
  * The shared accounting table for every cross-session usage surface: session
  * records bucketed by the day the session ended, with each day the per-request
  * ledger covers **replaced** by the ledger's counters.
@@ -157,21 +178,16 @@ export type UsageDayModelTable = TokenUsageDailyByModel;
 export function buildUsageDayTable(
   records: UsageSummaryRecord[],
   ledgerDaily?: TokenUsageDailyByModel,
+  sortedLedgerDays?: readonly string[],
 ): UsageDayModelTable {
   const table: UsageDayModelTable = new Map();
-  // Sorted once so each record's span check can stop at the first day past it.
-  const ledgerDays = ledgerDaily ? [...ledgerDaily.keys()].sort() : [];
-  const touchesLedger = (startDay: string, endDay: string): boolean => {
-    for (const day of ledgerDays) {
-      if (day > endDay) return false;
-      if (day >= startDay) return true;
-    }
-    return false;
-  };
+  // The caller may share this sorted array with other record span checks.
+  const ledgerDays =
+    sortedLedgerDays ?? (ledgerDaily ? [...ledgerDaily.keys()].sort() : []);
   for (const r of records) {
     if (!r.models) continue;
     const day = localDateKey(r.timestamp);
-    if (touchesLedger(localDateKey(r.startTime), day)) continue;
+    if (recordTouchesLedgerDays(r, ledgerDaily, ledgerDays)) continue;
     let byModel = table.get(day);
     if (!byModel) {
       byModel = new Map();

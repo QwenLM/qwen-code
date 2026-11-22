@@ -282,6 +282,90 @@ export function metricsToUsageRecord(
  */
 const MAX_TRAILING_PARSE_CHARS = 64 * 1024;
 
+/** Detect a root-level fork marker without JSON-parsing a large tool payload. */
+function hasTopLevelForkedFrom(line: string): boolean {
+  const key = '"forkedFrom"';
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      if (depth === 1 && line.startsWith(key, i)) {
+        let before = i - 1;
+        while (before >= 0 && /[ \t]/.test(line[before]!)) before--;
+        let after = i + key.length;
+        while (after < line.length && /[ \t]/.test(line[after]!)) after++;
+        if (
+          (line[before] === '{' || line[before] === ',') &&
+          line[after] === ':'
+        ) {
+          return true;
+        }
+      }
+      inString = true;
+      continue;
+    }
+    if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') depth--;
+  }
+  return false;
+}
+
+/** Slice top-level JSON objects, including objects glued by an interrupted append. */
+function splitTranscriptObjects(line: string): string[] {
+  const records: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      inString = true;
+      continue;
+    }
+    if (c === '{' || c === '[') {
+      if (c === '{' && depth === 0) start = i;
+      depth++;
+    } else if (c === '}' || c === ']') {
+      depth--;
+      if (c === '}' && depth === 0 && start >= 0) {
+        records.push(line.slice(start, i + 1));
+        start = -1;
+      }
+    }
+  }
+  return records;
+}
+
+/** Remove inherited records while retaining every subsequent native record. */
+function retainTranscriptRows(line: string, filePath: string): string[] {
+  if (!line.includes('"forkedFrom"')) return [line];
+  if (line.length <= MAX_TRAILING_PARSE_CHARS) {
+    return jsonl
+      .parseLineTolerant<ChatRecord>(line, filePath)
+      .filter((record) => !Object.hasOwn(record, 'forkedFrom'))
+      .map((record) => JSON.stringify(record));
+  }
+  // Never JSON-parse a large payload merely to discover a fork marker.
+  return splitTranscriptObjects(line).filter(
+    (record) => !hasTopLevelForkedFrom(record),
+  );
+}
+
 /**
  * Extracts the LAST top-level record's own `timestamp` from a raw JSONL line
  * without JSON-parsing it, for trailing lines too large to parse. Walks the
@@ -415,41 +499,49 @@ async function summarizeTranscriptFile(
       crlfDelay: Infinity,
     });
     try {
-      for await (const line of rl) {
-        if (line.trim().length === 0) continue;
-        // First-match extraction: a record's own `timestamp` precedes any nested
-        // payload, so this is the record's timestamp even on huge tool-result
-        // lines. Tolerant of non-compact writers (spaces around the colon).
-        const ts = extractJsonStringField(line, 'timestamp');
-        if (beforeMs !== undefined) {
-          const timestamp = ts === undefined ? NaN : Date.parse(ts);
-          if (!Number.isFinite(timestamp) || timestamp >= beforeMs) continue;
-        }
-        lastLine = line;
-        if (ts !== undefined) lastTsFallback = ts;
+      for await (const rawLine of rl) {
+        for (const line of retainTranscriptRows(rawLine, filePath)) {
+          if (line.trim().length === 0) continue;
+          // Skip inherited parent records, but keep later branch-native input,
+          // telemetry and tools. Never JSON-parse a large tool payload merely
+          // to test this marker; that would defeat the selective scan.
+          // First-match extraction: a record's own `timestamp` precedes any nested
+          // payload, so this is the record's timestamp even on huge tool-result
+          // lines. Tolerant of non-compact writers (spaces around the colon).
+          const ts = extractJsonStringField(line, 'timestamp');
+          if (beforeMs !== undefined) {
+            const timestamp = ts === undefined ? NaN : Date.parse(ts);
+            if (!Number.isFinite(timestamp) || timestamp >= beforeMs) continue;
+          }
+          lastLine = line;
+          if (ts !== undefined) lastTsFallback = ts;
 
-        if (!header) {
-          const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
-          if (recs.length > 0) header = recs[0]!;
-        }
+          if (!header) {
+            const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
+            if (recs.length > 0) header = recs[0]!;
+          }
 
-        if (line.includes('"ui_telemetry"')) {
-          for (const record of jsonl.parseLineTolerant<ChatRecord>(
-            line,
-            filePath,
-          )) {
-            if (record.type === 'system' && record.subtype === 'ui_telemetry') {
-              const payload = record.systemPayload as
-                | { uiEvent?: UiEvent }
-                | undefined;
+          if (line.includes('"ui_telemetry"')) {
+            for (const record of jsonl.parseLineTolerant<ChatRecord>(
+              line,
+              filePath,
+            )) {
               if (
-                payload?.uiEvent &&
-                payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-                payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
-                payload.uiEvent['event.name'] !== 'hook_lifecycle'
+                record.type === 'system' &&
+                record.subtype === 'ui_telemetry'
               ) {
-                telemetry.addEvent(payload.uiEvent);
-                hasEvents = true;
+                const payload = record.systemPayload as
+                  | { uiEvent?: UiEvent }
+                  | undefined;
+                if (
+                  payload?.uiEvent &&
+                  payload.uiEvent['event.name'] !== 'request_lifecycle' &&
+                  payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
+                  payload.uiEvent['event.name'] !== 'hook_lifecycle'
+                ) {
+                  telemetry.addEvent(payload.uiEvent);
+                  hasEvents = true;
+                }
               }
             }
           }
@@ -633,8 +725,16 @@ interface RebuildFromSessionJsonlOptions {
    * skipped: its older transcript may belong to a disjoint run.
    */
   skipSessionIds?: ReadonlySet<string>;
+  /**
+   * A single verified project chats directory, use only for scoped replay.
+   * Unscoped loads and ambiguous/duplicate project identities enumerate all
+   * project directories to preserve first-occurrence order.
+   */
+  projectChatsDirs?: readonly string[];
   /** Restrict replay to known run ids rather than discovering other sessions. */
   onlySessionIds?: ReadonlySet<string>;
+  /** Admit these known run ids even outside sinceMs; unlisted files still use it. */
+  supplementalSessionIds?: ReadonlySet<string>;
   /** Reconcile only transcript rows before the earliest known run boundary. */
   beforeMsBySession?: ReadonlyMap<string, number>;
 }
@@ -647,19 +747,53 @@ type TranscriptSummary = {
 interface ReplayCacheEntry {
   mtimeMs: number;
   size: number;
+  beforeMs?: number;
   summarized: TranscriptSummary;
 }
 
 /**
  * In-process, per-transcript replay cache for the read-only live merge. The
- * daemon is long-lived, so after the first scan an unchanged transcript is
- * never re-read: only files whose mtime/size changed (active sessions) are
- * rescanned. Transcripts are append-only, so any growth changes the size and
- * invalidates the entry. Kept in memory (not on disk) to preserve the
- * "opening the dashboard never writes `~/.qwen`" invariant. Replaced wholesale
- * each load so entries for transcripts that aged out of the window are pruned.
+ * daemon is long-lived, so a transcript is re-read only when its file
+ * signature (mtime/size) or exact temporal boundary changes. Transcripts are
+ * append-only, so any growth changes the size and invalidates the entry. Kept
+ * in memory (not on disk) to preserve the "opening the dashboard never writes
+ * `~/.qwen`" invariant. Replaced wholesale each load so entries for transcripts
+ * that aged out of the window are pruned.
  */
 let replayCache = new Map<string, ReplayCacheEntry>();
+
+function scopedProjectChatsDirs(
+  records: readonly UsageSummaryRecord[],
+  sessionIds: ReadonlySet<string> | undefined,
+): string[] | undefined {
+  if (!sessionIds || sessionIds.size === 0) return undefined;
+  const chatsDirs = new Map<string, string>();
+  for (const sessionId of sessionIds) {
+    const recordChatsDirs = new Set(
+      records
+        .filter((record) => record.sessionId === sessionId && record.project)
+        .map((record) =>
+          path.join(new Storage(record.project).getProjectDir(), 'chats'),
+        ),
+    );
+    if (recordChatsDirs.size !== 1) return undefined;
+    const chatsDir = [...recordChatsDirs][0]!;
+    try {
+      if (!fs.existsSync(path.join(chatsDir, `${sessionId}.jsonl`))) {
+        // Persisted metadata can predate a transcript move. Retain discovery.
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+    chatsDirs.set(path.dirname(chatsDir), chatsDir);
+  }
+  return chatsDirs.size === 1
+    ? [...chatsDirs.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([, chatsDir]) => chatsDir)
+    : undefined;
+}
 
 /** Test-only: clear the per-transcript replay cache between cases. */
 export function _resetReplayCacheForTest(): void {
@@ -674,7 +808,9 @@ async function rebuildFromSessionJsonl(
     persist = true,
     sinceMs,
     skipSessionIds,
+    projectChatsDirs,
     onlySessionIds,
+    supplementalSessionIds,
     beforeMsBySession,
   } = options;
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
@@ -687,38 +823,54 @@ async function rebuildFromSessionJsonl(
     return [];
   }
 
-  // Full read-only replay can use the cache. A boundary-limited supplement
-  // must not reuse a whole-transcript snapshot for a different temporal scope.
-  const useCache = !persist && !beforeMsBySession;
+  // Cache the exact temporal scope separately for each file, so a bounded
+  // supplement cannot borrow a whole-transcript snapshot or disable every
+  // unrelated file's ordinary warm read.
+  const useCache = !persist;
   const nextCache = useCache ? new Map<string, ReplayCacheEntry>() : null;
-  let projectDirs: string[];
-  try {
-    projectDirs = fs.readdirSync(projectsDir);
-  } catch (e) {
-    debugLogger.debug(`rebuildFromSessionJsonl: cannot read projectsDir: ${e}`);
-    return [];
+  let chatsDirs: readonly string[];
+  if (projectChatsDirs) {
+    chatsDirs = projectChatsDirs;
+  } else {
+    try {
+      chatsDirs = fs
+        .readdirSync(projectsDir)
+        .map((projDir) => path.join(projectsDir, projDir, 'chats'));
+    } catch (e) {
+      debugLogger.debug(
+        `rebuildFromSessionJsonl: cannot read projectsDir: ${e}`,
+      );
+      return [];
+    }
   }
 
   // Phase 1 — enumerate candidate transcripts in directory order, applying the
   // cheap stat/name filters before any file read.
   const candidates: Array<{ filePath: string; stats: fs.Stats }> = [];
-  for (const projDir of projectDirs) {
-    const chatsDir = path.join(projectsDir, projDir, 'chats');
+  for (const chatsDir of chatsDirs) {
     let files: string[];
-    try {
-      // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not a
-      // transcript — only real session JSONL files carry usage evidence.
-      files = fs
-        .readdirSync(chatsDir)
-        .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.ledger.jsonl'));
-    } catch (e) {
-      debugLogger.debug(
-        `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,
-      );
-      continue;
+    if (projectChatsDirs && onlySessionIds) {
+      files = [...onlySessionIds].map((id) => `${id}.jsonl`);
+    } else {
+      try {
+        // The prompt terminal ledger sidecar (<id>.ledger.jsonl) is not a
+        // transcript — only real session JSONL files carry usage evidence.
+        files = fs
+          .readdirSync(chatsDir)
+          .filter((f) => f.endsWith('.jsonl') && !f.endsWith('.ledger.jsonl'));
+      } catch (e) {
+        debugLogger.debug(
+          `rebuildFromSessionJsonl: cannot read chatsDir ${chatsDir}: ${e}`,
+        );
+        continue;
+      }
     }
 
     for (const file of files) {
+      const fileSessionId = path.basename(file, '.jsonl');
+      if (skipSessionIds?.has(fileSessionId)) continue;
+      if (onlySessionIds && !onlySessionIds.has(fileSessionId)) continue;
+
       const filePath = path.join(chatsDir, file);
       let stats: fs.Stats;
       try {
@@ -741,17 +893,14 @@ async function rebuildFromSessionJsonl(
         continue;
       }
 
-      // Bound the scan when merging live sessions into a persisted history:
-      // skip transcripts untouched before `sinceMs`.
-      if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
-
-      // Read no transcript on an ID skip, and limit scoped supplements to
-      // known run ids. Both checks happen before any transcript I/O.
-      if (skipSessionIds || onlySessionIds) {
-        const fileSessionId = path.basename(file, '.jsonl');
-        if (skipSessionIds?.has(fileSessionId)) continue;
-        if (onlySessionIds && !onlySessionIds.has(fileSessionId)) continue;
-      }
+      // An explicitly requested run may need an older boundary supplement;
+      // unrelated unrecorded transcripts still honor the trailing window.
+      if (
+        sinceMs !== undefined &&
+        stats.mtimeMs < sinceMs &&
+        !supplementalSessionIds?.has(fileSessionId)
+      )
+        continue;
 
       candidates.push({ filePath, stats });
     }
@@ -767,23 +916,25 @@ async function rebuildFromSessionJsonl(
       const { filePath, stats } = candidates[cursor++]!;
       try {
         let summarized: TranscriptSummary;
+        const beforeMs = beforeMsBySession?.get(
+          path.basename(filePath, '.jsonl'),
+        );
         const cached = useCache ? replayCache.get(filePath) : undefined;
         if (
           cached &&
           cached.mtimeMs === stats.mtimeMs &&
-          cached.size === stats.size
+          cached.size === stats.size &&
+          cached.beforeMs === beforeMs
         ) {
           summarized = cached.summarized;
         } else {
-          summarized = await summarizeTranscriptFile(
-            filePath,
-            beforeMsBySession?.get(path.basename(filePath, '.jsonl')),
-          );
+          summarized = await summarizeTranscriptFile(filePath, beforeMs);
         }
         if (nextCache) {
           nextCache.set(filePath, {
             mtimeMs: stats.mtimeMs,
             size: stats.size,
+            beforeMs,
             summarized,
           });
         }
@@ -969,22 +1120,31 @@ function transcriptReplayScope(
     skipSessionIds: new Set(),
     beforeMsBySession: new Map(),
   };
+  const authoritativeIds = new Set(
+    records
+      .filter((record) => record.transcriptRebuild === true)
+      .map((record) => record.sessionId),
+  );
   for (const record of records) {
-    if (record.runScoped === true && record.transcriptRebuild !== true) {
+    if (record.runScoped === true && !authoritativeIds.has(record.sessionId)) {
       scope.onlySessionIds.add(record.sessionId);
     }
     if (record.transcriptRebuild === true) {
-      if (record.sessionId !== currentSessionId) {
-        scope.skipSessionIds.add(record.sessionId);
-        scope.onlySessionIds.delete(record.sessionId);
-      }
-    } else if (
-      record.runScoped !== true &&
-      record.sessionId !== currentSessionId
-    ) {
+      // A later run must not turn an already completed migration back into a
+      // condition needing another transcript scan.
+      scope.skipSessionIds.add(record.sessionId);
+      scope.onlySessionIds.delete(record.sessionId);
+      scope.beforeMsBySession.delete(record.sessionId);
+      continue;
+    }
+    if (record.runScoped !== true && record.sessionId !== currentSessionId) {
       scope.skipSessionIds.add(record.sessionId);
     }
-    if (record.runScoped === true && Number.isFinite(record.startTime)) {
+    if (
+      record.runScoped === true &&
+      !authoritativeIds.has(record.sessionId) &&
+      Number.isFinite(record.startTime)
+    ) {
       const previous = scope.beforeMsBySession.get(record.sessionId);
       if (previous === undefined || record.startTime < previous) {
         scope.beforeMsBySession.set(record.sessionId, record.startTime);
@@ -994,7 +1154,7 @@ function transcriptReplayScope(
   for (const sessionId of scope.onlySessionIds) {
     scope.skipSessionIds.delete(sessionId);
   }
-  if (currentSessionId) {
+  if (currentSessionId && !authoritativeIds.has(currentSessionId)) {
     scope.onlySessionIds.add(currentSessionId);
     scope.skipSessionIds.delete(currentSessionId);
   }
@@ -1017,8 +1177,11 @@ export async function loadUsageHistory(
   }
 
   const scope = transcriptReplayScope(persisted, skipSessionInRebuild);
-  const scoped = scope.onlySessionIds.size > 0;
-  if (!scoped && persisted.length > 0 && !skipSessionInRebuild) {
+  const scoped = persisted.length > 0 && scope.onlySessionIds.size > 0;
+  // An empty history needs the original full migration, not a scope limited
+  // to the active session. That protects other old transcripts before the
+  // in-progress session is excluded from durable migration.
+  if (!scoped && persisted.length > 0) {
     return dedupBySessionId(persisted);
   }
   const beforeMsBySession = new Map(scope.beforeMsBySession);
@@ -1032,6 +1195,9 @@ export async function loadUsageHistory(
     skipSessionInRebuild,
     skipSessionIds: scope.skipSessionIds,
     onlySessionIds: scoped ? scope.onlySessionIds : undefined,
+    projectChatsDirs: scoped
+      ? scopedProjectChatsDirs(persisted, scope.onlySessionIds)
+      : undefined,
     beforeMsBySession: beforeMsBySession.size ? beforeMsBySession : undefined,
     persist: options?.persistRebuild ?? true,
   });
@@ -1075,15 +1241,12 @@ export async function loadUsageHistoryWithLive(options?: {
   const scope = transcriptReplayScope(persisted);
   const persistedIds = scope.skipSessionIds;
 
-  // The trailing window bounds an *incremental* live merge on top of persisted
-  // history: old days come from the persisted file, so only recent transcripts
-  // need replaying. When no cumulative/rebuilt base covers older transcripts
-  // (a fresh machine, a never-persisted Web Shell session, or a history with
-  // only run-scoped rows for this id), replay all of it rather than silently
-  // truncating the dashboard, matching the pre-existing empty-file behavior.
+  // Even with run-scoped records, an incremental live merge still bounds
+  // unrecorded transcripts by mtime. Only an empty history uses the original
+  // full replay; sinceMs: 0 remains the explicit unbounded escape hatch.
   const sinceMs =
     options?.sinceMs ??
-    (persistedIds.size > 0
+    (persisted.length > 0
       ? Date.now() - LIVE_REBUILD_WINDOW_DAYS * MS_PER_DAY
       : undefined);
 
@@ -1091,6 +1254,9 @@ export async function loadUsageHistoryWithLive(options?: {
     persist: false,
     sinceMs,
     skipSessionIds: persistedIds,
+    supplementalSessionIds: scope.onlySessionIds.size
+      ? scope.onlySessionIds
+      : undefined,
     beforeMsBySession: scope.beforeMsBySession.size
       ? scope.beforeMsBySession
       : undefined,

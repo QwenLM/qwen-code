@@ -237,24 +237,55 @@ run deltas even if it covers earlier activity. Measured transcript rebuilds need
 not be lost when the later runs are disjoint. Undercounting an ambiguous overlap
 is the safe direction; double counting is not.
 
-The normal `loadUsageHistory()` considers only known run-scoped ids and the
-explicit current session. It does not discover other unrecorded transcripts:
-this is provenance repair, not the deferred session census. Where a transcript
-would otherwise overlap its run, only record timestamps strictly before the
-earliest relevant run start are backfilled. Later events retain their own run
-assignment. These boundary-limited supplements are merged in memory, not
-appended as new authoritative whole-session snapshots. Unknown legacy
-cumulative records still lose to run deltas rather than being promoted on
-filename alone; the supplemental history comes from actual transcript events
-with usable timestamps. Other history retains its existing short read and
-reduction behavior.
+An empty `usage_record.jsonl` keeps the original full migration even when the
+caller names the current session. That session is excluded from **durable
+migration**, not from discovering older transcripts. Once history exists,
+`loadUsageHistory()` limits supplemental reconstruction to needed run-scoped
+ids and the explicit current id, and returns the reduction directly when no
+supplement is needed. It does not turn that targeted lookup into an unrelated
+session census. Only events with usable timestamps strictly before the relevant
+earliest run start are backfilled; later activity remains with its run.
+Boundary-limited supplements are ephemeral, never additional authoritative
+whole-session snapshots.
 
-`loadUsageHistoryWithLive()` applies the same distinction before skipping a
-transcript: only an ordinary cumulative record or a real transcript rebuild is
-full-session authority. A run-only id cannot hide older, disjoint transcript
-history behind its session id. If no cumulative/rebuilt base covers older
-history, the live read can scan the complete transcript set; otherwise its
-mtime-bounded recent replay remains unchanged.
+A completed `transcriptRebuild` remains authoritative after subsequent live
+runs, regardless of record order. Ordinary unknown cumulative copies still lose
+to run deltas. Exact-run boundary caches use the file signature **and** temporal
+boundary, rather than disabling caching across every transcript. Cache summaries
+never become warm candidates ahead of directory enumeration: duplicate session
+ids retain first-occurrence-by-directory-order independently of cache warmth.
+A scoped lookup may read exact known files without directory enumeration only
+when its ids unambiguously resolve to one verified project root, and the mapped
+transcripts exist. Missing, moved or multi-root identities retain full directory
+discovery rather than guessing; discovering new, unrecorded daemon sessions
+always requires bounded discovery. A boundary-limited read therefore cannot
+borrow a cached whole-transcript summary or make ordinary unrelated sessions
+uncacheable.
+
+Otherwise harmless empty calendar days do not require records, but unrelated
+unrecorded transcripts still respect `LIVE_REBUILD_WINDOW_DAYS` whenever any
+persisted history exists, including a run-only history. Only an empty history
+uses the unbounded initial replay, while `sinceMs: 0` is the explicit escape
+hatch. `loadUsageHistoryWithLive` merges this recent daemon activity read-only,
+whereas a named older run may still receive a precise boundary supplement
+beyond that window without opening unrelated stale transcripts.
+
+Forked ancestry is not new branch consumption. `forkSession` stamps
+`forkedFrom` on every copied parent record; only those inherited rows are
+skipped, not the rest of the transcript. The parent's sessions, requests,
+tools, files, skills, duration and project attribution therefore do not appear
+again under the branch. Subsequent unmarked API responses, tools and files
+remain visible as native branch usage even without a child run record; its
+start/end time derives from retained native rows rather than the copied parent
+header. A root-key, nesting- and escape-aware scan identifies the marker without
+JSON-parsing a large tool payload that merely contains the same text. Inherited
+and native objects glued together by an interrupted append are handled
+separately: bounded tolerant parsing for small lines, top-level slicing without
+full parsing for large ones. The inherited object cannot discard its adjacent
+native object. A fork with no native usage still produces no summary, while an
+explicit later branch
+run remains a separate `runScoped` record. The session-specific display can show
+restored parent history by design.
 
 Pre-deletion salvage checks coverage again in both `prepare` and `commit`, so
 the second check still handles a racing writer. An ordinary cumulative record,
@@ -280,21 +311,25 @@ inflated.
 The table build and window sum are now **shared exports** of
 `usage-dashboard-service` — `buildUsageDayTable(records, ledgerDaily)` and
 `sumUsageWindowByModel(table, startKey, endKey)` — used by both surfaces, so the
-two cannot drift. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
+two cannot drift. `recordTouchesLedgerDays` supplies the exact span-coverage
+rule to both the table and the delta; it does not invent an independent coverage
+interpretation. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
 column comes from the same source as the tokens.
 
 `loadStatsData` reads the ledger on every open, reaching back far enough for the
 previous range. It replaces the current report's `models`, `totalRequests` and
-`totalLatencyMs` with the shared token table. For each completed-day side,
-model-bearing session records require every completed local day to have a
-ledger key before that side uses the ledger. A side with no such records may
-use a sparse ledger: missing days can be ordinary zero-request days. If either
-side requires coverage it cannot prove, both sides stay on the session-record
-basis instead of comparing incompatible measurements. Concurrent opens of the
-same start day share one pending read. Only immutable completed-month
-aggregates are cached; current and future month files are always streamed again.
-The day/model table and subsequent report shapes are rebuilt on each load from
-those month aggregates. Token streaks count only days with positive token
+`totalLatencyMs` with the shared token table. A completed-day side uses the
+ledger when every model-bearing record in it touches a ledger-covered day,
+including an ordinary weekend with no requests and no ledger keys. A genuinely
+uncovered model-bearing record keeps **both** sides on the session-record basis,
+rather than comparing incompatible measurements. Consecutive idle days never
+force fabrication of zero-token ledger rows. Concurrent opens of the same start
+day share one pending read. Only immutable completed-month aggregates are
+cached; current and future month files are always streamed again. One sorted
+ledger-day array is shared by the day table and both comparison sides, rather
+than sorting once per record. The day/model table and subsequent report shapes
+are rebuilt on each load from those month aggregates. Token streaks count only
+days with positive token
 spend. Skill calls, files and other non-token fields still come from the session
 records, never from an invented model-token surrogate.
 
@@ -455,6 +490,13 @@ than a fabricated attribution.
   copies, and an old unmarked migration whose later transcript contains new API
   activity. Its pre-run events must survive without double-counting later run
   activity; the temporal supplement must not be persisted as a fresh authority.
+  Repeated reads of the same file at two distinct boundaries verify distinct
+  bounded summaries. A known older run transcript is admitted outside the
+  mtime window while unrelated stale files stay unopened. Duplicate ids choose
+  the same directory-first project with a warm or cold cache. A real fork
+  followed by unmarked daemon telemetry counts the new activity exactly once,
+  derives its duration only from native rows, and a large nested/quoted marker
+  never causes the large tool payload to be parsed.
 - TUI: unit tests for day replacement, per-day attribution, wholly uncovered runs,
   a ledger-backed previous window, equal-length flat-usage deltas, same-day
   record-derived fields, and fresh reads between opens. Also cover replay-only
@@ -469,7 +511,8 @@ than a fabricated attribution.
   through live reset, and restore both clocks after rollback. Include real files
   for an existing A session and a never-persisted B session, with and without
   new activity, so history is included once and the current session is not
-  prematurely persisted.
+  prematurely persisted. Multiple covered records share one ledger-key
+  enumeration across both comparison windows.
 - Mutation-witness each new guard, and record which suites were actually run.
 
 ## Acceptance criteria

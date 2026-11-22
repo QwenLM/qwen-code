@@ -4,12 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
   buildUsageDashboard,
+  buildUsageDayTable,
   loadUsageDashboard,
 } from './usage-dashboard-service.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
@@ -457,6 +458,34 @@ describe('loadUsageDashboard', () => {
       tokens: 500,
       sessions: 1,
     });
+  });
+
+  it('sorts ledger keys once for all record span checks', () => {
+    const ledgerDaily: TokenUsageDailyByModel = new Map([
+      ['2026-11-12', ledgerDay('qwen-max', { requests: 1, inputTokens: 100 })],
+    ]);
+    const keys = vi.spyOn(ledgerDaily, 'keys');
+    try {
+      const table = buildUsageDayTable(
+        [
+          rec({
+            sessionId: 'covered',
+            timestamp: Date.parse('2026-11-12T12:00:00Z'),
+            model: { inputTokens: 500, totalTokens: 500 },
+          }),
+          rec({
+            sessionId: 'uncovered',
+            timestamp: Date.parse('2026-11-13T12:00:00Z'),
+            model: { inputTokens: 100, totalTokens: 100 },
+          }),
+        ],
+        ledgerDaily,
+      );
+      expect(keys).toHaveBeenCalledTimes(1);
+      expect(table.get('2026-11-13')?.get('qwen-max')?.totalTokens).toBe(100);
+    } finally {
+      keys.mockRestore();
+    }
   });
 
   it('drops a run whose span touches a ledger day even if it ends on an uncovered day', () => {

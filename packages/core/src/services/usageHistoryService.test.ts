@@ -41,6 +41,7 @@ import {
   _resetReplayCacheForTest,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
+import { SessionService } from './sessionService.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
 
@@ -685,6 +686,46 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(usageLines()).toHaveLength(1);
   });
 
+  it('uses verified project paths for scoped reads without discovering other sessions', async () => {
+    const sessionId = 'known-project-run';
+    const project = process.cwd();
+    const service = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    });
+    const filePath = service.getSessionTranscriptPath(sessionId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(filePath))),
+      sessionId,
+      {
+        cwd: project,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 1000,
+        assistant: true,
+      },
+    );
+    expect(fs.existsSync(filePath)).toBe(true);
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    seedPersisted([
+      { ...runRec(sessionId, 200, start, start + 60_000), project },
+    ]);
+    const projectsDir = path.join(process.env['QWEN_HOME']!, 'projects');
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    try {
+      for (let i = 0; i < 2; i++) {
+        const records = await loadUsageHistory();
+        expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1200);
+      }
+      expect(directorySpy.mock.calls.map(([entry]) => String(entry))).toEqual(
+        [],
+      );
+      expect(directorySpy).not.toHaveBeenCalledWith(projectsDir);
+    } finally {
+      directorySpy.mockRestore();
+    }
+    expect(usageLines()).toHaveLength(1);
+  });
+
   it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
     // A persisted base means the window engages (old days come from the file).
     seedPersisted([persistedRec('sess-persisted', 500)]);
@@ -794,6 +835,413 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
   const DAY = 24 * 60 * 60 * 1000;
   const t0 = Date.parse('2026-06-01T00:00:00Z');
+
+  it('migrates older sessions before excluding the current session from durable writes', async () => {
+    plantChatJsonl('older-session', 1000);
+
+    const records = await loadUsageHistory('current-session');
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.sessionId).toBe('older-session');
+    expect(records[0]!.transcriptRebuild).toBe(true);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+    expect(usageLines()).toHaveLength(1);
+  });
+
+  it('does not reopen an authoritative rebuild just because a later run follows it', async () => {
+    const authoritativePath = plantChatJsonl('authoritative-session', 1000);
+    await loadUsageHistory();
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    fs.appendFileSync(
+      usagePath(),
+      `${JSON.stringify(runRec('authoritative-session', 100, start, start + 60_000))}\n`,
+    );
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const directory = path.join(process.env['QWEN_HOME']!, 'projects');
+    const openSpy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return originalOpen(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    try {
+      await loadUsageHistory();
+      expect(
+        opened.filter((entry) => entry === authoritativePath),
+      ).toHaveLength(0);
+      const calls = directorySpy.mock.calls.map(([entry]) => String(entry));
+      expect(calls).not.toContain(directory);
+      const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(
+        opened.filter((entry) => entry === authoritativePath),
+      ).toHaveLength(0);
+      expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1100);
+    } finally {
+      openSpy.mockRestore();
+      directorySpy.mockRestore();
+    }
+  });
+
+  it('keeps ordinary transcripts warm while checking its known runs', async () => {
+    seedPersisted([
+      runRec(
+        'run-session',
+        1000,
+        Date.parse('2026-07-01T00:00:00Z'),
+        Date.parse('2026-07-02T00:00:00Z'),
+      ),
+    ]);
+    const stable = plantChatJsonl('stable-session', 250);
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return originalOpen(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      await loadUsageHistoryWithLive({ sinceMs: 0 });
+      const first = opened.filter((entry) => entry === stable).length;
+      opened.length = 0;
+      const second = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      const warm = opened.filter((entry) => entry === stable).length;
+      expect(first).toBe(1);
+      expect(warm).toBe(0);
+      expect(totalTokensOf(aggregateUsage(second, 'all'))).toBe(1250);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps directory-first duplicate selection stable across cache resets', async () => {
+    const sessionId = 'duplicate-session';
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    const persisted = [runRec(sessionId, 200, start, start + 60_000)];
+    writeTranscript('a-project', sessionId, {
+      cwd: '/a/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 1000,
+      assistant: true,
+    });
+    writeTranscript('z-project', sessionId, {
+      cwd: '/z/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 2000,
+      assistant: true,
+    });
+    seedPersisted(persisted);
+
+    const assertDirectoryFirst = (records: UsageSummaryRecord[]) => {
+      expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1200);
+      expect(
+        records.find(
+          (record) =>
+            record.sessionId === sessionId && record.transcriptRebuild,
+        )?.project,
+      ).toBe('/a/project');
+    };
+    assertDirectoryFirst(await loadUsageHistoryWithLive({ sinceMs: 0 }));
+    assertDirectoryFirst(await loadUsageHistoryWithLive({ sinceMs: 0 }));
+    _resetReplayCacheForTest();
+    assertDirectoryFirst(await loadUsageHistoryWithLive({ sinceMs: 0 }));
+  });
+
+  it('caches each exact beforeMs boundary of an unchanged transcript', async () => {
+    const sessionId = 'boundary-session';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/p',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 100,
+    });
+    const later = {
+      sessionId,
+      timestamp: '2026-06-11T00:03:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:03:00.000Z',
+          response_id: 'later-response',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 120,
+          output_token_count: 60,
+          cached_content_token_count: 0,
+          thoughts_token_count: 20,
+          total_token_count: 200,
+          prompt_id: 'later-prompt',
+        },
+      },
+    };
+    fs.appendFileSync(
+      filePath,
+      `${JSON.stringify(later)}\n${JSON.stringify({
+        sessionId,
+        timestamp: '2026-06-11T00:04:00.000Z',
+        type: 'assistant',
+        message: { role: 'assistant', content: 'done' },
+      })}\n`,
+    );
+    seedPersisted([
+      runRec(
+        sessionId,
+        200,
+        Date.parse('2026-06-11T12:00:00Z'),
+        Date.parse('2026-06-11T12:01:00Z'),
+      ),
+    ]);
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return originalOpen(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const first = await loadUsageHistory(sessionId, {
+        persistRebuild: false,
+        beforeMsBySession: new Map([
+          [sessionId, Date.parse('2026-06-11T00:02:00Z')],
+        ]),
+      });
+      const second = await loadUsageHistory(sessionId, {
+        persistRebuild: false,
+        beforeMsBySession: new Map([
+          [sessionId, Date.parse('2026-06-11T00:06:00Z')],
+        ]),
+      });
+      expect(totalTokensOf(aggregateUsage(first, 'all'))).toBe(300);
+      expect(totalTokensOf(aggregateUsage(second, 'all'))).toBe(500);
+      expect(
+        first.find((record) => record.transcriptRebuild)?.models['qwen-max']
+          ?.totalTokens,
+      ).toBe(100);
+      expect(
+        second.find((record) => record.transcriptRebuild)?.models['qwen-max']
+          ?.totalTokens,
+      ).toBe(300);
+      expect(
+        opened.filter((filePath) => filePath.endsWith(`${sessionId}.jsonl`)),
+      ).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('applies the trailing mtime window even with run-scoped history', async () => {
+    const now = Date.now();
+    const transcriptStart = Date.parse('2026-06-11T00:00:00Z');
+    const oldRunStart = transcriptStart + DAY;
+    seedPersisted([
+      runRec('run-only', 50, now - DAY, now),
+      runRec('old-run', 50, oldRunStart, oldRunStart + 60_000),
+    ]);
+    const knownOld = plantChatJsonl('old-run', 100);
+    fs.utimesSync(knownOld, (now - 100 * DAY) / 1000, (now - 100 * DAY) / 1000);
+    const older = plantChatJsonl('old-unrecorded', 100);
+    const stale = (now - 100 * DAY) / 1000;
+    fs.utimesSync(older, stale, stale);
+    const recent = plantChatJsonl('recent-unrecorded', 100);
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(p));
+      return originalOpen(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const records = await loadUsageHistoryWithLive();
+      expect(records.map((record) => record.sessionId).sort()).toEqual([
+        'old-run',
+        'old-run',
+        'recent-unrecorded',
+        'run-only',
+      ]);
+      expect(
+        records.map((record) => [
+          record.sessionId,
+          record.models['qwen-max']?.totalTokens,
+          record.startTime,
+          record.timestamp,
+        ]),
+      ).toEqual([
+        ['old-run', 100, transcriptStart, transcriptStart + 120_000],
+        ['old-run', 50, oldRunStart, oldRunStart + 60_000],
+        ['recent-unrecorded', 100, transcriptStart, transcriptStart + 120_000],
+        ['run-only', 50, now - DAY, now],
+      ]);
+      expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(300);
+      expect(opened).not.toContain(older);
+      expect(opened).toContain(recent);
+      expect(opened).toContain(knownOld);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not count a forked parent transcript as additional branch usage', async () => {
+    const projectRoot = process.cwd();
+    const parentId = '11111111-1111-4111-8111-111111111111';
+    const forkId = '22222222-2222-4222-8222-222222222222';
+    const runtimeBaseDir = process.env['QWEN_HOME']!;
+    const service = new SessionService(projectRoot, { runtimeBaseDir });
+    const sourcePath = service.getSessionTranscriptPath(parentId);
+    expect(
+      writeTranscript(
+        path.basename(path.dirname(path.dirname(sourcePath))),
+        parentId,
+        {
+          cwd: projectRoot,
+          day: '2026-06-11',
+          durationMs: 1200,
+          tokens: 1000,
+          assistant: true,
+        },
+      ),
+    ).toBe(sourcePath);
+    await loadUsageHistory();
+    const forked = await service.forkSession(parentId, forkId);
+    expect(forked.copiedCount).toBeGreaterThan(0);
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    fs.appendFileSync(
+      usagePath(),
+      `${JSON.stringify(runRec(forkId, 100, start, start + 60_000))}\n`,
+    );
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    const report = aggregateUsage(records, 'all');
+    expect(report.sessionCount).toBe(2);
+    expect(report.totalDurationMs).toBe(180_000);
+    expect(report.totalRequests).toBe(2);
+    expect(totalTokensOf(report)).toBe(1100);
+    expect(
+      report.projects.reduce((sum, project) => sum + project.totalTokens, 0),
+    ).toBe(1100);
+    expect(
+      records.find((record) => record.sessionId === forkId)?.runScoped,
+    ).toBe(true);
+  });
+
+  it.each([
+    ['line-delimited records', '\n'],
+    ['small glued records', ''],
+  ])(
+    'retains native post-fork usage with %s while excluding inherited rows',
+    async (_shape, separator) => {
+      const projectRoot = process.cwd();
+      const parentId = '11111111-1111-4111-8111-111111111111';
+      const forkId = '22222222-2222-4222-8222-222222222222';
+      const service = new SessionService(projectRoot, {
+        runtimeBaseDir: process.env['QWEN_HOME']!,
+      });
+      const sourcePath = service.getSessionTranscriptPath(parentId);
+      writeTranscript(
+        path.basename(path.dirname(path.dirname(sourcePath))),
+        parentId,
+        {
+          cwd: projectRoot,
+          day: '2026-06-11',
+          durationMs: 1200,
+          tokens: 1000,
+          assistant: true,
+        },
+      );
+      await loadUsageHistory();
+      const forked = await service.forkSession(parentId, forkId);
+      const at = (minute: number) => `2026-06-13T00:0${minute}:00.000Z`;
+      const native = [
+        {
+          sessionId: forkId,
+          cwd: projectRoot,
+          uuid: 'branch-u1',
+          parentUuid: 'u3',
+          timestamp: at(0),
+          type: 'user',
+          message: { role: 'user', content: 'native branch request' },
+        },
+        {
+          sessionId: forkId,
+          cwd: projectRoot,
+          uuid: 'branch-u2',
+          parentUuid: 'branch-u1',
+          timestamp: at(1),
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': at(1),
+              response_id: 'branch-response',
+              model: 'qwen-max',
+              duration_ms: 800,
+              input_token_count: 300,
+              output_token_count: 150,
+              cached_content_token_count: 0,
+              thoughts_token_count: 50,
+              total_token_count: 500,
+              prompt_id: 'branch-prompt',
+            },
+          },
+        },
+        {
+          sessionId: forkId,
+          cwd: projectRoot,
+          uuid: 'branch-u3',
+          parentUuid: 'branch-u2',
+          timestamp: at(2),
+          type: 'assistant',
+          message: { role: 'assistant', content: 'native branch response' },
+        },
+      ];
+      // No child run record: deriving this activity from the daemon transcript
+      // is the only way it can be counted. An interrupted append may also lose
+      // the inherited file's final newline, gluing it to the next JSON object.
+      if (separator === '') {
+        fs.writeFileSync(
+          forked.filePath,
+          fs.readFileSync(forked.filePath, 'utf8').trimEnd(),
+        );
+      }
+      fs.appendFileSync(
+        forked.filePath,
+        native.map((record) => JSON.stringify(record)).join(separator) + '\n',
+      );
+      if (separator === '') {
+        expect(
+          fs.readFileSync(forked.filePath, 'utf8').trimEnd().split('}{'),
+        ).toHaveLength(4);
+      }
+
+      const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+      const report = aggregateUsage(records, 'all');
+      expect(report.sessionCount).toBe(2);
+      expect(totalTokensOf(report)).toBe(1500);
+      expect(report.totalRequests).toBe(2);
+      expect(report.totalDurationMs).toBe(240_000);
+      const branch = records.find((record) => record.sessionId === forkId);
+      expect(branch?.transcriptRebuild).toBe(true);
+      expect(branch?.startTime).toBe(Date.parse(at(0)));
+      expect(branch?.timestamp).toBe(Date.parse(at(2)));
+      expect(usageLines()).toHaveLength(1);
+    },
+  );
 
   it('marks what /clear and exit write as run-scoped', async () => {
     persistLive('sess-marker');
@@ -1678,6 +2126,65 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       expect(tokensOf(merged, sessionId)).toBe(1000);
       // No parse may touch the megabyte trailing payload; header + telemetry
       // lines are a few hundred chars each.
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('detects root fork markers without parsing nested markers in large payloads', async () => {
+    const sessionId = 'sess-nested-fork';
+    const filePath = plant(sessionId, 1000);
+    const records = fs
+      .readFileSync(filePath, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    // Put the marker last and add whitespace outside the key/value compact
+    // shape. A >64 KiB inherited row is glued to the next native telemetry
+    // record: only the inherited object may be discarded, without parsing it.
+    records[0]!['content'] = 'y'.repeat(70 * 1024);
+    records[0]!['forkedFrom'] = {
+      sessionId: 'parent-session',
+      messageUuid: records[0]!['uuid'],
+    };
+    const inheritedLine = JSON.stringify(records[0]).replace(
+      /"forkedFrom":/,
+      '"forkedFrom" :',
+    );
+    records.push({
+      sessionId,
+      cwd: '/cache/project',
+      uuid: 'u-big-tool-result',
+      parentUuid: 'u3',
+      timestamp: '2026-06-11T00:03:00.000Z',
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        content: 'x'.repeat(1024 * 1024),
+        response: {
+          forkedFrom: { sessionId: 'nested-marker' },
+          text: '{"forkedFrom":"quoted-marker",',
+        },
+      },
+    });
+    fs.writeFileSync(
+      filePath,
+      [
+        inheritedLine + JSON.stringify(records[1]),
+        ...records.slice(2).map((record) => JSON.stringify(record)),
+      ].join('\n') + '\n',
+    );
+    expect(fs.statSync(filePath).size).toBeGreaterThan(1024 * 1024);
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
       expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
     } finally {
       spy.mockRestore();

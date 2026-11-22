@@ -22,6 +22,7 @@ import {
   type UsageDayModelTable,
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
+import { recordTouchesLedgerDays } from '@qwen-code/qwen-code-core/services/usage-dashboard-service.js';
 
 /** Pending opens coalesce; only immutable completed months are retained. */
 const pendingLedgerLoads = new Map<string, Promise<TokenUsageDailyByModel>>();
@@ -279,38 +280,23 @@ function countLocalDays(startKey: string, endKey: string): number {
   return count;
 }
 
-function hasAllLedgerDays(
-  ledgerDaily: TokenUsageDailyByModel,
-  startKey: string,
-  endKey: string,
-): boolean {
-  for (let day = startKey; day <= endKey; day = addLocalDays(day, 1)) {
-    if (!ledgerDaily.has(day)) return false;
-  }
-  return true;
-}
-
 function canUseLedgerDelta(
   records: readonly UsageSummaryRecord[],
   ledgerDaily: TokenUsageDailyByModel,
-  startKey: string,
-  endKey: string,
+  sortedLedgerDays: readonly string[],
 ): boolean {
-  const hasRecordBackedModelActivity = records.some((record) =>
-    Object.values(record.models).some(
-      (model) =>
-        model.requests > 0 ||
-        model.inputTokens > 0 ||
-        model.outputTokens > 0 ||
-        model.cachedTokens > 0 ||
-        model.thoughtsTokens > 0 ||
-        model.totalTokens > 0 ||
-        (model.totalLatencyMs ?? 0) > 0,
-    ),
-  );
-  return (
-    !hasRecordBackedModelActivity ||
-    hasAllLedgerDays(ledgerDaily, startKey, endKey)
+  return !records.some(
+    (record) =>
+      Object.values(record.models).some(
+        (model) =>
+          model.requests > 0 ||
+          model.inputTokens > 0 ||
+          model.outputTokens > 0 ||
+          model.cachedTokens > 0 ||
+          model.thoughtsTokens > 0 ||
+          model.totalTokens > 0 ||
+          (model.totalLatencyMs ?? 0) > 0,
+      ) && !recordTouchesLedgerDays(record, ledgerDaily, sortedLedgerDays),
   );
 }
 
@@ -369,7 +355,8 @@ export async function loadStatsData(
       ? prevStartKey
       : currentStartKey;
   const ledgerDaily = await loadLedgerShared(earliestKey);
-  const table = buildUsageDayTable(records, ledgerDaily);
+  const sortedLedgerDays = [...ledgerDaily.keys()].sort();
+  const table = buildUsageDayTable(records, ledgerDaily, sortedLedgerDays);
   const report = aggregateUsage(
     filterUsageRecordsByLocalDay(records, currentStartKey, currentEndKey),
     'all',
@@ -394,7 +381,7 @@ export async function loadStatsData(
     );
     // A run killed before exit writes no record, so the ledger alone can cover
     // the previous window. Gate on either source, not on records only.
-    const ledgerCoversPrev = [...ledgerDaily.keys()].some(
+    const ledgerCoversPrev = sortedLedgerDays.some(
       (day) => day >= prevStartKey && day <= prevEndKey,
     );
     if (prevFiltered.length > 0 || ledgerCoversPrev) {
@@ -411,10 +398,9 @@ export async function loadStatsData(
         canUseLedgerDelta(
           currentCompletedRecords,
           ledgerDaily,
-          currentStartKey,
-          currentCompletedEndKey,
+          sortedLedgerDays,
         ) &&
-        canUseLedgerDelta(prevFiltered, ledgerDaily, prevStartKey, prevEndKey)
+        canUseLedgerDelta(prevFiltered, ledgerDaily, sortedLedgerDays)
       ) {
         applyTokenWindow(
           currentDeltaReport,
