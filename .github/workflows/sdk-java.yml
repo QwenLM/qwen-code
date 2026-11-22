@@ -316,6 +316,9 @@ jobs:
             # release checkouts may predate it; acquire that same revision
             # rather than falling back to the unsafe host repository.
             seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Cleanup is best-effort,
+            # so a removal failure preserves the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || true; exit "${seed_helper_status}"' EXIT
             curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
               "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
               -o "${seed_helper}" || {
@@ -1009,6 +1012,9 @@ jobs:
             # release checkouts may predate it; acquire that same revision
             # rather than falling back to the unsafe host repository.
             seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Cleanup is best-effort,
+            # so a removal failure preserves the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || true; exit "${seed_helper_status}"' EXIT
             curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
               "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
               -o "${seed_helper}" || {
@@ -2048,6 +2054,9 @@ jobs:
             # release checkouts may predate it; acquire that same revision
             # rather than falling back to the unsafe host repository.
             seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Cleanup is best-effort,
+            # so a removal failure preserves the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || true; exit "${seed_helper_status}"' EXIT
             curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
               "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
               -o "${seed_helper}" || {
@@ -2355,6 +2364,9 @@ jobs:
             # release checkouts may predate it; acquire that same revision
             # rather than falling back to the unsafe host repository.
             seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            # Remove only the downloaded copy. Cleanup is best-effort,
+            # so a removal failure preserves the saved step status.
+            trap 'seed_helper_status=$?; rm -f -- "${seed_helper}" || true; exit "${seed_helper_status}"' EXIT
             curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
               "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
               -o "${seed_helper}" || {

@@ -43,7 +43,22 @@ const job = (name) => {
 function inlineMavenCacheHelper(run) {
   const guard = 'if [ ! -f "${seed_helper}" ]; then';
   const guardStart = run.indexOf(guard);
-  if (guardStart < 0) return run;
+  if (guardStart < 0) {
+    const sourceStart = run.indexOf('source "${seed_helper}"');
+    if (sourceStart < 0) return run;
+    const lineStart = run.lastIndexOf('\n', sourceStart) + 1;
+    const indent = run.slice(lineStart, sourceStart);
+    const localRoot = run.includes('RUNNER_ENVIRONMENT')
+      ? '${repo}'
+      : '${RUNNER_TEMP}/m2-repo';
+    const helper = readFileSync('.github/scripts/maven-cache-seed.sh', 'utf8')
+      .replaceAll('${repo}', localRoot)
+      .replace(/^/gm, indent);
+    return `${run.slice(0, sourceStart)}${helper}${run.slice(sourceStart + 'source "${seed_helper}"'.length)}`.replace(
+      `${indent}seed_helper="\${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"\n`,
+      '',
+    );
+  }
   const lineStart = run.lastIndexOf('\n', guardStart) + 1;
   const indent = run.slice(lineStart, guardStart);
   const end = run.indexOf(`\n${indent}fi`, guardStart);
@@ -1922,21 +1937,26 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(helper).toContain(
       'if [ -e "${seed_previous_stale_repo}" ] || [ -L "${seed_previous_stale_repo}" ]; then',
     );
-    const referenceRun = parse(
+    const referenceJob = parse(
       readFileSync(
         '.github/workflows/release-managed-agent-reference.yml',
         'utf8',
       ),
-    ).jobs.build.steps.find(
+    ).jobs.build;
+    const referenceCheckout = referenceJob.steps.find((candidate) =>
+      candidate.uses?.startsWith('actions/checkout@'),
+    );
+    expect(referenceCheckout.with.ref).toBeUndefined();
+    const referenceRun = referenceJob.steps.find(
       (candidate) => candidate.name === 'Build Java components',
     ).run;
+    expect(referenceRun).toContain(
+      'seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"',
+    );
     expect(referenceRun).toContain('source "${seed_helper}"');
     expect(referenceRun).not.toContain('seed_mount_guard() {');
-    const executableText = (text) =>
-      text.replace(/^[ \t]*#.*(?:\r?\n|$)/gm, '').replace(/^[ \t]+/gm, '');
-    expect(executableText(guardCall(referenceRun)).trimEnd()).toBe(
-      executableText(sdkCalls[0]).trimEnd(),
-    );
+    expect(referenceRun).not.toMatch(/\bcurl\b/);
+    expect(referenceRun).not.toContain('mktemp');
     expect(referenceRun).toContain(
       'MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"',
     );
@@ -1974,13 +1994,30 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(body).not.toContain('${{');
       expect(body).toContain('source "${seed_helper}"');
       expect(body).not.toContain('seed_mount_guard() {');
-      for (const [helperExists, curlFailure, removeFailFlag = false] of [
+      for (const [
+        helperExists,
+        curlFailure,
+        removeFailFlag = false,
+        failSourceGuard = false,
+        mutation = null,
+      ] of [
         [true, 97],
         [false, 0],
         [false, 23],
         [false, 404, true],
         [false, 404],
+        [false, 0, false, true],
+        [false, 0, false, false, 'no-cleanup'],
+        [false, 0, false, true, 'no-cleanup'],
+        [true, 97, false, false, 'delete-workspace'],
+        [false, 0, false, false, 'rm-denied'],
+        [false, 0, false, false, 'rm-denied-nonzero'],
       ]) {
+        const cleanupDenied = ['rm-denied', 'rm-denied-nonzero'].includes(
+          mutation,
+        );
+        // A privileged uid cannot exercise this permission failure.
+        if (cleanupDenied && process.getuid?.() === 0) continue;
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-helper-'));
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
@@ -2057,6 +2094,7 @@ fi
 printf '%s\\n' "$url" >> "\${RUNNER_TEMP}/helper-url.log"
 if [ "\${FETCH_HTTP_STATUS:-200}" = "404" ]; then
   printf '404: Not Found\\n' > "$output"
+  cp "$output" "\${RUNNER_TEMP}/helper-response.log"
   if [ "$has_fail" -eq 1 ]; then
     printf 'stub: HTTP 404\\n' >&2
     exit 22
@@ -2074,17 +2112,42 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
         const stub = `
           mvn() {
             printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+            ${cleanupDenied ? 'chmod a-w "${RUNNER_TEMP}"' : ''}
+            ${mutation === 'rm-denied-nonzero' ? 'return 37' : ''}
           }
         `;
-        const scriptBody =
+        let scriptBody =
           curlFailure === 404 && removeFailFlag
             ? body.replace('curl --fail', 'curl')
             : body;
         expect(scriptBody.includes('curl --fail')).toBe(!removeFailFlag);
+        if (mutation === 'no-cleanup') {
+          expect(scriptBody).toContain("trap 'seed_helper_status=$?;");
+          scriptBody = scriptBody
+            .split('\n')
+            .filter(
+              (line) =>
+                !line.trimStart().startsWith("trap 'seed_helper_status="),
+            )
+            .join('\n');
+          expect(scriptBody).not.toContain("trap 'seed_helper_status=$?;");
+        }
+        if (mutation === 'delete-workspace') {
+          scriptBody = scriptBody.replace(
+            'source "${seed_helper}"',
+            'source "${seed_helper}"\nrm -f -- "${seed_helper}"',
+          );
+        }
+        const executableBody = failSourceGuard
+          ? scriptBody.replace(
+              'source "${seed_helper}"',
+              'findmnt() { return 1; }\nsource "${seed_helper}"',
+            )
+          : scriptBody;
         try {
           const result = spawnSync(
             'bash',
-            ['-e', '-c', `${stub}\n${scriptBody}`],
+            ['-e', '-c', `${stub}\n${executableBody}`],
             {
               encoding: 'utf8',
               timeout: 15000,
@@ -2106,9 +2169,18 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             },
           );
           expect(result.error, body).toBeUndefined();
-          const seedSucceeded = helperExists || curlFailure === 0;
+          const seedSucceeded =
+            helperExists || (curlFailure === 0 && !failSourceGuard);
           expect(result.status, result.stderr).toBe(
-            seedSucceeded ? 0 : curlFailure === 404 && removeFailFlag ? 127 : 1,
+            mutation === 'rm-denied-nonzero'
+              ? 37
+              : failSourceGuard
+                ? 1
+                : seedSucceeded
+                  ? 0
+                  : curlFailure === 404 && removeFailFlag
+                    ? 127
+                    : 1,
           );
           expect(readFileSync(hostJar, 'utf8')).toBe('host\n');
           if (!helperExists) {
@@ -2117,7 +2189,24 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
           const downloadPath = helperExists
             ? null
             : readFileSync(join(runnerTemp, 'helper-output.log'), 'utf8');
-          expect(existsSync(join(runnerTemp, 'm2-repo'))).toBe(seedSucceeded);
+          expect(existsSync(join(runnerTemp, 'm2-repo'))).toBe(
+            helperExists || curlFailure === 0,
+          );
+          expect(
+            readdirSync(runnerTemp).filter((name) =>
+              /^maven-cache-seed\..{6}$/.test(name),
+            ),
+          ).toHaveLength(mutation === 'no-cleanup' || cleanupDenied ? 1 : 0);
+          if (cleanupDenied) {
+            expect(result.stderr).toContain('Permission denied');
+          }
+          if (helperExists) {
+            expect(
+              existsSync(
+                join(workspace, '.github', 'scripts', 'maven-cache-seed.sh'),
+              ),
+            ).toBe(mutation !== 'delete-workspace');
+          }
           if (seedSucceeded) {
             expect(
               statSync(
@@ -2128,6 +2217,12 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             expect(result.stderr).not.toContain(
               'injected helper fetch failure',
             );
+          } else if (failSourceGuard) {
+            expect(result.stdout).toContain(
+              'filesystem boundaries could not be inspected',
+            );
+            expect(statSync(hostJar).nlink).toBe(1);
+            expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
           } else if (curlFailure === 404) {
             if (removeFailFlag) {
               expect(result.stderr).toContain('404:: command not found');
@@ -2138,7 +2233,10 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
               );
               expect(result.stderr).not.toContain('404:: command not found');
             }
-            expect(readFileSync(downloadPath, 'utf8')).toBe('404: Not Found\n');
+            expect(existsSync(downloadPath)).toBe(false);
+            expect(
+              readFileSync(join(runnerTemp, 'helper-response.log'), 'utf8'),
+            ).toBe('404: Not Found\n');
             expect(statSync(hostJar).nlink).toBe(1);
             expect(existsSync(join(runnerTemp, 'mvn-calls'))).toBe(false);
           } else {
@@ -2155,6 +2253,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             ).toBe(`${expectedUrl}\n`);
           }
         } finally {
+          if (cleanupDenied) chmodSync(runnerTemp, 0o755);
           rmSync(dir, { recursive: true, force: true });
         }
       }
@@ -3764,6 +3863,7 @@ exec /usr/bin/find "$@"
               PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
               HOME: join(dir, 'home'),
               RUNNER_TEMP: runnerTemp,
+              GITHUB_WORKSPACE: join(dir, 'workspace'),
               RUNNER_ENVIRONMENT: 'self-hosted',
               LC_ALL: 'C',
             },
@@ -3898,6 +3998,7 @@ exec /usr/bin/find "$@"
                 PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
                 HOME: join(dir, 'home'),
                 RUNNER_TEMP: runnerTemp,
+                GITHUB_WORKSPACE: join(dir, 'workspace'),
                 RUNNER_ENVIRONMENT: 'self-hosted',
                 LC_ALL: 'C',
               },
@@ -4018,6 +4119,7 @@ exec /usr/bin/find "$@"
             PATH: `${join(dir, 'bin')}:${process.env.PATH}`,
             HOME: home,
             RUNNER_TEMP: runnerTemp,
+            GITHUB_WORKSPACE: join(dir, 'workspace'),
             RUNNER_ENVIRONMENT: 'self-hosted',
           },
         });
@@ -4699,6 +4801,9 @@ exec /usr/bin/find "$@"
         });
         expect(result.error, testBody).toBeUndefined();
         expect(result.status, testBody + result.stderr).toBe(0);
+        expect(
+          statSync(join(jobLocal, 'com', 'example', 'lib-1.0.jar')).nlink,
+        ).toBe(2);
         for (const path of inherited) {
           expect(existsSync(path), path).toBe(skipSingleLinks);
           if (skipSingleLinks) {
