@@ -287,9 +287,20 @@ function driveRealProcess(
     code: number | null;
     signal: NodeJS.Signals | null;
   }>((resolve) => {
-    child.on('exit', (code, signal) => resolve({ code, signal }));
+    // 'close' follows stdio closure; 'exit' can fire while pipe bytes are
+    // still queued, so anchoring here keeps exited+drained ordering honest.
+    child.on('close', (code, signal) => resolve({ code, signal }));
   });
-  return { child, exited, drained: chain };
+  // A getter, not a snapshot: chain is reassigned by every data/end handler,
+  // so a captured promise would freeze at the initial Promise.resolve() and
+  // make `await drained` a no-op.
+  return {
+    child,
+    exited,
+    get drained() {
+      return chain;
+    },
+  };
 }
 
 async function waitFor(
@@ -441,6 +452,44 @@ describe.skipIf(process.platform === 'win32')('real-process delivery', () => {
       createHash('sha256').update(expected).digest('hex'),
     );
     expect(manifest.revision).toBeGreaterThan(1);
+  });
+
+  it('drained waits for the pipe tail beyond the 64 KiB buffer before finalize', async () => {
+    const r = await rig();
+    // One burst larger than the 64 KiB pipe buffer: the child exits only
+    // after writing it, but the parent may still hold the tail unread, so
+    // `await exited` alone must not be treated as "all bytes handed over".
+    const width = 131072;
+    const expected = '1'.padStart(width, '0') + '\n';
+    const { exited, drained } = driveRealProcess(
+      r.sink,
+      `printf '%0${width}d\\n' 1`,
+    );
+    const { code } = await exited;
+    await drained;
+    r.sink.setProcessResult({
+      exitCode: code,
+      signal: null,
+      rawOutput: Buffer.from(expected),
+      output: expected,
+      error: null,
+      aborted: false,
+      pid: 0,
+      executionMethod: 'child_process',
+    });
+    const envelope = await r.sink.finalize('success', [{ text: expected }]);
+    expect(envelope.executionStatus).toBe('success');
+    await r.registry.accept(r.prepared.identity, envelope);
+    await waitFor(() => r.childRuns.record(EXECUTION)!.run.state === 'settled');
+    const settled = r.childRuns.record(EXECUTION)!;
+    const manifest = parseToolResultManifestBytes(
+      await r.resources.read(settled.outputRef!),
+    );
+    const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+    expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
+    expect(stdout.digest).toBe(
+      createHash('sha256').update(expected).digest('hex'),
+    );
   });
 
   it('a forced stop under backpressure still produces its exit proof', async () => {

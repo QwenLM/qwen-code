@@ -333,6 +333,27 @@ describe('managed session resource store', () => {
     ).rejects.toThrow(/resourceId must be a single path segment/);
   });
 
+  it('refuses a client-chosen resource id that escapes its directory on publish', async () => {
+    const { store } = await createStore();
+    const bytes = Buffer.from('payload', 'utf8');
+    for (const resourceId of ['../../escaped', '..', 'a/b', '.']) {
+      await expect(
+        store.publish('managed-input', bytes, resourceId),
+      ).rejects.toThrow(/resourceId must be a single path segment/);
+    }
+    // Nothing landed outside the kind directory.
+    const kindDir = path.join(store.sessionRoot, 'managed-input');
+    const entries = await fs.readdir(kindDir).catch(() => []);
+    expect(entries).toEqual([]);
+    await expect(
+      fs.stat(path.join(store.sessionRoot, 'escaped')),
+    ).rejects.toThrow();
+    // A well-formed client-chosen id still publishes and reads back under it.
+    const ref = await store.publish('managed-input', bytes, 'worker-chosen-id');
+    expect(ref.resourceId).toBe('worker-chosen-id');
+    expect(await store.read(ref)).toEqual(bytes);
+  });
+
   it.skipIf(process.platform === 'win32')(
     'creates the session and kind directories privately',
     async () => {

@@ -251,6 +251,37 @@ class RuntimeObservationPullerTest {
     }
 
     @Test
+    void stopBackgroundProcessAdoptsTheDurableSessionWithoutAPriorReattach() throws Exception {
+        RuntimeBrokerService brokerA = newBroker("broker-a");
+        RuntimeBrokerHttpServer serverA = newHttpServer(brokerA);
+        HttpResponse<String> acquired = postBroker(serverA, "/tool-sessions:acquire", Map.of(
+                "protocolVersion", 1,
+                "requestId", "acq-1",
+                "harnessSessionId", harnessSessionId,
+                "runtimeSessionId", runtimeSessionId,
+                "turnKind", "bootstrap"));
+        assertThat(acquired.statusCode()).isEqualTo(200);
+        var binding = bindingRepo.findActive(new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(
+                scope, null, "static"));
+        seedBackgroundRun(binding.getBindingId(), binding.getGeneration(), "call-stop");
+
+        // Full Broker restart: brokerC has empty in-memory maps, and no
+        // publisher re-attach precedes the cancel, so stop must adopt the
+        // durable Session itself rather than 404 on the raw registry.
+        serverA.close();
+        brokerA.close();
+        openServers.clear();
+        openServices.clear();
+        RuntimeBrokerService brokerC = newBroker("broker-c");
+        acquireWriter();
+
+        ToolExecutionRecord stopped = brokerC.stopBackgroundProcess(TENANT, harnessSessionId, "call-stop")
+                .toCompletableFuture().join();
+        assertThat(stopped.isTerminal()).isTrue();
+        assertThat(executionRepo.findByExecutionCallId("call-stop:process").isTerminal()).isTrue();
+    }
+
+    @Test
     void aReplicaThatCannotUseTheLeaseLeavesThePullToOneThatCan() throws Exception {
         RuntimeBrokerService owner = newBroker("broker-owner");
         RuntimeBrokerHttpServer server = newHttpServer(owner);

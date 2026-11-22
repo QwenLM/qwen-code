@@ -101,7 +101,10 @@ final class RuntimeExecutionRecovery {
             return failed(notFound("runtime_execution_not_found",
                     "The background process was not found"));
         }
-        return bindingRegistry.requireReadySession(harnessSessionId, row.getRuntimeSessionId())
+        // Adopt the durable Session like observeBackgroundProcess does: a
+        // cancel can land on a Broker that restarted (or a replica) and has
+        // no in-memory registry entry yet, and the raw registry would 404.
+        return adoptedSessions.apply(harnessSessionId, row.getRuntimeSessionId())
                 .thenCompose(context -> {
                     if (!context.session().getScope().getTenantId()
                             .equals(tenantId)) {
