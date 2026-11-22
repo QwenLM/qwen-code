@@ -379,6 +379,46 @@ describe('useAssistantFeedback through the answer footer', () => {
     }
   });
 
+  it('keeps a failed clear cleared when another pane restores the session', () => {
+    const stored: AssistantFeedbackStore = {
+      'shared-session': { 'turn-a': 'up', 'turn-b': 'down' },
+    };
+    for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS - 1; index++) {
+      stored[`session-${index}`] = { 'turn-1': 'up' };
+    }
+    writeAssistantFeedbackStore(stored);
+    mountPair('shared-session', 'shared-session');
+    try {
+      writeAssistantFeedbackStore({
+        ...stored,
+        'session-10': { 'turn-1': 'up' },
+      });
+      expect(readAssistantFeedbackStore()['shared-session']).toBeUndefined();
+      // A real storage failure, so the write path's own snapshot bookkeeping
+      // runs — mocking the write function would skip exactly that code.
+      const setItem = vi
+        .spyOn(Storage.prototype, 'setItem')
+        .mockImplementationOnce(() => {
+          throw new Error('quota exceeded');
+        });
+      rateInPane('first', 'Satisfied');
+      expect(setItem).toHaveBeenCalledOnce();
+
+      renderPairTurns('turn-a', 'turn-c');
+      rateInPane('second', 'Satisfied');
+      renderPairTurns('turn-d', 'turn-c');
+      rateInPane('first', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()['shared-session']).toEqual({
+        'turn-b': 'down',
+        'turn-c': 'up',
+        'turn-d': 'down',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
   it('replays a queued edit over its pruned base', () => {
     writeAssistantFeedbackStore({
       'shared-session': { 'turn-a': 'up' },

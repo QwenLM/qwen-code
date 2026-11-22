@@ -87,7 +87,7 @@ const prunedSessions = new Map<
   Record<string, AssistantFeedbackRating>
 >();
 
-/** Ratings evicted from storage at the session cap. */
+/** Intended ratings of sessions not on disk (cap eviction or a failed write). */
 export function readPrunedAssistantFeedbackSession(
   sessionId: string,
 ): Readonly<Record<string, AssistantFeedbackRating>> | undefined {
@@ -261,26 +261,33 @@ export function writeAssistantFeedbackStore(
   if (typeof window === 'undefined') return false;
   const previous = readAssistantFeedbackStore();
   const kept = keepMostRecentSessions(store);
+  let persisted = false;
   try {
     window.localStorage.setItem(
       ASSISTANT_FEEDBACK_STORAGE_KEY,
       JSON.stringify({ v: STORAGE_VERSION, ...kept }),
     );
-    recordEditRevisions(previous, store, kept);
-    for (const sessionId of Object.keys(previous)) {
-      if (!store[sessionId]) prunedSessions.delete(sessionId);
-    }
-    for (const sessionId of Object.keys(store)) {
-      if (kept[sessionId]) prunedSessions.delete(sessionId);
-      else prunedSessions.set(sessionId, { ...store[sessionId]! });
-    }
-    return true;
+    persisted = true;
   } catch (error) {
     // A full or disabled localStorage must not break the click that just
     // happened; the mark still shows for this page.
     console.warn('[web-shell] failed to persist assistant feedback:', error);
-    return false;
   }
+  // Revisions only advance for persisted edits; a failed write leaves disk
+  // unchanged, so bumping them would retire other panes' queued edits.
+  if (persisted) recordEditRevisions(previous, store, kept);
+  // Snapshots must track the intended state of every session that is not on
+  // disk after this attempt — including after a failed write, or another
+  // pane's restore re-inserts ratings the user already cleared.
+  const onDisk = persisted ? kept : previous;
+  for (const sessionId of Object.keys(previous)) {
+    if (!store[sessionId]) prunedSessions.delete(sessionId);
+  }
+  for (const sessionId of Object.keys(store)) {
+    if (onDisk[sessionId]) prunedSessions.delete(sessionId);
+    else prunedSessions.set(sessionId, { ...store[sessionId]! });
+  }
+  return persisted;
 }
 
 /**

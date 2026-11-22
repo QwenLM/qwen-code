@@ -54,8 +54,9 @@ export function useAssistantFeedback(
         setAssistantFeedbackRating(current, sessionId, turnId, rating),
       );
       let next = readAssistantFeedbackStore();
-      // Replay this pane's uncommitted edits on the latest storage. Restore
-      // the ratings only when a successful write actually pruned the session.
+      // Replay this pane's uncommitted edits on the latest storage. A session
+      // absent from disk restores its intended ratings — evicted at the cap,
+      // or left unpersisted by a failed write.
       const pruned = readPrunedAssistantFeedbackSession(sessionId);
       if (pruned && !next[sessionId]) {
         next = { ...next, [sessionId]: { ...pruned } };
