@@ -5,6 +5,7 @@
  */
 
 import type { Application, RequestHandler } from 'express';
+import type { Dispatcher } from 'undici';
 import {
   ALL_PROVIDERS,
   ProviderInstallError,
@@ -156,7 +157,7 @@ async function fetchDeepInfraModelsFromUpstream(): Promise<unknown[]> {
   inFlightDeepInfraFetch = (async () => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
-    let dispatcher: { close?: () => Promise<void> } | undefined;
+    let dispatcher: Dispatcher | undefined;
     try {
       const { fetch: undiciFetch, EnvHttpProxyAgent } = await loadUndici();
       dispatcher = new EnvHttpProxyAgent();
