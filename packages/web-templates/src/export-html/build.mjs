@@ -188,11 +188,26 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
 // A frozen-install build of a clean detached worktree at main 82a0f3031f71
 // measures 2,151,147 bytes of renderer JS on Node 22.22.2, 171 above the
 // previous ceiling. CI's Build unit-test tree (Linux, Node 22.x) measures
-// 2,149,864 bytes. The forbidden-input guard passes. A normal build at the
-// measured size below is not warned; only further growth is warned.
-// The identity placeholder can change byte length when it is replaced, so the
-// budget measures the actual injected asset below, including the metadata
-// checks: 2,155,023 bytes with ChatSurface merged. Reserve 430 bytes for toolchain variance.
+// 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
+// 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
+// above the local measurement.
+//
+// The ChatSurface chat column (#17952) then grows the transcript dictionary
+// past that ceiling: the Build lane measures 2,151,214 bytes on main
+// 3911b60fc4 (run 44953143515, green) against 2,151,847 on 580108434f
+// (run 44963775498), +633, with CSS unchanged at 2,427,365; the three
+// subsequent main runs measure the same 2,151,847. The cause is six chat.*
+// keys in the two catalogs the document entry inlines (EN and ZH-CN; zh-TW
+// and RU are transcript-stubbed), the CHAT_MESSAGE_KEYS parity export, and
+// the transcript-reachable pendingPermissionRevision helper. The ChatSurface
+// component graph is not wired into any column and useDaemonChatController
+// has no importer, so no component code reaches the document entry; the
+// forbidden-input guard passes and the third-party input mix is unchanged.
+// A normal build at the measured size below is not warned; only further
+// growth is warned. The identity placeholder can change byte length when it
+// is replaced, so the budget measures the actual injected asset below,
+// including the metadata checks: 2,155,023 bytes with ChatSurface merged.
+// Reserve 430 bytes for toolchain variance.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 430;
 
 // Modules that must not be reachable from the document entry, checked against
