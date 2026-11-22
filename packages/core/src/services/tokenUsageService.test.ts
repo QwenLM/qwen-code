@@ -696,6 +696,18 @@ describe('tokenUsageService', () => {
     ).toBe(158);
     expect(readStream).toHaveBeenCalledOnce();
     expect(completedMonths.has(getTokenUsageFilePath('2026-04'))).toBe(true);
+
+    await recordUsage(config, 'past', 'late', usage(200, 20, 220), {
+      timestamp: '2026-04-20T12:00:00.000Z',
+    });
+    expect(
+      sum(await loadTokenUsageDailyByModel('2026-04-01', completedMonths)),
+    ).toBe(378);
+    expect(readStream).toHaveBeenCalledTimes(2);
+    expect(
+      sum(await loadTokenUsageDailyByModel('2026-04-01', completedMonths)),
+    ).toBe(378);
+    expect(readStream).toHaveBeenCalledTimes(2);
   });
 
   it('does not reuse completed-month data across runtime directories', async () => {

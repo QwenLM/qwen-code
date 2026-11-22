@@ -331,6 +331,12 @@ export type TokenUsageDailyByModel = Map<
 /** Completed-month daily aggregates, keyed by absolute ledger file path. */
 export type TokenUsageCompletedMonthCache = Map<string, TokenUsageDailyByModel>;
 
+// Metadata stays internal so the caller-facing aggregate map keeps its shape.
+const completedMonthSignatures = new WeakMap<
+  TokenUsageCompletedMonthCache,
+  Map<string, fs.Stats>
+>();
+
 async function accumulateMonthByDay(
   filePath: string,
   sinceLocalDate: string,
@@ -400,7 +406,7 @@ async function accumulateMonthByDay(
  *
  * A missing usage directory yields an empty table (usage statistics may be
  * disabled). Any other read error propagates: a partially read month would
- * silently understate the window. A caller can reuse completed-month tables;
+ * silently understate the window. A completed-month cache is reused only when file mtime/size still match, so appends invalidate its aggregate.
  * the current and future month files are always re-read.
  */
 export async function loadTokenUsageDailyByModel(
@@ -427,10 +433,31 @@ export async function loadTokenUsageDailyByModel(
     const filePath = path.join(dir, file);
     if (completedMonthCache && month < currentMonth) {
       let monthTable = completedMonthCache.get(filePath);
+      if (monthTable) {
+        const previous = completedMonthSignatures
+          .get(completedMonthCache)
+          ?.get(filePath);
+        if (!previous) {
+          monthTable = undefined;
+        } else {
+          const stats = await fs.promises.stat(filePath);
+          if (
+            stats.mtimeMs !== previous.mtimeMs ||
+            stats.size !== previous.size
+          ) {
+            monthTable = undefined;
+          }
+        }
+      }
       if (!monthTable) {
         monthTable = new Map();
         await accumulateMonthByDay(filePath, '', monthTable);
         completedMonthCache.set(filePath, monthTable);
+        const stats = await fs.promises.stat(filePath);
+        const signatures =
+          completedMonthSignatures.get(completedMonthCache) ?? new Map();
+        signatures.set(filePath, stats);
+        completedMonthSignatures.set(completedMonthCache, signatures);
       }
       for (const [day, byModel] of monthTable) {
         if (day < sinceLocalDate) continue;

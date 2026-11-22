@@ -339,8 +339,9 @@ including an ordinary weekend with no requests and no ledger keys. A genuinely
 uncovered model-bearing record keeps **both** sides on the session-record basis,
 rather than comparing incompatible measurements. Consecutive idle days never
 force fabrication of zero-token ledger rows. Concurrent opens of the same start
-day share one pending read. Only immutable completed-month aggregates are
-cached; current and future month files are always streamed again. One sorted
+day share one pending read. Completed-month aggregates are reused only while
+their file signatures remain unchanged; a late append forces a fresh read.
+Current and future month files are always streamed again. One sorted
 ledger-day array is shared by the day table and both comparison sides, rather
 than sorting once per record. The day/model table and subsequent report shapes
 are rebuilt on each load from those month aggregates. Token streaks count only
