@@ -1499,11 +1499,6 @@ export class ContentGenerationPipeline {
     );
     if (
       reasoningCapabilities?.profile === 'openai-reasoning' &&
-      resolveReasoningDeclaration(
-        this.config.cliConfig,
-        this.contentGeneratorConfig,
-        context.model,
-      ) === undefined &&
       getBuiltinKimiK3Reasoning({
         ...this.contentGeneratorConfig,
         model: context.model,
@@ -2039,19 +2034,24 @@ export class ContentGenerationPipeline {
   }
 
   private hasExplicitOpenRouterEffort(model?: string): boolean {
+    const flatEffort = {
+      ...this.contentGeneratorConfig.samplingParams,
+      ...this.contentGeneratorConfig.extra_body,
+    }['reasoning_effort'];
+    const declaration = resolveReasoningDeclaration(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      model || this.contentGeneratorConfig.model,
+    );
+    const hasDeclaredProfile =
+      typeof declaration === 'object' &&
+      declaration !== null &&
+      'profile' in declaration &&
+      declaration.profile !== undefined;
     return (
       isOpenRouterHostname(this.contentGeneratorConfig) &&
-      resolveReasoningDeclaration(
-        this.config.cliConfig,
-        this.contentGeneratorConfig,
-        model || this.contentGeneratorConfig.model,
-      ) === undefined &&
-      (!isReasoningEffortPlaceholder(
-        this.contentGeneratorConfig.samplingParams?.['reasoning_effort'],
-      ) ||
-        !isReasoningEffortPlaceholder(
-          this.contentGeneratorConfig.extra_body?.['reasoning_effort'],
-        ))
+      !hasDeclaredProfile &&
+      !isReasoningEffortPlaceholder(flatEffort)
     );
   }
 

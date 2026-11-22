@@ -2580,12 +2580,13 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('keeps flat precedence for other inferred OpenRouter defaults', async () => {
+    it('keeps flat precedence over an explicit OpenRouter nested effort', async () => {
       routeThrough(DefaultOpenAICompatibleProvider);
       const wire = await executeWithCapability(
         undefined,
         {
           baseUrl: OPENROUTER_URL,
+          reasoning: { effort: 'high' },
           samplingParams: undefined,
           extra_body: { reasoning_effort: 'low' },
         },
@@ -2616,6 +2617,90 @@ describe('ContentGenerationPipeline', () => {
         );
         expectFields(wire, {
           reasoning: { effort: 'max' },
+          reasoning_effort: undefined,
+        });
+      },
+    );
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'does not mix a partial declaration with explicit OpenRouter %s effort',
+      async (source) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          { defaultEffort: 'high' },
+          {
+            baseUrl: OPENROUTER_URL,
+            ...(source === 'extra_body' ? { samplingParams: undefined } : {}),
+            [source]: { reasoning_effort: 'low' },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it.each([null, ''] as const)(
+      'uses the inferred K3 default when extra_body %j replaces sampling effort',
+      async (placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: { reasoning_effort: 'low' },
+            extra_body: { reasoning_effort: placeholder },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: { effort: 'max' },
+          reasoning_effort: undefined,
+        });
+      },
+    );
+
+    it.each([null, ''] as const)(
+      'keeps final extra_body effort when a sampling %j placeholder is shadowed',
+      async (placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: { reasoning_effort: placeholder },
+            extra_body: { reasoning_effort: 'low' },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it.each([null, ''] as const)(
+      'cleans a declared OpenRouter profile placeholder %j',
+      async (placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          {
+            profile: 'openai-reasoning',
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+          },
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: { reasoning_effort: placeholder },
+            extra_body: undefined,
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: { effort: 'high' },
           reasoning_effort: undefined,
         });
       },

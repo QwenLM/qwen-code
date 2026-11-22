@@ -285,6 +285,15 @@ describe('reasoning declarations', () => {
     },
   );
 
+  it('rejects a non-Kimi declared default outside the inherited ladder', () => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'gpt-5.4' },
+        { defaultEffort: 'max' },
+      ),
+    ).toBeUndefined();
+  });
+
   it.each([
     'https://openrouter.ai/api/v1',
     'https://openrouter.ai./api/v1',

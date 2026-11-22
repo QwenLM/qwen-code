@@ -287,10 +287,15 @@ export function validateReasoningCapabilities(
       ? inherited.defaultEffort
       : (gpt?.defaultEffort ?? tieredGemini?.defaultEffort);
   const requestedDefault = input.defaultEffort ?? inheritedDefault;
+  const shouldClampDefault =
+    input.defaultEffort === undefined ||
+    (known === undefined &&
+      builtinKimi !== undefined &&
+      input.profile === undefined);
   const defaultEffort =
-    requestedDefault && efforts
+    requestedDefault && efforts && shouldClampDefault
       ? clampReasoningEffort(requestedDefault, efforts)
-      : undefined;
+      : requestedDefault;
   if (
     (toggleOnly &&
       (input.efforts !== undefined || input.defaultEffort !== undefined)) ||
