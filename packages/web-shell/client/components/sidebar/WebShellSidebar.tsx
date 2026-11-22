@@ -160,6 +160,10 @@ import { isLocalDaemon, isPageOriginDaemon } from '../../config/daemon';
 import { sessionMatchesSource as matchesSessionSource } from './sessionSearch';
 import { SessionSearchDialog } from './SessionSearchDialog';
 import { useLivePresence } from '../../live/live-presence';
+import {
+  isCoarsePointerDevice,
+  TOUCH_COMPOSER_QUERY,
+} from '../../hooks/useIsTouchComposer';
 import { SessionPrBadge, openableSessionPrs } from '../SessionPrBadge';
 import { hasVisibleGoal } from '../GoalStatusStrip';
 import { SessionGoalMarker } from '../SessionGoalMarker';
@@ -401,6 +405,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'artifacts'
   | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
@@ -451,6 +456,7 @@ export const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[]
     'prWatches',
     'workflows',
     'goals',
+    'artifacts',
     'managed',
   ];
 
@@ -477,7 +483,8 @@ export interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
    * Which items appear as inline buttons on standard session rows (on hover).
-   * Defaults to ['pin'];
+   * Defaults to none so titles keep the available width. Coarse-pointer
+   * devices always keep these actions in the dropdown instead.
    * archive stays in the dropdown so a stray click on the hover slot cannot
    * archive a session.
    * Only items that also pass their built-in visibility condition are rendered.
@@ -503,8 +510,8 @@ export const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionAction
     'split',
   ];
 
-const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
-  ['pin'];
+export const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
+  [];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -546,6 +553,8 @@ interface GroupMenuState {
   session: DaemonSessionSummary;
   top: number;
   left: number;
+  parentMenu?: HTMLElement;
+  returnFocus?: HTMLButtonElement;
 }
 
 type SessionWorkspaceScope =
@@ -589,6 +598,9 @@ interface WebShellSidebarProps {
   onOpenPrWatches?: () => void;
   onOpenWorkflows: () => void;
   onOpenGoals: () => void;
+  /** Opens the workspace artifact library page; absent when the daemon does
+   * not advertise `workspace_artifact_library`. */
+  onOpenArtifacts?: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. The table handles
@@ -879,16 +891,31 @@ function IconNewChat() {
 }
 
 /**
- * Qwen brand mark. Same artwork as the browser-tab favicon in index.html and
- * the QwenLM GitHub avatar; inlined as an SVG rather than hot-linked because
- * the Web Shell CSP is `img-src 'self' data: blob:` (see web-shell-static.ts),
- * which blocks remote images. The blue #082DFF fill is legible on both the
- * light and dark sidebar backgrounds. Filled (not stroked) so it opts out of
- * the shared `.navIcon svg` stroke styling.
+ * The dark theme uses the compact Qwen mark from https://thesvg.org/icon/qwen.
+ * The light theme deliberately keeps the original blue artwork. Both are
+ * inlined because the Web Shell CSP blocks remote images, and filled (not
+ * stroked) so they opt out of the shared `.navIcon svg` stroke styling.
  */
-function IconQwenLogo() {
+function IconQwenLogo({ theme }: { theme: WebShellTheme }) {
+  if (theme === WebShellThemeId.Dark) {
+    return (
+      <svg
+        data-testid="qwen-brand-mark"
+        viewBox="0 0 24 24"
+        fill="currentColor"
+        fillRule="evenodd"
+        aria-hidden="true"
+      >
+        <path d="M12.604 1.34c.393.69.784 1.382 1.174 2.075a.18.18 0 00.157.091h5.552c.174 0 .322.11.446.327l1.454 2.57c.19.337.24.478.024.837-.26.43-.513.864-.76 1.3l-.367.658c-.106.196-.223.28-.04.512l2.652 4.637c.172.301.111.494-.043.77-.437.785-.882 1.564-1.335 2.34-.159.272-.352.375-.68.37-.777-.016-1.552-.01-2.327.016a.099.099 0 00-.081.05 575.097 575.097 0 01-2.705 4.74c-.169.293-.38.363-.725.364-.997.003-2.002.004-3.017.002a.537.537 0 01-.465-.271l-1.335-2.323a.09.09 0 00-.083-.049H4.982c-.285.03-.553-.001-.805-.092l-1.603-2.77a.543.543 0 01-.002-.54l1.207-2.12a.198.198 0 000-.197 550.951 550.951 0 01-1.875-3.272l-.79-1.395c-.16-.31-.173-.496.095-.965.465-.813.927-1.625 1.387-2.436.132-.234.304-.334.584-.335a338.3 338.3 0 012.589-.001.124.124 0 00.107-.063l2.806-4.895a.488.488 0 01.422-.246c.524-.001 1.053 0 1.583-.006L11.704 1c.341-.003.724.032.9.34zm-3.432.403a.06.06 0 00-.052.03L6.254 6.788a.157.157 0 01-.135.078H3.253c-.056 0-.07.025-.041.074l5.81 10.156c.025.042.013.062-.034.063l-2.795.015a.218.218 0 00-.2.116l-1.32 2.31c-.044.078-.021.118.068.118l5.716.008c.046 0 .08.02.104.061l1.403 2.454c.046.081.092.082.139 0l5.006-8.76.783-1.382a.055.055 0 01.096 0l1.424 2.53a.122.122 0 00.107.062l2.763-.02a.04.04 0 00.035-.02.041.041 0 000-.04l-2.9-5.086a.108.108 0 010-.113l.293-.507 1.12-1.977c.024-.041.012-.062-.035-.062H9.2c-.059 0-.073-.026-.043-.077l1.434-2.505a.107.107 0 000-.114L9.225 1.774a.06.06 0 00-.053-.031zm6.29 8.02c.046 0 .058.02.034.06l-.832 1.465-2.613 4.585a.056.056 0 01-.05.029.058.058 0 01-.05-.029L8.498 9.841c-.02-.034-.01-.052.028-.054l.216-.012 6.722-.012z" />
+      </svg>
+    );
+  }
   return (
-    <svg viewBox="17.5 27.7 135.6 135.6" aria-hidden="true">
+    <svg
+      data-testid="qwen-brand-mark"
+      viewBox="17.5 27.7 135.6 135.6"
+      aria-hidden="true"
+    >
       <path
         fill="#082DFF"
         d="M130.06,43.66h-33.37c0-1.42-.37-2.84-1.1-4.11l-4.47-7.74c-1.47-2.54-4.18-4.11-7.12-4.11h-8.93c-2.94,0-5.65,1.57-7.12,4.11l-13.68,23.69c-1.47,2.54-1.47,5.67,0,8.22l4.47,7.74c1.47,2.54,4.18,4.11,7.12,4.11h64.19c2.94,0,5.65-1.57,7.12-4.11l4.47-7.74c1.47-2.54,1.47-5.67,0-8.22l-4.47-7.74c-1.47-2.54-4.18-4.11-7.12-4.11Z"
@@ -905,7 +932,13 @@ function IconQwenLogo() {
   );
 }
 
-function BrandLogoImage({ dataUri }: { dataUri: string }) {
+function BrandLogoImage({
+  dataUri,
+  theme,
+}: {
+  dataUri: string;
+  theme: WebShellTheme;
+}) {
   // A data URI the browser cannot decode (malformed XML, an xmlns-less root)
   // fires `error` and otherwise leaves a blank 28x28 box where the product mark
   // was. Fall back to the built-in mark — the same outcome a daemon-rejected
@@ -915,7 +948,7 @@ function BrandLogoImage({ dataUri }: { dataUri: string }) {
   // silently shows the built-in mark beside the operator's own name forever.
   const [failed, setFailed] = useState(false);
   if (failed) {
-    return <IconQwenLogo />;
+    return <IconQwenLogo theme={theme} />;
   }
   return (
     <img
@@ -1250,6 +1283,7 @@ export function WebShellSidebar({
   onOpenPrWatches,
   onOpenWorkflows,
   onOpenGoals,
+  onOpenArtifacts,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenWorkspacesOverview,
@@ -1407,19 +1441,43 @@ export function WebShellSidebar({
         primaryNavItems.has('scheduledTasks') ||
         (primaryNavItems.has('prWatches') && Boolean(onOpenPrWatches)) ||
         primaryNavItems.has('workflows') ||
-        primaryNavItems.has('goals'))) ||
+        primaryNavItems.has('goals') ||
+        (primaryNavItems.has('artifacts') && Boolean(onOpenArtifacts)))) ||
     (primaryNavItems.has('managed') && Boolean(onOpenManagedSessions)) ||
     Boolean(primaryNavOptions?.render);
   const sessionActionItems = useMemo(
     () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
     [sessionActionsOptions?.items],
   );
+  const [coarsePointer, setCoarsePointer] = useState(isCoarsePointerDevice);
+  const [narrowViewport, setNarrowViewport] = useState(
+    () => window.matchMedia('(max-width: 280px)').matches,
+  );
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(TOUCH_COMPOSER_QUERY);
+    const viewport = window.matchMedia('(max-width: 280px)');
+    setCoarsePointer(media.matches);
+    setNarrowViewport(viewport.matches);
+    const onPointerChange = (event: MediaQueryListEvent) =>
+      setCoarsePointer(event.matches);
+    const onViewportChange = (event: MediaQueryListEvent) =>
+      setNarrowViewport(event.matches);
+    media.addEventListener('change', onPointerChange);
+    viewport.addEventListener('change', onViewportChange);
+    return () => {
+      media.removeEventListener('change', onPointerChange);
+      viewport.removeEventListener('change', onViewportChange);
+    };
+  }, []);
   const inlineActionItems = useMemo(
     () =>
-      new Set(
-        sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS,
+      new Set<WebShellSidebarSessionInlineActionItem>(
+        coarsePointer
+          ? []
+          : (sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS),
       ),
-    [sessionActionsOptions?.inlineItems],
+    [coarsePointer, sessionActionsOptions?.inlineItems],
   );
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && branding?.hideWhenCompact);
@@ -2159,26 +2217,51 @@ export function WebShellSidebar({
   );
   const sidebarRef = useRef<HTMLElement>(null);
   const groupMenuRef = useRef<HTMLDivElement>(null);
+  // Portal content and the More trigger may live in different DOM roots.
+  const groupMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const focusGroupMenuSelection = useCallback(() => {
+    const items = Array.from(
+      groupMenuRef.current?.querySelectorAll<HTMLButtonElement>(
+        'button:not(:disabled)',
+      ) ?? [],
+    );
+    const selected =
+      items.find((item) => item.getAttribute('aria-checked') === 'true') ??
+      items[0];
+    selected?.focus();
+  }, []);
   const sessionMenuPointerDismissRef = useRef(false);
   const sessionMenuOpenRef = useRef(false);
   const renameFocusSuppressRef = useRef(false);
   const handleSessionMenuOpenChange = useCallback((open: boolean) => {
     sessionMenuOpenRef.current = open;
-    if (open) renameFocusSuppressRef.current = false;
+    if (open) {
+      // Pointer dismissal belongs to the menu that closed, not a later one.
+      sessionMenuPointerDismissRef.current = false;
+      renameFocusSuppressRef.current = false;
+    }
   }, []);
   const handleSessionMenuPointerDownOutside = useCallback(() => {
     sessionMenuPointerDismissRef.current = true;
   }, []);
-  const handleSessionMenuCloseAutoFocus = useCallback((event: Event) => {
-    if (renameFocusSuppressRef.current) {
-      renameFocusSuppressRef.current = false;
+  const handleSessionMenuCloseAutoFocus = useCallback(
+    (event: Event) => {
+      if (renameFocusSuppressRef.current) {
+        renameFocusSuppressRef.current = false;
+        event.preventDefault();
+        return;
+      }
+      if (groupMenu?.parentMenu === event.currentTarget) {
+        focusGroupMenuSelection();
+        event.preventDefault();
+        return;
+      }
+      if (!sessionMenuPointerDismissRef.current) return;
+      sessionMenuPointerDismissRef.current = false;
       event.preventDefault();
-      return;
-    }
-    if (!sessionMenuPointerDismissRef.current) return;
-    sessionMenuPointerDismissRef.current = false;
-    event.preventDefault();
-  }, []);
+    },
+    [focusGroupMenuSelection, groupMenu],
+  );
   const isCollapsedCloseBlocked = useCallback(
     () =>
       searchOpen ||
@@ -3299,6 +3382,11 @@ export function WebShellSidebar({
     primaryWorkspaceLiveStateGroupsEnabled,
   ]);
 
+  const closeGroupMenu = useCallback(() => {
+    setGroupMenu(null);
+    groupMenu?.returnFocus?.focus();
+  }, [groupMenu]);
+
   useEffect(() => {
     if (!groupMenu) return;
     const handlePointerDown = (event: MouseEvent) => {
@@ -3306,7 +3394,10 @@ export function WebShellSidebar({
       setGroupMenu(null);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (groupMenuRef.current?.contains(document.activeElement)) {
+        closeGroupMenu();
+      } else {
         setGroupMenu(null);
       }
     };
@@ -3316,23 +3407,15 @@ export function WebShellSidebar({
       document.removeEventListener('mousedown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [groupMenu]);
+  }, [closeGroupMenu, groupMenu]);
 
   useEffect(() => {
     if (!groupMenu) return;
     const animationFrame = window.requestAnimationFrame(() => {
-      const items = Array.from(
-        groupMenuRef.current?.querySelectorAll<HTMLButtonElement>(
-          'button:not(:disabled)',
-        ) ?? [],
-      );
-      const selected =
-        items.find((item) => item.getAttribute('aria-checked') === 'true') ??
-        items[0];
-      selected?.focus();
+      focusGroupMenuSelection();
     });
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [groupMenu]);
+  }, [focusGroupMenuSelection, groupMenu]);
 
   const handleGroupMenuKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -3357,14 +3440,14 @@ export function WebShellSidebar({
         nextIndex = items.length - 1;
       } else if (event.key === 'Escape') {
         event.preventDefault();
-        setGroupMenu(null);
+        closeGroupMenu();
         return;
       }
       if (nextIndex === undefined) return;
       event.preventDefault();
       items[nextIndex]?.focus();
     },
-    [],
+    [closeGroupMenu],
   );
 
   useEffect(
@@ -4947,6 +5030,8 @@ export function WebShellSidebar({
   const openGroupMenuFromAnchor = useCallback(
     async (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
       if (!canOrganizeSession(session, 'group')) return;
+      const returnFocus = groupMenuTriggerRef.current;
+      const parentMenu = anchorEl.closest<HTMLElement>('[role="menu"]');
       let groupCount = 0;
       try {
         const sessionActions = getSessionWorkspaceActions(session);
@@ -4990,6 +5075,8 @@ export function WebShellSidebar({
         session,
         top,
         left,
+        parentMenu: parentMenu ?? undefined,
+        returnFocus: returnFocus ?? undefined,
       });
     },
     [canOrganizeSession, getSessionWorkspaceActions, onError, t],
@@ -5555,7 +5642,7 @@ export function WebShellSidebar({
           <CalendarClockIcon aria-label={t('sidebar.scheduledTasks')} />
         </span>
       ) : null;
-      const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
+      const prBadge = <SessionPrBadge prs={session.prs ?? []} compact />;
       // Completed goals render no marker, matching the Goals listings' filter.
       const hasGoalMarker = hasVisibleGoal(session.goal);
       // Archived rows do not open on click, so their marker is a pure
@@ -5585,6 +5672,15 @@ export function WebShellSidebar({
               label={label}
               time={time}
               completedUnread={completedUnread}
+              // The starting spinner outranks the run dots, not the
+              // actionable approval/question cues.
+              statusLabel={
+                liveStarting &&
+                !session.isWaitingForPermission &&
+                !session.isWaitingForUserQuestion
+                  ? t('live.state.starting')
+                  : undefined
+              }
             >
               {row}
             </SessionDetailsTooltip>
@@ -5850,6 +5946,16 @@ export function WebShellSidebar({
               short: t('sidebar.userInputNeededShort'),
             }
           : null;
+      // Persisted cut-off hint: only while nothing live owns the turn, so a
+      // running or attention session never shows it. backgroundTurn is
+      // checked alongside backgroundRunning because a notification turn can
+      // ride it without a running background task.
+      const needsContinuation =
+        session.needsContinuation === true &&
+        !running &&
+        !backgroundRunning &&
+        !session.backgroundTurn &&
+        !attention;
       const showPin = !standalone && canOrganizeSession(session, 'pin');
       const showArchive = standalone
         ? sessionActionItems.has('archive') && Boolean(standalone.onArchive)
@@ -5947,7 +6053,9 @@ export function WebShellSidebar({
           showDelete ||
           showGroup);
       const sessionActionCount = recent
-        ? 2
+        ? coarsePointer
+          ? 1
+          : 2
         : inlineActionCount + Number(showMoreActions);
       return withDetails(
         <div
@@ -5970,8 +6078,20 @@ export function WebShellSidebar({
           tabIndex={0}
           aria-current={isSelected ? 'page' : undefined}
           onClick={openRow}
-          onDoubleClick={() => {
-            if (recent || !showRename) return;
+          onDoubleClick={(event) => {
+            // Interactive descendants own double-click; it must not become a
+            // title-rename gesture when a menu is reopened quickly.
+            if (
+              recent ||
+              !showRename ||
+              (event.target instanceof Element &&
+                event.target.closest(
+                  'button, a[href], input, textarea, select',
+                ))
+            ) {
+              event.stopPropagation();
+              return;
+            }
             if (standalone) standalone.onRename();
             else startRename(session);
           }}
@@ -6050,7 +6170,10 @@ export function WebShellSidebar({
               !completedUnread &&
               !backgroundRunning ? (
               <span
-                className={styles.sessionStatusDot}
+                className={cx(
+                  styles.sessionStatusDot,
+                  styles.sessionStatusDotRunning,
+                )}
                 data-web-shell-session-active-work
                 aria-hidden="true"
               />
@@ -6107,6 +6230,15 @@ export function WebShellSidebar({
                     {attention.short}
                   </span>
                 )}
+                {needsContinuation && (
+                  <span
+                    className={styles.sessionContinuation}
+                    aria-label={t('sidebar.continuationNeeded')}
+                    data-web-shell-session-continuation
+                  >
+                    {t('sidebar.continuationNeededShort')}
+                  </span>
+                )}
                 {running ? (
                   <span
                     className={cx(
@@ -6126,13 +6258,15 @@ export function WebShellSidebar({
                         : undefined
                     }
                   />
-                ) : !attention && gitIcon ? (
+                ) : !attention && !needsContinuation && gitIcon ? (
                   <span className={styles.sessionGitIcon}>{gitIcon}</span>
                 ) : null}
+                {/* Recent keeps its desktop buttons but shares the More path on touch. */}
                 {recent && (
                   <div
                     className={styles.sessionActions}
                     onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
                     onKeyDown={(event) => event.stopPropagation()}
                   >
                     {recent.actions}
@@ -6142,6 +6276,7 @@ export function WebShellSidebar({
                   <div
                     className={styles.sessionActions}
                     onClick={(event) => event.stopPropagation()}
+                    onDoubleClick={(event) => event.stopPropagation()}
                     onKeyDown={(event) => event.stopPropagation()}
                   >
                     {(() => {
@@ -6240,6 +6375,15 @@ export function WebShellSidebar({
                       <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
                         <DropdownMenuTrigger asChild>
                           <button
+                            onFocus={(event) => {
+                              groupMenuTriggerRef.current = event.currentTarget;
+                            }}
+                            onPointerDown={(event) => {
+                              groupMenuTriggerRef.current = event.currentTarget;
+                            }}
+                            onClick={(event) => {
+                              groupMenuTriggerRef.current = event.currentTarget;
+                            }}
                             className={styles.sessionActionButton}
                             type="button"
                             aria-label={t('sidebar.moreActions')}
@@ -6435,6 +6579,7 @@ export function WebShellSidebar({
       saveRename,
       sessionActionItems,
       inlineActionItems,
+      coarsePointer,
       livePresence,
       startRename,
       splitSessionIds,
@@ -7208,6 +7353,28 @@ export function WebShellSidebar({
           {!collapsed && !railLayout && <span>{t('sidebar.goals')}</span>}
         </button>
       )}
+      {projectFeaturesEnabled &&
+        primaryNavItems.has('artifacts') &&
+        onOpenArtifacts && (
+          <button
+            className={styles.pluginButton}
+            type="button"
+            data-testid="sidebar-artifacts-nav"
+            title={railLayout ? undefined : t('workspaceArtifactLibrary.title')}
+            aria-label={t('workspaceArtifactLibrary.title')}
+            aria-current={
+              railLayout && activePage === 'artifacts' ? 'page' : undefined
+            }
+            onClick={() => openNavigation(onOpenArtifacts)}
+          >
+            <span className={styles.navIcon}>
+              <FolderKanbanIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && !railLayout && (
+              <span>{t('workspaceArtifactLibrary.title')}</span>
+            )}
+          </button>
+        )}
       {primaryNavItems.has('managed') && onOpenManagedSessions && (
         <button
           className={styles.pluginButton}
@@ -7515,6 +7682,12 @@ export function WebShellSidebar({
         data-compact={
           containerWidth !== undefined && containerWidth <= 760 ? '' : undefined
         }
+        data-narrow={
+          narrowViewport ||
+          (containerWidth !== undefined && containerWidth <= 280)
+            ? ''
+            : undefined
+        }
         style={sidebarStyle}
       >
         {groupMenu && (
@@ -7522,6 +7695,7 @@ export function WebShellSidebar({
             ref={groupMenuRef}
             className={styles.groupMenu}
             role="menu"
+            data-web-shell-session-group-menu=""
             aria-label={t('sidebar.sessionGroup')}
             style={{ top: groupMenu.top, left: groupMenu.left }}
             onClick={(event) => event.stopPropagation()}
@@ -8083,9 +8257,10 @@ export function WebShellSidebar({
                           <BrandLogoImage
                             key={brand.logoDataUri}
                             dataUri={brand.logoDataUri}
+                            theme={theme}
                           />
                         ) : (
-                          <IconQwenLogo />
+                          <IconQwenLogo theme={theme} />
                         ))}
                     </span>
                     {(!collapsed || mobileOpen || homePreviewOpen) && (
@@ -9242,7 +9417,62 @@ export function WebShellSidebar({
                                 onError(error, t('sidebar.switchFailed')),
                               );
                           },
-                          actions: (
+                          actions: coarsePointer ? (
+                            <SessionMenu
+                              onOpenChange={handleSessionMenuOpenChange}
+                            >
+                              <DropdownMenuTrigger asChild>
+                                <button
+                                  type="button"
+                                  className={styles.sessionActionButton}
+                                  aria-label={t('sidebar.moreActions')}
+                                  title={t('sidebar.moreActions')}
+                                >
+                                  <EllipsisIcon size={16} />
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent
+                                align="end"
+                                onPointerDownOutside={
+                                  handleSessionMenuPointerDownOutside
+                                }
+                                onCloseAutoFocus={
+                                  handleSessionMenuCloseAutoFocus
+                                }
+                                style={SESSION_MENU_PORTAL_STYLE}
+                              >
+                                <DropdownMenuItem
+                                  disabled={
+                                    busy ||
+                                    isStandalone ||
+                                    !canOrganizeSession(session, 'pin')
+                                  }
+                                  onSelect={() => handleTogglePin(session)}
+                                >
+                                  <PinIcon size={16} strokeWidth={1.2} />
+                                  {pinLabel}
+                                </DropdownMenuItem>
+                                <DropdownMenuItem
+                                  disabled={archiveDisabled}
+                                  title={
+                                    isCurrent
+                                      ? t('sidebar.archiveCurrentDisabled')
+                                      : running
+                                        ? t('sidebar.archiveRunningDisabled')
+                                        : t('sidebar.archive')
+                                  }
+                                  onSelect={() =>
+                                    isStandalone
+                                      ? handleArchiveRecentStandalone(session)
+                                      : handleArchive(session)
+                                  }
+                                >
+                                  <ArchiveIcon size={16} strokeWidth={1.2} />
+                                  {t('sidebar.archive')}
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </SessionMenu>
+                          ) : (
                             <>
                               <button
                                 type="button"

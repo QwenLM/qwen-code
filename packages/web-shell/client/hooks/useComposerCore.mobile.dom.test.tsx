@@ -62,6 +62,8 @@ function Harness({
   shellModeEnabled,
   persistFileReferences,
   attachmentsEnabled,
+  followupState,
+  onAcceptFollowup,
 }: {
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
@@ -74,6 +76,8 @@ function Harness({
   shellModeEnabled?: boolean;
   persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
+  followupState?: UseComposerCoreOptions['followupState'];
+  onAcceptFollowup?: UseComposerCoreOptions['onAcceptFollowup'];
 }) {
   const composer = useComposerCore({
     onSubmit,
@@ -88,6 +92,8 @@ function Harness({
     shellModeEnabled,
     persistFileReferences,
     attachmentsEnabled,
+    followupState,
+    onAcceptFollowup,
   });
   latest = composer;
 
@@ -102,6 +108,7 @@ function Harness({
           value={composer.mobileComposer.value}
           onChange={composer.mobileComposer.onChange}
           onBlur={composer.mobileComposer.onBlur}
+          onSelect={() => composer.resetVerticalColumn()}
           placeholder={composer.mobileComposer.placeholder}
           data-web-shell-composer-editor
         />
@@ -113,6 +120,8 @@ function Harness({
           ref={composer.mobileComposer.expandedTextareaRef}
           value={composer.mobileComposer.value}
           onChange={composer.mobileComposer.onChange}
+          onBlur={composer.mobileComposer.onBlur}
+          onSelect={() => composer.resetVerticalColumn()}
           onPasteCapture={composer.imageTransferHandlers.onPasteCapture}
           data-expanded
         />
@@ -135,6 +144,8 @@ async function mount({
   shellModeEnabled,
   persistFileReferences,
   attachmentsEnabled,
+  followupState,
+  onAcceptFollowup,
 }: {
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
@@ -146,6 +157,8 @@ async function mount({
   shellModeEnabled?: boolean;
   persistFileReferences?: boolean;
   attachmentsEnabled?: boolean;
+  followupState?: UseComposerCoreOptions['followupState'];
+  onAcceptFollowup?: UseComposerCoreOptions['onAcceptFollowup'];
 } = {}) {
   container = document.createElement('div');
   document.body.append(container);
@@ -155,6 +168,8 @@ async function mount({
   let currentAttachmentsEnabled = attachmentsEnabled;
   let currentComposerInput = composerInput;
   let currentComposerInputVersion = composerInput ? 1 : 0;
+  let currentExpanded = expanded;
+  let currentFollowupState = followupState;
   const render = () => {
     root!.render(
       <WebShellPortalRootContext.Provider value={null}>
@@ -169,10 +184,12 @@ async function mount({
             onInputTextChange={onInputTextChange}
             sessionId={currentSessionId}
             atWorkspaceCwd={currentWorkspaceCwd}
-            expanded={expanded}
+            expanded={currentExpanded}
             shellModeEnabled={shellModeEnabled}
             persistFileReferences={persistFileReferences}
             attachmentsEnabled={currentAttachmentsEnabled}
+            followupState={currentFollowupState}
+            onAcceptFollowup={onAcceptFollowup}
           />
         </I18nProvider>
       </WebShellPortalRootContext.Provider>,
@@ -188,11 +205,18 @@ async function mount({
       currentComposerInputVersion += 1;
       act(() => render());
     },
+    setExpanded(next: boolean) {
+      currentExpanded = next;
+      act(() => render());
+    },
     switchSession(
       nextSessionId: string | undefined,
       nextWorkspaceCwd: string | undefined,
       nextAttachmentsEnabled = currentAttachmentsEnabled,
     ) {
+      if (nextSessionId !== currentSessionId) {
+        currentFollowupState = undefined;
+      }
       currentSessionId = nextSessionId;
       currentWorkspaceCwd = nextWorkspaceCwd;
       currentAttachmentsEnabled = nextAttachmentsEnabled;
@@ -284,6 +308,138 @@ describe('useComposerCore mobile textarea backend', () => {
     expect(latest!.mobileComposer).not.toBeNull();
     expect(container!.querySelector('textarea')).not.toBeNull();
     expect(document.querySelector('.cm-editor')).toBeNull();
+  });
+
+  describe('slash command authorization', () => {
+    it('first Send fills an empty slash suggestion without submitting', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn(() => {
+        act(() => latest!.insertText('/clear'));
+      });
+      await mount({
+        sessionId: 'command-empty',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+
+      await act(async () => latest!.submitText());
+
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onAcceptFollowup).toHaveBeenCalledWith('tab');
+      expect(latest!.mobileComposer!.value).toBe('/clear');
+      await act(async () => latest!.submitText());
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+    });
+
+    it('replaces a slash-prefix draft rather than appending the completion', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn(() => {
+        act(() => latest!.insertText('/clear'));
+      });
+      await mount({
+        sessionId: 'command-prefix',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      typeText('/cl');
+      const textarea = container!.querySelector('textarea')!;
+      textarea.focus();
+      textarea.setSelectionRange(3, 3);
+
+      await act(async () => latest!.submitText());
+
+      expect(latest!.mobileComposer!.value).toBe('/clear');
+      expect(textarea.value).toBe('/clear');
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onAcceptFollowup).toHaveBeenCalledWith('tab');
+      await act(async () => latest!.submitText());
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+    });
+
+    it('does not turn an exactly typed slash command into another accept', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn();
+      await mount({
+        sessionId: 'command-exact',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      typeText('/clear');
+
+      await act(async () => latest!.submitText());
+
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+      expect(onAcceptFollowup).not.toHaveBeenCalledWith('tab');
+    });
+
+    it('keeps ordinary prose completion on the one-Send fast path', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      await mount({
+        sessionId: 'command-prose',
+        onSubmit,
+        followupState: {
+          suggestion: 'run the tests',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      typeText('run');
+
+      await act(async () => latest!.submitText());
+
+      expect(onSubmit).toHaveBeenCalledOnce();
+      expect(onSubmit.mock.calls[0][0]).toBe('run the tests');
+    });
+
+    it('does not carry a suggested command acceptance across sessions', async () => {
+      mockTouchDevice();
+      const onSubmit = vi.fn();
+      const onAcceptFollowup = vi.fn(() => {
+        act(() => latest!.insertText('/clear'));
+      });
+      const controller = await mount({
+        sessionId: 'command-session-a',
+        onSubmit,
+        onAcceptFollowup,
+        followupState: {
+          suggestion: '/clear',
+          isVisible: true,
+          shownAt: 0,
+        },
+      });
+      await act(async () => latest!.submitText());
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      controller.switchSession('command-session-b', '/workspace/b');
+
+      expect(latest!.mobileComposer!.value).toBe('');
+      expect(onSubmit).not.toHaveBeenCalled();
+      await act(async () => latest!.submitText());
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(onAcceptFollowup).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('keeps selected-file metadata through a mobile draft remount', async () => {
@@ -1388,5 +1544,358 @@ describe('mobile composer prepareSubmit gate', () => {
     // The textarea draft outlives the view ref on mobile, so only the
     // mounted guard can stop this submit.
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+});
+
+describe('touch editing-row keys', () => {
+  function textarea() {
+    return container!.querySelector('textarea')!;
+  }
+
+  it('steps whole graphemes and keeps emoji intact when inserting slash', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('A😀B');
+    textarea().setSelectionRange(1, 1);
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(3);
+    act(() => latest!.pressEditingKey('slash'));
+    expect(latest!.mobileComposer!.value).toBe('A😀/B');
+  });
+
+  it('moves the caret on an exact-match draft instead of re-accepting', async () => {
+    mockTouchDevice();
+    const onAcceptFollowup = vi.fn();
+    await mount({
+      followupState: { suggestion: 'continue', isVisible: true, shownAt: 0 },
+      onAcceptFollowup,
+    });
+    typeText('continue');
+    textarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(4);
+    expect(latest!.mobileComposer!.value).toBe('continue');
+    expect(onAcceptFollowup).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a typed prefix through the right key', async () => {
+    mockTouchDevice();
+    const onAcceptFollowup = vi.fn();
+    await mount({
+      followupState: { suggestion: 'continue', isVisible: true, shownAt: 0 },
+      onAcceptFollowup,
+    });
+    typeText('cont');
+    textarea().setSelectionRange(4, 4);
+    act(() => latest!.pressEditingKey('right'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(latest!.mobileComposer!.value).toBe('continue');
+    expect(textarea().selectionStart).toBe(8);
+    expect(onAcceptFollowup).toHaveBeenCalledWith('right', {
+      skipOnAccept: true,
+    });
+  });
+
+  it('moves from the active end of a backward selection', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('aa\nbbb\ncc');
+    const el = textarea();
+    el.setSelectionRange(1, 5, 'backward');
+    act(() => latest!.pressEditingKey('up'));
+    expect([el.selectionStart, el.selectionEnd]).toEqual([0, 0]);
+
+    el.setSelectionRange(1, 5, 'backward');
+    el.dispatchEvent(new Event('select', { bubbles: true }));
+    act(() => latest!.pressEditingKey('down'));
+    expect([el.selectionStart, el.selectionEnd]).toEqual([4, 4]);
+  });
+
+  it('does nothing while an IME composition is active', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abcd');
+    textarea().setSelectionRange(2, 2);
+    act(() => latest!.setComposing(true));
+    act(() => {
+      latest!.pressEditingKey('up');
+      latest!.pressEditingKey('right');
+      latest!.pressEditingKey('slash');
+    });
+    expect(latest!.mobileComposer!.value).toBe('abcd');
+    expect(textarea().selectionStart).toBe(2);
+    act(() => latest!.setComposing(false));
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(3);
+  });
+
+  it('resets the preferred column on selection in the expanded textarea', async () => {
+    mockTouchDevice();
+    await mount({ expanded: true });
+    typeText('aaaa\nbb\ncccc');
+    const el = document.querySelector<HTMLTextAreaElement>(
+      'textarea[data-expanded]',
+    )!;
+    el.setSelectionRange(12, 12);
+    act(() => latest!.pressEditingKey('up'));
+    expect(el.selectionStart).toBe(7);
+    el.setSelectionRange(6, 6);
+    document.dispatchEvent(new Event('selectionchange'));
+    act(() => latest!.pressEditingKey('up'));
+    expect(el.selectionStart).toBe(1);
+  });
+
+  it('holds the preferred column across a vertical run until reset', async () => {
+    mockTouchDevice();
+    await mount();
+    const draft = 'aaaa\nbb\ncccc';
+    typeText(draft);
+    textarea().setSelectionRange(12, 12);
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(4);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(12);
+
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => {
+      textarea().setSelectionRange(10, 10);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    act(() => latest!.pressEditingKey('up'));
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(2);
+
+    act(() => latest!.pressEditingKey('down'));
+    typeText(draft);
+    textarea().setSelectionRange(7, 7);
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(2);
+  });
+
+  it('uses the current layout after the textarea width changes', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('a'.repeat(24));
+    const el = textarea();
+    el.style.border = '0';
+    let width = 300;
+    Object.defineProperty(el, 'clientWidth', {
+      configurable: true,
+      get: () => width,
+    });
+    const rectSpy = vi
+      .spyOn(Range.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: Range) {
+        const mirrorWidth = Number.parseInt(
+          this.startContainer.parentElement?.style.width ?? '300',
+          10,
+        );
+        // Eight graphemes per row at the first width, three after reflow.
+        const columns = mirrorWidth > 200 ? 8 : 3;
+        return {
+          top: Math.floor(this.startOffset / columns) * 10,
+        } as DOMRect;
+      });
+    try {
+      el.setSelectionRange(15, 15);
+      act(() => latest!.pressEditingKey('down'));
+      expect(el.selectionStart).toBe(23);
+      width = 150;
+      act(() => latest!.pressEditingKey('down'));
+      expect(el.selectionStart).toBe(24);
+      expect(
+        document.querySelector<HTMLElement>('[data-web-shell-caret-mirror]')!
+          .style.width,
+      ).toBe('150px');
+      act(() => {
+        el.setSelectionRange(12, 12);
+        document.dispatchEvent(new Event('selectionchange'));
+      });
+      act(() => latest!.pressEditingKey('up'));
+      expect(el.selectionStart).toBe(9);
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it('discards the measurement mirror when the composer unmounts', async () => {
+    mockTouchDevice();
+    await mount();
+    Object.defineProperty(textarea(), 'clientWidth', {
+      value: 300,
+      configurable: true,
+    });
+    act(() => latest!.pressEditingKey('up'));
+    const mirrors = () =>
+      document.querySelectorAll('[data-web-shell-caret-mirror]').length;
+    expect(mirrors()).toBe(1);
+    act(() => root?.unmount());
+    expect(mirrors()).toBe(0);
+    root = null;
+  });
+
+  it('keeps both textarea .current views live across expand and detach', async () => {
+    mockTouchDevice();
+    const composer = await mount({ expanded: true });
+    typeText('abc');
+    const expanded = () =>
+      document.querySelector<HTMLTextAreaElement>('textarea[data-expanded]')!;
+    expect(latest!.mobileComposer!.textareaRef.current).toBe(textarea());
+    expect(latest!.mobileComposer!.expandedTextareaRef.current).toBe(
+      expanded(),
+    );
+    const first = expanded();
+    composer.setExpanded(false);
+    expect(latest!.mobileComposer!.expandedTextareaRef.current).toBeNull();
+    expect(latest!.mobileComposer!.textareaRef.current).toBe(textarea());
+    composer.setExpanded(true);
+    const reopened = expanded();
+    expect(reopened).not.toBe(first);
+    expect(latest!.mobileComposer!.expandedTextareaRef.current).toBe(reopened);
+  });
+
+  it('drops a detached expanded textarea mirror without unmounting the hook', async () => {
+    mockTouchDevice();
+    const composer = await mount({ expanded: true });
+    typeText('abc\ndef');
+    const expandedTextarea = () =>
+      document.querySelector<HTMLTextAreaElement>('textarea[data-expanded]')!;
+    Object.defineProperty(expandedTextarea(), 'clientWidth', {
+      value: 300,
+      configurable: true,
+    });
+    expandedTextarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    const mirrors = () =>
+      document.querySelectorAll('[data-web-shell-caret-mirror]').length;
+    expect(mirrors()).toBe(1);
+    composer.setExpanded(false);
+    expect(mirrors()).toBe(0);
+    composer.setExpanded(true);
+    Object.defineProperty(expandedTextarea(), 'clientWidth', {
+      value: 300,
+      configurable: true,
+    });
+    expandedTextarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    expect(mirrors()).toBe(1);
+  });
+
+  it('recomputes the column after a horizontal move instead of writing it back', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abc\ndef');
+    textarea().setSelectionRange(1, 1);
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(2);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(6);
+  });
+
+  it('restarts vertical navigation from the caret after moving right', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abc\ndef\nghi\njkl');
+    textarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => latest!.pressEditingKey('right'));
+    expect(textarea().selectionStart).toBe(8);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(12);
+  });
+
+  it('restarts vertical navigation from the caret after inserting slash', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('abc\ndef\nghi\njkl');
+    textarea().setSelectionRange(3, 3);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => latest!.pressEditingKey('slash'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(textarea().selectionStart).toBe(8);
+    act(() => latest!.pressEditingKey('down'));
+    expect(textarea().selectionStart).toBe(12);
+  });
+
+  it('resets both vertical coordinates when a draft edit occurs', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('aaaa\nbb\ncccc');
+    // Isolate setText's atomic reset from the separate onSelect jump reset.
+    const selectReset = vi
+      .spyOn(latest!, 'resetVerticalColumn')
+      .mockImplementation(() => undefined);
+    try {
+      textarea().setSelectionRange(12, 12);
+      act(() => latest!.pressEditingKey('up'));
+      expect(textarea().selectionStart).toBe(7);
+      act(() => latest!.pressEditingKey('down'));
+      expect(textarea().selectionStart).toBe(12);
+      act(() => latest!.setText('aaaa\nbbbbbb\nx'));
+      textarea().setSelectionRange(13, 13);
+      act(() => latest!.pressEditingKey('up'));
+      expect(textarea().selectionStart).toBe(6);
+      act(() => latest!.pressEditingKey('down'));
+      expect(textarea().selectionStart).toBe(13);
+    } finally {
+      selectReset.mockRestore();
+    }
+  });
+
+  it('resets the held column when the user jumps the selection', async () => {
+    mockTouchDevice();
+    await mount();
+    typeText('aaaa\nbb\ncccc');
+    textarea().setSelectionRange(12, 12);
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(7);
+    act(() => {
+      textarea().setSelectionRange(9, 9);
+      document.dispatchEvent(new Event('selectionchange'));
+    });
+    act(() => latest!.pressEditingKey('up'));
+    expect(textarea().selectionStart).toBe(6);
+  });
+
+  it('scrolls the caret back into the capped scrollport on vertical runs', async () => {
+    mockTouchDevice();
+    await mount();
+    const draft = Array.from({ length: 40 }, (_, i) => `line ${i}`).join('\n');
+    typeText(draft);
+    const el = textarea();
+    const originalStyle = window.getComputedStyle.bind(window);
+    const styleSpy = vi
+      .spyOn(window, 'getComputedStyle')
+      .mockImplementation((element) =>
+        element instanceof HTMLTextAreaElement
+          ? ({
+              lineHeight: '25px',
+              fontSize: '16px',
+              paddingTop: '0px',
+            } as unknown as CSSStyleDeclaration)
+          : originalStyle(element),
+      );
+    Object.defineProperty(el, 'clientHeight', {
+      value: 300,
+      configurable: true,
+    });
+    el.scrollTop = 700;
+    el.setSelectionRange(draft.length, draft.length);
+    act(() => {
+      for (let i = 0; i < 15; i += 1) latest!.pressEditingKey('up');
+    });
+    expect(el.scrollTop).toBe(600);
+    styleSpy.mockRestore();
   });
 });
