@@ -274,7 +274,7 @@ seal 超时不能证明操作没有发生。租约仍有效时，使用相同 Ha
 
 ## 第四阶段：审批停靠
 
-只定义边界。
+只定义边界。实现前设计见[审批停靠](2026-11-21-managed-action-parking.zh-CN.md)；它经 G3 第三步的审批续跑 driver 恢复 Turn，而不是下文所说的 Managed Runtime continue 路径。
 
 - **现状。** 等待工具审批的 Turn 一直在 Harness 中运行，由 `HostedApprovalWaiters` 挂住，尽管 checkpoint 已经记录了 `await_action` 阶段。
 - **目标。** Turn 停在 `await_action`，本次请求结束。审批结果通过现有的 Managed Runtime continue 路径在任意池成员上恢复这个 Turn。
