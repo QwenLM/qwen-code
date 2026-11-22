@@ -47,7 +47,6 @@ interface SessionDetailsTooltipProps {
   workspaceLabel?: string;
   details?: ReactNode;
   openOnClick?: boolean;
-  hoverSuppressed?: boolean;
   ownerToken?: string;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -64,7 +63,6 @@ export function SessionDetailsTooltip({
   workspaceLabel,
   details,
   openOnClick = false,
-  hoverSuppressed = false,
   ownerToken,
   open: controlledOpen,
   onOpenChange,
@@ -87,8 +85,7 @@ export function SessionDetailsTooltip({
   const contentRef = useRef<HTMLDivElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement>(null);
   const restoreFocusRef = useRef(false);
-  const sidebarSuppressed = useContext(SidebarHoverSuppressionContext);
-  const hoverSuppressionActive = hoverSuppressed || sidebarSuppressed;
+  const hoverSuppressionActive = useContext(SidebarHoverSuppressionContext);
   const hoverSuppressedRef = useRef(hoverSuppressionActive);
   hoverSuppressedRef.current = hoverSuppressionActive;
   // The overview shares one token so its own entry points replace each

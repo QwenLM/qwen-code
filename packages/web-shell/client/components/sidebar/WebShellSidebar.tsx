@@ -5675,7 +5675,6 @@ export function WebShellSidebar({
               label={label}
               time={time}
               completedUnread={completedUnread}
-              hoverSuppressed={sessionMenuOpen || groupMenu !== null}
               // The starting spinner outranks the run dots, not the
               // actionable approval/question cues.
               statusLabel={
@@ -6568,8 +6567,6 @@ export function WebShellSidebar({
       handleRenameFromMenu,
       handleSessionMenuCloseAutoFocus,
       handleSessionMenuOpenChange,
-      sessionMenuOpen,
-      groupMenu,
       handleSessionMenuPointerDownOutside,
       handleTogglePin,
       handleUnarchive,

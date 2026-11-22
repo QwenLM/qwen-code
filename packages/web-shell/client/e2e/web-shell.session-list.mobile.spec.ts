@@ -23,11 +23,15 @@ function expectWrappedMetadataLayout(
 ): void {
   expect(more.height, label).toBeCloseTo(26, 1);
   for (const box of [...boxes, more]) {
-    expect(box.x, label).toBeGreaterThanOrEqual(row.x - 0.5);
+    expect(box.x, label).toBeGreaterThanOrEqual(
+      row.x - BROWSER_LAYOUT_TOLERANCE_PX,
+    );
     expect(box.x + box.width, label).toBeLessThanOrEqual(
       row.x + row.width + BROWSER_LAYOUT_TOLERANCE_PX,
     );
-    expect(box.y, label).toBeGreaterThanOrEqual(row.y - 0.5);
+    expect(box.y, label).toBeGreaterThanOrEqual(
+      row.y - BROWSER_LAYOUT_TOLERANCE_PX,
+    );
     expect(box.y + box.height, label).toBeLessThanOrEqual(
       row.y + row.height + BROWSER_LAYOUT_TOLERANCE_PX,
     );

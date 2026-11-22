@@ -15,6 +15,7 @@ import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { Button } from '../ui/button';
 import { WebShellPortalRootContext } from '../../portalRoot';
 import styles from '../SessionPrStateIcon.module.css';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 
 const popoverContentProps = vi.hoisted(() => vi.fn());
 vi.mock('../ui/popover', async (importOriginal) => {
@@ -888,19 +889,20 @@ describe('SessionDetailsTooltip', () => {
       await act(async () =>
         root.render(
           <I18nProvider language="en">
-            <SessionDetailsTooltip
-              session={{
-                sessionId: 'hover-suppression',
-                workspaceCwd: '/workspace',
-              }}
-              label="Session"
-              time=""
-              completedUnread={false}
-              hoverSuppressed={suppressed}
-              openOnClick={clickTriggered}
-            >
-              <button type="button">Session row</button>
-            </SessionDetailsTooltip>
+            <SidebarHoverSuppressionContext.Provider value={suppressed}>
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'hover-suppression',
+                  workspaceCwd: '/workspace',
+                }}
+                label="Session"
+                time=""
+                completedUnread={false}
+                openOnClick={clickTriggered}
+              >
+                <button type="button">Session row</button>
+              </SessionDetailsTooltip>
+            </SidebarHoverSuppressionContext.Provider>
           </I18nProvider>,
         ),
       );
