@@ -15571,6 +15571,10 @@ describe('Hosted Harness no-tool session', () => {
       },
     );
     vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'listStagedDeliveries',
+    ).mockResolvedValue([]);
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),

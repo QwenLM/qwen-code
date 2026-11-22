@@ -15,10 +15,13 @@ daemon 主列切换（2f）无法作为单个行为不变的改动落地：主�
 composer props 都超出当前 `SessionChatController` 契约。因此切换是一个多增量工程。
 本首个增量关闭明确延后到它的两项，使后续切换不会回归它们：
 
-- **R5-1——会话作用域准入锁。** `ChatSurface` 的在飞提交闩与 unknown 准入载荷锁
-  原本是无会话归属的组件级状态；陈旧锁可能阻塞下一会话的 composer。
-- **`loadOlder` 绑定。** daemon 绑定此前未绑定契约的可选 `loadOlder` 能力
-  （slice-2d 遗留），依赖 `controller.loadOlder` 的表面会静默丢失更早历史分页。
+- **R5-1——会话作用域准入锁与停止错误。** `ChatSurface` 的在飞提交闩、unknown 准入载荷锁
+  以及 `onCancel` 错误上报原本是无会话归属的组件级状态/回调；陈旧锁或迟到结算可能阻塞下一会
+  话的 composer 或在下一会话报错。
+- **历史分页状态事实与 `loadOlder` 绑定。** daemon 绑定此前未绑定契约的可选 `loadOlder`
+  能力与四项分页状态标志（`hasOlderHistory`、`loadingOlderHistory`、
+  `historyCapacityReached`、`historyPaginationError`），仅依赖控制器的表面会静默丢失更早
+  历史分页与重试状态。
 
 本增量是加法的：尚无生产列经 `ChatSurface` 渲染，故其本身不改变任何可观察行为。
 带视觉前后对比门的主列切换仍是 2f 的其余部分。
@@ -53,7 +56,26 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
   `commitAccepted` 本身已按身份作用域（`sourceChanged` 时只清除提交方草稿 key 并按提交
   方 key 写入历史，不触碰当前活动会话），因此 `.then` 在陈旧归属返回之前先对
   `result.admission === 'accepted'` 调用 `commitAccepted?.()`。若非活动的已暂存会话的
-  提交以 `unknown` 结算，其暂存条目记录 `admissionLocked = true` 而不打扰当前活动会话。
+  提交以 `unknown`（而非 `rejected`）结算，其暂存条目记录 `admissionLocked = true` 而不打
+  扰当前活动会话。
+- **停止结算错误留在发起会话与对应回合上（针对已入控制器队列的回合）。**
+  `SessionChatController` 暴露可选的 `activeTurnId?: string`（`createDaemonChatController`
+  从 `livePromptQueue[0]` 实时投影，`useDaemonChatController` 按持久会话维护已准入队列
+  并在控制器重建时去重注入 `livePromptIds`，使持久会话 `A -> B -> A` 往返保留
+  `activeTurnId`），`cancel()` 将派发时的目标回合写入返回的 `IntentResult.target.turnId`
+  副本（`controller.operations` 有意保持裸 `{ sessionId }` 目标，使 `retainOperations`
+  维持按会话有界保留而非按回合增长）。`onCancel` 读取在 `useLayoutEffect` 中更新的提交期
+  ref（`committedSessionIdRef`、`committedTokenRef`、`committedControllerRef` 与
+  `mountedRef`），使切换渲染被挂起/丢弃期间结算的取消仍对照当前已提交在屏会话判定，且组件
+  卸载后保持静默。仅当组件仍挂载、会话匹配（持久会话比
+  `committedSessionIdRef.current === cancelSessionId`，未分配 `''` 聊天比
+  `committedTokenRef.current === token`——任何 `'' -> id` 转换含提交中途分配均视为切换并
+  保持静默，与提交闩规则一致），且未绑定目标回合（`targetTurnId === undefined`，例如在
+  `submitting` 准入前按下停止）或 `committedControllerRef.current.activeTurnId === targetTurnId`
+  （`targetTurnId = result.target?.turnId ?? cancelTurnId`）时才上报
+  `chat.stopNotConfirmed`。对于目标回合在控制器队列中的 cancel，旧回合 `T1` 迟到的失败
+  不会把无回合限定的警告错报到新回合 `T2`（或空闲会话）；被抑制的 `IntentResult` 当前直接
+  丢弃，`ChatSurface` 尚无按回合归因的历史通知存储。
 
 切换同时更新 ref 与 state 两半；只更新其一会留下「可见但可派发」或「不可见但被阻塞」
 的 composer。这镜像了 `App` 与 `ChatPane` 已有的会话归属准入状态
@@ -61,13 +83,16 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
 
 ### 历史分页绑定
 
-`useDaemonChatController` 现在读取 `useDaemonTranscriptHistory()`，并把契约的
-`loadOlder(options?: { force?: boolean })` 绑定到其 `loadMore(options)`。控制器按会话
-构造一次，因此绑定经由每次渲染更新的 ref 读取历史句柄
-（`transcriptHistoryRef.current.loadMore(options)`），绝不钉死陈旧句柄，并在转录的分页
-错误重试按钮调用该绑定能力时转发 `{ force: true }`。历史分页是 provider 能力而非意图：
-它不走准入/结算引擎。`ChatSurface` 仍优先使用页面提供的 `onLoadOlderHistory` 而非
-`controller.loadOlder`，同时依赖该绑定能力的表面获得完整的重试 parity。
+`SessionChatController` 与 `DaemonChatControllerDeps` 现与
+`loadOlder(options?: { force?: boolean })` 一并暴露四项分页状态标志
+（`hasOlderHistory`、`loadingOlderHistory`、`historyCapacityReached`、
+`historyPaginationError`）。`useDaemonChatController` 读取
+`useDaemonTranscriptHistory()`，经由 `factsRef.current` 响应式投影 `hasMore`、
+`loading`、`capacityReached` 与 `paginationError`，并把 `loadOlder` 绑定到
+`transcriptHistoryRef.current.loadMore(options)`，使会话稳定的控制器绝不钉死挂载时的历史
+状态或陈旧加载器句柄，且在分页错误重试时转发 `{ force: true }`。`ChatSurface` 将
+`<TranscriptViewport />` 的每项分页 prop 默认回退到控制器的绑定事实或加载器
+（`prop ?? controller.prop`），同时允许所属页面显式覆盖任一属性。
 
 ## 设计决策与理由
 
@@ -80,9 +105,10 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
   话阻塞，又在往返切换（`A -> B -> A`）间保留归属会话的在飞与 unknown 准入锁。在非活动
   期间，accepted 提交仍 commit 其自身身份作用域的草稿，unknown 提交武装其暂存的
   `admissionLocked`，而任何错误与闩更新对当前活动会话均空操作。
-- **`loadOlder` 按调用读取并转发 `options`。** 会话稳定的控制器不得捕获首次渲染的历史
-  句柄，且转发 `{ force?: boolean }` 确保分页错误重试在绑定控制器能力路径与页面直接回调
-  路径上都能正常工作。
+- **`loadOlder` 与分页事实每次访问实时读取。** 会话稳定的控制器不得捕获首次渲染的历史句柄或
+  标志；ref 读取保持加载器与标志为最新，`ChatSurface` 经 `??` 回退到它们，且转发
+  `{ force?: boolean }` 确保分页错误重试在绑定控制器能力路径与页面直接回调路径上都能正常工
+  作。
 
 ## 遵守的约束
 
@@ -93,15 +119,13 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
 
 ## 验证
 
-- `ChatSurface` 套件新增六个会话作用域用例：准入锁在会话切换时清除（包括从已锁定新
-  聊天侧边栏切换出去的空闲 `'' -> id` 以及再回到全新 `''` 聊天）、首次提交在飞期间从未分
-  配新聊天切到已有会话时清除在飞闩并忽略已放弃的 `unknown` 结算、已分配会话之间的切换清除
-  在飞闩（且非活动结算不会清除新会话自身的在飞闩）、切换后的 accepted 结算仍提交发起会话的
-  草稿同时拒绝结算对新会话保持静默、往返切换（`A -> B -> A`）恢复准入锁（包括暂存期间以
-  `unknown` 结算的场景）与在飞提交闩、以及切换渲染在提交前被丢弃（经 `<Suspense>`）时重试
-  与切回原会话均保留已暂存的在飞闩。在各命名变异下验证转红并逐字节还原。
-- 绑定套件新增 `loadOlder`（含 `{ force: true }` 转发与每次渲染历史句柄刷新）用例，在其
-  命名变异下验证转红并逐字节还原。
+- `ChatSurface` 套件覆盖会话作用域提交闩、unknown 准入锁（含暂存期间 `unknown` 与
+  `rejected` 结算的区分）、被丢弃的 `<Suspense>` 切换渲染、会话作用域 `onCancel` 错误上报
+  （跨切换、持久会话往返及已放弃未分配新聊天）、以及控制器默认历史分页标志与显式 `false`
+  覆盖。在各命名变异下验证转红并逐字节还原。
+- 控制器与绑定套件覆盖实时 `hasOlderHistory`、`loadingOlderHistory`、
+  `historyCapacityReached`、`historyPaginationError` 与 `loadOlder`（含 `{ force: true }`
+  转发与每次渲染历史句柄刷新），在其命名变异下验证转红并逐字节还原。
 - 全套迁移套件绿；web-shell 两个类型项目（`tsconfig.lib.json`、`tsconfig.json`）
   均退出 0；ESLint 与 Prettier 干净。
 
@@ -109,6 +133,11 @@ composer props 都超出当前 `SessionChatController` 契约。因此切换是�
 
 - **主列切换本身 + 视觉前后对比门。** 需要经契约或槽位承载流式尾部投影、提交编排
   与富 composer 面；多增量工程。
+- **挂载前 / 刷新后 / 其他客户端运行中回合种子，以及按回合归因的历史停止通知面。**
+  `useDaemonChatController` 仅跟踪本 hook 实例准入的回合（`livePromptsBySessionRef`）；
+  挂载前已在运行的回合（页面刷新后或其他客户端发起）在 provider 暴露服务端活跃回合 id 之
+  前不会进入 `livePromptQueue`，而被抑制的过期停止失败在通知/操作收敛切片落地前直接丢弃，
+  不写入历史回合通知流。
 - **状态栈 / 用量统计 parity（slice 5）**，待 `statusFacts` 承载完整排队提示与
   goal 事实。
 - **Managed 适配器（slice 3）** 与 **ChatPane 收敛（slice 4）**。

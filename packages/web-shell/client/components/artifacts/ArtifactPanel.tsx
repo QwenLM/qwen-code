@@ -97,6 +97,7 @@ import {
 import taskStyles from '../dialogs/ScheduledTasksDialog.module.css';
 import {
   artifactKindLabel,
+  canPreviewWorkspaceArtifact,
   downloadWorkspaceFile,
   formatArtifactSize,
   getArtifactFreshnessKey,
@@ -104,10 +105,13 @@ import {
   getArtifactImageMimeType,
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
+  isAutomationSnapshotArtifact,
+  isCodeReviewArtifact,
   isDownloadOnlyWorkspaceArtifact,
   isDocxFile,
   isExcelFile,
   isPdfArtifact,
+  isWebPreviewSnapshotArtifact,
   MAX_WORKSPACE_FILE_BLOB_BYTES,
   normalizeArtifactMimeType,
   normalizePath,
@@ -3488,31 +3492,35 @@ function fileExtensionLabel(value: string) {
   return labels[extension] ?? extension.slice(0, 3).toUpperCase();
 }
 
-function ArtifactDetail({
+export function ArtifactDetail({
   artifact,
   sourceSessionId,
   workspaceActions,
   previewContent,
+  onSnapshotSessionNotFound,
 }: {
   artifact: DaemonSessionArtifact;
   sourceSessionId?: string;
   workspaceActions: ArtifactWorkspaceActions;
   previewContent?: string;
+  onSnapshotSessionNotFound?: () => void;
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
   const location = getArtifactLocation(artifact);
   const safeUrl = isSafeHref(artifact.url) ? artifact.url : undefined;
-  const isAutomationSnapshot =
-    artifact.metadata?.['artifactType'] === 'automation_snapshot';
-  const isCodeReview = artifact.metadata?.['artifactType'] === 'code_review';
-  const canPreviewWorkspaceFile =
-    artifact.storage === 'workspace' && Boolean(artifact.workspacePath);
+  const isAutomationSnapshot = isAutomationSnapshotArtifact(artifact);
+  const isCodeReview = isCodeReviewArtifact(artifact);
+  const canPreviewWorkspaceFile = canPreviewWorkspaceArtifact(artifact);
   const imageMimeType = getArtifactImageMimeType(artifact);
 
-  if (artifact.metadata?.['artifactType'] === 'web_preview_snapshot') {
+  if (isWebPreviewSnapshotArtifact(artifact)) {
     return (
-      <SavedWebPreview artifact={artifact} sourceSessionId={sourceSessionId} />
+      <SavedWebPreview
+        artifact={artifact}
+        sourceSessionId={sourceSessionId}
+        onSessionNotFound={onSnapshotSessionNotFound}
+      />
     );
   }
 

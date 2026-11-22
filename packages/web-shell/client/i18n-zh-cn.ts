@@ -23,6 +23,7 @@ import { MANAGED_TASK_MESSAGES_ZH } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_ZH } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_ZH } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_ZH } from './components/managed/managed-mcp-messages.js';
 import type { Messages, MessageValue } from './i18n.js';
 import { WEB_SHELL_LANGUAGES } from './i18n-language.js';
@@ -5131,6 +5132,7 @@ export const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...ARTIFACT_LIBRARY_MESSAGES_ZH,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
   ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,

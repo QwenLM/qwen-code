@@ -2601,6 +2601,52 @@ export interface DaemonSessionArtifactsEnvelope {
   warningDetails?: DaemonSessionArtifactWarningDetail[];
 }
 
+export interface DaemonArtifactLibrarySessionMetadata {
+  displayName?: string;
+  createdAt: string;
+  archiveState: 'active' | 'archived';
+  sourceType: string;
+  sourceId?: string;
+}
+
+export interface DaemonArtifactLibrarySessionEnvelope
+  extends DaemonSessionArtifactsEnvelope {
+  session: DaemonArtifactLibrarySessionMetadata;
+}
+
+export interface DaemonArtifactLibraryMemberError {
+  sessionId: string;
+  status: number;
+  code: string;
+  message: string;
+}
+
+export interface DaemonWorkspaceArtifactLibraryResult {
+  v: 1;
+  sessions: DaemonArtifactLibrarySessionEnvelope[];
+  errors: DaemonArtifactLibraryMemberError[];
+}
+
+export type DaemonWorkspaceArtifactLibraryStreamEvent =
+  | { type: 'start'; v: 1; total: number }
+  | ({ type: 'session' } & DaemonArtifactLibrarySessionEnvelope)
+  | ({ type: 'session_error'; v: 1 } & DaemonArtifactLibraryMemberError)
+  | {
+      type: 'complete';
+      v: 1;
+      total: number;
+      succeeded: number;
+      failed: number;
+      skipped: number;
+    }
+  | {
+      type: 'error';
+      v: 1;
+      status: number;
+      code: string;
+      message: string;
+    };
+
 export interface DaemonSessionArtifactMutationResult {
   v: 1;
   sessionId: string;
