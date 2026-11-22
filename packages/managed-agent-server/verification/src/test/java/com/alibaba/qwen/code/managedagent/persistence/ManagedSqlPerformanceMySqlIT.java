@@ -69,7 +69,7 @@ class ManagedSqlPerformanceMySqlIT {
             + " VALUES (?, 'workspace', 'ledger', 'automation_run', ?, 1, ?, 'automation_run', ?, ?)";
     private static final String EVENT_INSERT = "INSERT INTO ma_public_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id, event_type, data_json,"
-            + " is_terminal, gmt_create, stream_kind, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'SESSION', X'')";
+            + " is_terminal, gmt_create, stream_kind, stream_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 'SESSION', '')";
     private static final String OPERATION_INSERT = "INSERT INTO ma_operation"
             + " (operation_ref, scope_kind, scope_id, tenant_id, session_id, operation_id,"
             + " operation_kind, target_kind, target_id, request_digest, request_json, state, phase,"
@@ -493,7 +493,7 @@ class ManagedSqlPerformanceMySqlIT {
                 + " status, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, '[]', 'digest', 'RUNNING', ?, ?)", turns);
         jdbc.batchUpdate(EVENT_INSERT, events);
         jdbc.batchUpdate("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, gmt_modified)"
-                + " VALUES (?, ?, 'SESSION', X'', ?, ?)", List.of(
+                + " VALUES (?, ?, 'SESSION', '', ?, ?)", List.of(
                         new Object[] {TENANT, "turn-a", size + 7, NOW}, new Object[] {TENANT, "turn-b", size + 7, NOW},
                         new Object[] {TENANT, "turn-dry", 1, NOW}, new Object[] {TENANT, "turn-none", 0, NOW}));
         for (int from = 0; from < size; from += BATCH) {

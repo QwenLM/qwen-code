@@ -345,7 +345,7 @@ public class JdbcManagedToolResultStore
                                                 + " s.status, e.last_sequence FROM ma_session s"
                                                 + " JOIN ma_event_stream e ON e.tenant_id ="
                                                 + " s.tenant_id AND e.session_id = s.session_id AND"
-                                                + " e.stream_kind = 'SESSION' AND e.stream_id = X''"
+                                                + " e.stream_kind = 'SESSION' AND e.stream_id = ''"
                                                 + " WHERE s.tenant_id = ? AND s.session_id = ? FOR"
                                                 + " UPDATE",
                                             (schemaRow, schemaIndex) ->

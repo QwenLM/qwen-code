@@ -1092,7 +1092,7 @@ class HostedMonitorRunFaultGatesIT {
         // streamed.
         Integer events = jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind ="
-                        + " 'SESSION' AND stream_id = X'' AND tenant_id = ?"
+                        + " 'SESSION' AND stream_id = '' AND tenant_id = ?"
                         + " AND session_id = ?", Integer.class, tenant,
                 sessionId);
         assertThat(events).as(name + " projected events").isNotNull();

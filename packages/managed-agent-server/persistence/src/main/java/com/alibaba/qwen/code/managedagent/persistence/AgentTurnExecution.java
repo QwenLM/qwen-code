@@ -421,13 +421,13 @@ final class AgentTurnExecution {
         }
         jdbc.queryForObject("SELECT covered_sequence FROM"
                         + " ma_event_stream WHERE tenant_id"
-                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " FOR UPDATE",
                 Long.class, tenantId, sessionId);
         List<EventRecord> deltas =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND turn_id = ? AND"
                             + " event_type IN ('item.output_text.delta', 'item.reasoning.delta')"
                             + " ORDER BY sequence_id ASC",
                         eventJournal.eventMapper,
@@ -444,7 +444,7 @@ final class AgentTurnExecution {
             data.put("text", "");
             jdbc.update(
                     "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND session_id ="
-                        + " ? AND stream_kind = 'SESSION' AND stream_id = X'' AND sequence_id = ?",
+                        + " ? AND stream_kind = 'SESSION' AND stream_id = '' AND sequence_id = ?",
                     storeRows.writeJson(data),
                     tenantId,
                     sessionId,
@@ -496,7 +496,7 @@ final class AgentTurnExecution {
         if (!eventJournal.hasSourceEvent(tenantId, sessionId, reconciliationKey)) {
             jdbc.queryForObject(
                     "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                        + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                         + " UPDATE",
                     Long.class,
                     tenantId,
@@ -504,7 +504,7 @@ final class AgentTurnExecution {
             List<EventRecord> deltas =
                     jdbc.query(
                             "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                                + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                                + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                                 + " turn_id = ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta') ORDER BY sequence_id ASC",
                             eventJournal.eventMapper,
@@ -523,7 +523,7 @@ final class AgentTurnExecution {
                 data.put("text", "");
                 jdbc.update(
                         "UPDATE ma_public_event SET data_json = ? WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' AND"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' AND"
                             + " sequence_id = ?",
                         storeRows.writeJson(data),
                         tenantId,

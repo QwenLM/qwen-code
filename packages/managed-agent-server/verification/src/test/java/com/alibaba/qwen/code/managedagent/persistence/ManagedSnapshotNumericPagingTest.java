@@ -76,7 +76,7 @@ class ManagedSnapshotNumericPagingTest {
                 fixture.jdbc.update("UPDATE ma_message SET item_status='retracted'"
                         + " WHERE tenant_id=? AND session_id=? AND item_id=?", "tenant", "session", id(203));
                 fixture.jdbc.update("UPDATE ma_event_stream SET projection_version=projection_version+1"
-                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''",
+                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''",
                         "tenant", "session");
                 fixture.project();
             });
@@ -141,7 +141,7 @@ class ManagedSnapshotNumericPagingTest {
                 fixture.jdbc.update("UPDATE ma_message SET item_status='retracted' WHERE tenant_id=? AND session_id=? AND item_id=?",
                         "tenant", "session", id(203));
                 fixture.jdbc.update("UPDATE ma_event_stream SET projection_version=projection_version+1"
-                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", "tenant", "session");
+                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=''", "tenant", "session");
                 fixture.project();
             });
             var changed = fixture.forward(null, 201, 2);

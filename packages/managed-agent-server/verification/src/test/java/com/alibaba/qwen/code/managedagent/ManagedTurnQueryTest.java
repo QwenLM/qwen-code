@@ -158,7 +158,7 @@ class ManagedTurnQueryTest {
                     "turn.accepted", Map.of("input", List.of()), false, "accepted:" + turnId));
         }
         long sequence = jdbc.queryForObject("SELECT sequence_id FROM ma_public_event WHERE tenant_id = ?"
-                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " AND event_type = 'turn.accepted' AND turn_id = ?",
                 Long.class, tenant, sessionId, "turn_a");
         String eventId = UUID.randomUUID().toString();

@@ -528,7 +528,7 @@ class ToolPublicationStoreTest {
                 var before = jdbc.queryForMap(
                                 "SELECT capture_object_key AS object_key, resource_id, byte_length,"
                                     + " sha256, operation_id FROM ma_resource WHERE publication_id"
-                                    + " = X'7075622d31'");
+                                    + " = 'pub-1'");
                 assertThat(replacement.operationStatus(key, "pub-1", PUBLICATION_TOKEN, "original")
                         .path("state").asText()).isEqualTo("EXPIRED");
                 JsonNode expiredReplay = terminal
@@ -593,7 +593,7 @@ class ToolPublicationStoreTest {
                 assertThat(jdbc.queryForMap(
                                         "SELECT capture_object_key AS object_key, resource_id,"
                                             + " byte_length, sha256, operation_id FROM ma_resource"
-                                            + " WHERE publication_id = X'7075622d31'")).isEqualTo(before);
+                                            + " WHERE publication_id = 'pub-1'")).isEqualTo(before);
                 assertThat(jdbc.queryForObject(
                                         "SELECT deadline FROM ma_operation WHERE operation_kind IN"
                                             + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
@@ -601,7 +601,7 @@ class ToolPublicationStoreTest {
                 assertThat(objects).hasSize(1);
                 String category = terminal ? "producer" : "capture";
                 assertThat(jdbc.queryForObject("SELECT " + category + "_used_bytes FROM ma_output_capture"
-                        + " WHERE publication_id = X'7075622d31'", Long.class)).isEqualTo((long) bytes.length);
+                        + " WHERE publication_id = 'pub-1'", Long.class)).isEqualTo((long) bytes.length);
                 if (terminal) {
                     assertThat(replacement.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
                 } else {
@@ -679,7 +679,7 @@ class ToolPublicationStoreTest {
                 var candidate = jdbc.queryForMap(
                                 "SELECT capture_object_key AS object_key, resource_id, byte_length,"
                                         + " sha256 FROM ma_resource WHERE publication_id ="
-                                        + " X'7075622d31'");
+                                        + " 'pub-1'");
                 release.countDown();
                 assertThatThrownBy(() -> old.get(10, java.util.concurrent.TimeUnit.SECONDS))
                         .satisfies(error -> {
@@ -689,7 +689,7 @@ class ToolPublicationStoreTest {
                                     : "managed_tool_publication_claim_expired");
                         });
                 assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource"
-                        + " WHERE publication_id = X'7075622d31'", String.class)).isEqualTo("CANDIDATE");
+                        + " WHERE publication_id = 'pub-1'", String.class)).isEqualTo("CANDIDATE");
                 if (expired) {
                     data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "held");
                 }
@@ -700,10 +700,10 @@ class ToolPublicationStoreTest {
                 assertThat(jdbc.queryForMap(
                                         "SELECT capture_object_key AS object_key, resource_id,"
                                                 + " byte_length, sha256 FROM ma_resource WHERE"
-                                                + " publication_id = X'7075622d31'")).isEqualTo(candidate);
+                                                + " publication_id = 'pub-1'")).isEqualTo(candidate);
                 String category = terminal ? "producer" : "capture";
                 assertThat(jdbc.queryForObject("SELECT " + category + "_used_bytes FROM ma_output_capture"
-                        + " WHERE publication_id = X'7075622d31'", Long.class)).isEqualTo((long) bytes.length);
+                        + " WHERE publication_id = 'pub-1'", Long.class)).isEqualTo((long) bytes.length);
                 assertThat(objects).hasSize(1);
             } finally {
                 release.countDown();
@@ -906,12 +906,12 @@ class ToolPublicationStoreTest {
         assertThat(blockedPublic.path("upstream_truncated").isNull()).isTrue();
         assertThat(blockedPublic.path("artifacts")).isEmpty();
         String objectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
-                + " WHERE slot_key = X'61646d697373696f6e'", String.class);
+                + " WHERE slot_key = 'admission'", String.class);
         objects.get(objectKey)[0] = 'z';
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
         assertThat(jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture"
-                + " WHERE publication_id = X'7075622d31'", Boolean.class)).isTrue();
+                + " WHERE publication_id = 'pub-1'", Boolean.class)).isTrue();
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
     }
@@ -1071,7 +1071,7 @@ class ToolPublicationStoreTest {
         assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
         store.apply(request("fence"), WRITER_TOKEN, null);
         var held = jdbc.queryForMap("SELECT admission_held_bytes, admission_bytes"
-                + " FROM ma_output_capture WHERE publication_id = X'7075622d31'");
+                + " FROM ma_output_capture WHERE publication_id = 'pub-1'");
         assertThat(((Number) held.get("admission_held_bytes")).longValue())
                 .isEqualTo(((Number) held.get("admission_bytes")).longValue());
         assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("result")).isEqualTo(envelope);
@@ -1145,7 +1145,7 @@ class ToolPublicationStoreTest {
             switch (damage) {
                 case "missing-page" -> deleteCapturedSlot("page:stdout:0");
                 case "corrupt-page" -> jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
-                        + " WHERE slot_key = X'706167653a7374646f75743a30'", new byte[]{1});
+                        + " WHERE slot_key = 'page:stdout:0'", new byte[]{1});
                 case "missing-segment" -> deleteCapturedSlot("segment:stdout:0");
                 case "corrupt-segment" -> objects.values().iterator().next()[0] = 'z';
                 case "missing-empty-seal" -> jdbc.update(
@@ -1174,7 +1174,7 @@ class ToolPublicationStoreTest {
             if (quarantineBeforeProjection) {
                 jdbc.update(
                         "UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id ="
-                                + " X'7075622d31'");
+                                + " 'pub-1'");
             }
             JsonNode projected = projectPublicReceipt(data);
             if (quarantineBeforeProjection) {
@@ -1256,7 +1256,7 @@ class ToolPublicationStoreTest {
             assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
             jdbc.update(
                     "UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id ="
-                            + " X'7075622d31'");
+                            + " 'pub-1'");
             byte[] target = new byte[] {'?'};
             assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("receipt is unavailable");
             assertThat(target).containsExactly((byte) '?');
@@ -1269,7 +1269,7 @@ class ToolPublicationStoreTest {
         try (var stream = apiReader.open(artifact)) {
             assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
             String secondObject = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
-                    + " WHERE slot_key = X'7365676d656e743a7374646f75743a31'", String.class);
+                    + " WHERE slot_key = 'segment:stdout:1'", String.class);
             apiObjects.get(secondObject)[0] = 'x';
             byte[] target = new byte[] {'?'};
             assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("digest changed");
@@ -1278,7 +1278,7 @@ class ToolPublicationStoreTest {
             assertThat(target).containsExactly((byte) '?');
             assertThat(jdbc.queryForObject(
                                     "SELECT capture_state FROM ma_resource WHERE slot_key ="
-                                            + " X'7365676d656e743a7374646f75743a31'", String.class)).isEqualTo("QUARANTINED");
+                                            + " 'segment:stdout:1'", String.class)).isEqualTo("QUARANTINED");
         }
     }
 
@@ -1288,7 +1288,7 @@ class ToolPublicationStoreTest {
         try (var stream = apiReader.open(artifact)) {
             assertThat(stream.readNBytes(2)).isEqualTo("ab".getBytes(StandardCharsets.UTF_8));
             apiFailNextObject = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
-                    + " WHERE slot_key = X'7365676d656e743a7374646f75743a31'", String.class);
+                    + " WHERE slot_key = 'segment:stdout:1'", String.class);
             byte[] target = new byte[] {'?'};
             assertThatThrownBy(() -> stream.read(target)).hasMessageContaining("storage temporarily unavailable");
             assertThat(target).containsExactly((byte) '?');
@@ -1350,9 +1350,9 @@ class ToolPublicationStoreTest {
                 "bad-segment", "stdout", 1, "def".getBytes(StandardCharsets.UTF_8), digest("def")))
                 .hasMessageContaining("invalid_request");
         assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource"
-                + " WHERE slot_key = X'7365676d656e743a7374646f75743a31'", String.class)).isEqualTo("QUARANTINED");
+                + " WHERE slot_key = 'segment:stdout:1'", String.class)).isEqualTo("QUARANTINED");
         assertThat(jdbc.queryForObject("SELECT is_quarantined FROM ma_output_capture"
-                + " WHERE publication_id = X'7075622d31'", Boolean.class)).isFalse();
+                + " WHERE publication_id = 'pub-1'", Boolean.class)).isFalse();
         assertThat(verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "good-prefix", "stdout")
                 .path("byteLength").asLong()).isEqualTo(3);
         assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
@@ -1522,7 +1522,7 @@ class ToolPublicationStoreTest {
                         "SELECT gmt_create FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = 'finish'", Long.class);
         assertThat(deadline.getTime() - created).isEqualTo(3000);
         assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource"
-                + " WHERE slot_key = X'7365676d656e743a7374646f75743a30'", String.class)).isEqualTo("CANDIDATE");
+                + " WHERE slot_key = 'segment:stdout:0'", String.class)).isEqualTo("CANDIDATE");
     }
 
     @Test
@@ -2129,14 +2129,14 @@ class ToolPublicationStoreTest {
         ObjectNode second = addSecondExecution();
         store = newStore(ALLOCATION, 1);
         reserve();
-        jdbc.update("UPDATE ma_output_capture SET expires_at = 1 WHERE publication_id = X'7075622d31'");
+        jdbc.update("UPDATE ma_output_capture SET expires_at = 1 WHERE publication_id = 'pub-1'");
         ObjectNode next = request("reserve");
         next.set("binding", second);
         assertThat(store.apply(next, WRITER_TOKEN, PUBLICATION_TOKEN)
                 .path("state").asText()).isEqualTo("OPEN");
         var expired = jdbc.queryForMap("SELECT state, capture_held_bytes, producer_held_bytes,"
                 + " admission_held_bytes FROM ma_output_capture WHERE publication_id ="
-                            + " X'7075622d31'");
+                            + " 'pub-1'");
         assertThat(expired.get("state")).isEqualTo("FENCED");
         assertThat(((Number) expired.get("capture_held_bytes")).longValue()).isZero();
         assertThat(((Number) expired.get("producer_held_bytes")).longValue()).isZero();

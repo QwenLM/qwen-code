@@ -682,7 +682,7 @@ class ManagedArtifactApiIntegrationTest {
 
     @Test
     void deletionAndQuarantineHideContentWithoutChangingExecutionFacts() throws Exception {
-        fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
+        fixture.jdbc().update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = 'pub-1'");
         mvc.perform(asReader(get(ROOT + "/artifacts/" + stdout.path("id").asText())))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.artifact.availability").value("unavailable"))
                 .andExpect(jsonPath("$.access.can_read_content").value(false));

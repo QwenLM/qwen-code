@@ -96,7 +96,7 @@ final class AgentStoreRows {
             "ACCEPTED", "RUNNING", "CANCELLING");
 
     static final String SESSION_WITH_STREAM =
-            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = ''";
 
     final RowMapper<SessionRecord> sessionMapper;
 
@@ -205,7 +205,7 @@ final class AgentStoreRows {
                         List<StreamCounters> streams = jdbc.query(
                                 "SELECT last_sequence, replay_floor_sequence, gmt_modified FROM ma_event_stream"
                                         + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
-                                        + " 'SESSION' AND stream_id = X'' FOR UPDATE",
+                                        + " 'SESSION' AND stream_id = '' FOR UPDATE",
                                 (stream, index) -> new StreamCounters(stream.getLong("last_sequence"),
                                         stream.getLong("replay_floor_sequence"),
                                         nullableLong(stream, "gmt_modified")),

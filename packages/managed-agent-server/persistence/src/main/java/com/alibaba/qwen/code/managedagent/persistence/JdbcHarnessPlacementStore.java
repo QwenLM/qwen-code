@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.apache.commons.codec.digest.DigestUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -288,9 +287,9 @@ public class JdbcHarnessPlacementStore
     }
 
     private static void identity(String id) {
-        if (StringUtils.isBlank(id) || id.indexOf('\0') >= 0 || id.getBytes(StandardCharsets.UTF_8).length > 144) {
-            throw new IllegalArgumentException("Harness instance and boot identities must contain 1 to 144 UTF-8 bytes.");
-        }
+        // The VARCHAR(128) column admits only the pool endpoint charset; a
+        // PAD SPACE fold must never alias one instance's ownership to another.
+        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireInstanceId(id, "harnessInstanceId");
     }
 
     static ManagedAgentException blocked(String code) {

@@ -26,7 +26,7 @@ class ManagedSessionHistoryTest {
                                 + " VALUES (?,?,?,?,?,0)",
                         "tenant", id, "qwen-code", i % 2 == 0 ? "ARCHIVED" : "ACTIVE", i);
                 jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified)"
-                        + " VALUES (?, ?, 'SESSION', X'', 0)", "tenant", id);
+                        + " VALUES (?, ?, 'SESSION', '', 0)", "tenant", id);
             }
             var first = store.listSessions("tenant", null, null, null, 1, "archived");
             assertThat(first.sessions()).extracting(row -> row.sessionId()).containsExactly("session-4");

@@ -790,7 +790,7 @@ public class ToolPublicationAsyncVerificationTest {
         byte[] body = terminal(10);
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", body).path("state").asText())
                 .isEqualTo("PENDING");
-        fixture.jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'",
+        fixture.jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = 'terminal'",
                 new byte[] {1});
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -799,7 +799,7 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class))
                 .isEqualTo("OPEN");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
-                + " AND slot_key = X'7465726d696e616c'", Integer.class)).isZero();
+                + " AND slot_key = 'terminal'", Integer.class)).isZero();
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
                 + " AND capture_state <> 'VERIFIED'", Integer.class)).isZero();
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body).path("state").asText())
@@ -924,7 +924,7 @@ public class ToolPublicationAsyncVerificationTest {
                 assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class))
                         .isEqualTo("FINISHING");
                 assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
-                        + " AND slot_key = X'7465726d696e616c'", String.class)).isEqualTo("CANDIDATE");
+                        + " AND slot_key = 'terminal'", String.class)).isEqualTo("CANDIDATE");
                 assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM ma_output_capture", Long.class))
                         .isPositive();
                 due("finish");

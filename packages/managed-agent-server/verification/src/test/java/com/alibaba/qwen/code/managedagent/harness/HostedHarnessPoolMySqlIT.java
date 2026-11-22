@@ -161,7 +161,7 @@ class HostedHarnessPoolMySqlIT {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id,"
                 + " gmt_create, gmt_modified) VALUES (?, ?, 'qwen-code', 1, 1)", tenant, id);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, gmt_modified)"
-                + " VALUES (?, ?, 'SESSION', X'', 1)", tenant, id);
+                + " VALUES (?, ?, 'SESSION', '', 1)", tenant, id);
         return id;
     }
 

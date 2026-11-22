@@ -637,7 +637,7 @@ public final class ToolPublicationDataStore {
             return null;
         }
         var terminal = jdbc.query("SELECT resource_id, byte_length, capture_object_key AS object_key FROM ma_resource"
-                + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = X'7465726d696e616c' AND operation_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
+                + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = 'terminal' AND operation_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
                 scope, publicationId, operationId);
         long rollback = terminal.isEmpty() ? 0 : ((Number) terminal.get(0).get("byte_length")).longValue();
         String objectKey = terminal.isEmpty() ? null : (String) terminal.get(0).get("object_key");
@@ -649,7 +649,7 @@ public final class ToolPublicationDataStore {
                     ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, "capture", scope, publicationId),
                     terminal.getFirst().get("resource_id"));
             jdbc.update("DELETE FROM ma_resource WHERE scope_ref = ?"
-                            + " AND publication_id = ? AND slot_key = X'7465726d696e616c' AND operation_id = ?",
+                            + " AND publication_id = ? AND slot_key = 'terminal' AND operation_id = ?",
                     scope, publicationId, operationId);
         }
         jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", producer_phase = 'OPEN', finish_operation_id = NULL, finish_predecessor_id = NULL, finish_digest = NULL, producer_used_bytes = CASE WHEN producer_used_bytes >= ? THEN producer_used_bytes - ? ELSE 0 END WHERE scope_ref = ? AND publication_id = ? AND producer_phase = 'FINISHING' AND finish_operation_id = ?",
@@ -1142,11 +1142,11 @@ public final class ToolPublicationDataStore {
                         && row.length() == bytes.length, "Admission candidate changed");
                 if (candidate.objectKey() == null) {
                     jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
-                            + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = X'61646d697373696f6e'",
+                            + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = 'admission'",
                             bytes, scope, publicationId);
                 }
                 jdbc.update("UPDATE ma_resource SET capture_state = 'VERIFIED'"
-                        + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = X'61646d697373696f6e'",
+                        + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = 'admission'",
                         scope, publicationId);
                 jdbc.update("UPDATE ma_output_capture SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", admission_resource_id = ? WHERE scope_ref = ? AND publication_id = ?",
                         candidate.resourceId(), scope, publicationId);
@@ -1312,11 +1312,11 @@ public final class ToolPublicationDataStore {
                 && digest.equals(terminal.digest()), "Terminal candidate changed");
         if (claim.objectKey() == null) {
             jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
-                    + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = X'7465726d696e616c'",
+                    + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = 'terminal'",
                     bytes, scope, publicationId);
         }
         jdbc.update("UPDATE ma_resource SET capture_state = 'VERIFIED'"
-                + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = X'7465726d696e616c'",
+                + " WHERE scope_ref = ? AND publication_id = ? AND slot_key = 'terminal'",
                 scope, publicationId);
         ObjectNode ref = JSON.createObjectNode().put("resourceId", claim.resourceId())
                 .put("kind", "managed-tool-terminal").put("schemaVersion", 1)
@@ -2425,7 +2425,7 @@ public final class ToolPublicationDataStore {
         Long bytes;
         if ("terminal".equals(slot)) {
             bytes = jdbc.queryForObject("SELECT COALESCE(SUM(byte_length), 0) FROM ma_resource"
-                    + " WHERE scope_ref = ? AND publication_id = ? AND slot_key <> X'61646d697373696f6e'",
+                    + " WHERE scope_ref = ? AND publication_id = ? AND slot_key <> 'admission'",
                     Long.class, scope, publicationId);
         } else {
             String stream = slot.substring(slot.indexOf(':') + 1);

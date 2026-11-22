@@ -723,7 +723,7 @@ final class AgentSessionCommands {
                         "SELECT COALESCE( c.mutation_attempt_sequence, e.sequence_id) FROM"
                             + " ma_request_receipt c LEFT JOIN ma_public_event e ON e.tenant_id ="
                             + " c.tenant_id AND e.session_id = c.session_id AND e.stream_kind ="
-                            + " 'SESSION' AND e.stream_id = X'' AND e.source_key = ? WHERE"
+                            + " 'SESSION' AND e.stream_id = '' AND e.source_key = ? WHERE"
                             + " c.namespace = 'SESSION_COMMAND' AND c.receipt_key = ? AND"
                             + " c.session_id = ?",
                         Long.class,
@@ -736,7 +736,7 @@ final class AgentSessionCommands {
         Integer later =
                 jdbc.queryForObject(
                         "SELECT COUNT(*) FROM ma_public_event WHERE stream_kind = 'SESSION' AND"
-                            + " stream_id = X'' AND tenant_id = ? AND session_id = ? AND"
+                            + " stream_id = '' AND tenant_id = ? AND session_id = ? AND"
                             + " sequence_id > ? AND event_type = ? AND source_key LIKE 'control:%'",
                         Integer.class,
                         tenantId,

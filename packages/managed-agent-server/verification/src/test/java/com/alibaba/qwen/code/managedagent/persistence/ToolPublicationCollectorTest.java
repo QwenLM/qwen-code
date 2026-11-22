@@ -74,7 +74,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                         + " SELECT ?, tenant_id, workspace_id, ?, ?, 'execution-' || ?, ?, binding_json, binding_digest,"
                         + " token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
                         + " is_write_evidence, is_accepted_complete, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
-                        + " capture_used_bytes FROM ma_output_capture WHERE scope_ref = ? AND publication_id = X'7075622d31'",
+                        + " capture_used_bytes FROM ma_output_capture WHERE scope_ref = ? AND publication_id = 'pub-1'",
                 publicationScope, sessionId, publication, publication,
                 "capture-" + publication, scope);
         return publicationScope;
@@ -330,14 +330,14 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         jdbc.update("UPDATE ma_operation SET available_at = available_at - 120000 WHERE operation_kind = 'CAPTURE_GC' AND state <> 'SUCCEEDED'");
         assertThat(gc.runOnce()).isFalse();
         assertThat(evaluations.get()).isEqualTo(protectedCount + 1);
-        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind = 'CAPTURE_GC' AND publication_id = X'71756172616e74696e65642d30'");
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind = 'CAPTURE_GC' AND publication_id = 'quarantined-0'");
         assertThat(gc.runOnce()).isFalse();
         assertThat(evaluations.get()).isEqualTo(protectedCount + 2);
         assertThat(jdbc.queryForObject("SELECT available_at FROM ma_operation"
-                + " WHERE operation_kind = 'CAPTURE_GC' AND publication_id = X'71756172616e74696e65642d30'", Long.class))
+                + " WHERE operation_kind = 'CAPTURE_GC' AND publication_id = 'quarantined-0'", Long.class))
                 .isGreaterThanOrEqualTo(after + Duration.ofHours(24).toMillis());
         assertThat(jdbc.queryForList("SELECT inline_bytes FROM ma_resource"
-                + " WHERE publication_id <> X'7075622d31'", byte[].class)).hasSize(protectedCount)
+                + " WHERE publication_id <> 'pub-1'", byte[].class)).hasSize(protectedCount)
                 .allSatisfy(bytes -> assertThat(bytes).containsExactly((byte) 4));
         assertThat(objects.deleted).containsExactly("healthy/exact-key");
     }
@@ -385,11 +385,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     @ValueSource(strings = {"VERIFIED", "CANDIDATE", "QUARANTINED"})
     void failedPrefixAllowsCollectionOnlyWithVerifiedObjects(String objectState) {
         String failed = addOperation(OperationKind.OUTPUT_VERIFY, scope, "pub-1", session, "failed-prefix", "FAILED");
-        jdbc.update("UPDATE ma_operation SET slot_key = X'7072656669783a7374646f7574', is_verification_ready = TRUE,"
+        jdbc.update("UPDATE ma_operation SET slot_key = 'prefix:stdout', is_verification_ready = TRUE,"
                 + " failure_status = 403, failure_code = 'managed_tool_publication_storage_denied' WHERE operation_ref = ?", failed);
         addObject("one", "failed-prefix/exact-key", null);
         addObject("inline", null, new byte[] {8});
-        jdbc.update("UPDATE ma_resource SET capture_state = ? WHERE scope_ref = ? AND slot_key = X'6f6e65'",
+        jdbc.update("UPDATE ma_resource SET capture_state = ? WHERE scope_ref = ? AND slot_key = 'one'",
                 objectState, scope);
         var objects = new DeletingObjects();
         objects.bytes.put("failed-prefix/exact-key", new byte[] {7});
@@ -401,7 +401,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             assertThat(objects.deleted).isEmpty();
             assertThat(objects.bytes.get("failed-prefix/exact-key")).containsExactly((byte) 7);
             assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                    + " WHERE scope_ref = ? AND slot_key = X'696e6c696e65'", byte[].class, scope)).containsExactly((byte) 8);
+                    + " WHERE scope_ref = ? AND slot_key = 'inline'", byte[].class, scope)).containsExactly((byte) 8);
             return;
         }
         assertThat(blocker()).isNull();
@@ -664,7 +664,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", "c".repeat(64), new byte[] {2});
         }
         long used = jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
-                + " FROM ma_output_capture WHERE scope_ref = ? AND publication_id = X'7075622d31'", Long.class, scope);
+                + " FROM ma_output_capture WHERE scope_ref = ? AND publication_id = 'pub-1'", Long.class, scope);
         retire();
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind = 'CAPTURE_GC'"
                 + " AND scope_kind = 'PUBLICATION' AND scope_id = ? AND publication_id = ?", scope, "pub-2");
@@ -676,16 +676,16 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                     + " WHERE resource_id = ?", byte[].class, resource)).containsExactly(2);
         }
         assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE publication_id = X'7075622d32'", byte[].class)).containsExactly(2);
+                + " WHERE publication_id = 'pub-2'", byte[].class)).containsExactly(2);
         assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture"
-                + " WHERE publication_id = X'7075622d32'", String.class)).isEqualTo("RETIRING");
+                + " WHERE publication_id = 'pub-2'", String.class)).isEqualTo("RETIRING");
         assertThat(jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
-                + " FROM ma_output_capture WHERE publication_id = X'7075622d32'", Long.class)).isEqualTo(used);
+                + " FROM ma_output_capture WHERE publication_id = 'pub-2'", Long.class)).isEqualTo(used);
         assertThat(used).isPositive();
         assertThat(jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
-                + " FROM ma_output_capture WHERE publication_id = X'7075622d31'", Long.class)).isZero();
+                + " FROM ma_output_capture WHERE publication_id = 'pub-1'", Long.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT collected_bytes FROM ma_output_capture"
-                + " WHERE publication_id = X'7075622d31'", Long.class)).isEqualTo(used);
+                + " WHERE publication_id = 'pub-1'", Long.class)).isEqualTo(used);
     }
 
     @Test
@@ -716,11 +716,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(gc.runOnce()).isTrue();
         assertThat(objects.deleted).containsExactly("healthy");
         assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture"
-                + " WHERE scope_ref = ? AND publication_id = X'7075622d31'", String.class, scope)).isEqualTo("DELETING");
+                + " WHERE scope_ref = ? AND publication_id = 'pub-1'", String.class, scope)).isEqualTo("DELETING");
         assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture"
-                + " WHERE scope_ref = ? AND publication_id = X'7075622d32'", String.class, scope)).isEqualTo("COLLECTED");
+                + " WHERE scope_ref = ? AND publication_id = 'pub-2'", String.class, scope)).isEqualTo("COLLECTED");
         assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture"
-                + " WHERE scope_ref = ? AND publication_id = X'7075622d31'", Long.class, scope)).isEqualTo(1000);
+                + " WHERE scope_ref = ? AND publication_id = 'pub-1'", Long.class, scope)).isEqualTo(1000);
     }
 
     @Test
@@ -750,7 +750,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         assertThat(objects.bytes).containsOnlyKeys("outside-catalog");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE scope_ref = ?"
                 + " AND inline_bytes IS NOT NULL", Long.class, scope)).isZero();
-        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE publication_id IS NOT NULL AND slot_key = X'7a2d696e6c696e65' AND tenant_id = ?",
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE publication_id IS NOT NULL AND slot_key = 'z-inline' AND tenant_id = ?",
                 byte[].class, tenant)).isNull();
         assertThat(jdbc.queryForObject("SELECT released_held_bytes FROM ma_output_capture WHERE scope_ref = ?",
                 Long.class, scope)).isEqualTo(3000);

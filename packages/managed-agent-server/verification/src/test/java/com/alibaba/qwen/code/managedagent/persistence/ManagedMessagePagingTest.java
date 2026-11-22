@@ -52,7 +52,7 @@ class ManagedMessagePagingTest {
                         + " VALUES(?,?,?,0,0)",
                 "tenant", "session", "qwen-code");
         jdbc.update("INSERT INTO ma_event_stream(tenant_id,session_id,stream_kind,stream_id,"
-                + "last_sequence,covered_sequence,gmt_modified) VALUES(?,?,'SESSION',X'',0,0,0)", "tenant", "session");
+                + "last_sequence,covered_sequence,gmt_modified) VALUES(?,?,'SESSION','',0,0,0)", "tenant", "session");
     }
 
     private void seed(int count, boolean ties) {
@@ -69,7 +69,7 @@ class ManagedMessagePagingTest {
 
     private void progress(long sequence) {
         jdbc.update("UPDATE ma_event_stream SET covered_sequence=?,last_sequence=? WHERE tenant_id=?"
-                + " AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", sequence, sequence, "tenant", "session");
+                + " AND session_id=? AND stream_kind='SESSION' AND stream_id=''", sequence, sequence, "tenant", "session");
     }
 
     private StoreModels.MessagePage read(String cursor, int limit, boolean backward) {

@@ -87,7 +87,7 @@ final class AgentMessageProjection {
                     "Item sequence must be non-negative.");
         }
         var progress = jdbc.queryForMap("SELECT covered_sequence, projection_version, last_sequence, replay_floor_sequence FROM ma_event_stream"
-                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 tenantId, sessionId);
         long covered = ((Number) progress.get("covered_sequence")).longValue();
         int projection = ((Number) progress.get("projection_version")).intValue();
@@ -185,12 +185,12 @@ final class AgentMessageProjection {
         var sizes = jdbc.query("SELECT e.sequence_id, OCTET_LENGTH(e.data_json) AS byte_length FROM ma_public_event e"
                         + " JOIN (SELECT turn_id, event_type, MAX(sequence_id) AS seq FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ? AND sequence_id <= ?"
-                        + " AND stream_kind = 'SESSION' AND stream_id = X'' AND turn_id IN ("
+                        + " AND stream_kind = 'SESSION' AND stream_id = '' AND turn_id IN ("
                         + AgentStoreRows.placeholders(turns.size()) + ") AND event_type IN ('turn.started', 'turn.completed',"
                         + " 'turn.failed', 'turn.cancelled', 'turn.cancel.requested', 'environment.provisioning',"
                         + " 'environment.ready', 'environment.failed') GROUP BY turn_id, event_type) latest"
                         + " ON e.turn_id = latest.turn_id AND e.event_type = latest.event_type AND e.sequence_id = latest.seq"
-                        + " WHERE e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION' AND e.stream_id = X''",
+                        + " WHERE e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION' AND e.stream_id = ''",
                 (row, index) -> new EventSize(row.getLong("sequence_id"), row.getLong("byte_length")), arguments.toArray());
         if (sizes.stream().mapToLong(EventSize::bytes).sum() + itemBytes > MESSAGE_PAGE_BYTES) {
             throw messagePageTooLarge();
@@ -201,7 +201,7 @@ final class AgentMessageProjection {
         List<Object> eventArguments = new ArrayList<>(List.of(tenantId, sessionId));
         sizes.forEach(event -> eventArguments.add(event.sequence()));
         return jdbc.query("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event"
-                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''"
                         + " AND sequence_id IN (" + AgentStoreRows.placeholders(sizes.size()) + ") ORDER BY sequence_id ASC",
                 eventJournal.eventMapper, eventArguments.toArray());
     }
@@ -297,7 +297,7 @@ final class AgentMessageProjection {
         jdbc.query(
                 "SELECT s.session_id, s.covered_sequence FROM ma_event_stream s"
                     + " WHERE s.stream_kind = 'SESSION' AND"
-                    + " s.stream_id = X'' AND s.tenant_id = ? AND s.session_id IN ("
+                    + " s.stream_id = '' AND s.tenant_id = ? AND s.session_id IN ("
                         + AgentStoreRows.placeholders(sessionIds.size())
                         + ")",
                 reader,
@@ -310,7 +310,7 @@ final class AgentMessageProjection {
                 jdbc.query(
                         "SELECT s.replay_floor_sequence, s.covered_sequence FROM ma_event_stream s"
                             + " WHERE s.tenant_id = ? AND s.session_id = ?"
-                            + " AND s.stream_kind = 'SESSION' AND s.stream_id = X''",
+                            + " AND s.stream_kind = 'SESSION' AND s.stream_id = ''",
                         (result, row) ->
                                 new ReplayWindow(
                                         result.getLong("replay_floor_sequence"),
@@ -327,13 +327,13 @@ final class AgentMessageProjection {
     List<ReplayFloorTarget> findReplayFloorTargets(int limit) {
         return jdbc.query(
                 "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
-                    + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = X''"
+                    + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = ''"
                     + " AND s.covered_sequence > s.replay_floor_sequence"
                     + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
                     + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
                     + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
                     + " AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')"
-                    + " AND e.stream_kind = 'SESSION' AND e.stream_id = X''"
+                    + " AND e.stream_kind = 'SESSION' AND e.stream_id = ''"
                     + " AND e.event_type = 'turn.accepted' AND e.sequence_id <= s.replay_floor_sequence + 1)"
                     + " ORDER BY s.gmt_modified ASC LIMIT ?",
                 (row, index) -> new ReplayFloorTarget(row.getString("tenant_id"), row.getString("session_id")),
@@ -351,7 +351,7 @@ final class AgentMessageProjection {
                         "SELECT MIN(e.sequence_id) FROM ma_public_event e JOIN ma_turn t ON"
                             + " t.tenant_id = e.tenant_id AND t.session_id = e.session_id AND"
                             + " t.turn_id = e.turn_id WHERE e.tenant_id = ? AND e.session_id = ?"
-                            + " AND e.stream_kind = 'SESSION' AND e.stream_id = X'' AND"
+                            + " AND e.stream_kind = 'SESSION' AND e.stream_id = '' AND"
                             + " e.event_type = 'turn.accepted' AND t.status IN ('ACCEPTED',"
                             + " 'RUNNING', 'CANCELLING')",
                         Long.class,
@@ -365,7 +365,7 @@ final class AgentMessageProjection {
         }
         jdbc.update(
                 "UPDATE ma_event_stream SET replay_floor_sequence = ? WHERE tenant_id = ? AND"
-                    + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 floor,
                 tenantId,
                 sessionId);
@@ -374,7 +374,7 @@ final class AgentMessageProjection {
 
     List<MaterializationTarget> findMaterializationTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = '' WHERE s.session_kind = 'PUBLIC' AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.is_projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
@@ -386,7 +386,7 @@ final class AgentMessageProjection {
         SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Long covered = jdbc.queryForObject(
                         "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                             + " UPDATE",
                 Long.class, tenantId, sessionId);
         if (covered == null) {
@@ -396,7 +396,7 @@ final class AgentMessageProjection {
         List<EventRecord> events =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE stream_kind = 'SESSION' AND stream_id"
-                            + " = X'' AND tenant_id = ? AND session_id = ? AND sequence_id > ?"
+                            + " = '' AND tenant_id = ? AND session_id = ? AND sequence_id > ?"
                             + " ORDER BY sequence_id ASC LIMIT ?",
                         eventJournal.eventMapper,
                         tenantId,
@@ -443,7 +443,7 @@ final class AgentMessageProjection {
                                 + " AND NOT EXISTS (SELECT 1 FROM"
                                 + " ma_public_event terminal WHERE"
                                 + " terminal.stream_kind = 'SESSION' AND"
-                                + " terminal.stream_id = X'' AND"
+                                + " terminal.stream_id = '' AND"
                                 + " terminal.tenant_id ="
                                 + " ma_message.tenant_id AND"
                                 + " terminal.session_id ="
@@ -475,7 +475,7 @@ final class AgentMessageProjection {
         long now = clock.millis();
         jdbc.update(
                 "UPDATE ma_event_stream SET covered_sequence = ?, gmt_modified = ?"
-                    + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 nextCovered,
                 now,
                 tenantId,
@@ -485,7 +485,7 @@ final class AgentMessageProjection {
 
     void deferMaterializationTarget(String tenantId,
             String sessionId) {
-        jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+        jdbc.update("UPDATE ma_event_stream SET gmt_modified = ? WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = ''",
                 clock.millis(), tenantId, sessionId);
     }
 
@@ -493,7 +493,7 @@ final class AgentMessageProjection {
         Long covered =
                 jdbc.queryForObject(
                         "SELECT covered_sequence FROM ma_event_stream WHERE tenant_id = ? AND"
-                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = X'' FOR"
+                            + " session_id = ? AND stream_kind = 'SESSION' AND stream_id = '' FOR"
                             + " UPDATE",
                         Long.class,
                         tenantId,
@@ -524,7 +524,7 @@ final class AgentMessageProjection {
         List<EventRecord> events =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event WHERE tenant_id = ? AND session_id = ? AND"
-                                + " stream_kind = 'SESSION' AND stream_id = X'' AND turn_id = ? AND"
+                                + " stream_kind = 'SESSION' AND stream_id = '' AND turn_id = ? AND"
                                 + " sequence_id <= ? AND event_type IN ('item.output_text.delta',"
                                 + " 'item.reasoning.delta', 'turn.completed', 'turn.failed',"
                                 + " 'turn.cancelled') ORDER BY sequence_id",
@@ -603,7 +603,7 @@ final class AgentMessageProjection {
         jdbc.update(
                 "UPDATE ma_event_stream SET projection_version = projection_version + 1,"
                     + " gmt_modified = ? WHERE tenant_id = ? AND session_id = ?"
-                    + " AND stream_kind = 'SESSION' AND stream_id = X''",
+                    + " AND stream_kind = 'SESSION' AND stream_id = ''",
                 now,
                 tenantId,
                 sessionId);

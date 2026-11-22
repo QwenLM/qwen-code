@@ -334,7 +334,7 @@ public final class ToolPublicationAdmissionStore {
                 + " o.capture_object_key AS object_key, o.capture_state AS state, p.producer_phase, p.terminal_resource_id,"
                 + " p.admission_resource_id, p.binding_json FROM ma_output_capture p"
                 + " JOIN ma_resource o ON o.scope_ref = p.scope_ref"
-                + " AND o.publication_id = p.publication_id AND o.slot_key = X'61646d697373696f6e'"
+                + " AND o.publication_id = p.publication_id AND o.slot_key = 'admission'"
                 + " WHERE p.scope_ref = ? AND p.publication_id = ? AND p.tenant_id = ?"
                 + " AND p.workspace_id = ? AND p.session_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId,
                 text(key, "tenantId"), text(key, "workspaceId"), text(key, "sessionId"));
@@ -404,7 +404,7 @@ public final class ToolPublicationAdmissionStore {
                     "Admission root changed");
             var object = jdbc.query("SELECT capture_state AS state, sha256, byte_length, capture_object_key AS object_key"
                     + " FROM ma_resource WHERE scope_ref = ? AND publication_id = ?"
-                    + " AND slot_key = X'61646d697373696f6e'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
+                    + " AND slot_key = 'admission'", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
             require("VERIFIED".equals(object.get("state"))
                     && candidate.get("sha256").equals(object.get("sha256"))
                     && ((Number) candidate.get("byte_length")).longValue()

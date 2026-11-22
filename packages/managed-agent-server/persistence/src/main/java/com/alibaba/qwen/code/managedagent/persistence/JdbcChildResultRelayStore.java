@@ -195,7 +195,7 @@ public class JdbcChildResultRelayStore
     public boolean turnCancelRequested(String tenantId, String sessionId, String turnId) {
         return !jdbc.query("SELECT sequence_id FROM ma_public_event"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND stream_kind = 'SESSION' AND stream_id = X'' AND event_type = 'turn.cancel.requested'"
+                        + " AND stream_kind = 'SESSION' AND stream_id = '' AND event_type = 'turn.cancel.requested'"
                         + " AND turn_id = ? LIMIT 1",
                 (result, row) -> result.getLong("sequence_id"), tenantId,
                 sessionId, turnId).isEmpty();

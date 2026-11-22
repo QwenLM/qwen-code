@@ -117,6 +117,37 @@ public final class BrokerValues {
     }
 
     /**
+     * A Harness pool instance identity stored in a VARCHAR(128) column
+     * (harness_instance_id, claim_instance_id). The pool endpoint boundary
+     * admits exactly this charset; PAD SPACE collations fold trailing
+     * spaces, so the column boundary refuses anything outside it rather
+     * than letting two instances compare equal.
+     */
+    public static String requireInstanceId(String value, String name) {
+        if (value == null || !value.matches("[A-Za-z0-9._:-]{1,128}")) {
+            throw new IllegalArgumentException(name
+                    + " must match [A-Za-z0-9._:-]{1,128}");
+        }
+        return value;
+    }
+
+    /**
+     * A worker claim identity stored in a VARCHAR(128) column (claim,
+     * dispatch, lease, builder and operation owners). Production owners are
+     * ASCII prefix+UUID mints; an externally supplied owner must stay
+     * bounded, well-formed and free of trailing spaces so a PAD SPACE fold
+     * can never release another holder's claim.
+     */
+    public static String requireWorkerOwner(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
      * An id the worker admits on its provider envelope, where it becomes a
      * file name: ASCII letters, digits, {@code .}, {@code _} and {@code -},
      * never {@code .} and never containing {@code ..}. The Broker releases

@@ -95,6 +95,37 @@ class BrokerValuesTest {
     }
 
     @Test
+    void instanceIdsUseThePoolEndpointCharsetBudget() {
+        String instance = "i".repeat(128);
+        assertEquals(instance, BrokerValues.requireInstanceId(instance, "instanceId"));
+        assertEquals("pool-1.a:b_c", BrokerValues.requireInstanceId("pool-1.a:b_c", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("i".repeat(129), "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("instance ", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("inst\u00e9ance", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId("", "instanceId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireInstanceId(null, "instanceId"));
+    }
+
+    @Test
+    void workerOwnersUseThe128CharacterNoTrailingSpaceBudget() {
+        String owner = "w".repeat(128);
+        assertEquals(owner, BrokerValues.requireWorkerOwner(owner, "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner("w".repeat(129), "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner("worker ", "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner("wor\ud800ker", "owner"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireWorkerOwner(null, "owner"));
+    }
+
+    @Test
     void tenantIdsUseTheShared36CharacterBudget() {
         String tenant = "t".repeat(36);
         assertTrue(BrokerValues.isTenantId(tenant));

@@ -526,7 +526,7 @@ class WorkspaceProfileLifecycleTest {
             f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = X'6f7574636f6d65'");
             assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ManagedAgentException.class);
             verify.run();
-            f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = X'7075622d31'");
+            f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = 'pub-1'");
             assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
             return;
         }

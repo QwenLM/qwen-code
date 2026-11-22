@@ -1086,13 +1086,13 @@ public class EventTransportMultiNodeGate {
     private long stream(String session, String column) {
         return jdbc.queryForObject("SELECT " + column + " FROM ma_event_stream WHERE"
                 + " tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION'"
-                + " AND stream_id = X''", Long.class, tenant, session);
+                + " AND stream_id = ''", Long.class, tenant, session);
     }
 
     private Long wakeWatermark(String session) {
         return jdbc.queryForObject("SELECT wake_covered_sequence FROM ma_event_stream"
                 + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION'"
-                + " AND stream_id = X''", Long.class, tenant, session);
+                + " AND stream_id = ''", Long.class, tenant, session);
     }
 
     private long writerGeneration(String session) {

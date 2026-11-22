@@ -238,7 +238,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             throw new IllegalArgumentException(
                     "service dependencies are required");
         }
-        this.brokerOwnerId = BrokerValues.requireId(brokerOwnerId,
+        this.brokerOwnerId = BrokerValues.requireWorkerOwner(brokerOwnerId,
                 "brokerOwnerId");
         this.operationLeaseDuration = requireDuration(
                 operationLeaseDuration, "operationLeaseDuration");

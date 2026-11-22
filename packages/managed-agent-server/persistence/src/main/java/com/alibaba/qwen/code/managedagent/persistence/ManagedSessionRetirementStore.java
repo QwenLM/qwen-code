@@ -272,7 +272,7 @@ final class ManagedSessionRetirementStore {
         jdbc.update(
                 "UPDATE ma_event_stream SET covered_sequence = last_sequence"
                     + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION'"
-                    + " AND stream_id = X''",
+                    + " AND stream_id = ''",
                 tenant,
                 session);
         return false;

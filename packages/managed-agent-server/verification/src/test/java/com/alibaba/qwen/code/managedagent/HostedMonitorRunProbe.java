@@ -229,7 +229,7 @@ final class HostedMonitorRunProbe implements AutoCloseable {
         // the way findEvents does.
         return jdbc.queryForList(
                 "SELECT * FROM ma_public_event WHERE stream_kind = 'SESSION'"
-                        + " AND stream_id = X'' AND tenant_id = ? AND"
+                        + " AND stream_id = '' AND tenant_id = ? AND"
                         + " session_id = ? ORDER BY sequence_id", tenant,
                 sessionId);
     }

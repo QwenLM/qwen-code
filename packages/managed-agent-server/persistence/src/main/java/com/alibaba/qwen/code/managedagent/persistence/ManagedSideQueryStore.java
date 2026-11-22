@@ -203,6 +203,7 @@ public class ManagedSideQueryStore implements ManagedSideQueries {
 
     @Override
     public Claim claim(String tenant, String session, String id, String instance, String boot) {
+        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireInstanceId(instance, "claimInstanceId");
         com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "claimBootId");
         lockRoot(tenant, session);
         Row row = read(tenant, session, id, true);
