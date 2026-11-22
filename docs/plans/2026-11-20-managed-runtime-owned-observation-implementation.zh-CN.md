@@ -73,7 +73,7 @@
 
   该装置必须精确照抄生产协议：先 `holdDeliveries` 暂住实时推送、再安装、然后用安装响应报告的 `observedRuns` 水位播种游标。缺少播种时，第一条「已确认之后」的条目会被判 `Delivery sequence is not contiguous`（worker 早已裁剪已确认前缀）——产品是对的，装置是错的。生产的 `reattachAndDrainBackgroundDeliveries` 本就如此。
 
-- **投递批次上界（验收发现的缺陷）。** 原先一个 revision 最多携带 1024 个 256 KiB 段，base64 后单个 output 条目即可超过 `MANAGED_DELIVERY_REQUEST_LIMIT_BYTES`（512 KiB）。`deliverRpc` 在发出任何 HTTP 之前就拒绝超限请求，因此该条目永远推不出去、run 永久停在 held——违反 §11「预算下界为最大 flush 批次」。背景采集现改为 128 KiB 段、每段一页，使一个 revision 只携带单个段（编码后约 175 KB），即使两个流同时封页进同一条目也远低于上限。副作用是输出可见性提升：每 128 KiB 一个 revision，而非每 1024 段一页。
+- **投递批次上界（验收发现的缺陷）。** 原先一个 revision 最多携带 1024 个 256 KiB 段，base64 后单个 output 条目即可超过 `MANAGED_DELIVERY_REQUEST_LIMIT_BYTES`（512 KiB）。`deliverRpc` 在发出任何 HTTP 之前就拒绝超限请求，因此该条目永远推不出去、run 永久停在 held——违反 §11「预算下界为最大 flush 批次」。背景采集现改为 128 KiB 段、每段发布一个 revision，使一个 revision 每个流最多只携带一个新段（编码后约 175 KB），即使两个流同时封页进同一条目也低于上限。副作用是输出可见性提升：每 128 KiB 一个 revision，而非每 1024 段一页。最初的实现靠每段一页做到这一点，结果空闲 partial flush 会耗尽页数上限；见「评审修复（#17953）」。
 
 - **背压下强制停止（验收发现的缺陷）。** outbox 满且 run 处于 held 时，采集的写队列停驻在 `waitForRoom` 内，stop 的 `finish`/`finalize` 排在其后——保留的 terminal 槽位根本不可达，registry 的 completion 协程会永久挂起、Runtime hold 永不释放。这正是 §4.4 的违反（「满 outbox 绝不能让已停止的进程产不出退出证明」）；此前「broken capture 的终态 manifest 无法 chain」的假设在其下游——terminal 条目从未发出。修复落实设计的丢尾契约：
   - `WorkerBackgroundCaptureSink.setStopRequested()` 调用 `BackgroundDeliveryRun.requestStop()`，释放所有停驻的 room 等待者，stop 绝不等停驻队列。
@@ -122,7 +122,7 @@ mvn -Dmaven.repo.local=/tmp/<task>-m2 -Pmysql-integration -Dspotbugs.skip=true \
 - **M4 applier drain 成本（§7 项 3）。** 经真实 authority 提交观测 revision 加通知 input：**1 条 30 ms、100 条 31 ms/条、10,000 条 48 ms/条**（共 476 s，随 journal 增长而退化）。提交 10,000 条观测的 drain-only wake 约 8 分钟静默加载工作；backstop 的扫描上限为突发节流（§8）。
 - **M5 总输出上限（§11 Q3 发现，已证实）。** worker lane 恰好准入 **8 MiB**（64 页 × 1 段 × 128 KiB），随后 `size_limit` break、信封降级为 `unavailable`，最后持久 revision（64）存续。前台 lane 的 512 段页可达 ~32 GiB。
 
-**据此证据定下的常量（无需改动）：** `RUN_OUTBOX_BYTES` 8 MiB（≈最大条目的 45×，terminal 闭包有余量）、`BACKGROUND_SEGMENT_BYTES` 128 KiB 配 `BACKGROUND_SEGMENTS_PER_PAGE` 1（每个条目与最坏 terminal 闭包都合请求上限）、`PARTIAL_FLUSH_MS` 250（空闲 flush 开销相对 30 ms/条的提交成本可忽略）。**8 MiB 总上限不能单方面抬高：** 每页 2 段虽使上限翻倍，却把双流被丢尾闭包推到 ~700 KB、超过请求上限，terminal 将永远推不出去。抬高它需要协同改动 `maxPagesPerStream`/`maxManifestBytes`/请求上限——属 maintainer 设计决策（§11 Q3 携此证据保持开放）。Java 侧 pull 等待、staged-bytes 水位线、硬上限以及 wake→load 延迟，需下方 Broker + MySQL + daemon 度量。
+**据此证据定下的常量：** `RUN_OUTBOX_BYTES` 8 MiB（约为最大可能条目 ~506 KB 的 16×，terminal 闭包有余量）、`BACKGROUND_SEGMENT_BYTES` 128 KiB，每段一个 revision、增长一个最多 `BACKGROUND_SEGMENTS_PER_PAGE` 256 段的开放页（每个条目与最坏 terminal 闭包都合请求上限；见「评审修复」）、`PARTIAL_FLUSH_MS` 250（空闲 flush 开销相对 30 ms/条的提交成本可忽略）。**每流上限为 16,384 段（满段合计 2 GiB）：** 每页打包更多段会把双流被丢尾闭包推到 ~700 KB，而增长开放页让每个条目每流仍只带一个段，因此上限的抬高无需改动协议上限。再往上抬仍需协同改动 `maxPagesPerStream`/`maxManifestBytes`/请求上限——属 maintainer 设计决策（§11 Q3 携此证据保持开放）。Java 侧 pull 等待、staged-bytes 水位线、硬上限以及 wake→load 延迟，需下方 Broker + MySQL + daemon 度量。
 
 ### Daemon 启动见证（已落地）
 
@@ -163,12 +163,41 @@ Phase 3b server jar 在真实 daemon 拓扑里端到端启动。配方（全部�
 
   **新会话收尾清单（mingrong，~/p3b-suspension/）。** 环境已就位：boot.sh（完整 -D publication 配置 + export QWEN_MANAGED_RUNTIME_OBSERVATION=1 + export QWEN_MANAGED_HOOK_CGROUP_ROOT=…/user-63338.slice/qwen-bg + source oss-creds.env）、model-stub.mjs（后台命令 for i in $(seq 1 300); do echo line $i; sleep 1; done，端口 41990）、drive2.mjs/witness3.sh（WebShell 建 session+轮询）、thorough.sh（杀全部 p3b java/node/worker 再起一个）。桶 p3b-susp-oss-775954（ap-southeast-1）。步骤：(1) STS 过期则刷新 oss profile OAuth（aliyun configure --profile oss --mode OAuth，浏览器回调），从 ~/.aliyun/config.json oss profile 重生 oss-creds.env（OSS_ACCESS_KEY_ID/SECRET/SESSION_TOKEN）scp 到 mingrong；(2) bash thorough.sh，等 ~50s，断言**恰一个** p3b java 含 QWEN_MANAGED_RUNTIME_OBSERVATION=1 **且** spawn 的 worker 也含（失败模式＝重复 java 一个不含 env）；(3) bash witness3.sh——预期 TOOL STATUS completed、后台 pid cgroup …/qwen-bg/qwen-bg-<uuid>、随后 session head 翻为挂起/recovery-ready 而后台 pid 仍活、ma_runtime_stage 行累积、drain-only wake 无模型 turn 结算。H2 读：jdbc:h2:file:…/data/database/managed;MODE=MySQL;DATABASE_TO_LOWER=TRUE;AUTO_SERVER=TRUE，user qwen 空密码。若干净单重启后 node launcher 仍丢 env，查 CLI 启动 re-exec env 路径（loader scrub **不**剔 QWEN_MANAGED_RUNTIME_OBSERVATION）。
 
-完整 E2E harness（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT，或上述脚本化真实 daemon 驱动）必须在 Linux 跑；唯一开放项是 `captureBytes`/publication 准入接线。
+  **收尾验证执行（2026-11-22，新会话）：清单步骤 1–2 通过；certificate-env 假设被更上游的 commit 门缺陷取代（已修复）；首次见证持后台工作的挂起；staging/drain 被下一缺口（observation 注册）阻塞。**
+  - **步骤 1–2 已验证。** `oss` profile STS 仍有效（无需重授权；重生的 `oss-creds.env` 与已部署文件哈希一致）。`thorough.sh` 加基于 comm 的进程普查（`pgrep -x java` / `pgrep -x node` 配 cmdline 过滤——`pgrep -f` 会自匹配包裹 shell）确认恰一个 p3b java 含 `QWEN_MANAGED_RUNTIME_OBSERVATION=1`，spawn 的 worker 也含。env 竞争假设关闭：干净单 daemon 重启可靠送达 env。
+  - **真实阻塞在证书上游：journal commit 门拒绝运行中 capture 的已发布 manifest。** env 验证后 turn 仍不结算。回环 java 端口 tcpdump 抓到 `commitChildRunRecord`（rev 20→21）409 `managed_session_resource_missing`：事务引用后台 capture 的 `managed-tool-result-manifest`/`-page` 行，publication lane 让其保持 **PUBLISHED**（`ToolPublicationAdmissionStore` 仅在 `capture_state='VERIFIED'` 时提升 PUBLISHED→REFERENCED——进程运行中不可能）。`JournalStoreRows.storedResource` 只接受 REFERENCED 或 settled-published **配置类** kind，而 reader（`JournalResourceReads`，无 state 门）与 verifier（`verifyStoredResource` 的 OSS_OBJECT/MYSQL_INLINE 分支）都接受 PUBLISHED tool-result kind。child_run 记录因此永远提交不上 → 无 `running_attached` 记录 → 证书永不可能过 → 不挂起、不 stage、不 drain；卡死的 turn 还在 ~40s 带走 worker（及后台）。此前每次后台运行（12393117、af6272dc、85725706）都被同一 409 静默阻塞。
+  - **修复（已落本分支）。** `storedResource` 增接受 `publishedToolResult`（PUBLISHED + `toolResultLimit(kind) > 0`），与 reader/verifier 对齐；TOOL_PUBLICATION outcome 信封仍 fail-closed（其 kind limit 为 0，且 verifier 仍要求 REFERENCED + capture 目录匹配）。回归：`JournalStoreRowsPublishedResourceTest`（3 例：PUBLISHED manifest/page 如 reader 般被接受；PUBLISHED outcome 仍 409；object key 为 null 的 PUBLISHED manifest 仍 500）——无修复时红、有修复时绿已验证；`ManagedSessionStoreIntegrationTest` 16/16 不变；CI 同款双 execution Checkstyle 干净。exec jar 重建（`serverSha256 808ccd4c39eec827…`）并部署 mingrong。
+  - **持后台工作的挂起已见证（session `ceca1278-b2d1-4a0a-92fa-fca789f01fee`）。** TOOL STATUS completed；后台 pid 在 `…/qwen-bg/qwen-bg-f093c8b7-…` 内；worker OBS=1；model stub 恰服务 2 个请求（turn 结算）；harness 记录 `Hosted Session ceca1278… suspended idle.`；head 达 SEALED/READY 时后台仍活——真实 daemon 上首次有持活跃后台工作的 session 挂起。
+  - **下一缺口（精确）：harness 对 worker-owned 后台盲挂起。** seal 携带 `wake_seal_background=0`、`wake_retry_at=0`——未盖后台持有戳。writer lease 失效（seal 后 ~60s），runtime 被回收，后台 ~70s 死亡（命令要求 300s）；`ma_runtime_stage` 恒 0，无 drain wake。代码路径：`backgroundSuspensionCertificate` 在 `observationBindings` 为空时返回 false，而 harness session 的 `shell/backgroundLane.observationBindings` 为空——逐 binding 的 worker observation 注册从未到达 harness session，故无可见持有工作，挂起按普通 idle seal 进行（`backgroundCertified` false、`suspensionLiveWork` false）。切片 4 剩余工作即此注册/交接链（worker attestation → broker binding observation 能力 → harness lane `observationBindings`）；落地后 seal 盖 `backgroundHeld`、摘除后 capture 存活、输出暂存、drain-only wake 结算。model-stub 请求日志（2 请求，回收全程不变）是「drain 无模型 turn」的常设 oracle。
+  - **健壮性发现（worker-loss 族）：kill -9 重启搁浅 ACTIVE turn。** 硬重启后在途 turn 的 recovery 永久 deferred（`Original Harness attachment is unavailable`——重启的 harness 无 attachment），`requireRecoverablePlacement` 拒绝同 workspace 全部新 session（`runtime_placement_recovery_required`）。fixture 需全清 `ma_*` 才能继续（boot 以固定 idempotency key 确定性重建 workspace）。归入剩余「worker loss / Broker 重启围栏」fault case。
+  - **fixture 机制修正。** server 开 H2 不带 `AUTO_SERVER`，运行中第二连接读失败；改读 `managed.mv.db` 的**副本**（MVStore 快照副本可正常打开）。身份列为 `VARBINARY(2048)`：字符串字面量需 `CAST('…' AS BINARY(2048))`（裸 `=` 报 90110）。`witness4.sh`（timeline：后台存活/stub 请求数/staged 数/head 态）取代 `witness3.sh` 跑全周期。
+
+完整 E2E harness（仿 `HostedHarnessMySqlIT` + `managed-local-serve.ts` 的新 MySQL IT，或上述脚本化真实 daemon 驱动）必须在 Linux 跑；publication 准入已接通、commit 门已修复——开放项是上述 observation 注册 → 后台感知 seal 链。
+
+### 评审修复（#17953）
+
+PR 评审在开关打开的通路上发现十三处缺陷：十处会让投递卡死或丢失，三处关于资源与规模。每处修复都带一个在修复前代码上会失败的回归测试。
+
+- **暂存丢掉 null 字段。** Broker 序列化暂存条目时未带 `WriteNulls`，terminal 的 `exitSignal: null` 被丢掉，之后每次唤醒加载都解析失败。暂存现在写出 null。
+- **Monitor 通知无法暂存。** 暂存白名单列了一个无人产生的类型，漏了 `managed-input` 与 `managed-admission`。
+- **空闲 partial flush 耗尽页数上限。** 每段一页时，每次 250 ms flush 都消耗 64 页中的一页，每秒打一行的命令约 64 行后即触发 `size_limit`。采集的 `revisionPerSegment` 选项现在随每个段重新发布开放的末页，最多 256 段；descriptor 后继规则本就允许末页增长。terminal 闭包只携带结算的 manifest，被丢弃 revision 的 manifest 不会把它推过请求上限。
+- **partial flush 失败会卡死流。** 现在与写入失败一样把采集标记为损坏。
+- **Monitor 尾窗口可能死锁。** 尾窗口达到 `maxEvents` 时，`flushTail` 等待 `terminate`，后者等待单元 completion，而 completion 又在等 `flushTail`。尾窗口现在从不停止单元；与常驻循环一致，配额或空闲停止后跳过尾窗口，且物理退出优先于配额。
+- **在途推送期间重新挂接会让 run 停在 held。** 旧推送不再把 run 切到 held，较新的 publisher 在旧推送返回后接手。
+- **held 的 run 从不重试。** 推送失败后现在以退避（1 s 起、翻倍至 30 s）重试已安装的 publisher，首个被确认的批次后回到 attached。这也让先于 start receipt 到达的 terminal 条目得以结算。
+- **暂存确认会裁掉 Harness 尚未应用的条目。** 已安装 publisher 时（attached，或推送失败后 held），worker 忽略 `ackThrough`；只有无 Harness 持有的 run 才按暂存确认裁剪。否则重新挂接排空期间暂存的条目会丢失，暂存后的重试也会因序号不连续被拒。
+- **推送批次按实际发送的大小计算**，包括请求外层与条目间分隔符。
+- **观测条目夹带了采集输出。** Monitor 策略现在发布到自己的资源 store，观测只携带它自己的通知。
+- **worker 从不释放 run。** 一个 run 在某个消费方确认了它的 terminal 条目、且它的退出路径已取走回执后，即从注册表移除，注册响应的 `observedRuns` 只列仍在进行中的 run。每个资源 store 也会丢掉已由入队条目携带的字节，只保留最新的 manifest，因为采集在 finalize 时还要读回它。没有这一步，开放页增长会让一个长时间运行的 run 在 worker 里攒下数 GB。
+- **无法使用租约的副本会把能用的副本锁在外面。** Broker 现在先用本副本的 provisioner 检查 binding 的租约，再去拿拉取 claim，用不了这个 binding 的副本绝不会持有它的 claim。
+- **被唤醒的 Session 无法再次挂起。** 重新加载现在会重建 dispatch 时记录的信息：重新注册报告了观测归属时，该 worker 报告仍持有的每个未结算 run 的 binding 都加入 lane 的 `observationBindings`，run 仍在运行时挂起证书也能通过。
+
+验证：`RuntimeStageStoreTest` 6/6、`RuntimeObservationPullerTest` 2/2 且 Checkstyle 通过；core `local-shell-stream-capture` 15/15 及等价性 2/2；cli `managed-background-delivery` 15/15、其进程测试、两套 Shell publisher 测试、`hosted-turn-cleanup`、`managed-runtime-container`、`managed-context-worker` 与 `managed-runtime-tool-executor`。MySQL 8.4 暂存 IT 交由 CI。
 
 ### 剩余故障用例
 
 - **带在途 pull 的 re-attach/drain、挂起期间首条观测、detach→seal 窗口、挂起期间 monitor 策略停止、边界/水位线 wake、挂起资格矩阵、worker 丢失、跨 Broker 重启/副本围栏、删除挂起 Session** — Java 侧已由 H2 上的 `RuntimeStageStoreTest`、`RuntimeObservationPullerTest`、`WakeSealStampTest`、`SessionRecoveryServiceTest`、`HostedCleanupDebtStoreTest`、`RuntimeBrokerServiceTest` 覆盖，并已在真实 MySQL 8.4 上见证（见上）；各自仍需 daemon 级 E2E。
-- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。Linux 上 daemon 已带 flag 启动且**挂起已见证**（见上 Linux 真实 daemon 见证）；唯一开放项是让 WebShell session 准入后台 Shell 的 `captureBytes`/publication 接线，之后即可捕获「后台进程存活 + staging + drain」断言。Linux-only（durable local-process provisioner），故 CI hosted 车道或 Linux 主机。
+- **daemon 级挂起 E2E** — 经真实 daemon、worker 与 Broker 走完 资格 → 摘除 → 暂存唤醒 → 排空 循环（切片 3 投产门）。Linux 上 daemon 已带 flag 启动，WebShell session 已准入后台 Shell 进委派 cgroup，且**持活跃后台工作的挂起已见证**（见上收尾验证执行；阻塞 `running_attached` child_run 记录的 commit 门缺陷已修复）。开放项是 observation 注册 → 后台感知 seal 链：harness 目前对 worker-owned 后台盲挂起（`observationBindings` 空 → 无 `backgroundHeld` 戳 → lease 失效回收 runtime），故 staging + drain-only 结算断言尚不可捕获。Linux-only（durable local-process provisioner），故 CI hosted 车道或 Linux 主机。
 - **§7 度量 — Broker/daemon 半** — pull 成本/延迟（每 Broker 的 long-poll 连接数、每次空闲 pull 的 CPU、观测→wake→turn-start 与退出→结算时延）、挂起期间活跃输出下的 staging 行数/字节、静默加载的 drain 突发；这些确定 pull 等待（`pullWaitMs`，现 2,000）、staged-bytes 水位线（4 MiB）与硬上限（16 MiB）（§11 开放问题 1）。worker/applier 半已如上落地。
 
 ## 验证命令
@@ -186,5 +215,5 @@ cd packages/core && npx vitest run src/managed-runtime/local-shell-stream-captur
 - 即便 worker 模式，applier 仍要求经 `HostedShellPublisher.register()` 注册采集（prepare RPC 被跳过，但 `applyDelivery` 查找已注册采集）。生产在 `hosted-workspace-tool-turn.ts` 的后台准入处注册。
 - 测试资源 store 必须将字节落到 session 资源根布局（`<runtimeBaseDir>/resources/<sessionId>/<kind>/<resourceId>`）并经 `session.resources` 读取，否则 authority 的 `verifyExtensionResources` 拒绝记录 ref。
 - `LocalManagedSessionResourceStore.publish` 总是生成 UUID； honoring 客户端选定 ID 的 `DurableToolResultResourceStore` 须直接写该布局（见测试 double）。
-- 疑似潜在环（既有、本切片未复现也未修）：若 Monitor 的**尾**窗口恰是跨过 `maxEvents` 的那个，`flushTail → flush → autoStop → terminate` 会等待 registry completion，而后者正在等 `flushTail`（`registry.terminate` 返回 `entry.completion`）。正常 quota 路径从窗口 flush 触发、尾窗口为空，不触环。修复前需先单独复现。
+- 此处曾记为疑似的 Monitor 尾窗口环确实存在，已修复；见「评审修复（#17953）」。尾窗口绝不能调用 `terminate`，因为 `registry.terminate` 返回的 `entry.completion` 正是尾窗口所在的那条路径。
 - 本仓库不要对活跃 PR rebase/force-push；改为 merge `origin/main`。

@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcRuntimeStageStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
@@ -249,9 +250,58 @@ class RuntimeObservationPullerTest {
         assertThat(stopped.isTerminal()).isTrue();
     }
 
+    @Test
+    void aReplicaThatCannotUseTheLeaseLeavesThePullToOneThatCan() throws Exception {
+        RuntimeBrokerService owner = newBroker("broker-owner");
+        RuntimeBrokerHttpServer server = newHttpServer(owner);
+        RuntimeBrokerService blind = newBroker("broker-blind", false);
+        // Scan by hand only, the blind replica first.
+        for (RuntimeBrokerService broker : List.of(owner, blind)) {
+            broker.configureStageStore(stageStore, Duration.ofSeconds(30), Duration.ofHours(1), 50, 100L);
+        }
+        HttpResponse<String> acquired = postBroker(server, "/tool-sessions:acquire", Map.of(
+                "protocolVersion", 1,
+                "requestId", "acq-1",
+                "harnessSessionId", harnessSessionId,
+                "runtimeSessionId", runtimeSessionId,
+                "turnKind", "bootstrap"));
+        assertThat(acquired.statusCode()).isEqualTo(200);
+        var binding = bindingRepo.findActive(new com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest(
+                scope, null, "static"));
+        seedBackgroundRun(binding.getBindingId(), binding.getGeneration(), "call-1");
+        workerOutbox.add(outputEntry("call-1", 1L, "seg-1", "page-1", "man-1", "bg-out\n"));
+        workerAttached.set(false);
+
+        blind.runObservationScanOnce().toCompletableFuture().join();
+        owner.runObservationScanOnce().toCompletableFuture().join();
+        waitUntil(() -> stageStore.highestStagedSequence("call-1") == 1L);
+    }
+
     private RuntimeBrokerService newBroker(String ownerId) {
+        return newBroker(ownerId, true);
+    }
+
+    private RuntimeBrokerService newBroker(String ownerId, boolean leaseUsable) {
         URI workerUri = URI.create("http://127.0.0.1:" + workerServer.getAddress().getPort());
         RuntimeLease staticLease = new RuntimeLease("inst-1", workerUri, WORKER_TOKEN, "lease-1", 1L);
+        StaticRuntimeProvisioner staticProvisioner = new StaticRuntimeProvisioner(staticLease);
+        RuntimeProvisioner provisioner = leaseUsable ? staticProvisioner : new RuntimeProvisioner() {
+            @Override
+            public CompletionStage<RuntimeLease> provision(
+                    com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest request) {
+                return staticProvisioner.provision(request);
+            }
+
+            @Override
+            public String kind() {
+                return staticProvisioner.kind();
+            }
+
+            @Override
+            public boolean isUsable(RuntimeLease lease) {
+                return false;
+            }
+        };
         HttpRuntimeTransport httpTransport = new HttpRuntimeTransport(httpClient);
         RuntimeTransport transport = new ForwardingV3Transport(httpTransport);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
@@ -267,7 +317,7 @@ class RuntimeObservationPullerTest {
         };
         RuntimeBrokerService service = new RuntimeBrokerService(
                 resolver,
-                new StaticRuntimeProvisioner(staticLease),
+                provisioner,
                 transport,
                 bindingRepo,
                 runtimeSessionRepo,

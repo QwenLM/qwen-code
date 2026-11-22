@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONWriter;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
@@ -49,7 +50,8 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
             "managed-monitor-observation",
             "managed-message-chunks",
             "managed-message-chunk",
-            "managed-input-admission");
+            "managed-input",
+            "managed-admission");
 
     private final DataSource dataSource;
     private final JdbcTemplate jdbc;
@@ -306,7 +308,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
 
                 Map<String, Object> stripped = new LinkedHashMap<>(entry);
                 stripped.put("resources", List.of());
-                String entryJson = JSON.toJSONString(stripped);
+                String entryJson = JSON.toJSONString(stripped, JSONWriter.Feature.WriteNulls);
 
                 boolean inserted = insertStageRow(
                         callHash,

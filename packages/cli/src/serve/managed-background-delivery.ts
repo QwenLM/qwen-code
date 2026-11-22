@@ -37,14 +37,19 @@ import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 
 // A delivery entry carries its resources base64-encoded inside a request
 // bounded by MANAGED_DELIVERY_REQUEST_LIMIT_BYTES (512 KiB), and an entry
-// larger than that can never be pushed at all. One segment per page keeps
-// a revision to a single segment, and 128 KiB leaves room for both streams
-// sealing into one entry: 2 x 128 KiB x 4/3 stays well under the limit.
+// larger than that can never be pushed at all. Every segment publishes its
+// own revision, which re-publishes the stream's open page of up to 256
+// segment descriptors (~25 KB), so the largest entry — a segment and a page
+// per stream plus one manifest of at most 64 KiB — stays under 510 KB once
+// encoded. The 64-page bound then holds 16,384 segments per stream, so idle
+// partial flushes spend ordinals instead of exhausting pages.
 const BACKGROUND_SEGMENT_BYTES = 128 * 1024;
-const BACKGROUND_SEGMENTS_PER_PAGE = 1;
+const BACKGROUND_SEGMENTS_PER_PAGE = 256;
 const PARTIAL_FLUSH_MS = 250;
 /** Per-run outbox budget, sized above the largest single flush batch. */
 const RUN_OUTBOX_BYTES = 8 * 1024 * 1024;
+const PUSH_RETRY_BASE_MS = 1000;
+const PUSH_RETRY_MAX_MS = 30_000;
 const MONITOR_DEBOUNCE_FLOOR_MS = 1000;
 const EVENT_LINE_TRUNCATE = 2000;
 
@@ -67,7 +72,7 @@ interface BufferedResource {
  */
 export class WorkerDeliveryResourceStore {
   private readonly byId = new Map<string, BufferedResource>();
-  private readonly ordered: BufferedResource[] = [];
+  private ordered: BufferedResource[] = [];
   private nextIndex = 0;
 
   async publish(
@@ -128,6 +133,25 @@ export class WorkerDeliveryResourceStore {
   get watermark(): number {
     return this.nextIndex - 1;
   }
+
+  /** Drops everything at or before the marker, whose bytes an enqueued
+   * entry already carries, except the newest manifest: the capture reads
+   * its final revision back after delivering it. */
+  release(marker: number): void {
+    const manifest = this.ordered.findLast(
+      (entry) =>
+        entry.index <= marker &&
+        entry.ref.kind === MANAGED_TOOL_RESULT_KINDS.manifest,
+    );
+    for (const entry of this.ordered) {
+      if (entry.index <= marker && entry !== manifest) {
+        this.byId.delete(entry.ref.resourceId);
+      }
+    }
+    this.ordered = this.ordered.filter(
+      (entry) => entry.index > marker || entry === manifest,
+    );
+  }
 }
 
 function entryBytes(entry: ManagedDeliveryEntry): number {
@@ -148,7 +172,8 @@ export interface ObservationPullBatch {
 /**
  * One background run's ordered outbox and its delivery state. The worker
  * pushes to the resident Harness while attached; a failed push switches to
- * held and the entries stay until a consumer acknowledges them.
+ * held, keeps the entries until a consumer acknowledges them, and retries
+ * the installed publisher with backoff.
  */
 export class BackgroundDeliveryRun {
   private readonly outbox: ManagedDeliveryEntry[] = [];
@@ -161,6 +186,8 @@ export class BackgroundDeliveryRun {
   private descriptor: ShellPublisherDescriptor | undefined;
   private writerGeneration = 0;
   private pushing: Promise<void> | undefined;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private retryAttempt = 0;
   private stopping = false;
   private tailDropped = false;
   private terminalEmitted = false;
@@ -178,6 +205,8 @@ export class BackgroundDeliveryRun {
       }
     | undefined;
   private closed = false;
+  /** Called once a consumer acknowledged the terminal entry. */
+  onDrained?: () => void;
 
   constructor(
     readonly executionCallId: string,
@@ -219,6 +248,7 @@ export class BackgroundDeliveryRun {
     this.descriptor = descriptor;
     this.writerGeneration = writerGeneration;
     this.mode = 'attached';
+    this.retryAttempt = 0;
     this.finishStageWaiter('attached', []);
     void this.pushPending();
     return true;
@@ -383,39 +413,46 @@ export class BackgroundDeliveryRun {
     });
   }
 
+  /** Pushes to the installed publisher; held with one installed is a push
+   * that failed, so the retry timer drives this too. A newer attach during
+   * a push takes over once that push returns. */
   private async pushPending(): Promise<void> {
-    if (this.pushing || this.mode !== 'attached' || !this.descriptor) return;
-    if (this.outbox.length === 0) return;
+    if (this.pushing || !this.descriptor || this.outbox.length === 0) return;
     const descriptor = this.descriptor;
     this.pushing = (async () => {
       try {
-        while (this.outbox.length > 0 && this.mode === 'attached') {
-          // Batch entries up to the delivery request limit.
-          const batch: ManagedDeliveryEntry[] = [];
-          let batchBytes = 0;
+        while (this.outbox.length > 0 && this.descriptor === descriptor) {
+          // Size the batch as it is sent: the request wrapper plus a comma
+          // between entries.
+          const request = {
+            operation: 'deliver',
+            executionCallId: this.executionCallId,
+            entries: [] as ManagedDeliveryEntry[],
+          };
+          let requestBytes = Buffer.byteLength(JSON.stringify(request));
           for (const entry of this.outbox) {
-            const size = entryBytes(entry);
+            const size =
+              entryBytes(entry) + (request.entries.length > 0 ? 1 : 0);
             if (
-              batch.length > 0 &&
-              batchBytes + size > MANAGED_DELIVERY_REQUEST_LIMIT_BYTES
+              request.entries.length > 0 &&
+              requestBytes + size > MANAGED_DELIVERY_REQUEST_LIMIT_BYTES
             ) {
               break;
             }
-            batch.push(entry);
-            batchBytes += size;
-            if (batchBytes > MANAGED_DELIVERY_REQUEST_LIMIT_BYTES) break;
+            request.entries.push(entry);
+            requestBytes += size;
           }
-          if (batch.length === 0) break;
-          const reply = await deliverRpc(descriptor, {
-            operation: 'deliver',
-            executionCallId: this.executionCallId,
-            entries: batch,
-          });
+          const reply = await deliverRpc(descriptor, request);
           const appliedThrough = Number(reply['appliedThrough']);
           if (!Number.isSafeInteger(appliedThrough)) {
             throw new Error('Delivery acknowledgement is invalid.');
           }
           this.acknowledge(appliedThrough);
+          this.retryAttempt = 0;
+          if (this.mode === 'held' && this.descriptor === descriptor) {
+            this.mode = 'attached';
+            this.finishStageWaiter('attached', []);
+          }
           const receipt = reply['receipt'];
           if (receipt && typeof receipt === 'object') {
             this.terminalReceipt = receipt as ToolResultAcknowledgement;
@@ -425,11 +462,15 @@ export class BackgroundDeliveryRun {
           }
         }
       } catch {
-        // A failed push is not a capture failure: switch to held and keep
-        // the entries for the next consumer. Any waiter on the terminal
+        // A failed push is not a capture failure: switch to held, keep the
+        // entries for the next consumer and retry this publisher, unless a
+        // newer attach already owns delivery. Any waiter on the terminal
         // receipt is released as blocked rather than hanging.
-        this.mode = 'held';
-        this.wakeStageWaiterIfReady();
+        if (this.descriptor === descriptor) {
+          this.mode = 'held';
+          this.wakeStageWaiterIfReady();
+          this.scheduleRetry();
+        }
         for (const waiter of this.receiptWaiters.splice(0)) {
           waiter({
             executionCallId: this.executionCallId,
@@ -440,9 +481,24 @@ export class BackgroundDeliveryRun {
         }
       } finally {
         this.pushing = undefined;
+        if (this.descriptor !== descriptor) void this.pushPending();
       }
     })();
     return this.pushing;
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer || this.closed) return;
+    const delay = Math.min(
+      PUSH_RETRY_MAX_MS,
+      PUSH_RETRY_BASE_MS * 2 ** this.retryAttempt,
+    );
+    this.retryAttempt += 1;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.pushPending();
+    }, delay);
+    if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
   }
 
   private advanceAckedPrefix(ackedThrough: number): void {
@@ -459,6 +515,7 @@ export class BackgroundDeliveryRun {
       this.onBackpressure?.(false);
       for (const waiter of this.roomWaiters.splice(0)) waiter();
     }
+    if (this.terminalEmitted && this.outbox.length === 0) this.onDrained?.();
   }
 
   private acknowledge(appliedThrough: number): void {
@@ -543,7 +600,14 @@ export class BackgroundDeliveryRun {
     readonly maxEntries?: number;
   }): Promise<ObservationPullBatch> {
     this.finishStageWaiter('superseded', []);
-    if (params.ackThrough !== undefined && params.ackThrough > 0) {
+    // A Harness holding a publisher applies the outbox itself and may not
+    // have drained what the Broker staged meanwhile, so only a run no
+    // Harness holds lets a staging acknowledgement trim it.
+    if (
+      params.ackThrough !== undefined &&
+      params.ackThrough > 0 &&
+      !this.descriptor
+    ) {
       this.acknowledgeStaged(params.ackThrough);
     }
     const maxEntries = Math.max(1, Math.min(params.maxEntries ?? 64, 256));
@@ -612,6 +676,8 @@ export class BackgroundDeliveryRun {
     this.closed = true;
     this.mode = 'held';
     this.descriptor = undefined;
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
     this.wakeStageWaiterIfReady();
     for (const waiter of this.roomWaiters.splice(0)) waiter();
     for (const waiter of this.receiptWaiters.splice(0)) {
@@ -693,6 +759,7 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
       {
         segmentBytes: BACKGROUND_SEGMENT_BYTES,
         segmentsPerPage: BACKGROUND_SEGMENTS_PER_PAGE,
+        revisionPerSegment: true,
         onRevision: (ref) => this.onRevision(ref),
       },
     );
@@ -706,6 +773,7 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
     ) as { revision: number };
     if (await this.run.enqueueOutput(ref, manifest.revision, resources)) {
       this.lastResourceMarker = marker;
+      this.resources.release(marker);
     } else {
       // A dropped revision means the stop found the outbox full: freeze
       // the capture so the buffered tail is dropped and the final revision
@@ -801,10 +869,19 @@ export class WorkerBackgroundCaptureSink implements ManagedShellCaptureSink {
           }
         : null;
     const manifestRef = envelope.capture?.manifest ?? null;
+    // Of the revisions a forced stop dropped, only the settled manifest is
+    // ever read; their other manifests would only crowd the request limit.
     const resources = manifestRef
-      ? this.resources.since(this.lastResourceMarker)
+      ? this.resources
+          .since(this.lastResourceMarker)
+          .filter(
+            ({ ref }) =>
+              ref.kind !== MANAGED_TOOL_RESULT_KINDS.manifest ||
+              ref.resourceId === manifestRef.resourceId,
+          )
       : [];
     this.lastResourceMarker = this.resources.watermark;
+    this.resources.release(this.lastResourceMarker);
     this.run.enqueueTerminal(
       envelope,
       evidence,
@@ -846,10 +923,12 @@ export class WorkerMonitorPolicy {
   private idle: ReturnType<typeof setTimeout> | undefined;
   private ended = false;
   private stopReason: ManagedMonitorStopReason = 'exited';
+  /** Its own store, so an observation carries only its notification and
+   * never the capture's output. */
+  private readonly resources = new WorkerDeliveryResourceStore();
   private lastResourceMarker = -1;
 
   constructor(
-    private readonly sink: WorkerBackgroundCaptureSink,
     private readonly run: BackgroundDeliveryRun,
     private readonly params: {
       readonly monitorId: string;
@@ -887,8 +966,13 @@ export class WorkerMonitorPolicy {
   private armWindow(): void {
     const ms = Math.max(this.params.debounceMs, MONITOR_DEBOUNCE_FLOOR_MS);
     this.window = setTimeout(() => {
-      void this.flush().then(() => {
-        if (!this.ended) this.armWindow();
+      void this.flush().then(async () => {
+        if (this.ended) return;
+        if (this.sequence >= this.params.maxEvents) {
+          await this.autoStop('max_events');
+        } else {
+          this.armWindow();
+        }
       });
     }, ms);
     if (typeof this.window.unref === 'function') this.window.unref();
@@ -909,7 +993,7 @@ export class WorkerMonitorPolicy {
     this.buffered = [];
     this.sequence += 1;
     const inputId = `${this.params.monitorId}:notify:${this.sequence}`;
-    const contentRef = await this.sink.resources.publish(
+    const contentRef = await this.resources.publish(
       'managed-input',
       Buffer.from(
         JSON.stringify({
@@ -924,12 +1008,12 @@ export class WorkerMonitorPolicy {
         'utf8',
       ),
     );
-    const admissionRef = await this.sink.resources.publish(
+    const admissionRef = await this.resources.publish(
       'managed-admission',
       Buffer.from('{}', 'utf8'),
     );
-    const resources = this.sink.resources.since(this.lastResourceMarker);
-    const marker = this.sink.resources.watermark;
+    const resources = this.resources.since(this.lastResourceMarker);
+    const marker = this.resources.watermark;
     if (
       await this.run.enqueueObservation(
         this.sequence,
@@ -939,12 +1023,10 @@ export class WorkerMonitorPolicy {
       )
     ) {
       this.lastResourceMarker = marker;
+      this.resources.release(marker);
     }
     this.onNotification?.();
     this.armIdle();
-    if (this.sequence >= this.params.maxEvents) {
-      await this.autoStop('max_events');
-    }
   }
 
   private async autoStop(reason: ManagedMonitorStopReason): Promise<void> {
@@ -955,17 +1037,20 @@ export class WorkerMonitorPolicy {
     await this.terminate();
   }
 
-  /** The exit's tail window: commit it, then report the policy stop reason. */
+  /**
+   * The exit's tail window: commit it unless a quota or idle stop already
+   * ended observing, then report the policy stop reason. As in the resident
+   * loop, the physical end supersedes the quota. It never terminates the
+   * unit: it runs on that unit's completion path, which terminate awaits.
+   */
   async flushTail(): Promise<ManagedMonitorStopReason> {
     this.remainder += this.decoder.end();
     if (this.remainder.length > 0) {
       this.buffered.push(this.remainder);
       this.remainder = '';
     }
-    const wasEnded = this.ended;
-    this.ended = false;
     await this.flush();
-    this.ended = wasEnded || this.ended;
+    this.ended = true;
     this.disarm();
     return this.stopReason;
   }
