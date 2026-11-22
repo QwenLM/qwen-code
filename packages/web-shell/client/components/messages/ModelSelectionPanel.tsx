@@ -27,7 +27,7 @@ import {
   XIcon,
   ZapIcon,
 } from 'lucide-react';
-import { getDaemonAuthHeaders, getDaemonBaseUrl } from '../../config/daemon';
+import { getDaemonToken, getDaemonBaseUrl } from '../../config/daemon';
 import styles from './ModelSelectionPanel.module.css';
 
 export interface ModelCatalogItem {
@@ -42,6 +42,7 @@ export interface ModelCatalogItem {
   hasPriority: boolean;
   hasDiscount: boolean;
   discountPercent: number | null;
+  discountEndsAtMs?: number | null;
   centsPerInputToken: number | null;
   centsPerOutputToken: number | null;
   pricePerMillionInput: number | null; // in $/Mt
@@ -102,7 +103,7 @@ export function formatContextTokens(tokens: number | null | undefined): string {
   if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) {
     return `${tokens / 1_000_000}M`;
   }
-  if (tokens % 1000 === 0 && tokens % 1024 !== 0) {
+  if (tokens % 1000 === 0) {
     return `${tokens / 1000}k`;
   }
   if (tokens % 1024 === 0) {
@@ -180,20 +181,28 @@ function parseRawCatalog(rawList: unknown[]): ModelCatalogItem[] {
     const hasFlex = tags.includes('flex');
     const hasPriority = tags.includes('priority');
 
+    let discountEndsAtMs: number | null = null;
+    const endsAt = item.pricing?.discount_ends_at;
+    if (endsAt) {
+      const parsed = Date.parse(endsAt);
+      if (!isNaN(parsed)) {
+        discountEndsAtMs = parsed;
+      }
+    }
+
+    const isExpired = discountEndsAtMs !== null && discountEndsAtMs <= now;
+
     let isDiscountActive = false;
     const discountVal = item.pricing?.discount;
-    if (typeof discountVal === 'number' && discountVal > 0) {
-      const endsAt = item.pricing?.discount_ends_at;
-      if (endsAt) {
-        const endsAtMs = Date.parse(endsAt);
-        if (isNaN(endsAtMs) || endsAtMs > now) {
-          isDiscountActive = true;
-        }
-      } else {
+    if (!isExpired) {
+      if (typeof discountVal === 'number' && discountVal > 0) {
+        isDiscountActive = true;
+      } else if (tags.includes('discount')) {
         isDiscountActive = true;
       }
     }
-    const hasDiscount = isDiscountActive || tags.includes('discount');
+
+    const hasDiscount = isDiscountActive;
     const discountPercent =
       isDiscountActive && typeof discountVal === 'number' && discountVal > 0
         ? Number((discountVal * 100).toFixed(1))
@@ -230,6 +239,7 @@ function parseRawCatalog(rawList: unknown[]): ModelCatalogItem[] {
       hasPriority,
       hasDiscount,
       discountPercent,
+      discountEndsAtMs,
       centsPerInputToken: centsIn,
       centsPerOutputToken: centsOut,
       pricePerMillionInput: centsIn != null ? centsIn * 10000 : null,
@@ -239,6 +249,16 @@ function parseRawCatalog(rawList: unknown[]): ModelCatalogItem[] {
   }
 
   return catalog;
+}
+
+export function isItemDiscountActive(
+  item: ModelCatalogItem,
+  currentTimeMs: number = Date.now(),
+): boolean {
+  if (item.discountEndsAtMs != null && item.discountEndsAtMs <= currentTimeMs) {
+    return false;
+  }
+  return item.hasDiscount;
 }
 
 type SortField = 'name' | 'context' | 'quant' | 'priceIn' | 'priceOut';
@@ -359,7 +379,12 @@ export function ModelSelectionPanel({
           const daemonUrl = effectiveDaemonBaseUrl
             ? `${effectiveDaemonBaseUrl.replace(/\/+$/, '')}/workspace/auth/deepinfra-models`
             : '/workspace/auth/deepinfra-models';
-          const authHeaders = getDaemonAuthHeaders();
+          const effectiveToken =
+            optionalWorkspace?.token ??
+            getDaemonToken(effectiveDaemonBaseUrl || undefined);
+          const authHeaders = effectiveToken
+            ? { Authorization: `Bearer ${effectiveToken}` }
+            : undefined;
           const res = await fetch(daemonUrl, {
             signal: controller.signal,
             headers: {
@@ -416,7 +441,12 @@ export function ModelSelectionPanel({
       isMounted = false;
       controller.abort();
     };
-  }, [isDeepInfra, effectiveDaemonBaseUrl, retryCount]);
+  }, [
+    isDeepInfra,
+    effectiveDaemonBaseUrl,
+    optionalWorkspace?.token,
+    retryCount,
+  ]);
 
   const selectedIds = useMemo(() => parseModelIds(value), [value]);
 
@@ -469,7 +499,7 @@ export function ModelSelectionPanel({
       if (featuredOnly && !model.isFeatured) {
         return false;
       }
-      if (discountOnly && !model.hasDiscount) {
+      if (discountOnly && !isItemDiscountActive(model)) {
         return false;
       }
       if (priorityOnly && !model.hasPriority) {
@@ -601,7 +631,7 @@ export function ModelSelectionPanel({
           <Input
             ref={searchInputRef}
             className={styles.searchInput}
-            placeholder="Search model name..."
+            placeholder={t('auth.modelSelection.searchPlaceholder')}
             value={searchQuery}
             disabled={disabled}
             autoFocus={autoFocus && isDeepInfra}
@@ -617,12 +647,16 @@ export function ModelSelectionPanel({
             onValueChange={setSelectedType}
           >
             <SelectTrigger aria-label="Filter by type">
-              <SelectValue placeholder="All types" />
+              <SelectValue placeholder={t('auth.modelSelection.allTypes')} />
             </SelectTrigger>
             <SelectContent>
               {availableTypes.map((type) => (
                 <SelectItem key={type} value={type}>
-                  {type === 'all' ? 'All Types' : type}
+                  {type === 'all'
+                    ? t('auth.modelSelection.allTypes')
+                    : type === 'text-generation'
+                      ? t('auth.modelSelection.textGeneration')
+                      : type}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -637,12 +671,12 @@ export function ModelSelectionPanel({
             onValueChange={setSelectedQuant}
           >
             <SelectTrigger aria-label="Filter by quantization">
-              <SelectValue placeholder="All Quants" />
+              <SelectValue placeholder={t('auth.modelSelection.allQuant')} />
             </SelectTrigger>
             <SelectContent>
               {availableQuants.map((quant) => (
                 <SelectItem key={quant} value={quant}>
-                  {quant === 'all' ? 'All Quants' : quant}
+                  {quant === 'all' ? t('auth.modelSelection.allQuant') : quant}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -657,10 +691,12 @@ export function ModelSelectionPanel({
             onValueChange={(val) => setMinContext(Number(val))}
           >
             <SelectTrigger aria-label="Filter by context window">
-              <SelectValue placeholder="All contexts" />
+              <SelectValue placeholder={t('auth.modelSelection.anyContext')} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="0">All Contexts</SelectItem>
+              <SelectItem value="0">
+                {t('auth.modelSelection.anyContext')}
+              </SelectItem>
               <SelectItem value="32000">≥ 32k tokens</SelectItem>
               <SelectItem value="64000">≥ 64k tokens</SelectItem>
               <SelectItem value="128000">≥ 128k tokens</SelectItem>
@@ -681,7 +717,7 @@ export function ModelSelectionPanel({
             title="Filter featured models"
           >
             <SparklesIcon className={styles.buttonIconFeatured} />
-            <span>Featured</span>
+            <span>{t('auth.modelSelection.featured')}</span>
           </button>
 
           <button
@@ -693,7 +729,7 @@ export function ModelSelectionPanel({
             title="Filter discounted models"
           >
             <TagIcon className={styles.buttonIconDiscount} />
-            <span>Discount</span>
+            <span>{t('auth.modelSelection.discount')}</span>
           </button>
 
           <button
@@ -705,7 +741,7 @@ export function ModelSelectionPanel({
             title="Filter models supporting priority service tier"
           >
             <ZapIcon className={styles.buttonIconPriority} />
-            <span>Priority</span>
+            <span>{t('auth.modelSelection.priority')}</span>
           </button>
 
           <button
@@ -717,32 +753,34 @@ export function ModelSelectionPanel({
             title="Filter models supporting flex service tier"
           >
             <ClockIcon className={styles.buttonIconFlex} />
-            <span>Flex</span>
+            <span>{t('auth.modelSelection.flex')}</span>
           </button>
         </div>
       </div>
+
+      {fetchError && (
+        <div className={styles.errorNotice} role="alert">
+          <span>{t('auth.modelSelection.failed', { error: fetchError })}</span>
+          <button
+            type="button"
+            className={styles.retryButton}
+            onClick={() => setRetryCount((c) => c + 1)}
+          >
+            {t('auth.modelSelection.retry')}
+          </button>
+        </div>
+      )}
 
       {/* Model Table List */}
       <div className={styles.tableContainer}>
         {loading ? (
           <div className={styles.loadingNotice}>
             <Spinner />
-            <span>Loading models...</span>
-          </div>
-        ) : fetchError && models.length === 0 ? (
-          <div className={styles.errorNotice}>
-            <span>Failed to load models catalog: {fetchError}</span>
-            <button
-              type="button"
-              className={styles.retryButton}
-              onClick={() => setRetryCount((c) => c + 1)}
-            >
-              Retry
-            </button>
+            <span>{t('auth.modelSelection.loading')}</span>
           </div>
         ) : sortedModels.length === 0 ? (
           <div className={styles.emptyNotice}>
-            <span>No models found matching criteria.</span>
+            <span>{t('auth.modelSelection.noMatches')}</span>
           </div>
         ) : (
           <table className={styles.table}>
@@ -763,7 +801,7 @@ export function ModelSelectionPanel({
                     className={styles.sortableHeader}
                     onClick={() => handleSort('name')}
                   >
-                    <span>Model</span>
+                    <span>{t('auth.modelSelection.thName')}</span>
                     {sortField === 'name' ? (
                       <span className={styles.sortArrow}>
                         {sortDirection === 'asc' ? '↑' : '↓'}
@@ -787,7 +825,7 @@ export function ModelSelectionPanel({
                     className={styles.sortableHeader}
                     onClick={() => handleSort('context')}
                   >
-                    <span>Context</span>
+                    <span>{t('auth.modelSelection.thContext')}</span>
                     {sortField === 'context' ? (
                       <span className={styles.sortArrow}>
                         {sortDirection === 'asc' ? '↑' : '↓'}
@@ -811,7 +849,7 @@ export function ModelSelectionPanel({
                     className={styles.sortableHeader}
                     onClick={() => handleSort('quant')}
                   >
-                    <span>Quant</span>
+                    <span>{t('auth.modelSelection.thQuant')}</span>
                     {sortField === 'quant' ? (
                       <span className={styles.sortArrow}>
                         {sortDirection === 'asc' ? '↑' : '↓'}
@@ -836,7 +874,7 @@ export function ModelSelectionPanel({
                     onClick={() => handleSort('priceIn')}
                     title="Sort by input price per million tokens"
                   >
-                    <span>In ($/Mt)</span>
+                    <span>{t('auth.modelSelection.thInPrice')}</span>
                     {sortField === 'priceIn' ? (
                       <span className={styles.sortArrow}>
                         {sortDirection === 'asc' ? '↑' : '↓'}
@@ -861,7 +899,7 @@ export function ModelSelectionPanel({
                     onClick={() => handleSort('priceOut')}
                     title="Sort by output price per million tokens"
                   >
-                    <span>Out ($/Mt)</span>
+                    <span>{t('auth.modelSelection.thOutPrice')}</span>
                     {sortField === 'priceOut' ? (
                       <span className={styles.sortArrow}>
                         {sortDirection === 'asc' ? '↑' : '↓'}
@@ -905,7 +943,7 @@ export function ModelSelectionPanel({
                               />
                             </span>
                           )}
-                          {model.hasDiscount && (
+                          {isItemDiscountActive(model) && (
                             <span
                               title={
                                 model.discountPercent != null
@@ -988,8 +1026,9 @@ export function ModelSelectionPanel({
       <div className={styles.selectionSummary}>
         <div className="flex items-center gap-2">
           <span className="font-medium text-foreground">
-            {selectedIds.length}{' '}
-            {selectedIds.length === 1 ? 'model selected' : 'models selected'}
+            {t('auth.modelSelection.selectedCount', {
+              count: selectedIds.length,
+            })}
           </span>
           {sortedModels.length > 0 && (
             <button
@@ -998,7 +1037,7 @@ export function ModelSelectionPanel({
               onClick={handleSelectAllFiltered}
               disabled={disabled}
             >
-              Select all visible ({sortedModels.length})
+              {t('auth.modelSelection.selectAll')} ({sortedModels.length})
             </button>
           )}
           {selectedIds.length > 0 && (
@@ -1008,7 +1047,7 @@ export function ModelSelectionPanel({
               onClick={handleClearSelection}
               disabled={disabled}
             >
-              Clear all
+              {t('auth.modelSelection.deselectAll')}
             </button>
           )}
         </div>
@@ -1046,7 +1085,7 @@ export function ModelSelectionPanel({
           </div>
         )}
         <label htmlFor="model-ids-input" className={styles.manualInputLabel}>
-          Selected Model IDs (comma-separated or type custom model):
+          {t('auth.modelSelection.customPrompt')}
         </label>
         <Input
           ref={manualInputRef}
