@@ -2,10 +2,30 @@
 
 [English](2026-11-17-daemon-restart-recovery-inbox.md) | [简体中文](2026-11-17-daemon-restart-recovery-inbox.zh-CN.md)
 
-Status: implemented in this change. The read-only scan, both recovery routes, the
-daemon SDK client methods, the Web Shell panel, and the REST reference/protocol
-entries are included here. Code references below use symbol names rather than
-line numbers.
+Status: implemented and merged in
+[`b22dccd36d`](https://github.com/QwenLM/qwen-code/commit/b22dccd36d523b8699f4418ddda0208bbcf1b900).
+The read-only scan, both recovery routes, the daemon SDK client methods, the
+Web Shell panel, and the REST reference/protocol entries are included here.
+Code references below use symbol names rather than line numbers.
+
+## Merge and verification record
+
+The pre-merge and integration verification included a full build and type
+check, 103 focused recovery tests, 1,608 CLI server and telemetry tests, a real
+daemon probe with a loopback fake model, and three Chromium DOM workflows
+against a mock daemon. The [published verification
+report](https://github.com/QwenLM/qwen-code/pull/17677#issuecomment-7030887477)
+binds production head
+[`988dbcd182`](https://github.com/QwenLM/qwen-code/commit/988dbcd182073b0659203edeaaaeddb173e63b9f).
+These are evidence about the tested trees, not a claim that every main CI run
+or platform profile is green.
+
+The remaining scope and ownership decisions are tracked in
+[#17939](https://github.com/QwenLM/qwen-code/issues/17939). The intermittent
+macOS SIGKILL E2E failure is separately tracked in
+[#17934](https://github.com/QwenLM/qwen-code/issues/17934). That failure remains
+an independent investigation; the earlier passing tests do not establish that
+it is fixed.
 
 ## Problem and scope
 

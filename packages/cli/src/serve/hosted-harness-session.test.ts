@@ -116,7 +116,9 @@ import {
   reloadStableOwnerIds,
   settleCancelledHookTurn,
   settleCrashedWakeTurnAftermath,
+  wakeDispatchOwnsInput,
 } from './hosted-harness-session.js';
+import type { PendingSessionInput } from './hosted-wake-intake.js';
 import {
   HostedHookRecoveryRequiredError,
   HostedHookSession,
@@ -178,7 +180,10 @@ import {
   monitorWakeNeedsRecovery,
 } from './hosted-monitor-wake-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
-import { HostedSessionMessageSession } from './hosted-session-message-session.js';
+import {
+  HostedSessionMessageSession,
+  SESSION_MESSAGE_INPUT_SOURCE,
+} from './hosted-session-message-session.js';
 import { HostedSessionCommandSession } from './hosted-session-command-session.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
 import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runtime/managed-history-maintenance-record.js';
@@ -1219,6 +1224,54 @@ describe('attributeShellReceipts', () => {
     ]);
     expect(promptId).toBeNull();
     expect(receipts.map((item) => item.promptId)).toEqual(['prompt']);
+  });
+});
+
+describe('wakeDispatchOwnsInput', () => {
+  const NOW = 1_000_000;
+  const input = (
+    overrides: Partial<PendingSessionInput> = {},
+  ): PendingSessionInput => ({
+    inputId: 'loop:wakeup',
+    turnId: 'loop:wakeup',
+    source: 'loop',
+    sequence: 1,
+    contentRef: undefined,
+    notBefore: NOW + 1,
+    ...overrides,
+  });
+
+  it('owns a deferred, unattempted wake input', () => {
+    expect(
+      wakeDispatchOwnsInput(
+        {},
+        input(),
+        [{ daemonPromptId: 'another-turn' }],
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
+  it.each<
+    [
+      string,
+      { messagesStopped?: boolean },
+      PendingSessionInput,
+      Array<{ daemonPromptId?: string }>,
+    ]
+  >([
+    ['a non-wake input', {}, input({ source: 'hosted-harness' }), []],
+    [
+      "a stopped run's message",
+      { messagesStopped: true },
+      input({ source: SESSION_MESSAGE_INPUT_SOURCE }),
+      [],
+    ],
+    ['an immediate input', {}, input({ notBefore: null }), []],
+    ['an input due now', {}, input({ notBefore: NOW }), []],
+    ['an attempted input', {}, input(), [{ daemonPromptId: 'loop:wakeup' }]],
+  ])('leaves %s to the resident Session', (_, session, pending, projected) => {
+    expect(wakeDispatchOwnsInput(session, pending, projected, NOW)).toBe(false);
   });
 });
 
@@ -15518,6 +15571,10 @@ describe('Hosted Harness no-tool session', () => {
       },
     );
     vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'listStagedDeliveries',
+    ).mockResolvedValue([]);
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -28140,6 +28197,169 @@ describe('Hosted Harness tool approvals', () => {
     });
     await expect(state.model.mock.results[0].value).resolves.toMatchObject({
       text: 'Reviewed',
+    });
+  });
+
+  it('loads a mixed skills+hook package on the first Hosted turn and reports hooks degraded', async () => {
+    const archive = path.join(state.root, 'mixed.tar.gz');
+    await writeFile(
+      path.join(state.root, 'qwen-extension.json'),
+      JSON.stringify({ name: 'review', version: '1.0.0' }),
+    );
+    await mkdir(path.join(state.root, 'skills', 'review'), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(state.root, 'skills', 'review', 'SKILL.md'),
+      '---\nname: review\ndescription: Review changes\n---\nFollow PINNED_REVIEW_INSTRUCTIONS.',
+    );
+    await mkdir(path.join(state.root, 'hooks'), { recursive: true });
+    await writeFile(
+      path.join(state.root, 'hooks', 'hooks.json'),
+      JSON.stringify({
+        PostToolUse: [{ hooks: [{ type: 'command', command: 'collect.sh' }] }],
+      }),
+    );
+    await createTar({ cwd: state.root, file: archive, gzip: true }, [
+      'qwen-extension.json',
+      'skills',
+      'hooks',
+    ]);
+    const target = { platform: 'linux', arch: 'any' } as const;
+    const prepared = await prepareManagedPackageImport(
+      archive,
+      {
+        sourceKind: 'extension',
+        sourceDigest: createHash('sha256')
+          .update(await readFile(archive))
+          .digest('hex'),
+        target,
+        compilerVersion: 1,
+      },
+      { destination: path.join(state.root, 'compiled-mixed') },
+    );
+    const runtime = new ManagedExtensionRuntime({
+      executionMode: 'developer-process-group',
+      directory: path.join(state.root, 'runtime-mixed'),
+      admitted: async (sessionId) => sessionId === SESSION_ID,
+      idle: () => true,
+      compile: async (root) =>
+        (await compileManagedExtensionPackage(root, { target })).contributions,
+      drain: async () => undefined,
+      install: async () => undefined,
+    });
+    await runtime.cache.upload(
+      prepared.packageDigest,
+      createReadStream(prepared.archivePath),
+    );
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+    vi.mocked(HostedWorkspaceBroker.prototype.warm).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    let degradedComponents: ReadonlyArray<'mcp' | 'hooks'> | undefined;
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'extensionControl',
+    ).mockImplementation(async (operation) => {
+      switch (operation.kind) {
+        case 'extension-status':
+          return {
+            ...(await runtime.operationStatus(
+              SESSION_ID,
+              operation.operationId,
+            )),
+          };
+        case 'extension-prepare': {
+          const result = await runtime.prepare(
+            SESSION_ID,
+            operation.command,
+            operation,
+          );
+          degradedComponents = result.packages[0]?.degradedComponents;
+          return { ...result };
+        }
+        case 'extension-activate':
+          return {
+            ...(await runtime.activate(SESSION_ID, operation.operationId)),
+          };
+        default:
+          throw new Error(`Unexpected extension operation: ${operation.kind}`);
+      }
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        initialSelection: {
+          operationId: randomUUID(),
+          actorKey: 'a'.repeat(64),
+          expectedRevision: 0,
+          extensions: [
+            {
+              extensionId: 'sample',
+              packageRevision: 1,
+              packageDigest: prepared.packageDigest,
+            },
+          ],
+        },
+      })
+      .expect(200);
+    expect(degradedComponents).toEqual(['hooks']);
+    state.model.mockImplementationOnce(async ({ signal, toolTurn, skills }) => {
+      expect(skills?.invocations('/review:review')).toEqual(['review:review']);
+      const args = { skill: 'review:review' };
+      const call = {
+        name: 'skill',
+        args,
+        callId: 'call-review-mixed',
+        prompt_id: PROMPT_ID,
+        isClientInitiated: false,
+      };
+      const result = await toolTurn!.execute(
+        [call],
+        [{ functionCall: { name: call.name, id: call.callId, args } }],
+        'test-model',
+        signal,
+      );
+      expect(JSON.stringify(result)).toContain('PINNED_REVIEW_INSTRUCTIONS');
+      return { text: 'Reviewed mixed', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'Review these changes' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        promptId: PROMPT_ID,
+        prompt,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await waitFor(async () => {
+      expect(state.model).toHaveBeenCalledOnce();
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      )
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .expect(200);
+      expect(status.body).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: false,
+      });
+    });
+    await expect(state.model.mock.results[0].value).resolves.toMatchObject({
+      text: 'Reviewed mixed',
     });
   });
 
@@ -47014,17 +47234,19 @@ describe('idle suspension', () => {
   });
 
   it('an admitted mutation resets the idle timer', async () => {
-    const server = await app(false, undefined, true, { idleSuspendMs: 1000 });
+    const server = await app(false, undefined, true, { idleSuspendMs: 4000 });
     const clientId = await createIdleSession(server);
-    await sleep(600);
+    await sleep(2400);
     await headers(supertest(server).post(`/session/${SESSION_ID}/title`))
       .set('X-Qwen-Client-Id', clientId)
       .send({ title: 'still here' })
       .expect(200);
-    // Past the original deadline (1000ms + ≤10% jitter), before the one
-    // the title re-armed (≥1600ms from the create). The wide ratio keeps
-    // the assertion meaningful on a loaded shard without racing it.
-    await sleep(600);
+    // Past the original deadline (4000ms + ≤10% jitter = ≤4400ms) and before
+    // the one the title re-armed (≥6400ms from the create). Each sleep(2400)
+    // has 1600ms of overrun tolerance before its own bound, but the residency
+    // check itself clears the worst-case original fire by only ~400ms, so the
+    // two sleeps must total more than idleMs * 1.1 (#18053).
+    await sleep(2400);
     expect((await statusOf(server, clientId)).status).toBe(200);
     await vi.waitFor(
       async () => {

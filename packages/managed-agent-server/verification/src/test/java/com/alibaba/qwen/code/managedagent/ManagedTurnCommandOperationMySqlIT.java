@@ -182,19 +182,19 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, session);
         String target = ManagedSchemaKeys.key(turnId);
         jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key,"
-                        + " session_scope_key, operation_id, operation_kind,"
+                        + " operation_id, operation_kind,"
                         + " tenant_id, session_id, target_kind, target_key,"
                         + " target_id, request_digest, request_json, state,"
                         + " phase, admission_stage, delivery_state,"
                         + " failure_code, gmt_create, gmt_modified) VALUES"
-                        + " (?, ?, ?, ?, 'CANCEL', ?, ?, 'TURN', ?, ?,"
+                        + " (?, ?, ?, 'CANCEL', ?, ?, 'TURN', ?, ?,"
                         + " 'digest', '{}', 'FAILED', 'FAILED', 'JAVA_DURABLE',"
                         + " 'BLOCKED', 'turn_already_settled', 1, 1)",
                 IntStream.range(0, count)
                         .mapToObj(index -> new Object[] {
                                 ManagedSchemaKeys.key(session, turnId,
                                         Integer.toString(index)),
-                                scope, scope, "op_settled_" + index, TENANT,
+                                scope, "op_settled_" + index, TENANT,
                                 session, target, turnId})
                         .toList());
     }

@@ -730,9 +730,8 @@ class ManagedUserMessageStoreTest {
 
     private void seedConversationBoundary() {
         String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,domain,record_id,"
-                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,1)",
-                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
+        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,domain,record_id,"
+                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,1,'CONVERSATION',?,1)", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
                 TENANT, session, "side_query_conversation", "side_query_conversation", "{\"mainInputBoundary\":0}");
     }
 
