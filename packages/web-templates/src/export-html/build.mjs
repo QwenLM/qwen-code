@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_152_560;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -186,7 +186,17 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
+//
+// Merge measurement (2026-11-22, PR #18028): merging main 8e7d1e37c9 — which
+// carries the ChatSurface chat-column i18n (#17952) — into this branch measures
+// 2,151,847 renderer JS bytes on a frozen-install detached worktree (Node
+// v26.12.1, web-shell transcript lib rebuilt first), exactly matching CI run
+// 44965176587's merge-ref measurement that turned the tui-parity Build cli
+// step red against the previous 2,151,577 ceiling. This PR's diff touches no
+// web-shell/web-templates source, so the growth is entirely main's i18n; the
+// budget is reset to measurement + 713 / + 1,713 per house precedent instead
+// of taking either side's stale cap.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_153_560;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
