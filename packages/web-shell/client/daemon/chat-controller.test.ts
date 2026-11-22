@@ -942,4 +942,37 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.emitPrompt({ promptId: 'pB', outcome: 'cancelled' });
     expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
   });
+
+  it('projects live history pagination facts from deps', () => {
+    let hasOlderHistory = false;
+    let loadingOlderHistory = false;
+    let historyCapacityReached = false;
+    let historyPaginationError = false;
+    const h = harness({
+      get hasOlderHistory() {
+        return hasOlderHistory;
+      },
+      get loadingOlderHistory() {
+        return loadingOlderHistory;
+      },
+      get historyCapacityReached() {
+        return historyCapacityReached;
+      },
+      get historyPaginationError() {
+        return historyPaginationError;
+      },
+    });
+    expect(h.controller.hasOlderHistory).toBe(false);
+    expect(h.controller.loadingOlderHistory).toBe(false);
+    expect(h.controller.historyCapacityReached).toBe(false);
+    expect(h.controller.historyPaginationError).toBe(false);
+    hasOlderHistory = true;
+    loadingOlderHistory = true;
+    historyCapacityReached = true;
+    historyPaginationError = true;
+    expect(h.controller.hasOlderHistory).toBe(true);
+    expect(h.controller.loadingOlderHistory).toBe(true);
+    expect(h.controller.historyCapacityReached).toBe(true);
+    expect(h.controller.historyPaginationError).toBe(true);
+  });
 });

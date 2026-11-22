@@ -183,6 +183,33 @@ describe('useDaemonChatController', () => {
     }
   });
 
+  it('projects reactive transcript history pagination facts through the session-stable controller', () => {
+    mountReact(<Probe />);
+    const initialController = controller!;
+    expect(initialController.hasOlderHistory).toBe(false);
+    expect(initialController.loadingOlderHistory).toBe(false);
+    expect(initialController.historyCapacityReached).toBe(false);
+    expect(initialController.historyPaginationError).toBe(false);
+    const originalHistory = harness.history;
+    harness.history = {
+      ...originalHistory,
+      hasMore: true,
+      loading: true,
+      capacityReached: true,
+      paginationError: true,
+    };
+    try {
+      forceRerender!();
+      expect(controller).toBe(initialController);
+      expect(controller!.hasOlderHistory).toBe(true);
+      expect(controller!.loadingOlderHistory).toBe(true);
+      expect(controller!.historyCapacityReached).toBe(true);
+      expect(controller!.historyPaginationError).toBe(true);
+    } finally {
+      harness.history = originalHistory;
+    }
+  });
+
   it('splits question permissions from tool approvals', () => {
     harness.pendingPermissions = [
       permissionBlock('q1', { questions: true }),

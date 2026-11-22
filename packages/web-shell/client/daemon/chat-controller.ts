@@ -64,6 +64,10 @@ export interface DaemonChatControllerDeps {
   // Pass-through transcript facts.
   readonly messages: readonly Message[];
   readonly transcriptState: 'loading' | 'ready' | 'error';
+  readonly hasOlderHistory?: boolean;
+  readonly loadingOlderHistory?: boolean;
+  readonly historyCapacityReached?: boolean;
+  readonly historyPaginationError?: boolean;
   loadOlder?(options?: { force?: boolean }): Promise<void>;
 
   // Pass-through status and capability facts.
@@ -326,6 +330,18 @@ export function createDaemonChatController(
     },
     get transcriptState() {
       return deps.transcriptState;
+    },
+    get hasOlderHistory() {
+      return deps.hasOlderHistory;
+    },
+    get loadingOlderHistory() {
+      return deps.loadingOlderHistory;
+    },
+    get historyCapacityReached() {
+      return deps.historyCapacityReached;
+    },
+    get historyPaginationError() {
+      return deps.historyPaginationError;
     },
     loadOlder: deps.loadOlder?.bind(deps),
     get phase(): ChatPhase {

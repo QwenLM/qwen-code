@@ -28,17 +28,14 @@ export interface ChatSurfaceProps {
   readonly transcriptError?: ReactNode;
   readonly commands?: readonly CommandInfo[];
   readonly onError?: (error: unknown, fallback: string) => void;
-  // History pagination: the loader defaults to the controller's capability, but
-  // whether older history exists is a page fact the contract does not carry yet.
+  // History pagination: all five members default to the controller's bound
+  // facts and loader capability, while optional props let an owning page
+  // override them when needed.
   readonly hasOlderHistory?: boolean;
   readonly onLoadOlderHistory?: (options?: {
     force?: boolean;
   }) => Promise<void>;
-  // Paired with the pagination props: without it a failed older-history page is
-  // invisible and every top-scroll re-issues the failing request.
   readonly historyPaginationError?: boolean;
-  // Older-history spinner and capacity notice, forwarded to the transcript so
-  // the switch does not drop them (the contract does not carry these facts yet).
   readonly loadingOlderHistory?: boolean;
   readonly historyCapacityReached?: boolean;
   // Approval facts and focus/notification gating are computed by the owning
@@ -186,11 +183,17 @@ export function ChatSurface({
             loadingTranscript={controller.transcriptState === 'loading'}
             isResponding={isRunning}
             sessionKey={controller.sessionId}
-            hasOlderHistory={hasOlderHistory}
+            hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
             onLoadOlderHistory={loadOlder}
-            historyPaginationError={historyPaginationError}
-            loadingOlderHistory={loadingOlderHistory}
-            historyCapacityReached={historyCapacityReached}
+            historyPaginationError={
+              historyPaginationError ?? controller.historyPaginationError
+            }
+            loadingOlderHistory={
+              loadingOlderHistory ?? controller.loadingOlderHistory
+            }
+            historyCapacityReached={
+              historyCapacityReached ?? controller.historyCapacityReached
+            }
           />
         )}
       </div>
@@ -301,17 +304,26 @@ export function ChatSurface({
             controller.phase === 'submitting'
           }
           onCancel={() => {
-            // A refused or unknown stop admission must not be silent: the turn
-            // keeps running and the user needs to know the stop did not land.
+            const cancelSessionId = controller.sessionId;
+            const token = ownerTokenRef.current;
+            const isOwnerActive = () =>
+              cancelSessionId !== ''
+                ? refOwnerRef.current === cancelSessionId
+                : ownerTokenRef.current === token;
+            // A refused or unknown stop admission must not be silent on the
+            // session that requested it, while a late settlement after a
+            // session switch must not report a stop error on another session.
             void controller
               .cancel()
               .then((result) => {
+                if (!isOwnerActive()) return;
                 if (result.admission !== 'accepted') {
                   const message = t('chat.stopNotConfirmed');
                   reportError(new Error(message), message);
                 }
               })
               .catch((cause: unknown) => {
+                if (!isOwnerActive()) return;
                 const message = t('chat.stopNotConfirmed');
                 reportError(new Error(message, { cause }), message);
               });

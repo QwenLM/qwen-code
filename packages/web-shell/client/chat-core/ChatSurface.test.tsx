@@ -777,6 +777,36 @@ describe('ChatSurface', () => {
     expect(captured.transcript?.historyCapacityReached).toBe(true);
   });
 
+  it('defaults history pagination facts to the controller while letting page props override them', () => {
+    const controller = fakeController({
+      hasOlderHistory: true,
+      loadingOlderHistory: true,
+      historyCapacityReached: true,
+      historyPaginationError: true,
+    });
+    const container = mountReact(<ChatSurface controller={controller} />);
+    expect(captured.transcript?.hasOlderHistory).toBe(true);
+    expect(captured.transcript?.loadingOlderHistory).toBe(true);
+    expect(captured.transcript?.historyCapacityReached).toBe(true);
+    expect(captured.transcript?.historyPaginationError).toBe(true);
+    // Explicit false page props must override true controller facts (pins ??
+    // against || on all four pagination flags).
+    rerenderReact(
+      container,
+      <ChatSurface
+        controller={controller}
+        hasOlderHistory={false}
+        loadingOlderHistory={false}
+        historyCapacityReached={false}
+        historyPaginationError={false}
+      />,
+    );
+    expect(captured.transcript?.hasOlderHistory).toBe(false);
+    expect(captured.transcript?.loadingOlderHistory).toBe(false);
+    expect(captured.transcript?.historyCapacityReached).toBe(false);
+    expect(captured.transcript?.historyPaginationError).toBe(false);
+  });
+
   it('forwards the composer draft scope for a new chat', () => {
     const controller = fakeController({ sessionId: '' });
     mountReact(
@@ -1175,6 +1205,126 @@ describe('ChatSurface', () => {
     expect(
       container.querySelector('[data-testid="admission-locked-banner"]'),
     ).toBeNull();
+    // Settling a parked submit as 'rejected' while s3 is visible must NOT lock
+    // s2 on return (pins result.admission === 'unknown' on the parked branch).
+    await act(async () => {
+      (captured.editor?.onSubmit as SubmitHandler)(
+        'third in s2',
+        undefined,
+        undefined,
+        vi.fn(),
+        undefined,
+      );
+    });
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    await act(async () => {
+      resolveS2?.({ admission: 'rejected' });
+    });
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    expect(captured.editor?.submitDisabled).toBe(false);
+    expect(
+      container.querySelector('[data-testid="admission-locked-banner"]'),
+    ).toBeNull();
+  });
+
+  it('scopes cancel settlement errors to the session that requested the stop', async () => {
+    let resolveS1Cancel: ((value: { admission: string }) => void) | undefined;
+    const s1 = fakeController({
+      sessionId: 's1',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveS1Cancel = resolve;
+          }),
+      ),
+    });
+    let rejectS2Cancel: ((reason: unknown) => void) | undefined;
+    const s2 = fakeController({
+      sessionId: 's2',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((_resolve, reject) => {
+            rejectS2Cancel = reject;
+          }),
+      ),
+    });
+    let resolveS3Cancel: ((value: { admission: string }) => void) | undefined;
+    const s3 = fakeController({
+      sessionId: 's3',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveS3Cancel = resolve;
+          }),
+      ),
+    });
+    const onError = vi.fn();
+    const container = mountReact(
+      <ChatSurface controller={s1} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    // Switch s1 -> s2 before s1's cancel settles: s1's unconfirmed cancel must
+    // not report on s2.
+    rerenderReact(container, <ChatSurface controller={s2} onError={onError} />);
+    await act(async () => {
+      resolveS1Cancel?.({ admission: 'unknown' });
+    });
+    expect(onError).not.toHaveBeenCalled();
+    // Start a cancel in s2, switch to s3, and reject s2's cancel: s3 stays silent.
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    await act(async () => {
+      rejectS2Cancel?.(new Error('transport failed'));
+    });
+    expect(onError).not.toHaveBeenCalled();
+    // Start a cancel in s3, round-trip s3 -> s1 -> s3, then settle s3's cancel
+    // as 'rejected' while back on s3: s3 is active again and receives the error.
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s1} onError={onError} />);
+    rerenderReact(container, <ChatSurface controller={s3} onError={onError} />);
+    await act(async () => {
+      resolveS3Cancel?.({ admission: 'rejected' });
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    onError.mockClear();
+    // Start a cancel in an unallocated '' new chat, switch '' -> s1 -> '' (a
+    // brand-new '' chat), then settle the abandoned '' cancel as 'unknown':
+    // the rotated owner token keeps the brand-new '' chat silent.
+    let resolveUnallocCancel:
+      | ((value: { admission: string }) => void)
+      | undefined;
+    const unalloc1 = fakeController({
+      sessionId: '',
+      cancel: vi.fn(
+        () =>
+          new Promise<{ admission: string }>((resolve) => {
+            resolveUnallocCancel = resolve;
+          }),
+      ),
+    });
+    rerenderReact(
+      container,
+      <ChatSurface controller={unalloc1} onError={onError} />,
+    );
+    await act(async () => {
+      (captured.editor?.onCancel as () => void)();
+    });
+    rerenderReact(container, <ChatSurface controller={s1} onError={onError} />);
+    const unalloc2 = fakeController({ sessionId: '' });
+    rerenderReact(
+      container,
+      <ChatSurface controller={unalloc2} onError={onError} />,
+    );
+    await act(async () => {
+      resolveUnallocCancel?.({ admission: 'unknown' });
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('preserves a parked in-flight latch when the switch render is discarded before commit (R1-4)', async () => {

@@ -42,6 +42,10 @@ import {
 interface LiveFacts {
   messages: SessionChatController['messages'];
   transcriptState: SessionChatController['transcriptState'];
+  hasOlderHistory: boolean;
+  loadingOlderHistory: boolean;
+  historyCapacityReached: boolean;
+  historyPaginationError: boolean;
   pendingApprovals: readonly PendingApproval[];
   pendingQuestions: readonly PendingQuestion[];
   statusFacts: ChatStatusFacts;
@@ -144,6 +148,10 @@ export function useDaemonChatController(): SessionChatController {
   const factsRef = useRef<LiveFacts>({
     messages,
     transcriptState: 'loading',
+    hasOlderHistory: false,
+    loadingOlderHistory: false,
+    historyCapacityReached: false,
+    historyPaginationError: false,
     pendingApprovals,
     pendingQuestions,
     statusFacts: { queueLength: 0, goalActive: false },
@@ -160,6 +168,10 @@ export function useDaemonChatController(): SessionChatController {
       : connection.loadingTranscript
         ? 'loading'
         : 'ready',
+    hasOlderHistory: transcriptHistory.hasMore,
+    loadingOlderHistory: transcriptHistory.loading,
+    historyCapacityReached: transcriptHistory.capacityReached,
+    historyPaginationError: transcriptHistory.paginationError,
     pendingApprovals,
     pendingQuestions,
     // Queue length and goal activity are surfaced by the ChatSurface increment;
@@ -214,6 +226,18 @@ export function useDaemonChatController(): SessionChatController {
         },
         get transcriptState() {
           return factsRef.current.transcriptState;
+        },
+        get hasOlderHistory() {
+          return factsRef.current.hasOlderHistory;
+        },
+        get loadingOlderHistory() {
+          return factsRef.current.loadingOlderHistory;
+        },
+        get historyCapacityReached() {
+          return factsRef.current.historyCapacityReached;
+        },
+        get historyPaginationError() {
+          return factsRef.current.historyPaginationError;
         },
         get pendingApprovals() {
           return factsRef.current.pendingApprovals;
