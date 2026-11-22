@@ -126,7 +126,13 @@ describe('WebShellSidebar session row actions stylesheet', () => {
       /\.sessionMetaSlotReserved:has\(\.sessionActions\)\s*\{[^}]*display:\s*contents;/,
     );
     expect(touchMedia).toMatch(
-      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow\s+\.sessionMetaSlotReserved\s+\.sessionActions\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*2px 0 2px auto;[^}]*width:\s*var\(--session-actions-width, 26px\)/,
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow\s+\.sessionMetaSlotReserved\s+\.sessionActions\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*2px 0 auto auto;[^}]*width:\s*var\(--session-actions-width, 26px\)/,
+    );
+  });
+
+  it('wraps auxiliary metadata rather than overlapping narrow-row actions', () => {
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow:not\(\.archivedRow\):has\(\s*\.sessionMetaSlotReserved \.sessionAttention,\s*\.sessionMetaSlotReserved \.sessionContinuation,\s*\.sessionMetaSlotReserved \.sessionLoading\s*\)\s*\{\s*flex-wrap:\s*wrap;/,
     );
   });
 

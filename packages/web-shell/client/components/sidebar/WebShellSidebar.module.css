@@ -1621,6 +1621,15 @@ button.livePendingSession:hover {
     display: contents;
   }
 
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    ) {
+    flex-wrap: wrap;
+  }
+
   .sidebar.mobileOpen[data-narrow] .sessionRow .sessionLoading {
     margin-right: 4px;
     margin-left: 4px;
@@ -1631,7 +1640,7 @@ button.livePendingSession:hover {
     .sessionMetaSlotReserved
     .sessionActions {
     position: absolute;
-    inset: 2px 0 2px auto;
+    inset: 2px 0 auto auto;
     width: var(--session-actions-width, 26px);
   }
 }
