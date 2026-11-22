@@ -238,8 +238,8 @@ public class ManagedMemorySessionPrivacyTest {
 
     private String memory(String actor) {
         String id = "memstore_" + UUID.randomUUID();
-        jdbc.update("INSERT INTO ma_memory_store (store_key,owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
-                        + " VALUES (?,?,?,?,?,?,1)", ManagedSchemaKeys.key(tenant, id), ManagedSchemaKeys.key(tenant, actor),
+        jdbc.update("INSERT INTO ma_memory_store (owner_key,tenant_id,memory_store_id,owner_actor_key,namespace,gmt_create)"
+                        + " VALUES (?,?,?,?,?,1)", ManagedSchemaKeys.key(tenant, actor),
                 tenant, id, actorKey(actor), "memory-namespace-" + UUID.randomUUID());
         return id;
     }

@@ -18,6 +18,7 @@ import {
   isDeepSeekEstablishedHost,
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
+import { getBuiltinGeminiReasoning } from './gemini-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 import {
@@ -158,7 +159,9 @@ export function validateReasoningCapabilities(
         disableField: 'enable_thinking',
       };
     }
-    return getBuiltinDeepSeekReasoning(route);
+    return (
+      getBuiltinDeepSeekReasoning(route) ?? getBuiltinGeminiReasoning(route)
+    );
   }
   const input = validateReasoningDeclaration(route, declaration);
   if (!input) return undefined;
@@ -184,7 +187,9 @@ export function validateReasoningCapabilities(
     route.authType === 'anthropic'
       ? parseClaudeModelVersion(route.model)
       : undefined;
-  if (!inherited && !gpt && !claude && !input.profile)
+  const gemini = getBuiltinGeminiReasoning(route);
+  const tieredGemini = gemini?.toggleOnly ? undefined : gemini;
+  if (!inherited && !gpt && !claude && !gemini && !input.profile)
     return invalidReasoning(route);
   const auth = route.authType;
   let host = '';
@@ -264,12 +269,14 @@ export function validateReasoningCapabilities(
     inherited && !inherited.toggleOnly
       ? inherited.efforts
       : (gpt?.efforts ??
-        (claude ? anthropicSupportedEffortTiers(route.model) : undefined));
+        (claude
+          ? anthropicSupportedEffortTiers(route.model)
+          : tieredGemini?.efforts));
   const efforts = input.efforts ?? inheritedEfforts;
   const inheritedDefault =
     inherited && !inherited.toggleOnly
       ? inherited.defaultEffort
-      : gpt?.defaultEffort;
+      : (gpt?.defaultEffort ?? tieredGemini?.defaultEffort);
   const defaultEffort =
     input.defaultEffort ??
     (inheritedDefault && efforts

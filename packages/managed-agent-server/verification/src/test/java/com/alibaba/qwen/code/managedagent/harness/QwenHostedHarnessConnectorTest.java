@@ -3819,6 +3819,65 @@ class QwenHostedHarnessConnectorTest {
         assertThat(rebuilds.get()).isEqualTo(1);
     }
 
+    // The adoption handoff must share the clientLock that client() and
+    // close() hand the client over under, or an adoption and a close can
+    // each take and close the same client.
+    @Test
+    void adoptionHandsTheClientOverUnderTheClientLock() throws Exception {
+        HostedHarnessClient oldClient = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities oldCapabilities =
+                mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(oldCapabilities.getBootId()).thenReturn(BOOT_ID);
+        when(oldClient.capabilities()).thenReturn(oldCapabilities);
+        when(oldClient.loadSession(any(LoadHarnessSession.class)))
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        HostedHarnessGenerationException mismatch =
+                mock(HostedHarnessGenerationException.class);
+        when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
+        doThrow(mismatch).when(oldClient).submitTurn(any());
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties(), sessions(),
+                        mock(JdbcWorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", oldClient);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        ReentrantLock lock = (ReentrantLock) ReflectionTestUtils.getField(
+                connector, "clientLock");
+        java.util.concurrent.atomic.AtomicReference<Throwable> failure =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        Thread adopter = new Thread(() -> {
+            try {
+                connector.submit("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID,
+                        SUBMIT_CONTENT, SUBMIT_DIGEST);
+            } catch (RuntimeException error) {
+                failure.set(error);
+            }
+        });
+        adopter.setDaemon(true);
+
+        lock.lock();
+        try {
+            adopter.start();
+            long deadline = System.nanoTime()
+                    + TimeUnit.SECONDS.toNanos(10);
+            while (!lock.hasQueuedThread(adopter) && adopter.isAlive()
+                    && System.nanoTime() < deadline) {
+                Thread.sleep(10);
+            }
+            assertThat(lock.hasQueuedThread(adopter)).isTrue();
+            verify(oldClient, never()).close();
+        } finally {
+            lock.unlock();
+        }
+        adopter.join(10_000);
+
+        assertThat(adopter.isAlive()).isFalse();
+        assertThat(failure.get()).isSameAs(mismatch);
+        verify(oldClient).close();
+        assertThat(ReflectionTestUtils.getField(connector, "client")).isNull();
+    }
+
     // The one code-aware call site: a takeover refusal that cannot change
     // under retry surfaces as the typed terminal exception.
     @Test

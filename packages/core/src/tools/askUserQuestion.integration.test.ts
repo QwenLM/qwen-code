@@ -47,6 +47,7 @@ const REQUEST = {
 function makeHarness(opts: {
   /** What the PermissionManager resolves the call to (L4). */
   pmDecision: 'allow' | 'ask';
+  approvalMode?: ApprovalMode;
   interactive: boolean;
   /** ACP modality under test: `undefined` = plain text stdin. */
   inputFormat?: InputFormat;
@@ -69,7 +70,7 @@ function makeHarness(opts: {
     getSessionId: () => 'ask-user-question-session',
     getUsageStatisticsEnabled: () => true,
     getDebugMode: () => false,
-    getApprovalMode: () => ApprovalMode.DEFAULT,
+    getApprovalMode: () => opts.approvalMode ?? ApprovalMode.DEFAULT,
     setApprovalMode: vi.fn(),
     getPermissionsAllow: () => [],
     getPermissionsDeny: () => undefined,
@@ -172,26 +173,32 @@ function makeHarness(opts: {
 }
 
 describe('ask_user_question through CoreToolScheduler', () => {
-  it('does not park a stream-json direct-mode turn that has no responder', async () => {
-    // Direct mode (first stdin frame is a plain user message): the control
-    // system is never built, so nothing would ever answer `awaiting_approval`
-    // and the process could not exit. The scheduler's non-interactive
-    // auto-deny does not cover it either -- `isNonInteractiveDeny` carries
-    // `getInputFormat() !== STREAM_JSON` as a required conjunct.
-    const h = makeHarness({
-      pmDecision: 'allow',
-      interactive: false,
-      inputFormat: InputFormat.STREAM_JSON,
-      sdkMode: false,
-    });
+  it.each([ApprovalMode.DEFAULT, ApprovalMode.AUTO])(
+    'does not park a stream-json direct-mode turn that has no responder in %s mode',
+    async (approvalMode) => {
+      // Direct mode (first stdin frame is a plain user message): the control
+      // system is never built, so nothing would ever answer `awaiting_approval`
+      // and the process could not exit. The scheduler's non-interactive
+      // auto-deny does not cover it either -- `isNonInteractiveDeny` carries
+      // `getInputFormat() !== STREAM_JSON` as a required conjunct.
+      const h = makeHarness({
+        pmDecision: 'allow',
+        approvalMode,
+        interactive: false,
+        inputFormat: InputFormat.STREAM_JSON,
+        sdkMode: false,
+      });
 
-    await h.scheduler.schedule([REQUEST], new AbortController().signal);
-    await vi.waitFor(() => expect(h.onAllToolCallsComplete).toHaveBeenCalled());
+      await h.scheduler.schedule([REQUEST], new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(h.onAllToolCallsComplete).toHaveBeenCalled(),
+      );
 
-    expect(h.seenStatuses()).not.toContain('awaiting_approval');
-    expect(h.modelVisible()).toBe(
-      'Cannot ask user questions in non-interactive mode without ACP support. ' +
-        'Please run in interactive mode or enable ACP mode to use this tool.',
-    );
-  });
+      expect(h.seenStatuses()).not.toContain('awaiting_approval');
+      expect(h.modelVisible()).toBe(
+        'Cannot ask user questions in non-interactive mode without ACP support. ' +
+          'Please run in interactive mode or enable ACP mode to use this tool.',
+      );
+    },
+  );
 });
