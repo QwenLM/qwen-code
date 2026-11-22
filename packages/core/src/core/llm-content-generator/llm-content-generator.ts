@@ -32,6 +32,7 @@ import {
   getEffectiveReasoning,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
+import { supportsGeminiXhigh } from '../gemini-reasoning.js';
 import { buildSessionIdHeaders } from '../outbound-session-id.js';
 import {
   expandDynamicHeaders,
@@ -44,20 +45,127 @@ import { markRequestDispatched } from '../loggingContentGenerator/request-dispat
 
 const debugLogger = createDebugLogger('GEMINI');
 
-function installIsolatedTransport(client: GoogleGenAI): boolean {
+type GeminiStreamPart = { responseInternal: Response };
+
+type GeminiApiClient = {
+  apiCall?(url: string, init: RequestInit): Promise<Response>;
+  processStreamResponse?(response: Response): AsyncGenerator<GeminiStreamPart>;
+  includeExtraHttpOptionsToRequestInit(
+    init: RequestInit,
+    options: HttpOptions,
+    url: string,
+    signal?: AbortSignal,
+  ): Promise<RequestInit>;
+};
+
+function isThirdPartyGeminiBaseUrl(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname !== 'generativelanguage.googleapis.com';
+  } catch {
+    return true;
+  }
+}
+
+function withoutDoneSentinel(
+  stream: AsyncGenerator<GeminiStreamPart, void, unknown>,
+  response: Response,
+): AsyncGenerator<GeminiStreamPart, void, unknown> {
+  const iterator = stream[Symbol.asyncIterator]();
+  return {
+    async next() {
+      const result = await iterator.next();
+      if (result.done) return result;
+      const payload = await result.value.responseInternal.clone().text();
+      if (payload.trim() !== '[DONE]') return result;
+      await iterator.return?.();
+      try {
+        await response.body?.cancel();
+      } catch {
+        // A reset after a complete sentinel does not invalidate the response.
+      }
+      return { done: true, value: undefined };
+    },
+    async return() {
+      if (iterator.return) return iterator.return();
+      return { done: true, value: undefined };
+    },
+    async throw(error?: unknown) {
+      if (iterator.throw) return iterator.throw(error);
+      await iterator.return?.();
+      throw error;
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+}
+
+function installIsolatedTransport(
+  client: GoogleGenAI,
+  options: { apiKey?: string },
+): boolean {
   // @google/genai 2.6 has no public fetch hook. Both model request paths use
   // this instance's final HTTP call after the SDK has built the URL and auth.
   const { apiClient } = client as unknown as {
-    apiClient?: {
-      apiCall?(url: string, init: RequestInit): Promise<Response>;
-    };
+    apiClient?: GeminiApiClient;
   };
   if (typeof apiClient?.apiCall !== 'function') return false;
+  const destinations = new WeakMap<Response, string>();
+  // apiCall shallow-copies RequestInit but preserves the Headers instance.
+  const explicitNativeHeaderRequests = new WeakSet<Headers>();
+  if (typeof apiClient.includeExtraHttpOptionsToRequestInit === 'function') {
+    const includeExtraHttpOptionsToRequestInit =
+      apiClient.includeExtraHttpOptionsToRequestInit.bind(apiClient);
+    apiClient.includeExtraHttpOptionsToRequestInit = async (
+      init,
+      options,
+      url,
+      signal,
+    ) => {
+      const hasExplicitNativeHeader = Object.keys(options.headers ?? {}).some(
+        (name) => name.toLowerCase() === 'x-goog-api-key',
+      );
+      const request = await includeExtraHttpOptionsToRequestInit(
+        init,
+        options,
+        url,
+        signal,
+      );
+      if (hasExplicitNativeHeader && request.headers) {
+        explicitNativeHeaderRequests.add(request.headers as Headers);
+      }
+      return request;
+    };
+  }
   const apiCall = apiClient.apiCall.bind(apiClient);
-  apiClient.apiCall = (url, init) =>
-    retryContext.getStore()?.singleAttempt
+  apiClient.apiCall = async (url, init) => {
+    if (options.apiKey && !client.vertexai && isThirdPartyGeminiBaseUrl(url)) {
+      const headers = new Headers(init.headers);
+      if (
+        !headers.has('authorization') &&
+        !explicitNativeHeaderRequests.has(init.headers as Headers)
+      ) {
+        headers.set('Authorization', `Bearer ${options.apiKey}`);
+        init = { ...init, headers };
+      }
+    }
+    const response = await (retryContext.getStore()?.singleAttempt
       ? fetch(url, { ...init, redirect: 'error' })
-      : apiCall(url, init);
+      : apiCall(url, init));
+    destinations.set(response, url);
+    return response;
+  };
+  if (typeof apiClient.processStreamResponse === 'function') {
+    const processStreamResponse =
+      apiClient.processStreamResponse.bind(apiClient);
+    apiClient.processStreamResponse = (response) => {
+      const stream = processStreamResponse(response);
+      const destination = destinations.get(response) ?? response.url;
+      return !client.vertexai && isThirdPartyGeminiBaseUrl(destination)
+        ? withoutDoneSentinel(stream, response)
+        : stream;
+    };
+  }
   return true;
 }
 
@@ -151,7 +259,9 @@ export class LlmContentGenerator implements ContentGenerator {
     ) {
       throw new Error('Configure baseUrl explicitly for this Google model.');
     }
-    this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI);
+    this.hasIsolatedTransport = installIsolatedTransport(this.googleGenAI, {
+      apiKey: finalOptions.apiKey,
+    });
     this.contentGeneratorConfig = contentGeneratorConfig;
     this.cliConfig = cliConfig;
   }
@@ -286,9 +396,14 @@ export class LlmContentGenerator implements ContentGenerator {
     }
 
     if (reasoning) {
-      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
-      // is no xhigh/max, so the extra-strong tiers are capped at HIGH. An unset
-      // effort stays UNSPECIFIED so the model picks its own default.
+      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH, plus
+      // XHIGH for models that support it (Gemini 4 Neon / Hydrogen, or routes
+      // explicitly declaring xhigh). Unsupported stronger tiers clamp to the
+      // model's ceiling; an unset effort stays UNSPECIFIED so the model picks
+      // its own default.
+      const allowsXhigh = resolved
+        ? !resolved.toggleOnly && resolved.efforts.includes('xhigh')
+        : supportsGeminiXhigh(model || generation?.model);
       let thinkingLevel: ThinkingLevel;
       switch (reasoning.effort) {
         case 'low':
@@ -301,18 +416,29 @@ export class LlmContentGenerator implements ContentGenerator {
           thinkingLevel = 'HIGH' as ThinkingLevel;
           break;
         case 'xhigh':
-        case 'max':
-          // Gemini has no tier above HIGH; log the clamp once (mirroring the
-          // Anthropic generator's one-time clamp warning) so a /effort xhigh|max
-          // that silently runs at HIGH leaves a trace in debug logs.
+          if (allowsXhigh) {
+            thinkingLevel = 'XHIGH' as ThinkingLevel;
+          } else {
+            if (!this.effortClampWarned) {
+              debugLogger.warn(
+                `reasoning.effort='xhigh' is not supported by Gemini; clamping to 'HIGH'.`,
+              );
+              this.effortClampWarned = true;
+            }
+            thinkingLevel = 'HIGH' as ThinkingLevel;
+          }
+          break;
+        case 'max': {
+          const fallback = allowsXhigh ? 'XHIGH' : 'HIGH';
           if (!this.effortClampWarned) {
             debugLogger.warn(
-              `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to 'HIGH'.`,
+              `reasoning.effort='max' is not supported by Gemini; clamping to '${fallback}'.`,
             );
             this.effortClampWarned = true;
           }
-          thinkingLevel = 'HIGH' as ThinkingLevel;
+          thinkingLevel = fallback as ThinkingLevel;
           break;
+        }
         case undefined:
           // No effort set — let the model pick its own default.
           thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;

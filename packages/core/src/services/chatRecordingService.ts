@@ -4164,10 +4164,28 @@ export class ChatRecordingService {
     customTitle: string,
     titleSource: TitleSource = 'manual',
   ): Promise<boolean> {
+    return this.persistExplicitTitle(customTitle, titleSource);
+  }
+
+  async recordInitialTitle(customTitle: string): Promise<boolean> {
+    if (this.currentCustomTitle || this.pendingTitleWrites > 0) return false;
+    const onDisk = this.config
+      .getSessionService()
+      .getSessionTitleInfo(this.getSessionId());
+    if (onDisk.title) return false;
+    // The daemon publishes after checking for a concurrent manual rename.
+    return this.persistExplicitTitle(customTitle, 'auto', false);
+  }
+
+  private async persistExplicitTitle(
+    customTitle: string,
+    titleSource: TitleSource,
+    notify = true,
+  ): Promise<boolean> {
     this.pendingExplicitTitleWrites++;
     this.autoTitleController?.abort();
     try {
-      return await this.persistCustomTitle(customTitle, titleSource);
+      return await this.persistCustomTitle(customTitle, titleSource, notify);
     } finally {
       this.pendingExplicitTitleWrites--;
     }
@@ -4176,6 +4194,7 @@ export class ChatRecordingService {
   private async persistCustomTitle(
     customTitle: string,
     titleSource: TitleSource,
+    notify = true,
   ): Promise<boolean> {
     this.pendingTitleWrites++;
     let persisted = false;
@@ -4196,14 +4215,16 @@ export class ChatRecordingService {
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       this.persistListTitle(customTitle, titleSource);
-      try {
-        this.titleRecordedCallback?.(
-          customTitle,
-          titleSource,
-          record.sessionId,
-        );
-      } catch {
-        // Observer errors must never break title recording.
+      if (notify) {
+        try {
+          this.titleRecordedCallback?.(
+            customTitle,
+            titleSource,
+            record.sessionId,
+          );
+        } catch {
+          // Observer errors must never break title recording.
+        }
       }
       persisted = true;
       return true;

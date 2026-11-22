@@ -53,3 +53,4 @@ packages/core/src/skills/bundled/browser-use/runtime/
 # same reason; .prettierignore had cua-driver but not its sibling.
 packages/mobile-mcp/
 packages/managed-agent-server/**/target/
+packages/sdk-java/**/target/

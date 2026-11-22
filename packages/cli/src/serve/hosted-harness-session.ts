@@ -66,6 +66,7 @@ import {
 } from './hosted-approval-continuation.js';
 import {
   reconcileHostedTurnCleanup,
+  backgroundSuspensionCertificate,
   hasHostedCleanupDebt,
   hasBlockingHostedCleanupDebt,
   oweHostedTurnCleanup,
@@ -276,6 +277,10 @@ import {
   isHostedConfigScopedOwner,
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
+import {
+  detachBackgroundPublishers,
+  reattachAndDrainBackgroundDeliveries,
+} from './hosted-background-delivery-recovery.js';
 import { reconcileNeverStartedChildRuns } from './hosted-never-started-reconcile.js';
 import {
   ChildMessagesPendingError,
@@ -1370,11 +1375,25 @@ function harnessAuthorizationDetail(
     : `${authorization.reason}: ${sanitizeDaemonLogLine(authorization.message)}`;
 }
 
+/** The fence codes a close in flight raises under either lifecycle
+ * protocol: the v1 lifecycle fence or the v2 claim fence (files-on-v2).
+ * Shared by ordinaryAuthorizationError and the children/operations claim
+ * gate so the two cannot drift apart. */
+function isLifecycleFenceRemoteCode(code: unknown): boolean {
+  return (
+    code === 'managed_session_lifecycle_active' ||
+    code === 'workspace_lifecycle_claim_fenced'
+  );
+}
+
 function ordinaryAuthorizationError(res: Response, cause: unknown): void {
+  // A close in flight fences ordinary admission under either protocol:
+  // the v1 lifecycle fence or the v2 claim fence (files-on-v2). Both are
+  // conflicts that retry cannot clear until the close finishes.
   if (
     cause instanceof ManagedSessionStoreHttpError &&
     cause.status === 409 &&
-    cause.remoteCode === 'managed_session_lifecycle_active'
+    isLifecycleFenceRemoteCode(cause.remoteCode)
   )
     return error(res, 409, 'hosted_lifecycle_operation_active');
   error(res, 503, 'hosted_execution_authorization_unavailable');
@@ -1655,6 +1674,69 @@ async function attemptedPendingWakeInput(session: HostedSession) {
   return (
     pending.find((input) => wakeHasPriorAttempt(projected, input.turnId)) ??
     pending[0]
+  );
+}
+
+/** H4f × H4d-b: a stopped run's message inputs never start a turn; the
+ * relay's stop settles them. */
+function isStoppedMessage(
+  session: Pick<HostedSession, 'messagesStopped'>,
+  source: string | undefined,
+): boolean {
+  return (
+    session.messagesStopped === true && source === SESSION_MESSAGE_INPUT_SOURCE
+  );
+}
+
+/**
+ * The wake pump's pick over the committed prefix: the first deliverable wake
+ * input due at `now` and the earliest future notBefore it skips. Deferral is
+ * per input, not head-of-line.
+ */
+function pickWakeInputs(
+  session: HostedSession,
+  now: number,
+): { first?: PendingSessionInput; earliestDeferred?: number } {
+  const authority = session.managed.authority;
+  let first: PendingSessionInput | undefined;
+  let earliestDeferred: number | undefined;
+  for (const input of pendingSessionInputs(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+  )) {
+    if (
+      !isWakeInputSource(input.source) ||
+      isStoppedMessage(session, input.source)
+    ) {
+      continue;
+    }
+    if (input.notBefore !== null && input.notBefore > now) {
+      if (earliestDeferred === undefined || input.notBefore < earliestDeferred)
+        earliestDeferred = input.notBefore;
+      continue;
+    }
+    first ??= input;
+  }
+  return { first, earliestDeferred };
+}
+
+/**
+ * Where the control plane delivers wake inputs at their due time, it owns
+ * only deferred, unattempted ones. A due input is the pump's to run now, a
+ * stopped run's message waits for the relay's stop, and an attempted or
+ * non-wake input keeps its existing recovery.
+ */
+export function wakeDispatchOwnsInput(
+  session: Pick<HostedSession, 'messagesStopped'>,
+  input: PendingSessionInput,
+  projected: ReadonlyArray<{ readonly daemonPromptId?: string }>,
+  now: number,
+): boolean {
+  return (
+    isWakeInputSource(input.source) &&
+    !isStoppedMessage(session, input.source) &&
+    input.notBefore !== null &&
+    input.notBefore > now &&
+    !wakeHasPriorAttempt(projected, input.turnId)
   );
 }
 
@@ -2790,6 +2872,7 @@ async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
   drain = false,
+  probeOnly = false,
 ): Promise<void> {
   if (!drain && unsettledPromptId(session)) return;
   // A load can overlap the wake pump's retry. Re-read the debt with each
@@ -2809,7 +2892,7 @@ async function retryHostedCleanup(
               session.managed,
               options,
               undefined,
-              drain,
+              drain && !probeOnly,
             ),
           );
         }
@@ -4982,7 +5065,10 @@ export function registerHostedHarnessSessionRoutes(
   // teardown targets the next load re-acquires, not residency pins; the
   // runtime lease is released by teardown step 3. Instance-wide terms are
   // not per-Session eligibility.
-  const suspensionLiveWork = (session: HostedSession): boolean =>
+  const suspensionLiveWork = (
+    session: HostedSession,
+    backgroundCertified = false,
+  ): boolean =>
     session.active !== undefined ||
     session.recoveredTurn !== undefined ||
     session.blocked ||
@@ -5000,11 +5086,9 @@ export function registerHostedHarnessSessionRoutes(
     (session.hooks?.hasPendingOperations ?? false) ||
     compressionBusy(session) ||
     session.fileHistoryOwed !== undefined ||
-    hasHostedCleanupDebt(session.managed) ||
     session.childConsumption.size > 0 ||
     (session.messageOperations?.size ?? 0) > 0 ||
     unsettledInputs(session).size > 0 ||
-    session.heldRuntimeTurns.size > 0 ||
     session.automations?.hasPendingGateReleases === true ||
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
@@ -5016,20 +5100,22 @@ export function registerHostedHarnessSessionRoutes(
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
     session.streams.size > 0 ||
-    [...(session.shell?.monitorLoops?.values() ?? [])].some(
-      (loop) => loop.live,
-    ) ||
-    [...(session.backgroundLane?.monitorLoops?.values() ?? [])].some(
-      (loop) => loop.live,
-    ) ||
-    ['child_run', 'monitor_run'].some((domain) =>
-      session.managed.authority
-        .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
-        .some(
-          (entry) =>
-            !['settled', 'failed', 'cancelled'].includes(entry.run.state),
-        ),
-    ) ||
+    // The background terms a certified suspension exempts (§4.8).
+    (!backgroundCertified &&
+      (hasHostedCleanupDebt(session.managed) ||
+        session.heldRuntimeTurns.size > 0 ||
+        [
+          ...(session.shell?.monitorLoops?.values() ?? []),
+          ...(session.backgroundLane?.monitorLoops?.values() ?? []),
+        ].some((loop) => loop.live) ||
+        ['child_run', 'monitor_run'].some((domain) =>
+          session.managed.authority
+            .extensionRecordsInDomain(domain as 'child_run' | 'monitor_run')
+            .some(
+              (entry) =>
+                !['settled', 'failed', 'cancelled'].includes(entry.run.state),
+            ),
+        ))) ||
     (session.mcp !== undefined &&
       isHostedWorkspacePublicShellProfile(session.toolProfile) &&
       session.lifecycleProtocolVersion !== 2);
@@ -5051,21 +5137,53 @@ export function registerHostedHarnessSessionRoutes(
       publishers: false,
       writer: false,
     };
+    // The background certificate is re-derived on every eligibility pass,
+    // so an exemption the teardown relies on is never older than the last
+    // check before the irreversible boundary (§4.8).
+    let backgroundCertified = false;
+    const refreshBackgroundCertificate = async (): Promise<boolean> => {
+      const previous = backgroundCertified;
+      backgroundCertified =
+        session.stores?.supportsRuntimeObservation?.() === true &&
+        // The seal only stamps the background hold under wake dispatch; a
+        // certificate without it would suspend a Session into a seal its
+        // recovery cannot read.
+        session.stores?.supportsWakeDispatch?.() === true &&
+        (await backgroundSuspensionCertificate(
+          session.managed,
+          new Set([
+            ...(session.shell?.observationBindings ?? []),
+            ...(session.backgroundLane?.observationBindings ?? []),
+          ]),
+        ));
+      // The exemption evaporated between passes: revert instead of tearing
+      // down against evidence that no longer holds.
+      return previous && !backgroundCertified;
+    };
     const outcome = await runSuspensionAttempt(suspension, {
       pendingInputs: async () => {
-        const pending =
-          pendingSessionInputs(
-            session.managed.authority.eventsInSequenceRange(
-              1,
-              session.managed.authority.committedSequence,
-            ),
-          ).length > 0;
-        if (!marked && pending) suspensionStats.eligibilityFailures += 1;
-        return pending;
+        const pending = pendingSessionInputs(
+          session.managed.authority.eventsInSequenceRange(
+            1,
+            session.managed.authority.committedSequence,
+          ),
+        );
+        let blocked = pending.length > 0;
+        if (blocked && session.stores?.supportsWakeDispatch?.()) {
+          const projected = await session.managed.sink.project();
+          const now = Date.now();
+          blocked = pending.some(
+            (input) => !wakeDispatchOwnsInput(session, input, projected, now),
+          );
+        }
+        const certificateLost = await refreshBackgroundCertificate();
+        if (!marked && (blocked || certificateLost))
+          suspensionStats.eligibilityFailures += 1;
+        return blocked || certificateLost;
       },
       markClosing: (attemptStart) => {
         if (
-          suspensionLiveWork(session) ||
+          suspensionLiveWork(session, backgroundCertified) ||
           suspension.lastActivity > attemptStart ||
           session.ownershipRelease !== undefined ||
           session.lifecycle !== undefined ||
@@ -5082,7 +5200,7 @@ export function registerHostedHarnessSessionRoutes(
         session.mcpClosing = true;
         return true;
       },
-      liveWork: () => suspensionLiveWork(session),
+      liveWork: () => suspensionLiveWork(session, backgroundCertified),
       teardown: async () => {
         try {
           if (!done.wake) {
@@ -5095,10 +5213,21 @@ export function registerHostedHarnessSessionRoutes(
             done.owners = true;
           }
           if (!done.lease) {
-            if (await releaseLeaseNow(session, false, true))
+            if (
+              await releaseLeaseNow(session, false, true, backgroundCertified)
+            )
               throw new Error('Runtime lease release is unproven.');
-            if (broker) await retryHostedCleanup(session, broker, true);
-            else if (hasHostedCleanupDebt(session.managed))
+            if (broker)
+              await retryHostedCleanup(
+                session,
+                broker,
+                true,
+                backgroundCertified,
+              );
+            else if (
+              !backgroundCertified &&
+              hasHostedCleanupDebt(session.managed)
+            )
               throw new Error('Runtime cleanup remains owed.');
             done.lease = true;
           }
@@ -5106,6 +5235,23 @@ export function registerHostedHarnessSessionRoutes(
             for (const timer of session.replyPlanRetries?.values() ?? [])
               clearTimeout(timer);
             session.replyPlanRetries?.clear();
+            // A certified background suspension detaches its publisher
+            // with the final applied watermark instead of closing the
+            // worker relationship (§4.9); the local listener still stops
+            // because this resident is going away.
+            if (backgroundCertified && broker && session.stores?.publication) {
+              for (const lane of [session.backgroundLane, session.shell]) {
+                if (!lane?.publisher) continue;
+                await detachBackgroundPublishers({
+                  managed: session.managed,
+                  lane,
+                  writerOwner: session.stores.publication,
+                  brokerOptions: broker,
+                  childRuns: session.childRuns,
+                  monitors: session.monitors,
+                });
+              }
+            }
             await session.shell?.publisher?.close();
             await session.backgroundLane?.publisher?.close();
             done.publishers = true;
@@ -5120,8 +5266,29 @@ export function registerHostedHarnessSessionRoutes(
             // it, so waiting from within would deadlock.
             await session.managed.stopRenewal();
             await session.managed.releaseActivation();
-            // The memoized seal: a retry reconciles this same seal.
-            await session.managed.authority.close();
+            // The memoized seal: a retry reconciles this same seal. The wake
+            // stamp is what the pump would pick from the prefix this seal
+            // closes, recomputed on every retry.
+            let wake:
+              | { pending: boolean; dueAt: number; backgroundHeld?: boolean }
+              | undefined;
+            if (session.stores?.supportsWakeDispatch?.()) {
+              const { first, earliestDeferred } = pickWakeInputs(
+                session,
+                Date.now(),
+              );
+              wake =
+                first !== undefined
+                  ? { pending: true, dueAt: 0 }
+                  : {
+                      pending: earliestDeferred !== undefined,
+                      dueAt: earliestDeferred ?? 0,
+                    };
+              // The writer that ran the per-run evidence check certifies
+              // the background holds at this exact revision (§4.8).
+              if (backgroundCertified) wake.backgroundHeld = true;
+            }
+            await session.managed.authority.close(wake);
             done.writer = true;
           }
           // Only after every step confirmed: stopLocal fences the seal
@@ -7724,11 +7891,6 @@ export function registerHostedHarnessSessionRoutes(
             wakeAftermathInFlight = false;
           }
         });
-        // H4f × H4d-b: a stopped run's message inputs never start a turn;
-        // the relay's stop settles them.
-        const stoppedMessage = (source: string | undefined) =>
-          session.messagesStopped === true &&
-          source === SESSION_MESSAGE_INPUT_SOURCE;
         // The earliest future notBefore among the wake inputs the pick
         // below skips as not yet due. The pump's deferUntil reads the value
         // this same journal pass computed, so deferral costs no second read.
@@ -7738,32 +7900,10 @@ export function registerHostedHarnessSessionRoutes(
             // The whole committed prefix, not a bounded page: a notification
             // input lands late in the log, and a default-sized read would
             // hide every one of them once the Session passes that page.
-            const authority = session.managed.authority;
-            const now = Date.now();
-            let first: PendingSessionInput | undefined;
-            let earliestDeferred: number | undefined;
-            for (const input of pendingSessionInputs(
-              authority.eventsInSequenceRange(1, authority.committedSequence),
-            )) {
-              if (
-                !isWakeInputSource(input.source) ||
-                stoppedMessage(input.source)
-              ) {
-                continue;
-              }
-              if (input.notBefore !== null && input.notBefore > now) {
-                // Not yet due: defer this input without parking a due one
-                // behind it — deferral is per input, not head-of-line.
-                if (
-                  earliestDeferred === undefined ||
-                  input.notBefore < earliestDeferred
-                ) {
-                  earliestDeferred = input.notBefore;
-                }
-                continue;
-              }
-              if (first === undefined) first = input;
-            }
+            const { first, earliestDeferred } = pickWakeInputs(
+              session,
+              Date.now(),
+            );
             deferredUntil = earliestDeferred;
             if (first === undefined) return undefined;
             if (isHostedWakeContinuationId(first.turnId)) {
@@ -7838,7 +7978,7 @@ export function registerHostedHarnessSessionRoutes(
                   ? session.loops.expandFireText(turnId, text)
                   : Promise.resolve({ text, expanded: false }),
               busy: wakeBusy,
-              held: (turn) => stoppedMessage(turn.source),
+              held: (turn) => isStoppedMessage(session, turn.source),
               cancelled: async (turn) =>
                 (turn.source === AUTOMATION_INPUT_SOURCE &&
                   session.automations?.cancelRequested(turn.turnId) === true) ||
@@ -8797,6 +8937,22 @@ export function registerHostedHarnessSessionRoutes(
           resumeModel,
           body?.['cancellationTakeover'] === true,
         );
+      const deliveryRecoveryLane = session.backgroundLane ?? session.shell;
+      if (
+        brokerOptions &&
+        deliveryRecoveryLane &&
+        session.stores?.publication &&
+        !unsettledPromptId(session)
+      ) {
+        await reattachAndDrainBackgroundDeliveries({
+          managed,
+          lane: deliveryRecoveryLane,
+          writerOwner: session.stores.publication,
+          brokerOptions,
+          childRuns: session.childRuns,
+          monitors: session.monitors,
+        });
+      }
       if (
         brokerOptions &&
         hasHostedCleanupDebt(managed) &&
@@ -9081,7 +9237,7 @@ export function registerHostedHarnessSessionRoutes(
           req.path === '/children/operations' &&
           cause instanceof ManagedSessionStoreHttpError &&
           cause.status === 409 &&
-          cause.remoteCode === 'managed_session_lifecycle_active'
+          isLifecycleFenceRemoteCode(cause.remoteCode)
         ) {
           // Closing work means lifecycle admission, so the parent's own
           // child cleanup presents the matching lifecycle claim instead:
@@ -11377,6 +11533,7 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     terminal: boolean,
     rethrowOnFailure = false,
+    probeOnly = false,
   ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
@@ -11391,14 +11548,22 @@ export function registerHostedHarnessSessionRoutes(
       session,
       { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
       lease,
-      true,
+      !probeOnly,
       terminal,
     ).then(
       (outcome) => {
-        if (outcome !== 'released' && outcome !== 'deferred')
+        // A suspension release stops nothing (§4.9): the Broker confirmed
+        // this hold is a background execution of the current binding and
+        // generation, so 'held' is its success. Foreground debt still fails.
+        if (
+          outcome !== 'released' &&
+          outcome !== 'deferred' &&
+          !(probeOnly && outcome === 'held')
+        )
           throw new Error('Original Runtime cleanup is still owed.');
         // Only a non-terminal handback can defer, so a deferral here always
-        // means the owner really was left running.
+        // means the owner really was left running. A certified background
+        // hold is proven by the Broker's own answer, not left unproven.
         unproven = outcome === 'deferred';
         if (session.runtimeLeaseHeld === lease) {
           session.runtimeLeaseHeld = undefined;

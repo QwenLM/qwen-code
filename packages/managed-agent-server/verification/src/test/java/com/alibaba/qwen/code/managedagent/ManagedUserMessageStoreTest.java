@@ -493,7 +493,8 @@ class ManagedUserMessageStoreTest {
         long childRevision = queueRevision(child);
         var parentOperation = kind == OperationKind.CLOSE
                 ? workspaceStore.beginWorkspaceClose(TENANT, parent, ACTOR, ACTOR, "workspace-close", "digest", true)
-                : workspaceStore.beginWorkspaceLifecycle(TENANT, parent, kind, ACTOR, ACTOR, "workspace-delete", "digest", true, 1);
+                : workspaceStore.beginWorkspaceLifecycle(TENANT, parent, kind, ACTOR, ACTOR, "workspace-delete", "digest", true,
+                        WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.FILES));
         assertThat(workspaceStore.requireSession(TENANT, parent).status()).isEqualTo(kind == OperationKind.CLOSE ? "CLOSING" : "DELETING");
         assertThat(queueRevision(parent)).isEqualTo(parentRevision + 1);
         assertThat(queueRevision(child)).isEqualTo(childRevision);
@@ -729,9 +730,8 @@ class ManagedUserMessageStoreTest {
 
     private void seedConversationBoundary() {
         String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
-        jdbc.update("INSERT INTO ma_session_record (session_scope_key,record_key,tenant_id,session_id,domain,record_id,"
-                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,?,1,'CONVERSATION',?,1)",
-                scope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
+        jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,domain,record_id,"
+                        + "revision,record_kind,options_json,gmt_create) VALUES (?,?,?,?,?,1,'CONVERSATION',?,1)", com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "side_query_conversation"),
                 TENANT, session, "side_query_conversation", "side_query_conversation", "{\"mainInputBoundary\":0}");
     }
 

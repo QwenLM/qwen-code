@@ -589,16 +589,44 @@ class ManagedWorkspaceArtifactApiIntegrationTest {
 
     @Test
     void theWorkspacePagePredicateHasAnIndexAccessPath() throws Exception {
-        try (var connection = fixture.jdbc().getDataSource().getConnection();
-                var rows = connection.getMetaData()
-                        .getIndexInfo(null, null, "ma_operation", false, false)) {
-            var columns = new ArrayList<String>();
-            while (rows.next()) {
-                if ("idx_ma_operation_workspace".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
-                    columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+        // CI's full-tier MySQL serves several databases from one server, so an
+        // unscoped getIndexInfo(null, null, ...) matches ma_operation in every
+        // database and returns each column once per database. A decoy schema
+        // carrying the same index name reproduces that condition on any host;
+        // the read must scope to this test's own catalog and schema.
+        var decoy = "decoy_" + java.util.UUID.randomUUID().toString().replace("-", "");
+        boolean mysql;
+        try (var connection = fixture.jdbc().getDataSource().getConnection()) {
+            mysql = connection.getMetaData().getDatabaseProductName()
+                    .toLowerCase(java.util.Locale.ROOT).contains("mysql");
+        }
+        boolean created = false;
+        try {
+            fixture.jdbc().update("CREATE SCHEMA " + decoy);
+            created = true;
+            fixture.jdbc().update("CREATE TABLE " + decoy + ".ma_operation (id BIGINT,"
+                    + " workspace_id VARBINARY(2048), operation_kind VARCHAR(48), state VARCHAR(32))");
+            fixture.jdbc().update(mysql
+                    ? "CREATE INDEX idx_ma_operation_workspace ON " + decoy
+                            + ".ma_operation (workspace_id, operation_kind, state, id)"
+                    : "CREATE INDEX " + decoy + ".idx_ma_operation_workspace ON " + decoy
+                            + ".ma_operation (workspace_id, operation_kind, state, id)");
+            try (var connection = fixture.jdbc().getDataSource().getConnection();
+                    var rows = connection.getMetaData().getIndexInfo(
+                            connection.getCatalog(), connection.getSchema(),
+                            "ma_operation", false, false)) {
+                var columns = new ArrayList<String>();
+                while (rows.next()) {
+                    if ("idx_ma_operation_workspace".equalsIgnoreCase(rows.getString("INDEX_NAME"))) {
+                        columns.add(rows.getString("COLUMN_NAME").toLowerCase(java.util.Locale.ROOT));
+                    }
                 }
+                assertThat(columns).containsExactly("workspace_id", "operation_kind", "state", "id");
             }
-            assertThat(columns).containsExactly("workspace_id", "operation_kind", "state", "id");
+        } finally {
+            if (created) {
+                fixture.jdbc().update(mysql ? "DROP DATABASE " + decoy : "DROP SCHEMA " + decoy + " CASCADE");
+            }
         }
     }
 }

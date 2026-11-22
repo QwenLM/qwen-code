@@ -10,6 +10,8 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import type { IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
 import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
@@ -22,6 +24,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
+import { resolveDaemonExportChannel } from '../config/acp-channel-fallback.js';
 import type {
   DaemonMetricsBucket,
   DaemonPerfSnapshot,
@@ -50,6 +53,7 @@ import {
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { gzipJsonResponses } from './gzip-response.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   CredentialStore,
@@ -114,6 +118,8 @@ import {
 } from './web-shell-static.js';
 import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
+  forwardManagedTerminalUpgrade,
+  isManagedTerminalUpgradePath,
   mountManagedLocalWeb,
   type ManagedLocalWebOptions,
 } from './managed-local-web.js';
@@ -227,7 +233,6 @@ import {
   registerHostedPackagePreparation,
   HOSTED_PACKAGE_PREPARATION_PREFIX,
 } from './hosted-package-preparation.js';
-import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -929,6 +934,13 @@ export function createServeApp(
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  // Resolved once per daemon from the frozen launch env; both transcript
+  // export surfaces (workspace sessions and standalone conversations) share
+  // it so a co-resident daemon cannot relabel either.
+  const exportChannel = resolveDaemonExportChannel(
+    opts.profile,
+    daemonEnvAtBoot,
+  );
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
     opts.maxRegisteredWorkspaces,
     daemonEnvAtBoot,
@@ -1160,6 +1172,11 @@ export function createServeApp(
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
   const acpHttpEnabledAtBoot =
     opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
+  if (deps.managedLocalWeb && !acpHttpEnabledAtBoot) {
+    throw new Error(
+      'Managed local Web Terminal requires the ACP WebSocket dispatcher; unset QWEN_SERVE_ACP_HTTP=0.',
+    );
+  }
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
   // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
   // Shell page itself (`/live/web`) on every platform; the native macOS Host
@@ -2053,6 +2070,7 @@ export function createServeApp(
     );
     standaloneSessionService = new StandaloneSessionService({
       daemonLog,
+      exportChannel,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -2621,12 +2639,19 @@ export function createServeApp(
 
   installJsonBodyParser(app);
 
+  // Gzip JSON API responses for clients that negotiate it (#6181). Mounted
+  // after authenticate + rate limiter on purpose: auth/rate-limit rejections
+  // are tiny bodies from (possibly unauthenticated) callers and must not pay
+  // a compression tax. Web Shell session loads stream multi-megabyte
+  // transcript JSON — the wrapper compresses those while leaving SSE, static
+  // assets, and attachment downloads untouched (see gzip-response.ts).
+  app.use(gzipJsonResponses());
+
   const hostedHarness =
     opts.profile === 'hosted-harness'
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
-  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
@@ -2636,17 +2661,6 @@ export function createServeApp(
             token: opts.managedRuntimeBrokerToken,
           }
         : undefined;
-    if (opts.hostedCsiSessionStoreUrl && broker) {
-      const privateSessions = registerHostedCsiSessionRoutes(
-        app,
-        hostedHarness,
-        opts.hostedCsiSessionStoreUrl,
-        broker,
-        (id) => ordinary.owns(id),
-      );
-      stopHostedCsiSessions = privateSessions.stopLocal;
-      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
-    }
     const ordinary = registerHostedHarnessSessionRoutes(
       app,
       hostedHarness,
@@ -3674,6 +3688,7 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    exportChannel,
     // Late-bound: the refresh timer is started before this app exists, so the
     // serve root installs the hook on locals and it is read per restore.
     onSessionRestored: ({ workspaceCwd, sessionId }) => {
@@ -4261,6 +4276,10 @@ export function createServeApp(
     conversationRuntimeActivity,
   });
 
+  const managedLocalJava = deps.managedLocalWeb
+    ? new URL(deps.managedLocalWeb.javaUrl)
+    : undefined;
+
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
   // alongside the REST surface, sharing this same `bridge` instance.
   // Additive + toggleable (`QWEN_SERVE_ACP_HTTP=0` opts out).
@@ -4331,6 +4350,26 @@ export function createServeApp(
     // activate only when the flag is on and a registry is supplied.
     cdpTunnelOverWs: opts.cdpTunnelOverWs === true,
     ...(cdpTunnelRegistry ? { cdpTunnelRegistry } : {}),
+    ...(managedLocalJava
+      ? {
+          managedTerminalUpgrade: {
+            matches: isManagedTerminalUpgradePath,
+            forward: (
+              req: IncomingMessage,
+              socket: Duplex,
+              head: Buffer,
+              tracked: Set<Duplex>,
+            ) =>
+              forwardManagedTerminalUpgrade(
+                managedLocalJava,
+                req,
+                socket,
+                head,
+                tracked,
+              ),
+          },
+        }
+      : {}),
     // Browser captures audio and streams raw PCM here; the daemon transcribes
     // server-side via the reused CLI voice pipeline. Shares the ACP upgrade
     // listener's loopback/CSRF/bearer checks.
@@ -4550,7 +4589,6 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
-        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

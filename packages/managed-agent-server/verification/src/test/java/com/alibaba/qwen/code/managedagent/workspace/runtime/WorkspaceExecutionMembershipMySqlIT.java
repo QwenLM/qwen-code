@@ -19,7 +19,6 @@ import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.Fixture;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
@@ -91,9 +90,9 @@ class WorkspaceExecutionMembershipMySqlIT {
         var fixture = new Fixture(source, jdbc, store);
         var runtime = fixture.runtime("held-guard");
         try (var pool = Executors.newSingleThreadExecutor(); var blocker = lock(
-                "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_key = ?"
+                "SELECT tenant_id FROM ma_tenant_guard WHERE tenant_id = ?"
                         + " AND guard_domain = 'runtime_placement' FOR UPDATE",
-                RuntimeRequestKeys.valueKey(fixture.tenant))) {
+                fixture.tenant)) {
             try {
                 pool.submit(() -> {
                     authority.claim(fixture.session.workspace(), runtime.session());

@@ -310,7 +310,6 @@ final class AgentSessionQueries {
         List<Object> arguments = new ArrayList<>();
         arguments.add(tenantId);
         arguments.addAll(sessionIds);
-        sessionIds.forEach(id -> arguments.add(ManagedSessionStore.sessionScopeKey(tenantId, id)));
         Map<String, WebShellLifecycleOperation> result = new HashMap<>();
         jdbc.query("SELECT * FROM (SELECT o.session_id, o.operation_id, o.operation_kind, o.state, o.failure_code,"
                         + " ROW_NUMBER() OVER (PARTITION BY o.session_id ORDER BY CASE WHEN o.state IN"
@@ -318,7 +317,6 @@ final class AgentSessionQueries {
                         + " o.gmt_modified DESC, o.gmt_create DESC, o.operation_id DESC) AS lifecycle_rank FROM ma_operation o"
                         + " JOIN ma_session s ON s.tenant_id = o.tenant_id AND s.session_id = o.session_id"
                         + " WHERE o.tenant_id = ? AND o.session_id IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
-                        + " AND o.session_scope_key IN (" + AgentStoreRows.placeholders(sessionIds.size()) + ")"
                         + " AND ((s.status = 'CLOSING' AND o.operation_kind = 'CLOSE')"
                         + " OR (s.status = 'DELETING' AND o.operation_kind = 'DELETE')"
                         + " OR (s.status = 'ARCHIVING' AND o.operation_kind = 'ARCHIVE'))) lifecycle WHERE lifecycle_rank = 1",

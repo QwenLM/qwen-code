@@ -251,11 +251,9 @@ class ManagedActionStoreTest {
         String operationId = admitted.operation().operationId();
         markFailed(operationId, "action_response_delivery_failed", 10, 0);
         // The resurrection arm's evidence that a new delivery must wait.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
+        jdbc.update("INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?)",
                 RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
-                RuntimeAdmissionFences.storageFenceKey(TENANT),
-                RuntimeAdmissionFences.storageFenceKey("storage"),
                 TENANT, "storage", "op-fence");
 
         var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);
@@ -534,6 +532,23 @@ class ManagedActionStoreTest {
                 Long.class, TENANT, SESSION)).isEqualTo(1);
     }
 
+    @Test
+    void uncapturedPlanExitApprovalDecidesWithoutReleasingPlan() {
+        jdbc.update("UPDATE ma_session SET approval_mode='default', selected_approval_mode='yolo',"
+                + " approval_revision=2, is_plan_enabled=TRUE WHERE tenant_id=? AND session_id=?", TENANT, SESSION);
+        jdbc.update("INSERT INTO ma_turn (tenant_id,session_id,turn_id,prompt_id,input_json,payload_digest,"
+                        + "status,approval_mode,approval_revision,is_plan_enabled,gmt_create,gmt_modified)"
+                        + " VALUES (?,?,'turn','turn','[]','digest','RUNNING','default',1,TRUE,0,0)",
+                TENANT, SESSION);
+        ObjectNode options = planExitOptions();
+        options.remove("continuationRef");
+        project("requested", null, 1, options);
+        project("decided", response("allow"), 2, options);
+        assertThat(actions.find(TENANT, SESSION, ACTION).orElseThrow().state()).isEqualTo("decided");
+        assertThat(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                Boolean.class, TENANT, SESSION)).isTrue();
+    }
+
     private ObjectNode planExitOptions() {
         ObjectNode input = JSON.createObjectNode().put("harnessSessionId", SESSION)
                 .put("runtimeSessionId", "turn").put("payloadJson", "{\"toolName\":\"exit_plan_mode\",\"input\":{\"plan\":\"Read then edit\"}}");
@@ -567,7 +582,7 @@ class ManagedActionStoreTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"1,true", "2,true", "3,true", "1,false", "2,false", "3,false"})
+    @CsvSource({"3,true", "3,false"})
     void actionOptionsPreserveOnlyAnExplicitHumanDecisionRequirement(int version, boolean required) {
         ObjectNode options = planExitOptions().put("v", version).put("requiresHumanDecision", required);
         if (version < 3) {
@@ -673,7 +688,7 @@ class ManagedActionStoreTest {
     }
 
     private void project(String state, JsonNode answer, long sequence, long expiresAt) {
-        ObjectNode options = JSON.createObjectNode().put("v", 1).put("requestId", ACTION).put("turnId", "turn")
+        ObjectNode options = JSON.createObjectNode().put("v", 3).put("requestId", ACTION).put("turnId", "turn")
                 .put("functionCallId", "call").put("toolName", "write_file").put("policyRevision", "hosted-tool-approval/1")
                 .put("inputRevision", 1).put("createdAt", 1).put("expiresAt", expiresAt);
         options.putArray("options").addObject().put("id", "allow").put("label", "Allow");
@@ -713,10 +728,10 @@ class ManagedActionStoreTest {
         try {
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             String digest = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));
-            jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,workspace_id,session_id,resource_id,kind,"
+            jdbc.update("INSERT INTO ma_resource (resource_key,tenant_id,workspace_id,session_id,resource_id,kind,"
                             + "schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                            + " VALUES (?,?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
-                    ManagedSchemaKeys.key(scope, id), scope, TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
+                            + " VALUES (?,?,?,?,?,?,1,?,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE resource_key=resource_key",
+                    ManagedSchemaKeys.key(scope, id), TENANT, "workspace", SESSION, id, kind, bytes.length, digest, bytes);
             return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest);
         } catch (java.security.NoSuchAlgorithmException error) {
             throw new IllegalStateException(error);
