@@ -137,6 +137,8 @@ describe('themeCommand', () => {
         SettingScope.User,
         'ui.theme',
         'ANSI Light',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(settings.user.settings.ui?.theme).toBe('ANSI Light');
       expect(themeManager.getActiveTheme().name).toBe('ANSI Light');
@@ -158,6 +160,8 @@ describe('themeCommand', () => {
         SettingScope.Workspace,
         'ui.theme',
         'ANSI',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(themeManager.getActiveTheme().name).toBe('ANSI');
       expect(content(result)).toBe('Theme set to ANSI (project settings).');
@@ -177,6 +181,8 @@ describe('themeCommand', () => {
         SettingScope.User,
         'ui.theme',
         'ANSI',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(settings.workspace.settings.ui?.theme).toBe('ANSI Light');
       expect(settings.merged.ui?.theme).toBe('ANSI');
@@ -237,6 +243,8 @@ describe('themeCommand', () => {
         SettingScope.User,
         'ui.theme',
         'Alias',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(themeManager.getActiveTheme().name).toBe('Shown Name');
       expect(content(byKey.result)).toBe('Theme set to Alias (user settings).');
@@ -275,6 +283,8 @@ describe('themeCommand', () => {
         SettingScope.Workspace,
         'ui.theme',
         'Team Theme',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(themeManager.getActiveTheme().name).toBe('Team Theme');
       expect(content(result)).toBe(
@@ -317,6 +327,8 @@ describe('themeCommand', () => {
         SettingScope.User,
         'ui.theme',
         'dracula',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(themeManager.getActiveTheme().type).toBe('custom');
       expect(content(result)).toBe('Theme set to dracula (user settings).');
@@ -340,6 +352,8 @@ describe('themeCommand', () => {
         SettingScope.User,
         'ui.theme',
         'auto',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(settings.user.settings.ui?.theme).toBe('auto');
       expect(['Qwen Dark', 'Qwen Light']).toContain(
@@ -366,6 +380,8 @@ describe('themeCommand', () => {
         SettingScope.User,
         'ui.theme',
         'Brand',
+        undefined,
+        { throwOnWriteFailure: true },
       );
       expect(result).toMatchObject({ messageType: 'info' });
     });
@@ -407,6 +423,43 @@ describe('themeCommand', () => {
     });
 
     describe('applyThemeSetting', () => {
+      it('writes nothing when system settings pin the theme', () => {
+        const settings = makeSettings({
+          system: { ui: { theme: 'Qwen Light' } },
+        });
+        const setValue = vi.spyOn(settings, 'setValue');
+
+        const outcome = applyThemeSetting(
+          settings,
+          SettingScope.User,
+          'Dracula',
+        );
+
+        expect(outcome).toMatchObject({ applied: false, pinnedBySystem: true });
+        expect(setValue).not.toHaveBeenCalled();
+        expect(settings.user.settings.ui?.theme).toBeUndefined();
+      });
+
+      it('keeps a failed write through the untrusted redirect out of both files', () => {
+        vi.spyOn(themeManager, 'setActiveTheme').mockImplementation(
+          (name) => name !== 'Qwen Light',
+        );
+        const settings = makeSettings({
+          workspace: { ui: { theme: 'ANSI Light' } },
+          isTrusted: false,
+        });
+
+        const outcome = applyThemeSetting(
+          settings,
+          SettingScope.Workspace,
+          'Qwen Light',
+        );
+
+        expect(outcome.applied).toBe(false);
+        expect(settings.user.settings.ui?.theme).toBeUndefined();
+        expect(settings.workspace.settings.ui?.theme).toBe('ANSI Light');
+      });
+
       it('keeps a pick that a broken theme in another scope overrides', () => {
         const settings = makeSettings({
           workspace: { ui: { theme: 'NotATheme' } },
@@ -462,6 +515,26 @@ describe('themeCommand', () => {
         expect(settings.user.settings.ui?.theme).toBe('ANSI');
         expect(settings.workspace.settings.ui?.theme).toBeUndefined();
       });
+    });
+
+    it('reports an error and changes nothing when the settings file cannot be saved', () => {
+      const settings = makeSettings();
+      const userFile = settings.user.path;
+      fs.mkdirSync(path.dirname(userFile), { recursive: true });
+      fs.writeFileSync(userFile, '{ not json');
+      const before = themeManager.getActiveTheme().name;
+
+      const { result, onThemeChanged } = run('ANSI', settings);
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Theme "ANSI" could not be applied.',
+      });
+      expect(onThemeChanged).not.toHaveBeenCalled();
+      expect(settings.merged.ui?.theme).toBeUndefined();
+      expect(themeManager.getActiveTheme().name).toBe(before);
+      expect(fs.readFileSync(userFile, 'utf-8')).toBe('{ not json');
     });
 
     it('still refuses when NO_COLOR is set', () => {

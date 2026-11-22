@@ -16,13 +16,17 @@ import { AUTO_THEME_NAME, themeManager } from './theme-manager.js';
  * (Ink and OpenTUI) and `/theme <name>`, so all of them apply a theme the
  * same way.
  *
+ * Nothing is written when system settings pin the theme, since no other
+ * scope can override them; `pinnedBySystem` is set instead.
+ *
  * An untrusted workspace is left out of the merged settings, so a Workspace
  * write there would never take effect; it goes to User settings instead,
  * like the model picker does.
  *
- * If the new value is the one in effect and can't be activated, the scope's
- * previous value is put back (or the key removed again if the scope had
- * none). A write that another scope overrides is kept as is.
+ * If the settings file can't be saved, nothing changes and `applied` is
+ * false. If the new value is the one in effect and can't be activated, the
+ * scope's previous value is put back (or the key removed again if the scope
+ * had none). A write that another scope overrides is kept as is.
  *
  * Returns the theme in effect, whether it could be activated, and the scope
  * that was written. The selection took effect only when `applied` is true
@@ -32,13 +36,29 @@ export function applyThemeSetting(
   settings: LoadedSettings,
   scope: SettingScope,
   themeName: string,
-): { effective: string; applied: boolean; scope: SettingScope } {
+): {
+  effective: string;
+  applied: boolean;
+  scope: SettingScope;
+  pinnedBySystem?: boolean;
+} {
   const target =
     scope === SettingScope.Workspace && !settings.isTrusted
       ? SettingScope.User
       : scope;
+  const current = settings.merged.ui?.theme ?? AUTO_THEME_NAME;
+  if (isThemePinnedBySystem(settings)) {
+    return {
+      effective: current,
+      applied: false,
+      scope: target,
+      pinnedBySystem: true,
+    };
+  }
   const previous = settings.forScope(target).settings.ui?.theme;
-  writeThemeSetting(settings, target, themeName);
+  if (!writeThemeSetting(settings, target, themeName)) {
+    return { effective: current, applied: false, scope: target };
+  }
   const effective = activateMergedTheme(settings);
   if (!effective.applied && effective.name === themeName) {
     writeThemeSetting(settings, target, previous);
@@ -51,13 +71,26 @@ export function applyThemeSetting(
   };
 }
 
+/** System settings merge last, so a theme set there can't be overridden. */
+export function isThemePinnedBySystem(settings: LoadedSettings): boolean {
+  return settings.system.settings.ui?.theme !== undefined;
+}
+
+/** Saves `ui.theme` in `scope`. Returns false, changing nothing, if the file can't be written. */
 function writeThemeSetting(
   settings: LoadedSettings,
   scope: SettingScope,
   value: string | undefined,
-): void {
-  settings.setValue(scope, 'ui.theme', value);
-  if (value !== undefined) return;
+): boolean {
+  try {
+    // The throwing form saves before it touches the in-memory settings.
+    settings.setValue(scope, 'ui.theme', value, undefined, {
+      throwOnWriteFailure: true,
+    });
+  } catch {
+    return false;
+  }
+  if (value !== undefined) return true;
   // setValue leaves an own `theme: undefined` key behind, which the merge
   // copies over a lower scope's theme. Drop it so that theme shows through.
   const file = settings.forScope(scope);
@@ -65,6 +98,7 @@ function writeThemeSetting(
     deleteNestedPropertySafe(target as Record<string, unknown>, 'ui.theme');
   }
   settings.recomputeMerged();
+  return true;
 }
 
 function activateMergedTheme(settings: LoadedSettings): {
@@ -98,7 +132,7 @@ export function resolveThemeName(
   settings: LoadedSettings,
   requested: string,
 ): ThemeNameResolution {
-  if (settings.system.settings.ui?.theme !== undefined) {
+  if (isThemePinnedBySystem(settings)) {
     return { kind: 'pinned-by-system' };
   }
 

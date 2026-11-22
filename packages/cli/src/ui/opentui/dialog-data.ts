@@ -728,8 +728,19 @@ export function applyThemeSelection(
       }),
     };
   }
-  const { effective, applied } = applyThemeSetting(settings, scope, themeName);
+  const { effective, applied, pinnedBySystem } = applyThemeSetting(
+    settings,
+    scope,
+    themeName,
+  );
   applyOpenTuiTheme(getActiveOpenTuiTheme());
+  if (pinnedBySystem) {
+    return {
+      error: t(
+        'The theme is set in system settings, so /theme cannot change it.',
+      ),
+    };
+  }
   if (!applied || effective !== themeName) {
     return {
       error: t('Theme "{{themeName}}" could not be applied.', { themeName }),

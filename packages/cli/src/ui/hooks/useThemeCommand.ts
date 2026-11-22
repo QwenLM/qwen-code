@@ -114,11 +114,20 @@ export const useThemeCommand = (
           keepOpen = true;
           return;
         }
-        const { effective, applied } = applyThemeSetting(
+        const { effective, applied, pinnedBySystem } = applyThemeSetting(
           loadedSettings,
           scope,
           themeName,
         );
+        if (pinnedBySystem) {
+          setThemeError(
+            t(
+              'The theme is set in system settings, so /theme cannot change it.',
+            ),
+          );
+          keepOpen = true;
+          return;
+        }
         // Not applied, or saved but overridden by another settings scope.
         if (!applied || effective !== themeName) {
           setThemeError(

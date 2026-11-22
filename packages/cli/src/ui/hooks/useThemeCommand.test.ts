@@ -103,6 +103,7 @@ describe('useThemeCommand', () => {
     const user = { settings: { ui: {} } };
     const settings = {
       merged: { ui: {} },
+      system: { settings: {} },
       user,
       workspace: { settings: { ui: {} } },
       forScope: () => user,
@@ -148,9 +149,13 @@ describe('useThemeCommand', () => {
       };
     }
 
-    function makeSettings(user: Settings = {}, workspace: Settings = {}) {
+    function makeSettings(
+      user: Settings = {},
+      workspace: Settings = {},
+      system: Settings = {},
+    ) {
       return new LoadedSettings(
-        file('system'),
+        file('system', system),
         file('system-defaults'),
         file('user', user),
         file('workspace', workspace),
@@ -179,6 +184,19 @@ describe('useThemeCommand', () => {
       expect(result.current.isThemeDialogOpen).toBe(true);
       expect(setThemeError).toHaveBeenLastCalledWith(
         'Theme "Qwen Light" could not be applied.',
+      );
+    });
+
+    it('refuses a pick without saving when system settings pin the theme', () => {
+      const settings = makeSettings({}, {}, { ui: { theme: 'Qwen Light' } });
+      const { result, setThemeError } = openPicker(settings);
+
+      act(() => result.current.handleThemeSelect('Dracula', SettingScope.User));
+
+      expect(settings.user.settings.ui?.theme).toBeUndefined();
+      expect(result.current.isThemeDialogOpen).toBe(true);
+      expect(setThemeError).toHaveBeenLastCalledWith(
+        'The theme is set in system settings, so /theme cannot change it.',
       );
     });
 
