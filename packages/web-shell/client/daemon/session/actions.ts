@@ -4150,6 +4150,9 @@ export function createDaemonSessionActions({
                 'Branch session failed',
                 switchError,
                 'branch_session',
+                isSystemOverloadedError(switchError)
+                  ? { code: 'system_overloaded' }
+                  : undefined,
               );
             },
           );
@@ -4180,6 +4183,9 @@ export function createDaemonSessionActions({
           'Branch session failed',
           error,
           'branch_session',
+          isSystemOverloadedError(error)
+            ? { code: 'system_overloaded' }
+            : undefined,
         );
       } finally {
         branchInFlight = false;
@@ -4252,6 +4258,9 @@ export function createDaemonSessionActions({
           'Fork session failed',
           error,
           'fork_session',
+          isSystemOverloadedError(error)
+            ? { code: 'system_overloaded' }
+            : undefined,
         );
       }
     },

@@ -18408,6 +18408,79 @@ describe('App session callbacks', () => {
     ]);
   });
 
+  it.each([
+    [
+      'worktree is unsupported',
+      () =>
+        Promise.resolve({
+          v: 2,
+          workspaceCwd: '/tmp/project',
+          branch: 'main',
+          worktreeSupported: false,
+        }),
+    ],
+    ['worktree preflight fails', () => Promise.reject(new Error('offline'))],
+  ])(
+    'returns and awaits the fallback branch request when %s',
+    async (_scenario, preflight) => {
+      Object.assign(mockWorkspace.capabilities, {
+        features: ['session_branch_worktree'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/tmp/project',
+            primary: true,
+            trusted: true,
+          },
+        ],
+      });
+      const workspaceGit = vi.fn(preflight);
+      mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+        workspaceGit,
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      }));
+      const branch = deferred<{
+        sessionId: string;
+        displayName: string;
+        switchStarted: boolean;
+      }>();
+      mockSessionActions.branchSession.mockReturnValue(branch.promise);
+      renderApp();
+      await flush();
+
+      const request = testState.latestMessageListProps?.onBranchSession?.(
+        'checkpoint-fallback',
+      );
+      expect(request).toBeInstanceOf(Promise);
+      if (!(request instanceof Promise)) {
+        throw new Error('Expected the pending branch request');
+      }
+      let settled = false;
+      void request.then(() => {
+        settled = true;
+      });
+      await act(async () => {
+        await vi.waitFor(() => {
+          expect(mockSessionActions.branchSession).toHaveBeenCalledWith({
+            atRecordId: 'checkpoint-fallback',
+          });
+        });
+        await Promise.resolve();
+      });
+      expect(settled).toBe(false);
+
+      branch.resolve({
+        sessionId: 'branch-fallback',
+        displayName: 'Fallback branch',
+        switchStarted: false,
+      });
+      await act(async () => {
+        await request;
+      });
+      expect(settled).toBe(true);
+    },
+  );
+
   it('does not report a concurrent branch request as a failure', async () => {
     const branch = deferred<{
       sessionId: string;
@@ -60478,6 +60551,72 @@ describe('overload pause guards in App', () => {
     expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
   });
 
+  it('refuses /branch before allocating a restored branch while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/branch feature-x');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses checkpoint activation while paused instead of guessing runtime reuse', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    await act(async () => {
+      await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('keeps /fork on the existing ACP runtime while paused', async () => {
+    armOverload();
+    mockConnection.sessionId = 'source-session';
+    mockSessionActions.forkSession.mockResolvedValue({
+      launched: true,
+      description: 'write tests',
+    });
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('/fork write tests');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(true);
+    expect(mockSessionActions.forkSession).toHaveBeenCalledWith('write tests');
+    expect(toasts.every(([tone]) => tone !== 'warning')).toBe(true);
+  });
+
   it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
     armOverload();
     mockConnection.sessionId = null;
@@ -60610,6 +60749,45 @@ describe('overload pause guards in App', () => {
       'System overloaded (cpu_load: load ratio 3.00)',
     );
   });
+
+  it.each(['branch_session', 'fork_session'] as const)(
+    'reactively pauses creation on a %s overload notice',
+    async (operation) => {
+      const message = `System overloaded (cpu_load: ${operation})`;
+      testState.notices = [
+        {
+          id: `overload-${operation}`,
+          severity: 'error',
+          category: 'user_action',
+          operation,
+          code: 'system_overloaded',
+          message,
+          createdAt: Date.now(),
+        },
+      ];
+      const toasts: Array<[string, string]> = [];
+      const { container } = renderApp({
+        onToast: (tone, msg) => toasts.push([tone, msg]),
+      });
+      await flush();
+      toasts.length = 0;
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="new-session"]',
+      );
+      // Native disabled styling is owned by WebShellSidebar and its
+      // dedicated UI tests; this lightweight sidebar mock drives App handlers.
+      expect(btn).not.toBeNull();
+      await act(async () => {
+        btn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toEqual([['warning', message]]);
+    },
+  );
 
   it('refuses @-mention from a session-less draft with one warning toast and no noSession error', async () => {
     armOverload();

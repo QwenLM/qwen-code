@@ -15122,7 +15122,9 @@ export function App({
       }
       if (
         notice.code === 'system_overloaded' &&
-        notice.operation === 'create_session'
+        (notice.operation === 'create_session' ||
+          notice.operation === 'branch_session' ||
+          notice.operation === 'fork_session')
       ) {
         setOverloadRefusal({
           message: notice.message,
@@ -17292,6 +17294,15 @@ export function App({
       }
       if (sessionWriteBlocked) return;
       if (!requireActiveSessionForLocalCommand()) return;
+      // A record-point branch also reaches startSessionSwitch and can allocate
+      // a restored child, so every branch path must honor load admission.
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       const sourceSessionId = connectionRef.current.sessionId;
       const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       const requestKey = JSON.stringify([
@@ -17418,7 +17429,8 @@ export function App({
       const sourceSessionId = connectionRef.current.sessionId;
       const sourceWorkspaceCwd = connectionRef.current.workspaceCwd;
       if (!branchWorktreeEligible || !sourceSessionId || !sourceWorkspaceCwd) {
-        return branchCurrentSession({ atRecordId });
+        const request = branchCurrentSession({ atRecordId });
+        return request === false ? undefined : request;
       }
       return (async () => {
         try {
@@ -17431,11 +17443,13 @@ export function App({
           if (connectionRef.current.sessionId !== sourceSessionId) return;
           setSelectedWorkspaceGitStatus(status);
           if (status.worktreeSupported !== true) {
-            return branchCurrentSession({ atRecordId });
+            await branchCurrentSession({ atRecordId });
+            return;
           }
         } catch {
           if (connectionRef.current.sessionId !== sourceSessionId) return;
-          return branchCurrentSession({ atRecordId });
+          await branchCurrentSession({ atRecordId });
+          return;
         }
         setBranchSessionDialog({ sourceSessionId, atRecordId });
         setBranchSessionDialogBusy(false);
@@ -20858,8 +20872,11 @@ export function App({
           if (cmd === 'branch') {
             if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
-            branchCurrentSession({ name: branchName || undefined });
-            return true;
+            return (
+              branchCurrentSession({
+                name: branchName || undefined,
+              }) !== false
+            );
           }
           if (cmd === 'fork') {
             if (commandBlocked) return blockCommand();

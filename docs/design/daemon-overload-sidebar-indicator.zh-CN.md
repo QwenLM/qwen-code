@@ -41,6 +41,13 @@
 - 新建任务 nav 行内、按钮上方渲染警示条：警告图标加 `sidebar.overloadPaused`（"系统过载 · 暂停新建"），`title`/`aria-label` 携带 `overloadDetail`。
 - `newSessionDisabled` 变为 `creatingSession || overloadPaused`，禁用按钮；`handleNewSession` 与 worktree 变体在暂停期间提前 return，使侧栏所有入口受同一谓词守卫。
 - App 层 create handler 在暂停期间以警告 toast 拒绝，覆盖侧栏之外的入口（panel、空页），裁决相同。
+- 所有可能激活新 child 的 branch 流程，包括 record-point branch，都经过 `branchCurrentSession` 的同一预派发暂停守卫。`atRecordId` 只是历史引用，不能证明 UI 留在当前 runtime：返回的 session 可能在发布之后再通过 `startSessionSwitch` 进行 fresh load。先拒绝也避免在暂停激活期间留下额外的已发布历史点。slash handler 用显式 `false` 保留输入指令；`onBranchSession` 回调则继续保持既有 `void | Promise<void>` 契约。
+
+#### `fork` 与新 ACP child 的边界
+
+- `/fork` 通过现有 ACP 的 `entry.connection` 及其队列启动后台 `Agent` tool fork，不经过 `reserveFreshSession`。fork 子代理共享父生命周期和由父会话派生的运行时配置，属于现有工作，而不是 `spawn`、`load`、`resume`、`branch` 所表示的新 ACP child 分类。新建任务暂停不禁止这条现有会话的后台路径。
+- 真正来自 daemon 的 `503 { code: "system_overloaded" }` 与预先拒绝分配并不相同。`forkSession` 和 `branchSession` 保留该 code，同时保留各自的 `fork_session` / `branch_session` operation，包括 branch 已发布后经 `startSessionSwitch` 延迟出现的失败。App 的 notice effect 同时识别它们与 `create_session`，因此意外返回的过载错误仍能触发被动暂停，而不只是普通命令失败 toast。不会把它们的真实 operation 误标为 `create_session`。
+- 延迟出现 branch-load overload 属于恢复状态，不应再次请求 branch。已发布 branch 保留其 sessionId，待准入恢复后由调用方显式 load。`actions` 测试在发布后直接拒绝真实的 `pendingSessionLoadRef`，检查延迟 notice 同时保留 `branch_session` 与 `system_overloaded`。
 - 两个来源都清除后警示条消失、按钮重新可用。
 
 轮询/过期/OR 逻辑放在 `useDaemonStatusReport` 旁的小 hook `useDaemonOverloadPause` 中，无需渲染 App 即可测试；App 持有 notice effect 喂入的拒绝状态并组合本地化 tooltip。
