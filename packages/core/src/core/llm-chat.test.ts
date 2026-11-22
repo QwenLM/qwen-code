@@ -4839,6 +4839,33 @@ describe('LlmChat', async () => {
       expect(coldSpy).not.toHaveBeenCalled();
     });
 
+    it('keeps the pending message in the compaction gate input (#15486)', async () => {
+      // Compression sizes the compacted count from a baseline without the
+      // pending message, but its gate must still read the full effective
+      // count. Here the baseline alone (165K) is below the 170K auto
+      // threshold and only the pending message (10K) takes the prompt over
+      // it, below the 177K hard tier: a gate that read the baseline would
+      // skip a compaction this send needs.
+      chat.setHistory(largeInheritedHistory());
+      chat.setLastPromptTokenCount(165_000);
+      const compressSpy = vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      );
+      const generateText = vi.fn().mockResolvedValue(snapshotReply());
+      withBaseLlmClient(generateText);
+      mockStream(textStream('done'));
+
+      const events = await sendCollect('y'.repeat(40_000), 'prompt-15486-gate');
+
+      const opts = compressSpy.mock.calls[0][1];
+      expect(opts.force).toBe(false);
+      expect(opts.originalTokenCount).toBe(165_000);
+      expect(opts.precomputedEffectiveTokens).toBe(175_000);
+      expectCompressedEvent(events);
+      expect(generateText).toHaveBeenCalledTimes(1);
+    });
+
     it('routes zero-baseline compression through the cold side query end-to-end (R5-3)', async () => {
       // R3.4 without a provider anchor: at lastPromptTokenCount 0 a non-zero
       // baseline is derived locally and the service skips cache sharing for
@@ -4953,6 +4980,80 @@ describe('LlmChat', async () => {
         expect(infoOf(compressedEvent(events)).newTokenCount).toBeLessThan(
           pendingTokens,
         );
+        expectStreamCalls(1);
+      },
+    );
+
+    it.each(['without', 'with'] as const)(
+      'leaves a pending tool result out of the cold compacted count %s a retained tail (#15486)',
+      async (tail) => {
+        // The cold formula has two branches. Without a retained tail the
+        // side query carries the pending tool result, and the service
+        // subtracts it from the query's input count; with one, the query
+        // stops before the retained operation and carries no pending result,
+        // so nothing is subtracted. Either way the compacted count is the
+        // baseline (25K, pending left out) minus the summarized history
+        // (10K) plus the summary (1.5K), and with a tail also the note that
+        // introduces the retained operation. 64K window: the pending result
+        // (about 8K) takes the 25K prompt over the 31K auto threshold.
+        mockGeneratorConfig({
+          authType: AuthType.USE_OPENAI,
+          enableCacheControl: false,
+          contextWindowSize: 64_000,
+        });
+        const pending = fnResponse(
+          'read_file',
+          { output: 'y'.repeat(32_000) },
+          'read-1',
+        );
+        const pendingTokens = estimateContentTokens([content('user', pending)]);
+        const call = content(
+          'model',
+          fnCall('read_file', { file_path: 'big.txt' }, 'read-1'),
+        );
+        const firstPrompt = userText('x'.repeat(40_000));
+        const latestPrompt = userText('read the file');
+        markApiHistoryPrompt(firstPrompt, 'prompt-15486-first');
+        markApiHistoryPrompt(latestPrompt, 'prompt-15486-latest');
+        chat.setHistory(
+          tail === 'with'
+            ? [firstPrompt, modelText('ack'), latestPrompt, call]
+            : [firstPrompt, call],
+        );
+        chat.setLastPromptTokenCount(25_000);
+        const summarizedHistoryTokens = 10_000;
+        const coldSpy = vi.spyOn(sideQueryModule, 'runSideQuery');
+        coldSpy.mockResolvedValue({
+          text: '<state_snapshot>compressed</state_snapshot>',
+          usage: {
+            promptTokenCount:
+              1_000 +
+              summarizedHistoryTokens +
+              (tail === 'with' ? 0 : pendingTokens),
+            candidatesTokenCount: 1_500,
+          },
+        } as never);
+        mockStream(textStream('done'));
+
+        const events = await sendCollect([pending], 'prompt-15486-tail');
+
+        expect(coldSpy).toHaveBeenCalledTimes(1);
+        const sideQueryInput = JSON.stringify(coldSpy.mock.calls[0][1]);
+        expect(sideQueryInput.includes('y'.repeat(100))).toBe(
+          tail === 'without',
+        );
+        expectCompressedEvent(events);
+        const info = infoOf(compressedEvent(events));
+        // Summary and acknowledgement, plus the note before a retained tail.
+        expect(info.summaryPrefixLength).toBe(tail === 'with' ? 3 : 2);
+        const tailNoteTokens =
+          tail === 'with'
+            ? estimateContentTokens(chat.getHistory().slice(2, 3))
+            : 0;
+        expect(info.newTokenCount).toBe(
+          25_000 - summarizedHistoryTokens + 1_500 + tailNoteTokens,
+        );
+        expect(chat.getLastPromptTokenCount()).toBe(info.newTokenCount);
         expectStreamCalls(1);
       },
     );
@@ -5883,7 +5984,11 @@ describe('LlmChat', async () => {
         mockCompressOnce(compressed(seed, 20_000));
         mockStream(textStream('sent'));
 
-        await sendDrain(message, 'prompt-15486-record', target);
+        const events = await sendCollect(
+          message,
+          'prompt-15486-record',
+          target,
+        );
 
         expect(recordChatCompression).toHaveBeenCalledTimes(1);
         const payload = recordChatCompression.mock.calls[0][0];
@@ -5892,6 +5997,14 @@ describe('LlmChat', async () => {
         );
         expect(payload.info.originalTokenCount).toBe(seed + pendingTokens);
         expect(payload.info.newTokenCount).toBe(20_000 + pendingTokens);
+        // Only the record adds the message back. The adopted count and the
+        // live COMPRESSED event keep the compacted count, or the next
+        // estimate counts the message twice again.
+        const compressedEvent = events.find(
+          (event) => event.type === StreamEventType.COMPRESSED,
+        ) as { info: ChatCompressionInfo } | undefined;
+        expect(compressedEvent?.info.newTokenCount).toBe(20_000);
+        expect(target.getLastPromptTokenCount()).toBe(20_000);
       },
     );
 
@@ -15124,6 +15237,46 @@ describe('LlmChat', async () => {
         MIN_CLAMPED_OUTPUT_TOKENS,
       );
     });
+
+    it.each([
+      // The check on #15486: the usage-based estimate is about 22.8K and the
+      // walk about 14.5K, so the padded walk (about 34.5K) is past the
+      // window and capping the floor by it gave max_tokens 1. The fresh
+      // usage covers the walk and leaves about 10K, so the floor holds.
+      ['leaves room', 18_000, 4_766, MIN_CLAMPED_OUTPUT_TOKENS],
+      // Usage that fills the window still gets 1: the floor follows the
+      // count, not the smaller unpadded walk.
+      ['fills the window', 29_000, 3_766, 1],
+    ] as const)(
+      'caps a recovery floor on a 32K window by fresh usage that %s (#15486)',
+      async (_case, promptTokenCount, outputTokenCount, expected) => {
+        mockGeneratorConfig({
+          model: 'claude-sonnet-4-6',
+          contextWindowSize: 32_768,
+        });
+        mockCompress(noop(promptTokenCount));
+        serveStreams(
+          streamOf(
+            textChunk('p'.repeat(18_000), 'MAX_TOKENS', {
+              promptTokenCount,
+              totalTokenCount: promptTokenCount + outputTokenCount,
+            }),
+          ),
+          textStream(' …and done.'),
+        );
+
+        chat.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+        chat.setLastPromptTokenCount(promptTokenCount);
+        await drain(
+          await sendOn('claude-sonnet-4-6', 'hi', 'prompt-recovery-32k'),
+        );
+
+        expectStreamCalls(2);
+        // The first reply used its whole grant and was cut there.
+        expect(requestAt(0).config?.maxOutputTokens).toBe(outputTokenCount);
+        expect(requestAt(1).config?.maxOutputTokens).toBe(expected);
+      },
+    );
 
     it('keeps capping a recovery floor by the padded walk when no count covers the walk (#15486)', async () => {
       // No provider count: the recovery estimate is the history walk plus the

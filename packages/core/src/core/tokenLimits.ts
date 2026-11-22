@@ -41,7 +41,8 @@ export const OUTPUT_TOKEN_CEILING: TokenCount = ESCALATED_MAX_TOKENS;
  * explicit user ceiling below this floor is still respected (the floor
  * bounds the room, not the ceiling), and a window too small to hold the
  * floor wins the same way: `clampOutputTokensToWindow` caps it by
- * `window − prompt`. Must stay below ~5K so that
+ * `window − prompt`, where a count-based estimate's prompt is taken without
+ * its 20K overhead pad (#15486). Must stay below ~5K so that
  * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits
  * inside the headroom compaction leaves free (15% of a 100K window); see the
  * window-clamp design doc. That derivation is large-window-only — below
@@ -73,6 +74,17 @@ export function outputClampMargin(contextWindowSize: number): TokenCount {
  * `max_tokens`, so the result bottoms out at 1 and compaction/hard-rescue
  * owns the recovery — same shape as `computeCompactionOutputBudget`.
  *
+ * With `floorPromptTokens` below `promptTokens` the invariant holds against
+ * `floorPromptTokens` instead: the floor may exceed the room `promptTokens`
+ * leaves, by up to their difference. #15486 relaxes it this way on purpose
+ * for count-based estimates, whose 20K overhead pad stands for overhead the
+ * count already carries. If such a count still misses overhead, a real
+ * prompt above `window − MIN_CLAMPED_OUTPUT_TOKENS` gets a context-overflow
+ * 400 instead of a max_tokens 1 reply that ends the turn. On a first send
+ * reactive overflow recovery handles it; a recovery send after a truncated
+ * reply ends the reply with the text written so far. A fresh history walk
+ * (count 0) passes no `floorPromptTokens` and keeps the strict invariant.
+ *
  * @param outputCeiling - Upper bound on the request: the user's explicit
  *   max_tokens when set, else `min(tokenLimit(model,'output'),
  *   OUTPUT_TOKEN_CEILING)`.
@@ -100,9 +112,12 @@ export function clampOutputTokensToWindow(
   // window 8192 / prompt 5000 the 10K margin floor drives room to −6808 and
   // the request goes out at 4000, i.e. 9000 > 8192 (#13252). Still ≥ 1 so
   // `max_tokens` stays provider-valid when the prompt already fills the
-  // window. A padded estimate must not set this cap: on a window smaller
-  // than the pad it is negative for any prompt, and the request goes out
-  // with max_tokens 1 although the prompt fits.
+  // window. The caller of a count-based estimate passes it unpadded as
+  // `floorPromptTokens` (#15486): the 20K pad stands for overhead that count
+  // already carries, and on a window smaller than the pad a padded cap is
+  // negative for any prompt, so the request went out with max_tokens 1
+  // although the prompt fit. A fresh history walk really misses that
+  // overhead, so its padded estimate still sets the cap.
   const floor = Math.max(
     1,
     Math.min(MIN_CLAMPED_OUTPUT_TOKENS, contextWindowSize - floorPromptTokens),

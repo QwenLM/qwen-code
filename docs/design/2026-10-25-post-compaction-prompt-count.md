@@ -56,9 +56,20 @@ Fallbacks:
 - A caller that passes only the effective count gets the pending message's estimate subtracted from it.
 - Without a precomputed count, the local estimate walks the history without the pending message.
 
+Only the original count changes. The compression gate still reads the effective count, pending content included (`precomputedEffectiveTokens`), and so does the size check of the cache-sharing request. A send whose baseline is below the auto threshold, but whose pending message takes it over, still compacts.
+
+The cold path derives the compacted count from the side query's input count, and since #17141 that formula has two branches:
+
+- **No retained tail.** The side query carries the pending tool result, and the service subtracts that result from the input count.
+- **Retained tail.** The side query stops before the retained operation and carries no pending result, so nothing is subtracted.
+
+In both branches the compacted count is the original count, minus the summarized history, plus the summary (and, with a tail, the note that introduces it). A baseline without the pending message therefore keeps the message out of the compacted count on both branches.
+
 ### Compression records
 
-Records still store the pending message in their snapshot, and resume seeds its count from the record when no later response reported usage. So a record adds the pending message's estimate back to both of its counts. The persisted values therefore match what is stored today. Only the live counts change.
+Records still store the pending message in their snapshot, and resume seeds its count from the record when no later response reported usage. So a record adds the pending message's estimate back to both of its counts, at both places that write one: the automatic compaction and the deferred hard-tier record. The persisted values therefore match what is stored today. Only the live counts change.
+
+The add-back builds a new record payload and leaves the compression result alone. The count the chat adopts after compaction and the `COMPRESSED` event both keep the compacted count without the pending message. Adding the message into the result instead would bring the double count back, because the chat adopts the result's count after it writes the record.
 
 ### Overhead pad and output floor
 
@@ -70,25 +81,39 @@ floor     = max(1, min(4,000, window − floorPrompt))
 maxTokens = min(ceiling, max(floor, room))
 ```
 
-- **First send.** When the estimate is count-based, so that it starts from a provider count or a compacted count, the floor prompt is the unpadded estimate. A fresh history walk still uses the padded estimate.
-- **Recovery send.** The floor prompt is the count-based estimate when that estimate covers the history walk; otherwise it is the padded walk.
+- **First send.** Only an estimated count is padded. When that count is positive (a compacted count, or a resume seeded from an estimate), the floor prompt is the unpadded estimate. At count 0 the estimate is a fresh history walk, and the floor keeps the padded estimate. A provider count is not padded, so its floor does not change. The relaxation therefore applies only to `count > 0 && isEstimated`.
+- **Recovery send.** Every recovery send pads its history walk, whatever the count's provenance. The floor prompt is the count-based estimate, from a provider count or a compacted count, when it covers the walk. Otherwise, including at count 0, it is the padded walk.
+  - This covers the continuation after `MAX_TOKENS` on a small window that was reported on #15486. At 32,768 tokens, with a usage-based estimate of about 22.8K and a walk of about 14.5K, the padded walk is about 34.5K, and the continuation went out with `max_tokens: 1`. It now gets 4,000. A usage-based estimate that fills the window still gets 1.
 - **Room.** The room always comes from the padded estimate, so the pad still shrinks every grant above the floor.
+
+### Window invariant (#5950)
+
+The clamp was built so that `prompt + max_tokens ≤ window` holds on every main-turn request whose estimated prompt fits the window (#5950). #13252 then capped the 4,000-token floor by `window − prompt`, so that a small window keeps the invariant too.
+
+This change deliberately relaxes that invariant for count-based estimates. Their floor is capped by the window minus the unpadded estimate, so the padded estimate plus `max_tokens` can exceed the window by up to the pad. The invariant now holds against the unpadded count-based estimate rather than the padded one. Fresh walks at count 0 keep the padded cap, and on the first send a provider count was never padded.
+
+Without the relaxation, a small window is left with no output room after a compaction. On a 32,768-token window, the window minus the pad leaves 12,768 tokens, so any post-compaction estimate above that gets `max_tokens: 1`, even with the double count fixed.
+
+The window clamp has no design document of its own under `docs/design/`. This section records the change, and the comments on `MIN_CLAMPED_OUTPUT_TOKENS` and `clampOutputTokensToWindow` in `tokenLimits.ts` state the same scope.
 
 ## Decisions and rationale
 
-| Decision                                             | Rationale                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Fix the caller, not the compression service          | The service follows its documented contract. One caller passed a count that broke it. Manual `/compress`, reactive compaction, `/compress-fast` and the hosted compaction pass no pending message and stay as they are.                                                                                                                                                                 |
-| Pass the baseline instead of subtracting the message | The effective count can include a memory snapshot sent with this message. The same estimate without the pending content cancels exactly, whatever it holds.                                                                                                                                                                                                                             |
-| Records keep counting the pending message            | The record's snapshot stores the message, and resume seeds its count from the record. A record without it would start the resumed session one message short.                                                                                                                                                                                                                            |
-| Cap the floor, keep the pad                          | A fresh walk really misses about 18K tokens of overhead. A grant above the floor overflows by exactly the overhead the pad and the margin leave uncovered. A quarter-window pad plus the 10K margin covers the 18,359 tokens of the dry run only from about a 33K window up, so smaller fresh sessions would overflow. Capping the floor changes only grants that fall below the floor. |
-| Count-based estimates only                           | On a fresh walk the pad stands for real overhead. An unpadded cap there opens a band where today's grant of about 2K fits but 4K would not: window minus estimate between 20K and about 22.4K, with the 18,359-token overhead from the dry run.                                                                                                                                         |
-| A recovery send needs a covering count               | When the walk exceeds the count, the extra may be real growth that the count missed, for example a response without usage. The padded cap stays.                                                                                                                                                                                                                                        |
+| Decision                                             | Rationale                                                                                                                                                                                                                                                                                                                                                                                |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fix the caller, not the compression service          | The service follows its documented contract. One caller passed a count that broke it. Manual `/compress`, reactive compaction, `/compress-fast` and the hosted compaction pass no pending message and stay as they are.                                                                                                                                                                  |
+| Pass the baseline instead of subtracting the message | The effective count can include a memory snapshot sent with this message. The same estimate without the pending content cancels exactly, whatever it holds.                                                                                                                                                                                                                              |
+| Records keep counting the pending message            | The record's snapshot stores the message, and resume seeds its count from the record. A record without it would start the resumed session one message short.                                                                                                                                                                                                                             |
+| Cap the floor, keep the pad                          | A fresh walk really misses about 18K tokens of overhead. A grant above the floor overflows by exactly the overhead the pad and the margin leave uncovered. A quarter-window pad plus the 10K margin covers the 18,359 tokens of the dry run only from about a 33K window up, so smaller fresh sessions would overflow. Capping the floor changes only grants that fall below the floor.  |
+| Count-based estimates only                           | On a fresh walk the pad stands for real overhead. An unpadded cap there opens a band where today's grant of about 2K fits but 4K would not: window minus estimate between 20K and about 22.4K, with the 18,359-token overhead from the dry run.                                                                                                                                          |
+| A recovery send needs a covering count               | When the walk exceeds the count, the extra may be real growth that the count missed, for example a response without usage. The padded cap stays.                                                                                                                                                                                                                                         |
+| Relax the #5950 invariant for count-based estimates  | A count-based estimate already carries the overhead the pad stands for, and capping its floor by the padded estimate leaves a small window no room after a compaction. The cost is a possible 400 instead of a `max_tokens: 1` reply that ends the turn. On a first send reactive overflow recovery handles it; a recovery send ends the reply with the text written so far (see Risks). |
+| Keep the gate on the effective count                 | Only the count that sizes the compacted count changes. Compaction still triggers on the prompt this send will carry, so it triggers no later than before.                                                                                                                                                                                                                                |
 
 ## Risks
 
-- A count-based estimate can still miss overhead, for example a compacted count whose baseline was itself a fresh walk, or a resume seeded from an estimate. Inside a band at most 4K wide, the floor may then exceed the room that is really left. The provider rejects the request, and reactive overflow recovery handles it. Today the same case sends `max_tokens: 1`, and the turn ends.
+- The relaxed floor (see "Window invariant") can exceed the room that is really left when a count-based estimate misses overhead, for example a compacted count whose baseline was itself a fresh walk, or a resume seeded from an estimate. Only a real prompt above `window − 4,000` is affected, inside a band at most 4,000 tokens wide. The provider rejects the request as a context overflow, and the existing reactive overflow recovery compacts and retries. Before this change the same case sent `max_tokens: 1`, and the turn ended without output, so this failure is strictly better.
   - Measured on a 16K window: a resumed session re-adds about 3K tokens of startup context that the count seeded from the compression record does not include. The follow-up after `/compress` overflowed by 639, and recovery compacted and completed the turn. The same flow on a 20K window fits.
+  - A recovery send after a truncated reply relaxes the floor only when the count-based estimate covers the history walk, which rules out a count that missed more than the overhead it carries. A count that went stale by less, because a response in the loop reported no usage, still passes, and that send can exceed the window by at most `min(4,000, the content the count missed)`. The recovery loop does not run reactive overflow recovery: the rejected send is rolled back and the reply ends with the text written so far. Before this change that send got the padded floor, which is smaller and often 1 on a small window.
 - After an automatic compaction with a pending message, the "Context compressed (A -> B)" banner and the compression telemetry show both numbers without the pending message. The ACP session count also leaves it out until the next response reports usage.
 - Escalation after a truncated reply stays off when the floor lifts the grant, as it is today.
 - On a 16K window the request is partly unsatisfiable either way, because the real fixed overhead can approach the window.
@@ -105,12 +130,18 @@ maxTokens = min(ceiling, max(floor, room))
     - it leaves out the pending message and keeps the previous output;
     - it also leaves out a memory snapshot sent with the message;
     - it leaves out the pending message without a precomputed count.
-  - **End to end through the real compression service:** the C1 case, for a pending tool result and pending text, on both the cache-sharing and the cold accounting paths. The turn is sent, and the compacted count is smaller than the pending message.
-  - **Records:** the hard-tier and auto compression records count the pending message.
+  - **End to end through the real compression service:**
+    - the C1 case, for a pending tool result and pending text, on both the cache-sharing and the cold accounting paths. The turn is sent, and the compacted count is smaller than the pending message;
+    - both branches of the cold formula, with and without a retained tail. The compacted count is exactly the baseline minus the summarized history plus the summary (and the note before a retained tail), and the side query carries the pending result only without a tail;
+    - the gate: a 165K baseline is below the 170K auto threshold, and a 10K pending message takes the effective count to 175K. Compaction runs through the real gate, with the full count passed as `precomputedEffectiveTokens`.
+  - **Records:** the hard-tier and auto compression records count the pending message, while the adopted count and the `COMPRESSED` event keep the compacted count.
   - **First send:** a 16K window after a compaction gets 4,000 instead of 1, and a fresh session keeps the padded cap (1,999 on a 32K window).
-  - **Recovery:** a 16K window with a provider count gets 4,000, and without a covering count the padded cap stays.
+  - **Recovery:**
+    - a 16K window with a provider count gets 4,000;
+    - on a 32,768-token window, fresh usage that leaves room gets 4,000, and fresh usage that fills the window gets 1;
+    - without a covering count the padded cap stays.
 - Existing tests updated: two expected original counts now leave out the pending message, and one expected record count includes it.
-- An 11-mutant sweep is killed in full. It covers the baseline passed in, the baseline with pending content, the subtraction fallback, the walk fallback, the clamp's floor argument, the first send's count-based condition both ways, the recovery's covering-count condition both ways, and both record sites.
+- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail.
 - End-to-end runs against a mock provider and a real provider are reported on the PR.
 
 ## Acceptance criteria
