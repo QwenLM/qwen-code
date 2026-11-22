@@ -179,8 +179,7 @@ final class AgentMessageProjection {
             List<ItemRecord> items, long covered, long itemBytes) {
         List<String> turns = items.stream().map(ItemRecord::turnId).distinct().toList();
         List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId, covered));
-        turns.forEach(turn -> arguments.add(
-                ManagedSchemaKeys.identity(turn)));
+        arguments.addAll(turns);
         arguments.add(tenantId);
         arguments.add(sessionId);
         var sizes = jdbc.query("SELECT e.sequence_id, OCTET_LENGTH(e.data_json) AS byte_length FROM ma_public_event e"

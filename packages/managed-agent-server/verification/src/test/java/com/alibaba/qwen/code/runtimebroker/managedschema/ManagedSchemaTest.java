@@ -92,12 +92,12 @@ class ManagedSchemaTest {
             insert.executeUpdate();
             insert.setString(1, "replacement");
             assertThrows(SQLException.class, insert::executeUpdate);
-            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = X'6f6c64'");
+            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = 'old'");
             insert.executeUpdate();
             assertThrows(SQLException.class, () -> statement.executeUpdate(
-                    "UPDATE ma_journal_pack SET state = 'PUBLISHED' WHERE pack_id = X'7265706c6163656d656e74'"));
-            statement.executeUpdate("UPDATE ma_journal_pack SET is_put_closed = 1, state = 'PUBLISHED' WHERE pack_id = X'7265706c6163656d656e74'");
-            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = X'7265706c6163656d656e74'");
+                    "UPDATE ma_journal_pack SET state = 'PUBLISHED' WHERE pack_id = 'replacement'"));
+            statement.executeUpdate("UPDATE ma_journal_pack SET is_put_closed = 1, state = 'PUBLISHED' WHERE pack_id = 'replacement'");
+            statement.executeUpdate("UPDATE ma_journal_pack SET state = 'RETIRED' WHERE pack_id = 'replacement'");
             insert.setString(1, "next");
             insert.executeUpdate();
             try (var rows = statement.executeQuery("SELECT COUNT(*) FROM ma_journal_pack WHERE active_from_revision IS NULL")) {
@@ -713,7 +713,7 @@ class ManagedSchemaTest {
                             + " VALUES (?,?,?,?,0,0)")) {
             statement.setString(1, tenant);
             statement.setString(2, session);
-            statement.setBytes(3, ManagedSchemaKeys.identity("agent"));
+            statement.setString(3, "agent");
             statement.setString(4, kind);
             statement.executeUpdate();
         }

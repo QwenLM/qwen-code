@@ -97,7 +97,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement assign(String tenant, String session, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        identity(boot);
+        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (current.instanceId() != null) {
             return current;
@@ -138,7 +138,7 @@ public class JdbcHarnessPlacementStore
 
     private Placement takeover(String tenant, String session, Placement expected, String instance, String boot, OperationRecord operation) {
         identity(instance);
-        identity(boot);
+        com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(boot, "harnessOwnerBootId");
         Placement current = lockEligible(tenant, session, operation);
         if (!sameOwner(current, expected)) {
             throw blocked("harness_placement_changed");

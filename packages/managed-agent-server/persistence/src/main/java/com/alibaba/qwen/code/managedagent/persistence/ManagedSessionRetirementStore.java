@@ -63,7 +63,9 @@ final class ManagedSessionRetirementStore {
                 + " ORDER BY query_id LIMIT ? FOR UPDATE", tenant, session, limit);
         for (var row : queries) {
             if (row.get("read_lease_id") != null) {
-                jdbc.update("DELETE FROM ma_read_lease WHERE lease_id=?", row.get("read_lease_id"));
+                // read_lease_id stays VARBINARY; the lease_id it names is now
+                // VARCHAR, so bind the decoded text rather than raw bytes.
+                jdbc.update("DELETE FROM ma_read_lease WHERE lease_id=?", text(row.get("read_lease_id")));
             }
             jdbc.update("DELETE FROM ma_side_query WHERE tenant_id=? AND session_id=? AND query_id=?", tenant, session,
                     row.get("query_id"));
@@ -366,5 +368,10 @@ final class ManagedSessionRetirementStore {
                 session,
                 kind,
                 ManagedSchemaKeys.identity(owner));
+    }
+
+    private static String text(Object value) {
+        return value instanceof byte[] bytes
+                ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8) : (String) value;
     }
 }

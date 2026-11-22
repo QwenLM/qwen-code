@@ -42,9 +42,16 @@ public class CancelEvidence implements AcceptanceEvidence {
         if (!kind().equals(parked.kind())) {
             return Optional.empty();
         }
+        boolean h2 = Boolean.TRUE.equals(jdbc.execute(
+                (org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection ->
+                        "H2".equals(connection.getMetaData().getDatabaseProductName())));
+        // The Turn id is VARCHAR while the operation target it mirrors stays
+        // VARBINARY; H2 refuses that comparison without the byte coercion.
         List<Target> targets = jdbc.query("SELECT t.turn_id, t.prompt_id, o.target_id"
                         + " FROM ma_operation o LEFT JOIN ma_turn t ON t.tenant_id = o.tenant_id"
-                        + " AND t.session_id = o.session_id AND t.turn_id = o.target_id"
+                        + " AND t.session_id = o.session_id AND "
+                        + com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate.binaryIdentity("t.turn_id", h2)
+                        + " = o.target_id"
                         + " WHERE o.scope_kind = 'SESSION' AND o.scope_id = ? AND o.tenant_id = ? AND o.session_id = ?"
                         + " AND o.operation_id = ? AND o.operation_kind = 'CANCEL'"
                         + " AND o.target_kind = 'TURN' AND o.state = 'RECOVERY_BLOCKED'"

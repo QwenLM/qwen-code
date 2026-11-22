@@ -165,6 +165,12 @@ final class AgentSessionPolicies {
     // never resolves a definition again.
     AgentPin resolveAgentPin(String tenantId, String agentId,
             String requested, boolean workspaceBound) {
+        // The caller names the agent; the VARCHAR(64) column admits only a
+        // bounded, well-formed identity without trailing spaces, so a PAD SPACE
+        // fold can never resolve a stored definition under a different id.
+        if (agentId != null) {
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(agentId, "agentId");
+        }
         if ("qwen-code".equals(agentId)) {
             if (requested != null && !requested.equals(agentRevision)) {
                 throw new ManagedAgentException(400,

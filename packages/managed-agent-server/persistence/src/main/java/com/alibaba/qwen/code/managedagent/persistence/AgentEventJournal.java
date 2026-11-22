@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -95,10 +94,8 @@ final class AgentEventJournal {
                 pairs.append(",");
             }
             pairs.append(" (?, ?)");
-            // session_id is VARCHAR; turn_id remains binary. H2 row comparison
-            // requires each parameter to match its column type.
             arguments.add(turn.sessionId());
-            arguments.add(ManagedSchemaKeys.identity(turn.turnId()));
+            arguments.add(turn.turnId());
         }
         arguments.add(tenantId);
         // One row per session: the latest environment event of its latest

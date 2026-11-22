@@ -97,7 +97,15 @@ public class ManagedMemoryStore implements MemoryRepository {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             throw new IllegalStateException("Memory binding requires the Session creation transaction.");
         }
-        if (!MemoryModels.text(store, 512) || jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_store"
+        // The client names the Store; the VARCHAR(64) column admits only a
+        // bounded, well-formed identity without trailing spaces, never a
+        // PAD SPACE fold of a stored id.
+        try {
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireShortId(store, "memoryStoreId");
+        } catch (IllegalArgumentException invalid) {
+            throw unavailable();
+        }
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_memory_store"
                 + " WHERE tenant_id=? AND memory_store_id=? AND owner_actor_key=?",
                 Integer.class, tenant, store, owner(tenant, actor)) != 1) {
             throw unavailable();

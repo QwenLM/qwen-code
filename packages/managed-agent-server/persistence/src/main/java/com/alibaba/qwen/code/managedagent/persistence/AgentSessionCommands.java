@@ -643,7 +643,7 @@ final class AgentSessionCommands {
             + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
             + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1')"
             + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
-            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+            + " (agent_id = 'qwen-code' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
 
     void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
@@ -663,11 +663,11 @@ final class AgentSessionCommands {
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),
-                payloadDigest, now, now, "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), "qwen-code".getBytes(StandardCharsets.UTF_8),
-                "qwen-code".getBytes(StandardCharsets.UTF_8), tenantId, sessionId);
+                payloadDigest, now, now, "qwen-code",
+                "qwen-code", "qwen-code",
+                "qwen-code", "qwen-code",
+                "qwen-code", "qwen-code",
+                "qwen-code", tenantId, sessionId);
     }
 
     void insertCommand(String tenantId, String operation,

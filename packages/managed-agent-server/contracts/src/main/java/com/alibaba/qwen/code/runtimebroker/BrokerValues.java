@@ -101,6 +101,22 @@ public final class BrokerValues {
     }
 
     /**
+     * A short identity stored in a VARCHAR(64) column (agent, schedule,
+     * message, pack, lease, query, memory-store, receipt, prompt, turn,
+     * event, boot and epoch ids). PAD SPACE collations fold trailing spaces,
+     * so two distinct ids would compare equal; the boundary refuses them
+     * rather than relying on the column to preserve exactness.
+     */
+    public static String requireShortId(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 64 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-64 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
      * An id the worker admits on its provider envelope, where it becomes a
      * file name: ASCII letters, digits, {@code .}, {@code _} and {@code -},
      * never {@code .} and never containing {@code ..}. The Broker releases

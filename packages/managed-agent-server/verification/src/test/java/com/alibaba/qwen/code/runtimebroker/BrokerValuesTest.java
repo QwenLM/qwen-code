@@ -81,6 +81,20 @@ class BrokerValuesTest {
     }
 
     @Test
+    void shortIdsUseThe64CharacterNoTrailingSpaceBudget() {
+        String shortId = "s".repeat(64);
+        assertEquals(shortId, BrokerValues.requireShortId(shortId, "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId("s".repeat(65), "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId("short ", "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId("sh\ud800ort", "shortId"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireShortId(null, "shortId"));
+    }
+
+    @Test
     void tenantIdsUseTheShared36CharacterBudget() {
         String tenant = "t".repeat(36);
         assertTrue(BrokerValues.isTenantId(tenant));
