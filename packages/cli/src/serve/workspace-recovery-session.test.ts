@@ -1949,7 +1949,6 @@ describe('verifyRecoverySession', () => {
   it.each([
     { hookCatalog: {} },
     { agentDefinition: {} },
-    { sessionSkillsRef: {} },
     { initialSelection: {} },
     { lineage: {} },
     { childWorkspaces: true },
@@ -1963,6 +1962,39 @@ describe('verifyRecoverySession', () => {
       'unsupported Hosted profile',
     );
   });
+
+  it('admits a well-formed Session Skills ref on an external definition', async () => {
+    const bytes = Buffer.from(
+      JSON.stringify([{ name: 'added', description: 'Added', body: 'BODY' }]),
+    );
+    const sessionSkillsRef: ManagedSessionDurableRef = {
+      resourceId: 'session-skills',
+      kind: 'managed-agent-skills',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const f = fixture({
+      toolProfile: 'hosted-workspace-external-files/1',
+      sessionSkillsRef,
+    });
+    f.resources.set(sessionSkillsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.complete.has(sessionSkillsRef.resourceId)).toBe(true);
+  });
+
+  it.each([{}, { resourceId: 'session-skills', kind: 'managed-agent-skills' }])(
+    'refuses a malformed Session Skills ref on an external definition: %j',
+    async (sessionSkillsRef) => {
+      const f = fixture({
+        toolProfile: 'hosted-workspace-external-files/1',
+        sessionSkillsRef,
+      });
+      await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow();
+    },
+  );
 
   it('does not admit external files into migration', async () => {
     const f = fixture({ toolProfile: 'hosted-workspace-external-files/1' });
