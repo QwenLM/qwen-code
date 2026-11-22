@@ -1009,8 +1009,19 @@ describe('local container recipe pins', () => {
         /(?:^|[\s;|&(`])["']?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:node|(?:\/[A-Za-z0-9_.-]+)*\/node)["']?(?=\s+(?:-|["']?\/|<|["']?\S+\.[cm]?js(?:\s|$)))/.test(
           foldContinuations(text),
         );
+      const dynamicNodeModule = (text) =>
+        /(?:^|[\s;|&(`])node\s+["']?\$[A-Za-z_{]/.test(foldContinuations(text));
       const executableNode = (text) =>
-        helperToken(text) || dynamicImport(text) || interpreterCommand(text);
+        helperToken(text) ||
+        dynamicImport(text) ||
+        interpreterCommand(text) ||
+        dynamicNodeModule(text);
+      const evaluationOrModuleArguments = (text) =>
+        /(?:^|[\s;|&(`])(?:-e|--eval)(?=\s|$)|(?:^|[\s;|&(`])["']?(?:\/\S+|\S+\.[cm]?js)(?=\s|$)/.test(
+          foldContinuations(text),
+        );
+      const entryPointCandidate = (text) =>
+        executableNode(text) || evaluationOrModuleArguments(text);
       const fencedRanges = [];
       const fence =
         /^([ \t]*)```(bash|sh|shell|text)[^\n]*\n([\s\S]*?)^\1```[^\n]*$/gm;
@@ -1028,9 +1039,9 @@ describe('local container recipe pins', () => {
             body,
           );
         const relevant = (text) =>
-          executableNode(text) ||
+          entryPointCandidate(text) ||
           /NODE_OPTIONS|alias\s+node|function\s+node|node\s*\(\s*\)/.test(text);
-        if (executableText && relevant(body)) {
+        if (executableText) {
           if (/bash\s+-[a-z]*c|<<-?\s*['"]?[A-Za-z_]/.test(body)) {
             fragments.push({ source: body, quotedGate: false });
           } else {
@@ -1110,7 +1121,7 @@ describe('local container recipe pins', () => {
             index >= match.index && index < match.index + match[0].length,
         );
       for (const match of spans) {
-        if (inFences(match.index) || !executableNode(match[2])) {
+        if (inFences(match.index) || !entryPointCandidate(match[2])) {
           continue;
         }
         if (citation(match)) continue;
@@ -1126,30 +1137,50 @@ describe('local container recipe pins', () => {
       }
       let lineStart = 0;
       const rawLines = document.split('\n');
-      for (const [lineIndex, line] of rawLines.entries()) {
+      for (let lineIndex = 0; lineIndex < rawLines.length; lineIndex += 1) {
+        const firstLine = rawLines[lineIndex];
         const inFence = inFences(lineStart);
-        const trimmed = line.trim();
+        const inSpan = inCodeSpan(lineStart);
+        let continuationEnd = lineIndex;
+        while (
+          continuationEnd + 1 < rawLines.length &&
+          /\\[ \t]*\r?$/.test(rawLines[continuationEnd])
+        ) {
+          continuationEnd += 1;
+        }
+        const continued = continuationEnd > lineIndex;
+        const source = rawLines
+          .slice(lineIndex, continuationEnd + 1)
+          .join('\n');
+        const trimmed = firstLine.trim();
         const plainCitation =
           /^[('"]*(?:(?:<trusted-clone>|<clone>)\/scripts\/|\/trusted-scripts\/|scripts\/)?verify-pr-[a-z-]+\.mjs[\s'")\],.:]*$/.test(
             trimmed,
           );
         const followsNode =
-          lineIndex > 0 && /^node\s/.test(rawLines[lineIndex - 1].trim());
-        const continuedNode =
+          !continued &&
           lineIndex > 0 &&
-          /\\[ \t]*\r?$/.test(rawLines[lineIndex - 1]) &&
-          executableNode(`${rawLines[lineIndex - 1]}\n${line}`);
+          /^node\s/.test(rawLines[lineIndex - 1].trim());
+        const executable =
+          !trimmed.startsWith('`') &&
+          (/^(?:node\s|cd\s|touch\s|sudo\s|env\s|[A-Za-z_][A-Za-z0-9_]*=\S+(?:\s+|;)|ba?sh\s|["']?\/\S+\s|scripts\/\S*(?:\s|$)|verify-pr-\S*(?:\s|$))/.test(
+            trimmed,
+          ) ||
+            /^(?=[A-Za-z_$/'"\\])\S+\s+(?:(?:-e|--eval)(?=\s|$)|["']?(?:\/|\S+\.[cm]?js(?=\s|$)))/.test(
+              trimmed,
+            ));
         if (
           !inFence &&
-          !inCodeSpan(lineStart) &&
-          (executableNode(line) || continuedNode) &&
+          !inSpan &&
+          entryPointCandidate(source) &&
           (!plainCitation || followsNode)
         ) {
-          const executable =
-            /^(?:node\s|cd\s|touch\s|sudo\s|env\s|[A-Za-z_][A-Za-z0-9_]*=\S+\s+node\s|ba?sh\s|["']?\/\S+\s|scripts\/\S*(?:\s|$)|verify-pr-\S*(?:\s|$))/.test(
-              trimmed,
-            );
-          if (continuedNode || (!executable && followsNode)) {
+          // A continuation chain is one command. Do not enqueue its incomplete
+          // prefix, and do not reinterpret Markdown prose as Bash merely
+          // because a later sentence fragment contains a helper filename.
+          if (executable) {
+            fragments.push({ source, quotedGate: false });
+          } else if (followsNode) {
             let end = lineIndex + 1;
             while (end < rawLines.length && rawLines[end].trim() !== '') {
               end += 1;
@@ -1158,20 +1189,21 @@ describe('local container recipe pins', () => {
               source: rawLines.slice(lineIndex - 1, end).join('\n'),
               quotedGate: false,
             });
-          } else if (executable) {
-            fragments.push({ source: line, quotedGate: false });
           }
         }
         if (
           !inFence &&
-          !inCodeSpan(lineStart) &&
+          !inSpan &&
           /NODE_OPTIONS\s*=|alias\s+node|function\s+node|node\s*\(\s*\)/.test(
-            line,
+            source,
           )
         ) {
-          fragments.push({ source: line, quotedGate: false });
+          fragments.push({ source, quotedGate: false });
         }
-        lineStart += line.length + 1;
+        for (let index = lineIndex; index <= continuationEnd; index += 1) {
+          lineStart += rawLines[index].length + 1;
+        }
+        lineIndex = continuationEnd;
       }
 
       const calls = [];
@@ -1189,6 +1221,17 @@ describe('local container recipe pins', () => {
           return staticText(node.namedChild(0), source);
         }
         return null;
+      };
+      const staticCommandName = (node, source) => {
+        if (node.type !== 'command_name' || node.namedChildCount !== 1) {
+          return null;
+        }
+        const child = node.namedChild(0);
+        if (child.type === 'word') {
+          const raw = source.slice(child.startIndex, child.endIndex);
+          return raw.includes('\\') ? null : raw;
+        }
+        return staticText(child, source);
       };
       const argumentNodes = (command) => {
         const result = [];
@@ -1232,7 +1275,7 @@ describe('local container recipe pins', () => {
             }
             if (node.type !== 'command') return;
             const nameNode = node.childForFieldName('name');
-            const name = nameNode ? staticText(nameNode, source) : null;
+            const name = nameNode ? staticCommandName(nameNode, source) : null;
             const args = argumentNodes(node);
             if (name === 'alias') {
               if (
@@ -1243,6 +1286,25 @@ describe('local container recipe pins', () => {
                 valid = false;
               }
               return;
+            }
+            if (nameNode && name === null && args.length > 0) {
+              const firstArgument = args[0];
+              const rawArgument = source.slice(
+                firstArgument.startIndex,
+                firstArgument.endIndex,
+              );
+              const value = staticText(firstArgument, source);
+              if (
+                ['-e', '--eval'].includes(value) ||
+                /^["']?(?:\/|\$)/.test(rawArgument) ||
+                /\.[cm]?js["']?$/.test(rawArgument)
+              ) {
+                // A concatenated, escaped or expanded command name is not a
+                // statically validated interpreter just because its argument
+                // happens to be a quoted string.
+                valid = false;
+                return;
+              }
             }
             if (name && /^(?:node|(?:\/[A-Za-z0-9_.-]+)*\/node)$/.test(name)) {
               const trustedInterpreter = [
@@ -1392,7 +1454,7 @@ describe('local container recipe pins', () => {
             // above get a second AST pass; the others fail closed here.
             if (
               name &&
-              interpreterCommand(node.text) &&
+              (interpreterCommand(node.text) || dynamicNodeModule(node.text)) &&
               !['bash', 'sh', 'docker'].includes(name)
             ) {
               valid = false;
@@ -1770,6 +1832,23 @@ describe('local container recipe pins', () => {
         expect(await onlyDocumentedPrepareCalls(document), hostile).toBe(false);
       }
     }
+    const opaqueInterpreterHostiles = [
+      '\'no\'de -e "0 * 0"',
+      String.raw`nod\e -e "0 * 0"`,
+      'N=node; $N -e "0 * 0"',
+      'M=/tmp/example.mjs; node "$M"',
+    ];
+    for (const hostile of opaqueInterpreterHostiles) {
+      for (const [shape, document] of [
+        ['raw', `${skill}\n${hostile}`],
+        ['fenced', `${skill}\n\`\`\`bash\n${hostile}\n\`\`\``],
+      ]) {
+        expect(
+          await onlyDocumentedPrepareCalls(document),
+          `${shape} ${hostile}`,
+        ).toBe(false);
+      }
+    }
     const continuedEval = 'node \\\n -e "0 * 0"';
     for (const [interpreter, command] of [
       ['node', continuedEval],
@@ -1792,20 +1871,57 @@ describe('local container recipe pins', () => {
         }
       }
     }
-    expect(
-      await onlyDocumentedPrepareCalls(
-        skill.replace(
-          'node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1',
-          'node /trusted-scripts/verify-pr-credential-scan.mjs \\\n /work || exit 1',
+    for (const [newlineName, newline] of [
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+    ]) {
+      const deeplyContinued = 'node \\\n -e \\\n "0 * 0"'.replaceAll(
+        '\n',
+        newline,
+      );
+      for (const [shape, document] of [
+        ['raw', `${skill}\n${deeplyContinued}`],
+        ['fenced', `${skill}\n\`\`\`bash\n${deeplyContinued}\n\`\`\``],
+      ]) {
+        expect(
+          await onlyDocumentedPrepareCalls(document),
+          `three-line eval ${shape} ${newlineName}`,
+        ).toBe(false);
+      }
+    }
+    for (const continuation of [
+      'node /trusted-scripts/verify-pr-credential-scan.mjs \\\n /work || exit 1',
+      'node /trusted-scripts/verify-pr-credential-scan.mjs \\\n /work \\\n || exit 1',
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(
+          skill.replace(
+            'node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1',
+            continuation,
+          ),
         ),
-      ),
-      'a continued legitimate call preserves the invocation census',
-    ).toBe(true);
-    expect(
-      await onlyDocumentedPrepareCalls(
-        `${skill}\nThe prose word node does not execute anything; arbitrary-helper.js is only a filename.`,
-      ),
-    ).toBe(true);
+        'a continued legitimate call preserves the invocation census',
+      ).toBe(true);
+    }
+    for (const prose of [
+      'The prose word node does not execute anything; arbitrary-helper.js is only a filename.',
+      'node is the runtime cited by this sentence, not an invocation.',
+      'For details see verify-pr-check.mjs \\\nwhen discussing reports.',
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(`${skill}\n${prose}`),
+        prose,
+      ).toBe(true);
+    }
+    for (const document of [
+      `${skill}\ngrep -e needle ./notes.txt`,
+      `${skill}\n\`\`\`bash\ngrep -e needle ./notes.txt\ncat /tmp/notes.txt\n\`\`\``,
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(document),
+        'ordinary eval-flag and absolute-path arguments are not Node entry points',
+      ).toBe(true);
+    }
     expect(
       await onlyDocumentedPrepareCalls(
         `${skill}\n\`\`\`text\nA sentence containing node is not a command.\n\`\`\``,

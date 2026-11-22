@@ -223,13 +223,18 @@ author and `isCrossRepository`. Unlike the older optional context-digest
 warning, VM and host publication requires `--context-sha256` and a byte
 match. The existing outside-clone, non-symlink and single-link rules apply
 too. The PR-tree copy of the snapshot is never authoritative, and an artifact
-`context.json` cannot self-mint coordinates. When trusted repo/PR coordinates
-are known, a `pr<N>-verify-*` directory whose N differs is refused for both
-comment and local-trust approvals, even at the same head on a shared branch; a
-missing or cross-identifying artifact context cannot change that host identity.
-For this comparison the artifact ROOT must itself be a real directory, not a
-symlink or other non-directory; an alias named for the approved PR must not hide
-a different target. The operator must pass the resolved artifact directory path.
+`context.json` cannot self-mint coordinates. Every `vm` or `waived`
+declaration checked against an external context requires that context to carry
+a valid `owner/repo` slug and a positive `pr` or `number`; a missing or
+malformed repository or PR number is a hard refusal, and neither the artifact
+basename nor its `context.json` may fill the gap. Canonical prepare output
+always supplies both. With those trusted coordinates, a `pr<N>-verify-*`
+directory whose N differs is refused for both comment and local-trust
+approvals, even at the same head on a shared branch; a missing or
+cross-identifying artifact context cannot change that host identity. For this
+comparison the artifact ROOT must itself be a real directory, not a symlink or
+other non-directory; an alias named for the approved PR must not hide a
+different target. The operator must pass the resolved artifact directory path.
 Before any context or approval file is written, the time-stamped artifact directory must
 be a real directory, not a symbolic link or other file, whose fully canonical
 path is exactly the expected direct child of the real `tmp/` directory. An

@@ -2184,9 +2184,9 @@ describe('round-10 witnesses', () => {
     expect(result.errors.join('\n')).not.toMatch(/boundary\.json is missing/);
   });
 
-  // R10-2: the directory name no longer supplies the PR number; a snapshot
-  // without a number yields null coordinates even in a pr999-verify dir.
-  it('does not take the PR number from the artifact directory name', () => {
+  // R10-2: the directory name never supplies trusted identity. A host/VM
+  // approval without a trusted PR number is refused even in a pr999-verify dir.
+  it('requires the trusted PR number instead of taking it from the artifact directory name', () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-r10-'));
     tmpDirs.push(root);
     const dir = join(root, 'pr999-verify-x');
@@ -2229,14 +2229,108 @@ describe('round-10 witnesses', () => {
         env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
       },
     );
-    // No number in the snapshot → shape-only, with the downgrade disclosed;
-    // the directory name pr999 must NOT satisfy the comparison.
-    expect(res.status).toBe(0);
+    // The digest, approval body, head and directory shape are all valid. Only
+    // the trusted number is absent; pr999 must not fill that identity gap.
+    expect(res.status).toBe(1);
     expect(res.stdout).toMatch(
-      /approval target was not compared against this PR/,
+      /needs trusted repo and positive PR coordinates in --context/,
     );
     expect(res.stdout).not.toMatch(/approval permalink cites/);
+    expect(res.stdout).not.toMatch(/--context-sha256 matching/);
   });
+
+  it.each([{ source: 'comment' }, { source: 'local-trust' }])(
+    'fails closed when a $source approval has missing trusted coordinates, including aliases',
+    ({ source }) => {
+      const approval =
+        source === 'comment'
+          ? commentApproval({
+              approval:
+                'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-1234567890',
+            })
+          : localTrustApproval();
+      const setup = (directoryPr, coordinates) => {
+        const base = mkdtempSync(join(tmpdir(), 'verify-pr-missing-coords-'));
+        tmpDirs.push(base);
+        const clone = join(base, 'clone');
+        const dir = join(
+          clone,
+          'tmp',
+          `pr${directoryPr}-verify-20261123-000000`,
+        );
+        mkdirSync(join(dir, 'evidence'), { recursive: true });
+        writeFileSync(
+          join(dir, 'report.md'),
+          `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+        );
+        writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+        writeFileSync(
+          join(dir, 'assertions.json'),
+          JSON.stringify({ pass: 4, fail: 0, total: 4 }),
+        );
+        writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+        writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
+        const trustedText = JSON.stringify({
+          ...coordinates,
+          headRefOid: HEAD,
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+          executionApproval: approval,
+        });
+        const host = join(base, 'host.json');
+        writeFileSync(host, trustedText);
+        return { base, clone, dir, host, trustedText };
+      };
+      const check = ({ dir, clone, host, trustedText }) =>
+        spawnSync(
+          process.execPath,
+          [
+            SCRIPT,
+            '--context',
+            host,
+            '--context-root',
+            clone,
+            '--context-sha256',
+            createHash('sha256').update(trustedText).digest('hex'),
+            dir,
+          ],
+          {
+            encoding: 'utf8',
+            env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+          },
+        );
+
+      for (const coordinates of [
+        { pr: 42 },
+        { repo: 'QwenLM/qwen-code' },
+        {},
+        { repo: 'not-a-slug', pr: 42 },
+        { repo: 'QwenLM/qwen-code', pr: 0 },
+      ]) {
+        const round = setup(43, coordinates);
+        const cross = check(round);
+        expect(cross.status, cross.stdout).toBe(1);
+        expect(cross.stdout).toMatch(
+          /needs trusted repo and positive PR coordinates in --context/,
+        );
+        expect(cross.stdout).not.toMatch(/--context-sha256 matching/);
+
+        const alias = join(round.clone, 'tmp', 'pr42-verify-20261123-000000');
+        symlinkSync('pr43-verify-20261123-000000', alias, 'dir');
+        for (const roundDir of [alias, `${alias}/`]) {
+          const replay = check({ ...round, dir: roundDir });
+          expect(replay.status, replay.stdout).toBe(1);
+          expect(replay.stdout).toMatch(
+            /needs trusted repo and positive PR coordinates in --context/,
+          );
+        }
+      }
+
+      const control = check(setup(42, { repo: 'QwenLM/qwen-code', pr: 42 }));
+      expect(control.status, control.stdout).toBe(0);
+      expect(control.stdout).toContain('ok: verdict=merge-ready');
+    },
+  );
 
   // R10-49 (false negative): a Methodology heading and Boundary disclosure
   // that live only inside a code fence are a copied template, not the round's

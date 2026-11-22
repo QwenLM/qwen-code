@@ -100,10 +100,12 @@ Checks a local round against the rules the CI publisher enforces:
     Both must deeply equal the host-held --context executionApproval, bind
     its bytes with --context-sha256, and match the trusted head; prepare has
     already registered comment approvals to an in-flight head and round.
-    When the snapshot carries repo and pr, the approval permalink must cite
-    that PR. This host-coordinate binding also requires a real artifact
-    directory, not a symlink or other non-directory; pass the resolved path.
-    A shape-only waiver or a PR-side record alone is refused.
+    Host/VM publication requires a valid owner/repo slug and positive pr or
+    number in that snapshot; the artifact name/context cannot fill either.
+    The approval permalink must cite that PR. This host-coordinate binding
+    also requires a real artifact directory, not a symlink or other
+    non-directory; pass the resolved path. A shape-only waiver or a PR-side
+    record alone is refused.
     The CI publish job's own ci-lane record is honored only under
     --publish-lane, the flag the publish job passes (an argv claim, not an
     authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
@@ -1617,6 +1619,18 @@ function main(argv) {
     evidenceUnreadable,
     unreadableKeys,
   });
+  let executionMode = null;
+  try {
+    const mode = JSON.parse(files.boundary ?? '')?.mode;
+    if (mode === 'vm' || mode === 'waived') executionMode = mode;
+  } catch {
+    // The artifact-shape check reports malformed declarations.
+  }
+  if (contextPath && executionMode && !coordinates) {
+    result.errors.push(
+      `boundary.json mode ${executionMode} needs trusted repo and positive PR coordinates in --context (a valid owner/repo slug and pr/number); neither the artifact basename nor artifact context.json can supply missing identity`,
+    );
+  }
   if (contextPath && coordinates) {
     let realArtifactDirectory = false;
     try {
