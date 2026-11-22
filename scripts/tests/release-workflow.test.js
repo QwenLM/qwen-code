@@ -829,7 +829,9 @@ describe('release workflow', () => {
               NPM_TAG: 'preview',
               PUBLISH_AUDIO_CAPTURE: optional,
               PUBLISH_EXTERNAL_CONTEXT_MEM0: optional,
-              ...(msteams === null ? {} : { PUBLISH_CHANNEL_MSTEAMS: msteams }),
+              // undefined drops the key at spawn; an omitted key would
+              // inherit the runner's own PUBLISH_CHANNEL_MSTEAMS.
+              PUBLISH_CHANNEL_MSTEAMS: msteams === null ? undefined : msteams,
               PUBLISH_FAILURE: failure,
               CLI_PUBLISHED: cliPublished,
               PUBLISH_LOG: publishLog,
