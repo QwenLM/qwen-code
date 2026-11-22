@@ -466,7 +466,7 @@ describe('variant-tagged model ids', () => {
 
   it('keeps the model name of a Hugging Face GGUF id with a quantization tag', () => {
     // `ollama run hf.co/<user>/<repo>-GGUF:<quant>` ids carry a bare
-    // quantization tag and a `-GGUF` repo suffix.
+    // quantization tag after the colon.
     const id = 'hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF';
     for (const tag of [
       'Q4_K_M',
@@ -477,21 +477,32 @@ describe('variant-tagged model ids', () => {
       'F16',
       'FP16',
       'F32',
+      'FP32',
+      'FP8',
+      'TQ1_0',
+      'I2_S',
+      'NF4',
+      'INT4',
+      'INT8',
+      'MXFP4_MOE',
     ]) {
-      expect(normalize(`${id}:${tag}`)).toBe('qwen3-coder-30b-a3b-instruct');
+      expect(normalize(`${id}:${tag}`)).toBe(
+        'qwen3-coder-30b-a3b-instruct-gguf',
+      );
     }
     expect(tokenLimit(`${id}:Q4_K_M`)).toBe(262_144);
     expect(tokenLimit(`${id}:Q4_K_M`, 'output')).toBe(32_768);
     // gpt-oss GGUF builds ship as MXFP4.
     expect(normalize('hf.co/ggml-org/gpt-oss-20b-GGUF:MXFP4')).toBe(
-      'gpt-oss-20b',
+      'gpt-oss-20b-gguf',
     );
     expect(tokenLimit('hf.co/ggml-org/gpt-oss-20b-GGUF:MXFP4')).toBe(131_072);
   });
 
-  it('drops the -GGUF repo suffix without a tag as well', () => {
-    expect(normalize('Qwen3-Coder-30B-A3B-Instruct-GGUF')).toBe(
-      'qwen3-coder-30b-a3b-instruct',
+  it('only strips a quantization tag at the end of the id', () => {
+    // A tag-like word that is not the final segment is part of the name.
+    expect(normalize('hf.co/user/model-GGUF:Q4_K_M-extra')).toBe(
+      'q4_k_m-extra',
     );
   });
 });

@@ -102,6 +102,13 @@ describe('defaultModalities', () => {
   });
 
   describe('OpenAI', () => {
+    casesFor('returns text-only for', [
+      [
+        'gpt-oss GGUF builds',
+        TEXT_ONLY,
+        'hf.co/ggml-org/gpt-oss-20b-GGUF:MXFP4',
+      ],
+    ]);
     casesFor('returns image for', [
       [
         'gpt-5.2',
