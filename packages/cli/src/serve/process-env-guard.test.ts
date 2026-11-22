@@ -60,14 +60,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
-    'packages/cli/src/serve/hosted-harness-profile.ts',
-    {
-      reason:
-        'Hosted profile validation refuses private CSI roots when the process-scoped pool instance identity is configured.',
-      accesses: { 'key:QWEN_HOSTED_HARNESS_INSTANCE_ID': 1 },
-    },
-  ],
-  [
     'packages/cli/src/serve/hosted-loop-session.ts',
     {
       reason:
@@ -443,7 +435,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap. ' +
+        'The Hosted Harness capability digest is a process-scoped deployment contract fixed at daemon bootstrap. ' +
         'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
         'contracts, read once beside the settings they override rather than per tick. ' +
         'QWEN_CODE_MANAGED_RUNTIME is the Managed Agent attribution marker: the serve entry reads the ' +
@@ -454,7 +446,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
-        'computed:HOSTED_CSI_SESSION_STORE_URL_ENV': 1,
         'computed:QWEN_CODE_MANAGED_RUNTIME_ENV': 4,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,

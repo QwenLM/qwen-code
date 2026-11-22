@@ -2062,7 +2062,8 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     const buildJava = run('Build Java components');
     assert.match(buildJava, /-Dmaven\.repo\.local=/);
     assert.ok(buildJava.includes('source "${seed_helper}"'));
-    assert.ok(buildJava.includes('unavailable at workflow revision'));
+    assert.doesNotMatch(buildJava, /\bcurl\b/);
+    assert.ok(!buildJava.includes('mktemp'));
     assert.doesNotMatch(buildJava, /seed_mount_guard\(\) \{/);
     const seedHelper = readFileSync(
       '.github/scripts/maven-cache-seed.sh',
