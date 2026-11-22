@@ -652,6 +652,108 @@ describe('AuthMessage model configuration', () => {
       { replaceExisting: true, contextWindowSize: 10000000, maxTokens: 1 },
     );
   });
+
+  it('focuses model input upon advancing from apiKey step (autoFocus)', async () => {
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom provider',
+          description: '',
+          protocol: 'openai',
+          steps: ['apiKey', 'models'],
+        },
+      ],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: '',
+          providerIds: ['custom'],
+        },
+      ],
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <I18nProvider language="en">
+          <AuthMessage
+            activateSessionSubscriptionModel={vi.fn()}
+            onMessage={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await clickButton('Custom');
+    fillInput('API Key', 'test-key');
+    await clickButton('Next');
+
+    const modelInput = container!.querySelector<HTMLInputElement>(
+      'input[aria-label="Model IDs"]',
+    );
+    expect(modelInput).not.toBeNull();
+    expect(document.activeElement).toBe(modelInput);
+  });
+
+  it('forwards modelSpecs with contextWindowSize to installAuthProvider', async () => {
+    actions.getAuthProviders.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/workspace',
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom provider',
+          description: '',
+          protocol: 'openai',
+          steps: ['models'],
+          models: [
+            {
+              id: 'model-ctx',
+              contextWindowSize: 65536,
+            },
+          ],
+        },
+      ],
+      groups: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          description: '',
+          providerIds: ['custom'],
+        },
+      ],
+    });
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <I18nProvider language="en">
+          <AuthMessage
+            activateSessionSubscriptionModel={vi.fn()}
+            onMessage={vi.fn()}
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      ),
+    );
+    await clickButton('Custom');
+    fillInput('Model IDs', 'model-ctx');
+    await clickButton('Next');
+
+    expect(actions.installAuthProvider).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerId: 'custom',
+        modelIds: ['model-ctx'],
+        modelSpecs: [{ id: 'model-ctx', contextWindowSize: 65536 }],
+      }),
+    );
+  });
 });
 
 describe('host model management', () => {
