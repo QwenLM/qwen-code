@@ -2309,8 +2309,9 @@ then through `URL` parsing so the wire only carries `host:port`. `NO_PROXY`
 is passed through redaction verbatim because it is a host list rather than
 a URL. The whitelist of enumerated secret env vars currently includes
 `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
-`DASHSCOPE_API_KEY`, `OPENROUTER_API_KEY`, and `QWEN_SERVER_TOKEN`. Other
-env vars are not enumerated, so accidentally-set secrets stay invisible.
+`DASHSCOPE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPINFRA_API_KEY`, and
+`QWEN_SERVER_TOKEN`. Other env vars are not enumerated, so accidentally-set
+secrets stay invisible.
 
 ### `GET /workspace/preflight`
 
