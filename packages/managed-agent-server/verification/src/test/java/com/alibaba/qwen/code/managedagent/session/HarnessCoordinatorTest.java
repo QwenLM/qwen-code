@@ -3748,6 +3748,40 @@ class HarnessCoordinatorTest {
         });
     }
 
+    @Test
+    void aCertifiedActionParkEndsTheDriveWithoutATransientRetry() {
+        AgentStateStore store = boundCancellingStore();
+        TurnRecord running = turn("tenant", "session", "turn", "prompt", "epoch", 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class))).thenReturn(Optional.of(running));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(running));
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot"))).thenReturn(true);
+        when(store.parkTurnForAction(eq("tenant"), eq("session"), eq("turn"), anyString()))
+                .thenReturn(true);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenReturn(new Attachment("boot"));
+        SourceStream stream = mock(SourceStream.class);
+        when(stream.eventEpoch()).thenReturn("epoch");
+        when(stream.next()).thenReturn(null);
+        when(harness.stream("tenant", "session", 1, "epoch")).thenReturn(stream);
+        HarnessCoordinator coordinator = coordinator(store, harness);
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+
+        verify(store).parkTurnForAction(eq("tenant"), eq("session"), eq("turn"), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+        verify(store, never()).failTurn(anyString(), anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(stream).close();
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"idle", "controls", "terminal", "transport-error"})
     void anInactiveRecoveryBlockedStreamParksWithoutSettlingOrReplaying(String mode) throws Exception {

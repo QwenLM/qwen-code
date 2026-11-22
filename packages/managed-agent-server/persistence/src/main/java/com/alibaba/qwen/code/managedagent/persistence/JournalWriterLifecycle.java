@@ -271,7 +271,7 @@ final class JournalWriterLifecycle {
         // pace, so a crash after accepting an immediate input is recovered as
         // today; it never lowers a delay a claim just set.
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_seal_background = 0, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_seal_background = 0, wake_seal_parked_prompt_id = NULL, wake_seal_parked_until = NULL, wake_seal_parked_approval_revision = NULL, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
                 generation,
                 request.writerId(),
                 leaseUntil.getTime(),
@@ -412,11 +412,26 @@ final class JournalWriterLifecycle {
                     "The wake stamp does not match the committed journal revision.");
         }
         boolean effectivePending = wake.pending() || stagedWake;
+        ManagedSessionStoreModels.ParkedTurn parked = wake.parkedTurn();
+        if (parked != null) {
+            if (effectivePending || wake.backgroundHeld()) {
+                throw JournalStoreRows.invalid(
+                        "A parked Turn cannot share a wake-pending or background seal.");
+            }
+            JournalStoreRows.validateStableId(parked.promptId(), "wake.parkedTurn.promptId");
+            JournalStoreRows.validateCounter(parked.wakeAt(), "wake.parkedTurn.wakeAt", 0);
+            if (parked.approvalRevision() != null) {
+                JournalStoreRows.validateCounter(parked.approvalRevision(),
+                        "wake.parkedTurn.approvalRevision", 0);
+            }
+        }
         if (stagedWake) {
             jdbc.update(
                     "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
                         + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
                         + " wake_seal_background = ?, is_wake_pending = TRUE,"
+                        + " wake_seal_parked_prompt_id = NULL, wake_seal_parked_until = NULL,"
+                        + " wake_seal_parked_approval_revision = NULL,"
                         + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
                         + " THEN ? ELSE wake_retry_at END"
                         + " WHERE tenant_id = ? AND harness_session_id = ?",
@@ -427,17 +442,26 @@ final class JournalWriterLifecycle {
                     tenantId,
                     sessionId);
         } else {
+            List<Object> parameters = new java.util.ArrayList<>();
+            parameters.add(now.getTime());
+            parameters.add(wake.backgroundHeld());
+            parameters.add(effectivePending);
+            parameters.add(parked == null ? null : parked.promptId());
+            parameters.add(parked == null ? null : parked.wakeAt());
+            parameters.add(parked == null ? null : parked.approvalRevision());
+            if (effectivePending) {
+                parameters.add(wake.dueAt());
+            }
+            parameters.add(tenantId);
+            parameters.add(sessionId);
             jdbc.update(
-                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
-                        + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
-                        + " wake_seal_background = ?, is_wake_pending = ?"
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?, wake_seal_revision = journal_revision,"
+                        + " wake_head_revision = journal_revision, wake_seal_background = ?, is_wake_pending = ?,"
+                        + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
+                        + " wake_seal_parked_approval_revision = ?"
                         + (effectivePending ? ", wake_retry_at = ?" : "")
                         + " WHERE tenant_id = ? AND harness_session_id = ?",
-                    effectivePending
-                            ? new Object[] {now.getTime(), wake.backgroundHeld(), true, wake.dueAt(),
-                                    tenantId, sessionId}
-                            : new Object[] {now.getTime(), wake.backgroundHeld(), false,
-                                    tenantId, sessionId});
+                    parameters.toArray());
         }
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
     }

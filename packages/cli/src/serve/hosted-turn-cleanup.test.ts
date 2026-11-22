@@ -23,6 +23,7 @@ import {
   backgroundSuspensionCertificate,
   hasBlockingHostedCleanupDebt,
   hasHostedCleanupDebt,
+  hasHostedCleanupDebtExcluding,
   oweHostedTurnCleanup,
   reconcileHostedTurnCleanup,
 } from './hosted-turn-cleanup.js';
@@ -586,4 +587,15 @@ it('does not certify a Session with no unsettled background run', async () => {
   expect(
     await backgroundSuspensionCertificate(f.session, new Set(['binding@7'])),
   ).toBe(false);
+});
+
+it('exempts only the parked prompt from cleanup eligibility', async () => {
+  const f = await fixture();
+  expect(await hasHostedCleanupDebtExcluding(f.session, f.promptId)).toBe(
+    false,
+  );
+  expect(await hasHostedCleanupDebtExcluding(f.session, 'another-prompt')).toBe(
+    true,
+  );
+  expect(await hasHostedCleanupDebt(f.session)).toBe(true);
 });

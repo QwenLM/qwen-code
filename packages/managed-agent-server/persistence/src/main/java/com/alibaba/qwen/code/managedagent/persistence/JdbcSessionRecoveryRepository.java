@@ -17,7 +17,7 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
         return jdbc.query("SELECT recovery_status, recovery_detail_code, state,"
                         + " activation_phase, activation_head_revision, journal_revision,"
                         + " is_wake_pending, wake_head_revision, wake_seal_revision,"
-                        + " wake_seal_background"
+                        + " wake_seal_background, wake_seal_parked_prompt_id"
                         + " FROM ma_session_head WHERE tenant_id = ? AND session_id = ?"
                         + " AND head_kind = 'MANAGED_SESSION'",
                 (row, index) -> new HeadRecovery(row.getString("recovery_status"),
@@ -29,7 +29,8 @@ public class JdbcSessionRecoveryRepository implements SessionRecoveryRepository 
                         row.getInt("is_wake_pending") != 0,
                         row.getObject("wake_head_revision", Long.class),
                         row.getObject("wake_seal_revision", Long.class),
-                        row.getInt("wake_seal_background") != 0), tenantId, sessionId);
+                        row.getInt("wake_seal_background") != 0,
+                        row.getString("wake_seal_parked_prompt_id")), tenantId, sessionId);
     }
 
     @Override

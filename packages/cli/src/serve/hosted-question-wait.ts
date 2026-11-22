@@ -143,6 +143,7 @@ export async function waitForHostedQuestion(options: {
   expiresAt: number;
   signal: AbortSignal;
   released?: () => void;
+  registerFreeze?: (freeze?: () => boolean) => void;
 }): Promise<void> {
   const { session, broker, waiters, requestId, expiresAt, signal } = options;
   const claim = broker.mountClaim();
@@ -150,6 +151,8 @@ export async function waitForHostedQuestion(options: {
     throw new Error('Original question mount claim is unavailable.');
   const stop = new AbortController();
   let failure: unknown;
+  let released = false;
+  let retryRunning = true;
   const pending = () =>
     !stop.signal.aborted &&
     !signal.aborted &&
@@ -164,8 +167,10 @@ export async function waitForHostedQuestion(options: {
     if (!pending()) return false;
     try {
       await broker.releaseMount(claim);
-      if (!stop.signal.aborted && broker.mountClaim() === claim)
+      if (!stop.signal.aborted && broker.mountClaim() === claim) {
+        released = true;
         options.released?.();
+      }
       return false;
     } catch (cause) {
       if (!pending() || broker.mountClaim() !== claim) return false;
@@ -181,6 +186,15 @@ export async function waitForHostedQuestion(options: {
     signal,
     () => !pending() || failure !== undefined,
   );
+  const park = (): boolean => {
+    if (retryRunning || !released || !waiters.park(requestId)) return false;
+    stop.abort();
+    options.brokerOptions.mountHandbacks?.delete(finish);
+    signal.removeEventListener('abort', finish);
+    options.registerFreeze?.(undefined);
+    return true;
+  };
+  options.registerFreeze?.(park);
   options.brokerOptions.mountHandbacks?.add(finish);
   signal.addEventListener('abort', finish, { once: true });
   const first = attempt();
@@ -197,12 +211,16 @@ export async function waitForHostedQuestion(options: {
       again = await attempt();
     }
   })();
-  void retry.catch((cause: unknown) => {
-    if (!stop.signal.aborted) {
-      failure = cause;
-      waiters.notify(requestId);
-    }
-  });
+  void retry
+    .catch((cause: unknown) => {
+      if (!stop.signal.aborted) {
+        failure = cause;
+        waiters.notify(requestId);
+      }
+    })
+    .finally(() => {
+      retryRunning = false;
+    });
   try {
     await Promise.race([
       first,
@@ -217,6 +235,7 @@ export async function waitForHostedQuestion(options: {
     if (stop.signal.aborted && !signal.aborted)
       throw new Error('Question wait stopped with its Runtime still owed.');
   } finally {
+    options.registerFreeze?.(undefined);
     finish();
     signal.removeEventListener('abort', finish);
     options.brokerOptions.mountHandbacks?.delete(finish);

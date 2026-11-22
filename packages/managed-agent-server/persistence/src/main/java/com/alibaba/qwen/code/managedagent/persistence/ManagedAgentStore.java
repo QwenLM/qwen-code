@@ -899,6 +899,13 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
+    public boolean parkTurnForAction(String tenantId, String sessionId,
+            String turnId, String owner) {
+        return turnExecution.parkTurnForAction(tenantId, sessionId, turnId, owner);
+    }
+
+    @Override
+    @Transactional
     public void deferTurnRetry(String tenantId, String sessionId, String turnId, String owner, long retryAfter) {
         turnExecution.deferTurnRetry(tenantId, sessionId, turnId, owner, retryAfter);
     }

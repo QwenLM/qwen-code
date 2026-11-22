@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AuthorizeLifecycleRequest;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels;
@@ -120,6 +121,8 @@ class ManagedApprovalChangeTest {
         var admitted = transaction().execute(status -> store.insertTurnCommand(tenant, "SUBMIT_TURN", "live-turn", "digest",
                 session, input, SubmitHarnessTurn.computePayloadDigest(input)));
         var turn = store.findTurn(tenant, session, admitted.turnId()).orElseThrow();
+        jdbc.update("UPDATE ma_turn SET error_code = ?, retry_after = 1234 WHERE tenant_id = ? AND session_id = ?"
+                + " AND turn_id = ?", TurnExecutionStore.HARNESS_ACTION_PARKED, tenant, session, turn.turnId());
         jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
                 + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,options_json)"
                 + " VALUES (?,?,?,'action','action',1,1,'ACTION','requested','action',1,?)", "a".repeat(64), tenant, session,
@@ -129,6 +132,9 @@ class ManagedApprovalChangeTest {
         assertThat(change("actor", "live-change", "yolo", 0).replayed()).isTrue();
         assertThat(store.findTurnApprovalSelection(tenant, session, turn.promptId()))
                 .isEqualTo(new WebShellApprovalSelection("default", 0));
+        var unParked = store.findTurn(tenant, session, turn.turnId()).orElseThrow();
+        assertThat(unParked.errorCode()).isNull();
+        assertThat(unParked.retryAfter()).isNull();
         assertThat(jdbc.queryForObject("SELECT state FROM ma_session_record WHERE tenant_id=? AND session_id=?"
                 + " AND record_kind='ACTION'", String.class, tenant, session)).isEqualTo("requested");
         when(harness.supportsPlanMode()).thenReturn(true);

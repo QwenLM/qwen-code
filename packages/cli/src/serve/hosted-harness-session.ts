@@ -65,9 +65,14 @@ import {
   type RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
 import {
+  hostedActionParkRegistration,
+  type HostedActionParkRegistration,
+} from './hosted-action-parking.js';
+import {
   reconcileHostedTurnCleanup,
   backgroundSuspensionCertificate,
   hasHostedCleanupDebt,
+  hasHostedCleanupDebtExcluding,
   hasBlockingHostedCleanupDebt,
   oweHostedTurnCleanup,
   type HostedCleanupHold,
@@ -94,6 +99,7 @@ import {
   endHostedAction,
   parseHostedActionOptions,
   hostedLiveApprovalPoll,
+  hostedApprovalAsks,
 } from './hosted-tool-approval.js';
 import { readHostedQuestionDecision } from './hosted-user-question.js';
 
@@ -228,6 +234,7 @@ import {
   managedSessionDurableRefsEqual,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { ManagedSessionCommitRejectedError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
+import type { ManagedSessionWakeStamp } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { WorkflowStartCancelledError } from '@qwen-code/qwen-code-core/agents/runtime/workflow-runner.js';
 import {
@@ -837,6 +844,7 @@ interface HostedSession {
   cwd: string;
   streams: Set<() => void>;
   active?: { promptId: string; digest: string; abort: AbortController };
+  deadlineTimer?: NodeJS.Timeout;
   admissions: Map<string, { digest: string; lastEventId: number }>;
   blocked: boolean;
   /** #13800 D4: the named store failure kept in memory once a settlement's
@@ -2873,6 +2881,7 @@ async function retryHostedCleanup(
   options: HostedWorkspaceBrokerOptions,
   drain = false,
   probeOnly = false,
+  excludedPromptId?: string,
 ): Promise<void> {
   if (!drain && unsettledPromptId(session)) return;
   // A load can overlap the wake pump's retry. Re-read the debt with each
@@ -2893,6 +2902,7 @@ async function retryHostedCleanup(
               options,
               undefined,
               drain && !probeOnly,
+              excludedPromptId,
             ),
           );
         }
@@ -3854,6 +3864,7 @@ async function startHostedRecoveredTurn(
         )
       : undefined;
   timer?.unref();
+  session.deadlineTimer = timer;
   if (cancelled) {
     await stopPublicChildSource(session, resume.promptId);
     abort.abort();
@@ -3921,6 +3932,7 @@ async function startHostedRecoveredTurn(
     })
     .finally(() => {
       if (timer) clearTimeout(timer);
+      if (session.deadlineTimer === timer) session.deadlineTimer = undefined;
       session.active = undefined;
       noteSessionActivity(session);
     });
@@ -5061,6 +5073,89 @@ export function registerHostedHarnessSessionRoutes(
     suspension.rearm?.();
   };
 
+  interface ActionParkCandidate {
+    readonly registration: HostedActionParkRegistration;
+    readonly promptId: string;
+    readonly wakeAt: number;
+    readonly approvalRevision?: number;
+    readonly cleanupExempt: boolean;
+  }
+
+  const actionParkCandidate = async (
+    session: HostedSession,
+    backgroundCertified: boolean,
+  ): Promise<ActionParkCandidate | undefined> => {
+    const registration = hostedActionParkRegistration(session.managed);
+    if (
+      !registration ||
+      backgroundCertified ||
+      session.active?.promptId !== registration.promptId ||
+      session.recoveredTurn !== undefined ||
+      session.definition?.['lineage'] !== undefined ||
+      session.hooks ||
+      session.mcp ||
+      session.stores?.supportsActionParking?.() !== true ||
+      session.stores?.supportsWakeDispatch?.() !== true
+    )
+      return undefined;
+    const events = session.managed.authority.eventsInSequenceRange(
+      1,
+      session.managed.authority.committedSequence,
+    );
+    const accepted = events.find(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['turnId'] === registration.promptId,
+    );
+    if (!accepted || isWakeOwnedInput(accepted)) return undefined;
+    const unsettled = unsettledInputs(session);
+    if (
+      unsettled.size !== 1 ||
+      !unsettled.has(registration.promptId) ||
+      session.managed.authority.action(registration.options.requestId)
+        ?.state !== 'requested'
+    )
+      return undefined;
+    const continuation = await findHostedApprovalContinuation(
+      session.managed,
+      registration.promptId,
+    );
+    if (!continuation || continuation.plan.commandStep !== undefined)
+      return undefined;
+    let approvalRevision: number | undefined;
+    if (registration.livePoll) {
+      const selection = await session.stores.approvalSelection();
+      if (
+        !selection ||
+        !hostedApprovalAsks(
+          {
+            mode: selection.mode,
+            timeoutMs: registration.settings.timeoutMs,
+            permissionRules: selection.permissionRules,
+          },
+          registration.options.toolName,
+          registration.globProfile,
+        )
+      )
+        return undefined;
+      approvalRevision = selection.revision;
+    }
+    const deadline = accepted.payload['deadline'];
+    return {
+      registration,
+      promptId: registration.promptId,
+      wakeAt:
+        typeof deadline === 'number'
+          ? Math.min(registration.options.expiresAt, deadline)
+          : registration.options.expiresAt,
+      approvalRevision,
+      cleanupExempt: !(await hasHostedCleanupDebtExcluding(
+        session.managed,
+        registration.promptId,
+      )),
+    };
+  };
+
   // Live work only. The persistent owners (hooks, mcp, publishers) are
   // teardown targets the next load re-acquires, not residency pins; the
   // runtime lease is released by teardown step 3. Instance-wide terms are
@@ -5068,8 +5163,9 @@ export function registerHostedHarnessSessionRoutes(
   const suspensionLiveWork = (
     session: HostedSession,
     backgroundCertified = false,
+    actionPark?: ActionParkCandidate,
   ): boolean =>
-    session.active !== undefined ||
+    (session.active !== undefined && !actionPark) ||
     session.recoveredTurn !== undefined ||
     session.blocked ||
     session.lifecycle !== undefined ||
@@ -5088,7 +5184,7 @@ export function registerHostedHarnessSessionRoutes(
     session.fileHistoryOwed !== undefined ||
     session.childConsumption.size > 0 ||
     (session.messageOperations?.size ?? 0) > 0 ||
-    unsettledInputs(session).size > 0 ||
+    (!actionPark && unsettledInputs(session).size > 0) ||
     session.automations?.hasPendingGateReleases === true ||
     session.extensionBootstrapPending === true ||
     (session.replyPlanRetries?.size ?? 0) > 0 ||
@@ -5099,10 +5195,12 @@ export function registerHostedHarnessSessionRoutes(
     session.clientFiles?.active === true ||
     // An open Harness event stream is a reader this teardown would cut. The
     // design's predicate names it beside the Turn's own stream.
-    session.streams.size > 0 ||
+    (!actionPark && session.streams.size > 0) ||
     // The background terms a certified suspension exempts (§4.8).
     (!backgroundCertified &&
-      (hasHostedCleanupDebt(session.managed) ||
+      ((actionPark?.cleanupExempt
+        ? false
+        : hasHostedCleanupDebt(session.managed)) ||
         session.heldRuntimeTurns.size > 0 ||
         [
           ...(session.shell?.monitorLoops?.values() ?? []),
@@ -5160,6 +5258,7 @@ export function registerHostedHarnessSessionRoutes(
       // down against evidence that no longer holds.
       return previous && !backgroundCertified;
     };
+    const actionPark = await actionParkCandidate(session, false);
     const outcome = await runSuspensionAttempt(suspension, {
       pendingInputs: async () => {
         const pending = pendingSessionInputs(
@@ -5168,6 +5267,17 @@ export function registerHostedHarnessSessionRoutes(
             session.managed.authority.committedSequence,
           ),
         );
+        if (actionPark) {
+          const certificateLost = await refreshBackgroundCertificate();
+          const blocked =
+            backgroundCertified ||
+            certificateLost ||
+            hostedActionParkRegistration(session.managed) !==
+              actionPark.registration ||
+            pending.some((input) => input.turnId !== actionPark.promptId);
+          if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
+          return blocked;
+        }
         let blocked = pending.length > 0;
         if (blocked && session.stores?.supportsWakeDispatch?.()) {
           const projected = await session.managed.sink.project();
@@ -5183,7 +5293,7 @@ export function registerHostedHarnessSessionRoutes(
       },
       markClosing: (attemptStart) => {
         if (
-          suspensionLiveWork(session, backgroundCertified) ||
+          suspensionLiveWork(session, backgroundCertified, actionPark) ||
           suspension.lastActivity > attemptStart ||
           session.ownershipRelease !== undefined ||
           session.lifecycle !== undefined ||
@@ -5200,7 +5310,20 @@ export function registerHostedHarnessSessionRoutes(
         session.mcpClosing = true;
         return true;
       },
-      liveWork: () => suspensionLiveWork(session, backgroundCertified),
+      liveWork: () =>
+        suspensionLiveWork(session, backgroundCertified, actionPark),
+      beforeTeardown: () => {
+        if (!actionPark) return;
+        if (
+          backgroundCertified ||
+          hostedActionParkRegistration(session.managed) !==
+            actionPark.registration ||
+          !actionPark.registration.freeze()
+        )
+          throw new Error('The Action wait is no longer parkable.');
+        if (session.deadlineTimer) clearTimeout(session.deadlineTimer);
+        session.deadlineTimer = undefined;
+      },
       teardown: async () => {
         try {
           if (!done.wake) {
@@ -5214,7 +5337,13 @@ export function registerHostedHarnessSessionRoutes(
           }
           if (!done.lease) {
             if (
-              await releaseLeaseNow(session, false, true, backgroundCertified)
+              await releaseLeaseNow(
+                session,
+                false,
+                true,
+                backgroundCertified,
+                actionPark?.promptId,
+              )
             )
               throw new Error('Runtime lease release is unproven.');
             if (broker)
@@ -5223,10 +5352,16 @@ export function registerHostedHarnessSessionRoutes(
                 broker,
                 true,
                 backgroundCertified,
+                actionPark?.promptId,
               );
             else if (
               !backgroundCertified &&
-              hasHostedCleanupDebt(session.managed)
+              (!actionPark
+                ? hasHostedCleanupDebt(session.managed)
+                : await hasHostedCleanupDebtExcluding(
+                    session.managed,
+                    actionPark.promptId,
+                  ))
             )
               throw new Error('Runtime cleanup remains owed.');
             done.lease = true;
@@ -5269,24 +5404,36 @@ export function registerHostedHarnessSessionRoutes(
             // The memoized seal: a retry reconciles this same seal. The wake
             // stamp is what the pump would pick from the prefix this seal
             // closes, recomputed on every retry.
-            let wake:
-              | { pending: boolean; dueAt: number; backgroundHeld?: boolean }
-              | undefined;
-            if (session.stores?.supportsWakeDispatch?.()) {
+            let wake: ManagedSessionWakeStamp | undefined;
+            if (actionPark) {
+              wake = {
+                pending: false,
+                dueAt: 0,
+                parkedTurn: {
+                  promptId: actionPark.promptId,
+                  wakeAt: actionPark.wakeAt,
+                  ...(actionPark.approvalRevision === undefined
+                    ? {}
+                    : { approvalRevision: actionPark.approvalRevision }),
+                },
+              };
+            } else if (session.stores?.supportsWakeDispatch?.()) {
               const { first, earliestDeferred } = pickWakeInputs(
                 session,
                 Date.now(),
               );
               wake =
                 first !== undefined
-                  ? { pending: true, dueAt: 0 }
+                  ? {
+                      pending: true,
+                      dueAt: 0,
+                      ...(backgroundCertified ? { backgroundHeld: true } : {}),
+                    }
                   : {
                       pending: earliestDeferred !== undefined,
                       dueAt: earliestDeferred ?? 0,
+                      ...(backgroundCertified ? { backgroundHeld: true } : {}),
                     };
-              // The writer that ran the per-run evidence check certifies
-              // the background holds at this exact revision (§4.8).
-              if (backgroundCertified) wake.backgroundHeld = true;
             }
             await session.managed.authority.close(wake);
             done.writer = true;
@@ -10087,6 +10234,7 @@ export function registerHostedHarnessSessionRoutes(
             deadlineMs as number,
           );
     timer?.unref();
+    session.deadlineTimer = timer;
     session.active = { promptId, digest, abort };
     void (async () => {
       // A settled Turn's owed file-history retirement runs at admission,
@@ -10246,6 +10394,7 @@ export function registerHostedHarnessSessionRoutes(
           );
       } finally {
         if (timer) clearTimeout(timer);
+        if (session.deadlineTimer === timer) session.deadlineTimer = undefined;
         // Backstop for the admission-time retirement: it must finish inside
         // the busy flag, before the Session is re-admittable — a fresh
         // prompt meeting the still-pending marker would block with no
@@ -11534,10 +11683,16 @@ export function registerHostedHarnessSessionRoutes(
     terminal: boolean,
     rethrowOnFailure = false,
     probeOnly = false,
+    retainPromptId?: string,
   ): Promise<boolean> => {
     await retireOwedFileHistory(session, 'at close');
     const lease = session.runtimeLeaseHeld;
-    if (lease === undefined || !brokerOptions) return false;
+    if (
+      lease === undefined ||
+      !brokerOptions ||
+      lease.promptId === retainPromptId
+    )
+      return false;
     if (
       session.mcp &&
       lease.runtimeSessionId !== hostedRuntimeSessionId(lease.promptId)
