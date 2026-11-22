@@ -2026,6 +2026,18 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     assert.equal(doc.jobs.publish['runs-on'], 'ubuntu-latest');
   });
 
+  it('release-managed-agent-reference.yml tracks the seed helper for PRs', () => {
+    const doc = parse(
+      readFileSync(
+        join(workflowsDir, 'release-managed-agent-reference.yml'),
+        'utf8',
+      ),
+    );
+    assert.ok(
+      doc.on.pull_request.paths.includes('.github/scripts/maven-cache-seed.sh'),
+    );
+  });
+
   it('release-managed-agent-reference.yml build is safe on a shared pool host', () => {
     const text = readFileSync(
       join(workflowsDir, 'release-managed-agent-reference.yml'),
@@ -2049,12 +2061,19 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     const run = (name) => build.steps.find((s) => s.name === name).run;
     const buildJava = run('Build Java components');
     assert.match(buildJava, /-Dmaven\.repo\.local=/);
-    assert.match(buildJava, /find "\$\{repo\}" -depth -type d/);
-    assert.match(
-      buildJava,
-      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*'/,
+    assert.ok(buildJava.includes('source "${seed_helper}"'));
+    assert.ok(buildJava.includes('unavailable at workflow revision'));
+    assert.doesNotMatch(buildJava, /seed_mount_guard\(\) \{/);
+    const seedHelper = readFileSync(
+      '.github/scripts/maven-cache-seed.sh',
+      'utf8',
     );
-    assert.match(buildJava, /-exec rm -rf \{\} \+/);
+    assert.match(seedHelper, /find -P "\$\{repo\}" -xdev -depth/);
+    assert.match(
+      seedHelper,
+      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwencode-sdk\/\*' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*\/\*'/,
+    );
+    assert.match(seedHelper, /-delete \|\| exit 1/);
     assert.match(
       run('Assemble reference distribution'),
       /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,

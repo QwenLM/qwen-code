@@ -58,9 +58,9 @@ class ManagedSessionHistoryTest {
                     delete.operation().operationId());
             assertThat(store.findLatestLifecycleOperations("tenant", List.of("session-1")).get("session-1").operationId())
                     .isEqualTo(delete.operation().operationId());
-            assertThat(jdbc.queryForList("SELECT session_scope_key FROM ma_operation"
+            assertThat(jdbc.queryForList("SELECT session_id FROM ma_operation"
                             + " WHERE operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE')", String.class))
-                    .hasSize(3).containsOnly(ManagedSessionStore.sessionScopeKey("tenant", "session-1"));
+                    .hasSize(3).containsOnly("session-1");
         }
     }
 
@@ -76,7 +76,7 @@ class ManagedSessionHistoryTest {
             seedSession(jdbc, "tenant", "archive", "ARCHIVING", "PUBLIC");
             seedSession(jdbc, "tenant", "active", "ACTIVE", "PUBLIC");
             seedSession(jdbc, "tenant", "unrequested", "CLOSING", "PUBLIC");
-            // PUBLIC IDs are globally unique; a CONTROL row can reuse one in another tenant.
+            // Another tenant reuses the same Session ID.
             seedSession(jdbc, "other", "close", "CLOSING", "CONTROL");
             seedOperation(jdbc, "tenant", "close", "close-terminal", "CLOSE", "FAILED", 900, 900);
             seedOperation(jdbc, "tenant", "close", "close-early", "CLOSE", "PENDING", 90, 100);
@@ -122,12 +122,12 @@ class ManagedSessionHistoryTest {
     private void seedOperation(JdbcTemplate jdbc, String tenant, String session, String id,
             String kind, String state, long created, long modified) {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, tenant_id, session_id,"
                         + " operation_id, operation_kind, target_kind, target_key, request_digest, request_json,"
                         + " state, phase, failure_code, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)",
+                        + " VALUES (?, ?, ?, ?, ?, ?, 'SESSION', ?, 'digest', '{}', ?, ?, ?, ?, ?)",
                 AgentStoreRows.sessionOperationKey(tenant, session, OperationKind.valueOf(kind), id),
-                scope, scope, tenant, session, id, kind,
+                scope, tenant, session, id, kind,
                 ManagedSchemaKeys.key(session), state, state, "FAILED".equals(state) ? "fixture" : null, created, modified);
     }
 }

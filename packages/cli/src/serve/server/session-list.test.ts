@@ -1497,6 +1497,168 @@ describe('merged session catalog pagination', () => {
       });
     });
   });
+  describe('prompt-ledger continuation enrichment', () => {
+    const inFlight = { v: 1, promptId: 'p1', state: 'in_flight', at: 1 };
+    const terminal = (
+      value: string,
+      extra: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      v: 1,
+      promptId: 'p1',
+      terminal: value,
+      at: 2,
+      ...extra,
+    });
+
+    async function writeLedger(
+      session: BridgeSessionSummary,
+      records: Array<Record<string, unknown>>,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.ledger.jsonl`),
+        records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+    }
+
+    async function listSessions(
+      live: BridgeSessionSummary[] = [],
+      options: Parameters<typeof listWorkspaceSessionsForResponse>[2] = {},
+    ) {
+      const { bridge } = bridgeFor(live);
+      return listWorkspaceSessionsForResponse(bridge, workspaceCwd, options, {
+        runtimeBaseDir,
+      });
+    }
+
+    it.each([
+      ['dangling admission', [inFlight]],
+      ['reconciled interruption', [inFlight, terminal('interrupted')]],
+      [
+        'daemon shutdown flush',
+        [inFlight, terminal('error', { code: 'daemon_shutdown' })],
+      ],
+      [
+        'channel exit flush',
+        [inFlight, terminal('error', { code: 'channel_closed' })],
+      ],
+      [
+        'session close flush',
+        [inFlight, terminal('error', { code: 'session_closed' })],
+      ],
+      [
+        'session kill flush',
+        [inFlight, terminal('error', { code: 'session_killed' })],
+      ],
+    ] as const)('flags a cut-off last record: %s', async (_label, records) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [...records]);
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+
+    it.each([
+      ['completed', [inFlight, terminal('completed')]],
+      ['cancelled', [inFlight, terminal('cancelled')]],
+      ['model error', [inFlight, terminal('error', { code: 'model_error' })]],
+      [
+        'deadline exceeded',
+        [inFlight, terminal('error', { code: 'prompt_deadline_exceeded' })],
+      ],
+      [
+        'superseded interruption',
+        [
+          inFlight,
+          terminal('interrupted'),
+          { v: 1, promptId: 'p2', state: 'in_flight', at: 3 },
+          { v: 1, promptId: 'p2', terminal: 'completed', at: 4 },
+        ],
+      ],
+    ] as const)('leaves the field absent: %s', async (_label, records) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [...records]);
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it('leaves the field absent for an unreadable ledger', async () => {
+      const session = summary(0);
+      await persist(session);
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      // A directory at the ledger path makes the read throw (EISDIR).
+      await fs.mkdir(path.join(chats, `${session.sessionId}.ledger.jsonl`));
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it('does not enrich archived listings', async () => {
+      const session = summary(0);
+      await persist(session, session.createdAt, true);
+      await writeLedger(session, [inFlight], true);
+      const result = await listSessions([], { archiveState: 'archived' });
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it.each([
+      ['active prompt', { hasActivePrompt: true }],
+      ['active work', { activeWorkState: 'active' as const }],
+      ['running background tasks', { hasRunningBackgroundTasks: true }],
+      [
+        'background turn',
+        {
+          backgroundTurn: {
+            turnId: 't1',
+            taskId: 'task1',
+            kind: 'shell' as const,
+            startedAt: 1,
+          },
+        },
+      ],
+    ] as const)(
+      'drops the persisted flag when live state shows %s',
+      async (_label, liveExtra) => {
+        const session = summary(0);
+        await persist(session);
+        await writeLedger(session, [inFlight]);
+        const result = await listSessions([
+          { ...session, clientCount: 1, ...liveExtra },
+        ]);
+        expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+      },
+    );
+
+    it('keeps the flag when the live session is idle', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [inFlight]);
+      const result = await listSessions([
+        { ...session, clientCount: 1, hasActivePrompt: false },
+      ]);
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+
+    it.each([
+      ['organized', { view: 'organized' as const }],
+      ['metadata-filtered', { sourceType: 'default' }],
+    ] as const)('enriches the %s list path', async (_label, options) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [inFlight]);
+      const result = await listSessions([], options);
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+  });
 });
 
 describe('worktree sidecar enrichment (R3-1)', () => {
