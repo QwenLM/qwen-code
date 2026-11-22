@@ -18,7 +18,8 @@ public final class RuntimeProviderRegistry {
     private final Map<String, RuntimeProviderFactory> factories = new LinkedHashMap<>();
 
     public RuntimeProviderRegistry() {
-        this(ServiceLoader.load(RuntimeProviderFactory.class));
+        // Broker callbacks can run on threads whose context loader cannot see the host's provider JARs.
+        this(ServiceLoader.load(RuntimeProviderFactory.class, RuntimeProviderRegistry.class.getClassLoader()));
     }
 
     RuntimeProviderRegistry(Iterable<RuntimeProviderFactory> providers) {
