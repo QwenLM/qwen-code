@@ -664,13 +664,16 @@ export async function installMockDaemon(
 
 export function userTextEvent(
   text: string,
-  options: { id?: number; sessionId?: string } = {},
+  options: { id?: number; sessionId?: string; promptId?: string } = {},
 ): DaemonEvent {
   return sessionUpdateEvent(
     {
       sessionUpdate: 'user_message_chunk',
       content: { type: 'text', text },
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
+      // Mirrors the production replay stamp: the user record's
+      // daemonPromptId lands in the chunk's `_meta.promptId`.
+      ...(options.promptId ? { _meta: { promptId: options.promptId } } : {}),
     },
     options.id,
   );

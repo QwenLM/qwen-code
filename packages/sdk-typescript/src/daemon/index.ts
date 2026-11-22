@@ -128,7 +128,12 @@ export {
   reduceDaemonSessionEvent,
   reduceDaemonSessionEvents,
 } from './events.js';
-export { parseSseStream, SseFramingError } from './sse.js';
+export {
+  parseNamedSseStream,
+  parseSseStream,
+  SseFramingError,
+  type NamedSseFrame,
+} from './sse.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonToolPreview,
@@ -943,6 +948,7 @@ export type {
   DaemonSessionAttachmentReference,
   PromptResult,
   PromptTextContent,
+  RateSessionTurnResult,
   SetModelResult,
   DaemonSessionConfigOptionResult,
   ReasoningSelection,
@@ -970,6 +976,11 @@ export type {
   DaemonSessionArtifactRestoreState,
   DaemonSessionArtifactRetention,
   DaemonSessionArtifactsEnvelope,
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
   SessionSource,
   SessionSourceLocator,
   SessionSourceInput,

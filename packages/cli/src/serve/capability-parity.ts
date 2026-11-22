@@ -118,6 +118,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   session_turn_status: NO_MANAGED_EQUIVALENT(
     'Managed reads Turns by list and get, not a status route',
   ),
+  session_turn_feedback: NO_MANAGED_EQUIVALENT(
+    'no Managed per-turn feedback telemetry surface',
+  ),
   session_attachments: NO_MANAGED_EQUIVALENT(
     'Managed prompts carry no legacy attachment references',
   ),

@@ -72,6 +72,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_sub_session_send: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_turn_status: { since: 'v1' },
+  // `POST /session/:id/feedback` records a per-turn satisfied/not-satisfied
+  // mark into the owning session's telemetry pipeline (`user_feedback`).
+  // Clients pre-flight this tag before offering the marks; older daemons
+  // keep the answer footer unchanged.
+  session_turn_feedback: { since: 'v1' },
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
