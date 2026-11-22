@@ -182,13 +182,6 @@ export function validateReasoningCapabilities(
   )?.capabilities?.reasoning;
   const builtinKimi = getBuiltinKimiK3Reasoning(route);
   const inherited = parseModelReasoningCapabilities(known ?? builtinKimi);
-  const hasCompleteCustomKimiDeclaration =
-    known === undefined &&
-    builtinKimi !== undefined &&
-    input.profile !== undefined &&
-    (input.profile === 'dashscope-thinking' ||
-      input.profile === 'qwen-chat-template' ||
-      (input.efforts !== undefined && input.defaultEffort !== undefined));
   if (!input.profile && inherited?.toggleOnly) {
     if (input.efforts || input.defaultEffort) return invalidReasoning(route);
     return parseModelReasoningCapabilities({ ...inherited, ...input });
@@ -269,6 +262,11 @@ export function validateReasoningCapabilities(
     return invalidReasoning(route);
   const toggleOnly =
     profile === 'dashscope-thinking' || profile === 'qwen-chat-template';
+  const hasCompleteCustomKimiDeclaration =
+    known === undefined &&
+    builtinKimi !== undefined &&
+    (toggleOnly ||
+      (input.efforts !== undefined && input.defaultEffort !== undefined));
   const disableField =
     (!input.profile && inherited?.disableField) ||
     (toggleOnly
@@ -288,11 +286,11 @@ export function validateReasoningCapabilities(
     inherited && !inherited.toggleOnly
       ? inherited.defaultEffort
       : (gpt?.defaultEffort ?? tieredGemini?.defaultEffort);
+  const requestedDefault = input.defaultEffort ?? inheritedDefault;
   const defaultEffort =
-    input.defaultEffort ??
-    (inheritedDefault && efforts
-      ? clampReasoningEffort(inheritedDefault, efforts)
-      : undefined);
+    requestedDefault && efforts
+      ? clampReasoningEffort(requestedDefault, efforts)
+      : undefined;
   if (
     (toggleOnly &&
       (input.efforts !== undefined || input.defaultEffort !== undefined)) ||

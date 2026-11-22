@@ -266,6 +266,26 @@ describe('reasoning declarations', () => {
   });
 
   it.each([
+    ['medium', 'high'],
+    ['xhigh', 'max'],
+  ] as const)(
+    'clamps a declared Kimi K3 default %s onto the inherited ladder as %s',
+    (defaultEffort, expected) => {
+      expect(
+        resolveReasoningCapabilities(
+          { ...route, model: 'kimi-k3.1-pro' },
+          { defaultEffort },
+        ),
+      ).toMatchObject({
+        profile: 'openai-effort',
+        efforts: ['low', 'high', 'max'],
+        defaultEffort: expected,
+        canDisable: false,
+      });
+    },
+  );
+
+  it.each([
     'https://openrouter.ai/api/v1',
     'https://openrouter.ai./api/v1',
     'https://llm.openrouter.ai./api/v1',
@@ -294,6 +314,44 @@ describe('reasoning declarations', () => {
     expect(
       getEffectiveReasoning({ ...target, reasoning: false }, resolved),
     ).toBe(false);
+  });
+
+  it('derives the profile for a complete custom Kimi K3 opt-out', () => {
+    const target = { ...route, model: 'kimi-k3.1-pro' };
+    const resolved = resolveReasoningCapabilities(target, {
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'low',
+    });
+    expect(resolved).toMatchObject({
+      profile: 'openai-effort',
+      defaultEffort: 'low',
+    });
+    expect(resolved?.canDisable).toBeUndefined();
+    expect(
+      getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+    ).toBe(false);
+  });
+
+  it('keeps mandatory thinking on the shipped Moonshot K3 route only', () => {
+    const override = {
+      profile: 'openai-effort' as const,
+      efforts: ['low', 'high', 'max'] as const,
+      defaultEffort: 'low' as const,
+    };
+    const shipped = resolveReasoningCapabilities(
+      {
+        ...route,
+        model: 'kimi-k3',
+        baseUrl: 'https://api.moonshot.cn/v1',
+      },
+      override,
+    );
+    const custom = resolveReasoningCapabilities(
+      { ...route, model: 'kimi-k3' },
+      override,
+    );
+    expect(shipped?.canDisable).toBe(false);
+    expect(custom?.canDisable).toBeUndefined();
   });
 
   it.each(['dashscope-thinking', 'qwen-chat-template'] as const)(

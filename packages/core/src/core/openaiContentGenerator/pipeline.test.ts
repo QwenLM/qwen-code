@@ -2580,6 +2580,101 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('keeps flat precedence for other inferred OpenRouter defaults', async () => {
+      routeThrough(DefaultOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        undefined,
+        {
+          baseUrl: OPENROUTER_URL,
+          samplingParams: undefined,
+          extra_body: { reasoning_effort: 'low' },
+        },
+        'openai/gpt-5.4',
+      );
+      expectFields(wire, {
+        reasoning: undefined,
+        reasoning_effort: 'low',
+      });
+    });
+
+    it.each(
+      (['samplingParams', 'extra_body'] as const).flatMap((source) =>
+        [null, ''].map((placeholder) => [source, placeholder] as const),
+      ),
+    )(
+      'treats an OpenRouter %s flat %j placeholder as unset for inferred K3',
+      async (source, placeholder) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            ...(source === 'extra_body' ? { samplingParams: undefined } : {}),
+            [source]: { reasoning_effort: placeholder },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: { effort: 'max' },
+          reasoning_effort: undefined,
+        });
+      },
+    );
+
+    it.each([
+      [
+        'deepseek-openai',
+        {
+          thinking: { type: 'enabled' },
+          reasoning_effort: 'low',
+          reasoning: undefined,
+        },
+      ],
+      [
+        'openai-reasoning',
+        {
+          reasoning: { effort: 'high' },
+          reasoning_effort: 'low',
+          thinking: undefined,
+        },
+      ],
+    ] as const)(
+      'preserves a declared OpenRouter %s default beside an explicit flat tier',
+      async (profile, expected) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          {
+            profile,
+            efforts: ['low', 'high'],
+            defaultEffort: 'high',
+          },
+          {
+            baseUrl: OPENROUTER_URL,
+            samplingParams: undefined,
+            extra_body: { reasoning_effort: 'low' },
+          },
+          'company-alias',
+        );
+        expectFields(wire, expected);
+      },
+    );
+
+    it('honors reasoning off for a derived-profile custom Kimi K3', async () => {
+      routeThrough(DefaultOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        {
+          efforts: ['low', 'high', 'max'],
+          defaultEffort: 'low',
+        },
+        { reasoning: false },
+        'kimi-k3.1-pro',
+      );
+      expectFields(wire, {
+        reasoning_effort: 'none',
+        reasoning: undefined,
+      });
+    });
+
     it.each([
       ['qwen3.8-max', DASHSCOPE_URL],
       ['openai/gpt-5.4', OPENROUTER_URL],

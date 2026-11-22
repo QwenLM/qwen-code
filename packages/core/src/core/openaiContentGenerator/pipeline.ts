@@ -25,6 +25,7 @@ import {
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
 import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
+import { getBuiltinKimiK3Reasoning } from '../kimi-reasoning.js';
 import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
@@ -83,6 +84,7 @@ import {
 } from './provider/utils.js';
 import {
   getEffectiveReasoning,
+  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '../reasoning-overrides.js';
 
@@ -1433,12 +1435,12 @@ export class ContentGenerationPipeline {
       { ...this.contentGeneratorConfig, model: context.model },
       reasoningCapabilities,
     );
-    // A flat explicit tier must not coexist with OpenRouter's nested default.
+    // An inferred nested default must not compete with an explicit flat tier.
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
       effectiveReasoning &&
-      !this.hasExplicitOpenRouterEffort() &&
+      !this.hasExplicitOpenRouterEffort(context.model) &&
       request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
@@ -1495,6 +1497,22 @@ export class ContentGenerationPipeline {
       userPromptId,
       trailingReattachPartCount(request.contents),
     );
+    if (
+      reasoningCapabilities?.profile === 'openai-reasoning' &&
+      resolveReasoningDeclaration(
+        this.config.cliConfig,
+        this.contentGeneratorConfig,
+        context.model,
+      ) === undefined &&
+      getBuiltinKimiK3Reasoning({
+        ...this.contentGeneratorConfig,
+        model: context.model,
+      }) &&
+      'reasoning' in providerRequest &&
+      isReasoningEffortPlaceholder(providerRequest.reasoning_effort)
+    ) {
+      delete providerRequest.reasoning_effort;
+    }
     if (
       this.contentGeneratorConfig.enableCacheControl !== false &&
       isOfficialOpenAIEndpoint(this.contentGeneratorConfig)
@@ -2020,13 +2038,20 @@ export class ContentGenerationPipeline {
     return params;
   }
 
-  private hasExplicitOpenRouterEffort(): boolean {
+  private hasExplicitOpenRouterEffort(model?: string): boolean {
     return (
       isOpenRouterHostname(this.contentGeneratorConfig) &&
-      (this.contentGeneratorConfig.samplingParams?.['reasoning_effort'] !==
-        undefined ||
-        this.contentGeneratorConfig.extra_body?.['reasoning_effort'] !==
-          undefined)
+      resolveReasoningDeclaration(
+        this.config.cliConfig,
+        this.contentGeneratorConfig,
+        model || this.contentGeneratorConfig.model,
+      ) === undefined &&
+      (!isReasoningEffortPlaceholder(
+        this.contentGeneratorConfig.samplingParams?.['reasoning_effort'],
+      ) ||
+        !isReasoningEffortPlaceholder(
+          this.contentGeneratorConfig.extra_body?.['reasoning_effort'],
+        ))
     );
   }
 
@@ -2049,7 +2074,7 @@ export class ContentGenerationPipeline {
 
     if (
       request.config?.thinkingConfig?.includeThoughts === false ||
-      this.hasExplicitOpenRouterEffort()
+      this.hasExplicitOpenRouterEffort(request.model)
     ) {
       return {};
     }
