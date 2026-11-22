@@ -389,6 +389,31 @@ export function parseAuthProviderInstallRequest(
     rawAdvanced?.['maxTokens'],
     10_000_000,
   );
+  const serviceTier =
+    typeof rawAdvanced?.['service_tier'] === 'string' &&
+    rawAdvanced['service_tier'].trim().length > 0
+      ? rawAdvanced['service_tier'].trim()
+      : undefined;
+  const rawModelSpecs = Array.isArray(body['modelSpecs'])
+    ? body['modelSpecs']
+    : undefined;
+  const modelSpecs = rawModelSpecs
+    ?.map((spec) => {
+      if (!spec || typeof spec !== 'object') return null;
+      const specObj = spec as Record<string, unknown>;
+      const id = typeof specObj['id'] === 'string' ? specObj['id'].trim() : '';
+      if (!id) return null;
+      const cw = parsePositiveBoundedInteger(
+        specObj['contextWindowSize'] ?? specObj['max_tokens'],
+        10_000_000,
+      );
+      return {
+        id,
+        ...(cw !== undefined ? { contextWindowSize: cw } : {}),
+      };
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+
   const advancedConfig: ServeAuthProviderInstallRequest['advancedConfig'] =
     rawAdvanced
       ? {
@@ -419,6 +444,7 @@ export function parseAuthProviderInstallRequest(
             : {}),
           ...(contextWindowSize !== undefined ? { contextWindowSize } : {}),
           ...(maxTokens !== undefined ? { maxTokens } : {}),
+          ...(serviceTier ? { service_tier: serviceTier } : {}),
         }
       : undefined;
   return {
@@ -435,6 +461,7 @@ export function parseAuthProviderInstallRequest(
       ...(baseUrl ? { baseUrl } : {}),
       apiKey,
       ...(modelIds ? { modelIds } : {}),
+      ...(modelSpecs?.length ? { modelSpecs } : {}),
       ...(advancedConfig ? { advancedConfig } : {}),
     },
   };
