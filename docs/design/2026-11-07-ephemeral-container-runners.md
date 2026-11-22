@@ -159,9 +159,12 @@ still blocks registration sweeping for manual reconciliation. The sweep
 deletes registrations before removing the resources so a rejected deletion
 stays reachable on the next cycle. Second, a rejected JIT request deleted the local slot state while a leftover
 registration kept owning the display name, so every retry was rejected and the
-record needed to delete that registration was gone. A definitive rejection now
-reconciles the name instead of discarding the state, and a runner deletion
-GitHub rejects retains the state for the next attempt.
+record needed to delete that registration was gone. For a JIT refusal with
+a parsed HTTP 403 or 429 response, the manager removes only the new slot
+state. Earlier registrations have already been reconciled in the cycle, and
+the new registration uses a fresh name. Other definitive client rejections
+reconcile by name. A runner deletion GitHub rejects retains the state for the
+next attempt.
 
 Because these faults leave the process alive, systemd supervision cannot detect
 them. A slot that repeats the same failure for `stallAlertSeconds` (default
@@ -173,7 +176,8 @@ limited without a usable deadline). For JIT registration, a quota reset applies
 when GitHub reports zero remaining quota and the reset is within the next two
 hours. The manager logs and ignores resets beyond that window. It honors the
 later of the applicable reset and `Retry-After` and spreads retries after the
-deadline. A permission-only registration failure uses ordinary backoff. The
+deadline. A 403 without rate-limit evidence uses ordinary backoff, and the
+journal includes recognized GitHub permission diagnostics. The
 manager checks for a stall after a failure and once per second while waiting for
 a GitHub retry deadline. The alert identifies when the slot is waiting on GitHub.
 The backoff sleep is sliced and ends early on shutdown. This is the operator signal for a

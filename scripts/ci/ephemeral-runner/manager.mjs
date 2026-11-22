@@ -17,10 +17,24 @@ import { fileURLToPath } from 'node:url';
 const sleep = (ms) =>
   new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
+const githubPermissionReasons = [
+  'You must have repository read permissions or have the repository runners fine-grained permission',
+  'You must have repository read permissions or have the repository Administration permission',
+  'Resource not accessible by integration',
+  'Resource not accessible by personal access token',
+];
+
 export function command(
   program,
   args,
-  { env = process.env, input, timeout = 30000, binary = false, signal } = {},
+  {
+    env = process.env,
+    input,
+    timeout = 30000,
+    binary = false,
+    signal,
+    includeResponseHeaders = false,
+  } = {},
 ) {
   return new Promise((resolveCommand, reject) => {
     const child = spawn(program, args, {
@@ -52,7 +66,7 @@ export function command(
       clearTimeout(timer);
       const stdout = Buffer.concat(output);
       const text = binary ? '' : stdout.toString();
-      const response = args.includes('--include')
+      const response = includeResponseHeaders
         ? /^HTTP\/[\d.]+ (\d{3})[^\r\n]*\r?\n((?:[^\r\n]+\r?\n)*)\r?\n/.exec(
             text,
           )
@@ -106,9 +120,19 @@ export function command(
           resetTooFar ? 0 : resetAt,
         );
         if (retryAt > now) error.retryAt = retryAt;
-        if (!error.rateLimited)
-          error.message =
-            'GitHub runner registration permission denied (HTTP 403)';
+        if (!error.rateLimited) {
+          // Keep arbitrary response text out of the journal and stall counter.
+          const detail = /^gh:[ \t]+([^\r\n]+)/m.exec(stderr)?.[1];
+          error.permissionDetail = githubPermissionReasons.find(
+            (reason) =>
+              detail === reason ||
+              detail?.startsWith(reason + '.') ||
+              detail?.startsWith(reason + ' (HTTP 403)'),
+          );
+          error.message = error.permissionDetail
+            ? 'GitHub runner registration permission denied (HTTP 403)'
+            : 'GitHub runner registration refused (HTTP 403)';
+        }
       }
       reject(error);
     });
@@ -275,11 +299,21 @@ export function createManager(config, dependencies = {}) {
     }
   }
 
-  async function gh(args, input) {
-    return run('gh', ['api', ...args, ...(input ? ['--input', '-'] : [])], {
-      env: process.env,
-      input: input && JSON.stringify(input),
-    });
+  async function gh(args, input, { includeResponseHeaders = false } = {}) {
+    return run(
+      'gh',
+      [
+        'api',
+        ...(includeResponseHeaders ? ['--include'] : []),
+        ...args,
+        ...(input ? ['--input', '-'] : []),
+      ],
+      {
+        env: process.env,
+        input: input && JSON.stringify(input),
+        includeResponseHeaders,
+      },
+    );
   }
 
   async function save(slot, state) {
@@ -819,7 +853,6 @@ export function createManager(config, dependencies = {}) {
       result = parseJson(
         await gh(
           [
-            '--include',
             '-X',
             'POST',
             `/repos/${config.repo}/actions/runners/generate-jitconfig`,
@@ -830,6 +863,7 @@ export function createManager(config, dependencies = {}) {
             labels: config.labels,
             work_folder: '_work',
           },
+          { includeResponseHeaders: true },
         ),
       );
     } catch (error) {
@@ -1244,10 +1278,14 @@ export function createManager(config, dependencies = {}) {
                 log(
                   `slot ${slot}: ignored X-RateLimit-Reset more than 2 hours away`,
                 );
-              if (!reportStall())
+              if (!reportStall()) {
+                const retry = error.permissionDetail
+                  ? `GitHub reported: ${error.permissionDetail}. Check the token permissions and restart if the token changes; next attempt`
+                  : 'retrying';
                 log(
-                  `slot ${slot}: ${error.message}; ${error.rateLimited === false ? 'check runner administration permissions and restart if the token changes; next attempt' : 'retrying'} in ${Math.round(delay / 1000)}s without replenishing`,
+                  `slot ${slot}: ${error.message}; ${retry} in ${Math.round(delay / 1000)}s without replenishing`,
                 );
+              }
               await interruptibleWait(
                 delay,
                 error.retryAt === undefined ? undefined : reportStall,

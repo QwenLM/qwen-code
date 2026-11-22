@@ -1184,13 +1184,11 @@ test('JIT registration still consumes the body when response headers are include
       const output = await f.command(program, args, options);
       if (!args.includes('--include')) return output;
       const response = `HTTP/2.0 201 Created\nContent-Type: application/json\r\n\r\n${output}`;
-      return runCommand(process.execPath, [
-        '-e',
-        'process.stdout.write(process.argv[1]);',
-        '--',
-        response,
-        ...args,
-      ]);
+      return runCommand(
+        process.execPath,
+        ['-e', 'process.stdout.write(process.argv[1]);', '--', response],
+        { includeResponseHeaders: options.includeResponseHeaders },
+      );
     },
     sleep: f.sleep,
   });
@@ -2339,6 +2337,23 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       maxDelay: 91_000,
     },
     {
+      name: 'waits through an hourly primary quota window',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 4600',
+      minDelay: 3_600_000,
+      maxDelay: 3_600_000,
+    },
+    {
+      name: 'logs and falls back when the reset is outside the two-hour window',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 8201',
+      minDelay: 15_000,
+      maxDelay: 15_000,
+      resetIgnored: true,
+    },
+    {
       name: 'caps the spread after a long deadline',
       status: 429,
       reason: 'Too Many Requests',
@@ -2372,6 +2387,14 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       headers: 'Retry-After: 75',
       minDelay: 75_000,
       maxDelay: 76_000,
+    },
+    {
+      name: 'honors a valid Retry-After beyond the primary reset window',
+      status: 429,
+      reason: 'Too Many Requests',
+      headers: 'Retry-After: 7201',
+      minDelay: 7_201_000,
+      maxDelay: 7_201_000,
     },
     {
       name: 'uses Retry-After as rate-limit evidence on a 403',
@@ -2434,13 +2457,24 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       maxDelay: 30_000,
     },
     {
-      name: 'identifies a permission denial despite normal quota headers',
+      name: 'reports the missing permission without logging raw stderr',
       status: 403,
-      reason: 'Resource not accessible by integration',
+      reason:
+        'You must have repository read permissions or have the repository runners fine-grained permission. fixture-private-detail',
       headers: 'X-RateLimit-Remaining: 42\r\nX-RateLimit-Reset: 1090',
       minDelay: 5_000,
-      maxDelay: 10_000,
-      permission: true,
+      maxDelay: 5_000,
+      expectedLog:
+        /registration permission denied \(HTTP 403\).*repository runners fine-grained permission/,
+    },
+    {
+      name: 'does not attribute an unrecognized 403 to a missing permission',
+      status: 403,
+      reason: 'Forbidden by upstream proxy. fixture-private-detail',
+      headers: 'Content-Type: text/plain',
+      minDelay: 5_000,
+      maxDelay: 5_000,
+      expectedLog: /registration refused \(HTTP 403\)/,
     },
   ];
   for (const {
@@ -2451,7 +2485,7 @@ test('runner registration retries honor GitHub response headers', async (t) => {
     random,
     minDelay,
     maxDelay,
-    permission,
+    expectedLog,
     resetIgnored,
   } of cases) {
     await t.test(name, async (t) => {
@@ -2468,14 +2502,17 @@ test('runner registration retries honor GitHub response headers', async (t) => {
         attempts.push(clock.now);
         if (attempts.length === 2) manager.stop();
         const response = `HTTP/2.0 ${status}\n${headers}\r\n\r\n`;
-        return runCommand(process.execPath, [
-          '-e',
-          'process.stdout.write(process.argv[1]); process.stderr.write(process.argv[2]); process.exitCode = 1;',
-          '--',
-          args.includes('--include') ? response : '',
-          `gh: ${reason} (HTTP ${status})\n`,
-          ...args,
-        ]);
+        return runCommand(
+          process.execPath,
+          [
+            '-e',
+            'process.stdout.write(process.argv[1]); process.stderr.write(process.argv[2]); process.exitCode = 1;',
+            '--',
+            args.includes('--include') ? response : '',
+            `gh: ${reason} (HTTP ${status})\n`,
+          ],
+          { includeResponseHeaders: options.includeResponseHeaders },
+        );
       };
       const manager = createManager(f.config, {
         command,
@@ -2498,15 +2535,10 @@ test('runner registration retries honor GitHub response headers', async (t) => {
         ),
         resetIgnored ?? false,
       );
-      if (permission)
-        assert.match(
-          messages.join('\n'),
-          /registration permission denied \(HTTP 403\); check runner administration permissions and restart/,
-        );
-      else
-        assert.ok(
-          !messages.some((message) => message.includes('permission denied')),
-        );
+      const logs = messages.join('\n');
+      assert.doesNotMatch(logs, /fixture-private-detail/);
+      if (expectedLog) assert.match(logs, expectedLog);
+      else assert.doesNotMatch(logs, /registration permission denied/);
     });
   }
 });
@@ -2527,12 +2559,15 @@ test('a runner alerts during the retry deadline wait without retrying early', as
         ) {
           attempts.push(clock.now - startedAt);
           if (attempts.length === 1) {
-            return runCommand(process.execPath, [
-              '-e',
-              'process.stdout.write("HTTP/2.0 429\\nRetry-After: 60\\r\\n\\r\\n"); process.exitCode = 1;',
-              '--',
-              ...args,
-            ]);
+            assert.ok(args.includes('--include'));
+            return runCommand(
+              process.execPath,
+              [
+                '-e',
+                'process.stdout.write("HTTP/2.0 429\\nRetry-After: 60\\r\\n\\r\\n"); process.exitCode = 1;',
+              ],
+              { includeResponseHeaders: options.includeResponseHeaders },
+            );
           }
         }
         return f.command(program, args, options);
@@ -2627,6 +2662,7 @@ test('the stall alert defaults to a thirty-minute wall-clock threshold', async (
     `the default is a 1800 s wall clock, but the alert reported ${result.durationSeconds}s`,
   );
   assert.match(result.alerts[0], /docker unavailable/);
+  assert.match(result.alerts[0], /this slot is backing off before retrying/);
 });
 
 test('the stall threshold tracks wall clock, not the retry count', async (t) => {

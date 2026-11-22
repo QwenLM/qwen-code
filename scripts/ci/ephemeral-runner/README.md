@@ -235,10 +235,10 @@ deadline. For JIT registration, a quota reset applies when GitHub reports zero
 remaining quota and the reset is within the next two hours. The manager logs and
 ignores resets beyond that window. It waits at least until the applicable reset
 or `Retry-After`, whichever is later when both apply, and spreads retries after
-that time to avoid a burst across slots. A
-permission-only 403 uses the ordinary cadence and logs which permission to
-check. Restart the service if the token changes. Shutdown can interrupt the
-wait.
+that time to avoid a burst across slots. A 403 without rate-limit evidence
+uses the ordinary cadence. The journal includes recognized GitHub permission
+diagnostics. Restart the service if the token changes. Shutdown can interrupt
+the wait.
 
 `stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
 repeat the same failure before the manager logs `STALL ALERT`. The clock resets
