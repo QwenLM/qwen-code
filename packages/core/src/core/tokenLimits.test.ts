@@ -493,6 +493,12 @@ describe('tokenLimit with output type', () => {
       expect(tokenLimit('gpt-5-mini', 'output')).toBe(131072);
     });
 
+    it('should return 128K output for the o-series', () => {
+      expect(tokenLimit('o3', 'output')).toBe(131072);
+      expect(tokenLimit('o3-mini', 'output')).toBe(131072);
+      expect(tokenLimit('o4-mini', 'output')).toBe(131072);
+    });
+
     it('should return 64K output for Gemini 4.x and its aliases', () => {
       expect(tokenLimit('gemini-4-neon', 'output')).toBe(65536);
       expect(tokenLimit('gemini-4-pro-preview-20261121', 'output')).toBe(65536);
@@ -612,6 +618,8 @@ describe('tokenLimit with output type', () => {
 
     it('should return correct output limits for Kimi', () => {
       expect(tokenLimit('kimi-k2.5', 'output')).toBe(32768);
+      expect(tokenLimit('kimi-k3', 'output')).toBe(131072);
+      expect(tokenLimit('kimi-k3.1-pro', 'output')).toBe(131072);
     });
   });
 
