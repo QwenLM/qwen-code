@@ -74,7 +74,9 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // must not replace this measured shared-tree baseline with an older estimate.
 // The expansion-preserving normalization adds 42 bytes to that merged build.
 // The schema-version narrowing capture adds a further 8 bytes.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_154_390;
+// Including the merged ChatSurface inputs, local builds and the CI merge tree
+// both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -190,7 +192,7 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_154_390;
 // measured size below is not warned; only further growth is warned.
 // The identity placeholder can change byte length when it is replaced, so the
 // budget measures the actual injected asset below, including the metadata
-// checks: 2,154,390 bytes. Reserve 430 bytes for toolchain variance.
+// checks: 2,155,023 bytes with ChatSurface merged. Reserve 430 bytes for toolchain variance.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 430;
 
 // Modules that must not be reachable from the document entry, checked against

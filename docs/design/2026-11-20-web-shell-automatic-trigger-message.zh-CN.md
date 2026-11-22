@@ -101,14 +101,14 @@ document 模式遵循默认展开的 `TranscriptDocumentExpandedContext`，且�
 - `packages/cli/src/ui/utils/export/index.ts` — 在既有 V1 接口旁导出两个版本的工厂与 document 类型。
 - `packages/cli/src/ui/utils/export/formatters/html.ts` — 按 renderer 声明的 schema 上限选择 HTML 版本，并在读取时校验两种受支持的版本。
 - `packages/cli/src/ui/utils/export/export-transcript-document.test.ts` — V2 来源与 metadata 边界、非 cron 来源以及 V1 兼容性覆盖。
-- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — 默认和委托 schema 上限、委托及旧版 HTML 输出、非法配置与默认产物恢复覆盖。
+- `packages/cli/src/ui/utils/export/formatters/html.test.ts` — 默认和委托 schema 上限、独立及旧版 HTML 输出、非法配置与默认产物恢复覆盖。
 - `packages/web-templates/src/export-html/src/document-main.tsx` — 接受 V1 与 V2，但拒绝其它 schema 版本、V1 用户 metadata，以及 user Cron 标签以外的异常 metadata。
 - `docs/design/web-shell/chat-transcript-contract-prevalidation.md` 与 `.zh-CN.md` — 完整英中规范文档中的 allowlist、版本规则和生产 schema 约定。
 - `packages/web-shell/client/e2e/web-shell.automatic-trigger-message.spec.ts` — 确定性浏览器覆盖与截图。
 
 ## 验证计划
 
-真实 CI 合并树 `71161df9` 在别名展开修复前测量为 2,154,340 字节。加入该修复后，合并构建的 renderer 在身份注入后曾测为 **2,154,382 字节**，包含 user metadata 与附件引用的边界校验。为回调捕获已验证的 `schemaVersion` 以保留类型窄化，增加 **8 字节**，使 renderer 实测为 **2,154,390 字节**；分离的组件 CSS 仍为 **2,428,500 字节**。告警基线即实测的 **2,154,390**，硬上限为 **2,154,820 字节**，为工具链差异保留 430 字节。这里按实际合并实现和完整生产输入构建重新校准基线，而不是沿用测试模式或分支旧估计值，也不隐藏新增校验与共享渲染内容的增长。
+真实 CI 合并树 `71161df9` 在别名展开修复前测量为 2,154,340 字节。随后加入的 user metadata 边界、附件引用校验和 `schemaVersion` 类型收窄，使 renderer 在该阶段测为 **2,154,390 字节**。合并上游 ChatSurface 后，常规生产构建与 CI 合并树均实测身份注入后的 JavaScript 为 **2,155,023 字节**，分离的组件 CSS 为 **2,428,500 字节**；此前的 **2,154,390** 只是阶段性结果，不再代表现有共享输入。告警基线因此为 **2,155,023**，硬上限为 **2,155,453 字节**，为工具链差异保留 430 字节。这里按当前合并后的生产输入重新校准基线，不隐藏增长，也不以任意抬高上限来规避真实冲突。
 
 - 单测覆盖 `cron` 与 `loop`、普通/未知 source、per-run 优先级、展开、短 echo 控件抑制、内置渲染惰性、附件、编辑、内容、附件数与编辑态变化时在解析前收起旧详情、空内容、document 展开，以及以 `Loop tick — ` 开头的真实指令在 interactive 和 document 视图中的保留。单独验证仅切换来源别名（`cron` ↔ `loop`）时保留已展开详情，且不重建 renderer。验证自动触发标题在所有支持的 catalog 中均已本地化。
 - 验证现有 `MessageItem` 仅改变 source 时会更新转发的 props，并验证普通长消息在 source 变为自动来源后恢复紧凑状态。
