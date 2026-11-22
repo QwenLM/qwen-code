@@ -2483,6 +2483,12 @@ describe('MemoryManager', () => {
 
     it('reports a flush whose own deadline expired while the slot was held', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
+      // The deadline reads Date.now() while the flush's race timer is
+      // monotonic: a backward clock correction in between would let the
+      // parked run resume "before" its deadline and skip the loss report.
+      // Pin the clock and expire the deadline explicitly.
+      const base = Date.now();
+      const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(base);
       const mgr = new MemoryManager();
       await turn(mgr, 2);
       expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
@@ -2499,6 +2505,7 @@ describe('MemoryManager', () => {
       // The slot is held past the flush's 1ms budget, so the run that finally
       // takes it finds its own deadline already expired.
       await expect(mgr.flushPendingExtract('sess', 1)).resolves.toBe(false);
+      nowSpy.mockReturnValue(base + 1_000);
       release();
       await direct;
       await mgr.drain();
