@@ -482,16 +482,17 @@ If discovery is unavailable, fails, or matches no built-in model, a preset updat
 
 The standalone `qwen auth` CLI command has been removed. Use these replacements instead:
 
-| Previous use case                | Replacement                                                                                   |
-| -------------------------------- | --------------------------------------------------------------------------------------------- |
-| Interactive authentication setup | Run `qwen`, then use `/auth`                                                                  |
-| Coding Plan setup                | Use `/auth`, or set `BAILIAN_CODING_PLAN_API_KEY` with the Coding Plan base URL               |
-| Token Plan setup                 | Use `/auth`, or set `BAILIAN_TOKEN_PLAN_API_KEY` with the Token Plan base URL for your region |
-| OpenRouter setup                 | Use `/auth`, or set `OPENROUTER_API_KEY` and `OPENAI_BASE_URL=https://openrouter.ai/api/v1`   |
-| Requesty setup                   | Use `/auth`, or set `REQUESTY_API_KEY` and `OPENAI_BASE_URL=https://router.requesty.ai/v1`    |
-| API-key or custom provider setup | Configure `~/.qwen/settings.json`, `.env`, or provider-specific environment variables         |
-| Check current authentication     | Run `/doctor` inside Qwen Code                                                                |
-| OAuth browser flow               | Run `qwen` interactively and use `/auth`; OAuth cannot be configured with env vars alone      |
+| Previous use case                | Replacement                                                                                       |
+| -------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Interactive authentication setup | Run `qwen`, then use `/auth`                                                                      |
+| Coding Plan setup                | Use `/auth`, or set `BAILIAN_CODING_PLAN_API_KEY` with the Coding Plan base URL                   |
+| Token Plan setup                 | Use `/auth`, or set `BAILIAN_TOKEN_PLAN_API_KEY` with the Token Plan base URL for your region     |
+| OpenRouter setup                 | Use `/auth`, or set `OPENROUTER_API_KEY` and `OPENAI_BASE_URL=https://openrouter.ai/api/v1`       |
+| Requesty setup                   | Use `/auth`, or set `REQUESTY_API_KEY` and `OPENAI_BASE_URL=https://router.requesty.ai/v1`        |
+| DeepInfra setup                  | Use `/auth`, or set `DEEPINFRA_API_KEY` and `OPENAI_BASE_URL=https://api.deepinfra.com/v1/openai` |
+| API-key or custom provider setup | Configure `~/.qwen/settings.json`, `.env`, or provider-specific environment variables             |
+| Check current authentication     | Run `/doctor` inside Qwen Code                                                                    |
+| OAuth browser flow               | Run `qwen` interactively and use `/auth`; OAuth cannot be configured with env vars alone          |
 
 Legacy invocations such as `qwen auth status` print a removal notice that summarizes these migration paths, including a Token Plan entry with the base URLs for both regions.
 
