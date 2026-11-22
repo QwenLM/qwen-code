@@ -718,6 +718,29 @@ describe('DefaultOpenAICompatibleProvider', () => {
       expect(result).not.toHaveProperty('custom_param');
     });
 
+    it('includes service_tier in the request when configured', () => {
+      const p = providerWith({
+        service_tier: 'flex',
+      });
+      const originalRequest = hello('gpt-4');
+
+      const result = build(originalRequest, p);
+
+      expect(result).toHaveProperty('service_tier', 'flex');
+    });
+
+    it('lets extra_body override service_tier', () => {
+      const p = providerWith({
+        service_tier: 'priority',
+        extra_body: { service_tier: 'flex' },
+      });
+      const originalRequest = hello('gpt-4');
+
+      const result = build(originalRequest, p);
+
+      expect(result).toHaveProperty('service_tier', 'flex');
+    });
+
     it('mirrors reasoning_content into reasoning for Qwen3 assistant history turns without mutating the source request', () => {
       const originalRequest: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'Qwen/Qwen3.6-35B-A3B',
