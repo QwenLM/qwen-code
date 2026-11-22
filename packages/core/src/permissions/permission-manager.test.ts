@@ -2985,6 +2985,7 @@ describe('buildPermissionRules', () => {
     it.each([
       ['grep_search', '/external/dir', 'Read(//external/dir/**)'],
       ['glob', '/tmp/data', 'Read(//tmp/data/**)'],
+      ['glob', '/tmp/data/', 'Read(//tmp/data/**)'],
       ['list_directory', '/home/user/docs', 'Read(//home/user/docs/**)'],
     ])(
       'generates Read rule with directory as-is for %s',
@@ -3097,6 +3098,18 @@ describe('buildPermissionRules', () => {
           expect(reads('//server/other/a.txt')).toBe(false);
         },
       );
+
+      it('a plain directory with a trailing separator matches files in it', async () => {
+        setPlatform('linux');
+        expect(readsUnder('/tmp/data/')('/tmp/data/a.txt')).toBe(true);
+      });
+
+      it('does not widen a drive root to the whole drive', async () => {
+        setPlatform('win32');
+        const reads = readsUnder('D:\\');
+        expect(reads('D:\\Windows\\System32\\config\\SAM')).toBe(false);
+        expect(reads('D:\\backups\\credentials.txt')).toBe(false);
+      });
 
       it('treats a doubled leading slash as a plain absolute path on POSIX', async () => {
         setPlatform('linux');

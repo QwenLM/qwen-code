@@ -757,8 +757,15 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
         // keeps both of its own separators: `///server/share/**` resolves
         // back to `//server/share/**`. On POSIX `//tmp` is just `/tmp`.
         // A trailing separator (`dirname` keeps it on a share root) is
-        // dropped so the rule doesn't end in `//**`.
-        const posixDir = toPosixPath(dirPath).replace(/(.)\/+$/, '$1');
+        // dropped so the rule doesn't end in `//**`. A drive root (`D:/`)
+        // keeps it: trimmed, the rule would cover the whole drive. A loop,
+        // not a regex, so a long run of separators stays linear.
+        let posixDir = toPosixPath(dirPath);
+        if (!/^[A-Za-z]:\/$/.test(posixDir)) {
+          while (posixDir.length > 1 && posixDir.endsWith('/')) {
+            posixDir = posixDir.slice(0, -1);
+          }
+        }
         const isUncRoot =
           /^\\\\[^\\]/.test(dirPath) ||
           (process.platform === 'win32' && /^\/\/[^/]/.test(posixDir));
