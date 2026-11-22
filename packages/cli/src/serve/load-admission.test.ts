@@ -278,9 +278,14 @@ describe('load admission observation-gap latch', () => {
       getBridges: () => [],
       loadAdmission: monitor,
     });
-    expect(() =>
-      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
-    ).toThrow(SystemOverloadedError);
+    let caught: unknown;
+    try {
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(SystemOverloadedError);
+    expect(caught).toMatchObject({ reason: 'observation_gap' });
     monitor.dispose();
   });
 
@@ -343,9 +348,14 @@ describe('load admission observation-gap latch', () => {
       getBridges: () => [],
       loadAdmission: monitor,
     });
-    expect(() =>
-      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
-    ).toThrow(SystemOverloadedError);
+    let caught: unknown;
+    try {
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(SystemOverloadedError);
+    expect(caught).toMatchObject({ reason: 'observation_gap' });
     monitor.dispose();
   });
 

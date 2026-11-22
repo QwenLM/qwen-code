@@ -128,6 +128,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionResetPendingError,
+  SystemOverloadedError,
   BridgeTimeoutError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -136,6 +137,7 @@ import {
   type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import type { LoadAdmissionSnapshot } from '../load-admission.js';
 import {
   BtwStreamError,
   BtwStreamRequests,
@@ -382,6 +384,7 @@ interface RegisterSessionRoutesDeps {
   }) => void;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
+  getLoadAdmissionSnapshot?: () => LoadAdmissionSnapshot;
   daemonLog?: DaemonLogger;
   sseAdmissionCaps?: SseAdmissionCaps;
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
@@ -922,6 +925,7 @@ export function registerSessionRoutes(
     archiveCoordinator,
     mutate,
     sendBridgeError,
+    getLoadAdmissionSnapshot,
     daemonLog,
     promptDeadlineMs,
     sessionShellCommandEnabled,
@@ -6436,6 +6440,25 @@ export function registerSessionRoutes(
               };
 
               try {
+                // Pre-commit load check: a worktree branch always runs a cold
+                // loadSession after persistOnly branchSession, so refuse before
+                // creating the worktree or committing the branch.
+                const load = getLoadAdmissionSnapshot?.();
+                if (load?.overloaded) {
+                  throw Object.assign(
+                    new SystemOverloadedError(
+                      load.reason ?? 'cpu_load',
+                      load.loadRatio,
+                      load.eventLoopLagP99Ms,
+                    ),
+                    {
+                      operation: 'branch',
+                      workspaceCwd: runtime.workspaceCwd,
+                      sessionId: targetSessionId,
+                      sourceSessionId: sessionId,
+                    },
+                  );
+                }
                 reservation = await requestedSessionIdAdmission.reserveCreate(
                   targetSessionId,
                   {
@@ -6653,6 +6676,39 @@ export function registerSessionRoutes(
               } catch (error) {
                 if (published) {
                   await releaseRestored();
+                  // If the load monitor latched between branchSession and the
+                  // subsequent cold loadSession, preserve the documented 503
+                  // retryable contract instead of a 500 activation failure.
+                  // The branch + worktree are already committed, so the body
+                  // must carry targetSessionId to let the caller rehydrate the
+                  // branched child once load subsides — the generic
+                  // sendBridgeError load shape omits it for routes that have
+                  // not allocated a session yet.
+                  if (error instanceof SystemOverloadedError) {
+                    const loggedSessionId = targetSessionId;
+                    daemonLog?.warn('load admission rejected', {
+                      route: 'POST /session/:id/branch',
+                      sessionId: loggedSessionId,
+                      reason: error.reason,
+                      loadRatio: error.loadRatio,
+                      eventLoopLagP99Ms: error.eventLoopLagP99Ms,
+                      operation: 'branch',
+                      workspaceCwd: runtime.workspaceCwd,
+                      sourceSessionId: sessionId,
+                    });
+                    if (res.writable) {
+                      res.set('Retry-After', '15');
+                      res.status(503).json({
+                        error: error.message,
+                        code: 'system_overloaded',
+                        reason: error.reason,
+                        loadRatio: error.loadRatio,
+                        eventLoopLagP99Ms: error.eventLoopLagP99Ms,
+                        sessionId: targetSessionId,
+                      });
+                    }
+                    return;
+                  }
                   if (res.writable) {
                     res.status(500).json({
                       error: 'Branch created but failed to open its worktree',

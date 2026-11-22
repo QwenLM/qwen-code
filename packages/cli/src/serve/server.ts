@@ -3726,6 +3726,10 @@ export function createServeApp(
     },
     mutate,
     sendBridgeError,
+    getLoadAdmissionSnapshot:
+      deps.getLoadAdmissionSnapshot ??
+      (() =>
+        loadAdmissionMonitor?.snapshot() ?? DISABLED_LOAD_ADMISSION_SNAPSHOT),
     daemonLog,
     sseAdmissionCaps,
     channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
