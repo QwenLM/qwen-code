@@ -60454,6 +60454,30 @@ describe('overload pause guards in App', () => {
     expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
   });
 
+  it('refuses a paused shell command before a session-less busy draft can queue it', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    testState.streamingState = 'waiting';
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
   it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
     armOverload();
     mockConnection.sessionId = null;

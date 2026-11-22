@@ -21756,11 +21756,6 @@ export function App({
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (streamingStateRef.current !== 'idle') {
-          queuedShellCommandsRef.current.push(cmd);
-          pushToast('info', t('queue.shellQueued'));
-          return true;
-        }
         const needsSession = !connectionRef.current.sessionId;
         if (
           needsSession &&
@@ -21772,6 +21767,11 @@ export function App({
             overloadDetailRef.current ?? t('sidebar.overloadPaused'),
           );
           return false;
+        }
+        if (streamingStateRef.current !== 'idle') {
+          queuedShellCommandsRef.current.push(cmd);
+          pushToast('info', t('queue.shellQueued'));
+          return true;
         }
         let shellPromptPreparationOwner: symbol | undefined;
         if (needsSession) {
