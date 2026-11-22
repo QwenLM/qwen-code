@@ -152,9 +152,11 @@ interface Run {
 
 /**
  * The root config's `retry: 2` would rerun both TUI sessions after a stall,
- * tripling its cost in the required gate.
+ * tripling its cost in the required gate. The ceiling covers all three arms
+ * and must outlast the waits inside them: a shared host starved by other
+ * jobs stretches every mocked turn several-fold (#18119).
  */
-const PARITY_CASE_OPTIONS = { retry: 0, timeout: 240_000 };
+const PARITY_CASE_OPTIONS = { retry: 0, timeout: 900_000 };
 
 /** What the TUI logs for each model round it sends on the shared loop. */
 const SHARED_ROUND_LOG = 'model round on the shared agent loop';
@@ -889,13 +891,17 @@ describeTui(SUITE, () => {
       }
     }
     if (scenario.laterTurns) {
+      // The session's own turns — a teammate report reaching the leader, a
+      // notification, a cron fire — are delivered after the prompt's turn
+      // settled, so this wait carries their whole chain. A starved shared
+      // host stretches it past the old 90s ceiling (#18119).
       await until(
         () =>
           streamingCount() >= scenario.requests &&
           (scenario.sideRequests === undefined ||
             sideCount() >= scenario.sideRequests),
         'the session starts its later turns',
-        90_000,
+        240_000,
         () => session!.viewport(),
       );
       await turnEnds(scenario.requests);
