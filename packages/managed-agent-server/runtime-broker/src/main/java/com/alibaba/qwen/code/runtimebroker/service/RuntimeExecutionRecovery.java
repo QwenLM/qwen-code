@@ -34,6 +34,7 @@ final class RuntimeExecutionRecovery {
     private final RuntimeTransport transport;
     private final RuntimeExecutionReconciler executionReconciler;
     private final AtomicBoolean closed;
+    private volatile java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> adoptedSessions;
 
     RuntimeExecutionRecovery(RuntimeBindingRegistry bindingRegistry,
             RuntimeExecutionState executionState,
@@ -49,6 +50,12 @@ final class RuntimeExecutionRecovery {
         this.transport = transport;
         this.executionReconciler = executionReconciler;
         this.closed = closed;
+        this.adoptedSessions = bindingRegistry::requireReadySession;
+    }
+
+    void setAdoptedSessionLookup(
+            java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> lookup) {
+        this.adoptedSessions = lookup;
     }
 
     /**
@@ -63,7 +70,7 @@ final class RuntimeExecutionRecovery {
         requireOpen(closed);
         String invocationId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
+        return adoptedSessions.apply(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord invocation = executionState.requireExecution(context, invocationId);
                     ToolExecutionRecord process = executionState.requireExecution(context, invocationId + ":process");
@@ -94,7 +101,20 @@ final class RuntimeExecutionRecovery {
             return failed(notFound("runtime_execution_not_found",
                     "The background process was not found"));
         }
-        return bindingRegistry.requireReadySession(harnessSessionId, row.getRuntimeSessionId())
+        // Tenant-scoped read-only pre-check before any adoption side effect.
+        // Adoption resolves the tenant from harnessSessionId (not the caller's)
+        // and may recover a binding and send control RPCs that settle rows, so
+        // a mismatched caller tenant must 404 here with zero side effects —
+        // the raw registry lookup this replaces was a read-only map check.
+        if (sessionRepository.findHistorical(
+                tenantId, harnessSessionId, row.getRuntimeSessionId()) == null) {
+            return failed(notFound("runtime_execution_not_found",
+                    "The background process was not found"));
+        }
+        // Adopt the durable Session like observeBackgroundProcess does: a
+        // cancel can land on a Broker that restarted (or a replica) and has
+        // no in-memory registry entry yet, and the raw registry would 404.
+        return adoptedSessions.apply(harnessSessionId, row.getRuntimeSessionId())
                 .thenCompose(context -> {
                     if (!context.session().getScope().getTenantId()
                             .equals(tenantId)) {

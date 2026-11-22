@@ -942,4 +942,97 @@ describe('daemon controller: in-flight and racing correlation', () => {
     h.emitPrompt({ promptId: 'pB', outcome: 'cancelled' });
     expect(opsOf(h.controller, 'cancel')[0]?.state).toBe('established');
   });
+
+  it('projects live history pagination facts from deps', () => {
+    const flags = {
+      hasOlderHistory: false,
+      loadingOlderHistory: false,
+      historyCapacityReached: false,
+      historyPaginationError: false,
+    };
+    const h = harness({
+      get hasOlderHistory() {
+        return flags.hasOlderHistory;
+      },
+      get loadingOlderHistory() {
+        return flags.loadingOlderHistory;
+      },
+      get historyCapacityReached() {
+        return flags.historyCapacityReached;
+      },
+      get historyPaginationError() {
+        return flags.historyPaginationError;
+      },
+    });
+    expect([
+      h.controller.hasOlderHistory,
+      h.controller.loadingOlderHistory,
+      h.controller.historyCapacityReached,
+      h.controller.historyPaginationError,
+    ]).toEqual([false, false, false, false]);
+    const keys = [
+      'hasOlderHistory',
+      'loadingOlderHistory',
+      'historyCapacityReached',
+      'historyPaginationError',
+    ] as const;
+    for (let i = 0; i < keys.length; i++) {
+      for (let j = 0; j < keys.length; j++) {
+        flags[keys[j]] = i === j;
+      }
+      expect([
+        h.controller.hasOlderHistory,
+        h.controller.loadingOlderHistory,
+        h.controller.historyCapacityReached,
+        h.controller.historyPaginationError,
+      ]).toEqual(keys.map((_, j) => i === j));
+    }
+  });
+
+  it('tracks activeTurnId along the FIFO prompt queue and stamps it on cancel results', async () => {
+    const h = harness();
+    expect(h.controller.activeTurnId).toBeUndefined();
+    const s1 = h.controller.submit(input);
+    h.admitSubmit('p1');
+    await s1;
+    expect(h.controller.activeTurnId).toBe('p1');
+    // Queueing p2 behind p1 keeps p1 as the active cancel target.
+    const s2 = h.controller.submit(input);
+    h.admitSubmit('p2');
+    await s2;
+    expect(h.controller.activeTurnId).toBe('p1');
+    // Emit p1's terminal settlement while cancel1 is still in flight so the
+    // queue head advances to p2 before cancel1 settles: the returned target
+    // must still carry the dispatch-time subject ('p1'), not the settle-time
+    // head ('p2') (pins R2-3 against a settle-time queue read).
+    const cancel1 = h.controller.cancel();
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBe('p2');
+    h.resolveCancel('unknown');
+    const res1 = await cancel1;
+    expect(res1.admission).toBe('unknown');
+    expect(res1.target.turnId).toBe('p1');
+    const cancel2 = h.controller.cancel();
+    h.resolveCancel('rejected');
+    const res2 = await cancel2;
+    expect(res2.admission).toBe('rejected');
+    expect(res2.target.turnId).toBe('p2');
+    h.emitPrompt({ promptId: 'p2', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBeUndefined();
+    const idleCancel = h.controller.cancel();
+    h.resolveCancel('rejected');
+    const resIdle = await idleCancel;
+    expect(resIdle.target.turnId).toBeUndefined();
+  });
+
+  it('seeds and deduplicates livePromptIds so a re-created controller keeps its FIFO head without latching settled prompts', () => {
+    const h = harness({ livePromptIds: ['p1', 'p1', '', 'p2'] });
+    expect(h.controller.activeTurnId).toBe('p1');
+    h.emitPrompt({ promptId: 'p1', outcome: 'completed' });
+    // Deduplication ensures one terminal event clears p1 instead of leaving a
+    // duplicate p1 latched at the FIFO head.
+    expect(h.controller.activeTurnId).toBe('p2');
+    h.emitPrompt({ promptId: 'p2', outcome: 'completed' });
+    expect(h.controller.activeTurnId).toBeUndefined();
+  });
 });

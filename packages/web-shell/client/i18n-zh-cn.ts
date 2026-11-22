@@ -23,6 +23,7 @@ import { MANAGED_TASK_MESSAGES_ZH } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_ZH } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_ZH } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_ZH } from './components/managed/managed-mcp-messages.js';
 import type { Messages, MessageValue } from './i18n.js';
 import { WEB_SHELL_LANGUAGES } from './i18n-language.js';
@@ -1266,6 +1267,12 @@ export const ZH: Messages = {
   'composerMobile.commands': '全部命令',
   'composerMobile.searchCommands': '搜索命令',
   'composerMobile.history': '输入历史',
+  'composerMobile.acceptFollowup': '接受建议',
+  'composerMobile.dismissFollowup': '忽略建议',
+  'composerMobile.caretUp': '光标上移',
+  'composerMobile.caretDown': '光标下移',
+  'composerMobile.caretRight': '光标右移',
+  'composerMobile.insertSlash': '插入斜杠',
   'composerMobile.stop': '停止',
   'composerMobile.attachments': (v) => `已添加附件/图片：${v?.count ?? 0}`,
   'composerAdd.emptyState': '此处没有可用的添加操作',
@@ -4185,6 +4192,7 @@ export const ZH: Messages = {
   'rightPanel.restoreFailed': (v) => `面板恢复失败：${v?.error ?? '未知错误'}`,
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
+  'userMessage.automatic.title': '自动触发',
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
@@ -5121,6 +5129,7 @@ export const ZH: Messages = {
   ...MANAGED_LIFECYCLE_MESSAGES_ZH,
   ...WORKSPACE_REGISTRATION_MESSAGES_ZH,
   ...ARTIFACT_LIBRARY_MESSAGES_ZH,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_ZH,
   ...MANAGED_MCP_MESSAGES_ZH,
   ...MANAGED_EXTENSION_MESSAGES_ZH,
   ...TRAJECTORY_EXECUTION_MESSAGES_ZH,

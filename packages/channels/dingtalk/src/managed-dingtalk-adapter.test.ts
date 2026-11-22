@@ -880,7 +880,7 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
-  it('a failure on a later segment settles only that segment, leaving the prefix delivered (R12)', async () => {
+  it("a transient failure on a later segment settles the delivery unknown, keeping the prefix's per-ordinal receipts (R12)", async () => {
     const hooks: { beforeSend?: () => void } = {};
     const { adapter, plane, fake } = await connectedAdapter(tempCwd(), hooks);
     // beforeSend runs after the send is recorded and before the failure check,
@@ -897,9 +897,13 @@ describe('managed DingTalk adapter outbox', () => {
       'segment 0',
       'segment 1',
     ]);
-    // The delivered prefix keeps its own per-ordinal receipt; the failure
-    // settles the delivery unknown with no ordinal, so the tail stays
-    // re-drivable instead of the whole reply being recorded as never sent.
+    // The delivered prefix keeps its own per-ordinal receipt; this transient
+    // failure settles the delivery unknown with no ordinal, so the tail stays
+    // re-drivable instead of the whole reply being recorded as never sent. A
+    // failure the deps leave definitive settles rejected instead — the class,
+    // not the segment's position, decides the outcome; a definitive refusal
+    // after one of that segment's chunks already landed is reclassified
+    // unknown (R10-2).
     expect(
       plane.receipts.map(
         (entry) =>
@@ -1292,9 +1296,9 @@ describe('managed DingTalk adapter outbox', () => {
 describe('managed DingTalk adapter review fixes', () => {
   it('drops a group frame under the private-chat policy (R1-7)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
-    // The drop is a policy decision after acceptance, so the frame must still
-    // be acked: an unacked frame would be redelivered forever and would also
-    // satisfy a bare "nothing was submitted" assertion.
+    // The drop is a policy decision, not an acceptance: no claim is staged, but
+    // the frame is still acked — an unacked frame would be redelivered forever
+    // and would also satisfy a bare "nothing was submitted" assertion.
     expect(
       fake.push(
         'msg-group',
