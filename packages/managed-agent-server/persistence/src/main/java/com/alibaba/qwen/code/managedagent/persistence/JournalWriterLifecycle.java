@@ -271,7 +271,7 @@ final class JournalWriterLifecycle {
         // pace, so a crash after accepting an immediate input is recovered as
         // today; it never lowers a delay a claim just set.
         jdbc.update(
-                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
+                "UPDATE ma_session_head SET state = 'ACTIVE', writer_generation = ?, writer_id = ?, writer_lease_until = ?, lease_token_hash = ?, gmt_modified = ?, wake_seal_revision = NULL, wake_seal_background = 0, wake_retry_at = LEAST(wake_retry_at, ?) WHERE tenant_id = ? AND harness_session_id = ?",
                 generation,
                 request.writerId(),
                 leaseUntil.getTime(),
@@ -377,14 +377,29 @@ final class JournalWriterLifecycle {
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(),
                 writerToken, now, false);
+        boolean stagedWake = JdbcRuntimeStageStore.hasWakeWorthyRow(
+                jdbc, ManagedSessionStore.sessionScopeKey(tenantId, sessionId));
         WakeStamp wake = request.wake();
         if (wake == null) {
-            jdbc.update(
-                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
-                        + " harness_session_id = ?",
-                    now.getTime(),
-                    tenantId,
-                    sessionId);
+            if (stagedWake) {
+                jdbc.update(
+                        "UPDATE ma_session_head SET state = 'SEALED', is_wake_pending = TRUE,"
+                            + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
+                            + " THEN ? ELSE wake_retry_at END, gmt_modified = ? WHERE tenant_id = ? AND"
+                            + " harness_session_id = ?",
+                        now.getTime(),
+                        now.getTime(),
+                        now.getTime(),
+                        tenantId,
+                        sessionId);
+            } else {
+                jdbc.update(
+                        "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ? WHERE tenant_id = ? AND"
+                            + " harness_session_id = ?",
+                        now.getTime(),
+                        tenantId,
+                        sessionId);
+            }
             return new SealReceipt(head.writerGeneration(), "SEALED", false);
         }
         JournalStoreRows.validateCounter(wake.revision(), "wake.revision", 0);
@@ -396,14 +411,34 @@ final class JournalWriterLifecycle {
             throw JournalStoreRows.conflict("managed_session_wake_stamp_stale",
                     "The wake stamp does not match the committed journal revision.");
         }
-        jdbc.update(
-                "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?, wake_seal_revision = journal_revision,"
-                    + " wake_head_revision = journal_revision, is_wake_pending = ?"
-                    + (wake.pending() ? ", wake_retry_at = ?" : "")
-                    + " WHERE tenant_id = ? AND harness_session_id = ?",
-                wake.pending()
-                        ? new Object[] {now.getTime(), true, wake.dueAt(), tenantId, sessionId}
-                        : new Object[] {now.getTime(), false, tenantId, sessionId});
+        boolean effectivePending = wake.pending() || stagedWake;
+        if (stagedWake) {
+            jdbc.update(
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
+                        + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
+                        + " wake_seal_background = ?, is_wake_pending = TRUE,"
+                        + " wake_retry_at = CASE WHEN wake_retry_at IS NULL OR wake_retry_at > ?"
+                        + " THEN ? ELSE wake_retry_at END"
+                        + " WHERE tenant_id = ? AND harness_session_id = ?",
+                    now.getTime(),
+                    wake.backgroundHeld(),
+                    now.getTime(),
+                    now.getTime(),
+                    tenantId,
+                    sessionId);
+        } else {
+            jdbc.update(
+                    "UPDATE ma_session_head SET state = 'SEALED', gmt_modified = ?,"
+                        + " wake_seal_revision = journal_revision, wake_head_revision = journal_revision,"
+                        + " wake_seal_background = ?, is_wake_pending = ?"
+                        + (effectivePending ? ", wake_retry_at = ?" : "")
+                        + " WHERE tenant_id = ? AND harness_session_id = ?",
+                    effectivePending
+                            ? new Object[] {now.getTime(), wake.backgroundHeld(), true, wake.dueAt(),
+                                    tenantId, sessionId}
+                            : new Object[] {now.getTime(), wake.backgroundHeld(), false,
+                                    tenantId, sessionId});
+        }
         return new SealReceipt(head.writerGeneration(), "SEALED", false);
     }
 

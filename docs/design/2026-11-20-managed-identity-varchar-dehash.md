@@ -266,10 +266,11 @@ categories need explicit redesign beyond the index rebuild:
   `(tenant_id, session_id, resource_id)`) with lexicographic row-value cursor
   comparisons, and the same total order must hold across every transaction that
   locks those rows.
-- **Generated columns over hash keys.** `ma_request_receipt.decision_scope_key`
-  (`GENERATED … RTRIM(scope_key)`, V1:681) and `ma_side_query.active_slot`
-  (`GENERATED … actor_scope_key`, V1:1333) derive from hash columns; both must be
-  redefined over the raw scope columns or dropped together with their consumers.
+- **Generated column over a hash key.** `ma_side_query.active_slot`
+  (`GENERATED … actor_scope_key`, V1:1333) derives from a hash column; it must be
+  redefined over the raw scope columns or dropped together with its consumers.
+  `ma_request_receipt.decision_scope_key` was removed by
+  [dead schema objects](2026-11-21-managed-schema-dead-objects.md).
 - **CHECK constraints over hash keys.** `ck_ma_resource_capture` (scope_key/slot_key
   nullability coupling, V1:508), `ck_ma_ref_binding` (runtime_binding_key, V1:536),
   and `ck_ma_storage_registered` (physical_key, V1:989) reference hash columns and

@@ -5044,12 +5044,38 @@ render no excerpt at all. So: pass the flag; fall back to the bare
 call ONLY when stderr says `unknown flag` (older gh has neither the
 check nor the flag); and stripVTControlCharacters the result, because
 raw ANSI would otherwise reach feedback.md and step stdout, where the
-existing defang handles only `::` and `##[`. The behavioral suite's
-fake gh reproduces the refusal, so a missing flag turns it red. The
-same fix lands on the patrol's own GhClient.jobLog, which was equally
-log-blind on current gh. The excerpt fence is sized past any backtick
-run inside it, so a log line carrying backticks cannot close the fence
-early and spill the rest into feedback.md as markdown.
+existing defang handles only `::` and `##[`. Bare CR, the other
+terminal controls and the Bidi overrides are stripped downstream by
+skillLog, BETWEEN two redaction passes: stripVTControlCharacters
+leaves a `\r` that a fork-controlled log line could use to visually
+overwrite a line's start in a terminal (`\b` and the rest of C0/C1
+repaint it, the Bidi set reorders it). The first pass is the unchanged
+redactLog and runs before the strip, so the anchored secret patterns
+keep the word boundary a bare `\r` supplies and the CR-bounded
+Cookie:/Authorization: rules stop at the header's own line. Line
+SELECTION also runs before the strip, because the selectors need the
+whitespace a leading \r supplies and a weld must not eat the failure
+line before it can be chosen. The second pass, redactWeldedTokens,
+runs after the strip per CONTIGUOUS run of selected lines — joining
+non-adjacent windows would let the private-key rule pair a BEGIN in
+one with an END in another and delete the failure between them — and
+drops the \b anchors: a control byte inside a credential defeats
+every anchor until the strip welds the fragments back into a token,
+and the same strip can weld a word character onto its front. A value
+is a TEMPERED token: it runs to the next whitespace but never across
+the ##[error] marker, so a credential legitimately containing # [ ]
+(a password, a PEM body, a log-supplied [redacted] prefix) is fully
+redacted while the marker still survives. The Bearer separator is
+zero-or-more horizontal whitespace so a deleted space still redacts;
+the URL scheme is length-bounded (not lookbehind-bounded, which would
+refuse a welded digit-prefixed start) and the userinfo is one-or-more
+@-segments. The header rules stay out of that pass. The behavioral
+suite's fake gh reproduces
+the refusal, so a missing flag turns it red. The same fix lands on
+the patrol's own GhClient.jobLog, which was equally log-blind on
+current gh. The excerpt fence is sized past any backtick run inside
+it, so a log line carrying backticks cannot close the fence early and
+spill the rest into feedback.md as markdown.
 
 PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
 switches the working tree to the PR branch, so the collector AND the
