@@ -47251,12 +47251,8 @@ describe('idle suspension', () => {
     }
   });
 
-  it('parks a recoverable approval and resumes it through cold recovery', async () => {
-    state.wakeDispatch = true;
-    state.actionParking = true;
-    state.wakeStamps.length = 0;
-    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
-    const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
+  // A write_file approval the model raises once; only a resumed Turn ends.
+  function mockApprovalTurn(): void {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
       async function (this: HostedWorkspaceBroker) {
         this.runtime = {
@@ -47305,32 +47301,81 @@ describe('idle suspension', () => {
           'test-model',
           signal,
         );
-        throw new Error(
-          'The parked Turn unexpectedly continued before resume.',
-        );
+        throw new Error('The waiting Turn unexpectedly continued.');
       },
     );
+  }
+
+  async function promptApproval(
+    server: Server,
+    prompt: unknown[] = [{ type: 'text', text: 'write notes' }],
+  ): Promise<string> {
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+        approvalMode: 'default',
+        approvalTimeoutMs: 60_000,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    return clientId;
+  }
+
+  // Idles several periods inside the approval wait, so a park that must not
+  // happen has had every chance to.
+  async function promptAndIdleInApproval(
+    server: Server,
+    prompt?: unknown[],
+  ): Promise<string> {
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    waiting.mockClear();
+    try {
+      const clientId = await promptApproval(server, prompt);
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return clientId;
+    } finally {
+      waiting.mockRestore();
+    }
+  }
+
+  // A resident wait must not outlive its test: its live poll and its later
+  // suspension would read and stamp the next test's shared state.
+  async function endResidentApproval(server: Server, clientId: string) {
+    await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+    await vi.waitFor(
+      async () => {
+        expect((await statusOf(server, clientId)).status).toBe(404);
+      },
+      { timeout: 5000 },
+    );
+  }
+
+  it('parks a recoverable approval and resumes it through cold recovery', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
+    mockApprovalTurn();
     try {
       const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const created = await headers(supertest(server).post('/session'))
-        .send({
-          sessionId: SESSION_ID,
-          sessionScope: 'thread',
-          managedSessionStore: store(),
-          toolProfile: 'hosted-workspace-files/1',
-          approvalMode: 'default',
-          approvalTimeoutMs: 60_000,
-        })
-        .expect(200);
-      const prompt = [{ type: 'text', text: 'write notes' }];
-      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-        .set('X-Qwen-Client-Id', created.body.clientId as string)
-        .send({
-          prompt,
-          promptId: PROMPT_ID,
-          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-        })
-        .expect(202);
+      const clientId = await promptApproval(server);
       await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
         timeout: 5000,
       });
@@ -47347,9 +47392,7 @@ describe('idle suspension', () => {
       });
       await vi.waitFor(
         async () => {
-          expect(
-            (await statusOf(server, created.body.clientId as string)).status,
-          ).toBe(404);
+          expect((await statusOf(server, clientId)).status).toBe(404);
         },
         { timeout: 5000 },
       );
@@ -47385,12 +47428,25 @@ describe('idle suspension', () => {
           policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
         })
         .expect(200);
-      await vi.waitFor(async () => {
-        expect(
-          (await statusOf(server, loaded.body.clientId as string)).body,
-        ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
-      });
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
       expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      // The reloaded resident suspends on its own; let it go before the next
+      // test reads the shared wake stamps.
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(server, loaded.body.clientId as string)).status,
+          ).toBe(404);
+        },
+        { timeout: 5000 },
+      );
     } finally {
       state.wakeDispatch = false;
       state.actionParking = false;
@@ -47399,83 +47455,84 @@ describe('idle suspension', () => {
   });
 
   it('keeps an approval resident when Action parking is not advertised', async () => {
-    state.wakeDispatch = false;
+    // Wake dispatch stays on so only the Action parking grant gates the park.
+    state.wakeDispatch = true;
     state.actionParking = false;
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 1 });
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
-      async function (this: HostedWorkspaceBroker) {
-        this.runtime = {
-          bindingId: 'binding',
-          generation: '1',
-          workspaceGeneration: '1',
-        };
-      },
-    );
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
-    vi.spyOn(
-      HostedWorkspaceBroker.prototype,
-      'activeHoldRuntimeSessionIds',
-    ).mockResolvedValue([]);
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockImplementation(
-      async () => randomUUID(),
-    );
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
-      executionStatus: 'success',
-      responseParts: [{ text: 'written' }],
-    });
-    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
-      const call = {
-        name: 'write_file',
-        callId: 'park-disabled-call',
-        args: { file_path: 'notes.txt', content: 'hello' },
-        isClientInitiated: false,
-        prompt_id: PROMPT_ID,
-      };
-      await toolTurn!.execute(
-        [call],
-        [
-          {
-            functionCall: {
-              id: call.callId,
-              name: call.name,
-              args: call.args,
-            },
-          },
-        ],
-        'test-model',
-        signal,
-      );
-      throw new Error('The resident Turn unexpectedly continued.');
-    });
+    mockApprovalTurn();
     try {
       const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const created = await headers(supertest(server).post('/session'))
-        .send({
-          sessionId: SESSION_ID,
-          sessionScope: 'thread',
-          managedSessionStore: store(),
-          toolProfile: 'hosted-workspace-files/1',
-          approvalMode: 'default',
-          approvalTimeoutMs: 60_000,
-        })
-        .expect(200);
-      const prompt = [{ type: 'text', text: 'write notes' }];
-      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-        .set('X-Qwen-Client-Id', created.body.clientId as string)
-        .send({
-          prompt,
-          promptId: PROMPT_ID,
-          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-        })
-        .expect(202);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const clientId = await promptAndIdleInApproval(server);
       expect(state.wakeStamps).toEqual([]);
       expect(statsOf(server).cleanSuspensions).toBe(0);
+      await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('keeps an approval resident when its Prompt has no text to resume from', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptAndIdleInApproval(server, [
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
+            'base64',
+          ),
+        },
+      ]);
+      expect(state.wakeStamps).toEqual([]);
+      expect(statsOf(server).cleanSuspensions).toBe(0);
+      await endResidentApproval(server, clientId);
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('rearms a park attempt whose approval read failed', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    // The idle attempt makes the first read once the wait starts: the live
+    // poll ticks only after a second.
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const get = state.approvalSelections.get.bind(state.approvalSelections);
+    let failed = false;
+    const read = vi
+      .spyOn(state.approvalSelections, 'get')
+      .mockImplementation((key) => {
+        if (failed || waiting.mock.calls.length === 0) return get(key);
+        failed = true;
+        throw new Error('Approval selection is unavailable.');
+      });
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      await promptApproval(server);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      expect(failed).toBe(true);
+      expect(state.wakeStamps[0]).toMatchObject({
+        parkedTurn: { promptId: PROMPT_ID },
+      });
+    } finally {
+      read.mockRestore();
+      waiting.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
       state.approvalSelections.clear();
     }
   });

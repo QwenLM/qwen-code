@@ -2876,6 +2876,22 @@ function retainHostedCleanupHolds(
   }
 }
 
+// A resumed approval restarts from this text, so an Action park refuses a
+// Turn without it exactly as the recovery arms do.
+async function hostedOriginalPromptText(
+  managed: ManagedSession,
+  promptId: string,
+): Promise<string | undefined> {
+  const user = (await managed.sink.project()).find(
+    (item) => item.type === 'user' && item.daemonPromptId === promptId,
+  );
+  return (
+    user?.message?.parts
+      ?.flatMap((part) => (typeof part.text === 'string' ? [part.text] : []))
+      .join('\n') || undefined
+  );
+}
+
 async function retryHostedCleanup(
   session: HostedSession,
   options: HostedWorkspaceBrokerOptions,
@@ -5120,7 +5136,11 @@ export function registerHostedHarnessSessionRoutes(
       session.managed,
       registration.promptId,
     );
-    if (!continuation || continuation.plan.commandStep !== undefined)
+    if (
+      !continuation ||
+      continuation.plan.commandStep !== undefined ||
+      !(await hostedOriginalPromptText(session.managed, registration.promptId))
+    )
       return undefined;
     let approvalRevision: number | undefined;
     if (registration.livePoll) {
@@ -5258,23 +5278,32 @@ export function registerHostedHarnessSessionRoutes(
       // down against evidence that no longer holds.
       return previous && !backgroundCertified;
     };
-    const actionPark = await actionParkCandidate(session, false);
+    let actionPark: ActionParkCandidate | undefined;
     const outcome = await runSuspensionAttempt(suspension, {
       pendingInputs: async () => {
+        // Derived inside the attempt so a failed read reverts and rearms;
+        // the pass under the gate re-reads the approval selection (§4.1).
+        if (!marked) actionPark = await actionParkCandidate(session, false);
+        else if (actionPark) {
+          const current = await actionParkCandidate(session, false);
+          if (current?.registration !== actionPark.registration) return true;
+          actionPark = current;
+        }
         const pending = pendingSessionInputs(
           session.managed.authority.eventsInSequenceRange(
             1,
             session.managed.authority.committedSequence,
           ),
         );
-        if (actionPark) {
+        const park = actionPark;
+        if (park) {
           const certificateLost = await refreshBackgroundCertificate();
           const blocked =
             backgroundCertified ||
             certificateLost ||
             hostedActionParkRegistration(session.managed) !==
-              actionPark.registration ||
-            pending.some((input) => input.turnId !== actionPark.promptId);
+              park.registration ||
+            pending.some((input) => input.turnId !== park.promptId);
           if (!marked && blocked) suspensionStats.eligibilityFailures += 1;
           return blocked;
         }
@@ -5313,12 +5342,12 @@ export function registerHostedHarnessSessionRoutes(
       liveWork: () =>
         suspensionLiveWork(session, backgroundCertified, actionPark),
       beforeTeardown: () => {
-        if (!actionPark) return;
+        const park = actionPark;
+        if (!park) return;
         if (
           backgroundCertified ||
-          hostedActionParkRegistration(session.managed) !==
-            actionPark.registration ||
-          !actionPark.registration.freeze()
+          hostedActionParkRegistration(session.managed) !== park.registration ||
+          !park.registration.freeze()
         )
           throw new Error('The Action wait is no longer parkable.');
         if (session.deadlineTimer) clearTimeout(session.deadlineTimer);
@@ -6643,14 +6672,10 @@ export function registerHostedHarnessSessionRoutes(
               ? await findHostedMemoryResults(resident.managed, parked)
               : undefined;
           if (model || approval || memoryResults) {
-            const user = (await resident.managed.sink.project()).find(
-              (item) => item.type === 'user' && item.daemonPromptId === parked,
+            const text = await hostedOriginalPromptText(
+              resident.managed,
+              parked,
             );
-            const text = user?.message?.parts
-              ?.flatMap((part) =>
-                typeof part.text === 'string' ? [part.text] : [],
-              )
-              .join('\n');
             if (!text)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',
@@ -8615,15 +8640,7 @@ export function registerHostedHarnessSessionRoutes(
             pendingCommandApproval ??
             (await findHostedApprovalContinuation(managed, unsettled));
           if (resumeApproval) {
-            const user = (await managed.sink.project()).find(
-              (item) =>
-                item.type === 'user' && item.daemonPromptId === unsettled,
-            );
-            const text = user?.message?.parts
-              ?.flatMap((part) =>
-                typeof part.text === 'string' ? [part.text] : [],
-              )
-              .join('\n');
+            const text = await hostedOriginalPromptText(managed, unsettled);
             if (!text)
               throw new HostedToolRecoveryRequiredError(
                 'Original Prompt is missing.',

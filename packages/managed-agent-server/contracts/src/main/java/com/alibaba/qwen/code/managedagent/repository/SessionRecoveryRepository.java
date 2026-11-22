@@ -7,7 +7,7 @@ public interface SessionRecoveryRepository {
             String journalState, String activationPhase,
             Long activationHeadRevision, Long journalRevision,
             boolean wakePending, Long wakeHeadRevision, Long wakeSealRevision,
-            boolean wakeSealBackground, String wakeSealParkedPromptId) { }
+            boolean wakeSealBackground) { }
     public List<HeadRecovery> heads(String tenantId, String sessionId);
     public long nonInitialTurns(String tenantId, String sessionId);
 

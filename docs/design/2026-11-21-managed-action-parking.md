@@ -75,7 +75,7 @@ Non-goals:
 
 ### 4.1 Eligibility: one predicate shared with the recovery arm
 
-Parking is safe only when cold recovery would accept the same state. The acceptance conditions of today's takeover recovery arm (`hosted-harness-session.ts:8385-8420`) are therefore extracted into one function that both parking and recovery call, with tests asserting that both give the same answer for the same journal state. No separate copy of "equivalent-looking" conditions is written.
+Parking is safe only when cold recovery would accept the same state. The acceptance conditions of today's takeover recovery arm (`hosted-harness-session.ts:8385-8420`) are therefore extracted into one function that both parking and recovery call, with tests asserting that both give the same answer for the same journal state. No separate copy of "equivalent-looking" conditions is written. The first increment shares the journal-state terms: the approval-continuation lookup and the original Prompt text that both approval recovery arms resume from. The Session-shape terms (Hooks, MCP, lineage, wake-owned input) still mirror the takeover arm's guards; folding them into the shared function needs a refactor of the load path and is deferred to a follow-up.
 
 On top of the Phase 1 predicate, the Harness relaxes only these terms:
 
@@ -139,7 +139,7 @@ Parking is one CAS. It locks the `ma_turn` row first, following the existing loc
 - the Session has no unfinished `ACTION_RESPONSE` operation;
 - the Action projection for that Prompt in `ma_session_record` is still `requested`.
 
-It writes `error_code = 'HARNESS_ACTION_PARKED'` and `retry_after = wake_seal_parked_until`, and clears `dispatch_owner` and `dispatch_lease_until`; it counts against neither the retry budget nor the consecutive-failure count. If the CAS fails, the coordinator proceeds as today's `transientFailure`.
+It writes `error_code = 'hosted_action_parked'` and `retry_after = wake_seal_parked_until`, and clears `dispatch_owner` and `dispatch_lease_until`; it counts against neither the retry budget nor the consecutive-failure count. The mark is dispatch bookkeeping, not a Turn error: public and Web Shell Turn reads omit it. If the CAS fails, the coordinator proceeds as today's `transientFailure`.
 
 `findDispatchable` needs no change: it already skips rows whose `retry_after` has not passed and does not exclude this error code, so the existing sweep (every second by default) redispatches the Turn once the time passes. When `claimTurn` claims a parked row, it clears the error code in the same UPDATE, so the mark only ever means "unowned, waiting to be woken" and never stays on a Turn that is being dispatched. The error-code branches in `runClaimed` (`HARNESS_RECOVERY_BLOCKED`, `RUNTIME_RECOVERY_BLOCKED`, `WORKFLOW_RECOVERY_BLOCKED`) each match only their own code and are unaffected by the new one. `JdbcHostedCleanupDebtStore.OWED` already skips Sessions with a `RUNNING` Turn, so cleanup owed by a parked Turn does not trigger a cleanup-only load.
 
@@ -147,7 +147,7 @@ Only `HarnessCoordinator` reads the Harness event stream (`stream` and `observeS
 
 ### 4.6 Unparking
 
-A new store method clears `error_code` and `retry_after` on every `HARNESS_ACTION_PARKED` row of the Session. It runs inside the following transactions, together with their main writes, and also locks the Turn row first:
+A new store method clears `error_code` and `retry_after` on every `hosted_action_parked` row of the Session. It runs inside the following transactions, together with their main writes, and also locks the Turn row first:
 
 - `ACTION_RESPONSE` admission (`JdbcManagedActionStore`);
 - Turn cancel admission: the status becomes `CANCELLING`, and `findDispatchable` also requires `retry_after` to have passed for `CANCELLING`, so it must be cleared;
@@ -175,7 +175,7 @@ If decision delivery is delayed, the resumed Session may be suspended again afte
 
 ### 4.8 Recovery view and status
 
-A parked Session's head is `SEALED` + `released`, but it has a `RUNNING` Turn. The "clean suspension → `ready`" arm of the [recovery-view supplement](2026-11-18-managed-suspension-recovery-view.md) already requires no unsettled Turn, so it never reports such a Session as ready. The other side needs adding: when the park certificate matches `HARNESS_ACTION_PARKED` on the Turn row, the view reports "Turn in progress, awaiting an Action" and must not fall into `recovery_evidence_unavailable` or the operator arms; when they disagree, the view keeps its existing conservative answer. Public Session reads, Web Shell Session reads, and Turn reads all go through this view and are pinned by tests.
+A parked Session's head is `SEALED` + `released`, but it has a `RUNNING` Turn. The "clean suspension → `ready`" arm of the [recovery-view supplement](2026-11-18-managed-suspension-recovery-view.md) already requires no unsettled Turn, so it never reports such a Session as ready. The other side needs no new arm: the existing active-Turn arm already reports "Turn in progress" ahead of `recovery_evidence_unavailable` and the operator arms, whether or not the park certificate is still current. A later writer acquisition clears the certificate while the Turn row stays `hosted_action_parked` until it is redispatched, so the view must not read the certificate at all. Public Session reads, Web Shell Session reads, and Turn reads all go through this view and are pinned by tests.
 
 ## 5. Decisions and rationale
 
@@ -240,7 +240,7 @@ Before enabling, record:
 - A wait that is not eligible behaves exactly as it does today.
 - An eligible wait is cleanly parked after one idle period: the Session leaves `attachedSessions` and stops renewing; the `ma_turn` row releases its dispatch lease, and `retry_after` equals the certificate's wake time.
 - After a park, a decision, cancellation, mode change, and expiry each complete the original Turn through one cold recovery: Action, Prompt, and batch identities are unchanged, nothing is asked again, Allow executes exactly once, and Deny zero times.
-- Parking never spends the Turn's retry budget, and no committed decision, cancellation, or approval-mode change leaves the Turn parked until expiry.
+- A completed park never spends the Turn's retry budget. A park the CAS refuses because a decision, cancellation, or approval-mode change raced it falls back to one ordinary retry, which the Turn's next journaled progress resets. No committed decision, cancellation, or approval-mode change leaves the Turn parked until expiry.
 - Every status read of a parked Session truthfully reports the Turn in progress.
 - The real-process, MySQL, and fault cases required by §11 pass in CI, and the §7 measurements are complete, before the switch is turned on.
 

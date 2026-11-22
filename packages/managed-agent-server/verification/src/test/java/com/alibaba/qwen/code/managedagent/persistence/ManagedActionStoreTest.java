@@ -158,6 +158,16 @@ class ManagedActionStoreTest {
         assertThat(turn.get("retry_after")).isNull();
     }
 
+    // The Action park guard finds a Turn's requested Action by this column.
+    @Test
+    void projectsTheActionPromptIdentity() {
+        project("requested", null, 1, 1000);
+
+        assertThat(jdbc.queryForMap("SELECT prompt_id FROM ma_session_record WHERE tenant_id=?"
+                + " AND session_id=? AND record_kind='ACTION' AND action_id=?", TENANT, SESSION, ACTION)
+                .get("prompt_id")).isEqualTo("turn");
+    }
+
     @Test
     void doesNotOverwriteAResponseConfirmedAfterCandidateSelection() {
         project("requested", null, 1, 1000);

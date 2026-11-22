@@ -151,13 +151,6 @@ public class SessionRecoveryService {
                 session.sessionId(), session.workspace() == null ? null : session.workspace().getWorkspaceId()))) {
             return view("ready", "ready", turn, true, false, false);
         }
-        HeadRecovery head = heads.isEmpty() ? null : heads.getFirst();
-        if (active && TurnExecutionStore.HARNESS_ACTION_PARKED.equals(turn.errorCode())) {
-            return actionParkCertificateMatches(head, turn)
-                    ? view("recovering", "turn_active", turn, false, false, cancel)
-                    : view("awaiting_evidence", "recovery_evidence_unavailable",
-                            turn, false, false, cancel);
-        }
         if (active && !recoveryIntent(turn)) {
             return view("recovering", "turn_active", turn, false, false, cancel);
         }
@@ -170,6 +163,7 @@ public class SessionRecoveryService {
         // projection to have proved this exact revision carries no pending
         // input, and no durable obligation to survive. Anything less falls
         // through to the evidence-driven arms below, which stay conservative.
+        HeadRecovery head = heads.isEmpty() ? null : heads.getFirst();
         if (!active && head != null && "SEALED".equals(head.journalState())) {
             boolean projectionCurrent = head.activationHeadRevision() != null
                     && head.activationHeadRevision().equals(head.journalRevision());
@@ -268,14 +262,6 @@ public class SessionRecoveryService {
         } catch (ManagedAgentException forbidden) {
             return false;
         }
-    }
-
-    private static boolean actionParkCertificateMatches(HeadRecovery head, TurnRecord turn) {
-        return head != null && "SEALED".equals(head.journalState())
-                && "released".equals(head.activationPhase())
-                && head.journalRevision() != null
-                && head.journalRevision().equals(head.wakeSealRevision())
-                && turn.promptId().equals(head.wakeSealParkedPromptId());
     }
 
     private static boolean recoveryIntent(TurnRecord turn) {

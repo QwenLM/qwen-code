@@ -39,7 +39,7 @@ public interface TurnExecutionStore {
 
     String HARNESS_RECOVERY_BLOCKED = "hosted_harness_recovery_blocked";
 
-    String HARNESS_ACTION_PARKED = "HARNESS_ACTION_PARKED";
+    String HARNESS_ACTION_PARKED = "hosted_action_parked";
 
     public List<DispatchTarget> findDispatchable(long now, int limit);
 

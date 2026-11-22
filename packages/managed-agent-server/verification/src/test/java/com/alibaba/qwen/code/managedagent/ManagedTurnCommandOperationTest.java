@@ -736,11 +736,12 @@ class ManagedTurnCommandOperationTest {
                         + " wake_seal_parked_prompt_id = ?, wake_seal_parked_until = ?,"
                         + " wake_seal_parked_approval_revision = 0 WHERE session_id = ?",
                 prompt, now.get() + 1000, sessionId);
+        // Only the columns JdbcManagedActionStore.apply writes for an Action.
         jdbc.update("INSERT INTO ma_session_record (record_key,tenant_id,session_id,"
                         + "domain,record_id,revision,gmt_create,record_kind,state,action_id,action_version,"
-                        + "options_json,prompt_id,turn_id) VALUES (?,?,?,'action','action',1,1,"
-                        + "'ACTION','requested','action',1,'{}',?,?)",
-                "a".repeat(64), TENANT, sessionId, prompt, admitted.turnId());
+                        + "options_json,prompt_id) VALUES (?,?,?,'action','action',1,1,"
+                        + "'ACTION','requested','action',1,'{}',?)",
+                "a".repeat(64), TENANT, sessionId, prompt);
         return admitted;
     }
 

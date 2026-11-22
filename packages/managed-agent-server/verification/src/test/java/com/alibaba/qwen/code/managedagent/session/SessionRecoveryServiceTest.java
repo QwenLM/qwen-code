@@ -56,9 +56,9 @@ class SessionRecoveryServiceTest {
                 + " head_kind VARCHAR, recovery_status VARCHAR, recovery_detail_code VARCHAR,"
                 + " state VARCHAR, activation_phase VARCHAR, activation_head_revision BIGINT,"
                 + " journal_revision BIGINT, is_wake_pending INT, wake_head_revision BIGINT,"
-                + " wake_seal_revision BIGINT, wake_seal_background INT, wake_seal_parked_prompt_id VARCHAR)");
-        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0, null);
+                + " wake_seal_revision BIGINT, wake_seal_background INT)");
+        jdbc.update("INSERT INTO ma_session_head VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tenant", "session", "MANAGED_SESSION", "READY", null, "ACTIVE", null, null, 0L, 0, 0L, null, 0);
         // The obligation projections the sealed-head proof reads. Empty by
         // default: a cleanly suspended Session owes nothing.
         jdbc.execute("CREATE TABLE ma_turn (tenant_id VARCHAR, session_id VARCHAR, status VARCHAR)");
@@ -127,32 +127,20 @@ class SessionRecoveryServiceTest {
         verifyNoInteractions(harness, coordinator);
     }
 
-    @Test
-    void aConsistentActionParkReportsItsActiveTurnWithoutHarnessEvidence() {
+    // A parked Turn reads as running whether its seal certificate is current
+    // or a later writer acquisition has already cleared it.
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anActionParkedTurnReportsItsActiveTurnWithoutHarnessEvidence(boolean certified) {
         sealCleanly();
-        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 5,"
-                + " wake_seal_parked_prompt_id = 'private-prompt'");
+        jdbc.update(certified ? "UPDATE ma_session_head SET wake_seal_revision = 5"
+                : "UPDATE ma_session_head SET state = 'ACTIVE', activation_phase = 'active'");
         turn("RUNNING", TurnExecutionStore.HARNESS_ACTION_PARKED);
 
         var recovery = service.query("tenant", "actor", "session");
 
         assertThat(recovery.state()).isEqualTo("recovering");
         assertThat(recovery.reasonCode()).isEqualTo("turn_active");
-        assertThat(recovery.nextTurnAllowed()).isFalse();
-        verifyNoInteractions(harness, coordinator);
-    }
-
-    @Test
-    void anActionParkCertificateMismatchStaysConservative() {
-        sealCleanly();
-        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 5,"
-                + " wake_seal_parked_prompt_id = 'another-prompt'");
-        turn("RUNNING", TurnExecutionStore.HARNESS_ACTION_PARKED);
-
-        var recovery = service.query("tenant", "actor", "session");
-
-        assertThat(recovery.state()).isEqualTo("awaiting_evidence");
-        assertThat(recovery.reasonCode()).isEqualTo("recovery_evidence_unavailable");
         assertThat(recovery.nextTurnAllowed()).isFalse();
         verifyNoInteractions(harness, coordinator);
     }
