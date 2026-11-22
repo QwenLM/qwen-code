@@ -13246,6 +13246,9 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-bootstrap-selforigin-')),
     );
     writeWebShellFixture(tmpDir);
+    // Hold the boot: the 1s fallback otherwise mounts the runtime between the
+    // probes below on a contended runner, and the bootstrap premise is gone.
+    const { releaseBoot } = gateDeferredRuntimeBoot();
     const { handle, createBridge } = await startDeferredDaemon(tmpDir, {
       serveOptions: { hostname: '0.0.0.0' },
     });
@@ -13280,6 +13283,9 @@ describe('runQwenServe runtime startup failures', () => {
       expect(crossOrigin.status).toBe(403);
       expect(createBridge).not.toHaveBeenCalled();
     } finally {
+      // Release before closing so a failed assertion above cannot wedge the
+      // close behind a boot that will never proceed.
+      releaseBoot();
       await handle.close();
     }
   });
