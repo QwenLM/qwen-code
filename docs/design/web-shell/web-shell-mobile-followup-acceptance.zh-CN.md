@@ -2,7 +2,7 @@
 
 [English](web-shell-mobile-followup-acceptance.md) | [简体中文](web-shell-mobile-followup-acceptance.zh-CN.md)
 
-状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20–22 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示 → 有界镜像测量、折行行尾字素钳制、仅垂直写列、展开对话框 surface、忽略不聚焦)。
+状态:已在 main 实现并合入(PR #17918,合入提交 `f89c4b4d0704e4dd7691e2ce59b0cf3af91785da`),2026-11-20–22 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示 → 有界镜像测量、折行行尾字素钳制、仅垂直写列、展开对话框 surface、忽略不聚焦)。
 
 ## 问题
 
