@@ -183,6 +183,31 @@ export class MessageEmitter extends BaseEmitter {
     );
   }
 
+  /**
+   * Emits a PreToolUse block notice as a discrete message.
+   *
+   * Hook denials carry multi-line reasons (fact questions, recovery hints).
+   * Without the discrete marker clients splice the notice into the surrounding
+   * assistant prose, collapsing its structure and merging concurrent denials
+   * into one run-on paragraph — the same leak background notifications and
+   * vision-bridge notices already opt out of.
+   */
+  async emitPreToolUseBlockNotice(
+    toolName: string,
+    blockReason: string,
+  ): Promise<void> {
+    await this.sendUpdate(
+      createTranscriptMessageUpdate({
+        role: 'assistant',
+        text: `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+        extra: {
+          source: 'pre_tool_use_block',
+          qwenDiscreteMessage: true,
+        },
+      }),
+    );
+  }
+
   async emitVisionBridgeNotice(
     text: string,
     result: VisionBridgeResult,

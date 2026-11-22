@@ -769,6 +769,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           | { type?: string; text?: string }
           | undefined;
         if (meta?.['qwenDiscreteMessage'] === true) {
+          // Discrete notices are allow-listed by source; an unlisted source
+          // is dropped here, so every new notice source must be added below.
           if (
             meta['source'] === 'background_notification_response' &&
             meta['rewritten'] !== true &&
@@ -789,7 +791,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
               );
             }
           } else if (
-            meta['source'] === 'vision_bridge_notice' &&
+            (meta['source'] === 'vision_bridge_notice' ||
+              meta['source'] === 'pre_tool_use_block') &&
             content?.type === 'text' &&
             content.text
           ) {

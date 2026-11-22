@@ -1816,6 +1816,36 @@ describe('AcpBridge', () => {
     expect(textChunks).toEqual([['s-1', 'Vision bridge cancelled.']]);
   });
 
+  it('emits discrete PreToolUse block notices as text chunks', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: {
+          type: 'text',
+          text: '✗ **PreToolUse blocked**: write_file - line one\nline two',
+        },
+        _meta: {
+          source: 'pre_tool_use_block',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(textChunks).toEqual([
+      ['s-1', '✗ **PreToolUse blocked**: write_file - line one\nline two'],
+    ]);
+  });
+
   it('emits a completed background response separately from the active turn', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
