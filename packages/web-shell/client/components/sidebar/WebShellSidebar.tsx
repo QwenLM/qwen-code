@@ -5665,6 +5665,15 @@ export function WebShellSidebar({
               label={label}
               time={time}
               completedUnread={completedUnread}
+              // The starting spinner outranks the run dots, not the
+              // actionable approval/question cues.
+              statusLabel={
+                liveStarting &&
+                !session.isWaitingForPermission &&
+                !session.isWaitingForUserQuestion
+                  ? t('live.state.starting')
+                  : undefined
+              }
             >
               {row}
             </SessionDetailsTooltip>
