@@ -321,6 +321,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       setPendingJumpArtifactOpen: (req) => {
         pending = req;
       },
+      isCurrent: () => true,
       loadSidebarSession,
       reportError,
     });
@@ -372,6 +373,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       setPendingJumpArtifactOpen: (req) => {
         pending = req;
       },
+      isCurrent: () => true,
       loadSidebarSession: loadNotFound,
       reportError: reportNotFound,
     });
@@ -402,6 +404,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       setPendingJumpArtifactOpen: (req) => {
         pending = req;
       },
+      isCurrent: () => true,
       loadSidebarSession: loadAlreadyActive,
       reportError: vi.fn(),
     });
@@ -468,6 +471,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       setPendingJumpArtifactOpen: (req) => {
         errPending = req;
       },
+      isCurrent: () => true,
       loadSidebarSession: loadOnErr,
       reportError: reportOnErr,
     });
@@ -477,6 +481,73 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       expect.objectContaining({ message: 'session_archiving' }),
       'Failed to open session',
     );
+
+    // R1-2 (a): jump's own loadSidebarSession rejects while isCurrent() is true ->
+    // clears pendingJumpArtifactOpen and surfaces 'Failed to open session'.
+    let loadFailPending: PendingArtifactJumpOpenRequest | undefined;
+    const setLoadFailPending = vi.fn(
+      (req: PendingArtifactJumpOpenRequest | undefined) => {
+        loadFailPending = req;
+      },
+    );
+    const reportLoadFail = vi.fn();
+    await runArtifactLibrarySessionJump({
+      sessionId: 'sess-load-fail',
+      archiveState: 'active',
+      artifactId: 'art-load-fail',
+      targetCwd: '/work/proj',
+      primaryCwd: '/work/proj',
+      showChat: vi.fn(),
+      unarchivePrimarySession: vi.fn(),
+      unarchiveWorkspaceSessions: vi.fn(),
+      getPendingJumpArtifactOpen: () => loadFailPending,
+      setPendingJumpArtifactOpen: setLoadFailPending,
+      isCurrent: () => true,
+      loadSidebarSession: vi
+        .fn()
+        .mockRejectedValue(new Error('session deleted concurrently')),
+      reportError: reportLoadFail,
+    });
+    expect(loadFailPending).toBeUndefined();
+    expect(setLoadFailPending).toHaveBeenLastCalledWith(undefined);
+    expect(reportLoadFail).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'session deleted concurrently' }),
+      'Failed to open session',
+    );
+
+    // R1-2 (b): unarchive rejects AFTER isCurrent() flipped false -> stays silent
+    // (does not toast an error for an abandoned jump and arms no pending open).
+    let staleErrPending: PendingArtifactJumpOpenRequest | undefined;
+    let rejectStaleUnarchive!: (err: Error) => void;
+    let staleErrCurrent = true;
+    const reportStaleErr = vi.fn();
+    const staleErrPromise = runArtifactLibrarySessionJump({
+      sessionId: 'sess-stale-err',
+      archiveState: 'archived',
+      artifactId: 'art-stale-err',
+      targetCwd: '/work/proj',
+      primaryCwd: '/work/proj',
+      showChat: vi.fn(),
+      unarchivePrimarySession: vi.fn(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectStaleUnarchive = reject;
+          }),
+      ),
+      unarchiveWorkspaceSessions: vi.fn(),
+      getPendingJumpArtifactOpen: () => staleErrPending,
+      setPendingJumpArtifactOpen: (req) => {
+        staleErrPending = req;
+      },
+      isCurrent: () => staleErrCurrent,
+      loadSidebarSession: vi.fn(),
+      reportError: reportStaleErr,
+    });
+    staleErrCurrent = false;
+    rejectStaleUnarchive(new Error('unarchive failed after abandon'));
+    await staleErrPromise;
+    expect(staleErrPending).toBeUndefined();
+    expect(reportStaleErr).not.toHaveBeenCalled();
   });
 
   it('renders rows with displayName fallback and archive badges, previews workspace-file and metadata-only managed artifacts without loading a session, filters client-side and resets filter on workspace change, and bounds rendered rows with Show more', async () => {

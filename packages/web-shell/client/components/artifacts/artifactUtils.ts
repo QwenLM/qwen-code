@@ -770,7 +770,7 @@ export interface ArtifactLibrarySessionJumpDeps {
   setPendingJumpArtifactOpen: (
     request: PendingArtifactJumpOpenRequest | undefined,
   ) => void;
-  isCurrent?: () => boolean;
+  isCurrent: () => boolean;
   loadSidebarSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -819,14 +819,14 @@ export async function runArtifactLibrarySessionJump(
       } else {
         await unarchivePrimarySession(sessionId);
       }
-      if (isCurrent && !isCurrent()) return;
+      if (!isCurrent()) return;
     }
     if (artifactId) {
       setPendingJumpArtifactOpen({ sessionId, artifactId });
     }
     await loadSidebarSession(sessionId, targetCwd);
   } catch (error) {
-    if (isCurrent && !isCurrent()) return;
+    if (!isCurrent()) return;
     const current = getPendingJumpArtifactOpen();
     if (
       current?.sessionId === sessionId &&

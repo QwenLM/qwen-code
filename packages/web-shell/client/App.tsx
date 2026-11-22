@@ -11097,6 +11097,10 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  const artifactLibraryJumpGenRef = useRef(0);
+  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
+    undefined,
+  );
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
@@ -12502,6 +12506,7 @@ export function App({
           // `/clear` carry so the pane session's lineage never inherits the
           // cleared session's title.
           pendingManualTitleRef.current = undefined;
+          artifactLibraryJumpGenRef.current += 1;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -17415,6 +17420,7 @@ export function App({
         ? { displayName: opts.carryManualTitle }
         : undefined;
       splitClassificationGenerationRef.current += 1;
+      artifactLibraryJumpGenRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
       let availableWorkspaces = workspacesRef.current;
@@ -18587,10 +18593,6 @@ export function App({
     }
   }, [createNewSession, onSessionIdChange]);
 
-  const artifactLibraryJumpGenRef = useRef(0);
-  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
-    undefined,
-  );
   const loadSidebarSession = useCallback(
     async (
       sessionId: string,
@@ -18598,6 +18600,9 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      // Suppress the generation bump for the jump's own load so a rejection
+      // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
+      // catch block and still clears pending state and surfaces the error.
       if (artifactLibraryJumpDispatchingRef.current !== sessionId) {
         artifactLibraryJumpGenRef.current += 1;
       }
@@ -27096,7 +27101,7 @@ export function App({
                               {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
                             </span>
                             <button type="button" className={styles.composerActionTipButton}
-                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              onClick={() => { if (connection.sessionId) { artifactLibraryJumpGenRef.current += 1; void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); } }}>
                               {t('capacityChoice.resume')}
                             </button>
                           </div>

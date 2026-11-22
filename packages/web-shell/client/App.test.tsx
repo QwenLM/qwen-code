@@ -60485,7 +60485,8 @@ describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
       mockConnection.loadingTranscript = false;
     });
 
-    const { container, rerender } = renderApp();
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
     await flush();
     await act(async () => {
       container
@@ -60574,5 +60575,79 @@ describe('App workspace artifact library wiring (R2-1 & R2-4)', () => {
         (tab) => tab.artifactId === 'art-snap-canceled',
       ),
     ).toBe(false);
+
+    // R1-1: clicking New chat while unarchive is in flight also cancels the
+    // archived-session jump (createNewSession bumps artifactLibraryJumpGenRef).
+    let resolveUnarchiveNewChat!: () => void;
+    mockWorkspaceActions.unarchiveSession.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchiveNewChat = resolve;
+        }),
+    );
+    mockSessionActions.loadSession.mockClear();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-arch-newchat',
+        'art-snap-newchat',
+        'archived',
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="new-session"]')!
+        .click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveUnarchiveNewChat();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalledWith(
+      'sess-arch-newchat',
+      expect.anything(),
+    );
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.artifactId === 'art-snap-newchat',
+      ),
+    ).toBe(false);
+
+    // R1-2 (App-level): when the jump's own loadSession rejects, the dispatch
+    // suppression keeps isCurrent() true so the error alert is surfaced rather
+    // than silently swallowed.
+    mockSessionActions.loadSession.mockRejectedValueOnce(
+      new Error('session deleted mid-jump'),
+    );
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-artifacts-library"]',
+        )!
+        .click();
+      await Promise.resolve();
+    });
+    await flush();
+    await act(async () => {
+      testState.latestArtifactLibraryProps?.onJumpToSessionArtifact?.(
+        'sess-load-reject',
+        'art-snap-reject',
+        'active',
+      );
+      await Promise.resolve();
+    });
+    await flush();
+    expect(onToast).toHaveBeenCalledWith('error', 'session deleted mid-jump');
   });
 });
