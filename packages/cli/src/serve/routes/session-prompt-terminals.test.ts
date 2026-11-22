@@ -457,14 +457,11 @@ describe('POST /session/:id/load prompt terminals', () => {
           executionSummary: usage,
         }),
       });
+      // Both routes now read daemon-local and replay identically, so the
+      // completed tool output sits directly under `data` (the singular route
+      // no longer wraps bridge events in `data.update`).
       expect(summaryEvents).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({
-            data: qualified
-              ? completed
-              : expect.objectContaining({ update: completed }),
-          }),
-        ]),
+        expect.arrayContaining([expect.objectContaining({ data: completed })]),
       );
     },
   );
