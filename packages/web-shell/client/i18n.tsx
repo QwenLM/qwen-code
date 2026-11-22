@@ -1231,6 +1231,12 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
+  'composerMobile.acceptFollowup': 'Accept suggestion',
+  'composerMobile.dismissFollowup': 'Dismiss suggestion',
+  'composerMobile.caretUp': 'Move cursor up',
+  'composerMobile.caretDown': 'Move cursor down',
+  'composerMobile.caretRight': 'Move cursor right',
+  'composerMobile.insertSlash': 'Insert slash',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -1414,6 +1420,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'askUser.progress': (v) => `${v?.current ?? 0}/${v?.total ?? 0} questions`,
   'askUser.selectAnswer': 'Select an answer',
   'askUser.typePlaceholder': 'Type something...',
+  'chat.promptNotConfirmed': 'Prompt not confirmed',
+  'chat.promptNotAdmitted': 'Prompt not accepted',
+  'chat.failedToSend': 'Failed to send message',
+  'chat.approvalNotAccepted': 'Approval was not accepted',
+  'chat.acknowledgeUnknown': 'I have checked the session',
+  'chat.stopNotConfirmed': 'Stop request not confirmed',
   'askUser.shortcuts.previous': '← previous',
   'askUser.shortcuts.optionsSingle': '↑↓ select · Enter submit',
   'askUser.shortcuts.optionsNext': '↑↓ select · Enter next',
@@ -2787,6 +2799,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.sessionIssueStateNotPlanned': 'Not planned',
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.userInputNeededShort': 'Input',
+  'sidebar.continuationNeeded': 'Continue execution needed',
+  'sidebar.continuationNeededShort': 'Continue',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
   'sidebar.selectSessions': 'Select sessions',
@@ -4404,6 +4418,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `Failed to restore panel: ${v?.error ?? 'Unknown error'}`,
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
+  'userMessage.automatic.title': 'Automatic trigger',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
@@ -5427,6 +5442,10 @@ export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
 
 export const RESTART_RECOVERY_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
   key.startsWith('restartRecovery.'),
+);
+
+export const CHAT_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('chat.'),
 );
 
 const catalogs = new Map(eagerCatalogs);
