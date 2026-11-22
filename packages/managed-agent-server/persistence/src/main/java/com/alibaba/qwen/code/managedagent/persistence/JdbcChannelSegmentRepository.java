@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.BatchPreparedStatementSetter;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
@@ -69,7 +68,7 @@ public final class JdbcChannelSegmentRepository
                     public void setValues(PreparedStatement statement, int index)
                             throws SQLException {
                         SegmentLedger segment = segments.get(index);
-                        statement.setBytes(1, ManagedSchemaKeys.identity(deliveryId));
+                        statement.setString(1, deliveryId);
                         statement.setString(2, tenantId);
                         statement.setString(3, channelInstanceId);
                         statement.setString(4, segment.segmentId());
@@ -108,7 +107,7 @@ public final class JdbcChannelSegmentRepository
                         statement.setString(1, JdbcChannelDeliveryRepository
                                 .receiptJson(segment.providerReceipt()));
                         statement.setLong(2, now);
-                        statement.setBytes(3, ManagedSchemaKeys.identity(deliveryId));
+                        statement.setString(3, deliveryId);
                         statement.setString(4, tenantId);
                         statement.setString(5, channelInstanceId);
                         statement.setInt(6, segment.ordinal());
@@ -143,7 +142,7 @@ public final class JdbcChannelSegmentRepository
                         + " AND tenant_id = ? AND channel_id = ?"
                         + " AND segment_ordinal = ? AND provider_receipt_json IS NULL",
                 JdbcChannelDeliveryRepository.receiptJson(providerReceipt),
-                now, ManagedSchemaKeys.identity(deliveryId), tenantId,
+                now, deliveryId, tenantId,
                 channelInstanceId, ordinal) == 1;
     }
 
@@ -157,7 +156,7 @@ public final class JdbcChannelSegmentRepository
                         + " FROM ma_channel_segment WHERE delivery_id = ?"
                         + " AND tenant_id = ? AND channel_id = ?"
                         + " ORDER BY segment_ordinal",
-                MAPPER, ManagedSchemaKeys.identity(deliveryId), tenantId,
+                MAPPER, deliveryId, tenantId,
                 channelInstanceId);
     }
 
@@ -181,7 +180,7 @@ public final class JdbcChannelSegmentRepository
                 Collections.nCopies(byDelivery.size(), "?"));
         List<Object> arguments = new ArrayList<>();
         for (String deliveryId : byDelivery.keySet()) {
-            arguments.add(ManagedSchemaKeys.identity(deliveryId));
+            arguments.add(deliveryId);
         }
         arguments.add(tenantId);
         arguments.add(channelInstanceId);

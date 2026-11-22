@@ -1646,6 +1646,11 @@ public final class ManagedExtensionRecords {
                 () -> label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
                 () -> label + " must use NFC normalization");
+        // PAD SPACE collations fold trailing spaces, so two distinct ids would
+        // compare equal; the boundary refuses them rather than relying on the
+        // column to preserve exactness.
+        require(!value.endsWith(" "),
+                () -> label + " must not end with a space");
         return value;
     }
 

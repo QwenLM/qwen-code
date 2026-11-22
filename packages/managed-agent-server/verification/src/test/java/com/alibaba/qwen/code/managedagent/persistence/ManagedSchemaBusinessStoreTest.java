@@ -164,7 +164,7 @@ public class ManagedSchemaBusinessStoreTest {
                 tenant, session, com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.resourceRef(tenant, session, "message-body"));
         JdbcChildResultRelayStore relay = new JdbcChildResultRelayStore(jdbc);
         assertThat(relay.terminalResultText(tenant, session, "turn")).isEqualTo(text);
-        jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = X'6d6573736167652d626f6479'", "f".repeat(64), tenant, session);
+        jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE tenant_id = ? AND session_id = ? AND resource_id = 'message-body'", "f".repeat(64), tenant, session);
         assertThatThrownBy(() -> relay.terminalResultText(tenant, session, "turn")).hasMessageContaining("unavailable or corrupt");
     }
 
@@ -288,16 +288,16 @@ public class ManagedSchemaBusinessStoreTest {
             var admitted = new SessionResourceCollectionCollector(jdbc, manager, properties,
                     () -> Duration.ofMinutes(3).toNanos());
             assertThat(admitted.runOnce()).isFalse();
-            assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = X'7265736f75726365'",
+            assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = 'resource'",
                     byte[].class, tenant, session)).isEqualTo(bytes);
         }
         jdbc.update(
                 "UPDATE ma_operation SET available_at = 0 WHERE tenant_id = ? AND operation_kind ="
                         + " 'SESSION_RESOURCE_GC'", tenant);
         assertThat(collector.runOnce()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = X'7265736f75726365'", String.class, tenant, session))
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = 'resource'", String.class, tenant, session))
                 .isEqualTo("COLLECTED");
-        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = X'7265736f75726365'", byte[].class, tenant, session)).isNull();
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = 'resource'", byte[].class, tenant, session)).isNull();
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_operation WHERE tenant_id = ? AND"
                                         + " operation_kind = 'SESSION_RESOURCE_GC'",
@@ -333,11 +333,11 @@ public class ManagedSchemaBusinessStoreTest {
             ToolPublicationRetentionStore.retire(jdbc, tenant, session, "delete");
         });
         assertThat(collector.runOnce()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = X'70726f6a656374696f6e2d626f6479'", String.class, tenant, session)).isEqualTo("REFERENCED");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = 'projection-body'", String.class, tenant, session)).isEqualTo("REFERENCED");
         for (int batch = 0; batch < 8; batch++) {
             collector.runOnce();
         }
-        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = X'70726f6a656374696f6e2d626f6479'", String.class, tenant, session)).isEqualTo("COLLECTED");
+        assertThat(jdbc.queryForObject("SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = 'projection-body'", String.class, tenant, session)).isEqualTo("COLLECTED");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?", Long.class, tenant, session)).isZero();
         assertThat(jdbc.queryForMap(
                                 "SELECT last_sequence, replay_floor_sequence, covered_sequence FROM"

@@ -111,7 +111,7 @@ final class AgentMessageProjection {
             pageArguments.add(afterSequence);
         }
         pageArguments.addAll(List.of(position.sequence(), position.sequence(),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(position.item()), limit + 1));
+                position.item(), limit + 1));
         List<Candidate> raw = jdbc.query(
                 "SELECT m.item_id, m.first_sequence, m.body_resource_ref,"
                         + " OCTET_LENGTH(m.attributes_json) + OCTET_LENGTH(m.parts_json) AS inline_length,"
@@ -157,8 +157,7 @@ final class AgentMessageProjection {
             return new StoreModels.MessagePage(List.of(), List.of(), false, null, covered, position.through());
         }
         List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId));
-        selected.forEach(item -> arguments.add(
-                ManagedSchemaKeys.identity(item.id())));
+        selected.forEach(item -> arguments.add(item.id()));
         // Bodies are fetched only after the metadata-only lookahead has selected a bounded page.
         List<ItemRecord> rows = List.copyOf(jdbc.query(
                 "SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE tenant_id = ?"
@@ -269,7 +268,7 @@ final class AgentMessageProjection {
             String resourceId = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef.decode(
                     ref.getBytes(java.nio.charset.StandardCharsets.US_ASCII)).get(2);
             resourceIds.put(ref, resourceId);
-            arguments.add(ManagedSchemaKeys.identity(resourceId));
+            arguments.add(resourceId);
         }
         Map<String, Long> byResource = new HashMap<>();
         jdbc.query("SELECT resource_id, COALESCE(OCTET_LENGTH(inline_bytes), 0) AS body_length FROM ma_resource"
@@ -886,7 +885,7 @@ final class AgentMessageProjection {
                                                     && row.getString("encryption_key_id") == null,
                                     tenantId,
                                     sessionId,
-                                    ManagedSchemaKeys.identity(id));
+                                    id);
                     if (matching.size() != 1 || !matching.getFirst()) {
                         throw new IllegalStateException(
                                 "Immutable message body identity differs.", duplicate);
@@ -963,7 +962,7 @@ final class AgentMessageProjection {
                         },
                         tenantId,
                         sessionId,
-                        ManagedSchemaKeys.identity(resourceId),
+                        resourceId,
                         "managed-message-parts");
         if (rows.size() != 1) {
             throw new IllegalStateException("Message body resource is unavailable.");

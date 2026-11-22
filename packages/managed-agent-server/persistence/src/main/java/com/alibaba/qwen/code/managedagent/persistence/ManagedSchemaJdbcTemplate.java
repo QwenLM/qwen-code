@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.ArgumentPreparedStatementSetter;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.PreparedStatementSetter;
 import org.springframework.jdbc.core.RowMapper;
@@ -30,6 +31,13 @@ public class ManagedSchemaJdbcTemplate extends JdbcTemplate {
      */
     public static String binaryIdentity(String expression, boolean h2) {
         return h2 ? "STRINGTOUTF8(" + expression + ")" : expression;
+    }
+
+    /** {@link #binaryIdentity(String, boolean)} for callers holding only a template. */
+    public static String binaryIdentity(JdbcTemplate jdbc, String expression) {
+        boolean h2 = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
+                "H2".equals(connection.getMetaData().getDatabaseProductName())));
+        return binaryIdentity(expression, h2);
     }
 
     @Override

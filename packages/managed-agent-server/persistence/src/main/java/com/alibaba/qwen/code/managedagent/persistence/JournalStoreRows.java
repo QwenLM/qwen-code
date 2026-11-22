@@ -456,6 +456,12 @@ final class JournalStoreRows {
 
     static void validateStableId(String value, String label) {
         validateText(value, label, MAX_ID_BYTES);
+        // PAD SPACE collations fold trailing spaces, so two distinct stable ids
+        // would compare equal; the boundary refuses them rather than relying on
+        // the column to preserve exactness.
+        if (value.endsWith(" ")) {
+            throw invalid(label + " must not end with a space.");
+        }
     }
 
     static void validateText(String value, String label,

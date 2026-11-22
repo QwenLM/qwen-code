@@ -44,7 +44,8 @@ Tier A 已把简单的服务端铸造身份转为有界 `VARCHAR`。剩余 Tier 
 
 | 类别 | 列 | 预算 |
 |---|---|---|
-| 我们的代码铸造 | `item_id`、`content_part_id`、`resource_id`（ma_resource **及** ma_resource_ref）、`transaction_id`、`command_id`、`activation_id`、`writer_id`、`ma_session_head.operation_id`、`source_scope_id`、`parent_child_run_id`、ma_channel_segment `delivery_id`/`segment_id`、PR `binding_id`、`idempotency_key`（多数命名空间） | `VARCHAR(128)` |
+| 我们的代码铸造 | `item_id`、`content_part_id`、`transaction_id`、`command_id`、`activation_id`、`writer_id`、`ma_session_head.operation_id`、`source_scope_id`、`parent_child_run_id`、ma_channel_segment `delivery_id`/`segment_id`、PR `binding_id`、`idempotency_key`（多数命名空间） | `VARCHAR(128)` |
+| 复合 resource 铸造 | `resource_id`（ma_resource **及** ma_resource_ref） | `VARCHAR(256)` |
 | childRunId union | `record_id`、`child_run_id`、`execution_call_id`、`delivery_id`（CHILD_RESULT） | `VARCHAR(256)` |
 | 短确定值 | `isolation_key` | `VARCHAR(64)` |
 | 复合契约安全 | `provision_request_id` / `loss_evidence_id` | `VARCHAR(160)` / `VARCHAR(192)` |
@@ -66,8 +67,10 @@ child-operation 路径允许 320；统一到收敛的 256 界。
   `item_tool_<UUID>`（46，callId 已 digest）、`part_<turnId>_<type>_<seq`（≤74）。在事件
   摄入处对 harness 供给的 `data.itemId`/`contentPartId` 加显式 ≤128 无尾随空格校验
   （当前无校验）。
-- `resource_id`：UUID(36) / sha256hex(64) / `managed-native-journal-snapshot-page:`+64hex
-  (101)。收紧 `JournalStoreRows.validateStableId`（共享，亦覆盖
+- `resource_id`：UUID(36) / sha256hex(64) / snapshot-page(101)，但复合铸造超 128：
+  message-body `message:`+64hex+`:rev:`+64hex（139+，`AgentMessageProjection`）与
+  workspace-proof `workspace-proof:`+ownerKey+`:`+64hex（~170，`WorkspaceEvidenceResources`）。
+  收敛到 **256**，非 128。收紧 `JournalStoreRows.validateStableId`（共享，亦覆盖
   transaction/command/writer/activation/head.operation_id）。
 - `record_id`/`child_run_id`/`delivery_id`：域 id 经 `ManagedExtensionRecords.id`
   （≤512 字节 NFC）；在此加尾随空格拒绝（共享，覆盖 delivery records）。
@@ -94,12 +97,12 @@ child-operation 路径允许 320；统一到收敛的 256 界。
 
 | 索引 | 收敛字节 | 原 | 结果 |
 |---|---:|---:|---|
-| `uk_ma_resource_ref_business_key`（resource_id@128） | 1560 | 3096 | 解决；ma_resource_ref.resource_id 可转 |
+| `uk_ma_resource_ref_business_key`（resource_id@256） | 2072 | 3096 | 解决；ma_resource_ref.resource_id 可转 |
 | `idx_ma_message_execution`（item_id@128） | 1792 | 4096 | 解决 |
 | `uk_ma_channel_segment_identity`（@128） | 1680 | 4752 | 解决 |
 | `uk_ma_pr_watch_binding_business_key`（owner@64/repo@128） | 1432 | 4760 | 解决 |
 | `idx_runtime_binding_scope`（isolation@64） | 2432 | 4224 | 解决 |
-| `idx_ma_resource_delete_intent`（resource_id@128） | 2064 | 3600 | 解决 |
+| `idx_ma_resource_delete_intent`（resource_id@256） | 2576 | 3600 | 解决 |
 | `uk_ma_delivery_identity`（delivery@256/scope@128） | ≤2064 | 4368 | fit |
 
 收敛预算下七个问题索引全部 ≤3072。

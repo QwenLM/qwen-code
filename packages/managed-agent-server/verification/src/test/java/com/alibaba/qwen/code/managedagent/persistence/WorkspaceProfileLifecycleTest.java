@@ -483,7 +483,7 @@ class WorkspaceProfileLifecycleTest {
         }
         ToolPublicationContract.parseToolResult("manifest", f.json.writeValueAsBytes(manifest), 64 * 1024);
         var manifestRef = f.resource("manifest", "managed-tool-result-manifest", manifest);
-        f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED' WHERE resource_id <> X'6f7574636f6d65'");
+        f.jdbc.update("UPDATE ma_resource SET state = 'PUBLISHED' WHERE resource_id <> 'outcome'");
         boolean committed = !captureFailed && !"open".equals(mode);
         var outcome = f.json.createObjectNode().put("version", 1).put("decision", committed ? "committed" : "blocked");
         var identity = outcome.putObject("identity");
@@ -523,7 +523,7 @@ class WorkspaceProfileLifecycleTest {
                     + " admission_resource_id, receipt_sequence, receipt_revision) VALUES (?, 'tenant', 'workspace', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?,"
                     + " 'READY', 1024, 1024, 1024, 'REFERENCED', 'outcome', 1, 1)",
                     ManagedIdentityRefs.publicationScopeRef("tenant", "workspace", f.session), f.session, "call-1", "b".repeat(64), "h".repeat(64));
-            f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = X'6f7574636f6d65'");
+            f.jdbc.update("UPDATE ma_resource SET storage_kind = 'TOOL_PUBLICATION', inline_bytes = NULL WHERE resource_id = 'outcome'");
             assertThatThrownBy(() -> verifier.verifyPublications(operation)).isInstanceOf(ManagedAgentException.class);
             verify.run();
             f.jdbc.update("UPDATE ma_output_capture SET is_quarantined = TRUE WHERE publication_id = 'pub-1'");
@@ -539,11 +539,11 @@ class WorkspaceProfileLifecycleTest {
             return;
         }
         verify.run();
-        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = X'6d616e6966657374'", "0".repeat(64));
+        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = 'manifest'", "0".repeat(64));
         assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
-        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = X'6d616e6966657374'", manifestRef.path("digest").asText());
+        f.jdbc.update("UPDATE ma_resource SET sha256 = ? WHERE resource_id = 'manifest'", manifestRef.path("digest").asText());
         verify.run();
-        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'6d616e6966657374'");
+        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = 'manifest'");
         assertThatThrownBy(verify::run).isInstanceOf(ManagedAgentException.class);
     }
 
@@ -626,7 +626,7 @@ class WorkspaceProfileLifecycleTest {
                 beans.getBeanProvider(JdbcManagedToolResultStore.class));
         verifier.verifyPublications(operation);
         f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation, java.util.List.of(binding), WorkspaceToolProfiles.SHELL));
-        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = X'6d616e6966657374'");
+        f.jdbc.update("DELETE FROM ma_resource WHERE resource_id = 'manifest'");
         assertThatThrownBy(() -> f.transactions.executeWithoutResult(ignored -> verifier.verifyResources(operation,
                 java.util.List.of(binding), WorkspaceToolProfiles.SHELL))).isInstanceOf(ManagedAgentException.class);
         if ("publication".equals(mode)) {

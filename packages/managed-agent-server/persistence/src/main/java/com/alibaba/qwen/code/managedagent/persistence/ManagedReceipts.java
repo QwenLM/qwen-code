@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
@@ -101,6 +102,7 @@ final class ManagedReceipts {
             String previousStatus,
             Boolean workspaceBound,
             long now) {
+        BrokerValues.requireIdempotencyKey(key, "idempotencyKey");
         jdbc.update(
                 "INSERT INTO ma_request_receipt (receipt_key, namespace, tenant_id,"
                     + " scope_kind, scope_ref, scope_id, idempotency_key, idempotency_digest,"
@@ -113,7 +115,7 @@ final class ManagedReceipts {
                 scopeKind.name(),
                 ManagedSchemaKeys.identity(scope(tenant, scopeId)),
                 ManagedSchemaKeys.identity(scopeId),
-                ManagedSchemaKeys.identity(key),
+                key,
                 ManagedSchemaKeys.key(key),
                 digest,
                 operation,

@@ -670,7 +670,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
                 + " AND scope_kind = 'PUBLICATION' AND scope_id = ? AND publication_id = ?", scope, "pub-2");
         assertThat(collector(new DeletingObjects()).runOnce()).isTrue();
         assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE resource_id = X'7461726765742d726573756c74'", byte[].class)).isNull();
+                + " WHERE resource_id = 'target-result'", byte[].class)).isNull();
         for (String resource : List.of("sibling-result", "message-1", "checkpoint-1")) {
             assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
                     + " WHERE resource_id = ?", byte[].class, resource)).containsExactly(2);

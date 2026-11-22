@@ -58,7 +58,12 @@ public class JdbcManagedUserMessageStore
     @Transactional
     public Snapshot command(String tenant, String actor, String session, String key, Command command) {
         agents.authorizeUserMessageActor(tenant, actor, session);
-        if (key == null || key.isBlank() || key.length() > 128) {
+        if (key == null || key.isBlank()) {
+            throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
+        }
+        try {
+            com.alibaba.qwen.code.runtimebroker.BrokerValues.requireIdempotencyKey(key, "Idempotency-Key");
+        } catch (IllegalArgumentException invalid) {
             throw refusal("invalid_request", "A bounded Idempotency-Key is required.");
         }
         lockSession(tenant, session);
@@ -70,7 +75,7 @@ public class JdbcManagedUserMessageStore
                         + " WHERE tenant_id = ? AND session_id = ? AND actor_id = ? AND idempotency_key = ?",
                 (row, index) -> Map.entry(row.getString(1), row.getString(2)), tenant, session,
                 actor,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(key));
+                key);
         if (!replay.isEmpty()) {
             if (!digest.equals(replay.getFirst().getKey())) {
                 throw conflict("idempotency_conflict");
@@ -146,7 +151,7 @@ public class JdbcManagedUserMessageStore
         Snapshot result = snapshot(tenant, session);
         jdbc.update("INSERT INTO ma_user_message_command (tenant_id, session_id, idempotency_key, actor_id, request_digest, result_json)"
                 + " VALUES (?, ?, ?, ?, ?, ?)", tenant, session,
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.identity(key),
+                key,
                 actor, digest, encode(result));
         return result;
     }

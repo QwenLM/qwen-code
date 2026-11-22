@@ -75,6 +75,21 @@ public final class BrokerValues {
     }
 
     /**
+     * An idempotency key stored in a VARCHAR(128) column. Unicode is allowed
+     * (queue keys are not forced to ASCII); PAD SPACE collations fold trailing
+     * spaces, so two distinct keys would compare equal and the boundary refuses
+     * them rather than relying on the column to preserve exactness.
+     */
+    public static String requireIdempotencyKey(String value, String name) {
+        String id = requireId(value, name);
+        if (!isWellFormed(id) || id.length() > 128 || id.endsWith(" ")) {
+            throw new IllegalArgumentException(name
+                    + " must be 1-128 well-formed characters without trailing spaces");
+        }
+        return id;
+    }
+
+    /**
      * A Workspace identity stored in a VARCHAR column. PAD SPACE collations
      * fold trailing spaces, so two distinct ids would compare equal; the
      * boundary refuses them rather than relying on the column to preserve

@@ -1815,7 +1815,7 @@ class ToolPublicationStoreTest {
         binding.put("bindingGeneration", "2");
         assertThatThrownBy(this::reserve).hasMessageContaining("Broker execution");
         binding.put("bindingGeneration", "1");
-        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE resource_id = X'617267732d31'",
+        jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE resource_id = 'args-1'",
                 "{}".getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(this::reserve).isInstanceOf(RuntimeException.class);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isZero();

@@ -110,7 +110,7 @@ class ManagedAgentStoreChildCreationFenceTest {
         // And no Session row was minted for it: the fence rolls the
         // whole transaction back, never a half-created child.
         assertThat(jdbc.query("SELECT session_id FROM ma_session"
-                        + " WHERE tenant_id = 'tenant' AND parent_child_run_id = X'72756e2d736574746c6564'",
+                        + " WHERE tenant_id = 'tenant' AND parent_child_run_id = 'run-settled'",
                 (result, row) -> result.getString(1))).isEmpty();
     }
 

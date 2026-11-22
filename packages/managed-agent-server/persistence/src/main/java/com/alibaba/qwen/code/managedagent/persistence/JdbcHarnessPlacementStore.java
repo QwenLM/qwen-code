@@ -52,7 +52,8 @@ public class JdbcHarnessPlacementStore
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
         var saved = jdbc.query("SELECT b.inline_bytes, b.sha256 FROM ma_session_record r JOIN ma_resource b"
-                + " ON b.resource_id = r.record_resource_id"
+                + " ON " + ManagedSchemaJdbcTemplate.binaryIdentity(jdbc, "b.resource_id")
+                + " = r.record_resource_id"
                 + " AND b.tenant_id = r.tenant_id AND b.workspace_id = r.workspace_id AND b.session_id = r.session_id"
                 + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_id = ?"
                 + " AND r.domain = 'hosted_harness_release' AND r.record_kind = 'DOMAIN'"

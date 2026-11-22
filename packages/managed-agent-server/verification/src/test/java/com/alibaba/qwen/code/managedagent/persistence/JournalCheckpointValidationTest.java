@@ -48,7 +48,7 @@ class JournalCheckpointValidationTest {
                         insert.setString(1, owner);
                         insert.setInt(2, revision);
                         insert.setInt(3, revision);
-                        insert.setBytes(4, ("resource-" + resource).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        insert.setString(4, "resource-" + resource);
                         insert.addBatch();
                     }
                 }

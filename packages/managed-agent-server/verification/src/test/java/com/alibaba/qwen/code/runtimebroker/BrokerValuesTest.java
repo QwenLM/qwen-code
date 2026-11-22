@@ -50,6 +50,22 @@ class BrokerValuesTest {
     }
 
     @Test
+    void idempotencyKeysUseThe128CharacterNoTrailingSpaceBudgetAndAllowUnicode() {
+        String key = "k".repeat(128);
+        assertEquals(key, BrokerValues.requireIdempotencyKey(key, "idempotencyKey"));
+        // Queue keys are not forced to ASCII.
+        assertEquals("clé-𝄞-键", BrokerValues.requireIdempotencyKey("clé-𝄞-键", "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey("k".repeat(129), "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey("key ", "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey("k\ud800ey", "idempotencyKey"));
+        assertThrows(IllegalArgumentException.class,
+                () -> BrokerValues.requireIdempotencyKey(null, "idempotencyKey"));
+    }
+
+    @Test
     void workspaceIdsUseThe512CharacterNoTrailingSpaceBudget() {
         String workspace = "w".repeat(512);
         assertEquals(workspace, BrokerValues.requireWorkspaceId(workspace, "workspaceId"));

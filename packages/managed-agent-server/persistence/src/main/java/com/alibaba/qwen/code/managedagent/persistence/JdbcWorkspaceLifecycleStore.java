@@ -103,12 +103,9 @@ public class JdbcWorkspaceLifecycleStore
     public static boolean resourceClaim(JdbcTemplate jdbc, String tenant, String session,
             RuntimeLifecycleAuthority authority) {
         requireClaim(jdbc, tenant, session, authority, true);
-        boolean h2 = Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection ->
-                "H2".equals(connection.getMetaData().getDatabaseProductName())));
         return Boolean.TRUE.equals(jdbc.queryForObject("SELECT o.lifecycle_protocol_version = 2 AND f.phase = 'DRAINING'"
                 + " FROM ma_operation o JOIN ma_session_head f"
-                + " ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id AND f.operation_id = "
-                + ManagedSchemaJdbcTemplate.binaryIdentity("o.operation_id", h2)
+                + " ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id AND f.operation_id = o.operation_id"
                 + " WHERE o.operation_kind IN ('CLOSE', 'ARCHIVE', 'DELETE') AND o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ?", Boolean.class,
                 tenant, session, authority.operationId()));
     }

@@ -665,7 +665,7 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                         && digest.equals(rs.getString("sha256")),
                 tenantId,
                 sessionId,
-                ManagedSchemaKeys.identity(resourceId));
+                resourceId);
         if (matches.isEmpty() || !Boolean.TRUE.equals(matches.getFirst())) {
             throw new RuntimeBrokerException(
                     409,

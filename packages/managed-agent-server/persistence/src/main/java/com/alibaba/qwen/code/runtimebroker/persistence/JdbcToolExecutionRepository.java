@@ -184,7 +184,7 @@ public final class JdbcToolExecutionRepository
 
     @Override
     public ToolExecutionRecord findByIdempotencyKey(String idempotencyKey) {
-        String key = BrokerValues.requireId(idempotencyKey,
+        String key = BrokerValues.requireIdempotencyKey(idempotencyKey,
                 "idempotencyKey");
         return JdbcRepositorySupport.read(dataSource,
                 connection -> selectByIdempotencyKey(connection, key));

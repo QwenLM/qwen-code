@@ -79,14 +79,14 @@ final class HostedCleanupReferences {
             jdbc.update("DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
                     + " AND owner_kind = 'HOSTED_CLEANUP' AND owner_ref = ? AND owner_revision = ?"
                     + " AND resource_id = ? AND runtime_binding_id = ?", tenant, session,
-                    ManagedSchemaKeys.identity(owner), generation, ManagedSchemaKeys.identity(resourceId), binding);
+                    ManagedSchemaKeys.identity(owner), generation, resourceId, binding);
         } else if (previous.isEmpty()) {
             try {
                 jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref, owner_revision,"
                         + " tenant_id, workspace_id, session_id, journal_revision, resource_id,"
                         + " gmt_create, runtime_binding_id) VALUES ('HOSTED_CLEANUP', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         ManagedSchemaKeys.identity(owner), generation, tenant, workspace,
-                        session, revision, ManagedSchemaKeys.identity(resourceId), now, binding);
+                        session, revision, resourceId, now, binding);
             } catch (DuplicateKeyException race) {
                 requireSameIdentity(references(jdbc, tenant, session, owner, true), resourceId, binding, generation);
             }

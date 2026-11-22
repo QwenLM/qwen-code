@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
@@ -58,7 +57,7 @@ public final class JdbcChannelDeliveryRepository
                             + " provider_receipt_json, payload_json, gmt_create, gmt_modified)"
                             + " VALUES ('CHANNEL', ?, ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
                             + " 'NOT_APPLICABLE', ?, '{\"schemaVersion\":1}', ?, ?)",
-                    ManagedSchemaKeys.identity(candidate.channelInstanceId()),
+                    candidate.channelInstanceId(),
                     candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId(),
                     candidate.segmentId(), candidate.ordinal(), candidate.segmentCount(),
                     candidate.state(), receiptJson(candidate.providerReceipt()), now, now);
@@ -89,7 +88,7 @@ public final class JdbcChannelDeliveryRepository
                         + " WHERE delivery_kind = 'CHANNEL' AND source_scope_id = ?"
                         + " AND tenant_id = ? AND channel_id = ?"
                         + " AND delivery_id = ?",
-                MAPPER, ManagedSchemaKeys.identity(channelInstanceId), tenantId, channelInstanceId, deliveryId).stream()
+                MAPPER, channelInstanceId, tenantId, channelInstanceId, deliveryId).stream()
                 .findFirst();
     }
 
@@ -109,7 +108,7 @@ public final class JdbcChannelDeliveryRepository
         List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_delivery"
                         + " WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
                         + " AND channel_id = ? AND delivery_id = ?",
-                Long.class, ManagedSchemaKeys.identity(channelInstanceId), tenantId,
+                Long.class, channelInstanceId, tenantId,
                 channelInstanceId, deliveryId);
         if (generations.isEmpty()) {
             return null;
@@ -130,7 +129,7 @@ public final class JdbcChannelDeliveryRepository
                         + " AND channel_id = ? AND delivery_id = ? AND transport_state = ?"
                         + " AND claim_generation = ?",
                 state, receiptJson(providerReceipt), databaseNow(),
-                ManagedSchemaKeys.identity(channelInstanceId), tenantId,
+                channelInstanceId, tenantId,
                 channelInstanceId, deliveryId, expectedState, claimGeneration);
         Optional<ChannelDelivery> current = find(tenantId, channelInstanceId,
                 deliveryId);
@@ -140,7 +139,7 @@ public final class JdbcChannelDeliveryRepository
         }
         Long actualGeneration = jdbc.queryForObject("SELECT claim_generation FROM ma_delivery"
                         + " WHERE delivery_kind = 'CHANNEL' AND tenant_id = ? AND source_scope_id = ? AND delivery_id = ?",
-                Long.class, tenantId, ManagedSchemaKeys.identity(channelInstanceId), deliveryId);
+                Long.class, tenantId, channelInstanceId, deliveryId);
         if (actualGeneration == null || actualGeneration != claimGeneration) {
             return null;
         }
@@ -158,7 +157,7 @@ public final class JdbcChannelDeliveryRepository
             throw new IllegalArgumentException("limit must be in [1, 100]");
         }
         List<Object> arguments = new ArrayList<>();
-        arguments.add(ManagedSchemaKeys.identity(channelInstanceId));
+        arguments.add(channelInstanceId);
         arguments.add(tenantId);
         arguments.add(channelInstanceId);
         String cursor = "";

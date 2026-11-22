@@ -957,15 +957,15 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         publish("g-unknown-layout", CONTENT, new byte[6]);
         jdbc.update(
                 "UPDATE ma_resource SET object_key = 'injected' WHERE tenant_id = ? AND session_id = ? AND"
-                        + " resource_id = X'672d756e6b6e6f776e2d6c61796f7574'", tenant, session);
+                        + " resource_id = 'g-unknown-layout'", tenant, session);
         publish("h-version-layout", CONTENT, new byte[7]);
         jdbc.update(
                 "UPDATE ma_resource SET object_version_id = 'injected' WHERE tenant_id = ? AND session_id = ?"
-                        + " AND resource_id = X'682d76657273696f6e2d6c61796f7574'", tenant, session);
+                        + " AND resource_id = 'h-version-layout'", tenant, session);
         publish("i-encryption-layout", CONTENT, new byte[8]);
         jdbc.update(
                 "UPDATE ma_resource SET encryption_key_id = 'injected' WHERE tenant_id = ? AND session_id = ?"
-                        + " AND resource_id = X'692d656e6372797074696f6e2d6c61796f7574'", tenant, session);
+                        + " AND resource_id = 'i-encryption-layout'", tenant, session);
         retire();
         assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
         var collected = java.util.Set.of("a-referenced", "b-monitor", "e-overbound", "f-version");
@@ -986,7 +986,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         publish("freed", CONTENT, new byte[1000]);
         // The shape a byte-freeing writer leaves behind: bytes nulled, state and byte_length kept.
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'6672656564'", tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'freed'", tenant, session);
         retire();
         assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
         var ledger = ledger();
@@ -994,11 +994,11 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(ledger.get("collected_at")).isNotNull();
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND"
-                                        + " resource_id = X'656c696769626c65'", String.class, tenant, session))
+                                        + " resource_id = 'eligible'", String.class, tenant, session))
                 .isEqualTo("COLLECTED");
         assertThat(jdbc.queryForObject(
                                 "SELECT state FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND"
-                                        + " resource_id = X'6672656564'", String.class, tenant, session))
+                                        + " resource_id = 'freed'", String.class, tenant, session))
                 .isEqualTo("PUBLISHED");
     }
 
@@ -1248,7 +1248,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         initSession();
         publish("collected", CONTENT, new byte[64], "COLLECTED", "MYSQL_INLINE");
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'636f6c6c6563746564'", tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'collected'", tenant, session);
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
         source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
@@ -1269,7 +1269,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
         publish("tampered", CONTENT, new byte[64]);
         jdbc.update("UPDATE ma_resource SET inline_bytes = ?"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'74616d7065726564'", new byte[63], tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'tampered'", new byte[63], tenant, session);
         assertThatThrownBy(() -> sessions.readResource(tenant, "workspace-1", session, "tampered", token))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
                     assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt");
@@ -1436,7 +1436,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         // The shape ToolPublicationCollector.confirm() leaves: bytes nulled, state untouched,
         // and the cataloged publication object marked COLLECTED in the same transaction.
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'6672656564'", tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'freed'", tenant, session);
         jdbc.update(
                 "UPDATE ma_resource SET scope_ref = ?, publication_id = ?, slot_key ="
                         + " 'segment:stdout:0', capture_state = ? WHERE tenant_id = ? AND session_id = ? AND"
@@ -1459,7 +1459,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         publish("lost", MANIFEST, new byte[64], "REFERENCED", "MYSQL_INLINE");
         reference("lost");
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'6c6f7374'", tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'lost'", tenant, session);
         // Neither marker is evidence for this row: one names another resource of the same
         // Session, the other names this resource id under another Session's scope.
         addCaptureObject(ToolPublicationDataStore.scope(tenant, "workspace-1", session), "pub-sibling", session, "segment:stdout:0", "sibling", null, new byte[64], "COLLECTED");
@@ -1483,7 +1483,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         // The same byteless shape with no collected publication cataloging the resource:
         // nothing proves collection, so the read stays on the fail-closed path.
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'6c6f7374'", tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'lost'", tenant, session);
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
         source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
@@ -1503,7 +1503,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         // A cataloged publication object in a state the admission path actually leaves
         // behind (VERIFIED) is not evidence of collection: the byte loss stays fail-closed.
         jdbc.update("UPDATE ma_resource SET inline_bytes = NULL"
-                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = X'696e666c69676874'", tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = 'inflight'", tenant, session);
         jdbc.update(
                 "UPDATE ma_resource SET scope_ref = ?, publication_id = ?, slot_key ="
                         + " 'segment:stdout:0', capture_state = ? WHERE tenant_id = ? AND session_id = ? AND"
@@ -1683,7 +1683,7 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         ageMediaRetirement();
         collectMedia();
         assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ?"
-                + " AND session_id = 'media-other' AND resource_id = X'6d656469612d6f7574636f6d65'", byte[].class, tenant)).isEqualTo(mediaBytes(original));
+                + " AND session_id = 'media-other' AND resource_id = 'media-outcome'", byte[].class, tenant)).isEqualTo(mediaBytes(original));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_id ="
                 + " 'media-outcome' AND tenant_id = ? AND session_id = ?", Long.class, tenant, "media-other")).isEqualTo(1);
         assertThat(ledger().get("collected_bytes")).isEqualTo(expectedBytes);

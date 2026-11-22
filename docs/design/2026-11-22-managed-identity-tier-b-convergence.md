@@ -50,7 +50,8 @@ redesign. Converging each budget from its real producer eliminates those blocker
 
 | Class | Columns | Budget |
 |---|---|---|
-| Our-code minted | `item_id`, `content_part_id`, `resource_id` (ma_resource **and** ma_resource_ref), `transaction_id`, `command_id`, `activation_id`, `writer_id`, `ma_session_head.operation_id`, `source_scope_id`, `parent_child_run_id`, ma_channel_segment `delivery_id`/`segment_id`, PR `binding_id`, `idempotency_key` (most namespaces) | `VARCHAR(128)` |
+| Our-code minted | `item_id`, `content_part_id`, `transaction_id`, `command_id`, `activation_id`, `writer_id`, `ma_session_head.operation_id`, `source_scope_id`, `parent_child_run_id`, ma_channel_segment `delivery_id`/`segment_id`, PR `binding_id`, `idempotency_key` (most namespaces) | `VARCHAR(128)` |
+| Composite resource mints | `resource_id` (ma_resource **and** ma_resource_ref) | `VARCHAR(256)` |
 | childRunId union | `record_id`, `child_run_id`, `execution_call_id`, `delivery_id` (CHILD_RESULT) | `VARCHAR(256)` |
 | Short bounded | `isolation_key` | `VARCHAR(64)` |
 | Composite contract-safe | `provision_request_id` / `loss_evidence_id` | `VARCHAR(160)` / `VARCHAR(192)` |
@@ -73,8 +74,11 @@ unify both to the converged 256 bound.
   `item_tool_<UUID>` (46, callId digested), `part_<turnId>_<type>_<seq` (≤74). Add an
   explicit ≤128 no-trailing-space check for harness-supplied `data.itemId`/
   `contentPartId` at event ingestion (currently unvalidated).
-- `resource_id`: UUID(36) / sha256hex(64) / `managed-native-journal-snapshot-page:`+64hex
-  (101). Tighten `JournalStoreRows.validateStableId` (shared, also covers
+- `resource_id`: UUID(36) / sha256hex(64) / snapshot-page(101), but composite mints
+  exceed 128: message-body `message:`+64hex+`:rev:`+64hex (139+, `AgentMessageProjection`)
+  and workspace-proof `workspace-proof:`+ownerKey+`:`+64hex (~170,
+  `WorkspaceEvidenceResources`). Converge to **256**, not 128. Tighten
+  `JournalStoreRows.validateStableId` (shared, also covers
   transaction/command/writer/activation/head.operation_id).
 - `record_id`/`child_run_id`/`delivery_id`: domain ids via `ManagedExtensionRecords.id`
   (≤512 bytes NFC); add the trailing-space ban there (shared, covers delivery records).
@@ -102,12 +106,12 @@ unify both to the converged 256 bound.
 
 | Index | Converged bytes | Was | Result |
 |---|---:|---:|---|
-| `uk_ma_resource_ref_business_key` (resource_id@128) | 1560 | 3096 | resolved; ma_resource_ref.resource_id converts |
+| `uk_ma_resource_ref_business_key` (resource_id@256) | 2072 | 3096 | resolved; ma_resource_ref.resource_id converts |
 | `idx_ma_message_execution` (item_id@128) | 1792 | 4096 | resolved |
 | `uk_ma_channel_segment_identity` (@128) | 1680 | 4752 | resolved |
 | `uk_ma_pr_watch_binding_business_key` (owner@64/repo@128) | 1432 | 4760 | resolved |
 | `idx_runtime_binding_scope` (isolation@64) | 2432 | 4224 | resolved |
-| `idx_ma_resource_delete_intent` (resource_id@128) | 2064 | 3600 | resolved |
+| `idx_ma_resource_delete_intent` (resource_id@256) | 2576 | 3600 | resolved |
 | `uk_ma_delivery_identity` (delivery@256/scope@128) | ≤2064 | 4368 | fits |
 
 All seven problem indexes fit ≤3072 with converged budgets.
