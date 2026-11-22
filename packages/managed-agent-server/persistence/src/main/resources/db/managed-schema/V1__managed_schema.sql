@@ -128,7 +128,7 @@ CREATE TABLE ma_user_message_command (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
     session_id VARCHAR(64) NOT NULL COMMENT 'Managed Session identity.',
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same queue command.',
-    actor_id VARCHAR(36) NOT NULL COMMENT 'Actor identity associated with this record.',
+    actor_id VARBINARY(144) NOT NULL COMMENT 'Raw actor identity associated with this record.',
     request_digest CHAR(71) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
     result_json LONGTEXT NOT NULL COMMENT 'Serialized queue snapshot returned for this command and its retries.',
     CONSTRAINT uk_ma_user_message_command_business_key UNIQUE (tenant_id, session_id, actor_id, idempotency_key),
