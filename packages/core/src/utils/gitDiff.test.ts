@@ -653,6 +653,27 @@ describe('fetchGitDiffHunksForFile', () => {
     expect(result.hunks[0].lines.some((l) => l === '+TWO')).toBe(true);
   });
 
+  it('diffs a bracketed filename literally, not as a pathspec glob', async () => {
+    // `config[1].json` is a legal name and a pathspec glob matching
+    // `config1.json`. Without `--literal-pathspecs` git selects both and the
+    // first block wins, so the viewer rendered the sibling's changes under
+    // this file's name. Both files differ, so a wrong pick is observable.
+    await commit(repo, {
+      'config[1].json': 'bracket-orig\n',
+      'config1.json': 'plain-orig\n',
+    });
+    await write(repo, {
+      'config[1].json': 'BRACKET-MODIFIED\n',
+      'config1.json': 'PLAIN-MODIFIED\n',
+    });
+
+    const result = await hunksFor(repo, 'config[1].json');
+    const lines = result.hunks.flatMap((h) => h.lines);
+    expect(lines).toContain('-bracket-orig');
+    expect(lines).toContain('+BRACKET-MODIFIED');
+    expect(lines).not.toContain('+PLAIN-MODIFIED');
+  });
+
   it('returns null outside a git repo', () =>
     inPlainDir(async (plain) => {
       expect(await fetchGitDiffHunksForFile(plain, 'a.txt')).toBeNull();
