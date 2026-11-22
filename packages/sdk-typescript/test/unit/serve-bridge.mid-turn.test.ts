@@ -68,7 +68,9 @@ async function collect(frames: DaemonEvent[]) {
   return { state, collector };
 }
 
-describe('serve-bridge multi-round output', () => {
+// These controls pin legacy collectors without a promptId; nonblocking prompt
+// completion and pre-ack events are covered in serve-bridge.prompt-order.test.ts.
+describe('serve-bridge legacy output without prompt IDs', () => {
   it.each([
     { usage: { input: 1, output: 2 }, durationMs: 1 },
     { stopHookLoop: { phase: 'started' } },

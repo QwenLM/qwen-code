@@ -9,6 +9,7 @@ import { DaemonClient } from '../../src/daemon/DaemonClient.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 import { agentTools } from '../../src/daemon-mcp/serve-bridge/tools/agent.js';
 import {
+  interruptPromptCollector,
   startEventStream,
   stopEventStream,
 } from '../../src/daemon-mcp/serve-bridge/sse.js';
@@ -56,6 +57,7 @@ function start(
     endBeforeTerminal?: boolean;
     turnError?: boolean;
     holdConnection?: boolean;
+    maxPendingPromptsPerSession?: number;
   } = {},
 ) {
   const middle = deferred();
@@ -75,6 +77,7 @@ function start(
   const client = new DaemonClient({
     baseUrl: 'http://127.0.0.1:4170',
     fetch,
+    maxPendingPromptsPerSession: options.maxPendingPromptsPerSession,
   });
   const state: BridgeState = {
     client,
@@ -94,6 +97,7 @@ function start(
         return;
       }
       if (options.holdConnection) await connection.promise;
+      if (opts?.signal?.aborted) return;
       opts?.onSseStreamAccepted?.('stream');
       while (!state.eventStreams.get('session')?.activeCollector) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -258,3 +262,57 @@ it('waits for the persistent subscription to be accepted before admitting a prom
     stopEventStream(run.state, 'session');
   }
 });
+
+it('rejects a prompt stopped before its held stream connection is accepted', async () => {
+  const run = start({ holdConnection: true });
+  const stream = run.state.eventStreams.get('session')!;
+  try {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(run.fetch).not.toHaveBeenCalled();
+    stopEventStream(run.state, 'session');
+    run.connection.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(run.fetch).not.toHaveBeenCalled();
+    expect(run.settled()).toBe(true);
+    const result = await run.result;
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain(
+      'SSE stream closed before the prompt could start.',
+    );
+  } finally {
+    run.connection.resolve();
+    run.tail.resolve();
+    if (stream.activeCollector)
+      interruptPromptCollector(stream.activeCollector);
+    await run.result;
+    stopEventStream(run.state, 'session');
+  }
+});
+
+it.each([false, true])(
+  'releases the prompt slot before another turn on the same session (failed: %s)',
+  async (turnError) => {
+    const run = start({ turnError, maxPendingPromptsPerSession: 1 });
+    try {
+      await run.middle.promise;
+      run.tail.resolve();
+      const first = await run.result;
+      expect(first.isError === true).toBe(turnError);
+      const nextPrompt = vi
+        .spyOn(run.state.client, 'promptNonBlocking')
+        .mockRejectedValueOnce(new Error('second prompt reached the daemon'));
+      const second = await agentTools(run.state)
+        .find((entry) => entry.name === 'prompt')!
+        .handler({ prompt: 'second turn' }, undefined);
+      expect(nextPrompt).toHaveBeenCalledOnce();
+      expect(second.isError).toBe(true);
+      expect(second.content[0]!.text).toContain(
+        'second prompt reached the daemon',
+      );
+    } finally {
+      run.tail.resolve();
+      await run.result;
+      stopEventStream(run.state, 'session');
+    }
+  },
+);
