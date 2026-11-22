@@ -13,10 +13,11 @@ import { tokenLimit } from './tokenLimits.js';
 // `accounts/<org>/models/`) or an auth-type prefix (`openai:`). Each id below
 // must resolve to the limits and input modalities of the bare model id, or
 // the session silently runs with the default 200K window and text-only input.
-// A Vertex AI `@version` pin is not stripped by `normalize()` and no catalog
-// key contains `@`, so a pinned id skips the catalog and resolves through its
-// family pattern row. Its pair holds only while that row agrees with the
-// catalog entry for the bare id; the absolute pins below guard the window.
+// The suite runs with the models.dev catalog off, so these pairs compare the
+// pattern rows only. A Vertex AI `@version` pin is not stripped by
+// `normalize()` and no catalog key contains `@`, so at runtime a pinned id
+// always resolves through its family pattern row, which can differ from the
+// catalog entry the bare id gets; the absolute pins below guard the window.
 const GATEWAY_ID_SHAPES: Array<[shaped: string, bare: string]> = [
   ['azure/gpt-4o', 'gpt-4o'],
   ['openai:gpt-4o', 'gpt-4o'],
