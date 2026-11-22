@@ -162,8 +162,10 @@ Common fields:
 - `exclude_tools`: exclude named tools explicitly.
 - `allowed_tools`: bypass approval for matching tools; this is not a tool-registration allowlist.
 - `timeout`: seconds for control requests, permission callbacks, and stream
-  close waits. Every value must be a finite number greater than zero, whether
-  supplied in a mapping or a `TimeoutOptions` object.
+  close waits. Every value must be an `int` or `float` (not `bool`), greater than
+  zero and representable as finite floating-point seconds. Invalid types raise
+  `TypeError`; non-positive, non-finite or out-of-range values raise `ValueError`,
+  whether supplied in a mapping or a `TimeoutOptions` object.
 
 `env` is merged on top of the parent process environment. Set secrets such as
 `OPENAI_API_KEY` in the parent environment or a secrets manager rather than
@@ -436,6 +438,8 @@ SDK raises `ValidationError` if these session options are combined.
 ## Error Handling
 
 - `ValidationError`: invalid query options or malformed session identifiers
+- `TypeError`: a timeout value is not an `int` or `float`, or is a `bool`
+- `ValueError`: a timeout value is non-positive, non-finite, or out of range
 - `ControlRequestTimeoutError`: CLI control operation exceeded timeout
 - `ProcessExitError`: `qwen` exited with a non-zero code
 - `AbortError`: query or control request was cancelled
@@ -457,7 +461,7 @@ try:
                     print(f"Error: {error.get('message', 'Unknown error')}")
                 else:
                     print(message.get("result", ""))
-except ValidationError as exc:
+except (ValidationError, TypeError, ValueError) as exc:
     print(f"Invalid SDK options: {exc}")
 except ProcessExitError as exc:
     print(f"qwen exited with {exc.exit_code}: {exc}")

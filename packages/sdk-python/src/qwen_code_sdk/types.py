@@ -91,7 +91,11 @@ class TimeoutOptions:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"timeout.{name} must be a positive finite number")
-            if not isfinite(value) or value <= 0:
+            try:
+                finite = isfinite(value)
+            except OverflowError:
+                finite = False
+            if not finite or value <= 0:
                 raise ValueError(f"timeout.{name} must be a positive finite number")
 
     @classmethod

@@ -173,6 +173,11 @@ with query_sync(
 Use only one of `resume`, `continue_session`, or `session_id` in a request. The
 SDK raises `ValidationError` if these session options are combined.
 
+Timeout values must be an `int` or `float` (not `bool`), greater than zero and
+representable as finite floating-point seconds. Invalid types raise `TypeError`;
+non-positive, non-finite or out-of-range values raise `ValueError`, whether
+supplied in a mapping or a `TimeoutOptions` object.
+
 Unsupported in v1:
 
 - `mcp_servers`
@@ -448,6 +453,8 @@ delegates the selection of the latest session to the CLI.
 ## Error Model
 
 - `ValidationError`: invalid options, invalid UUIDs, unsupported combinations
+- `TypeError`: a timeout value is not an `int` or `float`, or is a `bool`
+- `ValueError`: a timeout value is non-positive, non-finite, or out of range
 - `ControlRequestTimeoutError`: initialize, interrupt, or other control request
   timed out
 - `ProcessExitError`: CLI exited non-zero
@@ -470,7 +477,7 @@ try:
                     print(f"Error: {error.get('message', 'Unknown error')}")
                 else:
                     print(message.get("result", ""))
-except ValidationError as exc:
+except (ValidationError, TypeError, ValueError) as exc:
     print(f"Invalid SDK options: {exc}")
 except ProcessExitError as exc:
     print(f"qwen exited with {exc.exit_code}: {exc}")
