@@ -111,8 +111,11 @@ export function SessionDetailsTooltip({
     );
   // A turn in flight hides the row's background dot and the blocked states
   // outrank it, so this status is where background work still gets named.
-  // Appended, never reordered: blocked-state precedence is pinned. The
-  // background-only arm below already names it and must not repeat it.
+  // Blocked-state precedence is pinned. The unread arm mirrors the row's dot
+  // precedence — the unread dot outranks the running/active-work dots, the
+  // background dot outranks unread — and carries the suffix for the same
+  // hidden-background reason. The background-only arm already names it and
+  // must not repeat it.
   const backgroundSuffix = session.hasRunningBackgroundTasks
     ? ` · ${t('background.running')}`
     : '';
@@ -120,16 +123,16 @@ export function SessionDetailsTooltip({
     ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
       ? `${t('sessionsOverview.status.askUserQuestion')}${backgroundSuffix}`
-      : session.hasActivePrompt
-        ? `${t('sidebar.running')}${backgroundSuffix}`
-        : session.hasRunningBackgroundTasks
-          ? t('background.running')
-          : session.activeWorkState === 'active'
-            ? t('sidebar.activeWork')
-            : session.activeWorkState === 'unknown'
-              ? t('sidebar.activityUnknown')
-              : completedUnread
-                ? t('sidebar.completedUnread')
+      : !session.hasActivePrompt && session.hasRunningBackgroundTasks
+        ? t('background.running')
+        : completedUnread
+          ? `${t('sidebar.completedUnread')}${backgroundSuffix}`
+          : session.hasActivePrompt
+            ? `${t('sidebar.running')}${backgroundSuffix}`
+            : session.activeWorkState === 'active'
+              ? t('sidebar.activeWork')
+              : session.activeWorkState === 'unknown'
+                ? t('sidebar.activityUnknown')
                 : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
