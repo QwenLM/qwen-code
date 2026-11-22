@@ -7447,6 +7447,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge.subscribeThrows = true;
     const connId = await initialize();
     await newSession(connId);
+    const conn = acpHandle!.registry.get(connId)!;
+    const sendSession = vi.spyOn(conn, 'sendSession');
     const sessStream = await openStream(connId, 'sess-1');
     // The guarantee is that the server CLOSES the stream (not a zombie that
     // heartbeats forever). A safety abort at 3s distinguishes "server closed"
@@ -7461,12 +7463,24 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }, 3000);
     const start = Date.now();
     try {
-      for await (const _f of readSse(sessStream, ac.signal)) {
+      for await (const _frame of readSse(sessStream, ac.signal)) {
         // drain
       }
+      // Check the actual pump's transport handoff: the terminal close can
+      // discard queued SSE bytes before they become readable on the client.
+      expect(sendSession).toHaveBeenCalledWith('sess-1', {
+        jsonrpc: '2.0',
+        method: '_qwen/notify',
+        params: {
+          sessionId: 'sess-1',
+          kind: 'stream_error',
+          error: 'subscribe failed',
+        },
+      });
     } finally {
       clearTimeout(timer);
       ac.abort();
+      sendSession.mockRestore();
     }
     // A zombie stream ends only via the safety abort; the close must not.
     expect(safetyAbortFired).toBe(false);

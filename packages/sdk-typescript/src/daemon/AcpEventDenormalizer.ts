@@ -76,10 +76,9 @@ export function denormalizeAcpNotification(
         : undefined;
     if (!type || type.length === 0) return undefined;
 
-    // Build the event data payload. For the new format, spread the
-    // update object and inject sessionId so the WS transport's
-    // per-session filter (event.data.sessionId) works. For the
-    // legacy format, use params.data or fall back to params itself.
+    // Both formats preserve the envelope sessionId in object payloads so
+    // the WS transport's per-session filter (event.data.sessionId) works.
+    // The legacy format uses params.data or falls back to params itself.
     let data: unknown;
     if (rawUpdate) {
       data = withEnvelopeSessionId(rawUpdate, params);
@@ -177,21 +176,25 @@ export function* filterEventsBySession(
   sessionId: string,
 ): Generator<DaemonEvent> {
   for (const event of events) {
-    const data = event.data;
-    if (isRecord(data)) {
-      const eventSessionId = data['sessionId'];
-      // If the event has a sessionId, only yield if it matches.
-      // Events without sessionId are workspace-scoped and pass through.
-      if (
-        typeof eventSessionId === 'string' &&
-        eventSessionId.length > 0 &&
-        eventSessionId !== sessionId
-      ) {
-        continue;
-      }
+    if (eventMatchesSession(event, sessionId)) {
+      yield event;
     }
-    yield event;
   }
+}
+
+/** Shared by the iterable filter and the live WebSocket listener. @internal */
+export function eventMatchesSession(
+  event: DaemonEvent,
+  sessionId: string,
+): boolean {
+  const eventSessionId = isRecord(event.data)
+    ? event.data['sessionId']
+    : undefined;
+  return (
+    typeof eventSessionId !== 'string' ||
+    eventSessionId.length === 0 ||
+    eventSessionId === sessionId
+  );
 }
 
 /**

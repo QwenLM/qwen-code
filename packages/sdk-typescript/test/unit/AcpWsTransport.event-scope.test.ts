@@ -88,27 +88,87 @@ describe('ACP notification envelope session scope', () => {
     },
   );
 
-  it('continues delivering workspace notifications to every subscribed session', async () => {
+  it.each([
+    ['workspace_changed', { marker: 'workspace' }],
+    ['_qwen/notify', { kind: 'settings_changed', data: { key: 'modelName' } }],
+  ])(
+    'continues delivering %s workspace notifications to every subscribed session',
+    async (method, params) => {
+      vi.stubGlobal('WebSocket', FakeWebSocket);
+      const transport = new AcpWsTransport('ws://daemon/acp');
+      const abort = new AbortController();
+      const iterators = ['first', 'second'].map((sessionId) =>
+        transport.subscribeEvents(sessionId, { signal: abort.signal }),
+      );
+      const pending = iterators.map((iterator) => iterator.next());
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      try {
+        FakeWebSocket.latest.receive({
+          jsonrpc: '2.0',
+          method,
+          params,
+        });
+        for (const message of await Promise.all(pending)) {
+          expect(message.value).toMatchObject({
+            type: method === '_qwen/notify' ? 'settings_changed' : method,
+            data: 'data' in params ? params.data : params,
+          });
+        }
+      } finally {
+        abort.abort();
+        await Promise.all(
+          iterators.map((iterator) => iterator.return(undefined)),
+        );
+        transport.dispose();
+      }
+    },
+  );
+
+  it.each([
+    'mcp_budget_warning',
+    'mcp_child_refused_batch',
+    'history_truncated',
+    'terminal_sequence',
+    'settings_changed',
+    'approval_mode_changed',
+  ])('routes %s to its origin on a shared socket', async (kind) => {
     vi.stubGlobal('WebSocket', FakeWebSocket);
     const transport = new AcpWsTransport('ws://daemon/acp');
     const abort = new AbortController();
-    const iterators = ['first', 'second'].map((sessionId) =>
+    const iterators = ['owner', 'foreign'].map((sessionId) =>
       transport.subscribeEvents(sessionId, { signal: abort.signal }),
     );
     const pending = iterators.map((iterator) => iterator.next());
     await new Promise<void>((resolve) => setImmediate(resolve));
     try {
+      const payloadScoped =
+        kind === 'settings_changed' || kind === 'approval_mode_changed';
+      FakeWebSocket.latest.receive({
+        jsonrpc: '2.0',
+        method: '_qwen/notify',
+        params: {
+          kind,
+          ...(payloadScoped ? {} : { sessionId: 'owner' }),
+          data: {
+            marker: kind,
+            ...(payloadScoped ? { sessionId: 'owner' } : {}),
+          },
+        },
+      });
       FakeWebSocket.latest.receive({
         jsonrpc: '2.0',
         method: 'workspace_changed',
-        params: { marker: 'workspace' },
+        params: { marker: 'sentinel' },
       });
-      for (const message of await Promise.all(pending)) {
-        expect(message.value).toMatchObject({
-          type: 'workspace_changed',
-          data: { marker: 'workspace' },
-        });
-      }
+      const [owner, foreign] = await Promise.all(pending);
+      expect(owner!.value).toMatchObject({
+        type: kind,
+        data: { sessionId: 'owner', marker: kind },
+      });
+      expect(foreign!.value).toMatchObject({
+        type: 'workspace_changed',
+        data: { marker: 'sentinel' },
+      });
     } finally {
       abort.abort();
       await Promise.all(

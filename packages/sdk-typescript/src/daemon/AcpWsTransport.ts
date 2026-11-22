@@ -13,6 +13,7 @@ import type {
 import { DaemonTransportClosedError } from './DaemonTransport.js';
 import {
   denormalizeAcpNotification,
+  eventMatchesSession,
   type JsonRpcNotification,
 } from './AcpEventDenormalizer.js';
 import {
@@ -293,16 +294,8 @@ export class AcpWsTransport implements DaemonTransport {
     const listener = (event: DaemonEvent) => {
       // Filter by session: if the event has a sessionId, only yield
       // if it matches. Workspace-scoped events (no sessionId) pass.
-      const data = event.data;
-      if (isRecord(data)) {
-        const evtSessionId = data['sessionId'];
-        if (
-          typeof evtSessionId === 'string' &&
-          evtSessionId.length > 0 &&
-          evtSessionId !== sessionId
-        ) {
-          return;
-        }
+      if (!eventMatchesSession(event, sessionId)) {
+        return;
       }
       // Drop oldest if queue is full.
       if (queue.length >= MAX_GENERATOR_QUEUE_SIZE) {

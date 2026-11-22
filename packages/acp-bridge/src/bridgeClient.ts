@@ -2827,7 +2827,7 @@ export class BridgeClient implements Client {
       if (!entry) return;
       entry.events.publish({
         type: 'settings_changed',
-        data: { key: 'mcp' },
+        data: { sessionId, key: 'mcp' },
       });
       return;
     }

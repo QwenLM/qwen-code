@@ -6279,6 +6279,10 @@ export class AcpDispatcher {
           'replay_complete',
           'model_switched',
           'model_switch_failed',
+          'mcp_budget_warning',
+          'mcp_child_refused_batch',
+          'history_truncated',
+          'terminal_sequence',
         ].includes(event.type);
         // `event.id` is undefined for the synthetic control frames (no SSE
         // `id:` line, so they don't burn a slot in the resume sequence) and

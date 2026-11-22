@@ -5862,7 +5862,7 @@ describe('MCP reload capability invalidation', () => {
     });
     expect(publish).toHaveBeenCalledExactlyOnceWith({
       type: 'settings_changed',
-      data: { key: 'mcp' },
+      data: { sessionId: 'owner', key: 'mcp' },
     });
     const retired = makeClient(undefined, {
       resolveEntry: () => entry,
