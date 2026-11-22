@@ -11,7 +11,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Real-MySQL gate for the managed identity VARCHAR budgets and NO PAD collation. */
+/** Real-MySQL gate for the managed identity VARCHAR budgets and table-default collation. */
 class ManagedSchemaIdentityColumnsMySqlIT {
     @Test
     void tenantAndSessionIdentityColumnsUseTheApprovedVarcharBudgets() throws Exception {
@@ -37,7 +37,7 @@ class ManagedSchemaIdentityColumnsMySqlIT {
                                 ? ("ma_tenant_guard".equals(table) ? 96 : 36)
                                 : 64;
                         if (!"varchar".equalsIgnoreCase(type) || length != expected
-                                || !"utf8mb4_0900_bin".equalsIgnoreCase(collation)) {
+                                || !"utf8mb4_bin".equalsIgnoreCase(collation)) {
                             violations.add(table + "." + column + " " + type + "(" + length
                                     + ") " + collation);
                         }

@@ -398,7 +398,7 @@ class ManagedSchemaMySqlIT {
                             + " AND column_name = 'tenant_id'")) {
                 org.junit.jupiter.api.Assertions.assertTrue(rs.next());
                 org.junit.jupiter.api.Assertions.assertEquals(96L, rs.getLong(1));
-                org.junit.jupiter.api.Assertions.assertEquals("utf8mb4_0900_bin", rs.getString(2));
+                org.junit.jupiter.api.Assertions.assertEquals("utf8mb4_bin", rs.getString(2));
             }
         }
     }

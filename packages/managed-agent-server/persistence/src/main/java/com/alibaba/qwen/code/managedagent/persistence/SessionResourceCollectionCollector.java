@@ -148,9 +148,7 @@ public final class SessionResourceCollectionCollector {
         var page = jdbc.query(
                 "SELECT s.*, CASE WHEN s.retired_at <= ? AND NOT EXISTS"
                     + " (SELECT 1 FROM ma_operation o WHERE o.operation_kind = 'SESSION_RESOURCE_GC'"
-                    + " AND o.scope_kind = 'SESSION' AND CAST(o.scope_id AS BINARY(512)) ="
-                    + " CAST(s.session_id AS BINARY(512))"
-                    + " AND CAST(o.target_id AS BINARY(512)) = CAST(s.session_id AS BINARY(512))"
+                    + " AND o.tenant_id = s.tenant_id AND o.session_id = s.session_id"
                     + " LIMIT 1) THEN 1 ELSE 0 END AS needs_ledger FROM"
                     + " (SELECT id, tenant_id, session_id, retired_at"
                     + " FROM ma_session WHERE id > ? AND id <= ? ORDER BY id LIMIT " + SCAN_ROWS + ") s ORDER BY s.id",
