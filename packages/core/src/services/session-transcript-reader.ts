@@ -1980,7 +1980,8 @@ function getIndexCacheBytesByClass(): { shared: number; oversized: number } {
 // (the offer) pass the just-verified snapshot length, frozen-prefix growth
 // (hook aggregates, projections decoded under a frozen cursor) passes a
 // fresh stat of the live file, and a failed stat passes undefined so
-// retention is refused rather than reclaiming blind. The entry being grown
+// reclaim is skipped (only additions that already fit without reclaim are
+// retained) rather than reclaiming blind. The entry being grown
 // is excluded from the reclaim scan — under a frozen snapshot it can itself
 // be shorter than the live file.
 function cacheAdditionFitsClassBudget(
@@ -3245,7 +3246,7 @@ function offerFreshIndexToCache(index: TranscriptIndex): void {
 // The frozen snapshot is NOT re-verified here — the page already passed
 // its snapshot guards, and a truncation or replacement under the read is
 // exactly what the reclaim must see. Any stat failure leaves the context
-// undefined: retention is refused rather than reclaiming blind.
+// undefined: reclaim is skipped rather than reclaiming blind.
 async function frozenReclaimContext(
   filePath: string,
 ): Promise<ReclaimContext | undefined> {
@@ -3392,6 +3393,15 @@ const managedProjections = new WeakMap<
     readonly records: ChatRecord[];
     readonly titleInfo: { title?: string; source?: 'auto' | 'manual' };
   }
+>();
+// Session title metadata is a few bytes and is never what the class byte
+// budget is sizing; keep it in a separate WeakMap so refusing to retain the
+// decoded bodies does not drop customTitle/titleSource from the restore
+// payload (while still deleting the bodies from managedProjections so a
+// follow-up read re-decodes instead of seeing an empty record list).
+const managedProjectionTitles = new WeakMap<
+  TranscriptIndex,
+  { title?: string; source?: 'auto' | 'manual' }
 >();
 
 function estimateManagedProjectionBytes(projection: {
@@ -4602,8 +4612,13 @@ export class SessionTranscriptReader {
     );
     // Read from the whole log: a session whose title the session list no
     // longer finds in its windows must not restore, and then re-anchor, an
-    // older one.
-    const persistedTitle = managedProjections.get(index)?.titleInfo ?? {};
+    // older one. Read from managedProjectionTitles first so a budget refusal
+    // that deleted the decoded bodies from managedProjections still preserves
+    // customTitle/titleSource.
+    const persistedTitle =
+      managedProjectionTitles.get(index) ??
+      managedProjections.get(index)?.titleInfo ??
+      {};
     const projection = buildManagedSessionRestoreProjection({
       sessionId,
       records,
@@ -4705,6 +4720,7 @@ export class SessionTranscriptReader {
           }
           throw error;
         }
+        managedProjectionTitles.set(index, projection.titleInfo);
         // The projection holds every decoded message body, while the cache
         // accounts only the physical hints. Retain it only while the index is
         // cache-resident and the bodies fit the entry's budget class; else

@@ -490,8 +490,11 @@ describe('persisted hook turn pages', () => {
     const newPhysical =
       getSessionTranscriptIndexCacheStatsForTest().byteSize - oldTotal;
     // The aggregate bytes are identical (same turn, same executions), so
-    // the crossed entry's total is known before retention.
+    // the crossed entry's total is known before retention. Pin the premise
+    // that both oversized entries cannot coexist in the budget without
+    // reclaiming the old one.
     const newTotal = newPhysical + (oldTotal - oldPhysical);
+    expect(oldTotal + newTotal).toBeGreaterThan(newTotal + 100);
     setSessionTranscriptIndexCacheMaxBytesForTest(newPhysical);
     setSessionTranscriptIndexCacheOversizedMaxBytesForTest(newTotal + 100);
     const read = vi.fn();

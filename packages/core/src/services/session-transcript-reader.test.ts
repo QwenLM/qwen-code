@@ -37,6 +37,7 @@ const {
   projectionReads: {
     count: 0,
     pause: null as null | Promise<void>,
+    titleInfo: null as null | { title?: string; source?: 'auto' | 'manual' },
   },
 }));
 
@@ -58,7 +59,10 @@ vi.mock(
           projectionReads.pause = null;
           await pause;
         }
-        return actual.readManagedSessionRecordsAndTitle(options);
+        const result = await actual.readManagedSessionRecordsAndTitle(options);
+        return projectionReads.titleInfo
+          ? { ...result, titleInfo: projectionReads.titleInfo }
+          : result;
       },
     };
   },
@@ -308,6 +312,7 @@ describe('SessionTranscriptReader', () => {
     statFault.failOnCall = null;
     statFault.beforeCall = null;
     projectionReads.pause = null;
+    projectionReads.titleInfo = null;
     resetSessionTranscriptIndexCacheForTest();
     Storage.setRuntimeBaseDir(null);
     await fs.rm(runtimeDir, { recursive: true, force: true });
@@ -5160,6 +5165,83 @@ describe('SessionTranscriptReader', () => {
       }
     },
   );
+
+  it('preserves customTitle and titleSource on restore when projection body retention is refused (R12-1)', async () => {
+    const bigText = 'x'.repeat(256 * 1024);
+    const { authority } = await openManagedFixture([
+      { uuid: 'u1', parent: null, text: 'short prompt' },
+      { uuid: 'a1', parent: 'u1', text: bigText },
+    ]);
+    try {
+      const reader = newReader();
+      await reader.readTurnHooksPage(sessionId, 'legacy-record:u1');
+      const physicalBytes =
+        getSessionTranscriptIndexCacheStatsForTest().byteSize;
+      clearSessionTranscriptIndexCacheEntriesForTest();
+      // Room for the physical index only: the decoded bodies do not fit
+      // either class, so accountManagedProjection refuses body retention and
+      // deletes the bodies from managedProjections.
+      setSessionTranscriptIndexCacheMaxBytesForTest(physicalBytes + 1024);
+      setSessionTranscriptIndexCacheOversizedMaxBytesForTest(1);
+      projectionReads.titleInfo = {
+        title: 'User-Named Session',
+        source: 'manual',
+      };
+      projectionReads.count = 0;
+
+      type Restored = NonNullable<
+        Awaited<ReturnType<SessionTranscriptReader['readRestoreProjection']>>
+      >;
+      const spy = vi.spyOn(
+        reader as unknown as {
+          readManagedRestoreProjection: (
+            ...args: unknown[]
+          ) => Promise<Restored>;
+        },
+        'readManagedRestoreProjection',
+      );
+      const first = await reader.readRestoreProjection(sessionId, NONE);
+      expect(first?.runtime.recording).toMatchObject({
+        customTitle: 'User-Named Session',
+        titleSource: 'manual',
+      });
+      // offerFreshIndexToCache admitted the physical index and refused the
+      // oversized bodies.
+      expect(getSessionTranscriptIndexCacheStatsForTest().byteSize).toBe(
+        physicalBytes,
+      );
+      expect(projectionReads.count).toBe(1);
+      const cachedIndex = spy.mock.calls[0]?.[1];
+      expect(cachedIndex).toBeDefined();
+
+      // Re-run against the cache-resident index instance (the exact R12-1
+      // trace: readManagedRecords -> accountManagedProjection deletes from
+      // managedProjections before readManagedRestoreProjection reads titleInfo).
+      const second = await (
+        reader as unknown as {
+          readManagedRestoreProjection: (
+            sid: string,
+            idx: unknown,
+            opts: SelectiveSessionRestoreOptions,
+            readOpts: Record<string, never>,
+          ) => Promise<Restored>;
+        }
+      ).readManagedRestoreProjection(
+        sessionId,
+        cachedIndex,
+        { replay: { kind: 'all', hideInheritedHistory: false } },
+        {},
+      );
+      expect(second.runtime.recording).toMatchObject({
+        customTitle: 'User-Named Session',
+        titleSource: 'manual',
+      });
+      expect(second.replay?.records).toHaveLength(2);
+      expect(projectionReads.count).toBe(2);
+    } finally {
+      await authority.close();
+    }
+  });
 
   it('accounts for retained projection hints in the cache byte estimate', async () => {
     const reader = newReader();

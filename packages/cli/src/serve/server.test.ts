@@ -35992,6 +35992,28 @@ describe('createServeApp', () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaae';
       const bridge = fakeBridge();
       await writeTranscriptSession(sid);
+      const chatsFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        `${sid}.jsonl`,
+      );
+      const appendUser = async (n: number, parent: string, text: string) => {
+        await fsp.appendFile(
+          chatsFile,
+          JSON.stringify({
+            uuid: `${sid}-user-${n}`,
+            parentUuid: parent,
+            sessionId: sid,
+            timestamp: `2026-05-28T12:00:0${n}.000Z`,
+            type: 'user',
+            message: { role: 'user', parts: [{ text }] },
+            cwd: wsDir,
+            version: '1.0.0',
+          }) + '\n',
+        );
+      };
+      await appendUser(2, `${sid}-user-1`, 'second turn');
+      await appendUser(3, `${sid}-user-2`, 'third turn');
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
         boundWorkspace: wsDir,
@@ -36010,15 +36032,18 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['cache-control']).toBe('no-store');
-      // Daemon-local read mints a real persisted-key snapshot.
+      // Daemon-local read mints a real persisted-key snapshot and forwards
+      // limit (3 turns on disk, 2 returned).
       expect(typeof res.body.snapshot).toBe('string');
-      expect(res.body.totalTurns).toBe(1);
-      expect(res.body.turns[0].label).toBe('hello transcript');
+      expect(res.body.totalTurns).toBe(3);
+      expect(res.body.turns).toHaveLength(2);
+      expect(res.body.turns[0].label).toBe('second turn');
+      expect(res.body.turns[1].label).toBe('third turn');
       expect(bridge.sessionTurnIndexCalls).toEqual([]);
 
       const outOfRange = await request(app)
         .get(
-          `/session/${sid}/turn-index?snapshot=${encodeURIComponent(res.body.snapshot)}&start=2`,
+          `/session/${sid}/turn-index?snapshot=${encodeURIComponent(res.body.snapshot)}&start=4`,
         )
         .set('Host', `127.0.0.1:${baseOpts.port}`);
       expect(outOfRange.status).toBe(400);
@@ -36052,6 +36077,9 @@ describe('createServeApp', () => {
         expect(builds).toBe(1);
         expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(1);
         expect(bridge.sessionTurnIndexCalls).toEqual([]);
+        // Cold session (getSessionSummary throws SessionNotFoundError): the
+        // live-flush barrier stays gated behind liveness and never calls flush.
+        expect(bridge.flushSessionTranscriptCalls).toEqual([]);
       } finally {
         setSessionTranscriptIndexBuildCompleteHookForTest(undefined);
         resetSessionTranscriptIndexCacheForTest();
@@ -36342,6 +36370,19 @@ describe('createServeApp', () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
       await writeTranscriptSession(sid);
       await writeTranscriptSession(sid, 'archived');
+      // Give the archived copy distinct text so the response body proves the
+      // active copy was read rather than the archived one.
+      const archivedFile = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        'archive',
+        `${sid}.jsonl`,
+      );
+      const archivedRaw = await fsp.readFile(archivedFile, 'utf8');
+      await fsp.writeFile(
+        archivedFile,
+        archivedRaw.replace('hello transcript', 'archived-only transcript'),
+      );
       const bridge = fakeBridge();
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
         bridge,
@@ -36356,6 +36397,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${baseOpts.port}`);
 
       expect(transcript.status).toBe(200);
+      expect(JSON.stringify(transcript.body)).toContain('hello transcript');
+      expect(JSON.stringify(transcript.body)).not.toContain(
+        'archived-only transcript',
+      );
       expect(exported.status).toBe(200);
       expect(exported.text).toContain(sid);
       // Daemon-local read: the active copy is served without the bridge page.
