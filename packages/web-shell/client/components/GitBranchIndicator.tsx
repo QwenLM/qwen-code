@@ -169,7 +169,7 @@ export function GitBranchChipContent({
             <GitBranchIcon />
           )}
         </span>
-        {compact && tone && (
+        {tone && (
           <span
             className={styles.gitBranchBadgeDot}
             data-tone={tone}

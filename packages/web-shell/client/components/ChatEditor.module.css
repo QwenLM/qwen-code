@@ -1534,9 +1534,10 @@
   flex: 0 0 var(--git-branch-icon-size, 16px);
 }
 
-/* Compact (icon-only) chip: a single severity dot on the branch icon so the
-   working-tree state is still glanceable without the text + inline indicators. */
+/* Reserve a visible severity dot for icon-only and detail-collapsed branch
+   chips, without duplicating the detailed indicators on wider layouts. */
 .gitBranchBadgeDot {
+  display: none;
   position: absolute;
   top: var(--git-branch-badge-offset, -2px);
   right: var(--git-branch-badge-offset, -3px);
@@ -1545,6 +1546,10 @@
   border-radius: 50%;
   background: var(--chat-editor-accent-color);
   box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchChipCompact .gitBranchBadgeDot {
+  display: block;
 }
 
 .gitBranchBadgeDot[data-tone='warning'] {
@@ -3279,9 +3284,14 @@
     .mobileContextRow [data-slot='select-value'],
     .mobileContextRow [data-web-shell-git-branch-label],
     .mobileContextRow .gitBranchText,
-    .mobileContextRow .gitBranchIndicators,
     .mobileContextRow .workspaceChipText {
       display: none;
+    }
+    .mobileContextRow .gitBranchIndicators {
+      display: none;
+    }
+    .mobileContextRow .gitBranchBadgeDot {
+      display: block;
     }
   }
 }
@@ -3306,6 +3316,10 @@
   flex-shrink: 0;
   gap: 4px;
   margin-inline-start: auto;
+}
+
+.mobileKeyboardPlaceholder {
+  visibility: hidden;
 }
 
 .mobileEditingActions:has(.mobileContextRow) {

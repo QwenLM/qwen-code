@@ -3237,6 +3237,7 @@ export const ChatEditor = memo(
         gitModeIntent && onGitModeIntentChange ? (
           <GitModePopover
             branch={gitBranch}
+            status={gitStatus}
             compact={compact}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
@@ -4971,19 +4972,21 @@ export const ChatEditor = memo(
                     <SlashIcon />
                   </button>
                   <div className={styles.mobileEditingTail}>
-                    {mobileFocused && (
-                      <button
-                        type="button"
-                        className={styles.toolBtn}
-                        aria-label={t('composerMobile.hideKeyboard')}
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() =>
-                          core.mobileComposer?.textareaRef.current?.blur()
-                        }
-                      >
-                        <KeyboardIcon />
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      className={`${styles.toolBtn} ${
+                        mobileFocused ? '' : styles.mobileKeyboardPlaceholder
+                      }`}
+                      disabled={!mobileFocused}
+                      aria-hidden={!mobileFocused}
+                      aria-label={t('composerMobile.hideKeyboard')}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() =>
+                        core.mobileComposer?.textareaRef.current?.blur()
+                      }
+                    >
+                      <KeyboardIcon />
+                    </button>
                     <button
                       type="button"
                       className={styles.toolBtn}

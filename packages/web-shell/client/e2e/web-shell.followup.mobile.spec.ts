@@ -355,8 +355,8 @@ test('@smoke mobile editing-row direction keys move the caret', async ({
   await textarea.fill('');
   await pushSuggestion(daemon, scenario.sessionId);
   await expect(page.locator(FOLLOWUP_BAR)).toBeVisible();
-  // Evidence shots share one focus state: unfocused, so the conditional
-  // hide-keyboard control is absent and no tap-hover tile lingers on a key.
+  // Evidence shots share one focus state: unfocused. The hide-keyboard slot
+  // remains reserved but its button is hidden and disabled, with no hover tile.
   await textarea.evaluate((el) => el.blur());
   await page.mouse.move(0, 0);
   await expect(
@@ -376,6 +376,7 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
   const textarea = page.locator(COMPOSER_TEXTAREA);
   const keys = page.locator('[data-web-shell-mobile-editing-keys]');
   await textarea.evaluate((el) => el.blur());
+  const heightByWidth = new Map<number, number>();
 
   const checkTail = async (keyboardVisible: boolean) => {
     for (const width of [240, 310, 320, 345, 390]) {
@@ -384,8 +385,24 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
         .poll(async () =>
           keys.evaluate((group, hasKeyboard) => {
             const buttons = Array.from(
-              group.querySelectorAll<HTMLButtonElement>('button'),
+              group.querySelectorAll<HTMLButtonElement>(
+                'button:not([aria-hidden="true"])',
+              ),
             );
+            const placeholder = group.querySelector<HTMLButtonElement>(
+              'button[aria-hidden="true"]',
+            );
+            if (hasKeyboard) {
+              if (placeholder) return false;
+            } else if (
+              !placeholder ||
+              !placeholder.disabled ||
+              getComputedStyle(placeholder).visibility !== 'hidden' ||
+              placeholder.getBoundingClientRect().width < 44 ||
+              placeholder.getBoundingClientRect().height < 44
+            ) {
+              return false;
+            }
             const labels = buttons.map((button) =>
               button.getAttribute('aria-label'),
             );
@@ -428,6 +445,11 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
           }, keyboardVisible),
         )
         .toBe(true);
+      const height = (await keys.boundingBox())!.height;
+      if (heightByWidth.has(width)) {
+        expect(height).toBeCloseTo(heightByWidth.get(width)!, 0);
+      }
+      heightByWidth.set(width, height);
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth),
       ).toBe(width);

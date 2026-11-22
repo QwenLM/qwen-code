@@ -1384,10 +1384,10 @@ for (const width of [390, 240]) {
       .getByRole('button');
     // Pin the controls this scenario must render before measuring them, so a
     // dropped button fails the test instead of shrinking the iterated set.
-    // (Hide keyboard renders only while the textarea is focused; fill does
-    // focus it. The standalone dev host always opts into the Add entry, so
-    // the no-Add contextual buttons — Input history and the Shell toggle —
-    // never render here and this loop does not measure them.)
+    // (Hide keyboard is visible only while focused, while its reserved slot is
+    // always present; fill does focus it. The standalone dev host always opts
+    // into the Add entry, so the no-Add contextual buttons — Input history and
+    // the Shell toggle — never render here and this loop does not measure them.)
     await expect(
       page.getByRole('button', { name: 'Expand editor', exact: true }),
     ).toHaveCount(1);
@@ -1721,14 +1721,30 @@ for (const width of [240, 310, 320, 345, 390]) {
     await installScenario(page, scenario, testInfo);
     await page.goto('/');
     const textarea = page.locator(COMPOSER_TEXTAREA);
-    await textarea.tap();
     const composer = page.locator('[data-web-shell-composer]');
+    const editingKeys = composer.locator(
+      '[data-web-shell-mobile-editing-keys]',
+    );
     const workspace = composer.locator('button[aria-label="Workspace"]');
     const keyboard = composer.getByRole('button', {
       name: 'Hide keyboard',
       exact: true,
     });
+    await textarea.tap();
     await expect(keyboard).toBeVisible();
+    await textarea.evaluate((element) => element.blur());
+    await expect(keyboard).toBeHidden();
+    await expect(
+      composer.locator('button[aria-label="Hide keyboard"]'),
+    ).toHaveCSS('visibility', 'hidden');
+    const idleEditingHeight = (await editingKeys.boundingBox())!.height;
+    await textarea.tap();
+    await expect(keyboard).toBeVisible();
+    const focusedEditingHeight = (await editingKeys.boundingBox())!.height;
+    expect(
+      Math.abs(focusedEditingHeight - idleEditingHeight),
+    ).toBeLessThanOrEqual(1);
+    const workspaceBeforeTap = (await workspace.boundingBox())!;
     const value = workspace.locator('[data-slot="select-value"]');
     const initialWorkspaceLabel = await value.innerText();
     if (await value.isVisible()) {
@@ -1744,6 +1760,12 @@ for (const width of [240, 310, 320, 345, 390]) {
     const workspaceMenu = page.getByRole('menu');
     const workspaceOptions = page.getByRole('menuitemradio');
     await expect(workspaceMenu).toBeVisible();
+    const workspaceAfterTap = (await workspace.boundingBox())!;
+    expect(workspaceAfterTap.y).toBeCloseTo(workspaceBeforeTap.y, 0);
+    expect((await editingKeys.boundingBox())!.height).toBeCloseTo(
+      focusedEditingHeight,
+      0,
+    );
     await expect(workspaceOptions).toHaveCount(2);
     await expect(workspaceOptions.first()).toBeVisible();
     await expect.poll(() => isUncovered(workspaceOptions.first())).toBe(true);
@@ -1807,6 +1829,49 @@ for (const width of [240, 310, 320, 345, 390]) {
     });
   });
 }
+
+test('mobile compact branch keeps a visible conflict indicator and usable menu @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 320, height: 844 });
+  const scenario = createGitWorkspaceScenario({
+    gitStatus: {
+      v: 2,
+      workspaceCwd: '/tmp/qwen-web-shell-e2e',
+      branch: 'main',
+      conflicted: 1,
+    },
+  });
+  scenario.capabilities.workspaces!.push({
+    id: 'secondary',
+    cwd: '/tmp/another-project',
+    primary: false,
+    trusted: true,
+  });
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  await page.locator(COMPOSER_TEXTAREA).tap();
+  const branch = page.getByTestId('git-mode-chip');
+  await expect(branch).toHaveAttribute(
+    'aria-label',
+    'Git mode: main — 1 conflicted',
+  );
+  const indicator = branch.locator('[data-tone="error"]');
+  await expect(indicator).toHaveCount(1);
+  await expect(indicator).toBeVisible();
+  const indicatorBounds = (await indicator.boundingBox())!;
+  expect(indicatorBounds.width).toBeGreaterThanOrEqual(7);
+  expect(indicatorBounds.height).toBeGreaterThanOrEqual(7);
+  expect(
+    await indicator.evaluate((element) => getComputedStyle(element).display),
+  ).not.toBe('none');
+  await page.screenshot({
+    path: testInfo.outputPath('branch-conflict-320.png'),
+  });
+  await branch.tap();
+  await expect(branch).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.getByRole('radio', { name: /Worktree/ })).toBeVisible();
+});
 
 // 412x450 is a Pixel 7 once the soft keyboard has resized the viewport. A
 // second workspace and a long branch wrap the workspace row onto two lines.

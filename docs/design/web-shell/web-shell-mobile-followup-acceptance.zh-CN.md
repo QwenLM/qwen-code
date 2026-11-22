@@ -2,11 +2,11 @@
 
 [English](web-shell-mobile-followup-acceptance.md) | [简体中文](web-shell-mobile-followup-acceptance.zh-CN.md)
 
-状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20–21 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示 → 有界镜像测量、折行行尾字素钳制、仅垂直写列、展开对话框 surface、忽略不聚焦)。
+状态:已实现于 `feat/web-shell-mobile-followup-acceptance`(PR #17918),2026-11-20–22 经多轮评审修订(Tab 键 → 动作词键 → 单 chip 建议条 → 光标/斜杠键排 → 240px 换行修复 → 字素/视觉行光标、列保持与滚动揭示 → 有界镜像测量、折行行尾字素钳制、仅垂直写列、展开对话框 surface、忽略不聚焦)。
 
 ## 问题
 
-触摸输入框(原生 `<textarea>` 后端,`(hover: none) and (pointer: coarse)`)只把 follow-up suggestion 渲染成 placeholder 灰字。桌面 CodeMirror 用 Tab / Enter / → 接受,语义是「填入输入框但不发送」;触摸后端没有对应手势。空输入点发送会整条直发,输入前缀再发送会补全直发,但两者都不允许用户先编辑再发。
+触摸输入框(原生 `<textarea>` 后端,`(hover: none) and (pointer: coarse)`)只把 follow-up suggestion 渲染成 placeholder 灰字。桌面 CodeMirror 用 Tab / → 接受时填入输入框但不发送;按 Enter 接受并发送;触摸后端没有对应手势。空输入点发送会整条直发,输入前缀再发送会补全直发,但两者都不允许用户先编辑再发。
 
 两个历史决策约束本变更:mobile-composer-actions 重设计移除了旧模拟 Tab/Esc/左右键,因为当时 Tab 在 textarea 后端上是死键;#14220 移除了编辑行的 ↑/↓ 历史步进,因为历史召回统一走搜索面板,且 plain textarea 恢复无法重建 inline tag chips。因此本变更不复活历史步进。
 
@@ -39,8 +39,8 @@
 - chip 与其它输入框控件一样 preventDefault mousedown,避免在手势插入前丢焦点;aria-label 组合本地化动作与建议文本,屏幕阅读器两者都得。
 - 「不出现模拟键盘键」的旧验收仍然成立:没有 follow-up 控件命名键盘键或光秃动词;编辑行键是有原生语义的光标/字符键,不是模拟接受/历史键。
 - 编辑键在 IME 组合期间让路(compositionstart/end 门控);纯光标移动不改草稿,草稿持久化与历史浏览状态不受影响。
-- 可选收起键盘按钮紧挨放大按钮之前,放大始终是编辑键组末项。两者组成不缩小的 flex 尾键组,整组换行:其它编辑键可以排在较早的行,但收起键盘与放大必须相邻,放大的右缘位于键组末尾,不缩小 44px 触摸目标也不溢出视口。
-- composer 容器宽度不超过 320px 时,工作区与分支的长文字标签通过容器查询收起为图标,保留选择入口及可访问名称;方向键、收起键盘与放大仍保留,打开菜单后仍能看到完整名称。触摸编辑器把工作区菜单的首选方向设为 bottom,避免菜单展开跨行时覆盖本次触摸激活位置;其它选择器调用点保留原来的默认 top。
+- 可选收起键盘按钮紧挨放大按钮之前,放大始终是编辑键组末项。两者组成不缩小的 flex 尾键组,整组换行:其它编辑键可以排在较早的行,但收起键盘与放大必须相邻,放大的右缘位于键组末尾,不缩小 44px 触摸目标也不溢出视口。失焦时收起键保留 44px 槽位,仅通过 visibility/aria-hidden 隐藏并禁用,不再卸载,因此焦点变化不会改变键组高度或移位 Workspace 入口。
+- composer 容器宽度不超过 320px 时,工作区与分支的长文字标签通过容器查询收起为图标,保留选择入口及可访问名称;方向键、收起键盘与放大仍保留,打开菜单后仍能看到完整名称。冲突、脏工作区、detached 与进行中的 Git 操作仍保留紧凑的严重度圆点,隐藏详细文字不会让分支看似干净。触摸编辑器把工作区菜单的首选方向设为 bottom,避免菜单展开跨行时覆盖本次触摸激活位置;其它选择器调用点保留原来的默认 top。
 
 ## 验证
 
@@ -48,9 +48,9 @@
 - `client/e2e/web-shell.touch-caret-issue-17918.mobile.spec.ts` 覆盖 5 个光标连续性用例，以及字体/word-spacing 变化后的布局 fingerprint、左右边框与原生方向键一致、顶部 padding 的滚动揭示、展开宿主清理与选区复位、反向选区活动端、小数宽度匹配与缓存失效、text-indent 匹配（含原生像素目标列对照）、布局宽度不随绘制缩放而改变、受限滚动视口内连续 Down 到空行时的揭示（保留换行亲和性）、含 15px 原生滚动条轨道的 border-box/content-box 几何匹配、连续空行揭示，另有 Chromium 原生对照证明右键为何仍需有界揭示。18 个中 16 个带 `@smoke`;原生滚动条的两种盒模型对照与 Chromium 原生滚动对照不进入该 grep。
 - 两个 Playwright spec 合计在 mobile-Chromium 下验证 **49/49**:31 项 follow-up/命令授权用例加 18 项光标用例;其中 **45 项**携带 `@smoke`(29+16),另外 4 项为计时、CDP-IME 与两类原生滚动条对照。
 - `ChatEditor.test.tsx` mobile composer actions:单测钉可见性(有草稿、无可见建议、桌面后端、disabled、simple 变体)、accept/dismiss 接线、忽略不调用外层聚焦、composition 与选区重置接线、编辑键接线与 → 的动态 aria-label(含完全匹配判据);`useComposerCore.test.ts` 钉字素/视觉行光标计算、折行行尾钳制、目标列保持以及正/反向选区活动端;`useComposerCore.mobile.dom.test.tsx` 对真实钩子钉完全匹配接受门、前缀接受、IME 让路、反向选区活动端、展开态选区复位、列保持与用户跳选区重置及水平后重算、滚动揭示;`utils/touchCaret.test.ts` 钉镜像唯一生命周期、小数宽度精度、缓存失效、布局宽度与绘制变换的区分及 text-indent 复制/指纹,`App.css.test.ts` 收集常驻/hover 规则的全部声明值，并钉住 color、background、边框主题 token 在两主题块均声明;七个文件(含 `i18n.test.ts` 与 `useComposerCore.dom.test.tsx`)**746/746** 通过。新增命令用例覆盖空草稿、前缀替换、完全手输、普通文本及会话切换隔离;桌面提交行为不变。上述布局夹具区分字素列与原生像素目标列,并在字体回退影响原生折行时钉住明确安装的字体族,不宣称任意 generic font 等价。
-- 配套 `client/e2e/web-shell.composer.mobile.spec.ts` 在 mock daemon 驱动的真实 React/Radix 页面中，覆盖 44px 点击区域、工作区及长文字换行和工作区/分支的紧凑标签。在 240、310、320、345 与 390px 下，保持原生 textarea 已聚焦，工作区入口只能经一次点按打开可见、含两个选项的菜单，不允许用第二次点按建立打开状态；再明确选择第二个工作区，要求菜单关闭且入口显示名称随之更新。文字隐藏时图标入口仍然保留，可见的短文字不被要求截断，并检查收起键盘/放大键相邻、触摸尺寸和无横向溢出。
+- 配套 `client/e2e/web-shell.composer.mobile.spec.ts` 在 mock daemon 驱动的真实 React/Radix 页面中，覆盖 44px 点击区域、工作区及长文字换行和工作区/分支的紧凑标签。在 240、310、320、345 与 390px 下，保持原生 textarea 已聚焦，工作区入口只能经一次点按打开可见、含两个选项的菜单，不允许用第二次点按建立打开状态；再明确选择第二个工作区，要求菜单关闭且入口显示名称随之更新。文字隐藏时图标入口仍然保留，可见的短文字不被要求截断，并检查收起键盘/放大键相邻、触摸尺寸和无横向溢出。还测量获得焦点与工作区激活前后的键组高度，要求收起键盘隐藏时入口保持点按前的位置。
 - web-shell `tsc --noEmit` 与改动文件 ESLint:干净。
-- 未覆盖:mobile-webkit / iOS 真机(本机缺 WebKit 运行库);软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置);展开对话框缩放动画中实际手指操作;generic 字体选择与本机原生排版一致性(本机 generic `monospace` 与明确字体族产生了不同的原生折行,新增宽度/缩进夹具固定明确安装的字体族)。
+- 本机未覆盖 mobile-webkit 浏览器仿真或 iOS 真机(宿主缺 WebKit 运行库);前述双引擎用例指 CI 的浏览器仿真,不代表 iOS 真机验收;软键盘弹起时新增行的高度挤压;iPad 外接键盘 Tab/→ 接受(后置);展开对话框缩放动画中实际手指操作;generic 字体选择与本机原生排版一致性(本机 generic `monospace` 与明确字体族产生了不同的原生折行,新增宽度/缩进夹具固定明确安装的字体族)。
 
 ## 待定问题
 
