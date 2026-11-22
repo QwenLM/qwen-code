@@ -13,6 +13,7 @@ import {
   enforceFunctionResponseBudget,
   finalizeToolResponses,
   isBudgetShrinkablePart,
+  minimumFunctionResponseContent,
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
@@ -976,6 +977,22 @@ describe('tool response finalization', () => {
     ).toBe(entries);
     expect(enforceFunctionResponseBudget(entries, 220)).toBe(entries);
     expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('protects a fallback-only recovery pointer from a small send budget', () => {
+    const artifact = '/tmp/tool-results/web-fetch.output';
+    const parts = convertToFunctionResponse(
+      'web_fetch',
+      'send',
+      `Full extracted text saved to: ${artifact}\n${'x'.repeat(1000)}`,
+      { fallbackPersistedOutputFiles: [artifact] },
+    );
+    const entries = [entry('send', parts)];
+
+    expect(enforceFunctionResponseBudget(entries, 20)).toBe(entries);
+    expect(minimumFunctionResponseContent(parts).budgetedChars).toBeGreaterThan(
+      0,
+    );
   });
 
   it('keeps a real preview when the persisted pointer cannot fit the allocation', async () => {

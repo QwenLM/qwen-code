@@ -139,9 +139,9 @@ function recoveryHeader(files: string[] | undefined): string {
 
 function minimumRecoveryBudget(slot: TextSlot): number {
   const text = slot.recovery?.text;
-  const files = slot.recovery?.persistedOutputFiles?.length
-    ? slot.recovery.persistedOutputFiles
-    : slot.recovery?.fallbackPersistedOutputFiles;
+  const files =
+    slot.recovery?.persistedOutputFiles ??
+    slot.recovery?.fallbackPersistedOutputFiles;
   return recoveryHeader(files).length + (text ? text.length + 2 : 0) + 3;
 }
 
@@ -378,11 +378,14 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
-    const persistedFiles =
-      entry.persistedOutputFiles ?? slot.recovery?.persistedOutputFiles;
-    const files = persistedFiles?.length
-      ? persistedFiles
-      : slot.recovery?.fallbackPersistedOutputFiles;
+    // A producer's [] is a final decision; a failed finalizer write may still
+    // fall back to the producer artifact.
+    const files =
+      slot.recovery?.persistedOutputFiles ??
+      (entry.persistedOutputFiles?.length
+        ? entry.persistedOutputFiles
+        : (slot.recovery?.fallbackPersistedOutputFiles ??
+          entry.persistedOutputFiles));
     const recovery = { ...slot.recovery, persistedOutputFiles: files };
     // Paths come from producer metadata or this module's write, never from a
     // string recovered from model-visible text.
@@ -431,7 +434,9 @@ export function minimumFunctionResponseContent(parts: Part[]): {
   const entries = [{ callId: '', toolName: '', responseParts: parts }];
   const slots = collectTextSlots(entries, false);
   const allocations = slots.map((slot) =>
-    slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length
+    slot.recovery?.text ||
+    slot.recovery?.persistedOutputFiles?.length ||
+    slot.recovery?.fallbackPersistedOutputFiles?.length
       ? Math.min(slot.text.length, minimumRecoveryBudget(slot))
       : 0,
   );
@@ -465,7 +470,9 @@ export function enforceFunctionResponseBudget(
     slots.some(
       (slot, index) =>
         slot.text.length > allocations[index] &&
-        (slot.recovery?.text || slot.recovery?.persistedOutputFiles?.length) &&
+        (slot.recovery?.text ||
+          slot.recovery?.persistedOutputFiles?.length ||
+          slot.recovery?.fallbackPersistedOutputFiles?.length) &&
         allocations[index] < minimumRecoveryBudget(slot),
     )
   )

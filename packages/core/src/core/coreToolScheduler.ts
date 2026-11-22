@@ -6778,6 +6778,8 @@ export class CoreToolScheduler {
           {
             text: replacement ? undefined : producerToolResult?.recoveryText,
             persistedOutputFiles: response.persistedOutputFiles,
+            fallbackPersistedOutputFiles:
+              producerToolResult?.fallbackPersistedOutputFiles,
           },
         );
         try {
@@ -7414,7 +7416,12 @@ export class CoreToolScheduler {
           getModelFacingToolName(scheduledCall.request),
           callId,
           content,
-          { recoveryText: toolResult.recoveryText, persistedOutputFiles },
+          {
+            recoveryText: toolResult.recoveryText,
+            persistedOutputFiles,
+            fallbackPersistedOutputFiles:
+              toolResult.fallbackPersistedOutputFiles,
+          },
         );
         const processedImages = await this.processToolResultImages(
           convertedResponse,

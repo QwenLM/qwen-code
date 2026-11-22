@@ -88,7 +88,8 @@ export const WEB_FETCH_SAVED_TEXT_PREFIX = 'Full extracted text saved to: ';
  * Four producers spill: `buildStub` (the `<persisted-output>` envelope),
  * `truncateAndSaveToFile`'s `envelope` (the `Tool output was too large...`
  * one), the send-path finalizer's artifact header, and `web_fetch`'s
- * saved-text note ahead of its metadata header. Bounded envelopes that could
+ * saved-text note in either its current or legacy metadata layout. Bounded
+ * envelopes that could
  * NOT save (`Full output could not be saved`, `Could not save full output to
  * file`) carry no path and return false: there is nothing to orphan, so they
  * stay clearable.
@@ -97,6 +98,11 @@ export function isPersistedOutputStub(content: string): boolean {
   if (content.startsWith(PERSISTED_OUTPUT_STUB_PREFIX)) return true;
   if (content.startsWith(PERSISTED_OUTPUT_ARTIFACT_PREFIX)) return true;
   if (content.startsWith(WEB_FETCH_SAVED_TEXT_PREFIX)) return true;
+  if (content.startsWith(WEB_FETCH_URL_PREFIX)) {
+    const headerEnd = content.indexOf('\n\n');
+    const savedAt = content.indexOf(`\n${WEB_FETCH_SAVED_TEXT_PREFIX}`);
+    if (savedAt >= 0 && (headerEnd === -1 || savedAt < headerEnd)) return true;
+  }
   if (!content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return false;
   // The header is the envelope's second line; matching the whole body would
   // also hit the preview, where the truncated content may quote this phrase.
