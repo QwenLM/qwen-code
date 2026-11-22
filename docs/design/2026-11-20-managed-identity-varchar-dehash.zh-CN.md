@@ -460,3 +460,49 @@ component := "-" | <utf8-byte-length>:<escaped-payload>
 MySQL 8.4 类型/collation/索引宽度门、完整 H2 套件（本地 10 分钟预算内未跑完）、
 SQL 性能基准与 TypeScript 消费者同步。后续必须继续按原子簇实施，不得把当前
 检查点宣称为完整去哈希完成。
+
+## 2026-11-22 最终策略（取代早期 NO PAD 提案）
+
+本节记录维护者最终确认并已落地的策略，取代上文「NO PAD / `utf8mb4_0900_bin` /
+尾随空格字节精确」的早期提案，以及 actor 列暂留 `VARBINARY(144)` 的 interim 决策。
+
+### Collation 与尾随空格
+
+- 移除所有列级 `COLLATE utf8mb4_0900_bin`，身份列继承表默认 `utf8mb4_bin`（PAD SPACE）。
+- 统一策略：**所有身份准入拒绝尾随空格**（`requireActor` 及
+  `requireBindingId/requireOperationId/requireShortId/requireWorkspaceId/requireStorageId/requireInstanceId/requireWorkerOwner`）。
+  准入既不允许尾随空格进入系统，PAD SPACE 折叠就不会发生在合法身份上。
+- 「等值精确含尾随空格」不再由 collation 保证，而由准入保证；大小写敏感仍由
+  `utf8mb4_bin` 保持。早期「尾随空格区分」测试改为「尾随空格拒绝」测试，大小写区分保留。
+
+### actor 列
+
+- raw actor（≤36 code points）授权/幂等键列统一 `VARCHAR(36)`：ma_user_message、
+  ma_user_message_command、ma_workspace_access、ma_schedule、ma_client_files_binding，
+  以及既有 ma_session.creator/owner_actor_key、ma_operation、ma_session_record、
+  extension、delivery、memory_store、session_worktree。
+- `ma_channel_instance.actor_id` 为 `VARCHAR(512)`（adapter 契约 `@Size(max=512)`，
+  register 拒绝尾随空格）。不再保留 actor 二进制/文本混用。
+
+### 已完成的 Tier A 转换
+
+- operation 家族 + `publication_command_id` `VARCHAR(128)`（`uk_ma_publication_operation`
+  3136→1600B）；短铸造 ID `VARCHAR(64)`（`decision_receipt_id` 128）；
+  action/run/channel/route/artifact/publication/capture/task/stream/instance/creation/worker-owner
+  `VARCHAR(128)`；`memory_id` `VARCHAR(256)`；`slot_key`/`occurrence_key` `VARCHAR(144)`；
+  workspace/storage/extension 按 registry 128 / runtime 512 / storage 256。
+- canonical ref、摘要、密文、对象键、`source_key` 等保留 `VARBINARY`。
+
+### 跨引擎注意
+
+- H2 2.3.232 的 `VARCHAR(n)` 按 UTF-16 unit 计长，MySQL 按 code point 计长；36 code point
+  的补充平面字符（emoji）在 H2 会超 36 unit。actor 边界测试用 BMP 字符（CJK）覆盖
+  36 code point 预算；生产目标 MySQL 按 code point 计。
+
+### 仍未完成
+
+- Tier B（resource_id/record_id/item_id/execution_call_id/delivery_id/segment_id/
+  idempotency_key/外部平台 ID/PR owner-repo/isolation_key）需准入/索引设计。
+- wenshao 其余阻塞：record_id 1024B prefix、Action owner_ref 退役泄漏、Hook 列宽/PAD SPACE、
+  N7 `lockPlacementDomain` 死锁、N9 schema gate 空匹配。
+- 与 #18048 语义合并冲突；完整 H2、MySQL 8.4 门/竞态/性能 pending CI。

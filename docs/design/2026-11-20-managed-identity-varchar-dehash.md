@@ -571,3 +571,64 @@ type/collation/index-width gates, the full H2 suite (did not finish within the
 10-minute local budget), SQL performance benchmarks, and TypeScript consumer
 synchronization. Continue as an atomic cluster; do not describe this checkpoint
 as complete de-hashing.
+
+## 2026-11-22 final policy (supersedes the earlier NO PAD proposal)
+
+This section records the maintainer-approved policy that has landed. It
+supersedes the earlier "NO PAD / `utf8mb4_0900_bin` / byte-exact trailing-space
+equality" proposal above, and the interim decision to keep actor columns at
+`VARBINARY(144)`.
+
+### Collation and trailing spaces
+
+- All column-level `COLLATE utf8mb4_0900_bin` clauses were removed; identity
+  columns inherit the table default `utf8mb4_bin` (PAD SPACE).
+- Uniform policy: **every identity admission rejects trailing spaces**
+  (`requireActor` and
+  `requireBindingId/requireOperationId/requireShortId/requireWorkspaceId/requireStorageId/requireInstanceId/requireWorkerOwner`).
+  Because admission never lets a trailing space into the system, PAD SPACE
+  folding cannot occur for a legal identity.
+- Exact equality "including trailing spaces" is now guaranteed by admission,
+  not by collation; case sensitivity is still provided by `utf8mb4_bin`. The
+  earlier trailing-space-distinction tests became trailing-space-rejection
+  tests; case-distinction tests are preserved.
+
+### Actor columns
+
+- Raw-actor (≤36 code points) authorization/idempotency key columns are uniformly
+  `VARCHAR(36)`: ma_user_message, ma_user_message_command, ma_workspace_access,
+  ma_schedule, ma_client_files_binding, plus the existing
+  ma_session.creator/owner_actor_key, ma_operation, ma_session_record, extension,
+  delivery, memory_store, and session_worktree columns.
+- `ma_channel_instance.actor_id` is `VARCHAR(512)` (adapter contract
+  `@Size(max=512)`, register rejects trailing spaces). The binary/text actor
+  split is gone.
+
+### Tier A conversions completed
+
+- Operation family + `publication_command_id` `VARCHAR(128)`
+  (`uk_ma_publication_operation` 3136→1600B); short minted IDs `VARCHAR(64)`
+  (`decision_receipt_id` 128); action/run/channel/route/artifact/publication/
+  capture/task/stream/instance/creation/worker-owner `VARCHAR(128)`; `memory_id`
+  `VARCHAR(256)`; `slot_key`/`occurrence_key` `VARCHAR(144)`; workspace/storage/
+  extension split registry 128 / runtime 512 / storage 256.
+- Canonical refs, digests, ciphertext, object keys, and `source_key` stay
+  `VARBINARY`.
+
+### Cross-engine note
+
+- H2 2.3.232 measures `VARCHAR(n)` in UTF-16 units while MySQL measures code
+  points; 36 code points of supplementary-plane characters (emoji) exceed 36
+  units on H2. Actor boundary tests use BMP characters (CJK) to exercise the
+  36-code-point budget; the production target MySQL counts code points.
+
+### Still outstanding
+
+- Tier B (resource_id/record_id/item_id/execution_call_id/delivery_id/segment_id/
+  idempotency_key/external platform IDs/PR owner-repo/isolation_key) needs
+  admission/index design.
+- Other wenshao blockers: record_id 1024B prefix, Action owner_ref retirement
+  leak, Hook width/PAD SPACE, N7 `lockPlacementDomain` deadlock, N9 schema gate
+  matching zero rows.
+- Semantic merge conflict with #18048; full H2 and MySQL 8.4 gates/races/
+  performance pending CI.
