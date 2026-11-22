@@ -2264,6 +2264,125 @@ describe('Qwen Subscription model selection', () => {
       detail: 'DEEPINFRA_SERVICE_TIER',
     });
   });
+
+  it('preserves DeepInfra Flex default timeout (600,000ms) across syncAfterAuthRefresh (R1-31)', () => {
+    const config = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'deepseek-ai/DeepSeek-V3',
+            baseUrl: 'https://api.deepinfra.com/v1/openai',
+            envKey: 'DEEPINFRA_API_KEY',
+          },
+        ],
+      },
+      generationConfig: {
+        model: 'deepseek-ai/DeepSeek-V3',
+        service_tier: 'flex',
+        timeout: 600000,
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        service_tier: {
+          kind: 'env',
+          envKey: 'DEEPINFRA_SERVICE_TIER',
+          detail: 'DEEPINFRA_SERVICE_TIER',
+        },
+        timeout: {
+          kind: 'default',
+          detail: 'DeepInfra flex queue default (10m)',
+        },
+      },
+    });
+
+    config.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'deepseek-ai/DeepSeek-V3');
+
+    expect(config.getGenerationConfig().timeout).toBe(600000);
+    expect(config.getGenerationConfigSources()['timeout']).toEqual({
+      kind: 'default',
+      detail: 'DeepInfra flex queue default (10m)',
+    });
+  });
+
+  it('does not leak model-specific service_tier to a different model without service_tier (R1-19)', async () => {
+    const config = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'model-a-priority',
+            baseUrl: 'https://api.openai.com/v1',
+            generationConfig: {
+              service_tier: 'priority',
+            },
+          },
+          {
+            id: 'model-b-deepseek',
+            baseUrl: 'https://api.deepseek.com',
+          },
+        ],
+      },
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'model-a-priority',
+      },
+    });
+
+    await config.switchModel(AuthType.USE_OPENAI, 'model-a-priority');
+    expect(config.getGenerationConfig().service_tier).toBe('priority');
+    expect(config.getGenerationConfigSources()['service_tier']).toEqual({
+      kind: 'modelProviders',
+      authType: AuthType.USE_OPENAI,
+      modelId: 'model-a-priority',
+      detail: 'generationConfig.service_tier',
+    });
+
+    await config.switchModel(AuthType.USE_OPENAI, 'model-b-deepseek');
+    expect(config.getGenerationConfig().service_tier).toBeUndefined();
+    expect(config.getGenerationConfigSources()['service_tier']).toBeUndefined();
+  });
+
+  it('clears DEEPINFRA_SERVICE_TIER and flex queue default timeout when switching to non-DeepInfra model (R1-19, R1-31)', async () => {
+    const config = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [
+          {
+            id: 'deepinfra-model',
+            baseUrl: 'https://api.deepinfra.com/v1/openai',
+            envKey: 'DEEPINFRA_API_KEY',
+          },
+          {
+            id: 'non-deepinfra-model',
+            baseUrl: 'https://api.other.com/v1',
+            envKey: 'OTHER_API_KEY',
+          },
+        ],
+      },
+      initialAuthType: AuthType.USE_OPENAI,
+      generationConfig: {
+        model: 'deepinfra-model',
+        service_tier: 'flex',
+        timeout: 600000,
+      },
+      generationConfigSources: {
+        model: { kind: 'cli', detail: '--model' },
+        service_tier: {
+          kind: 'env',
+          envKey: 'DEEPINFRA_SERVICE_TIER',
+          detail: 'DEEPINFRA_SERVICE_TIER',
+        },
+        timeout: {
+          kind: 'default',
+          detail: 'DeepInfra flex queue default (10m)',
+        },
+      },
+    });
+
+    await config.switchModel(AuthType.USE_OPENAI, 'non-deepinfra-model');
+    expect(config.getGenerationConfig().service_tier).toBeUndefined();
+    expect(config.getGenerationConfigSources()['service_tier']).toBeUndefined();
+    expect(config.getGenerationConfig().timeout).toBeUndefined();
+    expect(config.getGenerationConfigSources()['timeout']).toBeUndefined();
+  });
 });
 
 vi.mock('../qwen/subscription-models.js', async (original) => ({
