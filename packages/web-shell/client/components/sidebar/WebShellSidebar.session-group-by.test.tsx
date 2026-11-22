@@ -214,6 +214,7 @@ function renderSidebar(
           onNewSession={() => false}
           onLoadSession={onLoadSession}
           onError={() => {}}
+          sessionActions={{ inlineItems: ['pin'] }}
           {...overrides}
         />
       </I18nProvider>,
