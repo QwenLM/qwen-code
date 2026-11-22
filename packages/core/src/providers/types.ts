@@ -163,6 +163,8 @@ export interface ProviderSetupInputs {
   baseUrl: string;
   apiKey: string;
   modelIds: string[];
+  /** Optional specs for models providing contextWindowSize or other metadata */
+  modelSpecs?: Array<{ id: string; contextWindowSize?: number }>;
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
   advancedConfig?: {
