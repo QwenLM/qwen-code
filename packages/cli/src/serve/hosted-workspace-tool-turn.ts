@@ -361,6 +361,13 @@ export interface HostedShellTurnOptions {
   // The embedded wake scheduler's tip: a notification input committed
   // under its observation revision asks the pump to deliver it.
   monitorWakeKick?: () => void;
+  /**
+   * Bindings whose worker took over the background capture, keyed
+   * `bindingId@generation`. A suspension may only exempt a run whose
+   * binding is here: an older worker cannot answer the pull, so its Session
+   * stays resident rather than fail a detach at teardown.
+   */
+  observationBindings?: Set<string>;
 }
 
 /**
@@ -2240,6 +2247,9 @@ export class HostedWorkspaceToolTurn {
   private readonly agentDispatched = new Set<string>();
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
+  /** Phase 3b: the worker owns the background capture and Monitor policy, so
+   * this turn must not start its own observation loop. */
+  private workerOwnsObservation = false;
   private advertised?: FunctionDeclaration[];
   private readonly publication?: {
     owner: HttpToolPublicationOwner;
@@ -5805,6 +5815,7 @@ export class HostedWorkspaceToolTurn {
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
           );
+          this.workerOwnsObservation = this.broker.observationOwned;
         } else if (
           this.publication &&
           this.backgroundLane &&
@@ -5825,9 +5836,12 @@ export class HostedWorkspaceToolTurn {
               this.monitors,
               () => this.backgroundLane!.monitorWakeKick?.(),
             );
+          const writer = await this.publication.owner.owner();
           this.bindingGeneration = await this.broker.registerPublisher(
             await this.publisher.start(),
+            writer.writerGeneration,
           );
+          this.workerOwnsObservation = this.broker.observationOwned;
         }
       };
       // A Hook can move a call to a background lane, so a Hook turn picks
@@ -6327,6 +6341,12 @@ export class HostedWorkspaceToolTurn {
           runtimeBindingId: saved.runtimeBindingId,
           generation: saved.bindingGeneration,
         };
+        const observationLane = this.backgroundLane ?? this.shell;
+        if (this.workerOwnsObservation && observationLane) {
+          (observationLane.observationBindings ??= new Set()).add(
+            `${saved.runtimeBindingId}@${saved.bindingGeneration}`,
+          );
+        }
         if (request.background)
           await this.childRuns!.dispatchStarted(executionCallId, runtime);
         if (request.monitoring)
@@ -9265,6 +9285,10 @@ export class HostedWorkspaceToolTurn {
     executionCallId: string,
     runtimeCallId: string,
   ): Promise<void> {
+    // Phase 3b: when the worker owns the observation, its policy runs the
+    // windows and the applier commits the observation entries; starting a
+    // Harness loop here would observe the same watch twice.
+    if (this.workerOwnsObservation) return;
     // The lane is Shell-mode or the publication lane, whichever this turn
     // owns — the detached family's loops park on it either way.
     const lane = this.shell ?? this.backgroundLane;
