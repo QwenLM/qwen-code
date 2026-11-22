@@ -59,7 +59,10 @@ import {
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionNotFoundError,
+  SystemOverloadedError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import type {
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -2184,6 +2187,20 @@ function registerScheduledTaskCrudRoutes(
               removalGenerations,
               `POST ${base}/${id}/run fresh-session dispatch`,
             );
+          }
+          if (error instanceof SystemOverloadedError) {
+            writeStderrLine(
+              `qwen serve: POST ${base}/${id}/run load admission rejected (reason=${error.reason}, loadRatio=${error.loadRatio}, eventLoopLagP99Ms=${error.eventLoopLagP99Ms})`,
+            );
+            res.set('Retry-After', '15');
+            res.status(503).json({
+              error: error.message,
+              code: 'system_overloaded',
+              reason: error.reason,
+              loadRatio: error.loadRatio,
+              eventLoopLagP99Ms: error.eventLoopLagP99Ms,
+            });
+            return;
           }
           writeStderrLine(
             `qwen serve: POST ${base}/${id}/run could not create a fresh session: ${error instanceof Error ? error.message : String(error)}`,

@@ -152,6 +152,11 @@ lookups.
   The standalone creation path (`POST /standalone/sessions`) rethrows the
   refusal from its pre-dispatch rollback catch, so it answers the same 503
   contract instead of a 500 `standalone_creation_rolled_back`.
+- A refused scheduled-task `per_run` child retains the same 503 shape, after
+  the existing failed-attempt bookkeeping and `sessionDispatchFailed` marker,
+  including restoration of a consumed one-shot before returning the error.
+  Other dispatch failures keep the existing
+  `scheduled_task_session_dispatch_failed` response.
 - The monitor is only created when admission is actually wired: an injected
   bridge never receives `freshSessionAdmission`, so that path reports the
   disabled snapshot rather than `enabled: true` for a gate that never runs.
@@ -236,7 +241,9 @@ as today.
 - Unit tests (collocated): monitor enter/exit/debounce matrix per signal and
   combined, dispose, zero-load inertness; controller overload refusal with
   reservation/release invariants and disabled pass-through; REST and RPC
-  error mapping.
+  error mapping. A scheduled-task per-run refusal also preserves the overload
+  fields, `Retry-After`, the bound parent session, the failed-run marker and
+  the disabled-for-inspection one-shot recovery, without a new child session.
 - E2E plan: `.qwen/e2e-tests/load-based-session-admission.md`. Baseline
   dry-run against the globally installed `qwen` CLI shows the gap (creations
   admitted under load). Post-implementation groups against the local build:
@@ -294,3 +301,5 @@ as today.
 | `packages/cli/src/serve/acp-http/transport.test.ts`      | RPC mapping test                              |
 | `packages/cli/src/serve/daemon-status.test.ts`           | Status section / issue tests                  |
 | `packages/cli/src/serve/fast-path.test.ts`               | Flag parsing tests                            |
+| `packages/cli/src/serve/routes/scheduled-tasks.ts`       | Per-run overload HTTP mapping                 |
+| `packages/cli/src/serve/routes/scheduled-tasks.test.ts`  | Per-run refusal fields and failure history    |

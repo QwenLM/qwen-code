@@ -133,6 +133,9 @@ runtime 重建时 dispose，跟随 metrics sampler 的生命周期。
   与其他 503 容量形态一致。独立会话创建路径（`POST /standalone/sessions`）
   在其 pre-dispatch 回滚 catch 中重抛该拒绝，因此回答同一 503 契约，而不是
   500 `standalone_creation_rolled_back`。
+- 被拒的计划任务 `per_run` 子会话沿同样的 503 契约返回。既有的失败尝试记录
+  与 `sessionDispatchFailed` 标记继续保留；被消费的一次性任务也先在返回错误前
+  恢复。其它派发失败仍使用原有的 `scheduled_task_session_dispatch_failed` 响应。
 - 监视器只在准入真正接线时创建：注入 bridge 从不接收
   `freshSessionAdmission`，该路径报告 disabled 快照，而不是为永不运行的闸门
   报告 `enabled: true`。
@@ -199,7 +202,9 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 
 - 单元测试（同目录）：监视器逐信号与组合的进入/退出/去抖矩阵、dispose、
   零负荷失效；控制器过载拒绝与预留/释放不变量、禁用直通；REST 与 RPC
-  错误映射。
+  错误映射。计划任务 per-run 拒绝也核验 overload 字段、`Retry-After`、绑定父会话
+  不变、失败 run 标记与一次性任务暂停待显式恢复的状态，不新分配子会话。
+
 - E2E 计划：`.qwen/e2e-tests/load-based-session-admission.md`。对全局安装
   的 `qwen` CLI 做基线 dry-run，展示缺口（负荷下新建仍被放行）。实现后对
   本地构建分组：真实 CPU burner 负荷 → 新建返回 `503 system_overloaded`，
@@ -229,24 +234,26 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 
 ## 涉及文件
 
-| 文件                                                     | 变更                             |
-| -------------------------------------------------------- | -------------------------------- |
-| `packages/cli/src/serve/load-admission.ts`               | 新监视器（信号、滞回、快照）     |
-| `packages/cli/src/serve/load-admission.test.ts`          | 新单元测试                       |
-| `packages/cli/src/serve/total-session-admission.ts`      | `admit()` 中的可选负荷闸门       |
-| `packages/cli/src/serve/total-session-admission.test.ts` | 过载拒绝测试                     |
-| `packages/acp-bridge/src/bridgeErrors.ts`                | `SystemOverloadedError`          |
-| `packages/cli/src/serve/acp-session-bridge.ts`           | 重导出新错误类                   |
-| `packages/cli/src/serve/server/error-response.ts`        | REST 503 映射                    |
-| `packages/cli/src/serve/acp-http/dispatch.ts`            | RPC 错误映射                     |
-| `packages/cli/src/serve/run-qwen-serve.ts`               | 监视器生命周期、控制器接线、选项 |
-| `packages/cli/src/serve/server.ts`                       | 控制器接线（独立 app 工厂）      |
-| `packages/cli/src/serve/types.ts`                        | `ServeOptions.loadAdmission`     |
-| `packages/cli/src/commands/serve.ts`                     | `--load-admission` flag          |
-| `packages/cli/src/serve/fast-path.ts`                    | fast-path boolean flag 登记      |
-| `packages/cli/src/serve/daemon-status.ts`                | `loadAdmission` 节 + issue       |
-| `packages/cli/src/serve/routes/daemon-status.ts`         | status getter 透传               |
-| `packages/cli/src/serve/server.test.ts`                  | REST 映射测试                    |
-| `packages/cli/src/serve/acp-http/transport.test.ts`      | RPC 映射测试                     |
-| `packages/cli/src/serve/daemon-status.test.ts`           | status 节 / issue 测试           |
-| `packages/cli/src/serve/fast-path.test.ts`               | flag 解析测试                    |
+| 文件                                                     | 变更                              |
+| -------------------------------------------------------- | --------------------------------- |
+| `packages/cli/src/serve/load-admission.ts`               | 新监视器（信号、滞回、快照）      |
+| `packages/cli/src/serve/load-admission.test.ts`          | 新单元测试                        |
+| `packages/cli/src/serve/total-session-admission.ts`      | `admit()` 中的可选负荷闸门        |
+| `packages/cli/src/serve/total-session-admission.test.ts` | 过载拒绝测试                      |
+| `packages/acp-bridge/src/bridgeErrors.ts`                | `SystemOverloadedError`           |
+| `packages/cli/src/serve/acp-session-bridge.ts`           | 重导出新错误类                    |
+| `packages/cli/src/serve/server/error-response.ts`        | REST 503 映射                     |
+| `packages/cli/src/serve/acp-http/dispatch.ts`            | RPC 错误映射                      |
+| `packages/cli/src/serve/run-qwen-serve.ts`               | 监视器生命周期、控制器接线、选项  |
+| `packages/cli/src/serve/server.ts`                       | 控制器接线（独立 app 工厂）       |
+| `packages/cli/src/serve/types.ts`                        | `ServeOptions.loadAdmission`      |
+| `packages/cli/src/commands/serve.ts`                     | `--load-admission` flag           |
+| `packages/cli/src/serve/fast-path.ts`                    | fast-path boolean flag 登记       |
+| `packages/cli/src/serve/daemon-status.ts`                | `loadAdmission` 节 + issue        |
+| `packages/cli/src/serve/routes/daemon-status.ts`         | status getter 透传                |
+| `packages/cli/src/serve/server.test.ts`                  | REST 映射测试                     |
+| `packages/cli/src/serve/acp-http/transport.test.ts`      | RPC 映射测试                      |
+| `packages/cli/src/serve/daemon-status.test.ts`           | status 节 / issue 测试            |
+| `packages/cli/src/serve/fast-path.test.ts`               | flag 解析测试                     |
+| `packages/cli/src/serve/routes/scheduled-tasks.ts`       | per-run 拒绝的 503 契约与失败历史 |
+| `packages/cli/src/serve/routes/scheduled-tasks.test.ts`  | per-run 拒绝字段与失败历史测试    |
