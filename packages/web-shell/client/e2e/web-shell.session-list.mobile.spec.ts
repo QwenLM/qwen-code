@@ -163,6 +163,92 @@ test.describe('Chromium CDP drawer gestures', () => {
   });
 });
 
+test('A touch embedded host sizes dense rows by its own width @smoke', async ({
+  browser,
+}, testInfo) => {
+  const baseURL = resolveBaseURL(testInfo);
+  const context = await browser.newContext({
+    ...devices['iPhone 13'],
+    viewport: { width: 1000, height: 700 },
+    baseURL,
+    reducedMotion: 'reduce',
+  });
+  try {
+    const page = await context.newPage();
+    const scenario = createSessionListDensityScenario();
+    scenario.capabilities.features.push('workspace_qualified_rest_core');
+    scenario.sessions.push({
+      sessionId: 'embedded-density',
+      workspaceCwd: scenario.workspaceCwd,
+      createdAt: '2026-07-03T00:00:00.000Z',
+      updatedAt: '2026-07-03T00:00:00.000Z',
+      displayName: 'Embedded narrow row with PR and goal metadata',
+      clientCount: 0,
+      hasActivePrompt: false,
+      prs: [
+        {
+          number: 9517,
+          state: 'merged',
+          url: 'https://github.com/o/r/pull/9517',
+        },
+        {
+          number: 52484,
+          state: 'closed',
+          url: 'https://github.com/o/r/pull/52484',
+        },
+      ],
+      goal: {
+        status: 'active',
+        objective: 'Verify a narrow embedded host',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      },
+      branch: { name: 'feature/density', baseBranch: 'main' },
+    });
+    await installScenario(page, scenario, baseURL);
+    await page.goto('/e2e/navigation-rail-harness.html?narrow');
+    await page.getByTestId('host-shell').evaluate((host) => {
+      host.style.width = '200px';
+    });
+    await page.getByRole('button', { name: 'Toggle menu' }).tap();
+    const sidebar = page.getByRole('complementary', {
+      name: 'Workspace sidebar',
+    });
+    await expect(sidebar).toHaveAttribute('data-narrow', '');
+    const row = sidebar
+      .getByTestId('recent-sessions')
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: 'Embedded narrow row with PR and goal metadata' })
+      .locator('..');
+    await expect(row.getByRole('link', { name: /Pull Request/ })).toBeVisible();
+    await expect(row.getByTestId('session-goal-marker')).toBeVisible();
+    await expect(row.locator('[class*="sessionGitIcon"]')).toBeHidden();
+    const more = row.getByRole('button', { name: 'More actions', exact: true });
+    const [rowBox, moreBox, sidebarBox] = await Promise.all([
+      row.boundingBox(),
+      more.boundingBox(),
+      sidebar.boundingBox(),
+    ]);
+    if (!rowBox || !moreBox || !sidebarBox)
+      throw new Error('The embedded Recent row is not laid out.');
+    await testInfo.attach('embedded-layout', {
+      body: JSON.stringify({ rowBox, moreBox, sidebarBox }),
+      contentType: 'application/json',
+    });
+    expect(moreBox.x + moreBox.width).toBeLessThanOrEqual(
+      rowBox.x + rowBox.width + 0.5,
+    );
+    expect(moreBox.x + moreBox.width).toBeLessThanOrEqual(
+      sidebarBox.x + sidebarBox.width + 0.5,
+    );
+    await more.tap();
+    await expect(
+      page.getByRole('menuitem', { name: 'Pin', exact: true }),
+    ).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test('Recent touch rows keep actions reachable and preserve pointer focus @smoke', async ({
   browser,
 }, testInfo) => {
@@ -203,6 +289,12 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
         updatedAt: '2026-07-03T00:00:00.000Z',
       },
       branch: { name: 'feature/density', baseBranch: 'main' },
+    });
+    scenario.sessions.push({
+      ...scenario.sessions.at(-1)!,
+      sessionId: 'recent-running-density',
+      displayName: 'Recent running row with PR and goal metadata',
+      hasActivePrompt: true,
     });
     const daemon = await installScenario(page, scenario, baseURL);
     await gotoSession(page, scenario, daemon, 'dark');
@@ -262,6 +354,40 @@ test('Recent touch rows keep actions reachable and preserve pointer focus @smoke
     expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
       sidebarBox.x + sidebarBox.width + 0.5,
     );
+    const runningRow = recent
+      .locator('[data-web-shell-session-title]')
+      .filter({ hasText: 'Recent running row with PR and goal metadata' })
+      .locator('..');
+    const runningGoal = runningRow.getByTestId('session-goal-marker');
+    const runningSpinner = runningRow.locator('[class*="sessionLoading"]');
+    await expect(runningSpinner).toBeVisible();
+    const [runningRowBox, runningGoalBox, runningMore, runningSpinnerBox] =
+      await Promise.all([
+        runningRow.boundingBox(),
+        runningGoal.boundingBox(),
+        runningRow
+          .getByRole('button', { name: 'More actions', exact: true })
+          .boundingBox(),
+        runningSpinner.boundingBox(),
+      ]);
+    if (!runningRowBox || !runningGoalBox || !runningMore || !runningSpinnerBox)
+      throw new Error('The running Recent row is not laid out.');
+    expect(runningMore.x + runningMore.width).toBeLessThanOrEqual(
+      runningRowBox.x + runningRowBox.width + 0.5,
+    );
+    await testInfo.attach('narrow-running-recent-geometry', {
+      body: JSON.stringify({
+        runningRowBox,
+        runningGoalBox,
+        runningMore,
+        runningSpinnerBox,
+      }),
+      contentType: 'application/json',
+    });
+    expect(runningSpinnerBox.x).toBeGreaterThanOrEqual(
+      runningGoalBox.x + runningGoalBox.width - 0.5,
+    );
+    await runningGoal.click({ trial: true });
     await more.tap();
     const menu = page.getByRole('menu');
     await expect(

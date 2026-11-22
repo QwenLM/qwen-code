@@ -1583,23 +1583,37 @@ button.livePendingSession:hover {
 
 /* Very narrow touch drawers prioritize the title and enabled actions over
    branch/source decoration. PR state and goal markers stay visible. */
-@media (hover: none) and (pointer: coarse) and (max-width: 280px) {
-  .sidebar.mobileOpen .sessionGitIcon {
+@media (hover: none) and (pointer: coarse) {
+  .sidebar.mobileOpen[data-narrow] .sessionGitIcon {
     display: none;
   }
 
-  /* Intrinsic badge widths must not push More outside its row. */
-  .sidebar.mobileOpen .sessionRow:has(.sessionMetaSlotReserved) {
+  /* Keep markers in the flex layout; anchor only More outside their flow. */
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionActions
+    ) {
     padding-right: 26px;
   }
 
-  .sidebar.mobileOpen .sessionRow .sessionMetaSlotReserved {
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow)
+    .sessionMetaSlotReserved:has(.sessionActions) {
+    display: contents;
+  }
+
+  .sidebar.mobileOpen[data-narrow] .sessionRow .sessionLoading {
+    margin-right: 4px;
+    margin-left: 4px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
+    .sessionMetaSlotReserved
+    .sessionActions {
     position: absolute;
-    top: 2px;
-    right: 0;
-    bottom: 2px;
-    width: 26px;
-    height: auto;
+    inset: 2px 0 2px auto;
+    width: var(--session-actions-width, 26px);
   }
 }
 

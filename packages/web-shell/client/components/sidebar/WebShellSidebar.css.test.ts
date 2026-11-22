@@ -123,7 +123,10 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
     expect(nonHoverCss).not.toMatch(/^[ \t]*\.sessionMetaSlotReserved\s*\{/m);
     expect(touchMedia).toMatch(
-      /\.sidebar\.mobileOpen \.sessionRow \.sessionMetaSlotReserved\s*\{[^}]*position:\s*absolute;[^}]*right:\s*0;[^}]*width:\s*26px;/,
+      /\.sessionMetaSlotReserved:has\(\.sessionActions\)\s*\{[^}]*display:\s*contents;/,
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow\s+\.sessionMetaSlotReserved\s+\.sessionActions\s*\{[^}]*position:\s*absolute;[^}]*inset:\s*2px 0 2px auto;[^}]*width:\s*var\(--session-actions-width, 26px\)/,
     );
   });
 

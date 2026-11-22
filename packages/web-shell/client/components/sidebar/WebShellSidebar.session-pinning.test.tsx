@@ -2069,35 +2069,48 @@ describe('WebShellSidebar PR badge rows', () => {
   });
 
   it('follows pointer media changes with explicit inline actions', async () => {
-    let coarse = false;
-    const listeners = new Set<(event: MediaQueryListEvent) => void>();
+    const narrowViewportQuery = '(max-width: 280px)';
+    const states = new Map([
+      [TOUCH_COMPOSER_QUERY, false],
+      [narrowViewportQuery, false],
+    ]);
+    const listeners = new Map<
+      string,
+      Set<(event: MediaQueryListEvent) => void>
+    >();
     const coarseMedia = vi
       .spyOn(window, 'matchMedia')
       .mockImplementation((query) => {
-        const matches = query === TOUCH_COMPOSER_QUERY && coarse;
+        const registered = new Set<(event: MediaQueryListEvent) => void>();
+        listeners.set(query, registered);
         return {
-          matches,
+          matches: states.get(query) === true,
           media: query,
           addEventListener: (
             type: string,
             listener: (event: MediaQueryListEvent) => void,
           ) => {
-            if (query === TOUCH_COMPOSER_QUERY && type === 'change')
-              listeners.add(listener);
+            if (type === 'change') registered.add(listener);
           },
           removeEventListener: (
             type: string,
             listener: (event: MediaQueryListEvent) => void,
           ) => {
-            if (query === TOUCH_COMPOSER_QUERY && type === 'change')
-              listeners.delete(listener);
+            if (type === 'change') registered.delete(listener);
           },
         } as MediaQueryList;
       });
     const setCoarse = async (matches: boolean) => {
-      coarse = matches;
+      states.set(TOUCH_COMPOSER_QUERY, matches);
       await act(async () => {
-        for (const listener of listeners)
+        for (const listener of listeners.get(TOUCH_COMPOSER_QUERY) ?? [])
+          listener({ matches } as MediaQueryListEvent);
+      });
+    };
+    const setNarrowViewport = async (matches: boolean) => {
+      states.set(narrowViewportQuery, matches);
+      await act(async () => {
+        for (const listener of listeners.get(narrowViewportQuery) ?? [])
           listener({ matches } as MediaQueryListEvent);
       });
     };
@@ -2125,8 +2138,13 @@ describe('WebShellSidebar PR badge rows', () => {
       // Fine pointers preserve an explicitly configured inline action again.
       await setCoarse(false);
       expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
+      await setNarrowViewport(true);
+      expect(row?.querySelector('button[aria-label="Pin"]')).not.toBeNull();
 
       await setCoarse(true);
+      expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
+      await setNarrowViewport(false);
+      expect(row?.querySelector('button[aria-label="Pin"]')).toBeNull();
       const more = row?.querySelector<HTMLButtonElement>(
         'button[aria-label="More actions"]',
       );

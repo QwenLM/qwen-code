@@ -1443,14 +1443,25 @@ export function WebShellSidebar({
     [sessionActionsOptions?.items],
   );
   const [coarsePointer, setCoarsePointer] = useState(isCoarsePointerDevice);
+  const [narrowViewport, setNarrowViewport] = useState(
+    () => window.matchMedia('(max-width: 280px)').matches,
+  );
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
     const media = window.matchMedia(TOUCH_COMPOSER_QUERY);
+    const viewport = window.matchMedia('(max-width: 280px)');
     setCoarsePointer(media.matches);
-    const onChange = (event: MediaQueryListEvent) =>
+    setNarrowViewport(viewport.matches);
+    const onPointerChange = (event: MediaQueryListEvent) =>
       setCoarsePointer(event.matches);
-    media.addEventListener('change', onChange);
-    return () => media.removeEventListener('change', onChange);
+    const onViewportChange = (event: MediaQueryListEvent) =>
+      setNarrowViewport(event.matches);
+    media.addEventListener('change', onPointerChange);
+    viewport.addEventListener('change', onViewportChange);
+    return () => {
+      media.removeEventListener('change', onPointerChange);
+      viewport.removeEventListener('change', onViewportChange);
+    };
   }, []);
   const inlineActionItems = useMemo(
     () =>
@@ -7610,6 +7621,12 @@ export function WebShellSidebar({
         aria-label={t('sidebar.label')}
         data-compact={
           containerWidth !== undefined && containerWidth <= 760 ? '' : undefined
+        }
+        data-narrow={
+          narrowViewport ||
+          (containerWidth !== undefined && containerWidth <= 280)
+            ? ''
+            : undefined
         }
         style={sidebarStyle}
       >

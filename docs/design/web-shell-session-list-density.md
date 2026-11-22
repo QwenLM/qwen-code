@@ -24,13 +24,13 @@ A coarse pointer receives an 85% drawer through `(hover: none) and (pointer: coa
 
 The default desktop More menu owns optional Pin, along with the existing Rename, archive, group, split, and delete choices. On a fine pointer, an explicit host `inlineItems` override still renders the requested inline actions. Coarse pointers route those actions through More instead of reserving multiple persistent icon slots.
 
-Recent rows keep their desktop Pin/Archive buttons. Their coarse-pointer representation uses the same `SessionMenu` and Pin/Archive handlers, including the existing capability, busy, running/current, and standalone restrictions. A coarse touch viewport at most 280px wide omits the decorative Git/source icon; it does not remove PR or goal information, nor change hover-details data.
+Recent rows keep their desktop Pin/Archive buttons. Their coarse-pointer representation uses the same `SessionMenu` and Pin/Archive handlers, including the existing capability, busy, running/current, and standalone restrictions. A coarse touch viewport at most 280px wide, or a measured host of that width, omits the decorative Git/source icon; it does not remove PR or goal information, nor change hover-details data. The meta slot keeps status markers in the flex layout and anchors only More at the row's right edge, so these markers neither widen the More slot nor cover the goal marker.
 
 The PR badge uses compact spacing without dropping its number, visible state icon, link, count, or ARIA description. Other badge consumers retain their non-compact presentation.
 
 ## Interaction boundaries
 
-A live match-media subscription updates the coarse/fine action model when the device changes and removes its listener on unmount. The subscription covers attachable keyboards, trackpads, and resized/narrow desktop hosts without turning the check into a render-only snapshot.
+Independent pointer and viewport match-media listeners update the coarse/fine action model and narrow-row layout without overwriting one another's state; both listeners are removed on unmount. The subscription covers attachable keyboards, trackpads, and resized/narrow desktop hosts without turning the check into a render-only snapshot.
 
 Radix session menus portal outside the physical drawer. The App drawer therefore treats `[data-slot="dropdown-menu-content"]` as owned by its logical surface for both Escape and `touchmove`: Escape closes an open menu, native touch scrolling stays inside a short menu, and a subsequent Escape closes the drawer. The self-built Group menu is marked as part of the same logical keyboard/touch surface.
 
