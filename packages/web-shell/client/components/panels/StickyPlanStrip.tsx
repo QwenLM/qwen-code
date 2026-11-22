@@ -5,6 +5,7 @@ import {
   getTodoStatusIcon,
   STICKY_TODO_MAX_VISIBLE_ITEMS,
 } from '../../utils/todos';
+import { markProgrammaticScrollTarget } from '../../utils/programmaticScroll';
 import { useI18n } from '../../i18n';
 import styles from './StickyPlanStrip.module.css';
 
@@ -62,16 +63,27 @@ export const StickyPlanStrip = memo(function StickyPlanStrip({
         '[data-web-shell-message-list]',
       );
       if (!list || delta === 0) return;
-      const fromBottomBefore =
-        list.scrollHeight - list.scrollTop - list.clientHeight - delta;
-      if (fromBottomBefore < 30) return;
+      // A hidden subtree reports zero geometry; compensating from it would
+      // write garbage offsets (the strip's baseline already ignores it).
+      if (list.clientHeight === 0) return;
+      // Observed post-change distance: on a shrink the browser has already
+      // clamped scrollTop for readers closer to the bottom than the shrink,
+      // so reconstructing the pre-change distance from it would re-apply
+      // the clamp as an extra shift.
+      const fromBottomNow =
+        list.scrollHeight - list.scrollTop - list.clientHeight;
+      if (fromBottomNow < 30 || fromBottomNow - delta < 30) return;
+      markProgrammaticScrollTarget(list);
       list.scrollTop += delta;
     };
     let height = strip.getBoundingClientRect().height;
     compensate(height);
     const observer = new ResizeObserver(() => {
       const next = strip.getBoundingClientRect().height;
-      const delta = next - height;
+      // display:none reports 0 and is not a layout change; keep the last
+      // visible height so re-showing computes the true delta.
+      if (next === 0) return;
+      const delta = height === 0 ? 0 : next - height;
       height = next;
       compensate(delta);
     });
@@ -84,8 +96,9 @@ export const StickyPlanStrip = memo(function StickyPlanStrip({
       const list = strip.parentElement?.querySelector<HTMLElement>(
         '[data-web-shell-message-list]',
       );
-      if (!list) return;
+      if (!list || list.clientHeight === 0) return;
       if (list.scrollHeight - list.scrollTop - list.clientHeight < 30) return;
+      markProgrammaticScrollTarget(list);
       list.scrollTop -= height;
     };
   }, [mounted]);
