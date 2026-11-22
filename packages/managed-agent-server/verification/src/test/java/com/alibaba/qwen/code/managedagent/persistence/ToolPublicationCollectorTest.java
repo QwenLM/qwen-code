@@ -68,11 +68,11 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
     private String addPublication(String publication, String sessionId) {
         String publicationScope = ToolPublicationRetentionStore.hash(tenant + sessionId);
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                         + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                         + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                         + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                        + " SELECT ?, tenant_key, tenant_id, workspace_id, ?, ?, ?, ?, binding_json, binding_digest,"
+                        + " SELECT ?, tenant_id, workspace_id, ?, ?, ?, ?, binding_json, binding_digest,"
                         + " token_hash, state, capture_bytes, producer_bytes, admission_bytes, producer_phase,"
                         + " is_write_evidence, is_accepted_complete, capture_held_bytes, producer_held_bytes, admission_held_bytes,"
                         + " capture_used_bytes FROM ma_output_capture WHERE scope_key = ? AND publication_id = X'7075622d31'",
@@ -93,7 +93,7 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
             @Override public int update(String sql, Object... args) {
                 if (sql.startsWith("INSERT IGNORE INTO ma_operation") && sql.contains("'CAPTURE_GC'")) {
                     assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isTrue();
-                    batchSizes.add(args.length / 13);
+                    batchSizes.add(args.length / 12);
                     if (batchSizes.size() == 2 && fail.getAndSet(false)) {
                         throw new org.springframework.dao.DataAccessResourceFailureException("second enqueue batch");
                     }
@@ -135,11 +135,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         jdbc.update("UPDATE ma_output_capture SET scope_key = ?, workspace_id = 'workspace-2'"
                 + " WHERE scope_key = ? AND publication_id = ?", workspaceScope, scope, "pub-2");
         retire();
-        String sessionScope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        assertThat(scope).isNotEqualTo(sessionScope);
-        assertThat(jdbc.queryForMap("SELECT scope_key, session_scope_key, workspace_id FROM ma_operation"
-                + " WHERE operation_kind = 'CAPTURE_GC' AND publication_id = ?", "pub-2"))
-                .containsEntry("scope_key", workspaceScope).containsEntry("session_scope_key", sessionScope)
+        assertThat(jdbc.queryForMap("SELECT scope_key, workspace_id FROM ma_operation"
+                + " WHERE operation_kind = 'CAPTURE_GC' AND publication_id = ? AND tenant_id = ? AND session_id = ?",
+                "pub-2", tenant, session))
+                .containsEntry("scope_key", workspaceScope)
                 .containsEntry("workspace_id", "workspace-2");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE scope_key = ?",
                 Long.class, otherScope)).isZero();
@@ -531,11 +530,10 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
     void resourceHandoffRetriesWithinSecondsUntilTheSessionLedgerSettles() {
         addObject("one", "handoff/exact-key", null);
         String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
-        jdbc.update("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                 + " owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id,"
-                + " journal_revision, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, ?, 'workspace-1', ?,"
-                + " 'one', 1, " + ManagedSchemaTime.SQL_NOW + ")",
-                resourceScope, resourceScope, ManagedSchemaKeys.key(resourceScope, "one"), tenant,
+                + " journal_revision, gmt_create) VALUES ('JOURNAL', ?, 1, ?, ?, 'workspace-1', ?,"
+                + " 'one', 1, " + ManagedSchemaTime.SQL_NOW + ")", resourceScope, ManagedSchemaKeys.key(resourceScope, "one"), tenant,
                 session);
         retire();
         jdbc.update("UPDATE ma_operation SET available_at = 1 WHERE operation_kind ="
@@ -657,13 +655,13 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
         addCaptureObject(scope, "pub-2", session, "sibling-result", "sibling-result", null, new byte[] {2}, "VERIFIED");
 
         for (String resource : List.of("target-result", "sibling-result")) {
-            jdbc.update("UPDATE ma_resource SET state = 'REFERENCED', publish_command_id = 'publish' WHERE session_scope_key = ? AND resource_id = ?",
-                    ManagedSessionStore.sessionScopeKey(tenant, session), resource);
+            jdbc.update("UPDATE ma_resource SET state = 'REFERENCED', publish_command_id = 'publish' WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                    tenant, session, resource);
         }
         for (String resource : List.of("message-1", "checkpoint-1")) {
             String resourceScope = ManagedSessionStore.sessionScopeKey(tenant, session);
-            jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                    ManagedSchemaKeys.key(resourceScope, resource), resourceScope, tenant, session, resource,
+            jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'workspace-1', ?, ?, ?, 1, 1, ?, 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                    ManagedSchemaKeys.key(resourceScope, resource), tenant, session, resource,
                     resource.equals("message-1") ? "managed-message" : "managed-checkpoint", scope, new byte[] {2});
         }
         long used = jdbc.queryForObject("SELECT capture_used_bytes + producer_used_bytes + admission_used_bytes"
@@ -693,13 +691,13 @@ public class ToolPublicationCollectorTest extends ToolPublicationRetentionStoreT
 
     @Test
     void aFailingPublicationDoesNotStarveTheNextPublication() {
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                         + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                         + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                         + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                        + " VALUES (?, ?, ?, 'workspace-1', ?, 'pub-2', ?, 'capture-2', '{}', ?, ?, 'FENCED',"
+                        + " VALUES (?, ?, 'workspace-1', ?, 'pub-2', ?, 'capture-2', '{}', ?, ?, 'FENCED',"
                         + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
-                scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, ToolPublicationRetentionStore.hash(scope + "2"), scope, scope);
+                scope, tenant, session, ToolPublicationRetentionStore.hash(scope + "2"), scope, scope);
         addObject("one", "failing", null);
         addCaptureObject(scope, "pub-2", session, "two", "two", "healthy", null, "VERIFIED");
 

@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObje
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -44,6 +43,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.ossScope;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.require;
 import static com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract.text;
 
@@ -1089,7 +1089,7 @@ public final class ToolPublicationDataStore {
                     "Finished root changed");
             String resourceId = "result-" + hash(scope + ":" + publicationId + ":admission").substring(0, 32);
             String objectKey = bytes.length <= 64 * 1024 ? null
-                    : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash("admission");
+                    : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/admission";
             List<Stored> stored = stored(scope, publicationId, "admission");
             if (stored.isEmpty()) {
                 long used = ((Number) publication.get("admission_used_bytes")).longValue();
@@ -1225,7 +1225,7 @@ public final class ToolPublicationDataStore {
                 "Publication cannot finish");
         String resourceId = "result-" + hash(scope + ":" + publicationId + ":terminal").substring(0, 32);
         String objectKey = length <= 64 * 1024 ? null
-                : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash("terminal");
+                : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/terminal";
         String requestDigest = requestDigest("terminal", length, digest);
         List<Operation> prior = operation(scope, publicationId, operationId, true);
         if (!prior.isEmpty()) {
@@ -1716,7 +1716,7 @@ public final class ToolPublicationDataStore {
                 "managed_tool_publication_busy", "Publication is busy");
         String resourceId = kind == null ? null : "result-" + hash(scope + ":" + publicationId + ":" + slot).substring(0, 32);
         String objectKey = (kind != null && length <= 64 * 1024) ? null
-                : "managed-tool-results/" + scope + "/" + publicationId + "/" + hash(slot);
+                : "managed-tool-results/" + ossScope(key) + "/" + publicationId + "/" + slot;
         if (saved.isEmpty()) {
             String category = category(slot);
             long allocated = jdbc.queryForObject("SELECT " + category + "_bytes FROM ma_output_capture"
@@ -1872,13 +1872,12 @@ public final class ToolPublicationDataStore {
                 : slot.startsWith("seal:") || slot.startsWith("prefix:") ? "OUTPUT_VERIFY" : "OUTPUT_UPLOAD";
         var capture = jdbc.query("SELECT tenant_id, workspace_id, session_id FROM ma_output_capture"
                 + " WHERE scope_key = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope, publicationId).getFirst();
-        jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id,"
                         + " tenant_id, workspace_id, session_id, target_kind, target_key, publication_id,"
                         + " request_digest, slot_key, phase, state, claim_owner, claim_generation, claim_until,"
-                        + " deadline, request_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, ?,"
+                        + " deadline, request_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, ?,"
                         + " 'VERIFYING', 'PENDING', ?, ?, ?, ?, ?, ?, ?)",
                 ManagedSchemaKeys.operationKey(OperationKind.valueOf(kind), scope, ManagedSchemaKeys.key(publicationId), operationId),
-                ManagedSessionStore.sessionScopeKey((String) capture.get("tenant_id"), (String) capture.get("session_id")),
                 scope, kind, operationId, capture.get("tenant_id"), capture.get("workspace_id"),
                 capture.get("session_id"), ManagedSchemaKeys.key(publicationId), publicationId, requestDigest, slot,
                 owner, generation, until, deadline, JSON.createObjectNode().put("version", 1).put("slot", slot).toString(),

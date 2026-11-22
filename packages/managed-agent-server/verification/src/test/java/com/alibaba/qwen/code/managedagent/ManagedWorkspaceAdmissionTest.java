@@ -3048,13 +3048,13 @@ class ManagedWorkspaceAdmissionTest {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
-                        + " session_scope_key, operation_id, operation_kind,"
+                        + " operation_id, operation_kind,"
                         + " tenant_id, session_id, target_kind, target_key,"
                         + " target_id, actor_digest, idempotency_key,"
                         + " idempotency_digest, request_digest, request_json,"
                         + " state, phase, admission_stage, delivery_state,"
                         + " session_status_before, available_at, gmt_create,"
-                        + " gmt_modified, completed_at) VALUES (?, ?, ?,"
+                        + " gmt_modified, completed_at) VALUES (?, ?,"
                         + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
                         + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
                         + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
@@ -3062,7 +3062,7 @@ class ManagedWorkspaceAdmissionTest {
                 ManagedSchemaKeys.operationKey(
                         ManagedSchemaContract.OperationKind.DELETE, scope,
                         target, "op-del"),
-                scope, scope, tenant, sessionId, target, sessionId,
+                scope, tenant, sessionId, target, sessionId,
                 ManagedSchemaKeys.key("delete"), statusBefore);
         jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1, gmt_modified = 1, version ="

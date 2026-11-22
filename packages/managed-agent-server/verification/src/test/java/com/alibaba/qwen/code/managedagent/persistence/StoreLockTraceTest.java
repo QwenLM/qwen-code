@@ -91,16 +91,15 @@ class StoreLockTraceTest {
         String select = "select " + ManagedSchemaProjection.SESSION_HEAD.columns().toLowerCase(java.util.Locale.ROOT)
                 + " from ma_session_head where ";
         var journal = new StoreLockTrace.Event(SUCCEEDED, 1, 1, false,
-                select + "tenant_key = ? and harness_key = ? and tenant_id = ? and session_id = ?"
+                select + "tenant_id = ? and harness_session_id = ?"
                         + " and head_kind = 'managed_session' for update",
-                Map.of(1, "tenant-key", 2, "session-key", 3, "tenant", 4, "session"));
+                Map.of(1, "tenant", 2, "session"));
         var authority = new StoreLockTrace.Event(SUCCEEDED, 1, 1, false,
-                select + "head_kind = 'managed_session' and tenant_id = ? and session_id = ?"
-                        + " and tenant_key = ? and harness_key = ? and harness_session_id = ? for update",
-                Map.of(1, "tenant", 2, "session", 3, "tenant-key", 4, "session-key", 5, "session"));
+                select + "head_kind = 'managed_session' and tenant_id = ? and harness_session_id = ? for update",
+                Map.of(1, "tenant", 2, "session"));
         var checkpoint = new StoreLockTrace.Event(SUCCEEDED, 1, 1, false,
                 "select latest_checkpoint_resource_id, harness_session_id from ma_session_head where"
-                        + " tenant_key = ? and harness_key = ? and tenant_id = ? and session_id = ?"
+                        + " tenant_id = ? and harness_session_id = ?"
                         + " and head_kind = 'managed_session' for update", journal.arguments());
         assertThat(journal.mappedHead()).isTrue();
         assertThat(authority.mappedHead()).isFalse();
