@@ -36,7 +36,7 @@ Measured cases:
 - After a compaction, count the pending content exactly once.
 - Give a prompt that fits at least the floor, or all the room left when that is smaller, whenever its estimate already includes the fixed overhead.
 - Keep fresh-session grants, and every grant at or above the floor, unchanged.
-- Keep the counts persisted in compression records unchanged.
+- Keep a compression record's counts describing what it stores: the compacted history plus the pending turn as the request carries it.
 
 ## Non-goals
 
@@ -67,7 +67,7 @@ In both branches the compacted count is the original count, minus the summarized
 
 ### Compression records
 
-Records still store the pending message in their snapshot, and resume seeds its count from the record when no later response reported usage. So a record adds the pending message's estimate back to both of its counts, at both places that write one: the automatic compaction and the deferred hard-tier record. The persisted values therefore match what is stored today. Only the live counts change.
+Records still store the pending message in their snapshot, and resume seeds its count from the record when no later response reported usage. So a record adds the pending turn back to both of its counts, at both places that write one: the automatic compaction and the deferred hard-tier record. It adds the turn as the request after compaction carries it, which is what resume replays. The compacted history holds no memory snapshot, so the send attaches the current catalog's snapshot when there is one; with no catalog the request strips a replayed snapshot, which then adds nothing, although the record still stores the replay as it was. The effective count estimated before compaction cannot stand in for this: when the catalog is already in the history it attaches no snapshot, and compaction then drops that snapshot, so the send attaches it again. Without a memory snapshot in play the persisted values match what is stored today; with one they now count the snapshot the resumed history holds, and not one it does not.
 
 The add-back builds a new record payload and leaves the compression result alone. The count the chat adopts after compaction and the `COMPRESSED` event both keep the compacted count without the pending message. Adding the message into the result instead would bring the double count back, because the chat adopts the result's count after it writes the record.
 
@@ -102,7 +102,7 @@ The window clamp has no design document of its own under `docs/design/`. This se
 | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Fix the caller, not the compression service          | The service follows its documented contract. One caller passed a count that broke it. Manual `/compress`, reactive compaction, `/compress-fast` and the hosted compaction pass no pending message and stay as they are.                                                                                                                                                                  |
 | Pass the baseline instead of subtracting the message | The effective count can include a memory snapshot sent with this message. The same estimate without the pending content cancels exactly, whatever it holds.                                                                                                                                                                                                                              |
-| Records keep counting the pending message            | The record's snapshot stores the message, and resume seeds its count from the record. A record without it would start the resumed session one message short.                                                                                                                                                                                                                             |
+| Records count the pending turn as it is sent         | The record's snapshot stores the message, and resume seeds its count from the record. A record without it would start the resumed session one message short. Counting the turn as the request after compaction carries it keeps a memory snapshot the resumed history holds and leaves out one the request strips.                                                                       |
 | Cap the floor, keep the pad                          | A fresh walk really misses about 18K tokens of overhead. A grant above the floor overflows by exactly the overhead the pad and the margin leave uncovered. A quarter-window pad plus the 10K margin covers the 18,359 tokens of the dry run only from about a 33K window up, so smaller fresh sessions would overflow. Capping the floor changes only grants that fall below the floor.  |
 | Count-based estimates only                           | On a fresh walk the pad stands for real overhead. An unpadded cap there opens a band where today's grant of about 2K fits but 4K would not: window minus estimate between 20K and about 22.4K, with the 18,359-token overhead from the dry run.                                                                                                                                          |
 | A recovery send needs a covering count               | When the walk exceeds the count, the extra may be real growth that the count missed, for example a response without usage. The padded cap stays.                                                                                                                                                                                                                                         |
@@ -134,14 +134,15 @@ The window clamp has no design document of its own under `docs/design/`. This se
     - the C1 case, for a pending tool result and pending text, on both the cache-sharing and the cold accounting paths. The turn is sent, and the compacted count is smaller than the pending message;
     - both branches of the cold formula, with and without a retained tail. The compacted count is exactly the baseline minus the summarized history plus the summary (and the note before a retained tail), and the side query carries the pending result only without a tail;
     - the gate: a 165K baseline is below the 170K auto threshold, and a 10K pending message takes the effective count to 175K. Compaction runs through the real gate, with the full count passed as `precomputedEffectiveTokens`.
-  - **Records:** the hard-tier and auto compression records count the pending message, while the adopted count and the `COMPRESSED` event keep the compacted count.
+  - **Records:** the hard-tier and auto compression records count the pending message, while the adopted count and the `COMPRESSED` event keep the compacted count. On both record paths the record adds exactly the turn the request carried: with a fresh memory snapshot, with a snapshot that compaction dropped from the history and the send attached again, and without a replayed snapshot the request strips, which the record still stores.
   - **First send:** a 16K window after a compaction gets 4,000 instead of 1, and a fresh session keeps the padded cap (1,999 on a 32K window).
   - **Recovery:**
     - a 16K window with a provider count gets 4,000;
     - on a 32,768-token window, fresh usage that leaves room gets 4,000, and fresh usage that fills the window gets 1;
-    - without a covering count the padded cap stays.
+    - without a covering count the padded cap stays, including a positive count below the walk;
+    - a count-based estimate equal to the walk caps the floor: the check is inclusive.
 - Existing tests updated: two expected original counts now leave out the pending message, and one expected record count includes it.
-- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail.
+- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail. Five more for the round-one fixes do too: each record path adding the raw message, the auto record adding the pre-compaction effective count minus the baseline (which misses a snapshot compaction drops), and the recovery check written as `>` or as `> 0`.
 - End-to-end runs against a mock provider and a real provider are reported on the PR.
 
 ## Acceptance criteria
@@ -149,7 +150,7 @@ The window clamp has no design document of its own under `docs/design/`. This se
 - After a compaction with a pending message, the hard-tier guard and the output clamp count the pending content once.
 - A count-based estimate that fits never gets `max_tokens` below `min(4,000, window − unpadded estimate)` because of the pad.
 - Fresh-session grants, and every grant at or above the floor, are unchanged.
-- The counts persisted in compression records are unchanged.
+- A compression record counts the compacted history plus the pending turn exactly as the request after compaction carries it.
 
 ## Follow-ups
 

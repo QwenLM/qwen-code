@@ -960,9 +960,12 @@ const STREAM_RETRY_CONFIG = {
  * provider usage arrives. Counts derived from an API baseline may already
  * preserve some non-visible overhead; double-counting it is accepted because
  * the error direction is safe and provider usage self-corrects it. An
- * under-counted prompt is the one way `prompt + max_tokens` can overflow the
- * window (issue #5950). Sized to the documented worst case; costs nothing on
- * large windows (the output ceiling binds long before the pad matters).
+ * under-counted prompt is one way `prompt + max_tokens` can overflow the
+ * window (issue #5950). The other is the output floor, which a count-based
+ * estimate caps without this pad (#15486), by at most
+ * MIN_CLAMPED_OUTPUT_TOKENS. Sized to the documented worst case; costs
+ * nothing on large windows (the output ceiling binds long before the pad
+ * matters).
  */
 const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
 
@@ -3104,6 +3107,29 @@ export class LlmChat {
     return requestHistory;
   }
 
+  /**
+   * The pending turn as a request sent on top of `history` carries it: with
+   * the memory snapshot {@link getRequestHistoryForRoute} attaches when
+   * `history` does not hold the current catalog, and without replayed
+   * snapshots when there is no catalog, since the request strips them.
+   * Estimates of what a send adds read this so they match the request
+   * (#15486).
+   */
+  private pendingContentAsSent(pending: Content, history: Content[]): Content {
+    const catalog = this.config.getAutoMemoryContext?.() ?? '';
+    const snapshot = getAutoMemorySnapshot([...history, pending], catalog);
+    const withSnapshot = snapshot
+      ? { ...pending, parts: [...(pending.parts ?? []), snapshot] }
+      : pending;
+    if (catalog) return withSnapshot;
+    return (
+      withoutAutoMemorySnapshots([withSnapshot])[0] ?? {
+        ...withSnapshot,
+        parts: [],
+      }
+    );
+  }
+
   private getRequestHistoryForRoute(
     currentUserContent: Content | undefined,
     supportedModalities: InputModalities,
@@ -3256,15 +3282,21 @@ export class LlmChat {
     // The service reads `originalTokenCount` as the prompt before the pending
     // message (its gate adds that message itself) and keeps the message out
     // of `newTokenCount` only on that reading. A precomputed effective count
-    // folds the pending message in, so take it back out: otherwise the
-    // compacted count carries the message and every later estimate adds it a
-    // second time (#15486).
+    // folds the pending turn in, so take it back out: otherwise the
+    // compacted count carries the turn and every later estimate adds it a
+    // second time (#15486). The send path passes that baseline itself; a
+    // caller passing only the effective count gets the turn subtracted as the
+    // request carries it, memory snapshot included.
     const imageTokenEstimate = resolveSlimmingConfig(
       this.config.getChatCompression(),
     ).imageTokenEstimate;
-    const pendingUserMessageTokens = options?.pendingUserMessage
-      ? estimateContentTokens([options.pendingUserMessage], imageTokenEstimate)
-      : 0;
+    const pendingTurnTokens = (history: Content[]): number =>
+      options?.pendingUserMessage
+        ? estimateContentTokens(
+            [this.pendingContentAsSent(options.pendingUserMessage, history)],
+            imageTokenEstimate,
+          )
+        : 0;
     const originalTokenCount =
       originalTokenCountOverride !== undefined
         ? originalTokenCountOverride.count
@@ -3273,7 +3305,8 @@ export class LlmChat {
             ? (options.precomputedBaselineTokens ??
               Math.max(
                 0,
-                options.precomputedEffectiveTokens - pendingUserMessageTokens,
+                options.precomputedEffectiveTokens -
+                  pendingTurnTokens(this.history),
               ))
             : estimateContentTokens(
                 this.getHistoryShallow(true),
@@ -3331,9 +3364,12 @@ export class LlmChat {
       if (!options?.deferChatCompressionRecord) {
         // Resume replaces history with this snapshot, so include the pending
         // question and do not share the live array mutated later in the turn.
+        // Its count adds the turn as the send after compaction carries it:
+        // the compacted history holds no memory snapshot, so the send may
+        // attach one, and a replayed snapshot the request strips adds nothing.
         await this.recordCompression({
           info: options?.pendingUserMessage
-            ? withPendingMessageCounted(info, pendingUserMessageTokens)
+            ? withPendingMessageCounted(info, pendingTurnTokens(newHistory))
             : info,
           compressedHistory: options?.pendingUserMessage
             ? [...newHistory, options.pendingUserMessage]
@@ -3856,28 +3892,22 @@ export class LlmChat {
         // char/4 heuristic that can under-count by ~15-20K tokens; the reactive
         // overflow recovery below is the documented safety net when this
         // under-count causes hard-rescue to miss.
+        // `historyWalk` is the projection a count-less estimate walks; the
+        // effective count and its baseline pass one projection so a cold
+        // estimate copies the history once.
         const estimatePendingPrompt = (
           pending: Content,
           conservative = false,
           withPendingContent = true,
+          historyWalk: Content[] = this.lastPromptTokenCount > 0
+            ? []
+            : this.getHistoryShallow(true),
         ): number => {
           const catalog = this.config.getAutoMemoryContext?.() ?? '';
-          const snapshot = getAutoMemorySnapshot(
-            [...this.history, pending],
-            catalog,
+          const visiblePendingContent = this.pendingContentAsSent(
+            pending,
+            this.history,
           );
-          const pendingContent = snapshot
-            ? {
-                ...pending,
-                parts: [...(pending.parts ?? []), snapshot],
-              }
-            : pending;
-          const visiblePendingContent = catalog
-            ? pendingContent
-            : (withoutAutoMemorySnapshots([pendingContent])[0] ?? {
-                ...pendingContent,
-                parts: [],
-              });
           const unaccountedSnapshots =
             catalog && this.lastPromptTokenCount > 0
               ? this.history.flatMap((entry) =>
@@ -3887,7 +3917,7 @@ export class LlmChat {
                 )
               : [];
           return estimatePromptTokens(
-            this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true),
+            historyWalk,
             withPendingContent
               ? visiblePendingContent
               : { ...visiblePendingContent, parts: [] },
@@ -4139,7 +4169,14 @@ export class LlmChat {
         // failures fall through to reactive overflow after a few strikes.
         // Thresholds gate on the full window: the output clamp guarantees the
         // response fits, so nothing needs to be pre-reserved for it.
-        const effectiveTokens = estimatePendingPrompt(userContent);
+        const pendingEstimateWalk =
+          this.lastPromptTokenCount > 0 ? [] : this.getHistoryShallow(true);
+        const effectiveTokens = estimatePendingPrompt(
+          userContent,
+          false,
+          true,
+          pendingEstimateWalk,
+        );
         const isHardTier = effectiveTokens >= hard;
         const shouldForceFromHard =
           !exactRoute &&
@@ -4215,6 +4252,7 @@ export class LlmChat {
                 userContent,
                 false,
                 false,
+                pendingEstimateWalk,
               ),
               requestGenerationConfig: params.config,
               requestRouteKey,
@@ -4330,10 +4368,15 @@ export class LlmChat {
           compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
         ) {
           // Keep the pending question with the compressed answer on resume.
+          // Count the turn as this send carries it on the compacted history,
+          // as the auto record in tryCompress does (#15486).
           await this.recordCompression({
             info: withPendingMessageCounted(
               compressionInfo,
-              estimateContentTokens([userContent], imageTokenEstimate),
+              estimateContentTokens(
+                [this.pendingContentAsSent(userContent, this.history)],
+                imageTokenEstimate,
+              ),
             ),
             compressedHistory: [...this.getHistoryShallow(), userContent],
             summaryPrefixLength:
@@ -4435,7 +4478,8 @@ export class LlmChat {
         // lastPromptTokenCount is in scope and side queries (which set their
         // own maxOutputTokens via getBaseLlmClient()) stay exempt by
         // construction. This makes `prompt + max_tokens ≤ window` an invariant
-        // on every main-turn request (issue #5950).
+        // on every main-turn request (issue #5950), held against the unpadded
+        // estimate when that estimate starts from a count (#15486, below).
         //
         // The estimate above uses the surviving history and pending snapshot
         // before pushing userContent, avoiding double-counting on a history walk.
@@ -4444,9 +4488,10 @@ export class LlmChat {
         // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
         // counts based on prior API usage already preserve part of that
         // overhead, but conservatively double-counting it is safe and
-        // self-corrects when provider usage arrives. An under-count is the ONE
-        // way `prompt + max_tokens` can still overflow the window, so keep the
-        // pad until provider usage replaces the estimate.
+        // self-corrects when provider usage arrives. An under-count is one way
+        // `prompt + max_tokens` can still overflow the window, so keep the pad
+        // until provider usage replaces the estimate. The relaxed floor below
+        // is the other, by at most MIN_CLAMPED_OUTPUT_TOKENS.
         // A count-based estimate already carries the overhead the pad stands
         // for (API usage, or the remainder compaction keeps), so the pad may
         // shrink its grant but must not also cap the floor: on a window

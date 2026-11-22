@@ -6008,6 +6008,96 @@ describe('LlmChat', async () => {
       },
     );
 
+    describe.each([
+      // Hard tier: the record is written after the post-compaction guard.
+      ['hard-tier', 170_000, 'x'.repeat(32_000)],
+      // Between auto and hard: tryCompress writes the record itself.
+      ['auto', 172_000, 'go'],
+    ] as const)(
+      'the %s compression record counts the pending turn as it is sent (#15486)',
+      (_tier, seed, message) => {
+        const isSnapshot = (part: Part) =>
+          part.partMetadata?.['qwen-code:memory-catalog-snapshot'] === true;
+
+        /**
+         * Sends `pending` through a compaction and returns the record payload
+         * with the turn the request carried after it. Resume replays that
+         * turn and seeds its count from the record, so the record must add
+         * back exactly what the request carried.
+         */
+        async function compactAndSend(history: Content[], pending: Part[]) {
+          const recordChatCompression = vi.fn();
+          const target = newChat({
+            recorder: {
+              recordAssistantTurn: vi.fn(),
+              recordChatCompression,
+              recordMemoryCatalogSnapshot: vi.fn(),
+            },
+          });
+          target.setHistory(history);
+          target.setLastPromptTokenCount(seed);
+          mockCompressOnce(compressed(seed, 20_000));
+          mockStream(textStream('sent'));
+
+          await sendCollect(pending, 'prompt-15486-record-as-sent', target);
+
+          expect(recordChatCompression).toHaveBeenCalledTimes(1);
+          const payload = recordChatCompression.mock.calls[0][0];
+          const sentTurn = (requestAt(0).contents as Content[]).at(-1)!;
+          const sentTokens = estimateContentTokens([sentTurn]);
+          return { payload, sentTurn, sentTokens, target };
+        }
+
+        it('adds a fresh memory snapshot sent with the pending message', async () => {
+          mockConfig.getAutoMemoryContext = () => 'c'.repeat(4_000);
+
+          const { payload, sentTurn, sentTokens } = await compactAndSend(
+            [userText('history'), modelText('ok')],
+            [{ text: message }],
+          );
+
+          expect(sentTurn.parts?.some(isSnapshot)).toBe(true);
+          expect(payload.info.newTokenCount).toBe(20_000 + sentTokens);
+          expect(payload.info.originalTokenCount).toBe(seed + sentTokens);
+        });
+
+        it('adds the snapshot again when compaction drops the one in history', async () => {
+          // Before compaction the catalog is already in history, so the
+          // pre-compaction estimate attaches no snapshot. The summary drops
+          // it, and the send after compaction attaches the catalog again.
+          const catalog = 'c'.repeat(4_000);
+          mockConfig.getAutoMemoryContext = () => catalog;
+
+          const { payload, sentTurn, sentTokens } = await compactAndSend(
+            [
+              content('user', getAutoMemorySnapshot([], catalog)!),
+              modelText('ok'),
+            ],
+            [{ text: message }],
+          );
+
+          expect(sentTurn.parts?.some(isSnapshot)).toBe(true);
+          expect(payload.info.newTokenCount).toBe(20_000 + sentTokens);
+        });
+
+        it('leaves out a replayed snapshot the request strips, and keeps it in the record', async () => {
+          mockConfig.getAutoMemoryContext = () => '';
+          const replayed = getAutoMemorySnapshot([], 'r'.repeat(40_000))!;
+
+          const { payload, sentTurn, sentTokens } = await compactAndSend(
+            [userText('history'), modelText('ok')],
+            [{ text: message }, replayed],
+          );
+
+          expect(sentTurn.parts?.some(isSnapshot)).toBe(false);
+          expect(payload.info.newTokenCount).toBe(20_000 + sentTokens);
+          // The count is corrected, not the replay: the record still stores
+          // the turn as it was replayed.
+          expect(payload.compressedHistory.at(-1)?.parts).toContain(replayed);
+        });
+      },
+    );
+
     it('keeps the pending message out of an estimated baseline that was not precomputed (#15486)', async () => {
       // Count 0, so the baseline is a local estimate. The service's gate adds
       // the pending message to it, so the baseline itself must not.
@@ -15304,6 +15394,101 @@ describe('LlmChat', async () => {
         MIN_CLAMPED_OUTPUT_TOKENS,
       );
       expect(requestAt(1).config?.maxOutputTokens).toBeLessThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+    });
+
+    it('keeps capping a recovery floor by the padded walk when a positive count falls below the walk (#15486)', async () => {
+      // A provider count that misses content the walk sees cannot stand in for
+      // the overhead the pad covers. 16K window: the count-based estimate is
+      // about 5.6K and the walk about 15.4K, so the padded walk is past the
+      // window and the recovery gets 1. Capping by the count would grant
+      // 4,000 and overflow the window, with no reactive recovery in the loop.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 16_000,
+      });
+      mockCompress(noop(1_000));
+      serveStreams(
+        streamOf(
+          textChunk('p'.repeat(20_000), 'MAX_TOKENS', {
+            promptTokenCount: 1_000,
+            totalTokenCount: 5_000,
+          }),
+        ),
+        textStream(' …and done.'),
+      );
+
+      chat.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+      chat.setLastPromptTokenCount(1_000);
+      await drain(
+        await sendOn('claude-sonnet-4-6', 'hi', 'prompt-recovery-stale-count'),
+      );
+
+      expectStreamCalls(2);
+      // The first send starts from the count and gets more than the floor,
+      // so the recovery's ceiling does not hide which cap set its floor.
+      expect(requestAt(0).config?.maxOutputTokens).toBeGreaterThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+      expect(requestAt(1).config?.maxOutputTokens).toBeLessThan(
+        MIN_CLAMPED_OUTPUT_TOKENS,
+      );
+    });
+
+    it('caps a recovery floor by the count when the count-based estimate equals the walk (#15486)', async () => {
+      // The guard is inclusive. A first run measures the walk the recovery
+      // sees and its recovery message; a second run reports usage that makes
+      // the count-based estimate (prompt + output + 1.5 × the message) equal
+      // to that walk. 32,768 window: capped by the count the floor is 4,000,
+      // capped by the padded walk it would be 1.
+      mockGeneratorConfig({
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 32_768,
+      });
+      mockCompress(noop(18_000));
+      const output = 4_766;
+      const truncatedReply = (promptTokenCount: number) =>
+        streamOf(
+          textChunk('p'.repeat(20_000), 'MAX_TOKENS', {
+            promptTokenCount,
+            totalTokenCount: promptTokenCount + output,
+          }),
+        );
+      const run = async (target: LlmChat) => {
+        target.setHistory([userText('x'.repeat(40_000)), modelText('ok')]);
+        target.setLastPromptTokenCount(18_000);
+        await drain(
+          await sendOn(
+            'claude-sonnet-4-6',
+            'hi',
+            'prompt-recovery-equal',
+            target,
+          ),
+        );
+      };
+
+      serveStreams(truncatedReply(18_000), textStream(' …and done.'));
+      await run(newChat());
+      expectStreamCalls(2);
+      expect(requestAt(0).config?.maxOutputTokens).toBe(output);
+      const recoveryContents = requestAt(1).contents as Content[];
+      const walk = estimateContentTokens(recoveryContents);
+      const messageTokens = Math.ceil(
+        estimateContentTokens([recoveryContents.at(-1)!]) * 1.5,
+      );
+
+      serveStreams(
+        truncatedReply(walk - output - messageTokens),
+        textStream(' …and done.'),
+      );
+      await run(newChat());
+
+      expectStreamCalls(4);
+      expect(estimateContentTokens(requestAt(3).contents as Content[])).toBe(
+        walk,
+      );
+      expect(requestAt(3).config?.maxOutputTokens).toBe(
         MIN_CLAMPED_OUTPUT_TOKENS,
       );
     });
