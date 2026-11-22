@@ -16975,6 +16975,72 @@ describe('createAcpSessionBridge', () => {
         vi.useRealTimers();
       }
     });
+
+    it('renders real wchan and RSS values on grace and kill lines', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        let ticks = 0;
+        vi.mocked(sampleChannelProcess).mockImplementation(() => ({
+          cpuTicks: (ticks += 10),
+          state: 'R',
+          wchan: 'do_signal_stop',
+          rssBytes: 44_040_192,
+        }));
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS +
+            (CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT + 1) *
+              CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const lines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.startsWith('qwen serve: channel liveness'));
+        const graceLines = lines.filter((l) => l.includes('extending grace'));
+        // Non-empty wchan and non-zero RSS must pass through verbatim: a
+        // constant-'?' / constant-'0' renderer would keep every other test
+        // green while destroying the forensic value of these lines.
+        expect(graceLines[0]).toBe(
+          'qwen serve: channel liveness probe timed out but agent pid=4242 consumed CPU (10 ticks) state=R wchan=do_signal_stop rssMB=42; extending grace 1/6\n',
+        );
+        const killLines = lines.filter((l) => l.includes('killing channel'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=R wchan=do_signal_stop cpuDelta=10 busy=6 timeouts=0 rssMB=42; killing channel\n',
+        ]);
+        expect(handle.killed).toBe(true);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
   });
 
   it('transport failure marks the channel dying before process exit', async () => {
