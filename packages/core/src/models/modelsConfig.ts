@@ -1011,6 +1011,11 @@ export class ModelsConfig {
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      if (field === 'service_tier' && gc.service_tier === undefined) {
+        // Do not wipe an already-resolved service_tier (e.g. from CLI or env)
+        // when the model has no explicit service_tier override.
+        continue;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
       this.generationConfigSources[field] = {
