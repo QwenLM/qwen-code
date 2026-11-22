@@ -33529,6 +33529,46 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('rejects an oversized unpaged bulk load with transcript_page_too_large instead of emitting an unbounded NDJSON frame', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [],
+    });
+    const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        for (let index = 0; index <= LOAD_REPLAY_MAX_UPDATES; index += 1) {
+          await context.sendUpdate(replayUpdate);
+        }
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+        _meta: {
+          'qwen.session.loadReplayMode': 'bulk',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: -32012,
+      data: {
+        errorKind: 'transcript_page_too_large',
+        sessionId: 'persisted-1',
+        reason: 'updates',
+        limit: LOAD_REPLAY_MAX_UPDATES,
+      },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('tells the Goal renderer when a cold bulk replay page is partial', async () => {
     // The page did not end where the transcript does, so a card that
     // supersedes the page's last card must not be rendered.

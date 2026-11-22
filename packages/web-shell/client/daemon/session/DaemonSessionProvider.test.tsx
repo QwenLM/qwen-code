@@ -18837,6 +18837,65 @@ describe('DaemonSessionProvider', () => {
     expect(eventsCalls).toBe(1);
   });
 
+  it('stops reconnecting and surfaces the error on 413 transcript_too_large', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const tooLarge = new DaemonHttpError(
+      413,
+      {
+        error:
+          'Transcript snapshot for session big-1 is too large to index (1073741825 bytes, max 1073741824 bytes)',
+        code: 'transcript_too_large',
+        sessionId: 'big-1',
+        snapshotSize: 1073741825,
+        maxBytes: 1073741824,
+      },
+      'Transcript snapshot for session big-1 is too large to index (1073741825 bytes, max 1073741824 bytes)',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* tooLargeEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw tooLarge;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error:
+        'Transcript snapshot for session big-1 is too large to index (1073741825 bytes, max 1073741824 bytes)',
+      errorStatus: 413,
+    });
+    expect(connection?.missingSession).not.toBe(true);
+    expect(connection?.sessionId).toBeUndefined();
+    expect(eventsCalls).toBe(1);
+  });
+
   it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       v: 1,

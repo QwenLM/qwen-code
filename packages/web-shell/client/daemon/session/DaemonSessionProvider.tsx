@@ -904,11 +904,16 @@ const GeneratedUiScopeContext = createContext<
  *
  * 404/410 (session-not-found) leave the requested session disconnected instead
  * of silently creating a replacement empty session.
+ *
+ * 413 (`transcript_too_large` / `transcript_page_too_large`) will not resolve
+ * on its own; retrying loops forever, clears the visible error, and repeatedly
+ * cold-spawns ACP workers.
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
 const TERMINAL_SESSION_HTTP_STATUSES = new Set([
   ...AUTH_FAILURE_HTTP_STATUSES,
   ...MISSING_SESSION_HTTP_STATUSES,
+  413,
 ]);
 
 interface HeartbeatFailureState {

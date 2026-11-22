@@ -2132,6 +2132,102 @@ describe('SessionTranscriptReader', () => {
     expectRestoreAttribute('compression_selected', expect.any(Boolean));
   });
 
+  it('skips lifecycle ui_telemetry records during selected-record reads', async () => {
+    expect(SESSION_TRANSCRIPT_MAX_INDEX_BYTES).toBe(1024 * 1024 * 1024);
+
+    const apiResponseEvent = {
+      'event.name': 'qwen-code.api_response',
+      'event.timestamp': T0,
+      model: 'qwen3-coder',
+      status_code: 200,
+      duration_ms: 100,
+      input_token_count: 10,
+      output_token_count: 20,
+      cached_content_token_count: 0,
+      thoughts_token_count: 0,
+      tool_token_count: 0,
+      total_token_count: 30,
+    };
+    const requestLifecycle = sys('req-life', 'u1', 'ui_telemetry', {
+      uiEvent: {
+        'event.name': 'request_lifecycle',
+        v: 1,
+        kind: 'request',
+        phase: 'started',
+        executionId: 'exec-1',
+        sessionId,
+        promptId: `${sessionId}########1`,
+        model: 'model',
+        startedAt: 10,
+      },
+    });
+    const toolLifecycle = sys('tool-life', 'req-life', 'ui_telemetry', {
+      uiEvent: {
+        'event.name': 'tool_lifecycle',
+        v: 1,
+        kind: 'tool',
+        phase: 'started',
+        executionId: 'tool-1',
+        sessionId,
+        callId: 'call-1',
+        toolName: 'shell',
+        startedAt: 12,
+        executionStatus: 'running',
+      },
+    });
+    const hookLifecycle = sys('hook-life', 'tool-life', 'ui_telemetry', {
+      uiEvent: {
+        'event.name': 'hook_lifecycle',
+        v: 1,
+        kind: 'hook',
+        phase: 'started',
+        executionId: 'hook-1',
+        sessionId,
+        startedAt: 13,
+      },
+    });
+    const keptTelemetry = sys('kept-telemetry', 'hook-life', 'ui_telemetry', {
+      uiEvent: apiResponseEvent,
+    });
+    const lines = [
+      record('u1', null, 'hello'),
+      requestLifecycle,
+      toolLifecycle,
+      hookLifecycle,
+      keptTelemetry,
+      record('a1', 'kept-telemetry', 'world'),
+    ];
+    const filePath = await writeRecords(lines);
+
+    const fileContent = await fs.readFile(filePath, 'utf8');
+    const offsetOf = (uuid: string) => {
+      const idx = fileContent.indexOf(`"uuid":"${uuid}"`);
+      expect(idx).toBeGreaterThan(-1);
+      return fileContent.lastIndexOf('\n', idx) + 1;
+    };
+    const lifecycleOffsets = new Set([
+      offsetOf('req-life'),
+      offsetOf('tool-life'),
+      offsetOf('hook-life'),
+    ]);
+    const keptTelemetryOffset = offsetOf('kept-telemetry');
+
+    const readOffsets = new Set<number>();
+    setSessionTranscriptSelectedLineReadHookForTest((offset) => {
+      readOffsets.add(offset);
+    });
+
+    const projection = await newReader().readRestoreProjection(sessionId, {
+      replay: { kind: 'none' },
+    });
+
+    expect(projection?.runtime.uiTelemetryEvents).toEqual([apiResponseEvent]);
+    expect(readOffsets.has(keptTelemetryOffset)).toBe(true);
+    for (const offset of lifecycleOffsets) {
+      expect(readOffsets.has(offset)).toBe(false);
+    }
+  });
+
   it('uses the bounded persisted-title picker instead of the full active chain', async () => {
     const largeText = 'x'.repeat(70 * 1024);
     await writeRecords([

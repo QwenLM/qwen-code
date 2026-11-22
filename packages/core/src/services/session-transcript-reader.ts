@@ -113,7 +113,7 @@ export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
-export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -555,6 +555,7 @@ interface UuidIndexEntry {
   apiHistoryCompressionCandidate: boolean;
   resumeTokenCountsCandidate: boolean;
   attributionSnapshotCandidate: boolean;
+  uiTelemetryCandidate: boolean;
   goalRecoveryCandidate: boolean;
   turnHint: SessionTurnRecordHint;
   navigationKind?: SessionTranscriptNavigationTurnKind;
@@ -904,6 +905,20 @@ function isAttributionSnapshotCandidate(record: ChatRecord): boolean {
     record.subtype === 'attribution_snapshot' &&
     isObjectRecord(record.systemPayload) &&
     'snapshot' in record.systemPayload
+  );
+}
+
+function isRestoreUiTelemetryCandidate(record: ChatRecord): boolean {
+  if (record.type !== 'system' || record.subtype !== 'ui_telemetry') {
+    return false;
+  }
+  const uiEvent = (record.systemPayload as UiTelemetryRecordPayload | undefined)
+    ?.uiEvent;
+  return (
+    isObjectRecord(uiEvent) &&
+    uiEvent['event.name'] !== 'request_lifecycle' &&
+    uiEvent['event.name'] !== 'tool_lifecycle' &&
+    uiEvent['event.name'] !== 'hook_lifecycle'
   );
 }
 
@@ -2502,6 +2517,7 @@ function newIndexEntry(
     apiHistoryCompressionCandidate: isApiHistoryCompressionCandidate(record),
     resumeTokenCountsCandidate: isResumeTokenCountsCandidate(record),
     attributionSnapshotCandidate: isAttributionSnapshotCandidate(record),
+    uiTelemetryCandidate: isRestoreUiTelemetryCandidate(record),
     goalRecoveryCandidate: isGoalRecoveryCandidate(record),
     turnHint: getSessionTurnRecordHint(record, sessionId),
     ...(navigationKind ? { navigationKind } : {}),
@@ -2610,6 +2626,11 @@ async function buildIndex(params: {
             existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
             existing.assistantPreviewCandidate ||=
               isAssistantPreviewCandidate(fragmentRecord);
+            existing.uiTelemetryCandidate ||= isRestoreUiTelemetryCandidate({
+              ...(record as unknown as ChatRecord),
+              type: existing.type,
+              subtype: existing.subtype,
+            } as ChatRecord);
             if (existing.type === 'assistant' && record.usageMetadata) {
               existing.resumeTokenCountsCandidate =
                 isResumeTokenCountsCandidate({
@@ -4205,10 +4226,9 @@ export class SessionTranscriptReader {
       (entry) => entry.type === 'assistant',
     );
     const uiTelemetrySet = new Set(
-      index.runtimeUuids.filter((uuid) => {
-        const entry = index.byUuid.get(uuid);
-        return entry?.type === 'system' && entry.subtype === 'ui_telemetry';
-      }),
+      index.runtimeUuids.filter(
+        (uuid) => index.byUuid.get(uuid)?.uiTelemetryCandidate === true,
+      ),
     );
     const fileHistorySet = new Set(
       index.runtimeUuids.filter((uuid) => {

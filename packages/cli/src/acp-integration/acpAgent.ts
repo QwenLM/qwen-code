@@ -6363,7 +6363,7 @@ class QwenAgent implements Agent {
                 // under the gate: isTurnIdle() is structurally false while
                 // the close gate is held (#9704).
                 finalizeDangling: true,
-                ...(restoreOptions.replay.kind === 'recent'
+                ...(bulkReplay
                   ? {
                       limits: {
                         maxBytes: LOAD_REPLAY_MAX_BYTES,
@@ -6433,7 +6433,11 @@ class QwenAgent implements Agent {
               return withRestoreHint(liveSession, response);
             }
 
-            const enforceLimits = restoreOptions.replay.kind === 'recent';
+            // Every bulk load replay travels in a single NDJSON response frame
+            // that the bridge validates against LOAD_REPLAY_MAX_UPDATES and
+            // DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes, so enforce envelope limits
+            // even when the caller omitted `historyPageSize`.
+            const enforceLimits = true;
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -6608,14 +6612,10 @@ class QwenAgent implements Agent {
                             projection.replay!.branchPointsByAssistantUuid,
                         }
                       : {}),
-                    ...(restoreOptions.replay.kind === 'recent'
-                      ? {
-                          limits: {
-                            maxBytes: LOAD_REPLAY_MAX_BYTES,
-                            maxUpdates: LOAD_REPLAY_MAX_UPDATES,
-                          },
-                        }
-                      : {}),
+                    limits: {
+                      maxBytes: LOAD_REPLAY_MAX_BYTES,
+                      maxUpdates: LOAD_REPLAY_MAX_UPDATES,
+                    },
                     logger: debugLogger,
                   }),
                 );
@@ -6637,17 +6637,11 @@ class QwenAgent implements Agent {
                     : {}),
                   ...(projection.replay.hasMore ? { hasMore: true } : {}),
                 };
-                if (restoreOptions.replay.kind === 'recent') {
-                  degradeReplayEnvelopeAppHtml(
-                    replayEnvelope,
-                    LOAD_REPLAY_MAX_BYTES,
-                  );
-                }
-                validateLoadReplayEnvelope(
-                  sessionId,
+                degradeReplayEnvelopeAppHtml(
                   replayEnvelope,
-                  restoreOptions.replay.kind === 'recent',
+                  LOAD_REPLAY_MAX_BYTES,
                 );
+                validateLoadReplayEnvelope(sessionId, replayEnvelope, true);
               }
               const goalBootstrap = replayGoalBootstrap(projection);
               const rendered = await renderPreparedGoalUpdate(
@@ -6690,7 +6684,7 @@ class QwenAgent implements Agent {
                   sessionId,
                   replayEnvelope,
                   rendered.updates,
-                  restoreOptions.replay.kind === 'recent',
+                  true,
                 );
                 // What a full page cannot carry is the recovered Goal
                 // state, which the client must still get: it is sent as

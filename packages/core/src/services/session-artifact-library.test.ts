@@ -13,7 +13,10 @@ import {
   SessionStorageEntryError,
   SessionService,
 } from './sessionService.js';
-import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptTooLargeError,
+} from './session-transcript-reader.js';
 import { saveArtifactSnapshot } from '../tools/artifact/artifact-snapshots.js';
 import { fileURLToPath } from 'node:url';
 import { Storage } from '../config/storage.js';
@@ -471,10 +474,44 @@ describe('persisted artifact library', () => {
 
   it('rejects an oversized transcript before reading its body', async () => {
     await seed();
-    await fs.truncate(file, 64 * 1024 * 1024 + 1);
+    await fs.truncate(file, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
     await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow(
       SessionTranscriptTooLargeError,
     );
+  });
+
+  it('rebuilds and mutates artifact snapshots without retaining non-artifact message bodies', async () => {
+    await seed();
+    const heavyToolResult = {
+      uuid: 'tool-heavy',
+      parentUuid: 'assistant-1',
+      sessionId: id,
+      cwd,
+      timestamp: stamp,
+      version: '0.25.3',
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [{ text: 'x'.repeat(256 * 1024) }],
+      },
+    };
+    await fs.appendFile(file, JSON.stringify(heavyToolResult) + '\n');
+
+    const snapshot = await service.readSessionArtifactSnapshot(id);
+    expect(snapshot?.artifacts.map((item) => item.id)).toEqual([artifactId]);
+
+    const removed = await service.removeSessionArtifactsForLibrary(
+      id,
+      [artifactId],
+      {
+        assertStorageUnchanged: async () => {},
+        assertCanMutate: () => {},
+      },
+    );
+    expect(removed).toEqual([artifactId]);
+
+    const after = await service.readSessionArtifactSnapshot(id);
+    expect(after?.artifacts).toEqual([]);
   });
 
   it('refuses legacy mutation of a managed-owned transcript', async () => {

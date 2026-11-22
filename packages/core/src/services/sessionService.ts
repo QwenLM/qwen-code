@@ -117,6 +117,7 @@ import {
   retainArtifactSnapshot,
 } from '../tools/artifact/artifact-snapshots.js';
 import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
   type SelectiveSessionRestoreOptions,
@@ -3511,7 +3512,7 @@ export class SessionService {
       throw new SessionTranscriptChangedError();
     }
     const identity = physical.identities[0];
-    const maxBytes = MAX_TRANSCRIPT_READ_BYTES;
+    const maxBytes = SESSION_TRANSCRIPT_MAX_INDEX_BYTES;
     if (identity.size > maxBytes) {
       throw new SessionTranscriptTooLargeError(
         sessionId,
@@ -3526,6 +3527,7 @@ export class SessionService {
         (process.platform === 'win32' ? 0 : (fs.constants.O_NOFOLLOW ?? 0)),
     );
     const records: ChatRecord[] = [];
+    let firstRecordMeta: { cwd: string; version: string } | undefined;
     let complete = true;
     try {
       const stats = await handle.stat();
@@ -3551,7 +3553,31 @@ export class SessionService {
               identity.filePath,
             );
             complete &&= parsed.complete;
-            records.push(...parsed.records);
+            for (const record of parsed.records) {
+              firstRecordMeta ??= {
+                cwd: record.cwd,
+                version: record.version,
+              };
+              if (isSessionArtifactRecord(record)) {
+                records.push(record);
+              } else {
+                // Keep only chain-identity fields for non-artifact records so
+                // large transcripts do not retain message/tool-result bodies
+                // in memory while verifying history continuity.
+                records.push({
+                  uuid: record.uuid,
+                  parentUuid: record.parentUuid,
+                  sessionId: record.sessionId,
+                  timestamp: record.timestamp,
+                  type: record.type,
+                  ...(record.subtype !== undefined
+                    ? { subtype: record.subtype }
+                    : {}),
+                  cwd: firstRecordMeta.cwd,
+                  version: firstRecordMeta.version,
+                });
+              }
+            }
           }
         } finally {
           lines.close();
