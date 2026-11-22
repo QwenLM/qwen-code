@@ -5922,11 +5922,17 @@ export class LlmChat {
               countBasedRecoveryEstimate >= unpaddedWalkRecoveryEstimate
                 ? countBasedRecoveryEstimate
                 : undefined;
-            // recoveryParams is always `params` or `escalatedParams`, both of
-            // which have maxOutputTokens set; the `?? outputCeiling` is a
-            // defensive fallback that never fires in practice.
-            const recoveryCeiling =
-              recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            // The ceiling the attempt was sized from, before its window clamp:
+            // the escalation ceiling when the send escalated, else the
+            // request's own ceiling. Each iteration clamps to the window with
+            // its own estimate, so it must not also inherit an earlier clamp.
+            // That clamp was sized before any usage: on a fresh session the
+            // padded walk can squeeze the first grant to a few hundred tokens
+            // that a recovery with fresh usage would otherwise stay at
+            // (#15486).
+            const recoveryCeiling = shouldEscalateMaxOutputTokens
+              ? OUTPUT_TOKEN_CEILING
+              : outputCeiling;
             const iterationClampedMaxOutputTokens = clampOutputTokensToWindow(
               recoveryCeiling,
               contextWindowForClamp,

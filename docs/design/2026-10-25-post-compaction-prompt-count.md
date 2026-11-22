@@ -84,6 +84,7 @@ maxTokens = min(ceiling, max(floor, room))
 - **First send.** Only an estimated count is padded. When that count is positive (a compacted count, or a resume seeded from an estimate), the floor prompt is the unpadded estimate. At count 0 the estimate is a fresh history walk, and the floor keeps the padded estimate. A provider count is not padded, so its floor does not change. The relaxation therefore applies only to `count > 0 && isEstimated`.
 - **Recovery send.** Every recovery send pads its history walk, whatever the count's provenance. The floor prompt is the count-based estimate, from a provider count or a compacted count, when it covers the walk. Otherwise, including at count 0, it is the padded walk.
   - This covers the continuation after `MAX_TOKENS` on a small window that was reported on #15486. At 32,768 tokens, with a usage-based estimate of about 22.8K and a walk of about 14.5K, the padded walk is about 34.5K, and the continuation went out with `max_tokens: 1`. It now gets 4,000. A usage-based estimate that fills the window still gets 1.
+- **Recovery ceiling.** A recovery send's ceiling is the one its attempt was sized from before the window clamp: the escalation ceiling when the send escalated, else the request's own ceiling. Each iteration clamps to the window with its own estimate. It used to inherit the first send's clamped grant, which is sized before any usage: on a fresh session the padded walk can squeeze that grant to a few hundred tokens, and the recovery stayed there although fresh usage showed room. An end-to-end run on a 32,768-token window measured 320 on every continuation.
 - **Room.** The room always comes from the padded estimate, so the pad still shrinks every grant above the floor.
 
 ### Window invariant (#5950)
@@ -140,9 +141,10 @@ The window clamp has no design document of its own under `docs/design/`. This se
     - a 16K window with a provider count gets 4,000;
     - on a 32,768-token window, fresh usage that leaves room gets 4,000, and fresh usage that fills the window gets 1;
     - without a covering count the padded cap stays, including a positive count below the walk;
-    - a count-based estimate equal to the walk caps the floor: the check is inclusive.
+    - a count-based estimate equal to the walk caps the floor: the check is inclusive;
+    - a fresh session whose first grant the pad squeezed to about 500 tokens gets 4,000 on recovery once usage shows room, and a caller's ceiling of 2,000 still bounds it.
 - Existing tests updated: two expected original counts now leave out the pending message, and one expected record count includes it.
-- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail. Five more for the round-one fixes do too: each record path adding the raw message, the auto record adding the pre-compaction effective count minus the baseline (which misses a snapshot compaction drops), and the recovery check written as `>` or as `> 0`.
+- Mutation check: 14 hand-written mutants, each undoing one decision above (the record add-back, the adopted count, the gate input, the floor's scope on the first send and on recovery sends, either cold-path branch, the baseline itself), each make at least one of these tests fail. Five more for the round-one fixes do too: each record path adding the raw message, the auto record adding the pre-compaction effective count minus the baseline (which misses a snapshot compaction drops), and the recovery check written as `>` or as `> 0`. Three more for the recovery ceiling (back to the first grant, always the request's ceiling, always the escalation ceiling) each fail a test as well.
 - End-to-end runs against a mock provider and a real provider are reported on the PR.
 
 ## Acceptance criteria

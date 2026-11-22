@@ -15493,6 +15493,57 @@ describe('LlmChat', async () => {
       );
     });
 
+    it.each([
+      // No ceiling of its own: the recovery gets the floor.
+      [undefined, MIN_CLAMPED_OUTPUT_TOKENS],
+      // A caller's ceiling below the floor still bounds the recovery.
+      [2_000, 2_000],
+    ] as const)(
+      'lets a recovery send outgrow a first grant the pad squeezed on a fresh session (ceiling %s, #15486)',
+      async (ceiling, expected) => {
+        // A fresh session has no count, so its first send pads the history walk
+        // and a 32,768 window leaves a few hundred tokens. The truncated reply
+        // brings provider usage showing about 10K free. The recovery re-clamps
+        // against the window itself, so it must not also inherit that squeezed
+        // first grant as its ceiling; the request's own ceiling still applies.
+        mockGeneratorConfig({
+          model: 'claude-sonnet-4-6',
+          contextWindowSize: 32_768,
+        });
+        mockCompress(noop());
+        // The first grant is known only once the first request is built.
+        let firstGrant = 0;
+        streamMock().mockImplementation(async (request) => {
+          if (streamMock().mock.calls.length === 1) {
+            firstGrant = request.config?.maxOutputTokens ?? 0;
+            return streamOf(
+              textChunk('p'.repeat(2_040), 'MAX_TOKENS', {
+                promptTokenCount: 21_000,
+                totalTokenCount: 21_000 + firstGrant,
+              }),
+            );
+          }
+          return textStream(' …and done.');
+        });
+
+        chat.setHistory([userText('x'.repeat(49_000)), modelText('ok')]);
+        await drain(
+          await chat.sendMessageStream(
+            'claude-sonnet-4-6',
+            {
+              message: 'hi',
+              ...(ceiling ? { config: { maxOutputTokens: ceiling } } : {}),
+            },
+            'prompt-recovery-fresh-squeeze',
+          ),
+        );
+
+        expectStreamCalls(2);
+        expect(firstGrant).toBeLessThan(MIN_CLAMPED_OUTPUT_TOKENS);
+        expect(requestAt(1).config?.maxOutputTokens).toBe(expected);
+      },
+    );
+
     it('re-clamps recovery sends even when an intermediate response omits usage metadata', async () => {
       // Codex round 4: the FIRST truncated response reports usage, the SECOND
       // omits it; the count-based estimate freezes while history grows ~64K
