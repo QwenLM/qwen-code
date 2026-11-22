@@ -285,6 +285,20 @@ describe('reasoning declarations', () => {
     },
   );
 
+  it('clamps a declared Kimi K3 default with an explicit wire profile', () => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'kimi-k3.1-pro' },
+        { profile: 'openai-effort', defaultEffort: 'medium' },
+      ),
+    ).toMatchObject({
+      profile: 'openai-effort',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      canDisable: false,
+    });
+  });
+
   it('rejects a non-Kimi declared default outside the inherited ladder', () => {
     expect(
       resolveReasoningCapabilities(

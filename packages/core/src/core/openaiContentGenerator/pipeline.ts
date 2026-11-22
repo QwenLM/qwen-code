@@ -196,6 +196,39 @@ function profileReasoning(
   }
 }
 
+function restoreReasoningDefaults(
+  request: Record<string, unknown>,
+  reasoning: Exclude<ContentGeneratorConfig['reasoning'], false | undefined>,
+  capabilities: ResolvedReasoning | undefined,
+): void {
+  if (!capabilities?.profile) return;
+  const defaults = profileReasoning(
+    capabilities.profile,
+    reasoning,
+    capabilities.disableField,
+  );
+  const flatEffort = request['reasoning_effort'];
+  const nestedEffort = asObject(request['reasoning'])?.['effort'];
+  for (const [field, value] of Object.entries(defaults)) {
+    if (field === 'reasoning' && !isReasoningEffortPlaceholder(flatEffort)) {
+      continue;
+    }
+    if (
+      field === 'reasoning_effort' &&
+      (!isReasoningEffortPlaceholder(flatEffort) || nestedEffort !== undefined)
+    ) {
+      continue;
+    }
+    const current = asObject(request[field]);
+    const fallback = asObject(value);
+    if (current && fallback) {
+      request[field] = { ...fallback, ...current };
+    } else if (isReasoningEffortPlaceholder(request[field])) {
+      request[field] = value;
+    }
+  }
+}
+
 function applyConfiguredReasoningEffort(
   request: OpenAI.Chat.ChatCompletionCreateParams,
   capabilities: ResolvedReasoning | undefined,
@@ -1443,7 +1476,10 @@ export class ContentGenerationPipeline {
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
       effectiveReasoning &&
-      (!this.hasExplicitOpenRouterEffort(context.model) ||
+      (!this.hasExplicitOpenRouterEffort(
+        context.model,
+        reasoningCapabilities?.canDisable,
+      ) ||
         (resolveReasoningDeclaration(
           this.config.cliConfig,
           this.contentGeneratorConfig,
@@ -1737,6 +1773,16 @@ export class ContentGenerationPipeline {
       // it); a thinking-mandatory model rejects it like the boolean shapes.
       if (typed['reasoning_effort'] === 'none') {
         delete typed['reasoning_effort'];
+        if (
+          request.config?.thinkingConfig?.includeThoughts !== false &&
+          effectiveReasoning
+        ) {
+          restoreReasoningDefaults(
+            typed,
+            effectiveReasoning,
+            reasoningCapabilities,
+          );
+        }
       }
       const thinking = asObject(typed['thinking']);
       if (thinking?.['type'] === 'disabled') {
@@ -1755,6 +1801,33 @@ export class ContentGenerationPipeline {
           typed['chat_template_kwargs'] = remaining;
         } else {
           delete typed['chat_template_kwargs'];
+        }
+      }
+      if (
+        request.config?.thinkingConfig?.includeThoughts !== false &&
+        isOpenRouterHostname(this.contentGeneratorConfig)
+      ) {
+        const reasoning = asObject(typed['reasoning']);
+        const hasDisabledReasoning =
+          typed['reasoning'] === false ||
+          reasoning?.['enabled'] === false ||
+          reasoning?.['effort'] === 'none';
+        if (hasDisabledReasoning) {
+          const remaining = { ...reasoning };
+          delete remaining['enabled'];
+          if (remaining['effort'] === 'none') delete remaining['effort'];
+          if (Object.keys(remaining).length > 0) {
+            typed['reasoning'] = remaining;
+          } else {
+            delete typed['reasoning'];
+          }
+          if (effectiveReasoning) {
+            restoreReasoningDefaults(
+              typed,
+              effectiveReasoning,
+              reasoningCapabilities,
+            );
+          }
         }
       }
     }
@@ -1988,8 +2061,14 @@ export class ContentGenerationPipeline {
         ...configSamplingParams,
         ...this.contentGeneratorConfig.extra_body,
       }['reasoning_effort'];
-      const samplingParams =
-        getGptReasoningCapabilities(
+      const preservedReasoning =
+        configSamplingParams['reasoning'] === undefined &&
+        this.hasExplicitOpenRouterEffort(request.model)
+          ? this.buildReasoningConfig(request)
+          : {};
+      const samplingParams = {
+        ...preservedReasoning,
+        ...(getGptReasoningCapabilities(
           request.model || this.contentGeneratorConfig.model,
         ) &&
         configSamplingParams['reasoning'] === undefined &&
@@ -1998,7 +2077,8 @@ export class ContentGenerationPipeline {
         ) ||
           isReasoningEffortPlaceholder(rawEffort))
           ? { ...this.buildReasoningConfig(request), ...configSamplingParams }
-          : configSamplingParams;
+          : configSamplingParams),
+      };
       const requestMaxTokens = request.config?.maxOutputTokens;
       const maxTokens =
         reconcileMaxTokens(configSamplingParams.max_tokens, requestMaxTokens) ??
@@ -2045,11 +2125,15 @@ export class ContentGenerationPipeline {
     return params;
   }
 
-  private hasExplicitOpenRouterEffort(model?: string): boolean {
+  private hasExplicitOpenRouterEffort(
+    model?: string,
+    canDisable?: boolean,
+  ): boolean {
     return hasOpenRouterReasoningEffortOverride(
       this.config.cliConfig,
       this.contentGeneratorConfig,
       model || this.contentGeneratorConfig.model,
+      canDisable,
     );
   }
 
@@ -2070,27 +2154,32 @@ export class ContentGenerationPipeline {
     // configured reasoning object when explicitly enabled. This keeps provider- and
     // model-specific semantics intact while honoring request-level opt-out.
 
-    if (
-      request.config?.thinkingConfig?.includeThoughts === false ||
-      this.hasExplicitOpenRouterEffort(request.model)
-    ) {
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
       return {};
     }
 
+    const model = request.model || this.contentGeneratorConfig.model;
+    const resolved = resolveReasoningForModel(
+      this.config.cliConfig,
+      this.contentGeneratorConfig,
+      request.model,
+    );
     const reasoning = getEffectiveReasoning(
-      {
-        ...this.contentGeneratorConfig,
-        model: request.model || this.contentGeneratorConfig.model,
-      },
-      resolveReasoningForModel(
-        this.config.cliConfig,
-        this.contentGeneratorConfig,
-        request.model,
-      ),
+      { ...this.contentGeneratorConfig, model },
+      resolved,
     );
 
     if (reasoning === false || reasoning === undefined) {
       return {};
+    }
+
+    if (this.hasExplicitOpenRouterEffort(request.model, resolved?.canDisable)) {
+      if (
+        getBuiltinDeepSeekReasoning({ ...this.contentGeneratorConfig, model })
+      )
+        return {};
+      const { effort: _effort, ...siblings } = reasoning;
+      return Object.keys(siblings).length ? { reasoning: siblings } : {};
     }
 
     return { reasoning };
