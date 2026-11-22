@@ -3551,7 +3551,32 @@ it('declares the external Shell tool set: file tools, foreground Shell and glob'
   expect(schema.properties?.['is_background']).toBeUndefined();
 });
 
-it('refuses an external Shell Turn without its publication or with another lane', async () => {
+it('refuses a still-closed lane on an external files Turn before warming the Broker', () => {
+  // Skills became turn content on this lane; the other optional lanes stay
+  // closed, so the refusal arm must still fire for them.
+  broker.warm.mockClear();
+  expect(
+    () =>
+      new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        undefined,
+        {
+          profile: 'hosted-workspace-external-files/1',
+          mcp: {} as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+        },
+      ),
+  ).toThrow('External files profile does not support optional lanes.');
+  expect(broker.warm).not.toHaveBeenCalled();
+});
+
+it('refuses an external Shell Turn without its publication', async () => {
   const build = (
     publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
     extras?: { skills?: ReturnType<typeof publishedSkills> },
