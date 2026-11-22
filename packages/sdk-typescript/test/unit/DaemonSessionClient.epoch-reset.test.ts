@@ -13,7 +13,7 @@ describe('session replay cursor across event-bus epochs', () => {
     { seed: 'old', epoch: 'new', id: 2, expected: '2' },
     { seed: 'old', epoch: 'new', id: undefined, expected: '0' },
     { seed: 'old', epoch: 'old', id: 2, expected: '100' },
-    { seed: undefined, epoch: 'new', id: 2, expected: '100' },
+    { seed: undefined, epoch: 'new', id: 2, expected: '2' },
   ])(
     'reconnects with a cursor belonging to $epoch',
     async ({ seed, epoch, id, expected }) => {
@@ -51,7 +51,9 @@ describe('session replay cursor across event-bus epochs', () => {
       }
 
       expect(requests[0]?.get('last-event-id')).toBe('100');
-      expect(requests[0]?.get('x-qwen-event-epoch')).toBe(seed ?? null);
+      expect(requests[0]?.get('x-qwen-event-epoch')).toBe(
+        seed ?? 'unpaired-cursor-epoch',
+      );
       expect(requests[1]?.get('last-event-id')).toBe(expected);
       expect(session.eventEpoch).toBe(epoch);
     },

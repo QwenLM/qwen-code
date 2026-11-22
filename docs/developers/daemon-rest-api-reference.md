@@ -157,5 +157,10 @@ surfaces and are not promoted to an integration contract by omission.
   stable `code` or `errorKind` when present.
 - Preserve SSE response headers and disable proxy buffering. Resume with both
   `Last-Event-ID` and `X-Qwen-Event-Epoch` when the daemon supplied an epoch.
+  The session SDK requests resynchronization when a positive saved cursor has no
+  epoch, using the existing epoch-mismatch protocol; older daemons keep numeric
+  replay. After an epoch reset, pass an explicit cursor and epoch together to
+  override the cursor observed in that epoch. Subscriptions with no cursor remain
+  live-only.
 - A workspace trust boundary is not tenant isolation. Run separate daemons when
   security principals or process-level failure boundaries must be independent.

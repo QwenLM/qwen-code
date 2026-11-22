@@ -92,6 +92,12 @@ import type {
   RestoreStandaloneSessionRequest,
 } from './standalone-sessions.js';
 
+// Valid request token that cannot equal the daemon's randomUUID epoch. A
+// positive cursor without provenance must trigger the existing epoch-mismatch
+// replay path before any frames are filtered. Older daemons ignore the token
+// and retain their numeric replay behavior.
+const UNPAIRED_CURSOR_EPOCH = 'unpaired-cursor-epoch';
+
 /** Compacted replay snapshot returned by the daemon on session load. */
 export interface DaemonReplaySnapshot {
   compactedReplay: DaemonEvent[];
@@ -118,9 +124,10 @@ export interface DaemonSessionClientOptions {
    * Epoch token of the event bus that produced `lastEventId` (the
    * `eventEpoch` field of load/resume responses). Paired with the cursor
    * on every subscription so a daemon restart is detected as an epoch
-   * mismatch instead of a numeric guess. Absent on older daemons — the
-   * first subscription then learns the epoch from the
-   * `X-Qwen-Event-Epoch` response header.
+   * mismatch instead of a numeric guess. A positive cursor without an epoch
+   * requests resynchronization from epoch-aware daemons; older daemons retain
+   * numeric replay. The first subscription learns the current epoch from the
+   * `X-Qwen-Event-Epoch` response header when available.
    */
   eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
@@ -309,6 +316,7 @@ export class DaemonSessionClient {
    * subscription's `X-Qwen-Event-Epoch` response header.
    */
   private lastSeenEpoch: string | undefined;
+  private cursorEpochReset = false;
   private hasAcceptedRestStream = false;
   private lastAcceptedRestStreamId: string | undefined;
   private subscriptionActive = false;
@@ -1590,13 +1598,31 @@ export class DaemonSessionClient {
       delete subscribeOpts.clientId;
       delete subscribeOpts.previousSseStreamId;
       delete subscribeOpts.onSseStreamAccepted;
-      const lastEventId =
+      let lastEventId =
         subscribeOpts.lastEventId ??
         (resume ? this.lastSeenEventId : undefined);
+      if (
+        this.cursorEpochReset &&
+        subscribeOpts.lastEventId !== undefined &&
+        subscribeOpts.epoch === undefined
+      ) {
+        // An adapter may keep presenting its pre-restart cursor. Once that
+        // epoch was reset, an unpaired override cannot advance past the
+        // cursor actually observed in the current epoch. An explicit pair
+        // still retains the caller's seek intent.
+        lastEventId = Math.min(
+          subscribeOpts.lastEventId,
+          this.lastSeenEventId ?? 0,
+        );
+      }
       // Same seeding rhythm as the cursor: an explicit caller epoch wins,
       // otherwise pair the resumed cursor with the epoch it was minted in.
       const epoch =
-        subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
+        subscribeOpts.epoch ??
+        (resume ? this.lastSeenEpoch : undefined) ??
+        (lastEventId !== undefined && lastEventId > 0
+          ? UNPAIRED_CURSOR_EPOCH
+          : undefined);
       const callerOnEpoch = subscribeOpts.onEpoch;
       const restSubscription = this.client.transport.type === 'rest';
       if (!restSubscription) {
@@ -1624,10 +1650,19 @@ export class DaemonSessionClient {
         ...(epoch !== undefined ? { epoch } : {}),
         onEpoch: (learned) => {
           if (
-            this.lastSeenEpoch !== undefined &&
-            this.lastSeenEpoch !== learned
+            this.lastSeenEpoch !== learned &&
+            (this.lastSeenEventId !== undefined || lastEventId !== undefined)
           ) {
-            // Event ids are only ordered within one bus epoch.
+            // Event ids are only ordered within one bus epoch. Keep an
+            // absent cursor absent so a live-only stream does not become
+            // a replay subscription after learning a new epoch.
+            if (
+              this.lastSeenEpoch !== undefined ||
+              (this.lastSeenEventId ?? 0) > 0 ||
+              (lastEventId ?? 0) > 0
+            ) {
+              this.cursorEpochReset = true;
+            }
             this.lastSeenEventId = 0;
           }
           this.lastSeenEpoch = learned;
