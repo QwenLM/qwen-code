@@ -68,6 +68,7 @@ export type ModelGenerationConfig = Pick<
   | 'imageDetail'
   | 'splitToolMedia'
   | 'toolResultContentFormat'
+  | 'service_tier'
 >;
 
 export type ModelWireApi = 'chat-completions' | 'responses';
