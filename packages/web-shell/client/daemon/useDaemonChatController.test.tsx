@@ -30,6 +30,13 @@ const harness = vi.hoisted(() => ({
   blocks: [] as readonly DaemonTranscriptBlock[],
   pendingPermissions: [] as readonly DaemonTranscriptBlock[],
   promptSettledListener: undefined as ((event: unknown) => void) | undefined,
+  history: {
+    loadMore: vi.fn(async () => {}),
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    paginationError: false,
+  },
 }));
 
 vi.mock('./session/DaemonSessionProvider.js', () => ({
@@ -42,6 +49,7 @@ vi.mock('./session/DaemonSessionProvider.js', () => ({
   }),
   useDaemonTranscriptBlocks: () => harness.blocks,
   useDaemonPendingPermissions: () => harness.pendingPermissions,
+  useDaemonTranscriptHistory: () => harness.history,
   useDaemonPromptSettled: (listener: unknown) => {
     harness.promptSettledListener = listener as (event: unknown) => void;
   },
@@ -120,6 +128,7 @@ beforeEach(() => {
   harness.blocks = [];
   harness.pendingPermissions = [];
   harness.promptSettledListener = undefined;
+  harness.history.loadMore.mockClear();
   controller = undefined;
   forceRerender = undefined;
 });
@@ -150,6 +159,30 @@ describe('useDaemonChatController', () => {
     );
   });
 
+  it('binds loadOlder to the transcript history loader and forwards retry options', async () => {
+    mountReact(<Probe />);
+    // Dropping the loadOlder binding leaves the capability undefined, so the
+    // surface would silently lose older-history pagination; dropping the
+    // options parameter loses { force: true } on pagination-error retries;
+    // dropping the per-render ref update pins the mount-time history handle.
+    expect(controller!.loadOlder).toBeDefined();
+    await controller!.loadOlder!();
+    expect(harness.history.loadMore).toHaveBeenCalledTimes(1);
+    expect(harness.history.loadMore).toHaveBeenLastCalledWith(undefined);
+    const originalHistory = harness.history;
+    const nextLoadMore = vi.fn(async () => {});
+    harness.history = { ...originalHistory, loadMore: nextLoadMore };
+    try {
+      forceRerender!();
+      await controller!.loadOlder!({ force: true });
+      expect(originalHistory.loadMore).toHaveBeenCalledTimes(1);
+      expect(nextLoadMore).toHaveBeenCalledTimes(1);
+      expect(nextLoadMore).toHaveBeenLastCalledWith({ force: true });
+    } finally {
+      harness.history = originalHistory;
+    }
+  });
+
   it('splits question permissions from tool approvals', () => {
     harness.pendingPermissions = [
       permissionBlock('q1', { questions: true }),
@@ -158,6 +191,97 @@ describe('useDaemonChatController', () => {
     mountReact(<Probe />);
     expect(controller!.pendingQuestions.map((q) => q.id)).toEqual(['q1']);
     expect(controller!.pendingApprovals.map((a) => a.id)).toEqual(['a1']);
+    // The render-ready request payload is pinned, not just the ids: emptying
+    // request.options at the binding must turn this red.
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['submit', 'cancel']);
+    expect(
+      (
+        controller!.pendingQuestions[0].request.rawInput as {
+          questions?: unknown;
+        }
+      ).questions,
+    ).toEqual([{ question: 'Q0?' }, { question: 'Q1?' }]);
+  });
+
+  it('refreshes the cached request when a re-emitted payload changes under the same id', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    const before = controller!.pendingApprovals[0].request;
+    expect(before.title).toBe('permission');
+    // The daemon re-emits permission.request for the same requestId with a
+    // changed title and a bumped revision; id and classification are unchanged.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        title: 'Run ls',
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    const after = controller!.pendingApprovals[0].request;
+    expect(after.title).toBe('Run ls');
+    expect(after).not.toBe(before);
+  });
+
+  it('refreshes the cached request on a rawInput-only re-emit via the updatedAt term', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(
+      (controller!.pendingApprovals[0].request.rawInput as { command?: string })
+        .command,
+    ).toBeUndefined();
+    // Same id, title and option ids; only toolCall.rawInput changes and the
+    // revision bumps. Only the updatedAt term can catch this shape, so dropping
+    // it from the revision must turn this red.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        toolCall: { rawInput: { command: 'pwd' } },
+        updatedAt: 2,
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(
+      (controller!.pendingApprovals[0].request.rawInput as { command?: string })
+        .command,
+    ).toBe('pwd');
+  });
+
+  it('refreshes the cached request on a title-only re-emit at the same revision', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    // Same updatedAt and option ids; only the title changes. Only the title term
+    // can catch this shape, so dropping it from the revision must turn this red.
+    harness.pendingPermissions = [
+      { ...permissionBlock('a1'), title: 'Run pwd' } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(controller!.pendingApprovals[0].request.title).toBe('Run pwd');
+  });
+
+  it('refreshes the cached request on an option-id-only re-emit at the same revision', () => {
+    harness.pendingPermissions = [permissionBlock('a1')];
+    mountReact(<Probe />);
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['submit', 'cancel']);
+    // Same updatedAt and title; only the option ids change. Only the option-id
+    // term can catch this shape, so dropping it must turn this red.
+    harness.pendingPermissions = [
+      {
+        ...permissionBlock('a1'),
+        options: [
+          { optionId: 'allow', label: 'Allow', raw: { kind: 'allow_once' } },
+          { optionId: 'deny', label: 'Deny', raw: { kind: 'reject_once' } },
+        ],
+      } as DaemonTranscriptBlock,
+    ];
+    forceRerender!();
+    expect(
+      controller!.pendingApprovals[0].request.options.map((o) => o.id),
+    ).toEqual(['allow', 'deny']);
   });
 
   it('answers a question by voting its allow_once option with indexed answers', async () => {

@@ -10,6 +10,9 @@
   key in their own table corrected the `workspace_id` budget and added constraints for
   receipts, operations, Session hash columns and read leases, then decided the three
   questions it raised (see [Duplicate business keys](#duplicate-business-keys)).
+- Revision (2026-11-21): increment 2 removes the hash keys that only restate raw
+  columns of their own row, ahead of the VARCHAR conversion (see
+  [Increment 2](#increment-2-redundant-same-row-hash-keys)).
 - Date: 2026-11-20. Source baseline: `origin/main` at `7ef9d6decb`. Analysis was
   executed at `f10299764e`; the three intervening commits touch no
   `packages/managed-agent-server` file, and the shared V1 schema and
@@ -263,10 +266,11 @@ categories need explicit redesign beyond the index rebuild:
   `(tenant_id, session_id, resource_id)`) with lexicographic row-value cursor
   comparisons, and the same total order must hold across every transaction that
   locks those rows.
-- **Generated columns over hash keys.** `ma_request_receipt.decision_scope_key`
-  (`GENERATED … RTRIM(scope_key)`, V1:681) and `ma_side_query.active_slot`
-  (`GENERATED … actor_scope_key`, V1:1333) derive from hash columns; both must be
-  redefined over the raw scope columns or dropped together with their consumers.
+- **Generated column over a hash key.** `ma_side_query.active_slot`
+  (`GENERATED … actor_scope_key`, V1:1333) derives from a hash column; it must be
+  redefined over the raw scope columns or dropped together with its consumers.
+  `ma_request_receipt.decision_scope_key` was removed by
+  [dead schema objects](2026-11-21-managed-schema-dead-objects.md).
 - **CHECK constraints over hash keys.** `ck_ma_resource_capture` (scope_key/slot_key
   nullability coupling, V1:508), `ck_ma_ref_binding` (runtime_binding_key, V1:536),
   and `ck_ma_storage_registered` (physical_key, V1:989) reference hash columns and
@@ -349,6 +353,72 @@ confirms that the remaining work is one atomic cluster
    constraint exactly, without unifying derivations or relying on unproven id
    uniqueness. The kind list lives in the DDL, so a new tenant-addressed kind must be
    added there.
+
+## Increment 2: redundant same-row hash keys
+
+A hash column is redundant when it is derived only from raw columns of its own row,
+no other table joins on it, and it mints no identifier. Increment 2 drops those
+columns, rebuilds their uniques and indexes on the raw columns with the same column
+order, and rewrites every query to filter the raw columns. The VARBINARY types are
+unchanged; the VARCHAR conversion, the cross-table references and the decisions above
+remain the cluster described in the
+[implementation plan](../plans/2026-11-20-managed-identity-dehash-cluster-impl.md).
+
+| Table                                                        | Removed                            | Replaced by                                                      |
+| ------------------------------------------------------------ | ---------------------------------- | ---------------------------------------------------------------- |
+| `ma_session_head`                                            | `tenant_key`, `harness_key`        | `UNIQUE (tenant_id, harness_session_id)`                         |
+| `ma_session_record`, `ma_resource`, `ma_resource_ref`        | `session_scope_key`                | `(tenant_id, session_id)` prefix                                 |
+| `ma_operation`, `ma_journal_pack`, `ma_client_files_binding` | `session_scope_key`                | `(tenant_id, session_id)` prefix                                 |
+| `ma_client_files_request`                                    | `session_scope_key`, `request_key` | `UNIQUE (tenant_id, session_id, binding_generation, request_id)` |
+| `ma_side_query`                                              | `session_scope_key`, `query_key`   | `UNIQUE (tenant_id, query_id)`; session index on raw columns     |
+| `ma_memory_entry`                                            | `entry_key`                        | `UNIQUE (tenant_id, memory_store_id, memory_id)`                 |
+| `ma_extension_package`, `_settings`, `_operation`            | `scope_key`                        | `(tenant_id, workspace_id, extension_id, …)`                     |
+| `ma_output_capture`                                          | `tenant_key`                       | `idx_ma_capture_tenant (tenant_id, state)`                       |
+
+Width. Several raw replacements fit only because the child identity column is
+narrowed to its parent's width, 512 bytes: `ma_session_head.tenant_id` and
+`workspace_id`, `session_id` in `ma_session_record`, `ma_resource` and
+`ma_resource_ref`, and `ma_operation.tenant_id`. Their tenant and Session ids are those
+of `ma_session` and `ma_workspace` (512 bytes), and the journal writer, the only head
+writer that sets a workspace, already rejects tenant ids over 128 bytes and workspace
+and Session ids over 512 bytes, so no accepted value is lost. This supersedes the Session-head part of the `ma_session` row
+above: with the head tenant at 512 bytes the raw head key is 2560 bytes. Three
+non-unique indexes use a key prefix, `idx_ma_record_identity`, `idx_ma_ref_journal`
+and `idx_ma_delivery_source` (`record_id`, `resource_id` and `delivery_id` limited
+to 1024 bytes, MySQL only); every unique uses full columns. The widest rebuilt keys, `uk_ma_resource_id` and `idx_ma_head_workspace`,
+are exactly 3072 bytes, which InnoDB accepts.
+
+Kept, because they are not redundant:
+
+- `ma_session.tenant_key`, `session_key` and `session_scope_key` are the registration
+  marker written by the publication-retention CONTROL upsert. Every join moved off them
+  joins the raw columns and keeps `s.session_scope_key IS NOT NULL`, so a Session that
+  path never registered still does not match.
+- `ma_output_capture.scope_key` anchors the publication scope that `ma_operation`,
+  `ma_resource` and `ma_artifact` reference.
+- `resource_key`, `record_key`, `operation_key`, `target_key`, the delivery keys, actor
+  keys, storage keys and runtime request and scope keys are cross-table references,
+  minted identifiers or non-uniform derivations (see above).
+- `ma_request_receipt.tenant_key`: its raw replacement in the ingress keyset index
+  would be 3208 bytes. `ma_read_lease` stores no raw identity.
+
+Query rules:
+
+- Every Session head writer sets `session_id` to `harness_session_id`, so the former
+  `tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ?` lookups
+  become `tenant_id = ? AND harness_session_id = ?`: the same unique row and the same
+  `FOR UPDATE` lock.
+- A cross-table join that compared hash columns either binds the derived value
+  (`l.source_scope_key = ?`) or joins the raw columns through an index path. The
+  Session-message handover join needed one new index,
+  `idx_ma_delivery_source (delivery_kind, tenant_id, source_session_id, delivery_id)`.
+- Session retirement locks side queries and client-files requests in the order of
+  their rebuilt unique keys (`query_id`; `binding_generation, request_id`) instead of
+  hash order. It is the only multi-row locker that orders those rows, and the other
+  multi-row lock (live side queries by state) keeps its index order, so the change
+  adds no lock cycle.
+- Collision re-checks against the removed hashes are deleted with them; capacity logs
+  still print the tenant hash, never the raw tenant id.
 
 ## Invariants preserved
 

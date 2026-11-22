@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.EventIdentity;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Artifact;
 import com.alibaba.qwen.code.managedagent.repository.ManagedToolResultStore.Claim;
@@ -302,11 +301,11 @@ public class ManagedToolResultProjector {
 
     private JsonNode inlineOutcome(Source source) {
         var rows = jdbc.query("SELECT kind, schema_version, byte_length, sha256, inline_bytes, storage_kind, state"
-                        + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ?"
-                        + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND deletion_operation_key IS NULL",
+                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
+                        + " AND workspace_id = ? AND deletion_operation_key IS NULL",
                 (schemaRow, schemaIndex) -> com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows.read(schemaRow),
-                ManagedSessionStore.sessionScopeKey(source.tenantId(), source.sessionId()), source.outcomeRef().path("resourceId").asText(),
-                source.tenantId(), source.workspaceId(), source.sessionId());
+                source.tenantId(), source.sessionId(), source.outcomeRef().path("resourceId").asText(),
+                source.workspaceId());
         require(rows.size() == 1, "Not-started outcome is missing");
         var row = rows.getFirst();
         require("MYSQL_INLINE".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
