@@ -7,7 +7,10 @@
 import { describe, expect, it } from 'vitest';
 import { AuthType } from '../utils/auth-type.js';
 import type { ContentGeneratorConfig } from './contentGenerator.js';
-import { getBuiltinGeminiReasoning } from './gemini-reasoning.js';
+import {
+  getBuiltinGeminiReasoning,
+  supportsGeminiXhigh,
+} from './gemini-reasoning.js';
 import {
   getEffectiveReasoning,
   resolveReasoningCapabilities,
@@ -19,12 +22,29 @@ const route: ContentGeneratorConfig = {
   baseUrl: 'https://proxy.example.test',
 };
 
+const argonRoute: ContentGeneratorConfig = {
+  ...route,
+  model: 'gemini-4-argon',
+};
+
 describe('built-in Gemini 4 reasoning', () => {
   it('recognizes Gemini and Vertex routes with normalized Gemini 4 ids', () => {
     expect(getBuiltinGeminiReasoning(route)).toMatchObject({
       profile: 'gemini',
       thinking: true,
-      efforts: ['low', 'medium', 'high'],
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+      disableField: 'thinking',
+    });
+    expect(
+      getBuiltinGeminiReasoning({
+        ...route,
+        model: 'gemini-4-hydrogen',
+      }),
+    ).toMatchObject({
+      profile: 'gemini',
+      thinking: true,
+      efforts: ['low', 'medium', 'high', 'xhigh'],
       defaultEffort: 'high',
       disableField: 'thinking',
     });
@@ -34,7 +54,40 @@ describe('built-in Gemini 4 reasoning', () => {
         authType: AuthType.USE_VERTEX_AI,
         model: 'vertex_ai/gemini-4-pro-preview-20261121',
       }),
-    ).toMatchObject({ profile: 'gemini', defaultEffort: 'high' });
+    ).toMatchObject({
+      profile: 'gemini',
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'high',
+    });
+  });
+
+  it.each([
+    'gemini-4-neon',
+    'gemini-4-neon-xhigh',
+    'vertex_ai/gemini-4-neon-preview-20261121',
+    'gemini-4-hydrogen',
+    'gemini-4-hydrogen-xhigh',
+    'vertex_ai/gemini-4-hydrogen-preview-20261121',
+  ])('includes xhigh for %s', (model) => {
+    expect(supportsGeminiXhigh(model)).toBe(true);
+    expect(getBuiltinGeminiReasoning({ ...route, model })).toMatchObject({
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    });
+  });
+
+  it.each([
+    'gemini-4-argon',
+    'gemini-4-argon-high',
+    'gemini-4-carbon-high',
+    'gemini-4-pro-preview-20261121',
+    'gemini-4-neonlight',
+  ])('caps built-in ladder at high for %s', (model) => {
+    expect(supportsGeminiXhigh(model)).toBe(false);
+    expect(getBuiltinGeminiReasoning({ ...route, model })).toMatchObject({
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'high',
+    });
   });
 
   it.each([
@@ -49,7 +102,7 @@ describe('built-in Gemini 4 reasoning', () => {
     const resolved = resolveReasoningCapabilities(route, undefined);
     expect(resolved).toMatchObject({
       profile: 'gemini',
-      efforts: ['low', 'medium', 'high'],
+      efforts: ['low', 'medium', 'high', 'xhigh'],
       defaultEffort: 'high',
     });
     expect(getEffectiveReasoning(route, resolved)).toEqual({ effort: 'high' });
@@ -58,11 +111,30 @@ describe('built-in Gemini 4 reasoning', () => {
         { ...route, reasoning: { effort: 'xhigh' } },
         resolved,
       ),
-    ).toEqual({ effort: 'high' });
+    ).toEqual({ effort: 'xhigh' });
+    expect(
+      getEffectiveReasoning(
+        { ...route, reasoning: { effort: 'max' } },
+        resolved,
+      ),
+    ).toEqual({ effort: 'xhigh' });
     expect(
       getEffectiveReasoning({ ...route, reasoning: false }, resolved),
     ).toBe(false);
     expect(route.reasoning).toBeUndefined();
+
+    const argonResolved = resolveReasoningCapabilities(argonRoute, undefined);
+    expect(argonResolved).toMatchObject({
+      profile: 'gemini',
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'high',
+    });
+    expect(
+      getEffectiveReasoning(
+        { ...argonRoute, reasoning: { effort: 'xhigh' } },
+        argonResolved,
+      ),
+    ).toEqual({ effort: 'high' });
   });
 
   it('inherits the native format and ladder in a partial declaration', () => {
@@ -70,10 +142,24 @@ describe('built-in Gemini 4 reasoning', () => {
       resolveReasoningCapabilities(route, { defaultEffort: 'medium' }),
     ).toMatchObject({
       profile: 'gemini',
-      efforts: ['low', 'medium', 'high'],
+      efforts: ['low', 'medium', 'high', 'xhigh'],
       defaultEffort: 'medium',
       disableField: 'thinking',
     });
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'gemini-4-hydrogen' },
+        { defaultEffort: 'xhigh' },
+      ),
+    ).toMatchObject({
+      profile: 'gemini',
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'xhigh',
+      disableField: 'thinking',
+    });
+    expect(
+      resolveReasoningCapabilities(argonRoute, { defaultEffort: 'xhigh' }),
+    ).toBeUndefined();
   });
 
   it('clamps an inherited default into a declared narrower ladder', () => {
@@ -90,7 +176,7 @@ describe('built-in Gemini 4 reasoning', () => {
     });
   });
 
-  it('keeps an explicit narrower declaration', () => {
+  it('keeps an explicit narrower declaration and rejects max', () => {
     expect(
       resolveReasoningCapabilities(route, {
         profile: 'gemini',
@@ -98,6 +184,27 @@ describe('built-in Gemini 4 reasoning', () => {
         defaultEffort: 'low',
       }),
     ).toMatchObject({ efforts: ['low'], defaultEffort: 'low' });
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'company-alias' },
+        {
+          profile: 'gemini',
+          efforts: ['low', 'medium', 'high', 'xhigh'],
+          defaultEffort: 'high',
+        },
+      ),
+    ).toMatchObject({
+      profile: 'gemini',
+      efforts: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'high',
+    });
+    expect(
+      resolveReasoningCapabilities(route, {
+        profile: 'gemini',
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultEffort: 'high',
+      }),
+    ).toBeUndefined();
   });
 
   it('preserves mandatory thinking', () => {
