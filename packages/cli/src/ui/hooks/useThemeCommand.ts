@@ -10,6 +10,7 @@ import type { LoadedSettings, SettingScope } from '../../config/settings.js'; //
 import { type HistoryItemWithoutId, MessageType } from '../types.js';
 import process from 'node:process';
 import { t } from '../../i18n/index.js';
+import { applyThemeSetting } from '../themes/theme-selection.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 
 interface UseThemeCommandReturn {
@@ -110,11 +111,18 @@ export const useThemeCommand = (
           setIsThemeDialogOpen(true);
           return;
         }
-        loadedSettings.setValue(scope, 'ui.theme', themeName); // Update the merged settings
-        if (loadedSettings.merged.ui?.customThemes) {
-          themeManager.loadCustomThemes(loadedSettings.merged.ui?.customThemes);
+        const { effective, applied } = applyThemeSetting(
+          loadedSettings,
+          scope,
+          themeName,
+        );
+        if (!applied) {
+          setThemeError(
+            t('Theme "{{themeName}}" not found.', { themeName: effective }),
+          );
+          setIsThemeDialogOpen(true);
+          return;
         }
-        applyTheme(loadedSettings.merged.ui?.theme); // Apply the current theme
         setThemeError(null);
       } finally {
         setIsThemeDialogOpen(false); // Close the dialog

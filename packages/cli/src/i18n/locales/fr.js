@@ -276,6 +276,17 @@ export default {
   'Theme "{{themeName}}" not found.': 'Thème "{{themeName}}" introuvable.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Thème "{{themeName}}" introuvable dans la portée sélectionnée.',
+  'Settings service not available.': 'Service de paramètres indisponible.',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    'Thème inconnu "{{value}}". Choisissez parmi : {{themes}}.',
+  'The theme is set in system settings, so /theme cannot change it.':
+    'Le thème est défini dans les paramètres système, /theme ne peut donc pas le modifier.',
+  'Theme "{{themeName}}" could not be applied.':
+    'Impossible d\'appliquer le thème "{{themeName}}".',
+  'Theme set to {{themeName}} (project settings).':
+    'Thème défini sur {{themeName}} (paramètres du projet).',
+  'Theme set to {{themeName}} (user settings).':
+    'Thème défini sur {{themeName}} (paramètres utilisateur).',
   'Clear conversation history and free up context':
     "Effacer l'historique de conversation et libérer le contexte",
   'Compresses the context by replacing it with a summary.':

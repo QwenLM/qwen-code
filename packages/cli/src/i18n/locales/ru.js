@@ -277,6 +277,17 @@ export default {
   'Theme "{{themeName}}" not found.': 'Тема "{{themeName}}" не найдена.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Тема "{{themeName}}" не найдена в выбранной области.',
+  'Settings service not available.': 'Служба настроек недоступна.',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    'Неизвестная тема "{{value}}". Доступны: {{themes}}.',
+  'The theme is set in system settings, so /theme cannot change it.':
+    'Тема задана в системных настройках, поэтому /theme не может её изменить.',
+  'Theme "{{themeName}}" could not be applied.':
+    'Не удалось применить тему "{{themeName}}".',
+  'Theme set to {{themeName}} (project settings).':
+    'Тема установлена: {{themeName}} (настройки проекта).',
+  'Theme set to {{themeName}} (user settings).':
+    'Тема установлена: {{themeName}} (настройки пользователя).',
   'Clear conversation history and free up context':
     'Очистить историю диалога и освободить контекст',
   'Compresses the context by replacing it with a summary.':

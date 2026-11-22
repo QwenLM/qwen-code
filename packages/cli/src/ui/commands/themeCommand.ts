@@ -14,22 +14,10 @@ import type {
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
-import type { LoadedSettings } from '../../config/settings.js';
-import { AUTO_THEME_NAME, themeManager } from '../themes/theme-manager.js';
-
-/** Every theme name `/theme <name>` accepts: built-in, custom, and `auto`. */
-function getSelectableThemeNames(settings: LoadedSettings): string[] {
-  const customThemes = {
-    ...(settings.user.settings.ui?.customThemes || {}),
-    ...(settings.workspace.settings.ui?.customThemes || {}),
-  };
-  const names = [
-    AUTO_THEME_NAME,
-    ...themeManager.getAvailableThemes().map((theme) => theme.name),
-    ...Object.keys(customThemes),
-  ];
-  return [...new Set(names)];
-}
+import {
+  applyThemeSetting,
+  resolveThemeName,
+} from '../themes/theme-selection.js';
 
 function setThemeByName(
   context: CommandContext,
@@ -44,37 +32,45 @@ function setThemeByName(
     };
   }
 
-  const available = getSelectableThemeNames(settings);
-  const themeName = available.find(
-    (name) => name.toLowerCase() === requested.toLowerCase(),
-  );
-  if (!themeName) {
+  const resolution = resolveThemeName(settings, requested);
+  if (resolution.kind === 'pinned-by-system') {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t(
+        'The theme is set in system settings, so /theme cannot change it.',
+      ),
+    };
+  }
+  if (resolution.kind === 'unknown') {
     return {
       type: 'message',
       messageType: 'error',
       content: t('Unknown theme "{{value}}". Choose one of: {{themes}}.', {
         value: requested,
-        themes: available.join(', '),
+        themes: resolution.available.join(', '),
       }),
     };
   }
 
-  // Save where it takes effect: a workspace theme would override a user one.
-  const scope =
-    settings.workspace.settings.ui?.theme !== undefined
-      ? SettingScope.Workspace
-      : SettingScope.User;
-  settings.setValue(scope, 'ui.theme', themeName);
-  if (settings.merged.ui?.customThemes) {
-    themeManager.loadCustomThemes(settings.merged.ui.customThemes);
+  const { name: themeName, scope } = resolution;
+  const { effective, applied } = applyThemeSetting(settings, scope, themeName);
+  if (!applied || effective !== themeName) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Theme "{{themeName}}" could not be applied.', { themeName }),
+    };
   }
-  themeManager.setActiveTheme(settings.merged.ui?.theme ?? AUTO_THEME_NAME);
   context.ui.onThemeChanged?.();
 
   return {
     type: 'message',
     messageType: 'info',
-    content: t('Theme set to {{themeName}}.', { themeName }),
+    content:
+      scope === SettingScope.Workspace
+        ? t('Theme set to {{themeName}} (project settings).', { themeName })
+        : t('Theme set to {{themeName}} (user settings).', { themeName }),
   };
 }
 

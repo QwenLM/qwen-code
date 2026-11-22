@@ -543,6 +543,17 @@ export default {
   'Theme "{{themeName}}" not found.': 'Theme "{{themeName}}" not found.',
   'Theme "{{themeName}}" not found in selected scope.':
     'Theme "{{themeName}}" not found in selected scope.',
+  'Settings service not available.': 'Settings service not available.',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    'Unknown theme "{{value}}". Choose one of: {{themes}}.',
+  'The theme is set in system settings, so /theme cannot change it.':
+    'The theme is set in system settings, so /theme cannot change it.',
+  'Theme "{{themeName}}" could not be applied.':
+    'Theme "{{themeName}}" could not be applied.',
+  'Theme set to {{themeName}} (project settings).':
+    'Theme set to {{themeName}} (project settings).',
+  'Theme set to {{themeName}} (user settings).':
+    'Theme set to {{themeName}} (user settings).',
   'Clear conversation history and free up context':
     'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':

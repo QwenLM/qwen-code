@@ -76,6 +76,7 @@ import {
 import { getErrorMessage } from '../../utils/errors.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
+import { applyThemeSetting } from '../themes/theme-selection.js';
 import { applyOpenTuiTheme } from './theme.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
 import {
@@ -727,12 +728,7 @@ export function applyThemeSelection(
       }),
     };
   }
-  settings.setValue(scope, 'ui.theme', themeName);
-  if (settings.merged.ui?.customThemes) {
-    themeManager.loadCustomThemes(settings.merged.ui.customThemes);
-  }
-  const effective = settings.merged.ui?.theme;
-  themeManager.setActiveTheme(effective ?? AUTO_THEME_NAME);
+  applyThemeSetting(settings, scope, themeName);
   applyOpenTuiTheme(getActiveOpenTuiTheme());
   return { applied: themeName };
 }

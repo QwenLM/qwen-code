@@ -48,6 +48,7 @@ interface Harness {
   reloadCommands: ReturnType<typeof vi.fn>;
   startNewSession: ReturnType<typeof vi.fn>;
   reduceExtensionState: ReturnType<typeof vi.fn>;
+  applyActiveTheme: ReturnType<typeof vi.fn>;
 }
 
 function makeHost(
@@ -66,6 +67,7 @@ function makeHost(
   const reloadCommands = vi.fn(() => {});
   const startNewSession = vi.fn(() => {});
   const reduceExtensionState = vi.fn(() => {});
+  const applyActiveTheme = vi.fn(() => {});
 
   const deps: OpenTuiAppHostDeps = {
     config: { getSessionId: () => 'sess-1' } as unknown as Config,
@@ -90,6 +92,7 @@ function makeHost(
     getSessionStats: () => sessionStats,
     reduceExtensionState:
       reduceExtensionState as OpenTuiAppHostDeps['reduceExtensionState'],
+    applyActiveTheme,
   };
 
   return {
@@ -104,6 +107,7 @@ function makeHost(
     reloadCommands,
     startNewSession,
     reduceExtensionState,
+    applyActiveTheme,
   };
 }
 
@@ -264,6 +268,20 @@ describe('OpenTuiAppHost — forwarded shell actions', () => {
     expect(h.reloadCommands).toHaveBeenCalled();
     h.host.startNewSession('sess-2');
     expect(h.startNewSession).toHaveBeenCalledWith('sess-2');
+  });
+
+  it('applies the active theme through the injected dep and repaints', () => {
+    const h = makeHost();
+    const listener = vi.fn();
+    h.host.subscribe(listener);
+    const before = h.host.getVersion();
+
+    h.host.applyActiveTheme();
+
+    expect(h.applyActiveTheme).toHaveBeenCalledTimes(1);
+    expect(h.host.getVersion()).toBe(before + 1);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(h.onChange).toHaveBeenCalledTimes(1);
   });
 
   it('delegates confirmation dialogs to the bridge', async () => {

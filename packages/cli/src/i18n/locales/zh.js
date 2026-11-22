@@ -528,6 +528,17 @@ export default {
   'Theme "{{themeName}}" not found.': '未找到主题 "{{themeName}}"。',
   'Theme "{{themeName}}" not found in selected scope.':
     '在所选作用域中未找到主题 "{{themeName}}"。',
+  'Settings service not available.': '设置服务不可用。',
+  'Unknown theme "{{value}}". Choose one of: {{themes}}.':
+    '未知主题 "{{value}}"。可选主题：{{themes}}。',
+  'The theme is set in system settings, so /theme cannot change it.':
+    '主题由系统设置指定，/theme 无法更改。',
+  'Theme "{{themeName}}" could not be applied.':
+    '无法应用主题 "{{themeName}}"。',
+  'Theme set to {{themeName}} (project settings).':
+    '主题已设置为 {{themeName}}（项目设置）。',
+  'Theme set to {{themeName}} (user settings).':
+    '主题已设置为 {{themeName}}（用户设置）。',
   'Clear conversation history and free up context': '清除对话历史并释放上下文',
   'Compresses the context by replacing it with a summary.':
     '通过摘要替换来压缩上下文',
