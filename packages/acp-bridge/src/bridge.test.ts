@@ -125,10 +125,19 @@ import {
   SESSION_MODEL_PERSIST_DEFAULT_META_KEY,
 } from './bridgeTypes.js';
 import {
+  CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT,
   CHANNEL_LIVENESS_INTERVAL_MS,
   CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
   CHANNEL_LIVENESS_TIMEOUT_CODE,
 } from './channel-liveness.js';
+import { sampleChannelProcess } from './channel-process-sample.js';
+
+// The wiring tests below control the process snapshot deterministically;
+// every other test in this file runs channels without a pid, where the real
+// sampler returns undefined anyway.
+vi.mock('./channel-process-sample.js', () => ({
+  sampleChannelProcess: vi.fn(() => undefined),
+}));
 import {
   ApprovalMode,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
@@ -16747,6 +16756,288 @@ describe('createAcpSessionBridge', () => {
         );
         await bridge.shutdown();
       } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps numeric zero evidence and omits empty wchan in liveness telemetry', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        vi.mocked(sampleChannelProcess).mockReturnValue({
+          cpuTicks: 100,
+          state: 'T',
+          wchan: '',
+          rssBytes: 0,
+        });
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + 2 * CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const call = event.mock.calls.find(
+          ([name]) => name === 'channel.liveness_failed',
+        );
+        expect(call).toBeDefined();
+        const attrs = call![1] as Record<string, unknown>;
+        expect(attrs['qwen-code.daemon.channel.liveness.pid']).toBe(4242);
+        expect(attrs['qwen-code.daemon.channel.liveness.state']).toBe('T');
+        // Zero is evidence (a zero-CPU stall), not absence.
+        expect(attrs['qwen-code.daemon.channel.liveness.cpu_delta_ticks']).toBe(
+          0,
+        );
+        expect(attrs['qwen-code.daemon.channel.liveness.rss_bytes']).toBe(0);
+        expect(
+          attrs['qwen-code.daemon.channel.liveness.consecutive_timeouts'],
+        ).toBe(2);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            attrs,
+            'qwen-code.daemon.channel.liveness.wchan',
+          ),
+        ).toBe(false);
+        expect(Object.values(attrs).every((v) => v !== undefined)).toBe(true);
+        expect(vi.mocked(sampleChannelProcess)).toHaveBeenCalledWith(4242);
+        expect(handle.killed).toBe(true);
+        const killLines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('channel liveness failed'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=T wchan=? cpuDelta=0 busy=0 timeouts=2 rssMB=0; killing channel\n',
+        ]);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
+
+    it('omits absent evidence keys from liveness telemetry instead of undefined', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        vi.mocked(sampleChannelProcess).mockReturnValue(undefined);
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS + 2 * CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const call = event.mock.calls.find(
+          ([name]) => name === 'channel.liveness_failed',
+        );
+        expect(call).toBeDefined();
+        const attrs = call![1] as Record<string, unknown>;
+        expect(Object.keys(attrs).sort()).toEqual(
+          [
+            'qwen-code.daemon.acp_channel.id',
+            'qwen-code.daemon.channel.session_count',
+            'qwen-code.daemon.channel.transport_error_code',
+            'qwen-code.daemon.channel.liveness.busy_extensions',
+            'qwen-code.daemon.channel.liveness.consecutive_timeouts',
+          ].sort(),
+        );
+        expect(Object.values(attrs).every((v) => v !== undefined)).toBe(true);
+        expect(vi.mocked(sampleChannelProcess)).toHaveBeenCalledWith(undefined);
+        const killLines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.includes('channel liveness failed'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=? state=? wchan=? cpuDelta=? busy=0 timeouts=2 rssMB=?; killing channel\n',
+        ]);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
+
+    it('logs guarded evidence on every busy extension and on the final kill', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        let ticks = 0;
+        vi.mocked(sampleChannelProcess).mockImplementation(() => ({
+          cpuTicks: (ticks += 10),
+          state: 'R',
+          wchan: '',
+          rssBytes: 0,
+        }));
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS +
+            (CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT + 1) *
+              CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const lines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.startsWith('qwen serve: channel liveness'));
+        const graceLines = lines.filter((l) => l.includes('extending grace'));
+        expect(graceLines).toHaveLength(
+          CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT - 1,
+        );
+        expect(graceLines[0]).toBe(
+          'qwen serve: channel liveness probe timed out but agent pid=4242 consumed CPU (10 ticks) state=R wchan=? rssMB=0; extending grace 1/6\n',
+        );
+        expect(graceLines[4]).toContain('extending grace 5/6');
+        const killLines = lines.filter((l) => l.includes('killing channel'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=R wchan=? cpuDelta=10 busy=6 timeouts=0 rssMB=0; killing channel\n',
+        ]);
+        const call = event.mock.calls.find(
+          ([name]) => name === 'channel.liveness_failed',
+        );
+        expect(call?.[1]).toMatchObject({
+          'qwen-code.daemon.channel.liveness.busy_extensions': 6,
+          'qwen-code.daemon.channel.liveness.consecutive_timeouts': 0,
+        });
+        expect(handle.killed).toBe(true);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
+        vi.useRealTimers();
+      }
+    });
+
+    it('renders real wchan and RSS values on grace and kill lines', async () => {
+      vi.useFakeTimers();
+      const stderrSpy = vi.spyOn(process.stderr, 'write');
+      try {
+        const event = vi.fn();
+        let ticks = 0;
+        vi.mocked(sampleChannelProcess).mockImplementation(() => ({
+          cpuTicks: (ticks += 10),
+          state: 'R',
+          wchan: 'do_signal_stop',
+          rssBytes: 44_040_192,
+        }));
+        const handle = makeChannel({
+          initializeImpl: () => channelLivenessInitializeResponse(),
+          extMethodImpl: (method) =>
+            method === SERVE_STATUS_EXT_METHODS.channelPing
+              ? new Promise(() => {})
+              : {},
+        });
+        handle.channel = { ...handle.channel, pid: 4242 };
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          telemetry: {
+            captureContext: () => undefined,
+            runWithContext: async (_captured, fn) => await fn(),
+            withSpan: async (_operation, _attributes, fn) => await fn(),
+            event,
+            injectPromptContext: (request) => request,
+            metrics: {
+              sessionLifecycle: vi.fn(),
+              channelLifecycle: vi.fn(),
+              promptQueueWait: vi.fn(),
+              promptDuration: vi.fn(),
+              cancelled: vi.fn(),
+            },
+          },
+        });
+        await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await vi.advanceTimersByTimeAsync(
+          CHANNEL_LIVENESS_INTERVAL_MS +
+            (CHANNEL_LIVENESS_BUSY_EXTENSION_LIMIT + 1) *
+              CHANNEL_LIVENESS_PROBE_TIMEOUT_MS,
+        );
+        const lines = stderrSpy.mock.calls
+          .map((c) => String(c[0]))
+          .filter((l) => l.startsWith('qwen serve: channel liveness'));
+        const graceLines = lines.filter((l) => l.includes('extending grace'));
+        // Non-empty wchan and non-zero RSS must pass through verbatim: a
+        // constant-'?' / constant-'0' renderer would keep every other test
+        // green while destroying the forensic value of these lines.
+        expect(graceLines[0]).toBe(
+          'qwen serve: channel liveness probe timed out but agent pid=4242 consumed CPU (10 ticks) state=R wchan=do_signal_stop rssMB=42; extending grace 1/6\n',
+        );
+        const killLines = lines.filter((l) => l.includes('killing channel'));
+        expect(killLines).toEqual([
+          'qwen serve: channel liveness failed (acp_channel_liveness_timeout) pid=4242 state=R wchan=do_signal_stop cpuDelta=10 busy=6 timeouts=0 rssMB=42; killing channel\n',
+        ]);
+        expect(handle.killed).toBe(true);
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+        vi.mocked(sampleChannelProcess).mockReset();
         vi.useRealTimers();
       }
     });

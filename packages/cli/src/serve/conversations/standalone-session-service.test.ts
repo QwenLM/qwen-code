@@ -61,6 +61,23 @@ vi.mock('../server/session-list.js', () => ({
   listWorkspaceSessionsForResponse,
 }));
 
+const { exportSessionTranscriptMock } = vi.hoisted(() => ({
+  exportSessionTranscriptMock: vi.fn(
+    async (_options: {
+      config?: { getChannel?: () => string | undefined };
+    }) => ({
+      format: 'json',
+      content: '{}',
+      metadata: {},
+    }),
+  ),
+}));
+
+vi.mock('../server/session-export.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../server/session-export.js')>()),
+  exportSessionTranscript: exportSessionTranscriptMock,
+}));
+
 const sessionId = '11111111-1111-4111-8111-111111111111';
 const root = {
   configuredRoot: '/conversations',
@@ -133,7 +150,7 @@ interface Harness {
   assertExactRoot: ReturnType<typeof vi.fn>;
 }
 
-function createHarness(): Harness {
+function createHarness(exportChannel?: string): Harness {
   let restoredSummary: BridgeSessionSummary | undefined;
   const bridge = {
     setSessionConfigOption: vi.fn(),
@@ -253,6 +270,7 @@ function createHarness(): Harness {
   const warn = vi.fn();
   const options: StandaloneSessionServiceOptions = {
     daemonLog: { warn },
+    exportChannel,
     ensureRuntime,
     assertRuntimeCurrent: vi.fn(() => {
       if (runtimeQuarantined) {
@@ -471,6 +489,16 @@ afterEach(() => {
 });
 
 describe('StandaloneSessionService', () => {
+  it('labels standalone exports with the boot-resolved daemon channel', async () => {
+    const { service } = createHarness('desktop');
+    mockActiveStandalone();
+    await service.export(sessionId, 'json');
+    const call = exportSessionTranscriptMock.mock.calls.at(-1)![0] as {
+      config?: { getChannel?: () => string | undefined };
+    };
+    expect(call.config?.getChannel?.()).toBe('desktop');
+  });
+
   it('reads options from the exact runtime without exposing its cwd', async () => {
     const harness = createHarness();
 

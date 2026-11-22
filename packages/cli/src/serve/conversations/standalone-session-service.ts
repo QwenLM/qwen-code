@@ -302,6 +302,12 @@ export interface RestoredStandaloneSession extends BridgeRestoredSession {
 
 export interface StandaloneSessionServiceOptions {
   daemonLog?: Pick<DaemonLogger, 'warn'>;
+  /**
+   * Channel label for standalone transcript exports, resolved once per
+   * daemon at boot (same value as the workspace-session export route) so
+   * both export surfaces bucket identically.
+   */
+  exportChannel?: string;
   ensureRuntime(): Promise<WorkspaceRuntime>;
   assertRuntimeCurrent(runtime: WorkspaceRuntime): void;
   quarantineRuntime(runtime: WorkspaceRuntime): Promise<void>;
@@ -941,6 +947,7 @@ export class StandaloneSessionService {
           format,
           archiveState: durable.location,
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          config: { getChannel: () => this.options.exportChannel },
         });
       });
     });

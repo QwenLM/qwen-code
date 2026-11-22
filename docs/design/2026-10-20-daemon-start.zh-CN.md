@@ -18,7 +18,7 @@
 
 ## 环境隔离
 
-子进程是一个新的 daemon，不是启动它的会话的 worker。启动命令在 spawn 前移除父会话的绑定：`QWEN_CODE_SESSION_ID`、`QWEN_CODE_PROMPT_ID`、`QWEN_CODE_PROJECT_DIR`、`QWEN_CODE_SERVE`、`QWEN_CODE_AGENT_ID`、`QWEN_DAEMON_TOKEN`、`QWEN_CODE_MESSAGING_TOKEN`、`QWEN_CODE_MESSAGING_SOCKET`、`QWEN_CODE_CLI`、`QWEN_CODE_NO_RELAUNCH`，以及所有以 `QWEN_CODE_PRIVATE_` 开头的键（包括 Conversations runtime 与 guard-provider 标记）。相对的 `QWEN_RUNTIME_DIR`/`QWEN_HOME` 会在 spawn 前以启动目录为基准固定为绝对路径，使父子进程使用同一 discovery 命名空间。操作者的模型与认证环境保留。
+子进程是一个新的 daemon，不是启动它的会话的 worker。启动命令在 spawn 前移除父会话的绑定：`QWEN_CODE_SESSION_ID`、`QWEN_CODE_PROMPT_ID`、`QWEN_CODE_PROJECT_DIR`、`QWEN_CODE_SERVE`、`QWEN_CODE_MANAGED_RUNTIME`、`QWEN_CODE_AGENT_ID`、`QWEN_DAEMON_TOKEN`、`QWEN_CODE_MESSAGING_TOKEN`、`QWEN_CODE_MESSAGING_SOCKET`、`QWEN_CODE_CLI`、`QWEN_CODE_NO_RELAUNCH`，以及所有以 `QWEN_CODE_PRIVATE_` 开头的键（包括 Conversations runtime 与 guard-provider 标记）。相对的 `QWEN_RUNTIME_DIR`/`QWEN_HOME` 会在 spawn 前以启动目录为基准固定为绝对路径，使父子进程使用同一 discovery 命名空间。操作者的模型与认证环境保留。
 
 Windows 无盘符根路径也会按启动目录所在盘符解析；只有盘符/UNC 形式原样保留。
 

@@ -42,6 +42,21 @@ import type {
 const SEGMENT_BYTES = 1024 * 1024;
 const SEGMENTS_PER_PAGE = 512;
 
+export interface LocalShellStreamCaptureOptions {
+  readonly segmentsPerPage?: number;
+  /** Background worker-owned captures use 128 KiB so one flush fits one
+   * delivery request; the Harness foreground lane keeps the 1 MiB default. */
+  readonly segmentBytes?: number;
+  /** Invoked after every manifest revision publishes, with its ref. The
+   * worker-owned lane turns each revision into one delivery entry. */
+  readonly onRevision?: (ref: ManagedSessionDurableRef) => void | Promise<void>;
+  /** Publish a revision for every segment by re-publishing the open last
+   * page with it, up to `segmentsPerPage` segments, instead of opening a
+   * page per segment: frequent small flushes then spend ordinals, not the
+   * stream's few pages. */
+  readonly revisionPerSegment?: boolean;
+}
+
 type StreamId = 'stdout' | 'stderr';
 const BOTH: readonly StreamId[] = ['stdout', 'stderr'];
 
@@ -51,6 +66,8 @@ interface StreamState {
   readonly hash: ReturnType<typeof createHash>;
   readonly pages: ToolResultPageReference[];
   readonly pendingSegments: ToolResultSegment[];
+  /** The segments of the last page while it may still grow. */
+  openSegments: ToolResultSegment[];
   used: number;
   byteLength: number;
   ordinal: number;
@@ -69,13 +86,14 @@ interface StreamState {
   frozenSnapshot: ToolResultContentDescriptor;
 }
 
-function stream(id: StreamId): StreamState {
+function stream(id: StreamId, segmentBytes: number): StreamState {
   return {
     id,
-    buffer: Buffer.allocUnsafe(SEGMENT_BYTES),
+    buffer: Buffer.allocUnsafe(segmentBytes),
     hash: createHash('sha256'),
     pages: [],
     pendingSegments: [],
+    openSegments: [],
     used: 0,
     byteLength: 0,
     ordinal: 0,
@@ -99,14 +117,21 @@ function stream(id: StreamId): StreamState {
 }
 
 interface BrokenCapture {
-  readonly reason: 'quota_exhausted' | 'size_limit' | 'storage_failed';
+  readonly reason:
+    | 'quota_exhausted'
+    | 'size_limit'
+    | 'storage_failed'
+    | 'cancelled';
 }
 
 export class LocalShellStreamCapture implements ShellRawCaptureSink {
-  private readonly streams = {
-    stdout: stream('stdout'),
-    stderr: stream('stderr'),
-  };
+  private readonly segmentBytes: number;
+  private readonly segmentsPerPage: number;
+  private readonly revisionPerSegment: boolean;
+  private readonly onRevision?: (
+    ref: ManagedSessionDurableRef,
+  ) => void | Promise<void>;
+  private readonly streams: { stdout: StreamState; stderr: StreamState };
   private started = false;
   private broken: BrokenCapture | null = null;
   private revision = 0;
@@ -122,10 +147,17 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     private readonly resources: ManagedSessionResourceStore,
     readonly identity: ToolResultExpectedIdentity,
     private readonly assertWritable: () => Promise<void> = async () => {},
-    private readonly options: { readonly segmentsPerPage: number } = {
-      segmentsPerPage: SEGMENTS_PER_PAGE,
-    },
-  ) {}
+    options: LocalShellStreamCaptureOptions = {},
+  ) {
+    this.segmentBytes = options.segmentBytes ?? SEGMENT_BYTES;
+    this.segmentsPerPage = options.segmentsPerPage ?? SEGMENTS_PER_PAGE;
+    this.onRevision = options.onRevision;
+    this.revisionPerSegment = options.revisionPerSegment ?? false;
+    this.streams = {
+      stdout: stream('stdout', this.segmentBytes),
+      stderr: stream('stderr', this.segmentBytes),
+    };
+  }
 
   setStarted(_pid: number): void {
     this.started = true;
@@ -134,6 +166,13 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
   /** The caller's explicit broken mark, matching the foreground sink API. */
   failCapture(): void {
     this.fail(new Error('Capture transport failed.'));
+  }
+
+  /** The forced-stop broken mark: the unqueued tail is dropped, and the
+   * final revision declares the gap with the stop reason rather than
+   * admitting bytes the stop never delivered. */
+  cancelCapture(): void {
+    this.fail(new Error('cancelled'));
   }
 
   setProcessResult(result: {
@@ -169,13 +208,13 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     try {
       for (let offset = 0; offset < chunk.byteLength; ) {
         const length = Math.min(
-          SEGMENT_BYTES - state.used,
+          this.segmentBytes - state.used,
           chunk.byteLength - offset,
         );
         chunk.copy(state.buffer, state.used, offset, offset + length);
         state.used += length;
         offset += length;
-        if (state.used === SEGMENT_BYTES) await this.publishSegment(state);
+        if (state.used === this.segmentBytes) await this.publishSegment(state);
       }
     } catch (cause) {
       this.fail(cause);
@@ -226,7 +265,9 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
           ? 'size_limit'
           : cause instanceof Error && cause.message === 'quota_exhausted'
             ? 'quota_exhausted'
-            : 'storage_failed',
+            : cause instanceof Error && cause.message === 'cancelled'
+              ? 'cancelled'
+              : 'storage_failed',
     };
     // The latch is silent forever, but the manifest must stop advertising
     // a healthy open capture the moment the stream goes blind: mark every
@@ -299,11 +340,27 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
     state.ordinal++;
     state.used = 0;
     if (
-      state.pendingSegments.length === this.options.segmentsPerPage &&
-      !deferPageClose
+      !deferPageClose &&
+      (this.revisionPerSegment ||
+        state.pendingSegments.length === this.segmentsPerPage)
     ) {
       await this.publishPage(state);
     }
+  }
+
+  /** Publishes the buffered partial segment without ending the stream, so
+   * output becomes durable without waiting for the segment to fill. The
+   * worker-owned lane arms this on a short idle interval after each write. */
+  flushPartial(id: StreamId): Promise<void> {
+    const state = this.streams[id];
+    return (state.queue = state.queue.then(async () => {
+      if (this.broken || state.ended || state.used === 0) return;
+      try {
+        await this.publishSegment(state);
+      } catch (cause) {
+        this.fail(cause);
+      }
+    }));
   }
 
   private async publishPage(state: StreamState): Promise<void> {
@@ -369,10 +426,22 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       return;
     }
     await this.assertWritable();
-    if (state.pages.length >= MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream) {
+    // A grown last page replaces its predecessor at the same position,
+    // which the descriptor successor rule admits for an open stream.
+    const reopened =
+      state.openSegments.length > 0 &&
+      state.openSegments.length + state.pendingSegments.length <=
+        this.segmentsPerPage
+        ? state.pages[state.pages.length - 1]
+        : undefined;
+    if (
+      !reopened &&
+      state.pages.length >= MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream
+    ) {
       throw new Error('size_limit');
     }
-    const segments = state.pendingSegments.splice(0);
+    const added = state.pendingSegments.splice(0);
+    const segments = reopened ? [...state.openSegments, ...added] : added;
     // The two integers that freeze must carry come from exactly this
     // boundary: anything appended meanwhile opens a fresh page, never
     // sneaks into the revision being built right now.
@@ -383,8 +452,8 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       type: 'page',
       captureId: this.identity.captureId,
       streamId: state.id,
-      firstOrdinal: state.pageOrdinal,
-      offset: state.pageOffset,
+      firstOrdinal: state.pageOrdinal - (reopened?.segmentCount ?? 0),
+      offset: state.pageOffset - (reopened?.byteLength ?? 0),
       segments,
     });
     const bytes = Buffer.from(JSON.stringify(page));
@@ -396,24 +465,27 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
         MANAGED_TOOL_RESULT_KINDS.page,
         bytes,
       );
-      const byteLength = segments.reduce(
+      const byteLength = added.reduce(
         (length, segment) => length + segment.byteLength,
         0,
       );
-      state.pages.push({
+      const reference = {
         ref,
         segmentCount: segments.length,
-        byteLength,
-      });
+        byteLength: (reopened?.byteLength ?? 0) + byteLength,
+      };
+      if (reopened) state.pages[state.pages.length - 1] = reference;
+      else state.pages.push(reference);
+      if (this.revisionPerSegment) state.openSegments = segments;
       state.pageOffset += byteLength;
-      state.pageOrdinal += segments.length;
+      state.pageOrdinal += added.length;
       this.freezeSnapshot(state, frozenDigest, frozenByteLength);
     } catch (cause) {
       // A refused page write restores its batch so the degradation
       // announcement and any later settle flush can try again; a spliced
       // batch that stayed lost would make every later revision's descriptor
       // irreconcilable with its pages.
-      state.pendingSegments.unshift(...segments);
+      state.pendingSegments.unshift(...added);
       throw cause;
     }
   }
@@ -488,6 +560,7 @@ export class LocalShellStreamCapture implements ShellRawCaptureSink {
       bytes,
     );
     this.revision += 1;
+    if (this.onRevision) await this.onRevision(this.manifestRef);
     return this.manifestRef;
   }
 

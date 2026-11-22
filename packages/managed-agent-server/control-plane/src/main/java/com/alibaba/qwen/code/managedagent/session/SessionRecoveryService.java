@@ -180,8 +180,14 @@ public class SessionRecoveryService {
             // the stamp, so a refused load's seal never inherits it.
             boolean sealStamped = head.journalRevision() != null
                     && head.journalRevision().equals(head.wakeSealRevision());
+            // A suspension that certified its background holds may leave a
+            // live projected run and an owed cleanup behind: those ARE the
+            // certified work, and the pull plus the next drain-only load
+            // converge them. Only the seal at this exact revision proves it.
+            boolean backgroundCertified = sealStamped && head.wakeSealBackground();
             if ("released".equals(head.activationPhase()) && (wakeProven || sealStamped)
-                    && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId())) {
+                    && !recovery.hasUnsettledWork(session.tenantId(), session.sessionId(),
+                            backgroundCertified)) {
                 return view("ready", "ready", turn, true, false, false);
             }
         }

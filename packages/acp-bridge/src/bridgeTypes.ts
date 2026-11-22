@@ -1305,6 +1305,12 @@ export interface BridgeSessionSummary {
   pendingInteractionCount?: number;
   /** True when the most recently completed turn failed. */
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight; a list-surface hint that opening the session can offer
+   * "Continue execution". Absent without ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
