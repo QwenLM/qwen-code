@@ -32,6 +32,7 @@ import type {
   ManagedAgentSessionPhase,
 } from './managed-agent-provider.js';
 import { toManagedPermissionRequest } from './managed-approval.js';
+import { canonicalQuestionAnswers } from './managed-question-response.js';
 
 type OperationState = ChatOperation['state'];
 
@@ -113,7 +114,7 @@ export interface ManagedChatControllerDeps {
 }
 
 export const MANAGED_QUESTION_SUBMIT_OPTION_ID = 'submit';
-export const MANAGED_QUESTION_DISMISS_OPTION_ID = 'deny';
+export const MAX_MANAGED_QUESTION_TEXT_LENGTH = 8192;
 
 export function mapManagedPhase(
   phase: ManagedAgentSessionPhase,
@@ -174,22 +175,61 @@ export function toManagedQuestionPermissionRequest(
         multiSelect: question.multiple,
       })),
     },
+    // Managed question actions carry no dismiss wire variant (sending a string
+    // option id to a question action is rejected by the provider), so project
+    // only the allow_once submit option.
     options: [
       {
         id: MANAGED_QUESTION_SUBMIT_OPTION_ID,
         label: 'Submit',
         kind: 'allow_once',
       },
-      {
-        id: MANAGED_QUESTION_DISMISS_OPTION_ID,
-        label: 'Dismiss',
-        kind: 'reject_once',
-      },
     ],
   };
 }
 
 const DECIMAL_INDEX_RE = /^(0|[1-9]\d*)$/;
+
+function matchExactMultiSelectOptions(
+  raw: string,
+  options: readonly { id: string; label: string }[],
+): string[] | null {
+  // Match option labels/ids longest-first at comma boundaries. Require an exact
+  // cover of the entire value so free text that happens to start with an option
+  // label followed by a comma (e.g. "Verbose, but only for the parser") is
+  // never misread as selecting that option and amputating the text.
+  const candidates: Array<{ token: string; id: string }> = [];
+  for (const option of options) {
+    if (option.label.length > 0) {
+      candidates.push({ token: option.label, id: option.id });
+    }
+    if (option.id.length > 0 && option.id !== option.label) {
+      candidates.push({ token: option.id, id: option.id });
+    }
+  }
+  candidates.sort((a, b) => b.token.length - a.token.length);
+
+  const optionIds: string[] = [];
+  let pos = 0;
+  while (pos < raw.length) {
+    while (pos < raw.length && (raw[pos] === ',' || /\s/.test(raw[pos]!))) {
+      pos++;
+    }
+    if (pos >= raw.length) break;
+    const remaining = raw.slice(pos);
+    const matched = candidates.find(({ token }) => {
+      if (!remaining.startsWith(token)) return false;
+      const trimmedAfter = remaining.slice(token.length).trimStart();
+      return trimmedAfter.length === 0 || trimmedAfter.startsWith(',');
+    });
+    if (!matched) return null;
+    if (!optionIds.includes(matched.id)) optionIds.push(matched.id);
+    pos += matched.token.length;
+    while (pos < raw.length && /\s/.test(raw[pos]!)) pos++;
+    if (pos < raw.length && raw[pos] === ',') pos++;
+  }
+  return optionIds.length > 0 ? optionIds : null;
+}
 
 export function normalizeManagedQuestionAnswers(
   action: ManagedAgentPendingQuestionAction,
@@ -217,35 +257,23 @@ export function normalizeManagedQuestionAnswers(
     }
 
     if (question.multiple) {
-      const parts = entry.value
-        .split(',')
-        .map((part) => part.trim())
-        .filter((part) => part.length > 0);
-      const optionIds: string[] = [];
-      const freeTextParts: string[] = [];
-      for (const part of parts) {
-        const matched = question.options.find(
-          (option) => option.id === part || option.label === part,
-        );
-        if (matched) {
-          if (!optionIds.includes(matched.id)) optionIds.push(matched.id);
-        } else {
-          if (!question.allowText) return null;
-          freeTextParts.push(part);
-        }
-      }
-      if (
-        question.required &&
-        optionIds.length === 0 &&
-        freeTextParts.length === 0
-      ) {
+      const matchedOptionIds = matchExactMultiSelectOptions(
+        entry.value,
+        question.options,
+      );
+      if (matchedOptionIds !== null) {
+        byQuestionId.set(question.id, {
+          questionId: question.id,
+          optionIds: matchedOptionIds,
+        });
+      } else if (question.allowText) {
+        byQuestionId.set(question.id, {
+          questionId: question.id,
+          text: entry.value,
+        });
+      } else {
         return null;
       }
-      byQuestionId.set(question.id, {
-        questionId: question.id,
-        ...(optionIds.length > 0 ? { optionIds } : {}),
-        ...(freeTextParts.length > 0 ? { text: freeTextParts.join(', ') } : {}),
-      });
     } else {
       const matched = question.options.find(
         (option) =>
@@ -268,6 +296,13 @@ export function normalizeManagedQuestionAnswers(
         return null;
       }
     }
+    const recorded = byQuestionId.get(question.id);
+    if (
+      recorded?.text !== undefined &&
+      recorded.text.length > MAX_MANAGED_QUESTION_TEXT_LENGTH
+    ) {
+      return null;
+    }
   }
 
   for (const question of action.questions) {
@@ -282,11 +317,16 @@ export function normalizeManagedQuestionAnswers(
     }
   }
 
-  return action.questions
+  const collected = action.questions
     .map((question) => byQuestionId.get(question.id))
     .filter(
       (answer): answer is ManagedAgentQuestionAnswer => answer !== undefined,
     );
+  try {
+    return canonicalQuestionAnswers(action, collected);
+  } catch {
+    return null;
+  }
 }
 
 interface TrackedOperation {
@@ -297,7 +337,6 @@ interface TrackedOperation {
   backendOperationId?: string;
   boundTurnId?: string;
   boundActionId?: string;
-  abandoned?: boolean;
 }
 
 function projectTurnOutcomeForKind(
@@ -349,16 +388,14 @@ export function createManagedChatController(
 
   const rebuildOperations = (): readonly ChatOperation[] => {
     if (!dirty) return cachedOperations;
-    const projected: ChatOperation[] = tracked
-      .filter((entry) => !entry.abandoned)
-      .map((entry) =>
-        Object.freeze({
-          id: entry.id,
-          kind: entry.kind,
-          target: entry.target,
-          state: entry.state,
-        }),
-      );
+    const projected: ChatOperation[] = tracked.map((entry) =>
+      Object.freeze({
+        id: entry.id,
+        kind: entry.kind,
+        target: entry.target,
+        state: entry.state,
+      }),
+    );
     cachedOperations = Object.freeze(retainOperations(projected));
     dirty = false;
     return cachedOperations;
@@ -376,7 +413,7 @@ export function createManagedChatController(
     entry: TrackedOperation,
     next: Exclude<OperationState, 'pending'>,
   ): void => {
-    if (entry.abandoned || isTerminal(entry.state)) return;
+    if (isTerminal(entry.state)) return;
     if (entry.state !== next) {
       entry.state = next;
       dirty = true;
@@ -387,10 +424,10 @@ export function createManagedChatController(
     const next = mapManagedOperationStatus(event.status);
     let matched = false;
     for (const entry of tracked) {
-      if (entry.backendOperationId === event.operationId) {
-        matched = true;
-        applyState(entry, next);
-      }
+      if (entry.backendOperationId !== event.operationId) continue;
+      if (isTerminal(entry.state)) continue;
+      matched = true;
+      applyState(entry, next);
     }
     if (!matched && inFlightDispatches > 0) {
       bufferedOperationSettlement.set(event.operationId, next);
@@ -400,10 +437,10 @@ export function createManagedChatController(
   const settleByTurnId = (event: ManagedTurnSettlement): void => {
     let matched = false;
     for (const entry of tracked) {
-      if (entry.boundTurnId === event.turnId) {
-        matched = true;
-        applyState(entry, projectTurnOutcomeForKind(entry.kind, event.outcome));
-      }
+      if (entry.boundTurnId !== event.turnId) continue;
+      if (isTerminal(entry.state)) continue;
+      matched = true;
+      applyState(entry, projectTurnOutcomeForKind(entry.kind, event.outcome));
     }
     if (!matched && inFlightDispatches > 0) {
       bufferedTurnOutcome.set(event.turnId, event.outcome);
@@ -415,10 +452,10 @@ export function createManagedChatController(
       event.outcome === 'resolved' ? 'established' : 'failed';
     let matched = false;
     for (const entry of tracked) {
-      if (entry.boundActionId === event.actionId) {
-        matched = true;
-        applyState(entry, next);
-      }
+      if (entry.boundActionId !== event.actionId) continue;
+      if (isTerminal(entry.state)) continue;
+      matched = true;
+      applyState(entry, next);
     }
     if (!matched && inFlightDispatches > 0) {
       bufferedActionOutcome.set(event.actionId, event.outcome);
@@ -473,7 +510,6 @@ export function createManagedChatController(
       response = await transport();
     } catch {
       inFlightDispatches--;
-      entry.abandoned = true;
       removeTracked(entry);
       pruneBuffers();
       return {
@@ -490,13 +526,11 @@ export function createManagedChatController(
       pruneBuffers();
       return {
         admission: 'rejected',
-        outcome: 'unsettled',
         target: opTarget,
       };
     }
 
     if (response.admission === 'unknown') {
-      entry.abandoned = true;
       removeTracked(entry);
       pruneBuffers();
       return {
@@ -566,7 +600,7 @@ export function createManagedChatController(
       if (base === 'cancelling') return 'cancelling';
       if (base === 'running') {
         const cancelling = ops.some(
-          (op) => op.kind === 'cancel' && op.state === 'pending',
+          (op) => op.kind === 'cancel' && !isTerminal(op.state),
         );
         return cancelling ? 'cancelling' : 'running';
       }
@@ -593,7 +627,6 @@ export function createManagedChatController(
       if (cancelTarget === undefined) {
         return {
           admission: 'rejected',
-          outcome: 'unsettled',
           target: target(),
         };
       }
@@ -640,25 +673,14 @@ export function createManagedChatController(
       const action = deps.pendingActions.find(
         (candidate) => candidate.actionId === requestId,
       );
-      if (!action || inFlightActionIds.has(requestId)) {
+      if (
+        !action ||
+        action.kind === 'question' ||
+        inFlightActionIds.has(requestId) ||
+        !action.options.some((option) => option.id === optionId)
+      ) {
         return {
           admission: 'rejected',
-          outcome: 'unsettled',
-          target: opTarget,
-        };
-      }
-      if (action.kind === 'question') {
-        if (optionId !== MANAGED_QUESTION_DISMISS_OPTION_ID) {
-          return {
-            admission: 'rejected',
-            outcome: 'unsettled',
-            target: opTarget,
-          };
-        }
-      } else if (!action.options.some((option) => option.id === optionId)) {
-        return {
-          admission: 'rejected',
-          outcome: 'unsettled',
           target: opTarget,
         };
       }
@@ -696,7 +718,6 @@ export function createManagedChatController(
       if (!action || inFlightActionIds.has(requestId)) {
         return {
           admission: 'rejected',
-          outcome: 'unsettled',
           target: opTarget,
         };
       }
@@ -704,7 +725,6 @@ export function createManagedChatController(
       if (normalized === null) {
         return {
           admission: 'rejected',
-          outcome: 'unsettled',
           target: opTarget,
         };
       }

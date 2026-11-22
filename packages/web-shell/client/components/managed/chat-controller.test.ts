@@ -6,7 +6,14 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '../../adapters/types.js';
-import type { ChatCapabilities } from '../../chat-core/contract.js';
+import type {
+  ApprovalSelectionController,
+  ChatCapabilities,
+  ChatStatusFacts,
+  ContextUsageController,
+  ModelSelectionController,
+  SessionOpsController,
+} from '../../chat-core/contract.js';
 import { regionsToCapabilities } from '../../chat-core/capabilities.js';
 import type {
   ManagedAgentPendingAction,
@@ -16,8 +23,8 @@ import type {
 } from './managed-agent-provider.js';
 import {
   createManagedChatController,
-  MANAGED_QUESTION_DISMISS_OPTION_ID,
   MANAGED_QUESTION_SUBMIT_OPTION_ID,
+  MAX_MANAGED_QUESTION_TEXT_LENGTH,
   mapManagedOperationStatus,
   mapManagedPhase,
   normalizeManagedQuestionAnswers,
@@ -62,6 +69,7 @@ function permissionAction(
 function questionAction(
   overrides: Partial<ManagedAgentPendingQuestionAction> = {},
 ): ManagedAgentPendingQuestionAction {
+  // Matches the server-emitted shape (required: true, allowText: true).
   return {
     actionId: 'q-1',
     sessionId: 's1',
@@ -78,7 +86,7 @@ function questionAction(
         prompt: 'Target environment?',
         required: true,
         multiple: false,
-        allowText: false,
+        allowText: true,
         options: [
           { id: 'dev', label: 'Dev', description: 'Development cluster' },
           { id: 'prod', label: 'Prod', description: 'Production cluster' },
@@ -87,7 +95,7 @@ function questionAction(
       {
         id: 'notes',
         prompt: 'Extra flags?',
-        required: false,
+        required: true,
         multiple: true,
         allowText: true,
         options: [
@@ -106,6 +114,7 @@ function createHarness(overrides: Partial<ManagedChatControllerDeps> = {}) {
   let pendingActions: readonly ManagedAgentPendingAction[] = [];
   let messages: readonly Message[] = [];
   let transcriptState: 'loading' | 'ready' | 'error' = 'ready';
+  let statusFacts: ChatStatusFacts = { queueLength: 0, goalActive: false };
   const pagination = {
     hasOlderHistory: false,
     loadingOlderHistory: false,
@@ -183,7 +192,9 @@ function createHarness(overrides: Partial<ManagedChatControllerDeps> = {}) {
     get pendingActions() {
       return pendingActions;
     },
-    statusFacts: { queueLength: 0, goalActive: false },
+    get statusFacts() {
+      return statusFacts;
+    },
     capabilities,
     submitPrompt,
     cancelTurn,
@@ -232,6 +243,9 @@ function createHarness(overrides: Partial<ManagedChatControllerDeps> = {}) {
     setTranscriptState: (next: 'loading' | 'ready' | 'error') => {
       transcriptState = next;
     },
+    setStatusFacts: (next: ChatStatusFacts) => {
+      statusFacts = next;
+    },
     emitOperation: (event: ManagedOperationSettlement) => opListener?.(event),
     emitTurn: (event: ManagedTurnSettlement) => turnListener?.(event),
     emitAction: (event: ManagedActionSettlement) => actionListener?.(event),
@@ -263,7 +277,7 @@ describe('managed chat-controller mappings', () => {
     expect(mapManagedOperationStatus('recovery_blocked')).toBe('unsettled');
   });
 
-  it('converts a ManagedAgentPendingQuestionAction into an AskUserQuestion PermissionRequest', () => {
+  it('converts a ManagedAgentPendingQuestionAction into an AskUserQuestion PermissionRequest with submit option only (R1-3)', () => {
     const req = toManagedQuestionPermissionRequest(questionAction());
     expect(req.id).toBe('q-1');
     expect(req.sessionId).toBe('s1');
@@ -274,11 +288,6 @@ describe('managed chat-controller mappings', () => {
         id: MANAGED_QUESTION_SUBMIT_OPTION_ID,
         label: 'Submit',
         kind: 'allow_once',
-      },
-      {
-        id: MANAGED_QUESTION_DISMISS_OPTION_ID,
-        label: 'Dismiss',
-        kind: 'reject_once',
       },
     ]);
     expect(req.rawInput?.questions).toEqual([
@@ -303,63 +312,228 @@ describe('managed chat-controller mappings', () => {
     ]);
   });
 
-  it('normalizes decimal-indexed and id-keyed question answers and fails closed on invalid input', () => {
+  it('normalizes decimal-indexed and id-keyed question answers and fails closed on invalid or over-cap input', () => {
     const action = questionAction();
     expect(
       normalizeManagedQuestionAnswers(action, [
         { questionId: '0', value: 'Prod' },
-        { questionId: '1', value: 'Dry run, custom note' },
+        { questionId: '1', value: 'Verbose, Dry run' },
       ]),
     ).toEqual([
       { questionId: 'env', optionIds: ['prod'] },
-      { questionId: 'notes', optionIds: ['dry'], text: 'custom note' },
+      // Canonical option order from canonicalQuestionAnswers ('dry' before 'verbose').
+      { questionId: 'notes', optionIds: ['dry', 'verbose'] },
     ]);
-    // Direct questionId + optionId also accepted.
+    // Direct questionId + optionId + free text also accepted.
     expect(
       normalizeManagedQuestionAnswers(action, [
         { questionId: 'env', value: 'dev' },
+        { questionId: 'notes', value: 'custom free text' },
       ]),
-    ).toEqual([{ questionId: 'env', optionIds: ['dev'] }]);
+    ).toEqual([
+      { questionId: 'env', optionIds: ['dev'] },
+      { questionId: 'notes', text: 'custom free text' },
+    ]);
     // Missing required question -> null (fail closed).
     expect(
       normalizeManagedQuestionAnswers(action, [
         { questionId: 'notes', value: 'Dry run' },
       ]),
     ).toBeNull();
-    // Free text when allowText is false -> null (fail closed).
+    // Unknown question id, out-of-range index, or duplicate question -> null
+    // even when every required question is answered (pins the lookup/dedupe guards).
     expect(
       normalizeManagedQuestionAnswers(action, [
-        { questionId: '0', value: 'staging' },
-      ]),
-    ).toBeNull();
-    // Unknown question id, out-of-range index, or duplicate question -> null.
-    expect(
-      normalizeManagedQuestionAnswers(action, [
-        { questionId: '99', value: 'Prod' },
+        { questionId: 'env', value: 'Prod' },
+        { questionId: 'notes', value: 'Dry run' },
+        { questionId: '99', value: 'extra' },
       ]),
     ).toBeNull();
     expect(
       normalizeManagedQuestionAnswers(action, [
-        { questionId: 'unknown', value: 'Prod' },
+        { questionId: 'env', value: 'Prod' },
+        { questionId: 'notes', value: 'Dry run' },
+        { questionId: 'unknown', value: 'extra' },
       ]),
     ).toBeNull();
     expect(
       normalizeManagedQuestionAnswers(action, [
         { questionId: '0', value: 'Dev' },
         { questionId: 'env', value: 'Prod' },
+        { questionId: 'notes', value: 'Dry run' },
+      ]),
+    ).toBeNull();
+
+    // R1-5: single text over 8192 chars -> null (both single- and multi-select);
+    // combined payload over 32 KiB -> null.
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        {
+          questionId: '0',
+          value: 'x'.repeat(MAX_MANAGED_QUESTION_TEXT_LENGTH + 1),
+        },
+        { questionId: '1', value: 'Dry run' },
+      ]),
+    ).toBeNull();
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        { questionId: '0', value: 'Dev' },
+        {
+          questionId: '1',
+          value: 'y'.repeat(MAX_MANAGED_QUESTION_TEXT_LENGTH + 1),
+        },
+      ]),
+    ).toBeNull();
+    const fiveQuestions = questionAction({
+      questions: Array.from({ length: 5 }, (_, idx) => ({
+        id: `q${idx}`,
+        prompt: `Question ${idx}`,
+        required: true,
+        multiple: false,
+        allowText: true,
+        options: [],
+      })),
+    });
+    expect(
+      normalizeManagedQuestionAnswers(
+        fiveQuestions,
+        Array.from({ length: 5 }, (_, idx) => ({
+          questionId: String(idx),
+          value: 'a'.repeat(7000),
+        })),
+      ),
+    ).toBeNull();
+  });
+
+  it('decodes multi-select comma labels intact and keeps free text beginning with a label verbatim (F1 / R1-2)', () => {
+    const withText = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Pick options',
+          required: true,
+          multiple: true,
+          allowText: true,
+          options: [
+            { id: 'yes', label: 'Yes, please' },
+            { id: 'n', label: 'No' },
+            { id: 'ny', label: 'No, thanks' },
+            { id: 'dry', label: 'Dry run' },
+            { id: 'verbose', label: 'Verbose' },
+          ],
+        },
+      ],
+    });
+    // Single comma-containing label matches its option id, not free text.
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'Yes, please' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['yes'] }]);
+    // Longer comma-containing label wins over shorter prefix option ("No").
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'No, thanks' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['ny'] }]);
+    // Mixed selections combining plain and comma-containing labels decode cleanly in canonical order.
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'No, No, thanks' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['n', 'ny'] }]);
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'No, thanks, No' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['n', 'ny'] }]);
+    // R1-2a: free text beginning with an option label followed by a comma stays pure text
+    // (never invents optionIds: ['verbose'] or truncates the leading half).
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'Verbose, but only for the parser' },
+      ]),
+    ).toEqual([{ questionId: 'q', text: 'Verbose, but only for the parser' }]);
+    // Non-boundary prefix ("No way") and space-joined option labels ("No Verbose") stay pure text.
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'No way' },
+      ]),
+    ).toEqual([{ questionId: 'q', text: 'No way' }]);
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'No Verbose' },
+      ]),
+    ).toEqual([{ questionId: 'q', text: 'No Verbose' }]);
+
+    // allowText: false still accepts comma-containing option labels and rejects non-option text.
+    const noText = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Pick options',
+          required: true,
+          multiple: true,
+          allowText: false,
+          options: [
+            { id: 'yes', label: 'Yes, please' },
+            { id: 'n', label: 'No' },
+          ],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(noText, [
+        { questionId: '0', value: 'Yes, please' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['yes'] }]);
+    expect(
+      normalizeManagedQuestionAnswers(noText, [
+        { questionId: '0', value: 'Yes, please, rogue' },
       ]),
     ).toBeNull();
   });
 });
 
 describe('createManagedChatController', () => {
-  it('projects live pass-through facts, one-hot pagination flags, and forwards loadOlder options', async () => {
-    const h = createHarness();
+  it('projects live pass-through facts, sub-controllers, one-hot pagination flags, and forwards loadOlder options', async () => {
+    const modelSelection = {
+      tag: 'model',
+    } as unknown as ModelSelectionController;
+    const approvalSelection = {
+      tag: 'approval',
+    } as unknown as ApprovalSelectionController;
+    const contextUsage = {
+      tag: 'context',
+    } as unknown as ContextUsageController;
+    const sessionOps = { tag: 'ops' } as unknown as SessionOpsController;
+    const h = createHarness({
+      modelSelection,
+      approvalSelection,
+      contextUsage,
+      sessionOps,
+    });
     expect(h.controller.kind).toBe('managed');
     expect(h.controller.sessionId).toBe('s1');
     expect(h.controller.storageKey).toBe('managed:srv:s1');
     expect(h.controller.capabilities.artifacts).toBe(true);
     expect(h.controller.capabilities.terminal).toBe(false);
+    expect(h.controller.modelSelection).toBe(modelSelection);
+    expect(h.controller.approvalSelection).toBe(approvalSelection);
+    expect(h.controller.contextUsage).toBe(contextUsage);
+    expect(h.controller.sessionOps).toBe(sessionOps);
+
+    const sentinelMessages = [{ id: 'm1' }] as unknown as readonly Message[];
+    h.setMessages(sentinelMessages);
+    h.setTranscriptState('loading');
+    const sentinelStatus: ChatStatusFacts = {
+      queueLength: 2,
+      goalActive: true,
+    };
+    h.setStatusFacts(sentinelStatus);
+    expect(h.controller.messages).toBe(sentinelMessages);
+    expect(h.controller.transcriptState).toBe('loading');
+    expect(h.controller.statusFacts).toBe(sentinelStatus);
 
     const keys = [
       'hasOlderHistory',
@@ -431,39 +605,90 @@ describe('createManagedChatController', () => {
     expect(h.controller.phase).toBe('idle');
   });
 
-  it('applies buffered settlement that arrives before submitPrompt resolves', async () => {
+  it('applies buffered early settlements for operation, submit turn, cancel turn, approval, and question (R1-6)', async () => {
     const h = createHarness();
-    const d = deferred<ManagedTransportAdmission>();
-    h.submitPrompt.mockReturnValueOnce(d.promise);
+    h.setPendingActions([permissionAction(), questionAction()]);
 
-    const submitPromise = h.controller.submit({ text: 'fast turn' });
+    // 1. Operation settlement arriving before submitPrompt resolves.
+    const dOp = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(dOp.promise);
+    const pOp = h.controller.submit({ text: 'fast op' });
     h.emitOperation({ operationId: 'op-fast', status: 'completed' });
-    d.resolve({
+    dOp.resolve({
       admission: 'accepted',
       operationId: 'op-fast',
-      turnId: 't-fast',
+      turnId: 't-op',
     });
-    const res = await submitPromise;
-    expect(res.admission).toBe('accepted');
-    expect(res.outcome).toBe('established');
-    expect(h.controller.operations[0]?.state).toBe('established');
+    expect((await pOp).outcome).toBe('established');
+
+    // 2. Turn settlement arriving before submitPrompt resolves.
+    const dSub = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(dSub.promise);
+    const pSub = h.controller.submit({ text: 'fast turn' });
+    h.emitTurn({ turnId: 't-sub', outcome: 'failed' });
+    dSub.resolve({
+      admission: 'accepted',
+      operationId: 'op-sub',
+      turnId: 't-sub',
+    });
+    expect((await pSub).outcome).toBe('failed');
+
+    // 3. Turn settlement arriving before cancelTurn resolves.
+    h.setActiveTurnId('t-can');
+    const dCan = deferred<ManagedTransportAdmission>();
+    h.cancelTurn.mockReturnValueOnce(dCan.promise);
+    const pCan = h.controller.cancel();
+    h.emitTurn({ turnId: 't-can', outcome: 'cancelled' });
+    dCan.resolve({ admission: 'accepted', operationId: 'op-can' });
+    expect((await pCan).outcome).toBe('established');
+
+    // 4. Action settlement arriving before submitApproval resolves.
+    const dApp = deferred<ManagedTransportAdmission>();
+    h.submitApproval.mockReturnValueOnce(dApp.promise);
+    const pApp = h.controller.respondApproval('act-1', 'allow');
+    h.emitAction({ actionId: 'act-1', outcome: 'resolved' });
+    dApp.resolve({ admission: 'accepted', operationId: 'op-a-early' });
+    expect((await pApp).outcome).toBe('established');
+
+    // 5. Action settlement arriving before submitQuestion resolves.
+    const dQ = deferred<ManagedTransportAdmission>();
+    h.submitQuestion.mockReturnValueOnce(dQ.promise);
+    const pQ = h.controller.respondQuestion('q-1', [
+      { questionId: '0', value: 'Dev' },
+      { questionId: '1', value: 'Verbose' },
+    ]);
+    h.emitAction({ actionId: 'q-1', outcome: 'resolved' });
+    dQ.resolve({ admission: 'accepted', operationId: 'op-q-early' });
+    expect((await pQ).outcome).toBe('established');
   });
 
-  it('does not track rejected submits and abandons unknown/thrown submits without latching phase', async () => {
+  it('omits outcome on rejected submits and abandons resolved-unknown and thrown submits without latching phase (R1-4 / R1-6)', async () => {
     const h = createHarness();
     h.submitPrompt.mockResolvedValueOnce({ admission: 'rejected' });
     const rej = await h.controller.submit({ text: 'nope' });
     expect(rej).toEqual({
       admission: 'rejected',
+      target: { sessionId: 's1' },
+    });
+    expect(rej.outcome).toBeUndefined();
+    expect(h.controller.operations).toEqual([]);
+    expect(h.controller.phase).toBe('idle');
+
+    // Resolved { admission: 'unknown' } (distinct from thrown transport).
+    h.submitPrompt.mockResolvedValueOnce({ admission: 'unknown' });
+    const unkResolved = await h.controller.submit({ text: 'uncertain' });
+    expect(unkResolved).toEqual({
+      admission: 'unknown',
       outcome: 'unsettled',
       target: { sessionId: 's1' },
     });
     expect(h.controller.operations).toEqual([]);
     expect(h.controller.phase).toBe('idle');
 
+    // Thrown transport.
     h.submitPrompt.mockRejectedValueOnce(new Error('network lost'));
-    const unk = await h.controller.submit({ text: 'lost' });
-    expect(unk).toEqual({
+    const unkThrown = await h.controller.submit({ text: 'lost' });
+    expect(unkThrown).toEqual({
       admission: 'unknown',
       outcome: 'unsettled',
       target: { sessionId: 's1' },
@@ -472,17 +697,20 @@ describe('createManagedChatController', () => {
     expect(h.controller.phase).toBe('idle');
   });
 
-  it('requires an activeTurnId for cancel, stamps dispatch-time turnId on result, and projects turn outcomes', async () => {
+  it('requires activeTurnId for cancel, keeps cancelling phase on recovery_blocked, stamps dispatch-time turnId, and projects turn outcomes (R1-7)', async () => {
     const h = createHarness();
-    // Idle: no active turn -> fail closed without calling transport.
+    // Idle: no active turn -> fail closed without calling transport, outcome omitted.
     const idleRes = await h.controller.cancel();
-    expect(idleRes.admission).toBe('rejected');
-    expect(idleRes.target.turnId).toBeUndefined();
+    expect(idleRes).toEqual({
+      admission: 'rejected',
+      target: { sessionId: 's1' },
+    });
+    expect(idleRes.outcome).toBeUndefined();
     expect(h.cancelTurn).not.toHaveBeenCalled();
 
-    // Active turn t1: cancel lifts phase to 'cancelling', stamps dispatch-time
-    // turnId even if activeTurnId advances to t2 while cancel is in flight,
-    // and keeps the retained operation target bare { sessionId }.
+    // Active turn t1: cancel lifts phase to 'cancelling', stays 'cancelling' on
+    // recovery_blocked (unsettled), stamps dispatch-time turnId even if
+    // activeTurnId advances while cancel is in flight, and keeps retained target bare.
     h.setPhase('agent_running');
     h.setActiveTurnId('t1');
     const d = deferred<ManagedTransportAdmission>();
@@ -498,13 +726,18 @@ describe('createManagedChatController', () => {
     expect(res.target.turnId).toBe('t1');
     expect(h.controller.operations[0]?.target).toEqual({ sessionId: 's1' });
 
+    // R1-7: recovery_blocked -> unsettled cancel must keep phase === 'cancelling'.
+    h.emitOperation({ operationId: 'op-c1', status: 'recovery_blocked' });
+    expect(h.controller.operations[0]?.state).toBe('unsettled');
+    expect(h.controller.phase).toBe('cancelling');
+
     // Turn completing on its own proves cancel did not take effect -> failed.
     h.emitTurn({ turnId: 't1', outcome: 'completed' });
     expect(h.controller.operations[0]?.state).toBe('failed');
     expect(h.controller.phase).toBe('running');
 
-    // A second cancel on t2 that reaches 'cancelled' establishes and supersedes
-    // the previous terminal cancel row (bounded per-session retention).
+    // Second cancel on t2 that reaches 'cancelled' establishes and supersedes
+    // the previous terminal cancel row.
     const cancel2 = await h.controller.cancel();
     expect(cancel2.target.turnId).toBe('t2');
     h.emitTurn({ turnId: 't2', outcome: 'cancelled' });
@@ -512,20 +745,74 @@ describe('createManagedChatController', () => {
     expect(h.controller.operations[0]?.state).toBe('established');
   });
 
-  it('validates respondApproval and respondQuestion fail-closed and blocks concurrent duplicate dispatches', async () => {
+  it('does not let terminal rows absorb settlements needed by a later in-flight cancel or approval retry (R1-1)', async () => {
     const h = createHarness();
-    h.setPendingActions([permissionAction(), questionAction()]);
+    h.setPendingActions([permissionAction({ actionId: 'act-r1' })]);
 
-    // Unknown action or invalid option -> rejected without calling transport.
+    // Case 1: submit admitted with t1 and already terminal via operation settlement;
+    // cancel(t1) is in flight while emitTurn(t1, 'cancelled') arrives.
+    h.setPhase('agent_running');
+    h.setActiveTurnId('t1');
+    await h.controller.submit({ text: 'run' });
+    h.emitOperation({ operationId: 'op-sub-1', status: 'completed' });
     expect(
-      (await h.controller.respondApproval('missing', 'allow')).admission,
-    ).toBe('rejected');
+      h.controller.operations.find((op) => op.kind === 'submit')?.state,
+    ).toBe('established');
+
+    const dCan = deferred<ManagedTransportAdmission>();
+    h.cancelTurn.mockReturnValueOnce(dCan.promise);
+    const cancelPromise = h.controller.cancel();
+    expect(h.controller.phase).toBe('cancelling');
+    h.emitTurn({ turnId: 't1', outcome: 'cancelled' });
+    dCan.resolve({ admission: 'accepted', operationId: 'op-c-r1' });
+    const cancelRes = await cancelPromise;
+    expect(cancelRes.admission).toBe('accepted');
+    expect(cancelRes.outcome).toBe('established');
     expect(
-      (await h.controller.respondApproval('act-1', 'bogus')).admission,
-    ).toBe('rejected');
+      h.controller.operations.find((op) => op.kind === 'cancel')?.state,
+    ).toBe('established');
+    expect(h.controller.phase).toBe('running');
+
+    // Case 2: approval attempt 1 settles 'failed' (terminal row stays in tracked);
+    // retry's 'resolved' settlement arrives mid-POST and must establish attempt 2.
+    await h.controller.respondApproval('act-r1', 'allow');
+    h.emitAction({ actionId: 'act-r1', outcome: 'failed' });
     expect(
-      (await h.controller.respondApproval('q-1', 'submit')).admission,
-    ).toBe('rejected');
+      h.controller.operations.find((op) => op.kind === 'approval')?.state,
+    ).toBe('failed');
+
+    const dRetry = deferred<ManagedTransportAdmission>();
+    h.submitApproval.mockReturnValueOnce(dRetry.promise);
+    const retryPromise = h.controller.respondApproval('act-r1', 'allow');
+    h.emitAction({ actionId: 'act-r1', outcome: 'resolved' });
+    dRetry.resolve({ admission: 'accepted', operationId: 'op-a-r2' });
+    const retryRes = await retryPromise;
+    expect(retryRes.admission).toBe('accepted');
+    expect(retryRes.outcome).toBe('established');
+    expect(
+      h.controller.operations.find((op) => op.kind === 'approval')?.state,
+    ).toBe('established');
+  });
+
+  it('validates respondApproval and respondQuestion fail-closed, rejects question dismiss via submitApproval, blocks duplicates, and fails superseded approvals (R1-3 / R1-5 / R1-6)', async () => {
+    const h = createHarness();
+    h.setPendingActions([
+      permissionAction({ actionId: 'act-1' }),
+      permissionAction({ actionId: 'act-sup' }),
+      questionAction(),
+    ]);
+
+    // Unknown action, invalid option, or question action via respondApproval -> rejected (no outcome).
+    for (const [id, opt] of [
+      ['missing', 'allow'],
+      ['act-1', 'bogus'],
+      ['q-1', 'deny'],
+      ['q-1', 'submit'],
+    ] as const) {
+      const res = await h.controller.respondApproval(id, opt);
+      expect(res.admission).toBe('rejected');
+      expect(res.outcome).toBeUndefined();
+    }
     expect(h.submitApproval).not.toHaveBeenCalled();
 
     // Valid approval with concurrent duplicate blocked.
@@ -534,62 +821,119 @@ describe('createManagedChatController', () => {
     const first = h.controller.respondApproval('act-1', 'allow');
     const dup = await h.controller.respondApproval('act-1', 'allow');
     expect(dup.admission).toBe('rejected');
+    expect(dup.outcome).toBeUndefined();
     expect(h.submitApproval).toHaveBeenCalledTimes(1);
     dApp.resolve({ admission: 'accepted', operationId: 'op-a1' });
     expect((await first).admission).toBe('accepted');
     h.emitAction({ actionId: 'act-1', outcome: 'resolved' });
     expect(
-      h.controller.operations.find((op) => op.kind === 'approval')?.state,
+      h.controller.operations.find(
+        (op) => op.kind === 'approval' && op.target.requestId === 'act-1',
+      )?.state,
     ).toBe('established');
 
-    // Question dismiss routes through respondApproval with 'deny'.
-    const dismiss = await h.controller.respondApproval(
-      'q-1',
-      MANAGED_QUESTION_DISMISS_OPTION_ID,
-    );
-    expect(dismiss.admission).toBe('accepted');
-    expect(h.submitApproval).toHaveBeenLastCalledWith('q-1', 'deny');
+    // Design-mandated negative test: superseded approval never establishes.
+    await h.controller.respondApproval('act-sup', 'allow');
+    h.emitAction({ actionId: 'act-sup', outcome: 'superseded' });
+    expect(
+      h.controller.operations.find(
+        (op) => op.kind === 'approval' && op.target.requestId === 'act-sup',
+      )?.state,
+    ).toBe('failed');
 
-    // Question answers normalize and reject invalid payloads fail-closed.
-    const badQ = await h.controller.respondQuestion('q-1', [
-      { questionId: '0', value: 'invalid-free-text' },
+    // R1-5: over-cap question answer fails closed before calling submitQuestion.
+    const overCap = await h.controller.respondQuestion('q-1', [
+      {
+        questionId: '0',
+        value: 'x'.repeat(MAX_MANAGED_QUESTION_TEXT_LENGTH + 1),
+      },
+      { questionId: '1', value: 'Dry run' },
     ]);
-    expect(badQ.admission).toBe('rejected');
+    expect(overCap.admission).toBe('rejected');
+    expect(overCap.outcome).toBeUndefined();
     expect(h.submitQuestion).not.toHaveBeenCalled();
 
-    const goodQ = await h.controller.respondQuestion('q-1', [
+    // R1-6: respondQuestion concurrent duplicate guard.
+    const dQ = deferred<ManagedTransportAdmission>();
+    h.submitQuestion.mockReturnValueOnce(dQ.promise);
+    const firstQ = h.controller.respondQuestion('q-1', [
       { questionId: '0', value: 'Dev' },
-      { questionId: '1', value: 'Verbose, extra' },
+      { questionId: '1', value: 'Verbose' },
     ]);
-    expect(goodQ.admission).toBe('accepted');
+    const dupQ = await h.controller.respondQuestion('q-1', [
+      { questionId: '0', value: 'Dev' },
+      { questionId: '1', value: 'Verbose' },
+    ]);
+    expect(dupQ.admission).toBe('rejected');
+    expect(dupQ.outcome).toBeUndefined();
+    expect(h.submitQuestion).toHaveBeenCalledTimes(1);
     expect(h.submitQuestion).toHaveBeenCalledWith('q-1', [
       { questionId: 'env', optionIds: ['dev'] },
-      { questionId: 'notes', optionIds: ['verbose'], text: 'extra' },
+      { questionId: 'notes', optionIds: ['verbose'] },
     ]);
+    dQ.resolve({ admission: 'accepted', operationId: 'op-q1' });
+    expect((await firstQ).admission).toBe('accepted');
     h.emitAction({ actionId: 'q-1', outcome: 'expired' });
     expect(
       h.controller.operations.find((op) => op.kind === 'question')?.state,
     ).toBe('failed');
+  });
 
-    // Retrying an approval after a prior failed settlement must start pending
-    // (must not replay the stale failed outcome from attempt 1).
-    h.setPendingActions([permissionAction({ actionId: 'act-retry' })]);
-    await h.controller.respondApproval('act-retry', 'allow');
-    h.emitAction({ actionId: 'act-retry', outcome: 'failed' });
-    const retryRes = await h.controller.respondApproval('act-retry', 'allow');
-    expect(retryRes.admission).toBe('accepted');
-    expect(retryRes.outcome).toBe('unsettled');
-    expect(
-      h.controller.operations.find(
-        (op) => op.kind === 'approval' && op.target.requestId === 'act-retry',
-      )?.state,
-    ).toBe('pending');
-    h.emitAction({ actionId: 'act-retry', outcome: 'resolved' });
-    expect(
-      h.controller.operations.find(
-        (op) => op.kind === 'approval' && op.target.requestId === 'act-retry',
-      )?.state,
-    ).toBe('established');
+  it('consumes buffered settlements once and prunes buffers on rejected drain (C19 / C21)', async () => {
+    const h = createHarness();
+    h.setPendingActions([
+      permissionAction({ actionId: 'act-c19' }),
+      permissionAction({ actionId: 'act-c21' }),
+    ]);
+
+    // C19 (M03): hold a concurrent submit in flight so inFlightDispatches stays > 0,
+    // buffer an action failure and an operation failure, let attempt 1 consume
+    // them, then retry while the submit is still in flight — both retries must
+    // start pending instead of replaying the already-consumed buffer entries.
+    const heldSubmit = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(heldSubmit.promise);
+    const concurrentSubmit = h.controller.submit({ text: 'hold drain open' });
+
+    const dApp1 = deferred<ManagedTransportAdmission>();
+    h.submitApproval.mockReturnValueOnce(dApp1.promise);
+    const app1 = h.controller.respondApproval('act-c19', 'allow');
+    h.emitAction({ actionId: 'act-c19', outcome: 'failed' });
+    dApp1.resolve({ admission: 'accepted', operationId: 'op-c19-1' });
+    expect((await app1).outcome).toBe('failed');
+
+    const app2 = await h.controller.respondApproval('act-c19', 'allow');
+    expect(app2.admission).toBe('accepted');
+    expect(app2.outcome).toBe('unsettled');
+
+    const dSub1 = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(dSub1.promise);
+    const sub1 = h.controller.submit({ text: 'op buffer consume' });
+    h.emitOperation({ operationId: 'op-shared', status: 'failed' });
+    dSub1.resolve({ admission: 'accepted', operationId: 'op-shared' });
+    expect((await sub1).outcome).toBe('failed');
+
+    const dSub2 = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(dSub2.promise);
+    const sub2 = h.controller.submit({ text: 'op buffer retry' });
+    dSub2.resolve({ admission: 'accepted', operationId: 'op-shared' });
+    expect((await sub2).outcome).toBe('unsettled');
+
+    heldSubmit.resolve({ admission: 'rejected' });
+    await concurrentSubmit;
+
+    // C21 (M04 / M12): with no other dispatch in flight, buffer an action
+    // settlement during an attempt that is rejected, then retry — pruneBuffers
+    // must have cleared the orphan buffer so the retry starts pending.
+    const dRej = deferred<ManagedTransportAdmission>();
+    h.submitApproval.mockReturnValueOnce(dRej.promise);
+    const rejAttempt = h.controller.respondApproval('act-c21', 'allow');
+    h.emitAction({ actionId: 'act-c21', outcome: 'failed' });
+    dRej.resolve({ admission: 'rejected' });
+    expect((await rejAttempt).admission).toBe('rejected');
+
+    const afterRej = await h.controller.respondApproval('act-c21', 'allow');
+    expect(afterRej.admission).toBe('accepted');
+    expect(afterRej.outcome).toBe('unsettled');
   });
 
   it('releases settlement subscriptions on AbortSignal abort and skips subscribing when already aborted', () => {

@@ -59,31 +59,41 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
 - **相态投影（`mapManagedPhase` + `deriveChatPhase`）。** 穷举映射全部 10 个
   `ManagedAgentSessionPhase` 取值（`created`/`completed`/`cancelled` → `'idle'`，
   `failed` → `'failed'`，`cancelling` → `'cancelling'`，活跃运行/工具态 →
-  `'running'`），并与 `operations` 组合：在飞 `cancel` 将运行中会话提升为
-  `'cancelling'`，在飞 `submit` 将空闲/失败会话提升为 `'submitting'`。
+  `'running'`），并与 `operations` 组合：任一非终态 `cancel`（包括
+  `recovery_blocked` 带来的 `unsettled`）均将运行中会话提升为 `'cancelling'`，
+  在飞 `submit` 将空闲/失败会话提升为 `'submitting'`。
 - **准入 ≠ 建立。** `submit`、`cancel`、`respondApproval` 与 `respondQuestion` 各自
-  通过返回 `ManagedTransportAdmission` 的 `deps.*` 派发。`'rejected'` 不入账；
-  `'unknown'` 或抛错放弃追踪行，避免 `phase` 永久卡死。`'accepted'` 保持 `'pending'`
-  （`outcome: 'unsettled'`），仅在权威结算证据到达时推进：`subscribeOperationSettlement`
-  （`completed` → `'established'`，`failed`/`cancelled` → `'failed'`，
-  `recovery_blocked` → `'unsettled'`）、`subscribeTurnSettlement`（按操作类型投影：
-  回合自行完成使绑定的 `cancel` 转为 `'failed'`）或 `subscribeActionSettlement`
-  （`resolved` → `'established'`，`expired`/`superseded`/`failed` → `'failed'`）。
-  传输在飞期间先到达的结算会缓冲并在准入解析时立即应用。
-- **回合作用域取消与有界保留。** `deps.activeTurnId` 为 `undefined` 时 `cancel()`
+  通过返回 `ManagedTransportAdmission` 的 `deps.*` 派发。`'rejected'` 不入账且省略
+  `outcome`（与 `contract.ts` 和 daemon 适配器对齐）；`'unknown'` 或抛错移除追踪
+  行，避免 `phase` 永久卡死。`'accepted'` 保持 `'pending'`（`outcome: 'unsettled'`），
+  仅在权威结算证据到达时推进：`subscribeOperationSettlement`（`completed` →
+  `'established'`，`failed`/`cancelled` → `'failed'`，`recovery_blocked` →
+  `'unsettled'`）、`subscribeTurnSettlement`（按操作类型投影：回合自行完成使绑定
+  的 `cancel` 转为 `'failed'`）或 `subscribeActionSettlement`（`resolved` →
+  `'established'`，`expired`/`superseded`/`failed` → `'failed'`）。已终态行永不
+  吸收后续结算；存在在飞派发且未命中活跃行时，先到达的结算按 operation/turn/action
+  id 缓冲，在绑定时消费删除（针对 operation 与 action id），并在所有在飞派发排空时
+  清空。
+- **回合作用域取消与按目标保留。** `deps.activeTurnId` 为 `undefined` 时 `cancel()`
   fail-closed 返回 `rejected`（Managed 取消要求 `turnId`）；派发时捕获
   `cancelTarget = deps.activeTurnId`，保留在 `controller.operations` 中的操作目标
-  保持裸 `{ sessionId }` 以维持 `retainOperations` 按会话有界保留，并将
-  `turnId: cancelTarget` 写入返回的 `IntentResult.target` 副本，使 `ChatSurface`
-  的回合级取消守卫对 Managed 会话同样生效。
+  保持裸 `{ sessionId }`，使 `retainOperations` 按 `(kind, target)` 最多保留一条
+  终态行（`submit`/`cancel` 每会话一条，`approval`/`question` 按 `requestId` 各一
+  条，与 daemon 适配器一致），并将 `turnId: cancelTarget` 写入返回的
+  `IntentResult.target` 副本，使 `ChatSurface` 的回合级取消守卫对 Managed 会话同样
+  生效。
 - **待审批与待提问投影。** 权限动作（`kind !== 'question'`）复用既有
   `toManagedPermissionRequest(action, messages)`；提问动作（`kind === 'question'`）
   经 `toManagedQuestionPermissionRequest` 投影为共享 `AskUserQuestion` 卡片所需的
-  `PermissionRequest`（含 `allow_once` `'submit'` 选项与 `reject_once` `'deny'` 忽略
-  选项）。`respondApproval` 与 `respondQuestion` 对未知动作 id、非法选项、同一
-  `actionId` 的并发重复派发、以及非法或缺失必填项的回答均 fail-closed 返回
-  `rejected`（`normalizeManagedQuestionAnswers` 同时接受十进制索引与显式问题 id，按
-  选项 id 或 label 匹配，严格校验 `allowText` 与 `required`）。
+  `PermissionRequest`，仅投影 `allow_once` `'submit'` 选项（Managed 提问协议无字符
+  串选项忽略变体，故 `respondApproval` 对提问动作直接 fail-closed 返回 `rejected`）。
+  `respondApproval` 与 `respondQuestion` 对未知动作 id、非法选项、同一 `actionId`
+  的并发重复派发、以及非法、缺失必填项或超体积上限的回答均 fail-closed 返回
+  `rejected`（`normalizeManagedQuestionAnswers` 同时接受十进制索引与显式问题 id，
+  对多选要求逗号边界最长前缀精确覆盖选项才解码为 `optionIds`，既完整解码含逗号标签及
+  混合选择又绝不把带逗号自由文本误拆成虚构选项，严格校验 `allowText`、`required`、
+  单条 8192 字符上限，并经由 `canonicalQuestionAnswers` 实施规范排序与 32 KiB
+  `MAX_MANAGED_QUESTION_ANSWER_BYTES` 上限）。
 - **快照稳定与生命周期。** `operations` 记忆化为冻结数组，仅在追踪状态变化时重建。
   `deps.signal` 触发 abort 时释放全部结算订阅；构造时若 `deps.signal?.aborted` 已为
   `true` 则同步跳过订阅。
@@ -118,6 +128,8 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `useManagedPendingActions` 与 `ManagedAgentProvider` 接入
   `createManagedChatController`。
 - **切片 3c —— `ManagedSessionsPage` 切换至 `ChatSurface`** 并过浏览器级视觉前后
-  对比门（实现双模式首个真实 UI 收敛）。
+  对比门（实现双模式首个真实 UI 收敛）。切换前需明确共享 `AskUserQuestion` 卡片是
+  否学习 `required` 与 `allowText`（以及是否改为传递结构化选项 id 而非逗号拼接的标
+  签），使可选题可跳过、`allowText: false` 题目不再展示必然被适配器拒绝的自由文本框。
 - **Daemon 主列切换（2f 其余）**、**ChatPane 收敛（slice 4）**、**状态栈 parity
   （slice 5）** 与 **边界守卫（slice 6）**。

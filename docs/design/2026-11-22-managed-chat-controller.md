@@ -61,40 +61,51 @@ actions, and Java command operations into `SessionChatController`:
 - **Phase projection (`mapManagedPhase` + `deriveChatPhase`).** Exhaustively
   maps all 10 `ManagedAgentSessionPhase` values (`created`/`completed`/`cancelled`
   → `'idle'`, `failed` → `'failed'`, `cancelling` → `'cancelling'`, active
-  runtime/tool phases → `'running'`), while combining with `operations` so an
-  in-flight `cancel` lifts a running session to `'cancelling'` and an in-flight
-  `submit` lifts an idle/failed session to `'submitting'`.
+  runtime/tool phases → `'running'`), while combining with `operations` so any
+  non-terminal `cancel` (including `unsettled` after `recovery_blocked`) lifts a
+  running session to `'cancelling'` and an in-flight `submit` lifts an
+  idle/failed session to `'submitting'`.
 - **Admission ≠ establishment.** Each of `submit`, `cancel`, `respondApproval`,
   and `respondQuestion` dispatches through `deps.*` returning a
-  `ManagedTransportAdmission`. A `'rejected'` admission is not tracked; an
-  `'unknown'` or thrown transport abandons the tracked row so `phase` never
-  latches. An `'accepted'` admission stays `'pending'` (`outcome: 'unsettled'`)
-  until authoritative settlement evidence arrives via
-  `subscribeOperationSettlement` (`completed` → `'established'`,
-  `failed`/`cancelled` → `'failed'`, `recovery_blocked` → `'unsettled'`),
-  `subscribeTurnSettlement` (projected per kind: a turn completing on its own
-  fails a bound `cancel`), or `subscribeActionSettlement` (`resolved` →
-  `'established'`, `expired`/`superseded`/`failed` → `'failed'`). Settlements
-  that arrive while a transport call is still in flight are buffered and applied
-  immediately when admission resolves.
-- **Turn-scoped cancel with bounded retention.** `cancel()` fails closed when
+  `ManagedTransportAdmission`. A `'rejected'` admission is not tracked and omits
+  `outcome` (matching `contract.ts` and the daemon adapter); an `'unknown'` or
+  thrown transport removes the tracked row so `phase` never latches. An
+  `'accepted'` admission stays `'pending'` (`outcome: 'unsettled'`) until
+  authoritative settlement evidence arrives via `subscribeOperationSettlement`
+  (`completed` → `'established'`, `failed`/`cancelled` → `'failed'`,
+  `recovery_blocked` → `'unsettled'`), `subscribeTurnSettlement` (projected per
+  kind: a turn completing on its own fails a bound `cancel`), or
+  `subscribeActionSettlement` (`resolved` → `'established'`,
+  `expired`/`superseded`/`failed` → `'failed'`). Already-terminal rows never
+  absorb a later settlement; settlements that arrive while any transport
+  dispatch is in flight and match no active row are buffered by
+  operation/turn/action id, consumed on bind (for operation and action ids), and
+  cleared when all in-flight dispatches drain.
+- **Turn-scoped cancel with per-target retention.** `cancel()` fails closed when
   `deps.activeTurnId` is `undefined` (managed cancel requires a `turnId`),
   captures `cancelTarget = deps.activeTurnId` at dispatch time, keeps the
-  retained operation's target bare `{ sessionId }` so `retainOperations` stays
-  bounded per session, and stamps `turnId: cancelTarget` onto the returned
-  `IntentResult.target` copy so `ChatSurface`'s turn-scoped cancel guard works
-  identically for managed sessions.
+  retained operation's target bare `{ sessionId }` so `retainOperations` keeps
+  at most one terminal entry per `(kind, target)` (one terminal row per session
+  for `submit` and `cancel`, and one per `requestId` for `approval` and
+  `question`, matching the daemon adapter), and stamps `turnId: cancelTarget`
+  onto the returned `IntentResult.target` copy so `ChatSurface`'s turn-scoped
+  cancel guard works identically for managed sessions.
 - **Pending permissions and questions.** Permission actions (`kind !== 'question'`)
   reuse `toManagedPermissionRequest(action, messages)`. Question actions
   (`kind === 'question'`) project through `toManagedQuestionPermissionRequest`
   into the `PermissionRequest` shape consumed by `ChatSurface`'s shared
-  `AskUserQuestion` card (`allow_once` `'submit'` option and `reject_once`
-  `'deny'` dismiss option). Both `respondApproval` and `respondQuestion` fail
-  closed on unknown action ids, invalid options, concurrent duplicate dispatches
-  for the same `actionId`, or invalid/missing required question answers
-  (`normalizeManagedQuestionAnswers` accepts both decimal question indices and
-  explicit question ids, matches option ids or labels, enforces `allowText` and
-  `required`, and rejects anything else before calling transport).
+  `AskUserQuestion` card with only the `allow_once` `'submit'` option (the
+  managed question wire format carries no string-option dismiss variant, so
+  `respondApproval` fails closed on question actions). Both `respondApproval`
+  and `respondQuestion` fail closed on unknown action ids, invalid options,
+  concurrent duplicate dispatches for the same `actionId`, or invalid/missing
+  required/over-cap question answers (`normalizeManagedQuestionAnswers` accepts
+  both decimal question indices and explicit question ids, requires an exact
+  longest-first comma-boundary cover of option labels/ids for multi-select
+  options so comma-containing labels decode intact while free text starting with
+  a label stays verbatim text, enforces `allowText`, `required`, the 8192-char
+  per-answer text limit, and routes through `canonicalQuestionAnswers` for
+  canonical ordering and the 32 KiB `MAX_MANAGED_QUESTION_ANSWER_BYTES` cap).
 - **Snapshot stability and lifetime.** `operations` is memoized into a frozen
   array rebuilt only when tracked state changes. All settlement subscriptions
   are released when `deps.signal` aborts, and skipped synchronously if
@@ -135,5 +146,10 @@ actions, and Java command operations into `SessionChatController`:
   into `createManagedChatController`.
 - **Slice 3c — `ManagedSessionsPage` switch onto `ChatSurface`** with the
   browser before/after visual gate (first real UI convergence across both modes).
+  Before switching, decide whether the shared `AskUserQuestion` card should
+  learn `required` and `allowText` (and optionally carry structured option ids
+  instead of comma-joined labels) so optional questions can be skipped and
+  `allowText: false` questions do not show a free-text input that the adapter
+  rejects.
 - **Daemon main-column switch (rest of 2f)**, **ChatPane convergence (slice 4)**,
   **status-stack parity (slice 5)**, and **boundary guards (slice 6)**.
