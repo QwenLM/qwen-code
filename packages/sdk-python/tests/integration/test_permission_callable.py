@@ -52,5 +52,7 @@ def test_callbacks_with_unbound_keyword_only_arguments_fail_early(
         pass
 
     callback = permission if callback_option == "can_use_tool" else stderr
-    with pytest.raises(TypeError, match=callback_option):
+    with pytest.raises(
+        TypeError, match=rf"{callback_option}.*no required keyword-only arguments"
+    ):
         query("hello", {callback_option: callback})

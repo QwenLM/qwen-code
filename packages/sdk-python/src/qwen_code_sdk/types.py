@@ -300,16 +300,19 @@ def _validate_can_use_tool_callable(value: object, error_type: type[Exception]) 
     if not callable(value):
         raise error_type("can_use_tool must be callable")
 
-    if not iscoroutinefunction(value) and not iscoroutinefunction(value.__call__):
+    if not iscoroutinefunction(value) and not iscoroutinefunction(type(value).__call__):
         raise error_type("can_use_tool must be an async callable")
 
     try:
-        sig = signature(value)
+        sig = signature(value, follow_wrapped=False)
     except (TypeError, ValueError):
         return
 
     if not _supports_argument_count(sig, 3):
-        raise error_type("can_use_tool must accept exactly 3 positional arguments")
+        raise error_type(
+            "can_use_tool must accept exactly 3 positional arguments "
+            "and no required keyword-only arguments"
+        )
 
 
 def _validate_stderr_callable(value: object, error_type: type[Exception]) -> None:
@@ -317,12 +320,15 @@ def _validate_stderr_callable(value: object, error_type: type[Exception]) -> Non
         raise error_type("stderr must be callable")
 
     try:
-        sig = signature(value)
+        sig = signature(value, follow_wrapped=False)
     except (TypeError, ValueError):
         return
 
     if not _supports_argument_count(sig, 1):
-        raise error_type("stderr must accept exactly 1 positional argument")
+        raise error_type(
+            "stderr must accept exactly 1 positional argument "
+            "and no required keyword-only arguments"
+        )
 
 
 def _supports_argument_count(sig: Signature, count: int) -> bool:

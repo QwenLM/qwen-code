@@ -301,8 +301,11 @@ default timeout is 60 seconds.
 
 The `context` argument includes `cancel_event`, `suggestions`, and
 `blocked_path` when the CLI provides a path-specific permission target.
-`can_use_tool` must be an `async def` callback accepting
-`(tool_name, tool_input, context)`. `stderr` must accept a single `str`.
+`can_use_tool` must be an async callable: an `async def` function or an instance
+with an async `__call__` method accepting `(tool_name, tool_input, context)`.
+`stderr` must accept a single `str`. Neither callback may require additional
+keyword-only arguments. Decorated callbacks are checked against the wrapper
+that the SDK calls, rather than the function referenced by `__wrapped__`.
 
 ### Handling `ask_user_question`
 
