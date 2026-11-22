@@ -61,6 +61,7 @@ class ManagedSchemaTest {
             Map.entry("ma_runtime_binding", List.of("binding_id")),
             Map.entry("ma_runtime_session", List.of("scope_id", "runtime_session_id")),
             Map.entry("ma_tool_execution", List.of("execution_call_id")),
+            Map.entry("ma_runtime_stage", List.of("execution_call_id_hash", "delivery_seq")),
             Map.entry("ma_storage_owner", List.of("physical_id")),
             Map.entry("ma_tenant_guard", List.of("tenant_id", "guard_domain")),
             Map.entry("ma_read_lease", List.of("lease_id")),
@@ -462,15 +463,14 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void retainsBytePreciseIdentitiesAndSeparatePublicUniqueness() throws Exception {
+    void retainsBytePreciseTenantScopedSessionIdentities() throws Exception {
         DataSource source = initialized();
         try (var connection = source.getConnection()) {
             session(connection, "tenant", "session", "PUBLIC");
             session(connection, "tenant", "session ", "PUBLIC");
             session(connection, "tenant", "SESSION", "PUBLIC");
             session(connection, "another", "session", "CONTROL");
-            assertThrows(
-                    SQLException.class, () -> session(connection, "third", "session", "PUBLIC"));
+            session(connection, "third", "session", "PUBLIC");
             try (var statement = connection.createStatement();
                     var result =
                             statement.executeQuery(

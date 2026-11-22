@@ -158,6 +158,22 @@ public final class JdbcToolExecutionRepository
         }
     }
 
+    public static ToolExecutionRecord settleBackgroundProcessOnConnection(
+            Connection connection,
+            String processExecutionCallId,
+            Map<String, Object> result) throws SQLException {
+        ToolExecutionRecord current = selectByExecutionId(connection, processExecutionCallId, true);
+        if (current == null || current.isTerminal()
+                || current.getState() != ToolExecutionRecord.State.PREPARED) {
+            return current;
+        }
+        Instant now = JdbcRepositorySupport.databaseNow(connection);
+        ToolExecutionRecord settled = current.withResult(result, current.getLastSequence(), now)
+                .withVersion(current.getVersion() + 1);
+        updateExecution(connection, settled);
+        return settled;
+    }
+
     @Override
     public ToolExecutionRecord findByExecutionCallId(String executionCallId) {
         String id = BrokerValues.requireId(executionCallId,

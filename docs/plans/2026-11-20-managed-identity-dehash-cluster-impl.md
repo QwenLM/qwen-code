@@ -107,11 +107,11 @@ Execution notes:
    breaks on `NOT NULL DEFAULT` / generated columns); keep binary payloads (`record_bytes`, `object_key`,
    `capture_object_key`) as `VARBINARY`. Drop the 60 "Hashed" columns plus same-family derived
    identity keys (`physical_key`, `storage_key`, `holder_key`, `*_resource_key`, `import_key`,
-   `runtime_binding_key`, `execution_storage_key`, `source_record_key`, `delivery_key`,
+   `runtime_binding_key`, `execution_storage_key`, `delivery_key`,
    `result_operation_key`, `deletion_operation_key`). Keep the 32 content-digest columns and
    git-sha `VARCHAR(64)` columns. Rebuild every unique/index that used a dropped key on raw
-   columns; drop `ma_session.uk_ma_session_scope` (redundant with PK). Redefine the two generated
-   columns (`ma_request_receipt.decision_scope_key`, `ma_side_query.active_slot`) over raw scope
+   columns; drop `ma_session.uk_ma_session_scope` (redundant with PK). Redefine the generated
+   column `ma_side_query.active_slot` over raw scope
    columns; rewrite the three CHECKs (`ck_ma_resource_capture`, `ck_ma_ref_binding`,
    `ck_ma_storage_registered`) over raw columns. Keep the registered-Session restriction
    explicit when joins move off the `ma_session` hash columns, and add raw `tenant_id` /

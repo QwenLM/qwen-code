@@ -828,6 +828,7 @@ export const RU_PART5: Record<
     `Не удалось восстановить панель: ${v?.error ?? 'Неизвестная ошибка'}`,
   'userMessage.showMore': 'Показать ещё',
   'userMessage.showLess': 'Свернуть',
+  'userMessage.automatic.title': 'Автоматическое срабатывание',
   'userMessage.sendFailed': 'Не удалось отправить',
   'userMessage.retrySend': 'Повторить отправку сообщения',
   'userMessage.edit': 'Изменить сообщение',

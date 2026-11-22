@@ -220,10 +220,10 @@ resource_key`）、`JdbcHostedCleanupDebtStore`（`owner_key > ?`）、
   又作一致的 `FOR UPDATE` 获取顺序（防死锁）。替换它需要复合元组序（如
   `(tenant_id, session_id, resource_id)`）加字典序 row-value 游标比较，且所有锁这些
   行的事务必须保持同一全序。
-- **压在哈希键上的生成列。** `ma_request_receipt.decision_scope_key`
-  （`GENERATED … RTRIM(scope_key)`，V1:681）与 `ma_side_query.active_slot`
-  （`GENERATED … actor_scope_key`，V1:1333）由哈希列派生；二者必须在原始 scope 列上
-  重定义，或连同其消费方一起删除。
+- **压在哈希键上的生成列。** `ma_side_query.active_slot`
+  （`GENERATED … actor_scope_key`，V1:1333）由哈希列派生；必须在原始 scope 列上
+  重定义，或连同其消费方一起删除。`ma_request_receipt.decision_scope_key` 已由
+  [删除无用 schema 对象](2026-11-21-managed-schema-dead-objects.zh-CN.md)移除。
 - **压在哈希键上的 CHECK 约束。** `ck_ma_resource_capture`（scope_key/slot_key 空值
   耦合，V1:508）、`ck_ma_ref_binding`（runtime_binding_key，V1:536）、
   `ck_ma_storage_registered`（physical_key，V1:989）引用哈希列，必须在原始列上重写。

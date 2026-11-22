@@ -245,7 +245,8 @@ final class JournalStoreRows {
         requireResourceScope(resource, tenantId, workspaceId, sessionId,
                 resourceId);
         if (!"REFERENCED".equals(resource.state())
-                && !settledPublishedConfiguration(resource)) {
+                && !settledPublishedConfiguration(resource)
+                && !publishedToolResult(resource)) {
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
@@ -273,6 +274,20 @@ final class JournalStoreRows {
                 ? 0 : 1;
         return resource.byteLength() >= minimum
                 && resource.byteLength() <= limit;
+    }
+
+    /**
+     * A running background capture's published tool-result resources stay
+     * PUBLISHED until admission promotes them, and promotion requires the
+     * completed capture to be VERIFIED. The child-run journal references the
+     * manifest while the process is still running, so the commit gate must
+     * accept these kinds at PUBLISHED just as the reader and
+     * {@link #verifyStoredResource} already do; the storage-kind integrity
+     * rules there still apply (TOOL_PUBLICATION outcomes stay fail-closed).
+     */
+    static boolean publishedToolResult(ResourceRow resource) {
+        return "PUBLISHED".equals(resource.state())
+                && toolResultLimit(resource.kind()) > 0;
     }
 
     HeadRow findHeadForUpdate(String tenantId, String sessionId) {

@@ -700,8 +700,9 @@ public class JdbcManagedActionStore
         List<String[]> reserved = jdbc.query(
                         "SELECT request_digest, result_operation_ref FROM ma_request_receipt WHERE"
                                 + " namespace = 'ACTION_DECISION' AND tenant_id = ? AND"
-                                + " decision_scope = ?",
-                (r, row) -> new String[]{r.getString(1), r.getString(2)}, tenantId, ManagedSchemaKeys.identity(actionScope));
+                                + " scope_ref = ?",
+                (r, row) -> new String[]{r.getString(1), r.getString(2)}, tenantId,
+                ManagedSchemaKeys.identity(ManagedIdentityRefs.receiptScopeRef(tenantId, actionScope)));
         if (!reserved.isEmpty()) {
             if (!decision.equals(reserved.getFirst()[0])) {
                 throw new ManagedAgentException(409, "action_already_resolved", "A different Action decision is already admitted.");

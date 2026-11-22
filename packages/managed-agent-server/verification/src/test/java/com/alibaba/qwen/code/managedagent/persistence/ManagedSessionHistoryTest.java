@@ -72,7 +72,7 @@ class ManagedSessionHistoryTest {
             seedSession(jdbc, "tenant", "archive", "ARCHIVING", "PUBLIC");
             seedSession(jdbc, "tenant", "active", "ACTIVE", "PUBLIC");
             seedSession(jdbc, "tenant", "unrequested", "CLOSING", "PUBLIC");
-            // PUBLIC IDs are globally unique; a CONTROL row can reuse one in another tenant.
+            // Another tenant reuses the same Session ID.
             seedSession(jdbc, "other", "close", "CLOSING", "CONTROL");
             seedOperation(jdbc, "tenant", "close", "close-terminal", "CLOSE", "FAILED", 900, 900);
             seedOperation(jdbc, "tenant", "close", "close-early", "CLOSE", "PENDING", 90, 100);

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -191,6 +192,45 @@ final class ManagedSessionRetirementStore {
         if (!cleanupOwners.isEmpty()) {
             return true;
         }
+        var stagedRows = jdbc.queryForList(
+                "SELECT id, execution_call_id_hash, delivery_seq FROM ma_runtime_stage"
+                        + " WHERE runtime_session_key = ? ORDER BY execution_call_id_hash, delivery_seq"
+                        + " LIMIT ? FOR UPDATE",
+                ManagedSessionStore.sessionScopeKey(tenant, session),
+                limit);
+        for (var row : stagedRows) {
+            jdbc.update(
+                    "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'"
+                            + " AND owner_ref = ? AND owner_revision = ?",
+                    tenant,
+                    session,
+                    ManagedSchemaKeys.identity((String) row.get("execution_call_id_hash")),
+                    row.get("delivery_seq"));
+            jdbc.update("DELETE FROM ma_runtime_stage WHERE id = ?", row.get("id"));
+        }
+        if (!stagedRows.isEmpty()) {
+            return true;
+        }
+        var stagedRefs = jdbc.queryForList(
+                "SELECT owner_ref, owner_revision, resource_id FROM ma_resource_ref"
+                        + " WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'"
+                        + " ORDER BY owner_ref, owner_revision, resource_id LIMIT ? FOR UPDATE",
+                tenant,
+                session,
+                limit);
+        for (var row : stagedRefs) {
+            jdbc.update(
+                    "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind = 'RUNTIME_STAGE'"
+                            + " AND owner_ref = ? AND owner_revision = ? AND resource_id = ?",
+                    tenant,
+                    session,
+                    row.get("owner_ref"),
+                    row.get("owner_revision"),
+                    row.get("resource_id"));
+        }
+        if (!stagedRefs.isEmpty()) {
+            return true;
+        }
         var streams =
                 jdbc.queryForList(
                         "SELECT stream_kind, stream_id FROM ma_event_stream WHERE tenant_id = ? AND"
@@ -333,6 +373,13 @@ final class ManagedSessionRetirementStore {
         }
         if (hasJournalPacks(jdbc, tenant, session)) {
             throw new IllegalStateException("Session journal pack collection is incomplete");
+        }
+        String retirementScope = ManagedSessionStore.sessionScopeKey(tenant, session);
+        if (!jdbc.queryForList("SELECT id FROM ma_runtime_stage WHERE runtime_session_key = ? LIMIT 1",
+                retirementScope).isEmpty()
+                || !jdbc.queryForList("SELECT resource_id FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ?"
+                        + " AND owner_kind = 'RUNTIME_STAGE' LIMIT 1", tenant, session).isEmpty()) {
+            throw new IllegalStateException("Runtime staging collection is incomplete");
         }
         var operations =
                 jdbc.queryForList(

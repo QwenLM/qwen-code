@@ -87,7 +87,8 @@ class SessionOssStorageTest {
         var stored = resources.readExternal(TENANT, WORKSPACE, SESSION, "res-1");
         assertThat(stored.bytes()).isEqualTo(value);
         assertThat(stored.digest()).isEqualTo(JournalStoreRows.sha256(value));
-        assertThat(allocation.objectKey()).startsWith("test-resources/");
+        assertThat(allocation.objectKey())
+                .startsWith("test-resources/" + TENANT + "/" + SESSION + "/res-1/");
     }
 
     @Test
@@ -180,6 +181,10 @@ class SessionOssStorageTest {
         insertTransaction(1, first);
         insertTransaction(2, second);
         assertThat(packs.compactOnce(TENANT, WORKSPACE, SESSION)).isTrue();
+        assertThat(new String(jdbc.queryForObject("SELECT object_key FROM ma_journal_pack"
+                + " WHERE tenant_id = ? AND session_id = ?", byte[].class, TENANT, SESSION),
+                java.nio.charset.StandardCharsets.UTF_8))
+                .startsWith("test-resources/packs/" + TENANT + "/" + SESSION + "/pack-");
         assertThat(jdbc.queryForObject("SELECT packed_through_revision FROM ma_session_head"
                 + " WHERE tenant_id = ? AND session_id = ?", Long.class, TENANT, SESSION))
                 .isEqualTo(2L);

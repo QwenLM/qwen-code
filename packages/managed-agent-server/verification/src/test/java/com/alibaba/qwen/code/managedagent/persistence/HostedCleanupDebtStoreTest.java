@@ -121,6 +121,42 @@ class HostedCleanupDebtStoreTest {
         assertThat(second.exhausted()).isTrue();
     }
 
+    // Phase 3b §4.8: a seal that certified this debt as a background hold owns
+    // its discharge through the drain-only wake, so the scan must not hand it
+    // to a cleanup-only load. Any acquisition clears the certificate and the
+    // debt becomes retryable again.
+    @Test
+    void skipsADebtWhoseSealCertifiedItAsABackgroundHold() {
+        String session = session("certified");
+        String prompt = UUID.randomUUID().toString();
+        owed(TENANT, WORKSPACE, session, prompt, null);
+        certifiedHead(session, 1, 3);
+
+        assertThat(store.findOwed(10, -1, "").debts()).isEmpty();
+
+        // A stamp for another revision certifies nothing about this prefix.
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 2 WHERE session_id = ?", session);
+        assertThat(store.findOwed(10, -1, "").debts()).singleElement()
+                .satisfies(debt -> assertThat(debt.promptId()).isEqualTo(prompt));
+
+        // An acquired (live) head has no certificate either.
+        jdbc.update("UPDATE ma_session_head SET wake_seal_revision = 3, state = 'ACTIVE',"
+                + " wake_seal_background = 0 WHERE session_id = ?", session);
+        assertThat(store.findOwed(10, -1, "").debts()).singleElement()
+                .satisfies(debt -> assertThat(debt.promptId()).isEqualTo(prompt));
+    }
+
+    private void certifiedHead(String session, int background, long revision) {
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,"
+                + " workspace_id, session_id, harness_session_id, head_kind, state,"
+                + " writer_generation, journal_revision, committed_sequence,"
+                + " last_commit_digest, activation_epoch, packed_through_revision,"
+                + " wake_seal_revision, wake_seal_background, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, ?, 'MANAGED_SESSION', 'SEALED', 1, ?, ?,"
+                + " 'digest', 0, 0, ?, ?, 0, 0)",
+                TENANT, WORKSPACE, session, session, revision, revision, revision, background);
+    }
+
     private String session(String suffix) {
         return session(TENANT, suffix);
     }
