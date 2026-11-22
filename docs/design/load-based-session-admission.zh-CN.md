@@ -156,6 +156,7 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 - **两个信号。** 主机 load average 捕捉整机饱和，包括 daemon 之外进程的
   压力。事件循环延迟直接捕捉 daemon 被饿死，且在 `os.loadavg()` 恒为零的
   Windows 上仍然有效。
+- **观测缺口锁存。** 事件循环停摆时 tick 不运行，缓存判定会在 lag 信号最该起作用时保持健康。监视器在最后一次 tick 的单调年龄超过三个间隔时锁存 `observation_gap`，以同一 503 家族拒绝；锁存仅在三次按时健康 tick 后清除，跳过的间隔不算健康读数，冷启动（尚无 tick）保持 fail-open。新鲜度时钟用单调钟（`performance.now()`）而非 `Date.now()`，NTP 跳变与挂起不会伪造缺口。
 - **比值分子分母同为主机作用域。** `/proc/loadavg` 不做命名空间隔离，而
   `os.availableParallelism()` 遵守 cgroup 配额与亲和性掩码；两者相除曾让
   受限 CPU 的 daemon 在空闲时永久闩锁拒绝。分母因此取 `os.cpus().length`，

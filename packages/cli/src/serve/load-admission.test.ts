@@ -16,6 +16,8 @@ import {
   LOAD_RATIO_EXIT,
   type LoadAdmissionSignals,
 } from './load-admission.js';
+import { SystemOverloadedError } from './acp-session-bridge.js';
+import { createTotalSessionAdmissionController } from './total-session-admission.js';
 
 describe('createLoadAdmissionMonitor', () => {
   let signals: LoadAdmissionSignals;
@@ -236,5 +238,89 @@ describe('createLoadAdmissionMonitor', () => {
       eventLoopLagP99Ms: 0,
       sampledAtMs: 0,
     });
+  });
+});
+
+describe('load admission observation-gap latch', () => {
+  let signals: LoadAdmissionSignals;
+  let monoNow: number;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    signals = { loadRatio: 0.2, eventLoopLagP99Ms: 5 };
+    monoNow = 1_000;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const makeMonitor = () =>
+    createLoadAdmissionMonitor({
+      readSignals: () => signals,
+      now: () => monoNow,
+    });
+
+  it('latches a sampling blackout as non-admissible with its own reason', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    // Monotonic clock jumps past three intervals without any tick firing
+    // (a stalled event loop): the cached healthy verdict must not admit.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    const gap = monitor.snapshot();
+    expect(gap.overloaded).toBe(true);
+    expect(gap.reason).toBe('observation_gap');
+
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+      loadAdmission: monitor,
+    });
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
+    ).toThrow(SystemOverloadedError);
+    monitor.dispose();
+  });
+
+  it('clears the latch only after three timely healthy ticks', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // The first tick after the stall is untimely (its age spans the gap) and
+    // must not count; three timely healthy ticks then clear the latch.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES - 1; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+      expect(monitor.snapshot().reason).toBe('observation_gap');
+    }
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+    });
+    monitor.dispose();
+  });
+
+  it('does not count an untimely tick as a healthy reading', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // One late tick (the stall ended) is not enough to clear the latch.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+    monitor.dispose();
   });
 });

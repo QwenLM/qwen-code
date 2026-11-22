@@ -179,6 +179,7 @@ as today.
   including pressure from processes outside the daemon. Event-loop lag
   captures daemon starvation directly, and still works on Windows where
   `os.loadavg()` is always zero.
+- **Observation-gap latch.** A stalled event loop runs no ticks, so the cached verdict would stay healthy exactly when the lag signal matters. The monitor latches `observation_gap` when the monotonic age of the last tick exceeds three intervals and refuses through the same 503 family; the latch clears only after three timely healthy ticks, skipped intervals never count as healthy readings, and cold start (no tick yet) stays fail-open. The freshness clock is monotonic (`performance.now()`), not `Date.now()`, so NTP steps and suspends cannot fake a gap.
 - **Host scope on both sides of the ratio.** `/proc/loadavg` is not
   namespaced, while `os.availableParallelism()` honours cgroup quota and
   affinity masks; dividing one by the other latched a CPU-limited daemon

@@ -517,23 +517,30 @@ describe('scheduled-task keepalive', () => {
     }
   });
 
-  it('retries at the next interval after load-admission refusals instead of backing off', async () => {
+  it('retries at the next tick after load refusals and keeps the failure count', async () => {
     vi.useFakeTimers();
     try {
       await updateCronTasks(workspace, () => [
         task({ id: 'a', sessionId: 'sess-1', sessionOwnedByTask: false }),
       ]);
-      // Record attempt timestamps: the internal interval and the tasks-file
-      // watcher can add extra ticks, but every attempt still respects the
-      // backoff gate, so the GAP between the second refusal and the next
-      // attempt is what discriminates one interval from doubled backoff.
+      // Record attempt timestamps; the refusal settles 40ms after the tick
+      // began (awaited work), so arming the gate at +intervalMs would skip a
+      // whole cadence. After two load refusals a genuine failure must back
+      // off exactly one step (2x interval), proving the load branch kept the
+      // failure count at zero instead of incrementing it.
       const attemptTimes: number[] = [];
-      let refusalsLeft = 2;
+      let loadRefusalsLeft = 2;
+      let genuineFailureLeft = 1;
       const restoreSession = vi.fn(async () => {
         attemptTimes.push(Date.now());
-        if (refusalsLeft > 0) {
-          refusalsLeft -= 1;
+        vi.setSystemTime(Date.now() + 40);
+        if (loadRefusalsLeft > 0) {
+          loadRefusalsLeft -= 1;
           throw new SystemOverloadedError('cpu_load', 2.5, 20);
+        }
+        if (genuineFailureLeft > 0) {
+          genuineFailureLeft -= 1;
+          throw new Error('transcript gone');
         }
         return undefined;
       });
@@ -557,15 +564,26 @@ describe('scheduled-task keepalive', () => {
       await vi.advanceTimersByTimeAsync(10_001);
       await ka.tick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(attemptTimes.length).toBeGreaterThanOrEqual(2);
+      expect(attemptTimes).toHaveLength(2);
       const secondRefusalAt = attemptTimes[1];
       await vi.advanceTimersByTimeAsync(10_001);
       await ka.tick();
       await vi.advanceTimersByTimeAsync(0);
-      expect(attemptTimes.length).toBeGreaterThanOrEqual(3);
-      // Load refusal keeps the failure count: the next attempt lands one
-      // interval after the second refusal, not two (exponential backoff).
-      expect(attemptTimes[2] - secondRefusalAt).toBeLessThanOrEqual(10_001);
+      expect(attemptTimes).toHaveLength(3);
+      // Next tick after the refusal's tick (the 40ms settle epsilon rides
+      // along), not one interval after it settled.
+      expect(attemptTimes[2] - secondRefusalAt).toBeLessThanOrEqual(10_080);
+      expect(attemptTimes[2] - secondRefusalAt).toBeGreaterThanOrEqual(9_960);
+      const genuineFailureAt = attemptTimes[2];
+      await vi.advanceTimersByTimeAsync(10_001);
+      await ka.tick();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attemptTimes).toHaveLength(4);
+      // Kept count (0) + one genuine failure = 1 -> one interval of backoff.
+      // Incrementing in the load branch would make it 3 -> four intervals.
+      const gap = attemptTimes[3] - genuineFailureAt;
+      expect(gap).toBeGreaterThanOrEqual(10_000);
+      expect(gap).toBeLessThanOrEqual(10_120);
       ka.stop();
     } finally {
       vi.useRealTimers();

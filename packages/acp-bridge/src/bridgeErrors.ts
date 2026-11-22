@@ -316,11 +316,11 @@ export class TotalSessionLimitExceededError extends Error {
  * error type so routes can branch without text-matching.
  */
 export class SystemOverloadedError extends Error {
-  readonly reason: 'cpu_load' | 'event_loop_lag';
+  readonly reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap';
   readonly loadRatio: number;
   readonly eventLoopLagP99Ms: number;
   constructor(
-    reason: 'cpu_load' | 'event_loop_lag',
+    reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap',
     loadRatio: number,
     eventLoopLagP99Ms: number,
   ) {

@@ -14,7 +14,10 @@ export const EVENT_LOOP_LAG_ENTER_MS = 1_000;
 export const EVENT_LOOP_LAG_EXIT_MS = 250;
 export const LOAD_ADMISSION_SUSTAIN_SAMPLES = 3;
 
-export type LoadAdmissionReason = 'cpu_load' | 'event_loop_lag';
+export type LoadAdmissionReason =
+  | 'cpu_load'
+  | 'event_loop_lag'
+  | 'observation_gap';
 
 export interface LoadAdmissionSnapshot {
   readonly enabled: boolean;
@@ -45,6 +48,11 @@ export interface LoadAdmissionMonitorOptions {
   /** Test seam: replaces the real os/perf_hooks reads. */
   readonly readSignals?: () => LoadAdmissionSignals;
   readonly sampleMs?: number;
+  /**
+   * Monotonic millisecond clock for the observation-gap latch. Deliberately
+   * not Date.now(): an NTP step or suspend must not fake a sampling gap.
+   */
+  readonly now?: () => number;
 }
 
 export interface LoadAdmissionMonitor {
@@ -96,11 +104,20 @@ export function createLoadAdmissionMonitor(
   options: LoadAdmissionMonitorOptions = {},
 ): LoadAdmissionMonitor {
   const sampleMs = options.sampleMs ?? LOAD_ADMISSION_SAMPLE_MS;
+  const now = options.now ?? (() => performance.now());
   const cpu = freshSignalState();
   const lag = freshSignalState();
   let latest: LoadAdmissionSignals = { loadRatio: 0, eventLoopLagP99Ms: 0 };
   let sampledAtMs = 0;
   let disposed = false;
+  // Observation-gap latch: a stalled event loop runs no ticks, so the cached
+  // verdict would stay healthy exactly when the lag signal matters. Latch
+  // when the monotonic age of the last tick exceeds three intervals; clear
+  // only after three timely healthy ticks. Cold start (no tick yet) stays
+  // fail-open by design.
+  let lastTickMono: number | null = null;
+  let gapLatched = false;
+  let healthyTimelyStreak = 0;
 
   let histogram: ReturnType<typeof monitorEventLoopDelay> | undefined;
   let readSignals = options.readSignals;
@@ -124,6 +141,9 @@ export function createLoadAdmissionMonitor(
   }
 
   const tick = () => {
+    const mono = now();
+    const timely = lastTickMono === null || mono - lastTickMono <= 3 * sampleMs;
+    lastTickMono = mono;
     latest = readSignals!();
     sampledAtMs = Date.now();
     advanceSignal(cpu, latest.loadRatio, LOAD_RATIO_ENTER, LOAD_RATIO_EXIT);
@@ -133,25 +153,47 @@ export function createLoadAdmissionMonitor(
       EVENT_LOOP_LAG_ENTER_MS,
       EVENT_LOOP_LAG_EXIT_MS,
     );
+    // Skipped intervals are not healthy readings: only timely ticks with
+    // both signals clear count toward releasing the gap latch.
+    if (timely && !cpu.overloaded && !lag.overloaded) {
+      healthyTimelyStreak += 1;
+      if (gapLatched && healthyTimelyStreak >= LOAD_ADMISSION_SUSTAIN_SAMPLES) {
+        gapLatched = false;
+        healthyTimelyStreak = 0;
+      }
+    } else {
+      healthyTimelyStreak = 0;
+    }
   };
   const timer = setInterval(tick, sampleMs);
   timer.unref();
 
+  let frozen: LoadAdmissionSnapshot | null = null;
   return {
     snapshot(): LoadAdmissionSnapshot {
-      const overloaded = cpu.overloaded || lag.overloaded;
-      return {
+      // A disposed monitor is dead: freeze its last verdict instead of
+      // re-deriving a gap from a clock that keeps moving.
+      if (disposed && frozen) return frozen;
+      if (lastTickMono !== null && now() - lastTickMono > 3 * sampleMs) {
+        gapLatched = true;
+      }
+      const overloaded = gapLatched || cpu.overloaded || lag.overloaded;
+      const verdict = {
         enabled: true,
         overloaded,
-        reason: cpu.overloaded
-          ? 'cpu_load'
-          : lag.overloaded
-            ? 'event_loop_lag'
-            : null,
+        reason: gapLatched
+          ? 'observation_gap'
+          : cpu.overloaded
+            ? 'cpu_load'
+            : lag.overloaded
+              ? 'event_loop_lag'
+              : null,
         loadRatio: latest.loadRatio,
         eventLoopLagP99Ms: latest.eventLoopLagP99Ms,
         sampledAtMs,
       };
+      frozen = verdict;
+      return verdict;
     },
     dispose() {
       if (disposed) return;

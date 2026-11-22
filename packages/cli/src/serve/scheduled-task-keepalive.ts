@@ -407,7 +407,10 @@ export function startScheduledTaskKeepalive(
             // Keep the failure count and retry at the next interval.
             reviveState.set(sessionId, {
               failures: state?.failures ?? 0,
-              nextAttemptAt: Date.now() + intervalMs,
+              // Arm for the NEXT tick, not one interval after the refusal
+              // settles: the tick already spent awaited work before the
+              // admission threw, so +intervalMs would skip a whole cadence.
+              nextAttemptAt: Date.now(),
             });
             log.debug(
               'keepalive: revive refused by load admission, retry next interval',

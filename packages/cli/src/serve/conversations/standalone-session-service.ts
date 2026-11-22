@@ -2722,6 +2722,19 @@ export class StandaloneSessionService {
         this.recordCreationFailure(attempt, outcome);
         throw outcome;
       }
+      const loadRefusal =
+        error instanceof SystemOverloadedError
+          ? error
+          : error instanceof StandaloneSessionSpawnError &&
+              error.cause instanceof SystemOverloadedError
+            ? error.cause
+            : undefined;
+      if (loadRefusal) {
+        // Expected backpressure, not a creation defect: answer the retryable
+        // 503 without creation-failure diagnostics operators alert on.
+        attempt.cause ??= loadRefusal;
+        throw loadRefusal;
+      }
       attempt.cause ??= error;
       this.recordCreationFailure(attempt, error);
       throw error;

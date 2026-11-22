@@ -4127,6 +4127,11 @@ describe('StandaloneSessionService', () => {
     expect(harness.bridge.killSession).not.toHaveBeenCalled();
     expect(harness.quarantineRuntime).not.toHaveBeenCalled();
     expect(harness.reservation.release).toHaveBeenCalledOnce();
+    // Expected backpressure must not emit creation-failure diagnostics.
+    expect(harness.warn).not.toHaveBeenCalledWith(
+      'Standalone session creation failed.',
+      expect.anything(),
+    );
   });
 
   it.each([

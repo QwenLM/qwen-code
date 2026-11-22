@@ -758,3 +758,68 @@ describe('createServeApp load admission factory injection', () => {
     });
   });
 });
+
+describe('createServeApp load admission with injected workspace registry', () => {
+  it('never builds a monitor and reports disabled when a registry is injected', async () => {
+    const factory = vi.fn(() => ({
+      snapshot: () => ({
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load' as const,
+        loadRatio: 3,
+        eventLoopLagP99Ms: 1,
+        sampledAtMs: 1,
+      }),
+      dispose: vi.fn(),
+    }));
+    vi.doMock('./acp-session-bridge.js', async () => {
+      const actual = await vi.importActual<
+        typeof import('./acp-session-bridge.js')
+      >('./acp-session-bridge.js');
+      return {
+        ...actual,
+        createAcpSessionBridge: vi.fn(() => makeBridge()),
+      };
+    });
+
+    const { createServeApp } = await import('./server.js');
+    const { createWorkspaceRegistry } = await import('./workspace-registry.js');
+    const { ClientMcpSenderRegistry } = await import(
+      './acp-http/client-mcp-sender-registry.js'
+    );
+    const { DISABLED_LOAD_ADMISSION_SNAPSHOT } = await import(
+      './load-admission.js'
+    );
+    const registry = createWorkspaceRegistry([
+      {
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        sessionRuntimeBaseDir: '/tmp/wiring-registry-runtime',
+        primary: true,
+        trusted: true,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: makeBridge(),
+        workspaceService: {} as never,
+        routeFileSystemFactory: {} as never,
+        clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+      } as never,
+    ]);
+    const app = createServeApp(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        workspace: WS_BOUND,
+      } as Parameters<typeof createServeApp>[0],
+      () => 0,
+      { createLoadAdmissionMonitor: factory, workspaceRegistry: registry },
+    );
+    expect(factory).not.toHaveBeenCalled();
+    const res = await request(app)
+      .get('/daemon/status')
+      .set('Host', '127.0.0.1:0');
+    expect(res.status).toBe(200);
+    expect(res.body.runtime.loadAdmission).toEqual(
+      DISABLED_LOAD_ADMISSION_SNAPSHOT,
+    );
+  });
+});
