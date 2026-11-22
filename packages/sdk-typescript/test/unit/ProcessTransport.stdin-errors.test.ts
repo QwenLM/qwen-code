@@ -45,15 +45,30 @@ afterEach(async () => {
 });
 
 describe('ProcessTransport stdin errors', () => {
-  it('owns stdin error events instead of throwing an uncaught exception', () => {
-    const { stdin, transport, stderr } = setup();
+  it('owns stdin errors and reports the retained failure once at process exit', async () => {
+    const { child, stdin, transport, stderr } = setup();
     const error = Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
     expect(() => stdin.emit('error', error)).not.toThrow();
     expect(transport.isReady).toBe(false);
     expect(transport.exitError?.message).toContain('EPIPE');
+    Object.assign(child, { exitCode: 1 });
+    await expect(transport.waitForExit()).rejects.toMatchObject({
+      cause: error,
+    });
+    child.emit('close', 1, null);
+    await expect(transport.waitForExit()).rejects.toMatchObject({
+      cause: error,
+    });
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('CLI stdin error: write EPIPE'),
     );
+    expect(
+      stderr.mock.calls
+        .flat()
+        .filter((line: string) =>
+          line.includes('CLI stdin error: write EPIPE'),
+        ),
+    ).toHaveLength(1);
   });
 
   it('retains an asynchronous write error through process termination', async () => {
@@ -96,6 +111,7 @@ describe('ProcessTransport stdin errors', () => {
       if (order === 'process-first') stdin.emit('error', pipeError);
       const firstError = transport.exitError;
       Object.assign(child, { exitCode: 0 });
+      await expect(transport.waitForExit()).rejects.toBe(firstError);
       child.emit('close', 0, null);
       await expect(transport.waitForExit()).rejects.toBe(firstError);
       expect(firstError?.message).toContain(
