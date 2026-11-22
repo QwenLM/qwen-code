@@ -2,18 +2,48 @@ package com.alibaba.qwen.code.managedagent.config.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalRuntimeProviderFactory;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
 import org.junit.jupiter.api.Test;
 
+import java.net.URLClassLoader;
 import java.util.List;
 import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class RuntimeProviderRegistryTest {
+    @Test
+    void discoversApplicationProvidersEvenWhenTheCallingThreadCannotSeeThem() {
+        Thread thread = Thread.currentThread();
+        ClassLoader previous = thread.getContextClassLoader();
+        thread.setContextClassLoader(new ClassLoader(null) { });
+        try {
+            assertThat(new RuntimeProviderRegistry().require("external-workspace"))
+                    .isInstanceOf(ExternalRuntimeProviderFactory.class);
+        } finally {
+            thread.setContextClassLoader(previous);
+        }
+    }
+
+    @Test
+    void discoversThroughItsDefiningLoaderRatherThanTheSystemLoader() throws Exception {
+        try (var defining = new URLClassLoader(RuntimeProviderLoaders.testClasspath(),
+                ClassLoader.getPlatformClassLoader())) {
+            RuntimeProviderLoaders.withContextLoader(new ClassLoader(null) { }, () -> {
+                var registry = defining.loadClass(RuntimeProviderRegistry.class.getName())
+                        .getConstructor().newInstance();
+                var factory = registry.getClass().getMethod("require", String.class)
+                        .invoke(registry, "external-workspace");
+                assertThat(factory.getClass().getClassLoader()).isSameAs(defining);
+            });
+        }
+    }
+
     @Test
     void closesAProviderWhoseIdentityDiffersFromTheConfiguredKind() {
         var settings = new ManagedAgentProperties();
