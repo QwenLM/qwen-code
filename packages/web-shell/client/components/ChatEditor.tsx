@@ -3226,6 +3226,7 @@ export const ChatEditor = memo(
           }`}
           onSelectWorkspace={onSelectWorkspace}
           onSelectHostedWorkspace={onSelectHostedWorkspace}
+          contentSide={core.mobileComposer ? 'bottom' : 'top'}
           onSelectStandalone={onSelectStandaloneTarget}
           onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
           onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
@@ -4969,36 +4970,39 @@ export const ChatEditor = memo(
                   >
                     <SlashIcon />
                   </button>
-                  {mobileFocused && (
+                  <div className={styles.mobileEditingTail}>
+                    {mobileFocused && (
+                      <button
+                        type="button"
+                        className={styles.toolBtn}
+                        aria-label={t('composerMobile.hideKeyboard')}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() =>
+                          core.mobileComposer?.textareaRef.current?.blur()
+                        }
+                      >
+                        <KeyboardIcon />
+                      </button>
+                    )}
                     <button
                       type="button"
                       className={styles.toolBtn}
-                      aria-label={t('composerMobile.hideKeyboard')}
+                      disabled={disabled}
+                      aria-label={t('composerMobile.expand')}
                       onMouseDown={(event) => event.preventDefault()}
-                      onClick={() =>
-                        core.mobileComposer?.textareaRef.current?.blur()
-                      }
+                      onClick={() => {
+                        const textarea =
+                          core.mobileComposer?.textareaRef.current;
+                        expandedSelectionRef.current = [
+                          textarea?.selectionStart ?? 0,
+                          textarea?.selectionEnd ?? 0,
+                        ];
+                        setExpandedEditor(true);
+                      }}
                     >
-                      <KeyboardIcon />
+                      <Maximize2Icon />
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    className={styles.toolBtn}
-                    disabled={disabled}
-                    aria-label={t('composerMobile.expand')}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onClick={() => {
-                      const textarea = core.mobileComposer?.textareaRef.current;
-                      expandedSelectionRef.current = [
-                        textarea?.selectionStart ?? 0,
-                        textarea?.selectionEnd ?? 0,
-                      ];
-                      setExpandedEditor(true);
-                    }}
-                  >
-                    <Maximize2Icon />
-                  </button>
+                  </div>
                 </div>
               </div>
             )}

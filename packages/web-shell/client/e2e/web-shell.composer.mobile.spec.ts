@@ -1699,8 +1699,8 @@ test('mobile workspace controls share the editing row without overlapping @smoke
   expect(branchBox.x + branchBox.width).toBeLessThanOrEqual(expandBox.x);
 });
 
-for (const width of [390, 240]) {
-  test(`mobile workspace keeps editing controls accessible at ${width}px @smoke`, async ({
+for (const width of [240, 310, 320, 345, 390]) {
+  test(`mobile workspace opens on the first tap and keeps editing controls accessible at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
@@ -1720,14 +1720,35 @@ for (const width of [390, 240]) {
     const textarea = page.locator(COMPOSER_TEXTAREA);
     await textarea.tap();
     const composer = page.locator('[data-web-shell-composer]');
-    const workspace = composer.getByRole('button', {
-      name: 'Workspace',
-      exact: true,
-    });
+    const workspace = composer.locator('button[aria-label="Workspace"]');
     const keyboard = composer.getByRole('button', {
       name: 'Hide keyboard',
       exact: true,
     });
+    await expect(keyboard).toBeVisible();
+    const value = workspace.locator('[data-slot="select-value"]');
+    const initialWorkspaceLabel = await value.innerText();
+    if (await value.isVisible()) {
+      expect(
+        await value.evaluate(
+          (element) => element.scrollWidth > element.clientWidth,
+        ),
+      ).toBe(true);
+    }
+    await expect(workspace).toHaveAttribute('aria-expanded', 'false');
+    await workspace.tap();
+    await expect(workspace).toHaveAttribute('aria-expanded', 'true');
+    const workspaceMenu = page.getByRole('menu');
+    const workspaceOptions = page.getByRole('menuitemradio');
+    await expect(workspaceMenu).toBeVisible();
+    await expect(workspaceOptions).toHaveCount(2);
+    await expect(workspaceOptions.first()).toBeVisible();
+    await expect.poll(() => isUncovered(workspaceOptions.first())).toBe(true);
+    await workspaceOptions.nth(1).tap();
+    await expect(workspaceMenu).toHaveCount(0);
+    await expect(value).toHaveText('another-project');
+    await expect(value).not.toHaveText(initialWorkspaceLabel);
+    await textarea.tap();
     await expect(keyboard).toBeVisible();
     const workspaceBox = (await workspace.boundingBox())!;
     const keyboardBox = (await keyboard.boundingBox())!;
@@ -1742,31 +1763,38 @@ for (const width of [390, 240]) {
     expect(expandBox.x).toBeGreaterThanOrEqual(
       keyboardBox.x + keyboardBox.width,
     );
+    expect(
+      Math.abs(expandBox.x - keyboardBox.x - keyboardBox.width - 4),
+    ).toBeLessThanOrEqual(1);
     expect(keyboardBox.width).toBeGreaterThanOrEqual(44);
     expect(keyboardBox.height).toBeGreaterThanOrEqual(44);
     expect(expandBox.width).toBeGreaterThanOrEqual(44);
     expect(expandBox.height).toBeGreaterThanOrEqual(44);
     expect(expandBox.x + expandBox.width).toBeLessThanOrEqual(width);
-    const value = workspace.locator('[data-slot="select-value"]');
     const branchLabel = composer.locator('[data-web-shell-git-branch-label]');
     await expect(branchLabel).toHaveCount(1);
     if (width === 240) {
       await expect(value).toBeHidden();
       await expect(branchLabel).toBeHidden();
-      await workspace.tap();
-      await expect(page.getByRole('menuitemradio').first()).toBeVisible();
-      expect(
-        await page.getByRole('menuitemradio').count(),
-      ).toBeGreaterThanOrEqual(2);
-      await page.keyboard.press('Escape');
-      await textarea.focus();
-      await expect(keyboard).toBeVisible();
+      await expect(workspace).toBeVisible();
+      await expect(
+        composer.locator('[data-web-shell-git-branch]'),
+      ).toBeVisible();
     } else {
-      expect(
-        await value.evaluate(
-          (element) => element.scrollWidth > element.clientWidth,
-        ),
-      ).toBe(true);
+      if (await value.isVisible()) {
+        expect(
+          await value.evaluate(
+            (element) => element.scrollWidth <= element.clientWidth + 1,
+          ),
+        ).toBe(true);
+      }
+      if (await branchLabel.isVisible()) {
+        expect(
+          await branchLabel.evaluate(
+            (element) => element.scrollWidth <= element.clientWidth + 1,
+          ),
+        ).toBe(true);
+      }
     }
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),

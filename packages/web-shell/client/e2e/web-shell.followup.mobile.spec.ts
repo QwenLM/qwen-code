@@ -378,7 +378,7 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
   await textarea.evaluate((el) => el.blur());
 
   const checkTail = async (keyboardVisible: boolean) => {
-    for (const width of [390, 240]) {
+    for (const width of [240, 310, 320, 345, 390]) {
       await page.setViewportSize({ width, height: 844 });
       await expect
         .poll(async () =>
@@ -402,14 +402,15 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
               button.getBoundingClientRect(),
             );
             const expand = rects.at(-1)!;
-            const slash = rects[3]!;
             const expandRight = expand.x + expand.width;
+            // Tail buttons may wrap onto a later row, so compare right edges
+            // to every preceding button instead of requiring the same row.
             if (
               !rects.every(
                 (rect) =>
                   expandRight >= rect.x + rect.width - 1 &&
-                  expand.width >= 44 &&
-                  expand.height >= 44,
+                  rect.width >= 44 &&
+                  rect.height >= 44,
               )
             ) {
               return false;
@@ -423,7 +424,7 @@ test('@smoke mobile editing controls keep the keyboard and expand tail right ali
                 return false;
               }
             }
-            return expand.x >= slash.x + slash.width;
+            return true;
           }, keyboardVisible),
         )
         .toBe(true);

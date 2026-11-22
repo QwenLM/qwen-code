@@ -3301,6 +3301,13 @@
   gap: 4px;
 }
 
+.mobileEditingTail {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+  margin-inline-start: auto;
+}
+
 .mobileEditingActions:has(.mobileContextRow) {
   align-items: flex-start;
   margin-top: 0;
@@ -3313,7 +3320,7 @@
 
 /* Direction, hide-keyboard and expand buttons share this group's 18px icon
    geometry, including when the keyboard button appears and disappears. */
-.mobileEditingKeys > button > svg {
+:is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
   height: 18px;
 }
