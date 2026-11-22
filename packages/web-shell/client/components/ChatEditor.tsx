@@ -223,6 +223,17 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
   return files;
 }
 
+type MobileComposerLayoutTier = 'narrow' | 'medium' | 'wide';
+
+const MOBILE_CONTEXT_INLINE_MIN_WIDTH = 420;
+const MOBILE_CONTEXT_WIDE_MIN_WIDTH = 560;
+
+function resolveMobileLayoutTier(width: number): MobileComposerLayoutTier {
+  if (width >= MOBILE_CONTEXT_WIDE_MIN_WIDTH) return 'wide';
+  if (width >= MOBILE_CONTEXT_INLINE_MIN_WIDTH) return 'medium';
+  return 'narrow';
+}
+
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
   'plan',
@@ -3273,22 +3284,70 @@ export const ChatEditor = memo(
         )
       ) : null;
     const mobileVoiceActive = isMobile && voiceActive;
+    const [mobileLayoutTier, setMobileLayoutTier] =
+      useState<MobileComposerLayoutTier>(() =>
+        typeof window !== 'undefined'
+          ? resolveMobileLayoutTier(window.innerWidth)
+          : 'narrow',
+      );
+    useLayoutEffect(() => {
+      if (!isMobile || isSimple || mobileVoiceActive) return undefined;
+      const container = containerRef.current;
+      if (!container) return undefined;
+      const update = () => {
+        const measuredWidth = container.getBoundingClientRect().width;
+        const effectiveWidth =
+          measuredWidth > 0
+            ? measuredWidth
+            : typeof window !== 'undefined'
+              ? window.innerWidth
+              : 0;
+        const next = resolveMobileLayoutTier(effectiveWidth);
+        setMobileLayoutTier((current) => (current === next ? current : next));
+      };
+      update();
+      const resizeObserver = new ResizeObserver(update);
+      resizeObserver.observe(container);
+      window.addEventListener('resize', update);
+      return () => {
+        resizeObserver.disconnect();
+        window.removeEventListener('resize', update);
+      };
+    }, [isMobile, isSimple, mobileVoiceActive]);
+
+    const mobileHasInlineContext =
+      workspaceSelectVisible ||
+      workspaceIndicatorVisible ||
+      gitBranchVisible ||
+      Boolean(gitContextControl);
+    const mobileHasBelowContext =
+      contextChipPlacement === 'header'
+        ? gitBranchVisible || Boolean(gitContextControl)
+        : mobileHasInlineContext;
     const mobileContextRowVisible =
       isMobile &&
       !isSimple &&
       !mobileVoiceActive &&
-      (workspaceSelectVisible ||
-        workspaceIndicatorVisible ||
-        gitBranchVisible ||
-        Boolean(gitContextControl));
-    // The workspace/Git row lives inside the capped box and wraps on narrow
-    // viewports, so its measured height is added back to the cap.
+      mobileLayoutTier !== 'narrow' &&
+      mobileHasInlineContext;
+    const mobileBelowContextRowVisible =
+      isMobile &&
+      !isSimple &&
+      !mobileVoiceActive &&
+      mobileLayoutTier === 'narrow' &&
+      (!mobileFocused || branchPickerOpen) &&
+      mobileHasBelowContext;
+    // The workspace/Git row lives inside the capped box on wide/medium touch
+    // layouts, so its measured height is added back to the cap.
     const mobileContextRowRef = useRef<HTMLDivElement>(null);
     const [mobileContextRowHeight, setMobileContextRowHeight] =
       useState<number>();
     useLayoutEffect(() => {
       const row = mobileContextRowRef.current;
-      if (!row) return undefined;
+      if (!row) {
+        setMobileContextRowHeight(undefined);
+        return undefined;
+      }
       const update = () => setMobileContextRowHeight(row.offsetHeight);
       update();
       const resizeObserver = new ResizeObserver(update);
@@ -3501,26 +3560,35 @@ export const ChatEditor = memo(
     // mobile row share them. `inToolbar` also picks the visibility gate: a
     // placement that takes a chip out of the toolbar must not leave the toolbar
     // rendering it as well.
-    const workspaceControls = (inToolbar: boolean) => (
-      <>
-        {(inToolbar ? workspaceChipInToolbar : workspaceSelectVisible) &&
-          renderWorkspaceSelector(inToolbar && !showWorkspaceSelectLabel)}
-        {workspaceIndicatorVisible && workspaceName && (
-          <WorkspaceIndicator
-            name={workspaceName}
-            title={workspaceTitle ?? workspaceName}
-            color={workspaceColor}
-            compact={!showWorkspaceLabel}
-            ariaLabel={t('workspace.paneLabel', {
-              name: workspaceName,
-            })}
-          />
-        )}
-        {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
-          renderGitBranchChip(inToolbar && !showGitBranchLabel)}
-        {!inToolbar && gitContextControl}
-      </>
-    );
+    const workspaceControls = (
+      inToolbar: boolean,
+      options?: { compactGit?: boolean; includeWorkspace?: boolean },
+    ) => {
+      const includeWorkspace = options?.includeWorkspace ?? true;
+      return (
+        <>
+          {includeWorkspace &&
+            (inToolbar ? workspaceChipInToolbar : workspaceSelectVisible) &&
+            renderWorkspaceSelector(inToolbar && !showWorkspaceSelectLabel)}
+          {includeWorkspace && workspaceIndicatorVisible && workspaceName && (
+            <WorkspaceIndicator
+              name={workspaceName}
+              title={workspaceTitle ?? workspaceName}
+              color={workspaceColor}
+              compact={!showWorkspaceLabel}
+              ariaLabel={t('workspace.paneLabel', {
+                name: workspaceName,
+              })}
+            />
+          )}
+          {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
+            renderGitBranchChip(
+              options?.compactGit ?? (inToolbar && !showGitBranchLabel),
+            )}
+          {!inToolbar && gitContextControl}
+        </>
+      );
+    };
 
     const renderAddMenu = () =>
       (showAddMenuAction ||
@@ -4872,19 +4940,22 @@ export const ChatEditor = memo(
               <div
                 className={styles.mobileEditingActions}
                 data-web-shell-mobile-editing-actions
+                data-mobile-layout={mobileLayoutTier}
               >
                 {mobileContextRowVisible && (
                   <div
                     ref={mobileContextRowRef}
                     className={styles.mobileContextRow}
                   >
-                    {workspaceControls(false)}
+                    {workspaceControls(false, {
+                      compactGit: mobileLayoutTier === 'medium',
+                    })}
                   </div>
                 )}
                 {!showAddMenuAction && (
                   <button
                     type="button"
-                    className={styles.toolBtn}
+                    className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
                     disabled={disabled}
                     aria-label={t('composerMobile.history')}
                     onMouseDown={(event) => event.preventDefault()}
@@ -4896,7 +4967,7 @@ export const ChatEditor = memo(
                 {shellModeEnabled && (core.shellMode || !showAddMenuAction) && (
                   <button
                     type="button"
-                    className={styles.toolBtn}
+                    className={`${styles.toolBtn} ${styles.mobileEditingTextBtn}`}
                     disabled={disabled}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={core.toggleShellMode}
@@ -4908,16 +4979,13 @@ export const ChatEditor = memo(
                     )}
                   </button>
                 )}
-                {!mobileContextRowVisible && (
-                  <span className={styles.mobileEditingSpacer} />
-                )}
                 <div
                   className={styles.mobileEditingKeys}
                   data-web-shell-mobile-editing-keys
                 >
                   <button
                     type="button"
-                    className={styles.toolBtn}
+                    className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
                     disabled={disabled}
                     aria-label={t('composerMobile.caretUp')}
                     title={t('composerMobile.caretUp')}
@@ -4929,7 +4997,7 @@ export const ChatEditor = memo(
                   </button>
                   <button
                     type="button"
-                    className={styles.toolBtn}
+                    className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
                     disabled={disabled}
                     aria-label={t('composerMobile.caretDown')}
                     title={t('composerMobile.caretDown')}
@@ -4941,7 +5009,7 @@ export const ChatEditor = memo(
                   </button>
                   <button
                     type="button"
-                    className={styles.toolBtn}
+                    className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
                     disabled={disabled}
                     aria-label={
                       touchFollowupCompletion
@@ -4961,7 +5029,7 @@ export const ChatEditor = memo(
                   </button>
                   <button
                     type="button"
-                    className={styles.toolBtn}
+                    className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
                     disabled={disabled}
                     aria-label={t('composerMobile.insertSlash')}
                     title={t('composerMobile.insertSlash')}
@@ -4974,7 +5042,7 @@ export const ChatEditor = memo(
                   <div className={styles.mobileEditingTail}>
                     <button
                       type="button"
-                      className={`${styles.toolBtn} ${
+                      className={`${styles.toolBtn} ${styles.mobileEditingActionBtn} ${
                         mobileFocused ? '' : styles.mobileKeyboardPlaceholder
                       }`}
                       disabled={!mobileFocused}
@@ -4989,7 +5057,7 @@ export const ChatEditor = memo(
                     </button>
                     <button
                       type="button"
-                      className={styles.toolBtn}
+                      className={`${styles.toolBtn} ${styles.mobileEditingActionBtn}`}
                       disabled={disabled}
                       aria-label={t('composerMobile.expand')}
                       onMouseDown={(event) => event.preventDefault()}
@@ -5281,16 +5349,27 @@ export const ChatEditor = memo(
           </div>
         </div>
         {/* Mobile voice mode strips the toolbar down to the microphone and
-            send, so the row follows it out of the way. Mobile keeps its own
-            touch-sized row inside the composer, so this one is desktop-only. */}
-        {!isSimple && !isMobile && contextRowVisible && !mobileVoiceActive && (
+            send, so the row follows it out of the way. Wide/medium touch
+            layouts keep workspace/Git inline with the editing keys; narrow
+            phones move the context strip below the composer while blurred so
+            the 6-key editing bar stays strictly single-row. */}
+        {((!isSimple && !isMobile && contextRowVisible && !mobileVoiceActive) ||
+          mobileBelowContextRowVisible) && (
           <div
             className={styles.contextRow}
             data-web-shell-composer-context-row
           >
-            {workspaceSelectVisible && renderWorkspaceSelector(false)}
-            {gitBranchVisible && renderGitBranchChip(false)}
-            {gitContextControl}
+            {isMobile ? (
+              workspaceControls(false, {
+                includeWorkspace: contextChipPlacement !== 'header',
+              })
+            ) : (
+              <>
+                {workspaceSelectVisible && renderWorkspaceSelector(false)}
+                {gitBranchVisible && renderGitBranchChip(false)}
+                {gitContextControl}
+              </>
+            )}
           </div>
         )}
         {core.mobileComposer && (

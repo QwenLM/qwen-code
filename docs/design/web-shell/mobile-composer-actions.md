@@ -18,39 +18,56 @@ override; narrow desktop windows keep desktop editing.
 
 ### Toolbar and editing
 
-Remove the legacy touch action grid and simulated Tab/Esc/left/right keys. Keep add,
-model, approval, dictation, and send controls. Hide the width toggle on touch;
-retain the context-usage control when enabled by the host. Put workspace
-selection and Git controls on the leading side of the editing row, with hide
-keyboard and expand on the trailing side. Long workspace names truncate within
-the available space; multiple context controls may wrap within their group.
-Retain the group's measured height allowance in the composer's height cap, so
-context controls and wrapping host actions do not come out of the attachments'
-room when a soft keyboard shrinks the viewport.
-Context and editing controls must not overlap.
-Preserve host-provided toolbar slots.
+Remove the legacy 18-action touch grid and simulated Tab/Esc keys while keeping
+a permanent single-row 6-key editing bar above the textarea: up (`↑`), down
+(`↓`), right / accept follow-up (`→`), insert slash (`/`), hide keyboard, and
+expand editor. Keep add, model, approval, dictation, and send controls in the
+bottom toolbar. Hide the width toggle on touch; retain the context-usage
+control when enabled by the host.
 
-Use 44px touch targets and wrap controls on very narrow viewports rather than
-clip them. Center toolbar icons in their targets and remove extra gaps within
-the mobile toolbar groups, including the context-usage button. Keep Plan as an
-active-state chip. While a turn runs, stop remains
-available alongside send when there is a draft; stopping never clears that
-draft. Voice capture retains its existing reduced toolbar and hides the context and
-editing rows.
+Adapt workspace and Git context placement to the composer container's inline
+width so the editing row never wraps onto two lines:
 
-Add a small editing row with expand and, while the textarea is focused, hide
-keyboard. Its leading slots contain workspace/Git controls when present and
-otherwise stay free unless there is something contextual to
-show: the labelled history button when the host has no Add entry, and the
-Shell toggle. Recall goes through the history search panel, which lists and
-filters past inputs. One-entry-at-a-time stepping is not offered on touch,
-where the plain textarea restore cannot rebuild inline tag chips.
-The row wraps on extra-narrow screens and its controls are disabled with the
-composer. Hide keyboard blurs without returning focus through the composer
-surface click handler. A modal expanded editor edits the same controlled draft,
-preserves its selection when returning, and does not submit when closed. Its
-Done and keyboard controls are touch sized. Shell mode gets an explicit exit
-action. Session/workspace changes and disabled state close expanded editing.
+- **Wide (`≥ 560px`, iPad landscape/wide split, phone landscape):** workspace
+  selection and full Git controls sit inline on the leading side of the single
+  editing row with ellipsis truncation alongside the 6 editing keys.
+- **Medium (`420px–559px`, iPad narrow split, foldables):** workspace selection
+  stays inline with truncation while the Git control collapses to its compact
+  icon form alongside the 6 editing keys on the same single row.
+- **Narrow (`< 420px`, phone portrait, iPad Slide Over):** the editing row is
+  dedicated solely to the 6 editing keys (`↑ ↓ → /` leading, hide keyboard and
+  expand trailing). When `contextChipPlacement` is not `header` (such as a
+  new-session composer), workspace and Git move to a single-row non-wrapping
+  strip below the composer while the textarea is blurred (staying open while a
+  branch picker is active) and hide automatically while focused; when
+  `contextChipPlacement` is `header`, workspace is not duplicated below the
+  composer. Below `320px`, the below-composer strip collapses labels while
+  preserving icon and conflict badge indicators.
+
+Retain the inline context row's measured height allowance in the composer's
+height cap on wide/medium touch layouts. Context and editing controls must not
+overlap. Preserve host-provided toolbar slots.
+
+Keep 44px touch targets on the bottom toolbar and expand the 36px-tall single
+editing row buttons' hit areas via `::before` pseudo-elements so the row stays
+compact without shrinking tap targets. Center toolbar icons in their targets
+and remove extra gaps within the mobile toolbar groups, including the
+context-usage button. Allow model and mode labels to shrink with ellipsis so
+long model names do not prematurely wrap the bottom toolbar. Keep Plan as an
+active-state chip. While a turn runs, stop remains available alongside send
+when there is a draft; stopping never clears that draft. Voice capture retains
+its existing reduced toolbar and hides the context and editing rows.
+
+The editing row stays permanently single-row (`flex-wrap: nowrap`) across all
+widths, shrinking keys smoothly down to 240px viewports without page overflow
+and keeping Shell mode's exit control on the same row. Hide keyboard reserves
+its trailing slot so focus changes never shift the row, and blurs without
+returning focus through the composer surface click handler. Hosts without Add
+retain Shell and history-search entries in the editing row. A modal expanded
+editor edits the same controlled draft, preserves its selection when returning,
+and does not submit when closed. Its Done and keyboard controls are touch
+sized. Shell mode gets an explicit exit action. Session/workspace changes and
+disabled state close expanded editing.
 
 ### Touch add menu
 
@@ -120,10 +137,13 @@ Use the global qwen CLI for a baseline attempt and the repository browser
 harness for deterministic UI coverage. Verify local bundled UI when available.
 Record any runtime limitations separately from mocked browser results.
 
-- At phone widths, the old action grid and simulated keyboard keys are absent;
-  the editing row keeps only its contextual and editing controls. Toolbar
-  actions are reachable with no horizontal overflow. Desktop toolbar behavior
-  remains.
+- At phone widths, the old 18-action grid and Tab/Esc keys are absent; the
+  editing row stays strictly single-row with the 6 editing keys (`↑`, `↓`,
+  `→`, `/`, hide keyboard, expand editor), while workspace/Git move below the
+  composer while blurred on narrow widths (`< 420px`) and stay inline on
+  medium (`420px–559px`, compact Git) and wide (`≥ 560px`, full Git) iPad
+  widths. Toolbar actions are reachable with no horizontal overflow. Desktop
+  toolbar behavior remains.
 - Desktop Ctrl+R keeps the search field visible and focused in a short window
   (1280x300), overlapping the composer when necessary. Escape preserves the
   draft and returns focus to the editor. With enough room, the panel remains
@@ -142,9 +162,9 @@ Record any runtime limitations separately from mocked browser results.
 - Commands and skills preserve existing drafts and tags; history can be opened,
   selected, or dismissed. Live voice remains accessible.
 - History search restores a selected input and the draft focus without
-  submitting. The editing row's always-rendered controls (Expand editor, and
-  Hide keyboard while the textarea is focused) keep a 44px target and stay
-  inside the viewport at 390px and 240px widths.
+  submitting. All 6 permanent editing-row keys stay on one row and inside the
+  viewport at 1024px, 480px, 390px, 345px, 320px, 310px, and 240px widths with
+  zero horizontal page overflow.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

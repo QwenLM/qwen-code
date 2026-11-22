@@ -3211,7 +3211,7 @@
 .editorShell[data-web-shell-mobile-composer] .container:has(.mobileContextRow) {
   --chat-editor-max-height: calc(
     var(--chat-editor-composer-cap) +
-      var(--chat-editor-context-row-height, 44px) + 8px
+      var(--chat-editor-context-row-height, 36px) + 4px
   );
 }
 
@@ -3234,6 +3234,13 @@
 .editorShell[data-web-shell-mobile-composer] .toolbarLeading {
   max-width: 100%;
   margin-left: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer] .modelToolBtn,
+.editorShell[data-web-shell-mobile-composer] .modeToolBtn {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarRight {
@@ -3262,85 +3269,260 @@
   gap: 4px;
 }
 
+.mobileEditingActions {
+  flex-wrap: nowrap;
+  gap: 2px;
+  min-width: 0;
+  margin-top: -6px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) {
+  gap: 4px;
+  margin-top: -4px;
+}
+
 .mobileContextRow {
-  min-width: 44px;
-  min-height: 44px;
-  flex: 1;
-  flex-wrap: wrap;
+  flex: 1 1 0;
+  min-width: 0;
+  height: 36px;
+  min-height: 36px;
+  padding-right: 1px;
+  flex-wrap: nowrap;
+  overflow: hidden;
 }
 
 .mobileContextRow > *,
 .mobileContextRow [data-web-shell-git-branch] {
+  min-width: 0;
   max-width: 100%;
 }
 
 .editorShell[data-web-shell-mobile-composer] .mobileContextRow button {
+  height: 36px;
+  min-width: 34px;
   max-width: 100%;
-  flex-shrink: 1;
+  flex: 0 1 auto;
 }
 
-@supports (container-type: inline-size) {
-  @container (max-width: 320px) {
-    .mobileContextRow [data-slot='select-value'],
-    .mobileContextRow [data-web-shell-git-branch-label],
-    .mobileContextRow .gitBranchText,
-    .mobileContextRow .workspaceChipText {
-      display: none;
-    }
-    .mobileContextRow .gitBranchIndicators {
-      display: none;
-    }
-    .mobileContextRow .gitBranchBadgeDot {
-      display: block;
-    }
-  }
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > :has([data-web-shell-git-branch]),
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  > [data-web-shell-git-branch] {
+  flex: 0 0 auto;
 }
 
-.mobileEditingActions {
-  flex-wrap: wrap;
-  margin-top: -8px;
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  [data-web-shell-git-branch-label],
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  .gitBranchIndicators {
+  display: none;
 }
 
-/* Keep the controls together so hide-keyboard/expand stay an adjacent tail.
-   Group-internal wrapping preserves 44px targets and keeps them right aligned. */
+.mobileEditingActions[data-mobile-layout='medium']
+  .mobileContextRow
+  .gitBranchBadgeDot {
+  display: block;
+}
+
+/* Keep the 6 editing keys strictly on one row alongside any inline context. */
 .mobileEditingKeys {
   display: flex;
-  flex-basis: 100%;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 4px;
+  align-items: center;
+  flex: 1 1 0;
+  min-width: 0;
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+
+.mobileEditingActions:has(.mobileContextRow) .mobileEditingKeys {
+  flex: 0 1 auto;
 }
 
 .mobileEditingTail {
   display: inline-flex;
-  flex-shrink: 0;
-  gap: 4px;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 2px;
   margin-inline-start: auto;
+}
+
+.mobileEditingActions:has(.mobileContextRow) .mobileEditingTail {
+  margin-inline-start: 2px;
 }
 
 .mobileKeyboardPlaceholder {
   visibility: hidden;
 }
 
-.mobileEditingActions:has(.mobileContextRow) {
-  align-items: flex-start;
-  margin-top: 0;
+.editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn {
+  position: relative;
+  width: 40px;
+  min-width: 34px;
+  flex: 0 1 40px;
+  height: 36px;
+  padding: 0;
+  justify-content: center;
 }
 
-.mobileEditingActions > button > svg {
-  width: 18px;
-  height: 18px;
+.editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn::before {
+  content: '';
+  position: absolute;
+  inset: -4px -1px;
 }
 
-/* Direction, hide-keyboard and expand buttons share this group's 18px icon
-   geometry, including when the keyboard button appears and disappears. */
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions[data-mobile-layout='medium']
+  .mobileEditingActionBtn {
+  width: 36px;
+  min-width: 34px;
+  flex: 0 1 36px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .mobileEditingTextBtn {
+  height: 36px;
+  min-width: 0;
+  padding: 0 8px;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions:has(.mobileEditingTextBtn) {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions:has(.mobileEditingTextBtn)::-webkit-scrollbar {
+  display: none;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions:has(.mobileEditingTextBtn)
+  .mobileEditingActionBtn {
+  width: 34px;
+  min-width: 28px;
+  flex: 0 1 34px;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions:has(.mobileEditingTextBtn)
+  .mobileEditingTextBtn {
+  height: 34px;
+  padding: 0 6px;
+  font-size: 12px;
+}
+
+.mobileEditingActions > button > svg,
 :is(.mobileEditingKeys, .mobileEditingTail) > button > svg {
   width: 18px;
   height: 18px;
 }
 
-.mobileEditingSpacer {
-  flex: 1;
+.editorShell[data-web-shell-mobile-composer] .contextRow {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+  margin-top: -10px;
+  padding: 14px 6px 4px;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow::-webkit-scrollbar {
+  display: none;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow > * {
+  min-width: 0;
+  max-width: 100%;
+  flex: 0 1 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer] .contextRow button {
+  height: 30px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .contextRow
+  .workspaceSelectTrigger:has(+ *) {
+  max-width: 58%;
+}
+
+@supports (container-type: inline-size) {
+  @container (max-width: 320px) {
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      [data-slot='select-value'],
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      [data-web-shell-git-branch-label],
+    .editorShell[data-web-shell-mobile-composer] .contextRow .gitBranchText,
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .workspaceChipText {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .gitBranchIndicators {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .contextRow
+      .gitBranchBadgeDot {
+      display: block;
+    }
+  }
+
+  @container (max-width: 260px) {
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingActions {
+      gap: 1px;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .mobileEditingActions::-webkit-scrollbar {
+      display: none;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingKeys {
+      gap: 1px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingTail {
+      flex: 2 1 0;
+      gap: 1px;
+      margin-inline-start: 1px;
+    }
+
+    .editorShell[data-web-shell-mobile-composer] .mobileEditingActionBtn {
+      width: auto;
+      min-width: 26px;
+      flex: 1 1 0;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      .mobileEditingActionBtn::before {
+      inset: -4px 0;
+    }
+
+    .editorShell[data-web-shell-mobile-composer]
+      :is(.mobileEditingKeys, .mobileEditingTail)
+      > button
+      > svg {
+      width: 15px;
+      height: 15px;
+    }
+  }
 }
 
 .mobileExpandedEditor {

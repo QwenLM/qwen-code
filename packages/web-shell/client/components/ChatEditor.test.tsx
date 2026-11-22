@@ -6922,6 +6922,125 @@ describe('ChatEditor mobile composer actions', () => {
     ).toBeNull();
   });
 
+  it('switches mobile context placement across wide (iPad), medium (split), and narrow (phone 3A) widths', () => {
+    const backend = mobileComposer('draft');
+    const { observers, restore } = captureResizeObservers();
+    let containerWidth = 768;
+    const rectSpy = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.matches('[data-web-shell-composer-surface]')) {
+          return { width: containerWidth } as DOMRect;
+        }
+        return { width: 0 } as DOMRect;
+      });
+    const workspaces = [
+      { id: 'w1', name: 'primary', cwd: '/tmp/primary' },
+      { id: 'w2', name: 'secondary', cwd: '/tmp/secondary' },
+    ];
+    try {
+      const container = renderChatEditor({
+        workspaces,
+        selectedWorkspaceId: 'w1',
+        onSelectWorkspace: vi.fn(),
+        gitBranch: 'feature/mobile-bar',
+        contextChipPlacement: 'below',
+      });
+      const surface = container.querySelector<HTMLElement>(
+        '[data-web-shell-composer-surface]',
+      )!;
+      const actions = () =>
+        container.querySelector<HTMLElement>(
+          '[data-web-shell-mobile-editing-actions]',
+        )!;
+
+      // Wide (iPad): inline workspace + full git branch alongside the 6 keys.
+      expect(actions().getAttribute('data-mobile-layout')).toBe('wide');
+      expect(
+        actions().querySelector('[class*="mobileContextRow"]'),
+      ).not.toBeNull();
+      expect(
+        actions().querySelector('[data-web-shell-git-branch]')?.className,
+      ).not.toContain('gitBranchChipCompact');
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+
+      // Medium (iPad narrow split): inline workspace + compact git branch.
+      containerWidth = 480;
+      act(() => fireResize(observers, surface));
+      expect(actions().getAttribute('data-mobile-layout')).toBe('medium');
+      expect(
+        actions().querySelector('[class*="mobileContextRow"]'),
+      ).not.toBeNull();
+      expect(
+        actions().querySelector('[data-web-shell-git-branch]')?.className,
+      ).toContain('gitBranchChipCompact');
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+
+      // Narrow (phone 3A): top row has only the 6 editing keys; workspace + git
+      // move below the composer while blurred and hide while focused.
+      containerWidth = 390;
+      act(() => fireResize(observers, surface));
+      expect(actions().getAttribute('data-mobile-layout')).toBe('narrow');
+      expect(actions().querySelector('[class*="mobileContextRow"]')).toBeNull();
+      const belowRow = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      )!;
+      expect(belowRow).not.toBeNull();
+      expect(belowRow.querySelector('[aria-label="Workspace"]')).not.toBeNull();
+      expect(
+        belowRow.querySelector('[data-web-shell-git-branch]')?.textContent,
+      ).toContain('feature/mobile-bar');
+
+      act(() => backend.textareaRef.current!.focus());
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+
+      act(() => backend.textareaRef.current!.blur());
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).not.toBeNull();
+
+      // Narrow + existing session (`header`): workspace is owned by the header
+      // and is not duplicated under the composer.
+      rerenderChatEditor(container, {
+        workspaces,
+        selectedWorkspaceId: 'w1',
+        onSelectWorkspace: vi.fn(),
+        gitBranch: 'feature/mobile-bar',
+        contextChipPlacement: 'header',
+      });
+      const headerBelowRow = container.querySelector(
+        '[data-web-shell-composer-context-row]',
+      )!;
+      expect(headerBelowRow).not.toBeNull();
+      expect(
+        headerBelowRow.querySelector('[aria-label="Workspace"]'),
+      ).toBeNull();
+      expect(
+        headerBelowRow.querySelector('[data-web-shell-git-branch]'),
+      ).not.toBeNull();
+
+      // Without git either, existing sessions render zero rows below.
+      rerenderChatEditor(container, {
+        workspaces,
+        selectedWorkspaceId: 'w1',
+        onSelectWorkspace: vi.fn(),
+        contextChipPlacement: 'header',
+      });
+      expect(
+        container.querySelector('[data-web-shell-composer-context-row]'),
+      ).toBeNull();
+    } finally {
+      rectSpy.mockRestore();
+      restore();
+    }
+  });
+
   function visibleFollowup() {
     composerCoreState.followupState = {
       isVisible: true,
