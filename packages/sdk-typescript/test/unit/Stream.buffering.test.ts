@@ -1,7 +1,46 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Stream } from '../../src/utils/Stream.js';
 
 describe('Stream buffered bursts', () => {
+  it('drains without shifting or copying a mostly live buffer', async () => {
+    const stream = new Stream<number>();
+    for (let i = 0; i < 8192; i++) stream.enqueue(i);
+    const storage = stream as unknown as { queue: unknown[] };
+    const buffer = storage.queue;
+    const shift = vi.spyOn(buffer, 'shift');
+    try {
+      for (let i = 0; i < 2048; i++) await stream.next();
+      expect(shift).not.toHaveBeenCalled();
+      expect(storage.queue).toBe(buffer);
+    } finally {
+      shift.mockRestore();
+    }
+  });
+
+  it('releases a consumed payload before compacting the buffer', async () => {
+    const consumed = { message: 'already read' };
+    const waiting = { message: 'still waiting' };
+    const stream = new Stream<typeof consumed>();
+    stream.enqueue(consumed);
+    stream.enqueue(waiting);
+
+    expect((await stream.next()).value).toBe(consumed);
+    const storage = stream as unknown as { queue: unknown[] };
+    expect(storage.queue).not.toContain(consumed);
+    expect(storage.queue).toContain(waiting);
+  });
+
+  it('bounds retained storage while a large burst is partly consumed', async () => {
+    const stream = new Stream<number>();
+    const produced = 20_000;
+    const consumed = 15_000;
+    for (let i = 0; i < produced; i++) stream.enqueue(i);
+    for (let i = 0; i < consumed; i++) await stream.next();
+
+    const storage = stream as unknown as { queue: unknown[] };
+    expect(storage.queue.length).toBeLessThanOrEqual(2 * (produced - consumed));
+  });
+
   it('keeps FIFO order across a partial drain and a second producer burst', async () => {
     const stream = new Stream<number>();
     for (let i = 0; i < 20_000; i++) stream.enqueue(i);
