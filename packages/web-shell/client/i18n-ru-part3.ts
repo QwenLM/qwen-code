@@ -619,6 +619,9 @@ export const RU_PART3: Record<
   'sidebar.toggleMenu': 'Переключить меню',
   'sidebar.newChat': 'Новый чат',
   'sidebar.newTask': 'Новая сессия',
+  'sidebar.overloadPaused': 'Система перегружена — новые задачи приостановлены',
+  'sidebar.overloadDetail': (v) =>
+    `Коэффициент нагрузки хоста ${v?.['ratio'] ?? '?'}, p99 цикла событий ${v?.['lag'] ?? '?'} мс (${v?.['reason'] ?? 'unknown'}). Новые задачи возобновятся после спада нагрузки.`,
   'sidebar.newWorktreeTask': 'Новая сессия worktree',
   'sidebar.moveWorkspaceUp': 'Выше',
   'sidebar.moveWorkspaceDown': 'Ниже',

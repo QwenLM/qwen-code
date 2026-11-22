@@ -2467,8 +2467,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New session',
   'sidebar.overloadPaused': 'System overloaded — new tasks paused',
-  'sidebar.overloadDetail':
-    'Host load ratio {ratio}, event-loop p99 {lag} ms ({reason}). New tasks resume when load subsides.',
+  'sidebar.overloadDetail': (v) =>
+    `Host load ratio ${v?.['ratio'] ?? '?'}, event-loop p99 ${v?.['lag'] ?? '?'} ms (${v?.['reason'] ?? 'unknown'}). New tasks resume when load subsides.`,
   'sidebar.newWorktreeTask': 'New worktree session',
   'sidebar.moveWorkspaceUp': 'Move up',
   'sidebar.moveWorkspaceDown': 'Move down',

@@ -71,7 +71,7 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // Keep the warning close to the measurement and the hard ceiling close above
 // it: a cap left far above the measurement is a ratchet with enough slack for
 // a whole dependency family to come back unnoticed.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_151_089;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -186,7 +186,17 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_150_577;
 // 2,149,864 bytes. The forbidden-input guard passes. Preserve the existing
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
-const MAX_DOCUMENT_RUNTIME_BYTES = 2_151_577;
+//
+// The overload-indicator slice (#18054) adds four catalog entries per locale
+// pair (sidebar.overloadPaused / sidebar.overloadDetail in en, zh-CN, zh-TW,
+// ru); the detail entries are interpolating functions, which the document
+// entry inlines with the rest of the eager catalogs. Measured with the
+// web-shell transcript lib rebuilt first (stale lib dist invalidates the
+// A/B): merge base ec251c4b09 = 2,151,214 bytes, this tree = 2,151,659 on
+// Node 26 (+445). Applying the recorded 1,283-byte local/CI delta puts CI at
+// ~2,150,376; the 713/1,713 margins above that estimate leave 430 bytes
+// above the local measurement. The forbidden-input guard passes.
+const MAX_DOCUMENT_RUNTIME_BYTES = 2_152_089;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

@@ -19,8 +19,9 @@
 
 - 不新建仪表盘，侧栏不放原始 CPU/内存数字；那些留在 Daemon Status 对话框。
 - 指示条是仅在过载时占空间的薄警示条；正常运行视觉不变。
-- 只禁用新建入口。已有会话、prompt、cancel、导航不受影响。
+- 只暂停新建：所有新建入口被禁用或省略，空白草稿的首条 prompt（会分配会话）以同一警告拒绝。已有会话的 prompt、cancel、导航不受影响。managed 模式豁免：其 home 按钮不创建 daemon 会话。
 - daemon 侧闸门、阈值与 status 契约在本切片不变。
+- **本 commit 上惰性，属设计。** 本树没有任何代码产生两个暂停来源：闸门、`runtime.loadAdmission` 发布、503 `system_overloaded` 路径、以及本文件链接的 `load-based-session-admission` 设计文档都随 #18052 交付，须先合（或同批）。在此之前轮询面对的 daemon 省略该字段，警示条只能经被动拒绝提示出现，而旧 daemon 从不发送它。SDK 成员保持可选正是为此。
 
 ## 设计
 

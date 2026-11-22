@@ -2402,8 +2402,8 @@ export const ZH: Messages = {
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建会话',
   'sidebar.overloadPaused': '系统过载 · 暂停新建',
-  'sidebar.overloadDetail':
-    '主机负荷比 {ratio}，事件循环 p99 {lag} ms（{reason}）。负荷回落后恢复新建。',
+  'sidebar.overloadDetail': (v) =>
+    `主机负荷比 ${v?.['ratio'] ?? '?'}，事件循环 p99 ${v?.['lag'] ?? '?'} ms（${v?.['reason'] ?? 'unknown'}）。负荷回落后恢复新建。`,
   'sidebar.newWorktreeTask': '新建 Worktree 会话',
   'sidebar.moveWorkspaceUp': '上移',
   'sidebar.moveWorkspaceDown': '下移',

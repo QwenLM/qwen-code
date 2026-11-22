@@ -6,6 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act } from 'react';
 import { renderHook } from '@testing-library/react';
 import type { DaemonStatusReport } from '@qwen-code/sdk/daemon';
 import {
@@ -14,18 +15,14 @@ import {
   useDaemonOverloadPause,
 } from './useDaemonOverloadPause.js';
 
-const statusMock = vi.hoisted(() => ({
-  report: undefined as DaemonStatusReport | undefined,
-  reload: vi.fn(),
+const providerMock = vi.hoisted(() => ({
+  workspace: undefined as
+    | { actions: { loadDaemonStatus: ReturnType<typeof vi.fn> } }
+    | undefined,
 }));
 
-vi.mock('./useDaemonStatusReport.js', () => ({
-  useDaemonStatusReport: () => ({
-    report: statusMock.report,
-    reload: statusMock.reload,
-    loading: false,
-    error: undefined,
-  }),
+vi.mock('../DaemonWorkspaceProvider.js', () => ({
+  useOptionalDaemonWorkspace: () => providerMock.workspace,
 }));
 
 function reportWith(overloaded: boolean): DaemonStatusReport {
@@ -44,14 +41,20 @@ function reportWith(overloaded: boolean): DaemonStatusReport {
 }
 
 describe('useDaemonOverloadPause', () => {
+  let loadDaemonStatus: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.useFakeTimers();
-    statusMock.report = undefined;
-    statusMock.reload.mockClear();
+    loadDaemonStatus = vi.fn().mockResolvedValue(reportWith(false));
+    providerMock.workspace = { actions: { loadDaemonStatus } };
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    Object.defineProperty(document, 'hidden', {
+      value: false,
+      configurable: true,
+    });
   });
 
   const renderPause = (
@@ -65,32 +68,57 @@ describe('useDaemonOverloadPause', () => {
     return { view, onRefusalExpired };
   };
 
-  it('pauses while the poll reports overload', () => {
-    statusMock.report = reportWith(true);
+  const flush = async () => {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+
+  it('fetches the summary once on mount, before any interval tick', async () => {
+    renderPause();
+    await flush();
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(1);
+    expect(loadDaemonStatus).toHaveBeenCalledWith('summary');
+  });
+
+  it('pauses while the poll reports overload', async () => {
+    loadDaemonStatus.mockResolvedValue(reportWith(true));
     const { view } = renderPause();
+    await flush();
     expect(view.result.current.paused).toBe(true);
     expect(view.result.current.pollOverloaded).toBe(true);
     expect(view.result.current.loadAdmission?.loadRatio).toBe(2.5);
   });
 
-  it('stays unpaused with a normal poll and no refusal', () => {
-    statusMock.report = reportWith(false);
+  it('stays unpaused with a normal poll and no refusal', async () => {
     const { view } = renderPause();
+    await flush();
     expect(view.result.current.paused).toBe(false);
   });
 
-  it('stays unpaused when the daemon omits the field entirely', () => {
-    statusMock.report = { runtime: {} } as unknown as DaemonStatusReport;
+  it('stays unpaused when the daemon omits the field entirely', async () => {
+    loadDaemonStatus.mockResolvedValue({
+      runtime: {},
+    } as unknown as DaemonStatusReport);
     const { view } = renderPause();
+    await flush();
     expect(view.result.current.paused).toBe(false);
   });
 
-  it('pauses on an unexpired refusal even while the poll looks normal', () => {
-    statusMock.report = reportWith(false);
+  it('tolerates a missing workspace provider without throwing', async () => {
+    providerMock.workspace = undefined;
+    const { view } = renderPause();
+    await flush();
+    expect(view.result.current.paused).toBe(false);
+    expect(loadDaemonStatus).not.toHaveBeenCalled();
+  });
+
+  it('pauses on an unexpired refusal even while the poll looks normal', async () => {
     const { view } = renderPause({
       message: 'System overloaded (cpu_load…)',
       expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
     });
+    await flush();
     expect(view.result.current.paused).toBe(true);
     expect(view.result.current.pollOverloaded).toBe(false);
     expect(view.result.current.refusalMessage).toBe(
@@ -98,43 +126,65 @@ describe('useDaemonOverloadPause', () => {
     );
   });
 
-  it('expires the refusal hint and notifies the caller', () => {
-    statusMock.report = reportWith(false);
+  it('expires the refusal hint and notifies the caller', async () => {
     const { view, onRefusalExpired } = renderPause({
       message: 'hint',
       expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
     });
+    await flush();
     expect(view.result.current.paused).toBe(true);
-    vi.advanceTimersByTime(OVERLOAD_REFUSAL_TTL_MS + 1);
+    await vi.advanceTimersByTimeAsync(OVERLOAD_REFUSAL_TTL_MS + 1);
     expect(onRefusalExpired).toHaveBeenCalledTimes(1);
-    // The caller clears the refusal state; re-render to observe the hook's
-    // time-derived verdict without it.
     view.rerender();
     expect(view.result.current.paused).toBe(false);
   });
 
-  it('keeps pausing when the poll confirms overload past the hint expiry', () => {
-    statusMock.report = reportWith(true);
+  it('keeps pausing when the poll confirms overload past the hint expiry', async () => {
+    loadDaemonStatus.mockResolvedValue(reportWith(true));
     const { view, onRefusalExpired } = renderPause({
       message: 'hint',
       expiresAt: Date.now() + OVERLOAD_REFUSAL_TTL_MS,
     });
-    vi.advanceTimersByTime(OVERLOAD_REFUSAL_TTL_MS + 1);
+    await flush();
+    await vi.advanceTimersByTimeAsync(OVERLOAD_REFUSAL_TTL_MS + 1);
     expect(onRefusalExpired).toHaveBeenCalledTimes(1);
     view.rerender();
     expect(view.result.current.paused).toBe(true);
   });
 
-  it('reloads the status summary on the poll interval while enabled', () => {
+  it('reloads on the poll interval while enabled', async () => {
     renderPause();
-    expect(statusMock.reload).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(OVERLOAD_POLL_INTERVAL_MS * 3);
-    expect(statusMock.reload).toHaveBeenCalledTimes(3);
+    await flush();
+    loadDaemonStatus.mockClear();
+    await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(3);
   });
 
-  it('does not poll while disabled', () => {
+  it('does not stack requests while one summary is still in flight', async () => {
+    renderPause();
+    await flush();
+    loadDaemonStatus.mockClear();
+    loadDaemonStatus.mockImplementationOnce(() => new Promise(() => {}));
+    await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    expect(loadDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not poll while the tab is hidden', async () => {
+    renderPause();
+    await flush();
+    loadDaemonStatus.mockClear();
+    Object.defineProperty(document, 'hidden', {
+      value: true,
+      configurable: true,
+    });
+    await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    expect(loadDaemonStatus).not.toHaveBeenCalled();
+  });
+
+  it('does not poll while disabled', async () => {
     renderPause(null, false);
-    vi.advanceTimersByTime(OVERLOAD_POLL_INTERVAL_MS * 3);
-    expect(statusMock.reload).not.toHaveBeenCalled();
+    await flush();
+    await vi.advanceTimersByTimeAsync(OVERLOAD_POLL_INTERVAL_MS * 3);
+    expect(loadDaemonStatus).not.toHaveBeenCalled();
   });
 });

@@ -52,6 +52,7 @@ import {
   isInvalidClientIdError,
   isAcpChildCapacityError,
   isSessionLimitExceededError,
+  isSystemOverloadedError,
 } from './httpErrors.js';
 import {
   applyConfigOptions,
@@ -2973,7 +2974,9 @@ export function createDaemonSessionActions({
           'create_session',
           isSessionLimitExceededError(error)
             ? { code: 'session_limit_exceeded' }
-            : undefined,
+            : isSystemOverloadedError(error)
+              ? { code: 'system_overloaded' }
+              : undefined,
         );
       }
     },

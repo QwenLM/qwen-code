@@ -19,8 +19,9 @@ The load-admission gate (see [load-based session admission](load-based-session-a
 
 - No new dashboard and no raw CPU/memory numbers in the sidebar; those stay in the Daemon Status dialog.
 - The indicator is a thin warning strip that only occupies space while overloaded; normal operation is visually unchanged.
-- Only the create entry points are disabled. Existing sessions, prompts, cancel, and navigation are untouched.
+- Only creation is paused: every create entry point is disabled or omitted, and a first prompt in a fresh draft (which would allocate a session) is refused with the same warning. Prompts to existing sessions, cancel, and navigation are untouched. Managed mode is exempt: its home button creates no daemon session.
 - The daemon-side gate, its thresholds, and the status contract are unchanged by this slice.
+- **Inert at this commit, by design.** Nothing in this tree produces either pause source: the gate, the `runtime.loadAdmission` publication, the 503 `system_overloaded` path and the `load-based-session-admission` design docs this file links to all ship in #18052, which must merge first (or in the same batch). Until then the poll runs against daemons that omit the field and the strip can only appear via the reactive refusal hint, which older daemons never send. The SDK member stays optional for exactly this reason.
 
 ## Design
 

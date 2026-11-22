@@ -1034,3 +1034,21 @@ describe('web-shell zh-TW locale', () => {
     ).toBe('顯示 5/10 行，3/3 欄');
   });
 });
+
+describe('overload strip messages interpolate their readings', () => {
+  const vars = { ratio: '2.50', lag: 20, reason: 'cpu_load' };
+
+  it.each(['en', 'zh-CN', 'zh-TW', 'ru'] as const)(
+    '%s renders the readings, not the raw template',
+    (language) => {
+      const t = getTranslator(language);
+      const detail = t('sidebar.overloadDetail', vars);
+      expect(detail).toContain('2.50');
+      expect(detail).toContain('cpu_load');
+      expect(detail).not.toContain('{ratio}');
+      expect(detail).not.toContain('{lag}');
+      expect(detail).not.toContain('{reason}');
+      expect(t('sidebar.overloadPaused')).not.toBe('sidebar.overloadPaused');
+    },
+  );
+});

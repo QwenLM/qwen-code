@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect } from 'react';
-import { useDaemonStatusReport } from './useDaemonStatusReport.js';
+import { useCallback, useEffect, useRef } from 'react';
+import { useOptionalDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
+import { useDaemonResource } from './useDaemonResource.js';
 
 export interface OverloadRefusal {
   message: string;
@@ -23,6 +24,10 @@ export const OVERLOAD_POLL_INTERVAL_MS = 5_000;
  * `onRefusalExpired` so a poll gap cannot hide a fresh refusal and the UI
  * never stays paused longer than the daemon's retry hint without poll
  * confirmation.
+ *
+ * Best-effort by design: without an ancestor workspace provider (embedded
+ * pickers, provider-less renders) the poll simply never runs instead of
+ * throwing, and the reactive refusal hint still works.
  */
 export function useDaemonOverloadPause(options: {
   enabled: boolean;
@@ -30,15 +35,34 @@ export function useDaemonOverloadPause(options: {
   onRefusalExpired: () => void;
 }) {
   const { enabled, refusal, onRefusalExpired } = options;
-  const { report, reload } = useDaemonStatusReport({ enabled });
+  const workspace = useOptionalDaemonWorkspace();
+  const actions = workspace?.actions;
+  const load = useCallback(
+    () => actions!.loadDaemonStatus('summary'),
+    [actions],
+  );
+  // autoLoad so an already-overloaded daemon is visible before the first
+  // interval tick (and again after every reconnect, which re-creates load).
+  const { data: report, reload } = useDaemonResource(load, {
+    enabled: enabled && actions !== undefined,
+    autoLoad: true,
+  });
+  const inFlightRef = useRef(false);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || actions === undefined) return;
     const timer = setInterval(() => {
-      void reload();
+      // Same guards as the status dialog poller: a saturated daemon can hold
+      // a summary request for the full 30 s client timeout, and a hidden tab
+      // should not add load to the condition being reported.
+      if (document.hidden || inFlightRef.current) return;
+      inFlightRef.current = true;
+      void reload().finally(() => {
+        inFlightRef.current = false;
+      });
     }, OVERLOAD_POLL_INTERVAL_MS);
     return () => clearInterval(timer);
-  }, [enabled, reload]);
+  }, [enabled, actions, reload]);
 
   useEffect(() => {
     if (!refusal) return;

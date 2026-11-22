@@ -3814,7 +3814,14 @@ export function WebShellSidebar({
 
   const handleNewSession = useCallback(
     (workspaceCwd?: string, fromRecent = false) => {
-      if (creatingSessionRef.current || overloadPaused) return;
+      if (creatingSessionRef.current) return;
+      if (overloadPaused) {
+        onError(
+          new Error(t('sidebar.overloadPaused')),
+          t('sidebar.overloadPaused'),
+        );
+        return;
+      }
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -3860,8 +3867,14 @@ export function WebShellSidebar({
   // new task; only the creation callback differs.
   const handleNewWorktreeSession = useCallback(
     (workspaceCwd?: string) => {
-      if (!onNewWorktreeSession || creatingSessionRef.current || overloadPaused)
+      if (!onNewWorktreeSession || creatingSessionRef.current) return;
+      if (overloadPaused) {
+        onError(
+          new Error(t('sidebar.overloadPaused')),
+          t('sidebar.overloadPaused'),
+        );
         return;
+      }
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
@@ -9016,7 +9029,7 @@ export function WebShellSidebar({
                                             },
                                           }
                                         : {}),
-                                      ...(ws.trusted
+                                      ...(ws.trusted && !overloadPaused
                                         ? {
                                             newSession: () =>
                                               handleNewSession(wsCwd),
@@ -9027,6 +9040,7 @@ export function WebShellSidebar({
                                       // intent and the daemon rejects the session.
                                       ...(ws.trusted &&
                                       !ws.ssh &&
+                                      !overloadPaused &&
                                       onNewWorktreeSession &&
                                       gitBranch
                                         ? {
@@ -9107,6 +9121,7 @@ export function WebShellSidebar({
                                             type="button"
                                             title={t('sidebar.newTask')}
                                             aria-label={t('sidebar.newTask')}
+                                            disabled={newSessionDisabled}
                                             onClick={(event) => {
                                               event.preventDefault();
                                               event.stopPropagation();
@@ -9223,6 +9238,7 @@ export function WebShellSidebar({
                       })
                     }
                     onNewSession={onNewStandaloneSession}
+                    newSessionDisabled={newSessionDisabled}
                     onLoadSession={onLoadStandaloneSession}
                     onRenameSession={(sessionId, displayName) =>
                       onSessionRenameConfirmed?.(

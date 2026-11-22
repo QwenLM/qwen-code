@@ -2324,6 +2324,9 @@ export const ZH_TW: Record<string, MessageValue> = {
   'sidebar.toggleMenu': '切換選單',
   'sidebar.newChat': '新對話',
   'sidebar.newTask': '新建會話',
+  'sidebar.overloadPaused': '系統過載 · 暫停新建',
+  'sidebar.overloadDetail': (v) =>
+    `主機負荷比 ${v?.['ratio'] ?? '?'}，事件迴圈 p99 ${v?.['lag'] ?? '?'} ms（${v?.['reason'] ?? 'unknown'}）。負荷回落後恢復新建。`,
   'sidebar.newWorktreeTask': '新建 Worktree 會話',
   'sidebar.moveWorkspaceUp': '上移',
   'sidebar.moveWorkspaceDown': '下移',

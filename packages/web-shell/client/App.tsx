@@ -13657,6 +13657,20 @@ export function App({
         ownerRef?: { current: DaemonSessionOwnerSnapshot };
       },
     ) => {
+      // A first prompt in a fresh draft would allocate a daemon session;
+      // refuse it up front while paused instead of failing after submit.
+      if (
+        overloadPausedRef.current &&
+        !managedModeRef.current &&
+        !connectionRef.current.sessionId &&
+        !createSessionPromiseRef.current
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return;
+      }
       if (sessionWriteBlockedRef.current) {
         throw new DOMException(
           'Session switch is still preparing',
@@ -14096,6 +14110,8 @@ export function App({
     [
       beginPromptPreparation,
       clearFollowup,
+      pushToast,
+      t,
       disarmSubmittedPromptRetry,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -14111,6 +14127,13 @@ export function App({
 
   const resolveSessionForWorkspace = useCallback(
     async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return undefined;
+      }
       try {
         if (!forceCreate) {
           // Reuse the connected session only when it owns the target checkout.
@@ -14151,6 +14174,8 @@ export function App({
     },
     [
       getComposerWorkspaceCwd,
+      pushToast,
+      t,
       connection.sessionId,
       activeWorkspaceCwd,
       sessionCatalogController,
@@ -25028,7 +25053,7 @@ export function App({
                   // in the composer's workspace picker instead. From a Live
                   // chat it opens an ordinary task; a fresh voice conversation
                   // comes from the Live controls.
-                  overloadPaused={overloadPaused}
+                  overloadPaused={overloadPaused && !managedMode}
                   overloadDetail={overloadDetail}
                   onNewSession={(workspaceCwd) => {
                     if (managedMode && typeof workspaceCwd !== 'string') {
