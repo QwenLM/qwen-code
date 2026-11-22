@@ -32,6 +32,7 @@ import {
   metricsToUsageRecord as toRecord,
   aggregateUsage,
   dedupBySessionId,
+  getTimeRangeBounds,
   loadUsageHistory,
   loadUsageHistoryWithLive,
   persistSessionUsage,
@@ -42,6 +43,7 @@ import {
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import { SessionService } from './sessionService.js';
+import { localDateKey } from './usage-dashboard-service.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
 
@@ -1316,6 +1318,32 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
 
     expect(records).toHaveLength(1);
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(10);
+  });
+
+  it('preserves a covering rebuild and its known run skills', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-covered-skills', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+      },
+      {
+        ...runRec('sess-covered-skills', 500, t0 + 10_000, t0 + 20_000),
+        skills: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: { 'helper-skill': { count: 1, success: 1, fail: 0 } },
+        },
+      },
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBe(true);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+    expect(records[0]!.skills?.totalCalls).toBe(1);
+    expect(records[0]!.skills?.byName['helper-skill']?.count).toBe(1);
   });
 
   it('keeps a rebuild whose window and counters cover the live run', () => {
@@ -2826,5 +2854,26 @@ describe('aggregateUsage — skills', () => {
     const report = aggregateUsage([skillRecord('a')], 'all');
     expect(report.skills.totalCalls).toBe(0);
     expect(report.skills.topSkills).toEqual([]);
+  });
+});
+
+describe('getTimeRangeBounds — local calendar-day windows', () => {
+  const originalTimeZone = process.env['TZ'];
+  afterEach(() => {
+    vi.useRealTimers();
+    if (originalTimeZone === undefined) delete process.env['TZ'];
+    else process.env['TZ'] = originalTimeZone;
+  });
+
+  it('does not add a boundary day across a DST transition', () => {
+    process.env['TZ'] = 'America/New_York';
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-03-09T04:30:00Z'));
+    expect(localDateKey(getTimeRangeBounds('week').start.getTime())).toBe(
+      '2026-03-02',
+    );
+    expect(localDateKey(getTimeRangeBounds('month').start.getTime())).toBe(
+      '2026-02-07',
+    );
   });
 });

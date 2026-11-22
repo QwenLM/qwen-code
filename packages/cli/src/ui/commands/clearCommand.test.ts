@@ -10,19 +10,36 @@ import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SessionEndReason } from '@qwen-code/qwen-code-core';
 
-// Mock the telemetry service
+const { telemetryMock, persistSessionUsageMock } = vi.hoisted(() => ({
+  telemetryMock: {
+    reset: vi.fn(),
+    resetLiveMetrics: vi.fn(),
+    getMetrics: vi.fn(() => ({ models: {} })),
+    getLiveMetrics: vi.fn(() => ({ models: {} })),
+    getSessionStartTime: vi.fn(() => new Date()),
+    getRunStartTime: vi.fn(() => new Date()),
+  },
+  persistSessionUsageMock: vi.fn(),
+}));
+
+vi.mock('@qwen-code/qwen-code-core/telemetry/uiTelemetry.js', () => ({
+  uiTelemetryService: telemetryMock,
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/services/usageHistoryService.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/services/usageHistoryService.js')
+    >()),
+    persistSessionUsage: persistSessionUsageMock,
+  }),
+);
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const actual = await vi.importActual('@qwen-code/qwen-code-core');
   return {
     ...actual,
-    uiTelemetryService: {
-      reset: vi.fn(),
-      getMetrics: vi.fn(() => ({ models: {} })),
-      getLiveMetrics: vi.fn(() => ({ models: {} })),
-      getSessionStartTime: vi.fn(() => new Date()),
-      getRunStartTime: vi.fn(() => new Date()),
-    },
-    persistSessionUsage: vi.fn(),
+    uiTelemetryService: telemetryMock,
+    persistSessionUsage: persistSessionUsageMock,
   };
 });
 
@@ -412,6 +429,8 @@ describe('clearCommand', () => {
               abortAll: mockAbortBackgroundShells,
             }),
             startNewSession: mockStartNewSession,
+            getSessionId: () => 'test-session-id',
+            getProjectRoot: () => '/test/project',
             getLlmClient: vi.fn().mockReturnValue({
               resetChat: mockResetChat,
             } as unknown as LlmClient),

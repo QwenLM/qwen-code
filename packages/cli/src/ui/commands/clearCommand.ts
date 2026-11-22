@@ -12,10 +12,9 @@ import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
-  persistSessionUsage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
-import { hasRunActivity } from '@qwen-code/qwen-code-core/services/usageHistoryService.js';
+import { flushRunUsageOnSessionSwap } from '../../utils/usage-persistence.js';
 import {
   hasBlockingBackgroundWork,
   buildBackgroundWorkBlockedMessage,
@@ -80,22 +79,7 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist this run's usage before resetting metrics. Replayed history
-      // belongs to the run that spent it, which already persisted its own.
-      const metrics = uiTelemetryService.getLiveMetrics();
-      if (hasRunActivity(metrics)) {
-        try {
-          persistSessionUsage({
-            sessionId: config.getSessionId(),
-            startTime: uiTelemetryService.getRunStartTime(),
-            endTime: new Date(),
-            project: config.getProjectRoot(),
-            metrics,
-          });
-        } catch {
-          // Best-effort — don't block /clear
-        }
-      }
+      flushRunUsageOnSessionSwap(config, config.getSessionId());
 
       getInteractiveModSession(config)?.invalidateTools();
       const newSessionId = config.startNewSession();

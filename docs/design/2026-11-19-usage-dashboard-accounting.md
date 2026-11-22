@@ -224,10 +224,13 @@ history from an old unmarked record whose provenance is unknowable.
   to run deltas because it may be another replay-inflated copy. A measured
   transcript reconstruction survives beside disjoint runs. An exactly matching
   window is a duplicate, not two spends. Otherwise, a reconstruction that wholly
-  covers a run's window and its model/tool/skill/file counters may replace that
-  run without counting it twice. Partial overlap remains ambiguous and drops
-  the reconstructed copy rather than guessing what to subtract. Multiple
-  correlated whole-transcript snapshots remain last-wins.
+  covers a run's window and its model/tool/file counters may replace that run
+  without counting it twice. Transcript replay has no skill-invocation channel,
+  so skills cannot decide coverage: the known live skills from covered runs are
+  retained in the rebuilt summary instead of discarding its entire history. Partial
+  overlap remains ambiguous and drops the reconstructed copy rather than
+  guessing what to subtract. Multiple correlated whole-transcript snapshots
+  remain last-wins.
 
 Both markers are optional, so every reader that filters `version === 1` keeps
 working without a schema migration.
@@ -374,8 +377,12 @@ than a fabricated attribution.
 - **Calendar-day windows.** Day buckets cannot be split by hour, so `today`, `week`
   and `month` select whole local days (`today` is unchanged; `week` and `month`
   include the full boundary day instead of the hours after a rolling `now - N*24h`).
-  This makes the summary agree with the day-bucketed charts. On the legacy path the
-  effect is measurable and confined to that one boundary day: for `week` on the
+  This makes the summary agree with the day-bucketed charts. Their start dates
+  follow the current local calendar date minus 7/30 days at local midnight,
+  rather than the local date produced by subtracting a constant number of
+  milliseconds across DST transitions. Whole boundary-day inclusion is
+  intentional. On the legacy path the effect is measurable and confined to that
+  one boundary day: for `week` on the
   reference history, 2026-11-12 went from 4,110,008,866 to 17,376,555,073 tokens
   because a session that ended in its first hours carries a replay-inflated
   history. With ledger coverage that day is replaced anyway.

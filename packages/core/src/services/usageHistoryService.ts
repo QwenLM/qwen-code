@@ -1030,7 +1030,6 @@ function rebuildCoversRun(
   }
   return (
     rebuilt.tools.totalCalls >= run.tools.totalCalls &&
-    (rebuilt.skills?.totalCalls ?? 0) >= (run.skills?.totalCalls ?? 0) &&
     rebuilt.files.linesAdded >= run.files.linesAdded &&
     rebuilt.files.linesRemoved >= run.files.linesRemoved
   );
@@ -1071,6 +1070,7 @@ export function dedupBySessionId(
     const latestRebuild = rebuilt[rebuilt.length - 1];
     if (latestRebuild) {
       const compatibleRuns: UsageSummaryRecord[] = [];
+      const coveredRuns: UsageSummaryRecord[] = [];
       let canKeepRebuild = true;
       for (const run of kept) {
         if (
@@ -1088,9 +1088,40 @@ export function dedupBySessionId(
         } else if (!rebuildCoversRun(latestRebuild, run)) {
           canKeepRebuild = false;
           break;
+        } else {
+          coveredRuns.push(run);
         }
       }
-      if (canKeepRebuild) out.push(latestRebuild);
+      if (canKeepRebuild) {
+        if (coveredRuns.length === 0) {
+          out.push(latestRebuild);
+        } else {
+          // Transcript replay has no skill-invocation channel. These known
+          // per-run counts are retained instead of discarding the whole
+          // reconstruction merely because skills cannot be replayed.
+          const skills = {
+            totalCalls: latestRebuild.skills?.totalCalls ?? 0,
+            totalSuccess: latestRebuild.skills?.totalSuccess ?? 0,
+            totalFail: latestRebuild.skills?.totalFail ?? 0,
+            byName: { ...latestRebuild.skills?.byName },
+          };
+          for (const run of coveredRuns) {
+            if (!run.skills) continue;
+            skills.totalCalls += run.skills.totalCalls;
+            skills.totalSuccess += run.skills.totalSuccess;
+            skills.totalFail += run.skills.totalFail;
+            for (const [name, metrics] of Object.entries(run.skills.byName)) {
+              const current = skills.byName[name];
+              skills.byName[name] = {
+                count: (current?.count ?? 0) + metrics.count,
+                success: (current?.success ?? 0) + metrics.success,
+                fail: (current?.fail ?? 0) + metrics.fail,
+              };
+            }
+          }
+          out.push({ ...latestRebuild, skills });
+        }
+      }
       out.push(...(canKeepRebuild ? compatibleRuns : kept));
     } else {
       out.push(...kept);
@@ -1280,11 +1311,11 @@ export function getTimeRangeBounds(range: TimeRange): {
       break;
     }
     case 'week': {
-      start = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 7);
       break;
     }
     case 'month': {
-      start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30);
       break;
     }
     case 'all':
