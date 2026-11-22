@@ -35250,14 +35250,14 @@ describe('Session', () => {
               vi
                 .mocked(mockChat.sendMessageStream)
                 .mock.calls.map(([, request]) => request.message),
-            ).toEqual(
-              [
-                'do it',
-                'correct foreground',
-                'first cron fire',
-                'second cron fire',
-              ].map((text) => [{ text }]),
-            );
+            ).toEqual([
+              // The person's prompts carry the typed-prompt mark; cron fires
+              // are not their words and stay unmarked.
+              [core.markTypedPrompt({ text: 'do it' })],
+              [core.markTypedPrompt({ text: 'correct foreground' })],
+              [{ text: 'first cron fire' }],
+              [{ text: 'second cron fire' }],
+            ]);
             expect(scheduler.stop).not.toHaveBeenCalled();
           } finally {
             release();
