@@ -109,11 +109,40 @@ describe('GenAI request attribute extraction', () => {
     ).toEqual({});
   });
 
+  it('omits non-integer and unsafe top_k values but keeps explicit zero', () => {
+    expect(extractOpenAiRequestAttributes({ top_k: 20.5 })).toEqual({});
+    expect(extractAnthropicRequestAttributes({ top_k: 20.5 })).toEqual({});
+    expect(extractLlmRequestAttributes({ config: { topK: 20.5 } })).toEqual({});
+    expect(
+      extractOpenAiRequestAttributes({ top_k: Number.MAX_SAFE_INTEGER + 1 }),
+    ).toEqual({});
+    expect(
+      extractAnthropicRequestAttributes({
+        top_k: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toEqual({});
+    expect(
+      extractLlmRequestAttributes({
+        config: { topK: Number.MAX_SAFE_INTEGER + 1 },
+      }),
+    ).toEqual({});
+    expect(extractOpenAiRequestAttributes({ top_k: 0 })).toEqual({
+      'gen_ai.request.top_k': 0,
+    });
+    expect(extractAnthropicRequestAttributes({ top_k: 0 })).toEqual({
+      'gen_ai.request.top_k': 0,
+    });
+    expect(extractLlmRequestAttributes({ config: { topK: 0 } })).toEqual({
+      'gen_ai.request.top_k': 0,
+    });
+  });
+
   it('requires own properties', () => {
     const request = Object.create({
       n: 2,
       max_tokens: 50,
       temperature: 0.2,
+      top_k: 7,
       stop: ['inherited'],
       reasoning_effort: 'high',
     }) as Record<string, unknown>;
