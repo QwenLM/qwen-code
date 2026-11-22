@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
@@ -161,7 +160,7 @@ public final class ToolPublicationCollector {
     static void enqueue(JdbcTemplate jdbc, List<Map<String, Object>> captures, long now) {
         for (int start = 0; start < captures.size(); start += ENQUEUE_ROWS) {
             var batch = captures.subList(start, Math.min(start + ENQUEUE_ROWS, captures.size()));
-            var args = new ArrayList<Object>(batch.size() * 13);
+            var args = new ArrayList<Object>(batch.size() * 12);
             for (var capture : batch) {
                 String scope = (String) capture.get("scope_key");
                 String publication = (String) capture.get("publication_id");
@@ -169,16 +168,15 @@ public final class ToolPublicationCollector {
                 String session = (String) capture.get("session_id");
                 String request = JSON.createObjectNode().put("version", 1)
                         .put("publicationId", publication).toString();
-                Collections.addAll(args, operationKey(scope, publication),
-                        ManagedSessionStore.sessionScopeKey(tenant, session), scope,
+                Collections.addAll(args, operationKey(scope, publication), scope,
                         operationId(scope, publication), publication, tenant,
                         capture.get("workspace_id"), session, ManagedSchemaKeys.key(publication),
                         ManagedSchemaKeys.key(request), request, now, now);
             }
             jdbc.update(
-                    "INSERT IGNORE INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, publication_id, tenant_id, workspace_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES "
+                    "INSERT IGNORE INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, publication_id, tenant_id, workspace_id, session_id, target_kind, target_key, request_digest, request_json, phase, state, gmt_create, gmt_modified) VALUES "
                             + String.join(", ", Collections.nCopies(batch.size(),
-                                    "(?, ?, ?, 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)")),
+                                    "(?, ?, 'CAPTURE_GC', ?, ?, ?, ?, ?, 'OUTPUT_CAPTURE', ?, ?, ?, 'COLLECTING', 'PENDING', ?, ?)")),
                     args.toArray());
         }
     }

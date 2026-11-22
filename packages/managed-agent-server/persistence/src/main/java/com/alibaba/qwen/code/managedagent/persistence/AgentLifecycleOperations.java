@@ -431,16 +431,15 @@ final class AgentLifecycleOperations {
         // Java is the only authority an archive needs, so it completes here.
         boolean archive = kind == OperationKind.ARCHIVE;
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                "INSERT INTO ma_operation (operation_key, scope_key,"
                     + " target_kind, target_key, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_digest, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, receipt_id, available_at,"
                     + " gmt_create, gmt_modified, completed_at, lifecycle_protocol_version) VALUES"
-                    + " (?, ?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE',"
+                    + " (?, ?, 'SESSION', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE',"
                     + " ?, ?, ?, ?, ?, ?, ?, ?)",
                 AgentStoreRows.sessionOperationKey(tenantId, sessionId, kind, operationId),
-                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 AgentStoreRows.sessionOperationTarget(sessionId),
                 sessionId,
@@ -489,14 +488,12 @@ final class AgentLifecycleOperations {
             // LIFECYCLE_ONLY row, and the DRAINING row that still names the
             // failed operation whose validated effects the resume inherits.
             jdbc.update("UPDATE ma_session_head SET"
-                            + " operation_id = ? WHERE tenant_key = ? AND"
-                            + " harness_key = ? AND tenant_id = ? AND"
+                            + " operation_id = ? WHERE"
+                            + " tenant_id = ? AND"
                             + " harness_session_id = ? AND (phase ="
                             + " 'LIFECYCLE_ONLY' AND operation_id IS NULL OR"
                             + " phase = 'DRAINING' AND operation_id = ?)",
                     operationId,
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId, sessionId, failedBefore.get().operationId());
             // The effects the failed operation validated stay valid for its
             // resume: the receipt moves to the new operation with them, and
@@ -525,11 +522,10 @@ final class AgentLifecycleOperations {
                 // Preserve a live writer once, without reviving an expired owner on retries.
                 jdbc.update("UPDATE ma_session_head SET writer_lease_until = GREATEST(writer_lease_until, ("
                                 + ManagedSchemaTime.SQL_NOW + ") + ?), gmt_modified = " + ManagedSchemaTime.SQL_NOW
-                                + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                                + " WHERE tenant_id = ? AND harness_session_id = ?"
                                 + " AND head_kind = 'MANAGED_SESSION' AND phase = 'LIFECYCLE_ONLY' AND operation_id = ? AND state = 'ACTIVE'"
                                 + " AND writer_lease_until > (" + ManagedSchemaTime.SQL_NOW + ")",
-                        lifecycleHandoffMillis, RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
+                        lifecycleHandoffMillis, tenantId, sessionId, operationId);
             }
         }
         jdbc.update("UPDATE ma_session SET status = ?,"
@@ -759,11 +755,9 @@ final class AgentLifecycleOperations {
             // else.
             jdbc.update("UPDATE ma_session_head SET"
                             + " operation_id = NULL, claim_lease_until = NULL"
-                            + " WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " WHERE"
                             + " tenant_id = ? AND harness_session_id = ? AND"
                             + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId, sessionId, operationId);
         }
         return updated == 1;
@@ -809,11 +803,9 @@ final class AgentLifecycleOperations {
                 && WorkspaceToolProfiles.lifecycleProtocol(version.intValue())) {
             var row = rows.getFirst();
             jdbc.update(
-                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_generation = ?, claim_lease_until = ? WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND (phase = 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_generation = ?, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND (phase = 'LIFECYCLE_ONLY' OR ? = 2 AND phase = 'DRAINING')",
                     row.get("claim_generation"),
                     row.get("claim_lease_until"),
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
                     tenantId,
                     sessionId,
                     operationId, version.intValue());
@@ -854,9 +846,7 @@ final class AgentLifecycleOperations {
                         generation);
         if (updated == 1) {
             jdbc.update(
-                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
                     tenantId,
                     sessionId,
                     operationId,
@@ -897,9 +887,7 @@ final class AgentLifecycleOperations {
                         claimGeneration);
         if (updated == 1) {
             jdbc.update(
-                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
-                    RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                    RuntimeAdmissionFences.harnessDrainKey(sessionId),
+                    "UPDATE ma_session_head SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", claim_lease_until = NULL WHERE tenant_id = ? AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
                     tenantId,
                     sessionId,
                     operationId,

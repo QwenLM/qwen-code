@@ -327,14 +327,13 @@ class ChildResultRelayStoreTest {
             String recordId, String kind, String deliveryState,
             String taskState, long createdAt) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
+                        + " VALUES (?, ?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, ?, ?, ?, ?, ?)",
-                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
                 TENANT, sessionId, recordId,
                 "resource-" + recordId,
@@ -806,8 +805,8 @@ class ChildResultRelayStoreTest {
     private void resource(String sessionId, String resourceId, String kind, String body) {
         String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,
+        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), TENANT, sessionId,
                 resourceId, kind, bytes.length, "a".repeat(64), bytes);
     }
 

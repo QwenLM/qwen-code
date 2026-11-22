@@ -1915,6 +1915,14 @@ export interface DaemonSessionSummary {
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight (dangling admission, reconciled interruption, or a teardown
+   * flush), so opening the session can offer "Continue execution". A hint for
+   * list surfaces only — the loaded session's recovery status stays
+   * authoritative. Absent when there is no ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
@@ -4441,6 +4449,17 @@ export interface DaemonUsageDashboard {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/feedback`. */
+export interface RateSessionTurnResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached the session's
+   * telemetry logger. RUM delivery itself remains best-effort and is
+   * additionally gated by the usage-statistics opt-in.
+   */
+  recorded: boolean;
 }
 
 /** Creation-only selection; does not change shared defaults or later session behavior. */
