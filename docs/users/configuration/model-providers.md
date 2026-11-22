@@ -376,6 +376,22 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 }
 ```
 
+#### DeepInfra Preset and Interactive Model Selection
+
+When connecting DeepInfra through the Web Shell or Desktop settings (`Connect a Provider` → `DeepInfra`), step 4 ("Model IDs") presents an interactive model catalog browser:
+
+![DeepInfra Interactive Model Selection](../../design/assets/deepinfra-model-selection-modal.png)
+
+- **Live Model Catalog**: Automatically fetches the latest available models from DeepInfra with pricing (`$/Mt`), context window (`max_tokens`), and quantization variants.
+- **Search & Filters**: Instant name/task search, dropdown filters for task type, quantization format (e.g. `fp8`, `int4`, `fp16`), and context lengths up to `1024k`.
+- **Toggle Filter Buttons**:
+  - `Featured`: Recommended benchmark models.
+  - `Discount`: Models with active promotional or discounted pricing.
+  - `Priority`: Models supporting priority low-latency routing.
+  - `Flex`: Models supporting the 20% discounted flex routing tier.
+- **In & Out Pricing Sort**: Dedicated sortable columns for input and output pricing in `$/Mt`.
+- **Service Tier (`flex`)**: Configure `"service_tier": "flex"` in `generationConfig` (or pass `--service-tier flex`) to route inference requests to DeepInfra's Flex tier at a 20% discount.
+
 When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
 
 ### Oracle Cloud Infrastructure (OCI) Generative AI
