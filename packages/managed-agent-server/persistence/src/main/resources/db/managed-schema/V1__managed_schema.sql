@@ -5,8 +5,8 @@
 -- No old-schema upgrade or compatibility objects are provided.
 
 CREATE TABLE ma_session (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     agent_id VARBINARY(512) COMMENT 'Agent definition identity selected for the Session.',
     title VARCHAR(512) COMMENT 'Display title of the Session.',
     status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE' COMMENT 'Public Session lifecycle status.',
@@ -17,7 +17,7 @@ CREATE TABLE ma_session (
     gmt_modified BIGINT UNSIGNED NOT NULL COMMENT 'Last record update time in Unix epoch milliseconds.',
     version BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Optimistic concurrency version of the record.',
     CONSTRAINT pk_ma_session PRIMARY KEY (tenant_id, session_id),
-    public_session_id VARCHAR(64) /*!50000 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin */ GENERATED ALWAYS AS (CASE WHEN session_kind = 'PUBLIC' THEN session_id ELSE NULL END)
+    public_session_id VARCHAR(64) /*!50000 COLLATE utf8mb4_0900_bin */ GENERATED ALWAYS AS (CASE WHEN session_kind = 'PUBLIC' THEN session_id ELSE NULL END)
         COMMENT 'Generated public Session identity enforcing global uniqueness for PUBLIC rows.',
     CONSTRAINT uk_ma_session_public_session_id UNIQUE (public_session_id),
     deleted_at BIGINT UNSIGNED COMMENT 'Logical deletion time in Unix epoch milliseconds.',
@@ -32,13 +32,13 @@ CREATE TABLE ma_session (
     agent_revision VARCHAR(128) NOT NULL DEFAULT '1' COMMENT 'Pinned Agent definition revision.',
     approval_mode VARCHAR(32) NOT NULL DEFAULT 'yolo' COMMENT 'Initial approval policy captured when the Session was created.',
     tool_profile VARCHAR(64) DEFAULT 'hosted-workspace-files/1' COMMENT 'Hosted tool capability profile admitted for the Session.',
-    creator_actor_key VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL COMMENT 'Raw identity of the actor that created the Session.',
-    owner_actor_key VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL COMMENT 'Raw identity of the actor that owns the Session.',
+    creator_actor_key VARCHAR(36) COLLATE utf8mb4_0900_bin NULL COMMENT 'Raw identity of the actor that created the Session.',
+    owner_actor_key VARCHAR(36) COLLATE utf8mb4_0900_bin NULL COMMENT 'Raw identity of the actor that owns the Session.',
     memory_store_id VARBINARY(512) NULL COMMENT 'Immutable optional personal memory Store binding.',
     owner_only TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether only the Session owner may access this Session.',
     CONSTRAINT ck_ma_session_memory CHECK ((owner_only = 0 AND memory_store_id IS NULL) OR (owner_only = 1 AND owner_actor_key IS NOT NULL)),
-    parent_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL COMMENT 'Immediate parent Session identity for a child Session.',
-    root_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NULL COMMENT 'Root Session identity of the child-Session lineage.',
+    parent_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NULL COMMENT 'Immediate parent Session identity for a child Session.',
+    root_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NULL COMMENT 'Root Session identity of the child-Session lineage.',
     parent_child_run_id VARBINARY(2048) NULL COMMENT 'Child-run identity in the immediate parent Session.',
     child_depth INT UNSIGNED NULL COMMENT 'Depth of the Session in its child-Session lineage.',
     agent_definition_digest CHAR(64) NULL COMMENT 'Digest of the immutable Agent definition selected at admission.',
@@ -90,8 +90,8 @@ CREATE INDEX idx_ma_session_retirement ON ma_session (retired_at, is_recovery_pr
 CREATE INDEX idx_ma_session_storage_scope ON ma_session (tenant_id, workspace_storage_id, is_resource_gc_completed, session_id);
 
 CREATE TABLE ma_user_message_queue (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     is_paused TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether automatic dispatch from this Session queue is paused.',
     resumed_turn_id VARBINARY(256) COMMENT 'Turn associated with the latest queue resume.',
     next_sequence BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT 'Next monotonically increasing input queue sequence.',
@@ -104,8 +104,8 @@ CREATE TABLE ma_user_message_queue (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Per-Session input queue ordering, pause state, and dispatch progress.';
 
 CREATE TABLE ma_user_message (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     message_id VARBINARY(144) NOT NULL COMMENT 'Stable identity of the queued user input.',
     sequence_number BIGINT UNSIGNED NOT NULL COMMENT 'FIFO position of the input within the Session.',
     revision BIGINT UNSIGNED NOT NULL COMMENT 'Input revision used to reject stale edits or withdrawals.',
@@ -125,10 +125,10 @@ CREATE TABLE ma_user_message (
 CREATE INDEX idx_ma_user_message_pending ON ma_user_message (state, tenant_id, session_id, sequence_number);
 
 CREATE TABLE ma_user_message_command (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same queue command.',
-    actor_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Actor identity associated with this record.',
+    actor_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Actor identity associated with this record.',
     request_digest CHAR(71) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
     result_json LONGTEXT NOT NULL COMMENT 'Serialized queue snapshot returned for this command and its retries.',
     CONSTRAINT uk_ma_user_message_command_business_key UNIQUE (tenant_id, session_id, actor_id, idempotency_key),
@@ -137,8 +137,8 @@ CREATE TABLE ma_user_message_command (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Idempotent receipts for input queue submit, edit, withdraw, and resume commands.';
 
 CREATE TABLE ma_turn (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     turn_id VARBINARY(256) NOT NULL COMMENT 'Turn identity within the Session.',
     prompt_id VARBINARY(144) NOT NULL COMMENT 'Stable prompt identity used for Harness submission and retry.',
     input_json LONGTEXT NOT NULL COMMENT 'Serialized user input blocks.',
@@ -179,9 +179,9 @@ CREATE TABLE ma_turn (
 CREATE INDEX idx_ma_turn_dispatch ON ma_turn (status, dispatch_lease_until, gmt_modified);
 
 CREATE TABLE ma_session_head (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Session identity used by the journal or Harness admission head.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Session identity used by the journal or Harness admission head.',
     has_activity_diagnostics TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether committed journal content carries activity diagnostics.',
     state VARCHAR(32) COMMENT 'Private journal lifecycle state.',
     writer_generation BIGINT UNSIGNED COMMENT 'Writer generation fencing stale journal owners.',
@@ -204,7 +204,7 @@ CREATE TABLE ma_session_head (
     activation_event_epoch BIGINT UNSIGNED COMMENT 'Event epoch of the currently projected activation.',
     activation_expires_at BIGINT UNSIGNED COMMENT 'Activation lease expiry in Unix epoch milliseconds.',
     activation_head_revision BIGINT UNSIGNED COMMENT 'Journal revision through which the activation projection is current.',
-    harness_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Originating Harness Session identity.',
+    harness_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Originating Harness Session identity.',
     head_kind VARCHAR(16) NOT NULL COMMENT 'MANAGED_SESSION for journal authority or HARNESS for admission control only.',
     phase VARCHAR(32) NOT NULL DEFAULT 'OPEN' COMMENT 'Harness admission or drain phase.',
     operation_id VARBINARY(512) COMMENT 'Stable operation identity.',
@@ -229,9 +229,9 @@ CREATE TABLE ma_session_head (
 CREATE INDEX idx_ma_head_workspace ON ma_session_head (tenant_id, workspace_id, harness_session_id);
 
 CREATE TABLE ma_session_journal_tx (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     journal_revision BIGINT UNSIGNED NOT NULL COMMENT 'Revision in the private Session transaction journal.',
     command_ref VARBINARY(512) NOT NULL COMMENT 'Canonical operation and command identity reference for journal deduplication.',
     transaction_id VARBINARY(2048) NOT NULL COMMENT 'Stable identity of the committed journal transaction.',
@@ -271,9 +271,9 @@ CREATE TABLE ma_session_journal_tx (
 
 CREATE TABLE ma_journal_pack (
     pack_id VARBINARY(144) NOT NULL COMMENT 'Stable pack identity.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     from_revision BIGINT UNSIGNED NOT NULL COMMENT 'First journal revision covered by the pack.',
     through_revision BIGINT UNSIGNED NOT NULL COMMENT 'Last journal revision covered by the pack.',
     manifest_resource_ref VARBINARY(512) NOT NULL COMMENT 'Canonical identity reference of the pack manifest resource.',
@@ -301,8 +301,8 @@ CREATE INDEX ix_ma_journal_pack_through ON ma_journal_pack (tenant_id, session_i
 CREATE INDEX ix_ma_journal_pack_state ON ma_journal_pack (state, gmt_modified);
 
 CREATE TABLE ma_event_stream (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     stream_kind VARCHAR(16) NOT NULL COMMENT 'Event stream type: SESSION or TASK.',
     stream_id VARBINARY(512) NOT NULL COMMENT 'Task identity for TASK streams, or the empty identity for the Session stream.',
     last_sequence BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Durable tail sequence of the public event stream.',
@@ -327,8 +327,8 @@ CREATE TABLE ma_event_stream (
 CREATE INDEX idx_ma_stream_projection ON ma_event_stream (stream_kind, is_projection_pending, gmt_modified);
 
 CREATE TABLE ma_public_event (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     sequence_id BIGINT UNSIGNED NOT NULL COMMENT 'Monotonic sequence within the Session or Task stream.',
     event_id VARBINARY(256) NOT NULL COMMENT 'Globally unique public event identity.',
     turn_id VARBINARY(256) COMMENT 'Turn identity within the Session.',
@@ -368,8 +368,8 @@ CREATE INDEX idx_ma_event_turn ON ma_public_event (tenant_id, session_id, turn_i
 CREATE INDEX idx_ma_event_type_sequence ON ma_public_event (tenant_id, session_id, stream_kind, stream_id, event_type, sequence_id, turn_id);
 
 CREATE TABLE ma_message (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     item_id VARBINARY(512) NOT NULL COMMENT 'Public message Item identity.',
     turn_id VARBINARY(256) NOT NULL COMMENT 'Turn identity within the Session.',
     item_type VARCHAR(32) NOT NULL COMMENT 'Public message Item type.',
@@ -397,9 +397,9 @@ CREATE INDEX idx_ma_message_history ON ma_message (tenant_id, session_id, first_
 CREATE INDEX idx_ma_message_execution ON ma_message (execution_call_id, item_id);
 
 CREATE TABLE ma_session_record (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     domain VARCHAR(64) NOT NULL COMMENT 'Typed domain such as child_run, mcp_configuration, hook_execution, or schedule.',
     record_id VARBINARY(512) NOT NULL COMMENT 'Domain-specific Session record identity.',
     operation_id VARCHAR(128) COMMENT 'Raw identity of the domain operation linked to the record.',
@@ -454,7 +454,7 @@ CREATE INDEX idx_ma_record_delivery ON ma_session_record (domain, delivery_state
 CREATE INDEX idx_ma_record_session_delivery ON ma_session_record (tenant_id, session_id, domain, delivery_state, gmt_create, record_id);
 
 CREATE TABLE ma_agent_definition (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     agent_id VARBINARY(512) NOT NULL COMMENT 'Agent definition identity within the tenant.',
     revision BIGINT UNSIGNED NOT NULL COMMENT 'Immutable revision of the Agent definition.',
     digest CHAR(64) NOT NULL COMMENT 'Digest of the serialized Agent definition.',
@@ -466,9 +466,9 @@ CREATE TABLE ma_agent_definition (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Immutable tenant-scoped Agent definition revisions pinned by Sessions.';
 
 CREATE TABLE ma_resource (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     resource_id VARBINARY(512) NOT NULL COMMENT 'Resource identity within the Session scope.',
     kind VARBINARY(2048) NOT NULL COMMENT 'Resource content kind selecting its validation and interpretation.',
     schema_version INT UNSIGNED NOT NULL COMMENT 'Version of the stored content schema.',
@@ -512,15 +512,15 @@ CREATE TABLE ma_resource_ref (
     owner_kind VARCHAR(32) NOT NULL COMMENT 'Typed resource owner, such as JOURNAL, NATIVE_SNAPSHOT, MESSAGE, or OPERATION.',
     owner_ref VARBINARY(512) NOT NULL COMMENT 'Canonical identity reference of the owning record.',
     owner_revision BIGINT UNSIGNED NOT NULL COMMENT 'Owning record revision that retains this resource.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     journal_revision BIGINT UNSIGNED COMMENT 'Journal revision associated with this reference when applicable.',
     resource_id VARBINARY(512) NOT NULL COMMENT 'Resource identity within the Session scope.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_resource_ref_business_key UNIQUE (tenant_id, session_id, owner_kind, owner_ref, owner_revision, resource_id),
     CONSTRAINT ck_ma_ref_owner CHECK ((CASE owner_kind WHEN 'JOURNAL' THEN 7 WHEN 'NATIVE_SNAPSHOT' THEN 15 WHEN 'CAPTURE' THEN 7 WHEN 'ARTIFACT' THEN 8 WHEN 'MESSAGE' THEN 7 WHEN 'SESSION_RECORD' THEN 14 WHEN 'EVENT_STREAM' THEN 12 WHEN 'OPERATION' THEN 9 WHEN 'OPERATION_WORK' THEN 14 WHEN 'RECOVERY' THEN 8 WHEN 'HOSTED_CLEANUP' THEN 14 WHEN 'SIDE_QUERY' THEN 10 ELSE -1 END = CHAR_LENGTH(owner_kind))),
-    runtime_binding_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Raw Runtime binding identity required for HOSTED_CLEANUP references.',
+    runtime_binding_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Raw Runtime binding identity required for HOSTED_CLEANUP references.',
     CONSTRAINT ck_ma_ref_binding CHECK ((owner_kind = 'HOSTED_CLEANUP' AND runtime_binding_id IS NOT NULL AND owner_revision > 0) OR (owner_kind <> 'HOSTED_CLEANUP' AND runtime_binding_id IS NULL)),
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT 'Database-generated identity of this row.',
     CONSTRAINT pk_ma_resource_ref_id PRIMARY KEY (id)
@@ -532,9 +532,9 @@ CREATE INDEX idx_ma_ref_journal ON ma_resource_ref (tenant_id, session_id, journ
 
 CREATE TABLE ma_output_capture (
     scope_ref VARBINARY(512) NOT NULL COMMENT 'Canonical tenant, Workspace, and Session publication scope reference.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     publication_id VARBINARY(512) NOT NULL COMMENT 'Tool output publication identity.',
     execution_call_id VARBINARY(512) NOT NULL COMMENT 'Raw tool execution identity.',
     capture_id VARBINARY(512) NOT NULL COMMENT 'Tool output capture identity.',
@@ -611,9 +611,9 @@ CREATE TABLE ma_artifact (
 CREATE INDEX idx_ma_artifact_page ON ma_artifact (scope_ref, creation_sequence, artifact_id);
 
 CREATE TABLE ma_memory_store (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     memory_store_id VARBINARY(512) NOT NULL COMMENT 'Opaque personal MemoryStore identity.',
-    owner_actor_key VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw authenticated owner actor identity.',
+    owner_actor_key VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw authenticated owner actor identity.',
     namespace VARCHAR(128) NOT NULL COMMENT 'Opaque provider user_id selected only by the server.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_memory_store_identity UNIQUE (tenant_id, memory_store_id),
@@ -624,7 +624,7 @@ CREATE TABLE ma_memory_store (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='User-owned personal memory resources and provider namespaces.';
 
 CREATE TABLE ma_memory_entry (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     memory_store_id VARBINARY(512) NOT NULL COMMENT 'Owning personal MemoryStore identity.',
     memory_id VARBINARY(512) NOT NULL COMMENT 'Provider entry identity, never an authorization capability.',
     is_deleted TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Deletion marker suppressing stale provider search hits.',
@@ -639,18 +639,18 @@ CREATE TABLE ma_memory_entry (
 CREATE TABLE ma_request_receipt (
     receipt_key CHAR(64) NOT NULL COMMENT 'Minted identity of the scoped idempotency receipt.',
     namespace VARCHAR(32) NOT NULL COMMENT 'Closed command namespace used to separate idempotency domains.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     scope_kind VARCHAR(16) NOT NULL COMMENT 'Request scope type: TENANT, ACTOR, SESSION, or CHANNEL.',
     scope_ref VARBINARY(768) NOT NULL COMMENT 'Canonical tenant and scope identity reference used to partition records.',
     scope_id VARBINARY(768) NOT NULL COMMENT 'Original identity of the request scope.',
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same request.',
     idempotency_digest CHAR(64) NOT NULL COMMENT 'Digest of the idempotency key used in unique indexes.',
     request_digest VARCHAR(80) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
-    actor_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Raw actor identity associated with this record.',
+    actor_id VARCHAR(36) COLLATE utf8mb4_0900_bin COMMENT 'Raw actor identity associated with this record.',
     operation VARCHAR(64) COMMENT 'Command operation associated with this receipt.',
     state VARCHAR(32) NOT NULL COMMENT 'Admission or settlement state of the request.',
     is_workspace_bound TINYINT UNSIGNED COMMENT 'Whether the Session creation request binds a Workspace.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Managed Session identity.',
     turn_id VARBINARY(512) COMMENT 'Turn identity within the Session.',
     agent_id VARBINARY(512) COMMENT 'Agent definition identity associated with the request.',
     agent_revision BIGINT UNSIGNED COMMENT 'Agent definition revision associated with the request.',
@@ -689,15 +689,15 @@ CREATE TABLE ma_operation (
     scope_id VARBINARY(512) NOT NULL COMMENT 'Raw identity of the operation scope.',
     operation_id VARBINARY(512) NOT NULL COMMENT 'Stable operation identity.',
     operation_kind VARCHAR(48) NOT NULL COMMENT 'Operation type selecting its lifecycle and processing rules.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Managed Session identity.',
     workspace_id VARBINARY(2048) COMMENT 'Workspace identity within the tenant.',
     target_kind VARCHAR(32) NOT NULL COMMENT 'Type of resource or entity targeted by the operation.',
     target_revision BIGINT UNSIGNED COMMENT 'Target revision captured by the operation.',
     target_id VARBINARY(512) NOT NULL COMMENT 'Original identity of the operation target.',
     storage_id VARBINARY(256) COMMENT 'Raw logical storage identity used for indexed lookup and coordination.',
     physical_id VARBINARY(512) COMMENT 'Canonical physical storage identity reference shared by logical aliases.',
-    actor_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Raw actor identity used for authorization and idempotency.',
+    actor_id VARCHAR(36) COLLATE utf8mb4_0900_bin COMMENT 'Raw actor identity used for authorization and idempotency.',
     idempotency_key VARBINARY(2048) COMMENT 'Original key identifying retries of the same request.',
     idempotency_digest CHAR(64) COMMENT 'Digest of the idempotency key used in unique indexes.',
     request_digest VARCHAR(80) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
@@ -778,8 +778,8 @@ CREATE TABLE ma_operation_work (
     operation_ref VARBINARY(1024) NOT NULL COMMENT 'Canonical identity reference of the durable operation.',
     work_kind VARCHAR(32) NOT NULL COMMENT 'Typed work target, such as SESSION or RESOURCE.',
     target_id VARBINARY(512) NOT NULL COMMENT 'Original identity of the operation target.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Managed Session identity.',
     storage_id VARBINARY(256) COMMENT 'Raw logical storage identity used for indexed lookup and coordination.',
     physical_id VARBINARY(512) COMMENT 'Canonical physical storage identity reference shared by logical aliases.',
     state VARCHAR(32) NOT NULL COMMENT 'Processing state of this operation target.',
@@ -805,7 +805,7 @@ CREATE INDEX idx_ma_work_physical ON ma_operation_work (physical_id, work_kind, 
 CREATE INDEX idx_ma_work_evidence ON ma_operation_work (evidence_resource_ref);
 
 CREATE TABLE ma_workspace (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation BIGINT UNSIGNED NOT NULL COMMENT 'Current generation of the registered Workspace.',
     storage_id VARBINARY(1024) NOT NULL COMMENT 'Logical storage identity.',
@@ -819,7 +819,7 @@ CREATE TABLE ma_workspace (
     workspace_kind VARCHAR(16) NOT NULL DEFAULT 'ROOT' COMMENT 'ROOT for a registered Workspace or CHILD_GIT for a child Git Workspace.',
     child_state VARCHAR(32) COMMENT 'Preparation, merge, discard, or failure state of a child Workspace.',
     parent_workspace_id VARBINARY(512) COMMENT 'Parent Workspace identity for CHILD_GIT entries.',
-    parent_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Parent Session that owns the child Workspace operation.',
+    parent_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Parent Session that owns the child Workspace operation.',
     child_run_id VARBINARY(2048) COMMENT 'Child-run identity that requested this Workspace.',
     child_workspace_id VARBINARY(128) COMMENT 'Stable public identity of the child Workspace.',
     parent_cwd_relative VARCHAR(2048) COMMENT 'Parent working directory relative to the root Workspace.',
@@ -834,7 +834,7 @@ CREATE TABLE ma_workspace (
     conflict_paths LONGTEXT COMMENT 'Serialized paths involved in a child Workspace merge conflict.',
     last_error VARCHAR(1024) COMMENT 'Most recent diagnostic failure message.',
     is_default TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether this is the default root Workspace for the tenant.',
-    default_tenant VARCHAR(36) /*!50000 CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin */ GENERATED ALWAYS AS (CASE WHEN is_default THEN tenant_id ELSE NULL END)
+    default_tenant VARCHAR(36) /*!50000 COLLATE utf8mb4_0900_bin */ GENERATED ALWAYS AS (CASE WHEN is_default THEN tenant_id ELSE NULL END)
         COMMENT 'Generated tenant identity enforcing at most one default Workspace.',
     gmt_create BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Record creation time in Unix epoch milliseconds.',
     gmt_modified BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Last record update time in Unix epoch milliseconds.',
@@ -853,7 +853,7 @@ CREATE INDEX idx_ma_workspace_storage ON ma_workspace (tenant_id, storage_id, st
 CREATE INDEX idx_ma_workspace_parent ON ma_workspace (tenant_id, parent_workspace_id, workspace_kind);
 
 CREATE TABLE ma_workspace_access (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
     actor_id VARBINARY(2048) NOT NULL COMMENT 'Encoded tenant and actor identity receiving this Workspace grant.',
     CONSTRAINT uk_ma_workspace_access_business_key UNIQUE (tenant_id, workspace_id, actor_id),
@@ -866,9 +866,9 @@ CREATE TABLE ma_workspace_access (
 CREATE INDEX idx_ma_workspace_access_actor ON ma_workspace_access (tenant_id, actor_id, workspace_id);
 
 CREATE TABLE ma_extension_source_import (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
-    actor_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw actor identity owning the source import.',
+    actor_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw actor identity owning the source import.',
     operation_id VARBINARY(128) NOT NULL COMMENT 'Actor-scoped import operation identity.',
     request_digest CHAR(64) NOT NULL COMMENT 'Source reference and target request fingerprint.',
     request_json LONGTEXT NOT NULL COMMENT 'Original exact source reference and target, without locations or credentials.',
@@ -879,7 +879,7 @@ CREATE TABLE ma_extension_source_import (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Source import intents retained before external I/O, paired with publication operations when prepared.';
 
 CREATE TABLE ma_extension_package (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
     extension_id VARBINARY(128) NOT NULL COMMENT 'Workspace extension identity.',
     package_revision BIGINT UNSIGNED NOT NULL COMMENT 'Immutable extension package revision.',
@@ -901,7 +901,7 @@ CREATE TABLE ma_extension_package (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Versioned Workspace extension package manifests and publication state.';
 
 CREATE TABLE ma_extension_settings (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
     extension_id VARBINARY(128) NOT NULL COMMENT 'Workspace extension identity.',
     settings_revision BIGINT UNSIGNED NOT NULL COMMENT 'Immutable extension settings revision.',
@@ -916,9 +916,9 @@ CREATE TABLE ma_extension_settings (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Immutable Workspace extension settings revisions with encrypted values.';
 
 CREATE TABLE ma_extension_operation (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
-    actor_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw identity of the actor owning the extension operation.',
+    actor_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw identity of the actor owning the extension operation.',
     operation_id VARCHAR(128) NOT NULL COMMENT 'Stable operation identity.',
     extension_id VARBINARY(128) NOT NULL COMMENT 'Workspace extension identity.',
     operation_kind VARCHAR(16) NOT NULL COMMENT 'Extension mutation type: publish or settings.',
@@ -936,7 +936,7 @@ CREATE TABLE ma_extension_operation (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Idempotent Workspace extension publication and settings mutation receipts.';
 
 CREATE TABLE ma_storage (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     storage_id VARBINARY(256) NOT NULL COMMENT 'Logical storage identity.',
     physical_id VARBINARY(512) COMMENT 'Canonical physical storage identity reference shared by logical aliases.',
     registration_state VARCHAR(16) NOT NULL DEFAULT 'FENCE_ONLY' COMMENT 'Registration state: FENCE_ONLY, REGISTERED, RETIRING, or RETIRED.',
@@ -958,7 +958,7 @@ CREATE INDEX idx_ma_storage_physical ON ma_storage (physical_id);
 
 CREATE TABLE ma_runtime_slot (
     request_id VARBINARY(3000) NOT NULL COMMENT 'Canonical Runtime request identity reference selecting a stable slot.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation VARBINARY(2048) NOT NULL COMMENT 'Workspace generation captured for this binding.',
     canonical_cwd VARCHAR(512) NOT NULL COMMENT 'Canonical working directory for the Runtime request.',
@@ -979,7 +979,7 @@ CREATE TABLE ma_runtime_binding (
     binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
     request_id VARBINARY(3000) NOT NULL COMMENT 'Canonical Runtime request identity reference selecting a stable slot.',
     scope_id VARBINARY(2048) NOT NULL COMMENT 'Canonical scope identity reference used to partition records.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation VARBINARY(2048) NOT NULL COMMENT 'Workspace generation captured for this binding.',
     canonical_cwd VARCHAR(512) NOT NULL COMMENT 'Canonical working directory for the Runtime request.',
@@ -1036,14 +1036,14 @@ CREATE INDEX idx_ma_runtime_recovery_candidate ON ma_runtime_binding (is_recover
 
 CREATE TABLE ma_runtime_session (
     scope_id VARBINARY(2048) NOT NULL COMMENT 'Canonical scope identity reference used to partition records.',
-    runtime_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Runtime execution Session identity.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    runtime_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Runtime execution Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation VARBINARY(2048) NOT NULL COMMENT 'Workspace generation captured for this binding.',
     canonical_cwd VARCHAR(512) NOT NULL COMMENT 'Canonical working directory for the Runtime request.',
     capability_digest VARBINARY(2048) NOT NULL COMMENT 'Digest identifying the requested Runtime capabilities.',
     isolation_class VARCHAR(32) NOT NULL COMMENT 'Runtime isolation policy.',
-    harness_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Originating Harness Session identity.',
+    harness_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Originating Harness Session identity.',
     turn_kind VARCHAR(32) NOT NULL COMMENT 'Execution turn kind used for Runtime Session admission.',
     binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the referenced Runtime binding.',
@@ -1066,8 +1066,8 @@ CREATE TABLE ma_tool_execution (
     idempotency_key VARBINARY(2048) NOT NULL COMMENT 'Original key identifying retries of the same request.',
     binding_id VARBINARY(2048) NOT NULL COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED NOT NULL COMMENT 'Generation of the referenced Runtime binding.',
-    harness_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Originating Harness Session identity.',
-    runtime_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Runtime execution Session identity.',
+    harness_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Originating Harness Session identity.',
+    runtime_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Runtime execution Session identity.',
     turn_id VARBINARY(2048) NOT NULL COMMENT 'Turn identity within the Session.',
     tool_call_id VARBINARY(2048) NOT NULL COMMENT 'Tool-call identity within the originating Turn.',
     request_digest VARCHAR(512) NOT NULL COMMENT 'Request digest used to reject conflicting retries.',
@@ -1105,8 +1105,8 @@ CREATE TABLE ma_storage_owner (
     holder_id VARBINARY(512) COMMENT 'Canonical reference of the exclusive storage holder, when present.',
     binding_id VARBINARY(2048) COMMENT 'Runtime binding identity.',
     runtime_generation BIGINT UNSIGNED COMMENT 'Generation of the referenced Runtime binding.',
-    runtime_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Runtime execution Session identity.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Tenant identity used for isolation.',
+    runtime_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Runtime execution Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin COMMENT 'Tenant identity used for isolation.',
     storage_id VARBINARY(256) COMMENT 'Logical storage identity.',
     mount_revision BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Revision of the registered mount identity.',
     mount_state VARCHAR(16) NOT NULL DEFAULT 'UNVERIFIED' COMMENT 'Verification or maintenance state of the registered mount.',
@@ -1132,7 +1132,7 @@ CREATE TABLE ma_storage_owner (
 CREATE INDEX idx_ma_storage_owner_binding ON ma_storage_owner (binding_id, runtime_generation, physical_id);
 
 CREATE TABLE ma_tenant_guard (
-    tenant_id VARCHAR(96) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Readable lock scope: tenant identity or an explicit cross-tenant/host sentinel.',
+    tenant_id VARCHAR(96) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Readable lock scope: tenant identity or an explicit cross-tenant/host sentinel.',
     guard_domain VARCHAR(32) NOT NULL COMMENT 'Lock domain: runtime_placement or output_publication.',
     CONSTRAINT pk_ma_tenant_guard PRIMARY KEY (tenant_id, guard_domain),
     CONSTRAINT ck_ma_guard_domain CHECK ((CASE guard_domain WHEN 'runtime_placement' THEN 17 WHEN 'output_publication' THEN 18 ELSE -1 END = CHAR_LENGTH(guard_domain))),
@@ -1142,8 +1142,8 @@ CREATE TABLE ma_tenant_guard (
 
 CREATE TABLE ma_read_lease (
     lease_id VARBINARY(144) NOT NULL COMMENT 'Unique identity of the resource reader lease.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     retirement_generation BIGINT UNSIGNED NOT NULL COMMENT 'Session retirement generation captured when the lease was acquired.',
     expires_at BIGINT UNSIGNED NOT NULL COMMENT 'Expiry time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_read_lease_business_key UNIQUE (lease_id),
@@ -1155,7 +1155,7 @@ CREATE TABLE ma_read_lease (
 CREATE INDEX idx_ma_read_session ON ma_read_lease (tenant_id, session_id, expires_at);
 
 CREATE TABLE ma_channel_instance (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     channel_id VARBINARY(512) NOT NULL COMMENT 'External channel instance identity within the tenant.',
     platform VARCHAR(64) NOT NULL COMMENT 'External messaging platform identifier.',
     account_id VARBINARY(2048) NOT NULL COMMENT 'External platform account identity.',
@@ -1173,10 +1173,10 @@ CREATE TABLE ma_channel_instance (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='External channel accounts, Workspace context, and routing policy.';
 
 CREATE TABLE ma_channel_binding (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     channel_id VARBINARY(512) NOT NULL COMMENT 'External channel instance identity within the tenant.',
     route_id VARBINARY(512) NOT NULL COMMENT 'Stable identity of the external conversation route.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     scope_kind VARCHAR(16) NOT NULL COMMENT 'Routing scope selecting sender, chat, or thread identity.',
     sender_id VARBINARY(2048) COMMENT 'External sender identity when routing by sender.',
     chat_id VARBINARY(2048) COMMENT 'External chat or conversation identity.',
@@ -1192,13 +1192,13 @@ CREATE INDEX idx_ma_channel_created ON ma_channel_instance (tenant_id, gmt_creat
 CREATE INDEX idx_ma_channel_binding_session ON ma_channel_binding (tenant_id, session_id);
 
 CREATE TABLE ma_pr_watch_binding (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     channel_id VARBINARY(512) NOT NULL COMMENT 'External channel instance identity within the tenant.',
     binding_id VARBINARY(512) NOT NULL COMMENT 'Stable derived identity of the PR-watch binding.',
     owner VARBINARY(512) NOT NULL COMMENT 'Repository owner identity of the watched pull request.',
     repo VARBINARY(512) NOT NULL COMMENT 'Repository name identity of the watched pull request.',
     pr_number BIGINT UNSIGNED NOT NULL COMMENT 'Watched pull request number.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Existing Managed Session the PR events inject into.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Existing Managed Session the PR events inject into.',
     events_json LONGTEXT NOT NULL COMMENT 'Serialized enabled PR-watch transition set.',
     gmt_create BIGINT UNSIGNED NOT NULL COMMENT 'Record creation time in Unix epoch milliseconds.',
     CONSTRAINT uk_ma_pr_watch_binding_business_key UNIQUE (tenant_id, channel_id, owner, repo, pr_number),
@@ -1208,11 +1208,11 @@ CREATE TABLE ma_pr_watch_binding (
 
 CREATE TABLE ma_delivery (
     delivery_kind VARCHAR(32) NOT NULL COMMENT 'Delivery type: CHANNEL, SESSION_MESSAGE, or CHILD_RESULT.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     channel_id VARBINARY(512) COMMENT 'External channel instance identity within the tenant.',
     delivery_id VARBINARY(512) NOT NULL COMMENT 'Stable delivery identity retained across retries.',
-    source_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Session that produced the message or result.',
-    target_session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin COMMENT 'Session receiving a relayed message or child result.',
+    source_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Session that produced the message or result.',
+    target_session_id VARCHAR(64) COLLATE utf8mb4_0900_bin COMMENT 'Session receiving a relayed message or child result.',
     source_scope_id VARBINARY(512) NOT NULL COMMENT 'Raw source scope identity used for delivery lookup and uniqueness.',
     source_revision BIGINT UNSIGNED COMMENT 'Source record revision captured by the delivery.',
     segment_id VARBINARY(512) COMMENT 'Identity of an external channel message segment.',
@@ -1259,7 +1259,7 @@ CREATE INDEX idx_ma_delivery_source ON ma_delivery (delivery_kind, tenant_id, so
 
 CREATE TABLE ma_channel_segment (
     delivery_id VARBINARY(512) NOT NULL COMMENT 'Raw delivery_id of the parent CHANNEL delivery.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     channel_id VARBINARY(512) NOT NULL COMMENT 'External channel instance identity within the tenant.',
     segment_id VARBINARY(512) NOT NULL COMMENT 'Stable segment identity from the delivery record plan.',
     segment_ordinal BIGINT UNSIGNED NOT NULL COMMENT 'Ordering position of the segment within the delivery.',
@@ -1275,9 +1275,9 @@ CREATE INDEX idx_ma_channel_segment_delivery ON ma_channel_segment (tenant_id, c
 
 CREATE TABLE ma_side_query (
     query_id VARBINARY(512) NOT NULL COMMENT 'Public actor-private side query identity.',
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
-    actor_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw authenticated actor identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    actor_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw authenticated actor identity.',
     actor_scope_ref VARBINARY(256) NOT NULL COMMENT 'Canonical actor and Session identity reference.',
     kind VARCHAR(16) NOT NULL COMMENT 'Query kind: btw or recap.',
     trigger_kind VARCHAR(16) NOT NULL COMMENT 'Admission trigger: manual or automatic.',
@@ -1322,9 +1322,9 @@ CREATE INDEX idx_ma_side_query_deadline ON ma_side_query (state, deadline_at);
 CREATE INDEX idx_ma_side_query_instance ON ma_side_query (claim_instance_id, claim_boot_id, state);
 
 CREATE TABLE ma_schedule (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     schedule_id VARBINARY(512) NOT NULL COMMENT 'Automation schedule identity within the tenant.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     workspace_id VARBINARY(2048) NOT NULL COMMENT 'Workspace identity within the tenant.',
     actor_id VARBINARY(2048) NOT NULL COMMENT 'Actor identity associated with this record.',
     record_revision BIGINT UNSIGNED NOT NULL COMMENT 'Revision of the private schedule domain record.',
@@ -1360,11 +1360,11 @@ CREATE TABLE ma_schedule (
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin COMMENT='Automation schedule projections, scan leases, trigger watermarks, and gate outcomes.';
 
 CREATE TABLE ma_schedule_occurrence (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
     schedule_id VARBINARY(512) NOT NULL COMMENT 'Automation schedule identity within the tenant.',
     occurrence_key VARBINARY(640) NOT NULL COMMENT 'Stable identity of a scheduled or manual trigger occurrence.',
     run_id VARBINARY(512) NOT NULL COMMENT 'Automation run identity assigned to the occurrence.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Session associated with this trigger occurrence.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Session associated with this trigger occurrence.',
     slot BIGINT UNSIGNED NULL COMMENT 'Scheduled trigger time in Unix epoch milliseconds, when applicable.',
     trigger_kind VARCHAR(16) NOT NULL COMMENT 'Source of the trigger, such as scheduled or manual.',
     outcome VARCHAR(16) NOT NULL COMMENT 'Recorded trigger outcome, including admitted, skipped, missed, or unknown results.',
@@ -1451,13 +1451,13 @@ CREATE INDEX idx_ma_head_session ON ma_session_head (tenant_id, session_id, head
 CREATE INDEX idx_ma_runtime_execution_storage ON ma_runtime_session (execution_storage_id);
 
 CREATE TABLE ma_session_worktree (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
     storage_id VARBINARY(512) NOT NULL COMMENT 'Logical storage identity.',
     physical_id VARBINARY(512) NOT NULL COMMENT 'Canonical physical storage identity reference shared by logical aliases.',
     worktree_id CHAR(32) NOT NULL COMMENT 'Stable identity of the Session-owned Git worktree.',
-    owner_actor_key VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw actor identity owning the Session worktree.',
+    owner_actor_key VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Raw actor identity owning the Session worktree.',
     state VARCHAR(16) NOT NULL COMMENT 'Worktree lifecycle state: PREPARING, READY, FAILED, BLOCKED, REMOVING, or REMOVED.',
     revision BIGINT UNSIGNED NOT NULL COMMENT 'Monotonic worktree state revision.',
     plan_json LONGTEXT NOT NULL COMMENT 'Frozen worktree creation or removal plan.',
@@ -1490,8 +1490,8 @@ CREATE INDEX idx_ma_extension_source_import_workspace ON ma_extension_source_imp
 CREATE INDEX idx_ma_extension_operation_workspace ON ma_extension_operation (tenant_id, workspace_id);
 
 CREATE TABLE ma_client_files_binding (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     actor_id VARBINARY(2048) NOT NULL COMMENT 'Authenticated actor that registered the client directory.',
     generation BIGINT UNSIGNED NOT NULL COMMENT 'Monotonic registration generation fencing stale connections.',
     state VARCHAR(16) NOT NULL COMMENT 'Binding lifecycle state: active or closed.',
@@ -1512,8 +1512,8 @@ CREATE INDEX idx_ma_client_files_binding_expiry ON ma_client_files_binding (stat
 CREATE INDEX idx_ma_client_files_binding_session ON ma_client_files_binding (session_id);
 
 CREATE TABLE ma_client_files_request (
-    tenant_id VARCHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
-    session_id VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
+    tenant_id VARCHAR(36) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Tenant identity used for isolation.',
+    session_id VARCHAR(64) COLLATE utf8mb4_0900_bin NOT NULL COMMENT 'Managed Session identity.',
     binding_generation BIGINT UNSIGNED NOT NULL COMMENT 'Registration generation this request belongs to.',
     request_id VARCHAR(128) NOT NULL COMMENT 'JSON-RPC request identity as text.',
     payload_json LONGTEXT NOT NULL COMMENT 'Opaque JSON-RPC request forwarded to the browser, size-bounded by the service.',
