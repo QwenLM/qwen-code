@@ -7025,6 +7025,33 @@ describe('WebShellSidebar Live group', () => {
     expect(details).toContain('Preparing voice chat');
     expect(details).toContain('Background tasks running');
   });
+  it('lets the background dot own the slot over the unread dot', async () => {
+    const session = {
+      sessionId: 'bg-unread',
+      workspaceCwd: '/tmp/project',
+      displayName: 'BG unread',
+      hasRunningBackgroundTasks: true,
+    };
+    active.sessions = [{ ...session, hasActivePrompt: true }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    const runningRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[class*="sessionRow"]'),
+    ).find((r) => r.textContent?.includes('BG unread'));
+    expect(runningRow).toBeDefined();
+    expect(
+      runningRow!.querySelector('[data-web-shell-session-running]'),
+    ).not.toBeNull();
+    active.sessions = [{ ...session, hasActivePrompt: false }];
+    renderSidebar();
+    await act(async () => Promise.resolve());
+    expect(
+      container.querySelector('[data-web-shell-session-background-running]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+  });
   it.each([
     ['isWaitingForPermission', 'Needs approval'],
     ['isWaitingForUserQuestion', 'User input needed'],

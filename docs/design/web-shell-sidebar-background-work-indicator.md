@@ -244,7 +244,10 @@ row. No page errors.
 5. Dot precedence mirrors the hover chain (unread over running/active-work,
    background over unread, starting spinner over all); the touch layout and
    the existing hover contracts are unchanged.
-6. Every assertion above dies under the corresponding mutation.
+6. Every pinned assertion dies under its corresponding mutation: the tooltip
+   matrix and the row-side dot witness cover the composed chains; row guards
+   for transient windows (unread beside a resumed turn) mirror the hover
+   chain pinned by the matrix.
 
 ## Open questions / follow-ups
 

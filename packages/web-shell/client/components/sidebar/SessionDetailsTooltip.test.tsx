@@ -264,7 +264,49 @@ describe('SessionDetailsTooltip', () => {
       const details = document.querySelector('[role="dialog"]');
       expect(details?.textContent).toContain('Background tasks running');
       expect(details?.textContent).not.toContain('· Background tasks running');
-      expect(details?.textContent).not.toContain('Finished');
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
+  it('composes the background suffix exactly once on a running turn', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'running-background',
+                workspaceCwd: '/workspace',
+                hasActivePrompt: true,
+                hasRunningBackgroundTasks: true,
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Running · Background tasks running',
+      );
+      expect(
+        (details?.textContent ?? '').split('Background tasks running').length -
+          1,
+      ).toBe(1);
     } finally {
       act(() => root.unmount());
     }

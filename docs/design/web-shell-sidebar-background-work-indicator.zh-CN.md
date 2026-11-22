@@ -188,7 +188,8 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
    不再计入计数，并从请求中剔除。
 5. 圆点优先级与 hover 链一致（unread 优先于 running/active-work，background 优先
    于 unread，启动 Spinner 优先于全部）；触屏布局、既有悬停契约不变。
-6. 上述每条断言在对应变异下都会失败。
+6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵与行侧圆点见证覆盖组合
+   链；瞬态窗口的行守卫（unread 与恢复回合并存）镜像矩阵钉住的 hover 链。
 
 ## 待决问题 / 后续
 
