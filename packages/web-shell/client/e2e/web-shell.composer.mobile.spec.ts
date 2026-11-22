@@ -2175,3 +2175,57 @@ test('mobile Shell entry closes the drawer and returns editor focus @smoke', asy
   await expect(textarea).toHaveValue('keep draft');
   expect(daemon.promptRequests()).toHaveLength(0);
 });
+
+for (const width of [240, 360]) {
+  test(`mobile Shell mode keeps every editing key on one visible row at ${width}px @smoke`, async ({
+    page,
+  }, testInfo) => {
+    await page.setViewportSize({ width, height: 844 });
+    const scenario = createWebShellDaemonScenario();
+    const daemon = await installScenario(page, scenario, testInfo);
+    await gotoSession(page, scenario, daemon);
+    const textarea = page.locator(COMPOSER_TEXTAREA);
+    await textarea.fill('!pwd');
+    await page
+      .getByRole('button', { name: 'Add to message', exact: true })
+      .tap();
+    await page.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+    const actions = page.locator('[data-web-shell-mobile-editing-actions]');
+    const exitShell = actions.getByRole('button', {
+      name: 'Exit Shell',
+      exact: true,
+    });
+    await expect(exitShell).toBeVisible();
+    await expect(page.locator('[data-web-shell-mobile-add-menu]')).toHaveCount(
+      0,
+    );
+
+    const buttons = actions.getByRole('button');
+    await expect(buttons).toHaveCount(7);
+    const boxes = await Promise.all(
+      (await buttons.all()).map((button) => button.boundingBox()),
+    );
+    const firstY = boxes[0]!.y;
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+      expect(Math.abs(box!.y - firstY)).toBeLessThanOrEqual(1);
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
+    }
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBe(width);
+
+    // The trailing Expand editor action is directly tappable without scrolling
+    // the editing row horizontally on a 240px viewport.
+    await actions
+      .getByRole('button', { name: 'Expand editor', exact: true })
+      .tap();
+    await expect(
+      page.locator('[data-web-shell-expanded-editor]'),
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath(`shell-expanded-${width}.png`),
+    });
+  });
+}

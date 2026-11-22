@@ -3393,6 +3393,7 @@
 
 .editorShell[data-web-shell-mobile-composer]
   .mobileEditingActions:has(.mobileEditingTextBtn) {
+  gap: 1px;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -3404,17 +3405,27 @@
 
 .editorShell[data-web-shell-mobile-composer]
   .mobileEditingActions:has(.mobileEditingTextBtn)
+  .mobileEditingKeys,
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions:has(.mobileEditingTextBtn)
+  .mobileEditingTail {
+  gap: 1px;
+  min-width: 0;
+}
+
+.editorShell[data-web-shell-mobile-composer]
+  .mobileEditingActions:has(.mobileEditingTextBtn)
   .mobileEditingActionBtn {
-  width: 34px;
-  min-width: 28px;
-  flex: 0 1 34px;
+  width: auto;
+  min-width: 0;
+  flex: 1 1 0;
 }
 
 .editorShell[data-web-shell-mobile-composer]
   .mobileEditingActions:has(.mobileEditingTextBtn)
   .mobileEditingTextBtn {
   height: 34px;
-  padding: 0 6px;
+  padding: 0 4px;
   font-size: 12px;
 }
 
