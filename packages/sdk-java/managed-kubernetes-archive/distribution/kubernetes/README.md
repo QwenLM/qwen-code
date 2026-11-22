@@ -2,11 +2,11 @@
 
 [中文](README.zh-CN.md)
 
-> **Historical deployment template.** The Kubernetes EndpointSlice pool discovery described here has been removed from the Java control plane and cold-archived under [`packages/sdk-java/managed-kubernetes-archive/`](../../../sdk-java/managed-kubernetes-archive/). Java now supports only `discovery: static` with an explicit `instances` list; startup refuses `discovery: kubernetes` and the `namespace`/`service-name`/`service-uid`/`port-name` properties with `Harness pool discovery must be static`, and `discovery-rbac.yaml` / `discovery-role-binding.yaml` are no longer read by any code. The EndpointSlice sections below are preserved for restoring the archived discovery; follow-up issue [#17427](https://github.com/QwenLM/qwen-code/issues/17427) tracks retiring or adapting this package. For a current pool, configure static instances as shown under "Build and configure".
+> **Archived deployment template.** This package is retired: the Kubernetes EndpointSlice pool discovery described here was removed from the Java control plane by [#17415](https://github.com/QwenLM/qwen-code/pull/17415), and the whole package moved into this cold archive via [#17427](https://github.com/QwenLM/qwen-code/issues/17427). Java now supports only `discovery: static` with an explicit `instances` list; startup refuses `discovery: kubernetes` with `Harness pool discovery must be static`, and `discovery-rbac.yaml` / `discovery-role-binding.yaml` are no longer read by any code. The EndpointSlice sections below are preserved for restoring the archived discovery. For a current pool, configure static instances as shown under "Build and configure".
 
 This opt-in package runs the Hosted Harness as a private, horizontally expandable pool. Java retains tenant/actor admission, durable placement and subscriptions. Session RPCs target the selected EndpointSlice Pod address and exact instance/boot; the Service is a discovery anchor. The existing local-process deployment does not enable the pool environment variable or Java pool configuration.
 
-See the [design](../../../../docs/design/2026-10-21-managed-harness-kubernetes.md) for ownership, fencing and the acceptance matrix. These files are deployment templates. No cluster, certificate issuer, metrics adapter or production capacity has been validated by adding them.
+See the [design](../../../../../docs/design/2026-10-21-managed-harness-kubernetes.md) for ownership, fencing and the acceptance matrix. These files are deployment templates. No cluster, certificate issuer, metrics adapter or production capacity has been validated by adding them.
 
 ## Prerequisites and inputs
 

@@ -561,11 +561,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 preparedFields.add("publicationId");
             }
             if (body.containsKey("inputBytesBase64") || body.containsKey("toolDefinitionBytesBase64")) {
-                if (body.containsKey("toolProtocol")) {
-                    throw new RuntimeBrokerException(400, "runtime_reference_invalid", "Private CSI allocation is not tool v3", false);
-                }
-                preparedFields.add("inputBytesBase64");
-                preparedFields.add("toolDefinitionBytesBase64");
+                throw new RuntimeBrokerException(400, "runtime_broker_csi_removed",
+                        "Private CSI allocation is no longer supported", false);
             }
             if (!body.keySet().equals(preparedFields)) {
                 throw new RuntimeBrokerException(400, "runtime_broker_invalid_request",
