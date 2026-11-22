@@ -30,6 +30,7 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
   isGeneratedUiStateRecord,
+  isLifecycleUiTelemetryEvent,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
   selectActiveGeneratedUiStateRecordUuids,
@@ -3554,6 +3555,14 @@ export class SessionService {
             );
             complete &&= parsed.complete;
             for (const record of parsed.records) {
+              if (
+                record === null ||
+                typeof record !== 'object' ||
+                Array.isArray(record)
+              ) {
+                records.push(record);
+                continue;
+              }
               firstRecordMeta ??= {
                 cwd: record.cwd,
                 version: record.version,
@@ -3600,6 +3609,7 @@ export class SessionService {
       );
     }
     this.assertMaintainableSessionUnchanged(sessionId, physical);
+    artifactLibraryRetainedRecordsHookForTest?.(records);
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
@@ -6023,12 +6033,8 @@ function remapSystemPayloadForFork(
     const payload = record.systemPayload as
       | { uiEvent?: Record<string, unknown> }
       | undefined;
-    if (
-      payload?.uiEvent?.['event.name'] === 'request_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'tool_lifecycle' ||
-      payload?.uiEvent?.['event.name'] === 'hook_lifecycle'
-    ) {
-      const event = payload.uiEvent;
+    if (isLifecycleUiTelemetryEvent(payload?.uiEvent)) {
+      const event = payload!.uiEvent!;
       return {
         ...payload,
         uiEvent: {
@@ -6082,11 +6088,11 @@ function isForkSideRecord(record: ChatRecord): boolean {
 }
 
 /**
- * Transcript size cap shared by the library mutation read and the
- * best-effort first-open seed's size gate. It bounds the library mutation
- * read; for the seed it declines to seed an oversized conversation-less
- * transcript. The load funnel's own parse is the load and is not bounded
- * by this cap — the seed's size gate runs after that read.
+ * Transcript size cap for the best-effort first-open artifact summary seed's
+ * size gate: it declines to seed an oversized conversation-less transcript.
+ * The library mutation read streams and strips non-artifact bodies under
+ * `SESSION_TRANSCRIPT_MAX_INDEX_BYTES`, and the load funnel's own parse is not
+ * bounded by this cap — the seed's size gate runs after that read.
  */
 const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
 
@@ -6226,12 +6232,7 @@ export function replayUiTelemetryFromConversation(
       | UiTelemetryRecordPayload
       | undefined;
     const uiEvent = payload?.uiEvent;
-    if (
-      uiEvent &&
-      uiEvent['event.name'] !== 'request_lifecycle' &&
-      uiEvent['event.name'] !== 'tool_lifecycle' &&
-      uiEvent['event.name'] !== 'hook_lifecycle'
-    ) {
+    if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
       uiTelemetryService.addEvent(uiEvent as UiEvent, sessionId);
     }
   }
@@ -6273,4 +6274,14 @@ export function normalizeDerivedBranchTitle(
     .replace(/(\S)\(\d+\)$/, '$1')
     .trim();
   return normalized || undefined;
+}
+
+let artifactLibraryRetainedRecordsHookForTest:
+  | ((records: readonly ChatRecord[]) => void)
+  | undefined;
+
+export function setArtifactLibraryRetainedRecordsHookForTest(
+  hook: ((records: readonly ChatRecord[]) => void) | undefined,
+): void {
+  artifactLibraryRetainedRecordsHookForTest = hook;
 }

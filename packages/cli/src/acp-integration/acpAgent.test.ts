@@ -33537,9 +33537,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       recoveredGoalUpdates: [],
     });
     const replayUpdate = { sessionUpdate: 'agent_message_chunk' };
+    let emitted = 0;
     mockHistoryReplay.mockImplementation(
       async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
-        for (let index = 0; index <= LOAD_REPLAY_MAX_UPDATES; index += 1) {
+        for (let index = 0; index < LOAD_REPLAY_MAX_UPDATES + 50; index += 1) {
+          emitted += 1;
           await context.sendUpdate(replayUpdate);
         }
       },
@@ -33564,6 +33566,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         limit: LOAD_REPLAY_MAX_UPDATES,
       },
     });
+    expect(emitted).toBe(LOAD_REPLAY_MAX_UPDATES + 1);
 
     mockConnectionState.resolve();
     await agentPromise;

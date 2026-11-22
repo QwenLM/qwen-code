@@ -93,6 +93,7 @@ import {
 } from './session-artifact-persistence.js';
 import {
   aggregateTranscriptRecordFragments,
+  isLifecycleUiTelemetryEvent,
   isUserPromptSubmitContextPartText,
   isTranscriptConversationRecord,
   projectUserTranscriptForDisplay,
@@ -394,12 +395,7 @@ function buildManagedSessionRestoreProjection(
       const uiEvent = (
         record.systemPayload as UiTelemetryRecordPayload | undefined
       )?.uiEvent;
-      if (
-        uiEvent &&
-        uiEvent['event.name'] !== 'request_lifecycle' &&
-        uiEvent['event.name'] !== 'tool_lifecycle' &&
-        uiEvent['event.name'] !== 'hook_lifecycle'
-      ) {
+      if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
         uiTelemetryEvents.push(uiEvent as UiEvent);
       }
     }
@@ -914,12 +910,7 @@ function isRestoreUiTelemetryCandidate(record: ChatRecord): boolean {
   }
   const uiEvent = (record.systemPayload as UiTelemetryRecordPayload | undefined)
     ?.uiEvent;
-  return (
-    isObjectRecord(uiEvent) &&
-    uiEvent['event.name'] !== 'request_lifecycle' &&
-    uiEvent['event.name'] !== 'tool_lifecycle' &&
-    uiEvent['event.name'] !== 'hook_lifecycle'
-  );
+  return isObjectRecord(uiEvent) && !isLifecycleUiTelemetryEvent(uiEvent);
 }
 
 function isFiniteNonNegativeInteger(value: unknown): value is number {
@@ -4301,12 +4292,7 @@ export class SessionTranscriptReader {
         const uiEvent = (
           record.systemPayload as UiTelemetryRecordPayload | undefined
         )?.uiEvent;
-        if (
-          uiEvent &&
-          uiEvent['event.name'] !== 'request_lifecycle' &&
-          uiEvent['event.name'] !== 'tool_lifecycle' &&
-          uiEvent['event.name'] !== 'hook_lifecycle'
-        ) {
+        if (uiEvent && !isLifecycleUiTelemetryEvent(uiEvent)) {
           uiTelemetryEvents.push(uiEvent as UiEvent);
         }
       }

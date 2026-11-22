@@ -1297,9 +1297,7 @@ function mapSessionRestoreRequestError(
 function validateLoadReplayEnvelope(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
-  enforceLimits: boolean,
 ): void {
-  if (!enforceLimits) return;
   if (envelope.updates.length > LOAD_REPLAY_MAX_UPDATES) {
     throw new HistoryReplayLimitError(
       sessionId,
@@ -1329,7 +1327,6 @@ function appendGoalUpdatesWithinLimits(
   sessionId: string,
   envelope: BridgeLoadReplayEnvelope,
   goalUpdates: readonly SessionUpdate[],
-  enforceLimits: boolean,
 ): boolean {
   if (goalUpdates.length === 0) return true;
   const withGoal = {
@@ -1337,7 +1334,7 @@ function appendGoalUpdatesWithinLimits(
     updates: [...envelope.updates, ...goalUpdates],
   };
   try {
-    validateLoadReplayEnvelope(sessionId, withGoal, enforceLimits);
+    validateLoadReplayEnvelope(sessionId, withGoal);
   } catch (error) {
     if (!(error instanceof HistoryReplayLimitError)) throw error;
     debugLogger.debug(
@@ -6437,7 +6434,6 @@ class QwenAgent implements Agent {
             // that the bridge validates against LOAD_REPLAY_MAX_UPDATES and
             // DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes, so enforce envelope limits
             // even when the caller omitted `historyPageSize`.
-            const enforceLimits = true;
             const envelope: BridgeLoadReplayEnvelope = {
               v: LOAD_REPLAY_VERSION,
               updates: replay.updates,
@@ -6452,16 +6448,13 @@ class QwenAgent implements Agent {
                 : {}),
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
-            if (enforceLimits) {
-              degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
-            }
-            validateLoadReplayEnvelope(sessionId, envelope, enforceLimits);
+            degradeReplayEnvelopeAppHtml(envelope, LOAD_REPLAY_MAX_BYTES);
+            validateLoadReplayEnvelope(sessionId, envelope);
             // The card is presentation: a full page simply goes without it.
             appendGoalUpdatesWithinLimits(
               sessionId,
               envelope,
               renderGoalUpdates(),
-              enforceLimits,
             );
             return withRestoreHint(liveSession, {
               ...response,
@@ -6641,7 +6634,7 @@ class QwenAgent implements Agent {
                   replayEnvelope,
                   LOAD_REPLAY_MAX_BYTES,
                 );
-                validateLoadReplayEnvelope(sessionId, replayEnvelope, true);
+                validateLoadReplayEnvelope(sessionId, replayEnvelope);
               }
               const goalBootstrap = replayGoalBootstrap(projection);
               const rendered = await renderPreparedGoalUpdate(
@@ -6684,7 +6677,6 @@ class QwenAgent implements Agent {
                   sessionId,
                   replayEnvelope,
                   rendered.updates,
-                  true,
                 );
                 // What a full page cannot carry is the recovered Goal
                 // state, which the client must still get: it is sent as

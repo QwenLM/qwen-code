@@ -12,6 +12,7 @@ import {
   SessionArtifactLibraryError,
   SessionStorageEntryError,
   SessionService,
+  setArtifactLibraryRetainedRecordsHookForTest,
 } from './sessionService.js';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
@@ -115,6 +116,7 @@ beforeEach(async () => {
   service = new SessionService(cwd, { runtimeBaseDir: runtime });
 });
 afterEach(async () => {
+  setArtifactLibraryRetainedRecordsHookForTest(undefined);
   await fs.rm(temp, { recursive: true, force: true });
 });
 
@@ -494,11 +496,34 @@ describe('persisted artifact library', () => {
         role: 'user',
         parts: [{ text: 'x'.repeat(256 * 1024) }],
       },
+      toolCallResult: { output: 'y'.repeat(64 * 1024) },
     };
     await fs.appendFile(file, JSON.stringify(heavyToolResult) + '\n');
 
+    let retained: ReadonlyArray<Record<string, unknown>> = [];
+    setArtifactLibraryRetainedRecordsHookForTest((records) => {
+      retained = records.map((entry) => ({ ...entry }));
+    });
+
     const snapshot = await service.readSessionArtifactSnapshot(id);
     expect(snapshot?.artifacts.map((item) => item.id)).toEqual([artifactId]);
+
+    const retainedHeavy = retained.find(
+      (entry) => entry['uuid'] === 'tool-heavy',
+    );
+    expect(retainedHeavy).toBeDefined();
+    expect(retainedHeavy).not.toHaveProperty('message');
+    expect(retainedHeavy).not.toHaveProperty('toolCallResult');
+    expect(retainedHeavy).not.toHaveProperty('systemPayload');
+    const retainedAssistant = retained.find(
+      (entry) => entry['uuid'] === 'assistant-1',
+    );
+    expect(retainedAssistant).toBeDefined();
+    expect(retainedAssistant).not.toHaveProperty('message');
+    const retainedArtifact = retained.find(
+      (entry) => entry['subtype'] === 'session_artifact_event',
+    );
+    expect(retainedArtifact).toHaveProperty('systemPayload');
 
     const removed = await service.removeSessionArtifactsForLibrary(
       id,
