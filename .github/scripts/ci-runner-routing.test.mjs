@@ -2049,12 +2049,12 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     const run = (name) => build.steps.find((s) => s.name === name).run;
     const buildJava = run('Build Java components');
     assert.match(buildJava, /-Dmaven\.repo\.local=/);
-    assert.match(buildJava, /find "\$\{repo\}" -depth -type d/);
+    assert.match(buildJava, /find -P "\$\{repo\}" -xdev -depth/);
     assert.match(
       buildJava,
-      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*'/,
+      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwencode-sdk\/\*' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*\/\*'/,
     );
-    assert.match(buildJava, /-exec rm -rf \{\} \+/);
+    assert.match(buildJava, /-delete \|\| exit 1/);
     assert.match(
       run('Assemble reference distribution'),
       /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
