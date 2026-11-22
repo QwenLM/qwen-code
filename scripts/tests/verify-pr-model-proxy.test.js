@@ -1006,8 +1006,11 @@ describe('local container recipe pins', () => {
       const fragments = [];
       const foldContinuations = (text) => text.replace(/\\\r?\n[ \t]*/g, '');
       const nodeProgramBoundary = (text) =>
-        /^node\s+(?:-|["']?(?:\/|<|\$)|\S+\.[cm]?js(?=\s|$))/.test(text);
+        /^node\s+(?:-|["']?(?:\/|<|\$)|(?:\S+\/\S*|\S+\.[cm]?js)(?=\s|$)|[A-Za-z0-9_.-]+\s*$)/.test(
+          text,
+        );
       const fencedRanges = [];
+      const transcriptBodies = [];
       const fence =
         /^([ \t]*)```([A-Za-z0-9_-]+)[^\n]*\n([\s\S]*?)^\1```[^\n]*$/gm;
       for (const match of document.matchAll(fence)) {
@@ -1019,9 +1022,15 @@ describe('local container recipe pins', () => {
           )
           .join('\n');
         const language = match[2].toLowerCase();
+        if (['console', 'terminal'].includes(language)) {
+          transcriptBodies.push(body);
+          continue;
+        }
         const textHelperExample =
           language === 'text' &&
-          nodeProgramBoundary(foldContinuations(body).trim());
+          /^node\s+(?:-|["']?(?:\/|<|\$)|\S+\.[cm]?js(?=\s|$))/.test(
+            foldContinuations(body).trim(),
+          );
         if (!['bash', 'sh', 'shell'].includes(language) && !textHelperExample) {
           continue;
         }
@@ -1030,6 +1039,7 @@ describe('local container recipe pins', () => {
       const inFences = (index) =>
         fencedRanges.some(([start, end]) => index >= start && index < end);
       const proseCommandFragments = new Set([
+        'bash setup.sh | tail -30',
         'chmod 444',
         'chmod 555',
         'cp -a',
@@ -1048,6 +1058,7 @@ describe('local container recipe pins', () => {
         'QWEN_SANDBOX_IMAGE_TAG=<label>',
         'QWEN_VERIFY_CREDENTIAL_FREE=1',
         'QWEN_VERIFY_JAVA=1',
+        'qwen --version',
         'qwencode=<n>',
         'ref=refs/heads/<branch>',
         'SANDBOX=sandbox-exec',
@@ -1119,15 +1130,17 @@ describe('local container recipe pins', () => {
         const checks = [
           /^gate:/,
           /^(?:NODE_OPTIONS\s*=|alias\s|function\s|node\s*\(\s*\))/,
-          /^command\s+(?:-v(?:\s|$)|["'$/]|node(?=\s|$))/,
+          /^command\s+(?:-v(?:\s|$)|["'$/]|(?:node|qwen)(?=\s|$))/,
           /^\/(?:[A-Za-z0-9_.-]+\/)+(?:env|nice|sudo)(?=\s|$)/,
-          /^(?:env|nice|sudo|exec|eval|sh|cd|touch|cat|echo|grep|printf|sed|cp|rm|mkdir|chmod|kill|docker|python3|true)(?=\s|$)/,
+          /^(?:env|nice|sudo|exec|eval|sh|cd|touch|cat|echo|grep|printf|sed|cp|rm|mkdir|chmod|kill|docker|python3?|true)(?=\s|$)/,
           /^read\s+(?:-|[A-Z_][A-Z0-9_]*(?:\s|$))/,
           /^scripts\/\S+\s/,
           /^verify-pr-/,
           /^["']?(?:\/[A-Za-z0-9_.-]+)*\/(?:node|bash|sh|verify-pr-[a-z-]+\.mjs)(?=\s|$)/,
-          /^qwen\s+.*--approval-mode\s/,
-          /^(?:bash|sh)\s+-[a-z]*c(?:\s|$)/,
+          /^qwen\s+-/,
+          /^(?:bash|sh)\s+(?:-[a-z]*c(?:\s|$)|["']?\S+\.(?:sh|bash)(?=\s|$)|["']?[A-Za-z0-9_.-]+\s*$)/,
+          /^(?:if|while|until)\s+(?:(?:true|false|command|qwen|node|bash|sh|env|nice|sudo|docker|test)(?=\s|;|$)|\[)/,
+          /^[{(]\s*(?:\/|["']?(?:node|bash|sh|qwen)(?=\s|$)|command(?=\s|$)|(?:env|nice|sudo|docker|printf|python3?|true)(?=\s|$))/,
           /^for\s+[A-Za-z_][A-Za-z0-9_]*\s+in\s/,
           /^(?:export\s+[A-Za-z_][A-Za-z0-9_]*(?:=|\s|$)|unset(?:\s+[A-Za-z_][A-Za-z0-9_]*)+\s*$|[A-Za-z_][A-Za-z0-9_]*=)/,
           /(?:^|[;&|]\s*)(?:["']?(?:\/[A-Za-z0-9_.-]+)*\/node|node)\s+(?:-e|--eval)(?=\s|$)/,
@@ -1139,12 +1152,59 @@ describe('local container recipe pins', () => {
           nodeProgramBoundary(text) || checks.some((check) => check.test(text))
         );
       };
+      for (const body of transcriptBodies) {
+        const lines = body.split('\n');
+        for (let index = 0; index < lines.length; index += 1) {
+          const prompted = lines[index].match(/^[ \t]*[$#][ \t]+(.*)$/)?.[1];
+          const raw = lines[index].trim();
+          if (prompted === undefined && !executableBoundary(raw)) continue;
+          const selected = [prompted ?? raw];
+          const nextInput = () =>
+            lines[index + 1]?.replace(/^[ \t]*>[ \t]?/, '');
+          while (
+            index + 1 < lines.length &&
+            /(?:\\|&&|\|\||\|&?)[ \t]*$/.test(selected.at(-1))
+          ) {
+            selected.push(nextInput());
+            index += 1;
+          }
+          const heredoc = selected[0].match(
+            /<<(-?)[ \t]*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/,
+          );
+          if (heredoc) {
+            while (index + 1 < lines.length) {
+              const input = nextInput();
+              index += 1;
+              selected.push(input);
+              const delimiter = heredoc[1] ? input.trim() : input.trimEnd();
+              if (delimiter === heredoc[2]) break;
+            }
+          }
+          fragments.push({ source: selected.join('\n'), quotedGate: false });
+        }
+      }
       const spans = [...document.matchAll(/(`+)([\s\S]*?)\1/g)];
       const inCodeSpan = (index) =>
         spans.some(
           (match) =>
             index >= match.index && index < match.index + match[0].length,
         );
+      const inlineTailLines = new Set();
+      for (const match of spans) {
+        if (inFences(match.index)) continue;
+        const closing = match.index + match[0].length;
+        const lineEnd = document.indexOf('\n', closing);
+        const trailing = document.slice(
+          closing,
+          lineEnd < 0 ? document.length : lineEnd,
+        );
+        const tail = trailing.match(
+          /^[ \t]*(?:&&|\|\||\|&|[;|&])[ \t]*([\s\S]+)$/,
+        )?.[1];
+        if (!tail || !executableBoundary(tail)) continue;
+        fragments.push({ source: tail, quotedGate: false });
+        inlineTailLines.add(document.lastIndexOf('\n', match.index - 1) + 1);
+      }
       for (const match of spans) {
         if (inFences(match.index) || citation(match)) continue;
         let source = match[2].trim();
@@ -1202,6 +1262,7 @@ describe('local container recipe pins', () => {
           );
         if (
           !inFence &&
+          !inlineTailLines.has(lineStart) &&
           (!inSpan || leadingCitation) &&
           !plainCitation &&
           !citationLineWithoutExecutableTrailer &&
@@ -1273,8 +1334,27 @@ describe('local container recipe pins', () => {
           ? raw.slice(1, -1)
           : raw;
       const cacheRoot = '~/.cache/qwen-verify/pr<n>';
-      const cachePath = (raw, suffix) =>
-        unquote(raw) === `${cacheRoot}/${suffix}`;
+      const cachePath = (raw, suffix = '') => {
+        const path = `.cache/qwen-verify/pr<n>${suffix ? `/${suffix}` : ''}`;
+        return [
+          `~/${path}`,
+          `$HOME/${path}`,
+          `"$HOME/${path}"`,
+          `\${HOME}/${path}`,
+          `"\${HOME}/${path}"`,
+        ].includes(raw);
+      };
+      const coordinateProvenance = new Map([
+        ['ME', '"$(gh api user --jq .login)"'],
+        [
+          'PREV',
+          String.raw`"$(gh api "repos/<owner>/<repo>/issues/<n>/comments" --paginate --slurp | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const all=JSON.parse(d).flat();const hit=all.filter(c=>(/bot$/.test(c.user.login)||c.user.login===process.argv[1])&&c.body.split("\n\n")[0].includes("Verdict:")).pop();process.stdout.write(hit?hit.body+"\n":"")})' "$ME")"`,
+        ],
+        [
+          'BASE_OID',
+          String.raw`"$(node -e 'const fs=require("node:fs"); console.log(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).baseRefOid)' ~/.cache/qwen-verify/pr<n>/pr.json)"`,
+        ],
+      ]);
       const relativeDataPath = (raw) => {
         const path = unquote(raw);
         return (
@@ -1441,12 +1521,11 @@ describe('local container recipe pins', () => {
               parent?.type === 'command'
                 ? staticCommandName(parent.childForFieldName('name'), source)
                 : null;
-            if (['ME', 'PREV', 'BASE_OID'].includes(name)) {
+            if (coordinateProvenance.has(name)) {
               return (
                 parent?.type !== 'command' &&
                 parent?.type !== 'declaration_command' &&
-                assigned.startsWith('"$(') &&
-                assigned.endsWith(')"')
+                assigned === coordinateProvenance.get(name)
               );
             }
             if (name === 'REVIEW_OPENAI_BASE_URL') {
@@ -1496,7 +1575,18 @@ describe('local container recipe pins', () => {
             let statement = command.parent;
             while (
               statement &&
-              ['list', 'pipeline', 'negated_command'].includes(statement.type)
+              [
+                'list',
+                'pipeline',
+                'negated_command',
+                'compound_statement',
+                'subshell',
+                'if_statement',
+                'else_clause',
+                'do_group',
+                'while_statement',
+                'for_statement',
+              ].includes(statement.type)
             ) {
               statement = statement.parent;
             }
@@ -1597,7 +1687,7 @@ describe('local container recipe pins', () => {
               return (
                 rawValues.length === 2 &&
                 rawValues[0] === '-p' &&
-                (unquote(rawValues[1]) === cacheRoot ||
+                (cachePath(rawValues[1]) ||
                   cachePath(rawValues[1], 'qwen-base') ||
                   (trustedDockerExec && rawValues[1] === '"$HOME/.qwen"'))
               );
@@ -2594,6 +2684,131 @@ describe('local container recipe pins', () => {
     };
     await expectInRawAndBash(
       [
+        'cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json "~/.cache/qwen-verify/pr<n>/review-threads.json"',
+        "cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json '~/.cache/qwen-verify/pr<n>/review-threads.json'",
+        'chmod 600 "~/.cache/qwen-verify/pr<n>/proxy.json"',
+        'mkdir -p "~/.cache/qwen-verify/pr<n>"',
+        'sed -n \'s/^  context-sha256  //p\' "~/.cache/qwen-verify/pr<n>/prepare.log" > ~/.cache/qwen-verify/pr<n>/pr.sha256',
+      ],
+      false,
+      'quoted tildes are literal path characters, not HOME expansion',
+    );
+    await expectInRawAndBash(
+      [
+        'cp <pr-clone>/tmp/verify-context/pr<n>-review-threads.json ~/.cache/qwen-verify/pr<n>/review-threads.json',
+        'chmod 600 "$HOME/.cache/qwen-verify/pr<n>/proxy.json"',
+        'mkdir -p "${HOME}/.cache/qwen-verify/pr<n>"',
+        'sed -n \'s/^  context-sha256  //p\' "$HOME/.cache/qwen-verify/pr<n>/prepare.log" > ~/.cache/qwen-verify/pr<n>/pr.sha256',
+        'cat notes.txt',
+      ],
+      true,
+      'unquoted tildes, HOME expansions and ordinary data reads remain valid',
+    );
+    await expectInRawAndBash(
+      [
+        'ME="$(cat notes.txt)"',
+        'ME="$(gh api "repos/<owner>/<repo>/issues/<n>/comments" --paginate --slurp)"',
+        'PREV="$(cat notes.txt)"',
+        'PREV="$(gh api user --jq .login)"',
+        'BASE_OID="$(cat notes.txt)"',
+        'BASE_OID="$(node /tmp/arbitrary.js ~/.cache/qwen-verify/pr<n>/pr.json)"',
+      ],
+      false,
+      'round coordinates are bound to their distinct trusted provenance',
+    );
+    await expectInRawAndBash(
+      [
+        'qwen --auth-type openai --approval-mode=yolo --prompt "/verify-pr <n>"',
+        'qwen --auth-type openai --yolo --prompt "/verify-pr <n>"',
+        'qwen --auth-type openai -y --prompt "/verify-pr <n>"',
+        'command qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+        'node payload',
+        'node scripts/payload',
+        'bash payload.sh',
+        'bash payload',
+        'if true; then node /tmp/arbitrary.js; fi',
+        '{ node /tmp/arbitrary.js; }',
+        '(node /tmp/arbitrary.js)',
+      ],
+      false,
+      'raw managed commands, wrappers, extensionless scripts and compounds are selected',
+    );
+    const containerDeclaration = String.raw`printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}'`;
+    await expectInRawAndBash(
+      [
+        '{ printf \'%s\\n\' forged; } > "$rd/boundary.json"',
+        '(printf \'%s\\n\' forged) > "$rd/boundary.json"',
+        'if true; then printf \'%s\\n\' forged; fi > "$rd/boundary.json"',
+      ],
+      false,
+      'grouped boundary redirects validate the declaration payload',
+    );
+    await expectInRawAndBash(
+      [
+        `{ ${containerDeclaration}; } > "$rd/boundary.json"`,
+        `(${containerDeclaration}) > "$rd/boundary.json"`,
+        `if true; then ${containerDeclaration}; fi > "$rd/boundary.json"`,
+      ],
+      true,
+      'canonical grouped boundary declarations remain valid',
+    );
+    await expectInRawAndBash(
+      [
+        '`docker run`; cp /tmp/replacement.js /trusted-scripts/verify-pr-prepare.mjs',
+        '`cp -a`; touch /tmp/should-not-write',
+        '`true`; node -e "0 * 0"',
+        'For details see `cp -a`; touch /tmp/should-not-write',
+        '`docker run; cp /tmp/replacement.js /trusted-scripts/verify-pr-prepare.mjs`',
+      ],
+      false,
+      'inline citations cannot hide an executable shell tail',
+    );
+    for (const [language, invocation] of [
+      [
+        'Bash',
+        'qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+      ],
+      [
+        'console',
+        'qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"',
+      ],
+      [
+        'terminal',
+        '$ qwen --auth-type openai --approval-mode=yolo --prompt "/verify-pr <n>"',
+      ],
+      ['console', '$ node payload'],
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(
+          `${skill}\n\`\`\`${language}\n${invocation}\n\`\`\``,
+        ),
+        `${language} selects shell input without executing it`,
+      ).toBe(false);
+    }
+    for (const [language, transcript] of [
+      [
+        'console',
+        '$ node --version\nv22.0.0\nqwen version 0.28.3\noutput: 24 passed',
+      ],
+      ['terminal', '$ cat <<\'JSON\'\n{"mode":"data"}\nJSON\n{"output":true}'],
+      ['json', '{"command":"qwen --approval-mode yolo"}'],
+      ['text', 'node payload\noutput: qwen --approval-mode yolo'],
+    ]) {
+      expect(
+        await onlyDocumentedPrepareCalls(
+          `${skill}\n\`\`\`${language}\n${transcript}\n\`\`\``,
+        ),
+        `${language} output and data remain data`,
+      ).toBe(true);
+    }
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`\`\`console\npython3 - <<'PY'\nprint('not data')\nPY\n\`\`\``,
+      ),
+      'an unprompted Python here-doc in a transcript is still executable',
+    ).toBe(false);
+    await expectInRawAndBash(
+      [
         'cp /tmp/replacement.js /trusted-scripts/verify-pr-prepare.mjs',
         'chmod 777 ~/.cache/qwen-verify/pr<n>/proxy.json',
         'rm -f ~/.cache/qwen-verify/pr<n>/pr.json',
@@ -2726,6 +2941,8 @@ describe('local container recipe pins', () => {
         'docker exec -i qwen-verify-<n> bash -lc \'qwen --auth-type openai --approval-mode yolo --prompt "/verify-pr <n>"\'',
         'docker exec -i qwen-verify-<n> bash -lc \'node -e "0 * 0"\'',
         'docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n> bash -lc \'node -e "0 * 0"\'',
+        'docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n> bash -lc \'qwen --auth-type openai --approval-mode=yolo --prompt "/verify-pr <n> --repo <owner>/<repo>"\'',
+        'docker exec -i -e QWEN_VERIFY_CREDENTIAL_FREE=1 qwen-verify-<n> bash -lc \'qwen --auth-type openai --yolo --prompt "/verify-pr <n> --repo <owner>/<repo>"\'',
       ],
       false,
       'docker exec is recursive and yolo needs attested context',
