@@ -23,7 +23,10 @@ import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed
 import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result-store.js';
 import type { HostedChildRunSession } from './hosted-child-run-session.js';
 import type { HostedMonitorSession } from './hosted-monitor-session.js';
-import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
+import {
+  boundMonitorObservationLines,
+  buildMonitorNotificationInput,
+} from './hosted-monitor-notification.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import {
   HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
@@ -962,9 +965,9 @@ export class HostedShellPublisher {
           // already recorded runtime_lost.
           return envelope;
         }
-        const windowLines = background.remainder
-          .split('\n')
-          .filter((line) => line.length > 0);
+        const windowLines = boundMonitorObservationLines(
+          background.remainder.split('\n').filter((line) => line.length > 0),
+        );
         if (windowLines.length > 0) {
           const args = JSON.parse(
             (

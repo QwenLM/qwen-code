@@ -101,6 +101,15 @@ describe('monitor task-notification envelope', () => {
     expect(marker).not.toContain('界');
   });
 
+  it('counts the omission marker within the 32 KiB byte budget', () => {
+    const lines = Array.from({ length: 300 }, () => 'x'.repeat(200));
+    const bounded = boundMonitorObservationLines(lines);
+    expect(bounded).toHaveLength(163);
+    expect(bounded.slice(0, -1)).toEqual(lines.slice(0, 162));
+    expect(bounded.at(-1)).toBe('... 138 more lines omitted');
+    expect(Buffer.byteLength(bounded.join('\n'), 'utf8')).toBe(32_588);
+  });
+
   it('omits an individually over-budget line instead of slicing it', () => {
     const bounded = boundMonitorObservationLines(['x'.repeat(70_000), 'next']);
     expect(bounded).toEqual(['... 2 more lines omitted']);

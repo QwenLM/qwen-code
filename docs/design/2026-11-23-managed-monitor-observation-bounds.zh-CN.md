@@ -30,7 +30,7 @@ resident lane 因此可能产生任意大的持久化观测、外部存储依赖
 
 窗口已经同时满足两个限制时，内容保持不变。否则，helper 保留由完整原始行组成的最长合法前缀，不切断任何原始行或多字节字符。最后一项为 `... N more lines omitted`，`N` 是未保留原始行的准确数量。单行本身超过预算时整行省略。
 
-`HostedMonitorLoop.flush` 只调用一次 helper，所得数组同时传给 `monitors.observe` 和 `buildMonitorNotificationInput`。`WorkerMonitorPolicy.flush` 在构造通知资源并调用 `enqueueObservation` 前应用同一个 helper。XML 转义、显示控制字符净化和观测数据结构保持不变。
+`HostedMonitorLoop.flush` 只调用一次 helper，所得数组同时传给 `monitors.observe` 和 `buildMonitorNotificationInput`。`WorkerMonitorPolicy.flush` 在构造通知资源并调用 `enqueueObservation` 前应用同一个 helper。`HostedShellPublisher.finalizeBackground` 对观测臂从未挂载的 ownerless watch tail 也应用同一个 helper，再将同一有界数组用于尾部观测和 wake input。XML 转义、显示控制字符净化和观测数据结构保持不变。
 
 32 KiB 预算特意为 worker 的两份表示留出空间。原始行在 observation 中经过 JSON 转义，通知内容经过最高六倍的 XML 扩张后还要 base64 编码。64 KiB 方案虽然通过纯文本回归，却在引号密集内容下仍产生 651,558 字节请求。收紧后的共享预算覆盖这种输入，不再只按纯文本 sizing。
 
@@ -46,13 +46,13 @@ resident lane 因此可能产生任意大的持久化观测、外部存储依赖
 
 ## 验证
 
-helper 测试覆盖小窗口不变、精确行数和字节边界、按行数截断、多字节 UTF-8 文本，以及单行本身超预算的情况。
+helper 测试覆盖小窗口不变、精确行数和字节边界、按行数截断、多字节 UTF-8 文本、单行本身超预算，以及一个字面量字节预算用例。该用例写死保留行数、省略数量和总字节数，守卫漏算标记时会失败。
 
-resident 测试使用 fake executor、manual clock、实际 session authority 和本地 resource store，独立覆盖周期 flush 与退出 flush。检查观测与通知内容一致、省略数量准确、字节上限和每个原始窗口只消耗一个观测序号。
+resident 测试使用 fake executor、manual clock、实际 session authority 和本地 resource store，独立覆盖周期 flush 与退出 flush。检查观测与通知内容一致、省略数量准确、字节上限和每个原始窗口只消耗一个观测序号。另一个 ownerless-tail 用例在观测臂从未挂载的情况下驱动真实 publisher 完成最终投递，同时验证持久化观测和 wake input。
 
 worker 测试驱动真实 `WorkerMonitorPolicy` 并检查 staged delivery entry。纯文本和 XML-heavy 用例断言序列化请求上限、观测与通知同源、准确省略数量和原始字节上限。另一组真实 publisher 与 applier 路径分别运行小窗口和超大窗口，验证观测只提交一次且 monitor record 最终落定。
 
-原始纯文本回归产生 1,426,041 字节请求，超大 applier 用例的 observation sequence 停在零。第一版 64 KiB 实现也在 XML-heavy 用例中以 651,558 字节失败。最终共享实现通过三个聚焦文件的全部 65 项测试。仓方类型、格式、lint 和 diff 检查结果随 PR 证据记录。
+原始纯文本回归产生 1,426,041 字节请求，超大 applier 用例的 observation sequence 停在零。第一版 64 KiB 实现也在 XML-heavy 用例中以 651,558 字节失败。最终共享实现通过四个聚焦文件的全部 93 项测试，包括 ownerless-tail 和字面量字节守卫回归。仓方类型、格式、lint 和 diff 检查结果随 PR 证据记录。
 
 ## 验收标准
 

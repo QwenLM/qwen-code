@@ -30,7 +30,7 @@ The shared `boundMonitorObservationLines` helper accepts one window and returns 
 
 A window already within both limits is returned unchanged. Otherwise, the helper keeps the longest legal prefix of complete source lines. It never slices a source line or a multibyte character. The final item is `... N more lines omitted`, where `N` is the exact number of unretained source lines. A single over-budget line is omitted rather than sliced.
 
-`HostedMonitorLoop.flush` applies the helper once and uses the result for both `monitors.observe` and `buildMonitorNotificationInput`. `WorkerMonitorPolicy.flush` does the same before constructing the notification resource and calling `enqueueObservation`. Existing XML escaping, display-control sanitization, and observation schemas remain unchanged.
+`HostedMonitorLoop.flush` applies the helper once and uses the result for both `monitors.observe` and `buildMonitorNotificationInput`. `WorkerMonitorPolicy.flush` does the same before constructing the notification resource and calling `enqueueObservation`. `HostedShellPublisher.finalizeBackground` applies the same helper to an ownerless watch tail whose observation arm never attached, then uses the bounded array for both the tail observation and its wake input. Existing XML escaping, display-control sanitization, and observation schemas remain unchanged.
 
 The 32 KiB budget deliberately leaves room for both worker representations. Raw lines are JSON-escaped in the observation, while notification content can expand sixfold under XML escaping before base64 encoding. A 64 KiB budget passed a plain-text regression but still produced a 651,558-byte request for quote-heavy content. The smaller shared budget covers that case instead of sizing only for plain text.
 
@@ -46,13 +46,13 @@ The constants remain private implementation limits rather than new operator sett
 
 ## Validation
 
-Helper tests cover unchanged small windows, exact line and byte boundaries, line-count truncation, multibyte UTF-8 text, and an individually over-budget line.
+Helper tests cover unchanged small windows, exact line and byte boundaries, line-count truncation, multibyte UTF-8 text, an individually over-budget line, and a literal byte-budget case whose expected retained count, omission count, and total bytes fail if the marker is removed from the guard.
 
-Resident tests use the fake executor, manual clock, actual session authority, and local resource store. They independently cover periodic and exit flushes, observation and notification identity, exact omission counts, byte limits, and one observation sequence per original window.
+Resident tests use the fake executor, manual clock, actual session authority, and local resource store. They independently cover periodic and exit flushes, observation and notification identity, exact omission counts, byte limits, and one observation sequence per original window. A separate ownerless-tail test drives the real publisher through final delivery with no observation arm attached and verifies both the stored observation and wake input.
 
 Worker tests drive the real `WorkerMonitorPolicy` and inspect the staged delivery entry. Plain-text and XML-heavy cases assert the serialized request limit, shared observation and notification lines, exact omission counts, and raw byte limit. A separate publisher and applier path runs small and oversized windows through final delivery and verifies that the observation commits once and the monitor record settles.
 
-The original plain-text regression produced a 1,426,041-byte request and left the oversized applier case at observation sequence zero. The first 64 KiB implementation also failed the XML-heavy case at 651,558 bytes. The final shared implementation passes all 65 tests across the three focused files. Repository type, formatting, lint, and diff checks are recorded with the PR evidence.
+The original plain-text regression produced a 1,426,041-byte request and left the oversized applier case at observation sequence zero. The first 64 KiB implementation also failed the XML-heavy case at 651,558 bytes. The final shared implementation passes all 93 tests across the four focused files, including the ownerless-tail and literal byte-guard regressions. Repository type, formatting, lint, and diff checks are recorded with the PR evidence.
 
 ## Acceptance criteria
 
