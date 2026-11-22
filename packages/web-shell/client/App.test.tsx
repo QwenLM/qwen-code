@@ -1509,16 +1509,31 @@ vi.mock('./daemon/session/DaemonSessionProvider', async (importOriginal) => {
 });
 
 // This harness renders App without a DaemonWorkspaceProvider; the overload
-// pause hook reads the workspace status resource, so stub it here. Its real
-// behavior is covered by useDaemonOverloadPause.test.ts and the sidebar
-// overload-strip suite.
+// pause hook reads the workspace status resource, so stub it here with a
+// per-test controllable state (default unpaused, reset in beforeEach).
+const overloadPauseStub = vi.hoisted(() => ({
+  paused: false,
+  pollOverloaded: false,
+  loadAdmission: undefined as
+    | {
+        enabled: boolean;
+        overloaded: boolean;
+        reason: string | null;
+        loadRatio: number;
+        eventLoopLagP99Ms: number;
+        sampledAtMs: number;
+      }
+    | undefined,
+  refusalMessage: undefined as string | undefined,
+}));
+
 vi.mock('./daemon/workspace/hooks/useDaemonOverloadPause.js', () => ({
   OVERLOAD_REFUSAL_TTL_MS: 15_000,
   useDaemonOverloadPause: () => ({
-    paused: false,
-    pollOverloaded: false,
-    loadAdmission: undefined,
-    refusalMessage: undefined,
+    paused: overloadPauseStub.paused,
+    pollOverloaded: overloadPauseStub.pollOverloaded,
+    loadAdmission: overloadPauseStub.loadAdmission,
+    refusalMessage: overloadPauseStub.refusalMessage,
   }),
 }));
 
@@ -13813,6 +13828,10 @@ beforeEach(() => {
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
   testState.latestScheduledTasksProps = null;
+  overloadPauseStub.paused = false;
+  overloadPauseStub.pollOverloaded = false;
+  overloadPauseStub.loadAdmission = undefined;
+  overloadPauseStub.refusalMessage = undefined;
   testState.latestPrWatchesProps = null;
   testState.latestGoalsProps = null;
   testState.latestWorkflowRunsProps = null;
@@ -60335,5 +60354,86 @@ describe('upstream embedded transport reproduction', () => {
     await flush();
     expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  describe('overload pause guards in App', () => {
+    const armOverload = () => {
+      overloadPauseStub.paused = true;
+      overloadPauseStub.pollOverloaded = true;
+      overloadPauseStub.loadAdmission = {
+        enabled: true,
+        overloaded: true,
+        reason: 'cpu_load',
+        loadRatio: 2.5,
+        eventLoopLagP99Ms: 20,
+        sampledAtMs: 1_000,
+      };
+    };
+
+    it('refuses !ls from an empty draft with one warning toast and no sendShellCommand', async () => {
+      armOverload();
+      mockConnection.sessionId = null;
+      const toasts: Array<[string, string]> = [];
+      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+      await flush();
+      toasts.length = 0;
+
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.[0]).toBe('warning');
+      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    });
+
+    it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
+      armOverload();
+      mockConnection.sessionId = null;
+      const toasts: Array<[string, string]> = [];
+      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+      await flush();
+      toasts.length = 0;
+
+      let accepted: boolean | void;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(
+          '/goal set keep tests green',
+        );
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.[0]).toBe('warning');
+      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    });
+
+    it('rejects a paused unbound manual run with the overload message, not cancellation', async () => {
+      armOverload();
+      mockConnection.sessionId = null;
+      mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+      const { container } = renderApp({});
+      await flush();
+      testState.prompt = '/schedule';
+      await clickSubmit(container);
+      await flush();
+      const handler = testState.latestScheduledTasksProps?.onRunPrompt;
+      if (!handler) throw new Error('onRunPrompt was not captured');
+
+      await expect(handler('check status', null)).rejects.toThrow(
+        'System overloaded — new tasks paused',
+      );
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    });
   });
 });

@@ -19181,7 +19181,13 @@ export function App({
           resolve();
         };
         sendPrompt(prompt, undefined, undefined, { onAdmitted: admit }).then(
-          () => {
+          (result) => {
+            if (result === false) {
+              if (!admitted) {
+                reject(new Error(t('sidebar.overloadPaused')));
+              }
+              return;
+            }
             if (!admitted) {
               reject(new Error('Run was cancelled before it started'));
             }
@@ -20044,6 +20050,17 @@ export function App({
       }
 
       const needsSession = !connectionRef.current.sessionId;
+      if (
+        needsSession &&
+        overloadPausedRef.current &&
+        !managedModeRef.current
+      ) {
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
+      }
       goalSessionCreationInFlightRef.current = needsSession;
       void (async () => {
         const sourceOwner = sessionOwnerGuard.capture();
@@ -21559,6 +21576,17 @@ export function App({
           return true;
         }
         const needsSession = !connectionRef.current.sessionId;
+        if (
+          needsSession &&
+          overloadPausedRef.current &&
+          !managedModeRef.current
+        ) {
+          pushToast(
+            'warning',
+            overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+          );
+          return false;
+        }
         let shellPromptPreparationOwner: symbol | undefined;
         if (needsSession) {
           if (shellSubmitInFlightRef.current) return false;

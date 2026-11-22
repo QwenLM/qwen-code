@@ -124,11 +124,15 @@ vi.mock('./WorkspaceSection', async () => {
     }) => {
       capturedChrome.section = props;
       // The workspace menu is rendered through the section's header-actions
-      // render prop; invoke it so the menu capture sees the real actions.
+      // render prop; pass a real gitBranch so worktree creation is eligible
+      // and removing `!overloadPaused` makes the paused assertion fail.
       return React.createElement(
         React.Fragment,
         null,
-        props.headerActions?.(true, {}) as never,
+        props.headerActions?.(true, {
+          overview: undefined,
+          gitBranch: 'main',
+        }) as never,
       );
     },
     isAbsolutePath: (value: string) => value.startsWith('/'),
@@ -338,6 +342,17 @@ describe('WebShellSidebar overload strip', () => {
     expect(
       capturedChrome.menu!.actions?.['newWorktreeSession'],
     ).toBeUndefined();
+    // Every New-session button (nav button + per-workspace header button)
+    // must be disabled, not only the first DOM match.
+    const buttons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(
+        'button[aria-label="New session"]',
+      ),
+    );
+    expect(buttons.length).toBeGreaterThanOrEqual(2);
+    for (const btn of buttons) {
+      expect(btn.disabled).toBe(true);
+    }
     // The blocking git poll's only consumer is hidden while paused.
     expect(capturedChrome.section!.gitBranchWanted).toBe(false);
   });
@@ -363,7 +378,27 @@ describe('WebShellSidebar overload strip', () => {
     renderSidebar({ onNewWorktreeSession: () => {} });
     await flushSidebar();
     expect(capturedChrome.menu!.actions?.['newSession']).toBeTypeOf('function');
+    expect(capturedChrome.menu!.actions?.['newWorktreeSession']).toBeTypeOf(
+      'function',
+    );
     expect(capturedChrome.section!.gitBranchWanted).toBe(true);
+  });
+
+  it('passes newSessionDisabled to StandaloneRecents when the sidebar mounts it', async () => {
+    workspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+    } as typeof workspace.capabilities;
+    renderSidebar({
+      overloadPaused: true,
+      onLoadStandaloneSession: () => {},
+      onStandaloneNotice: () => {},
+    });
+    await flushSidebar();
+    // Assert directly on the standalone capture (no `recent ?? standalone`
+    // union), so dropping `newSessionDisabled={newSessionDisabled}` on the
+    // sidebar's `<StandaloneRecents>` turns this case red.
+    expect(capturedEntries.standalone).toBeDefined();
+    expect(capturedEntries.standalone!.newSessionDisabled).toBe(true);
   });
 
   it('honors newSessionDisabled on the standalone header button', async () => {

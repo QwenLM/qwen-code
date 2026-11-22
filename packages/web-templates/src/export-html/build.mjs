@@ -80,9 +80,12 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
 // across independent local transcript/export builds.
 // Merging origin/main (91a14e3349, including #17918) with the overload-
-// indicator slice (#18054, +445 for the four-locale sidebar.overload* entries)
-// measures 2,156,018 renderer JS bytes and 2,428,500 CSS bytes after
-// rebuilding @qwen-code/web-shell's transcript library on the merged tree
+// indicator slice (#18054) adds two catalog entries to the EN and ZH-CN
+// catalogs the document entry inlines (sidebar.overloadPaused and the
+// interpolating function sidebar.overloadDetail; zh-TW and RU are
+// transcript-stubbed and contribute no document bytes), adding +445 bytes:
+// rebuilt @qwen-code/web-shell transcript lib + export-html on the merged
+// tree measures 2,156,018 renderer JS bytes and 2,428,500 CSS bytes
 // (2,155,573 + 445 = 2,156,018 exact). Keep the house margins from this
 // single measurement: warning = measurement + 713, hard ceiling = warning +
 // 1,000 (measurement + 1,713).
@@ -202,16 +205,6 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_731;
 // 713- and 1,713-byte margins above the CI measurement, leaving 430 bytes
 // above the local measurement.
 //
-// The overload-indicator slice (#18054) adds four catalog entries per locale
-// pair (sidebar.overloadPaused / sidebar.overloadDetail in en, zh-CN, zh-TW,
-// ru); the detail entries are interpolating functions, which the document
-// entry inlines with the rest of the eager catalogs. Measured with the
-// web-shell transcript lib rebuilt first (stale lib dist invalidates the
-// A/B): merge base ec251c4b09 = 2,151,214 bytes, this tree = 2,151,659 on
-// Node 26 (+445). Applying the recorded 1,283-byte local/CI delta puts CI at
-// ~2,150,376; the 713/1,713 margins above that estimate leave 430 bytes
-// above the local measurement. The forbidden-input guard passes.
-//
 // The ChatSurface chat column (#17952) then grows the transcript dictionary
 // past that ceiling: the Build lane measures 2,151,214 bytes on main
 // 3911b60fc4 (run 44953143515, green) against 2,151,847 on 580108434f
@@ -224,16 +217,6 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_731;
 // has no importer, so no component code reaches the document entry; the
 // forbidden-input guard passes and the third-party input mix is unchanged.
 // Re-track the lane measurement, preserving the 713- and 1,713-byte margins.
-// Merged-tree re-measure (#18054 x #18067 x current main): with the
-// web-shell transcript lib rebuilt on the merged source (main adfed6ef43
-// merge plus the overload-indicator slice), the renderer measures 2,155,468
-// JS bytes. Both thresholds derive from that single measurement with the
-// lane's current caliber: warning = measured + 683 = 2,156,151, ceiling =
-// warning + 430 = 2,156,581. The overload-indicator catalog entries (four
-// locales, detail as interpolating functions) contribute +445 over the
-// pre-slice base; the remainder is upstream Web Shell copy carried by the
-// merge. The forbidden-input guard passes and the third-party input mix is
-// unchanged.
 //
 // A normal build at the measured size below is not warned; only further
 // growth is warned. The identity placeholder can change byte length when it
@@ -242,8 +225,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_731;
 // The latest measured shared tree also re-tracks this ceiling to 2,157,286,
 // which is 1,713 bytes above its 2,155,573-byte measurement, and stays coupled
 // to the warning threshold instead of becoming an independent literal.
-// With #18054 merged on top of 91a14e3349 (2,156,018 measured), the same
-// coupled expression yields 2,157,731 (1,713 above the merged measurement).
+// With #18054 merged on top of 91a14e3349 (+445 from the two EN/ZH-CN
+// sidebar.overload* entries; zh-TW and RU are transcript-stubbed; 2,156,018
+// measured, forbidden-input guard passing), the same coupled expression
+// yields 2,157,731 (1,713 above the merged measurement).
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against

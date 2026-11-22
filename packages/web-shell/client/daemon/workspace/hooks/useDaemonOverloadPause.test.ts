@@ -224,4 +224,23 @@ describe('useDaemonOverloadPause', () => {
     await flush();
     expect(loadDaemonStatus).toHaveBeenCalledTimes(1);
   });
+
+  it('drops the poll pause when enabled flips false (daemon offline)', async () => {
+    loadDaemonStatus.mockResolvedValue(reportWith(true));
+    let enabled = true;
+    const onRefusalExpired = vi.fn();
+    const view = renderHook(() =>
+      useDaemonOverloadPause({ enabled, refusal: null, onRefusalExpired }),
+    );
+    await flush();
+    expect(view.result.current.paused).toBe(true);
+    expect(view.result.current.pollOverloaded).toBe(true);
+
+    // useDaemonResource retains the last payload with error unset when
+    // disabled; the hook must not keep creation paused across an outage.
+    enabled = false;
+    view.rerender();
+    expect(view.result.current.paused).toBe(false);
+    expect(view.result.current.pollOverloaded).toBe(false);
+  });
 });
