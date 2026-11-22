@@ -379,6 +379,16 @@ export function isMachineToolDescription(
     );
   };
   if (matches(produced.text)) return true;
+  // A legacy shell title carries core's decorations verbatim — the raw
+  // directory, ` [background]` and ` [timeout: …ms]` — while the browser
+  // rebuilds a friendly directory and drops the timeout from the summary.
+  if (
+    isShellToolName(tool.toolName) &&
+    tool.args?.command &&
+    matches(getDaemonShellDescription(tool))
+  ) {
+    return true;
+  }
   const name = tool.toolName.toLowerCase();
   const suffix =
     name === 'read_file' || name === 'readfile' || name === 'read'
@@ -456,6 +466,18 @@ function collapseDotSegments(text: string): string {
     kept.push(segment);
   }
   return kept.join('/');
+}
+
+// core interpolates the shell directory raw and keeps every decoration it
+// appends; the browser's own variant displays a friendly directory and omits
+// the timeout, so a legacy title needs the producer's framing to compare.
+function getDaemonShellDescription(tool: ACPToolCall): string {
+  const args = tool.args ?? {};
+  let description = String(args.command);
+  if (args.directory) description += ` [in ${String(args.directory)}]`;
+  if (args.is_background) description += ' [background]';
+  else if (args.timeout) description += ` [timeout: ${String(args.timeout)}ms]`;
+  return description;
 }
 
 function getDaemonSearchDescription(

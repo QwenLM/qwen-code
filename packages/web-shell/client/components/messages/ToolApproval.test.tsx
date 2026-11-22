@@ -2392,6 +2392,49 @@ describe('ToolApproval RTL description isolation', () => {
     );
   });
 
+  // Legacy rows and older daemons carry no flag, so the card falls back to the
+  // transcript heuristic. core interpolates the directory raw and keeps every
+  // decoration it appends, while the browser rebuilds a friendly directory and
+  // drops the timeout, so the heuristic must accept the producer's framing.
+  it.each([
+    {
+      name: 'timeout',
+      toolName: 'run_shell_command',
+      title: 'npm test [timeout: 60000ms]',
+      rawInput: { command: 'npm test', timeout: 60000 },
+    },
+    {
+      name: 'raw directory',
+      toolName: 'run_shell_command',
+      title: 'ls [in /workspace/مجلد]',
+      rawInput: { command: 'ls', directory: '/workspace/مجلد' },
+    },
+    {
+      name: 'shell alias directory',
+      toolName: 'shell',
+      title: 'ls [in /workspace/مجلد]',
+      rawInput: { command: 'ls', directory: '/workspace/مجلد' },
+    },
+    {
+      name: 'directory and timeout',
+      toolName: 'run_shell_command',
+      title: 'ls [in /workspace/مجلد] [timeout: 5000ms]',
+      rawInput: {
+        command: 'ls',
+        directory: '/workspace/مجلد',
+        timeout: 5000,
+      },
+    },
+  ])(
+    'isolates a legacy decorated shell command ($name) without provenance',
+    ({ toolName, title, rawInput }) => {
+      render(undefined, { ...request, toolName, title, rawInput }, [], 'ar');
+      container!.dir = 'rtl';
+      const desc = container!.querySelector(`.${styles.desc}`)!;
+      expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(title);
+    },
+  );
+
   it('keeps the description unisolated when the producer says it is prose', () => {
     render(
       undefined,
