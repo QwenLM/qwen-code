@@ -806,9 +806,9 @@ CREATE INDEX idx_ma_work_evidence ON ma_operation_work (evidence_resource_ref);
 
 CREATE TABLE ma_workspace (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
-    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    workspace_id VARBINARY(128) NOT NULL COMMENT 'Workspace identity within the tenant.',
     workspace_generation BIGINT UNSIGNED NOT NULL COMMENT 'Current generation of the registered Workspace.',
-    storage_id VARBINARY(1024) NOT NULL COMMENT 'Logical storage identity.',
+    storage_id VARBINARY(256) NOT NULL COMMENT 'Logical storage identity.',
     display_name VARCHAR(512) NOT NULL COMMENT 'User-visible Workspace name.',
     config_ref VARBINARY(2048) NOT NULL COMMENT 'Reference to the Workspace execution configuration.',
     policy_ref VARBINARY(2048) NOT NULL COMMENT 'Reference to the Workspace execution policy.',
@@ -818,7 +818,7 @@ CREATE TABLE ma_workspace (
     CONSTRAINT ck_ma_workspace_state CHECK ((CASE state WHEN 'ACTIVE' THEN 6 WHEN 'DRAINING' THEN 8 WHEN 'REMOVED' THEN 7 ELSE -1 END = CHAR_LENGTH(state))),
     workspace_kind VARCHAR(16) NOT NULL DEFAULT 'ROOT' COMMENT 'ROOT for a registered Workspace or CHILD_GIT for a child Git Workspace.',
     child_state VARCHAR(32) COMMENT 'Preparation, merge, discard, or failure state of a child Workspace.',
-    parent_workspace_id VARBINARY(512) COMMENT 'Parent Workspace identity for CHILD_GIT entries.',
+    parent_workspace_id VARBINARY(128) COMMENT 'Parent Workspace identity for CHILD_GIT entries.',
     parent_session_id VARCHAR(64) COMMENT 'Parent Session that owns the child Workspace operation.',
     child_run_id VARBINARY(2048) COMMENT 'Child-run identity that requested this Workspace.',
     child_workspace_id VARBINARY(128) COMMENT 'Stable public identity of the child Workspace.',
@@ -854,7 +854,7 @@ CREATE INDEX idx_ma_workspace_parent ON ma_workspace (tenant_id, parent_workspac
 
 CREATE TABLE ma_workspace_access (
     tenant_id VARCHAR(36) NOT NULL COMMENT 'Tenant identity used for isolation.',
-    workspace_id VARBINARY(512) NOT NULL COMMENT 'Workspace identity within the tenant.',
+    workspace_id VARBINARY(128) NOT NULL COMMENT 'Workspace identity within the tenant.',
     actor_id VARBINARY(2048) NOT NULL COMMENT 'Encoded tenant and actor identity receiving this Workspace grant.',
     CONSTRAINT uk_ma_workspace_access_business_key UNIQUE (tenant_id, workspace_id, actor_id),
     role VARCHAR(16) NOT NULL COMMENT 'Workspace access role: READER, OPERATOR, or OWNER.',
