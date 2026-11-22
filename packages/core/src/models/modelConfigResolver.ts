@@ -62,6 +62,7 @@ export interface ModelConfigCliInput {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  serviceTier?: string;
 }
 
 /**
@@ -337,6 +338,23 @@ export function resolveModelConfig(
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
   applyTimeoutEnvOverride(env, generationConfig, sources, modelProvider);
 
+  if (generationConfig.service_tier === undefined) {
+    const envServiceTier =
+      env['OPENAI_SERVICE_TIER'] || env['DEEPINFRA_SERVICE_TIER'];
+    if (envServiceTier) {
+      generationConfig.service_tier = envServiceTier;
+      const key = env['OPENAI_SERVICE_TIER']
+        ? 'OPENAI_SERVICE_TIER'
+        : 'DEEPINFRA_SERVICE_TIER';
+      sources['service_tier'] = { kind: 'env', envKey: key, detail: key };
+    }
+  }
+
+  if (cli?.serviceTier !== undefined) {
+    generationConfig.service_tier = cli.serviceTier;
+    sources['service_tier'] = cliSource('--service-tier');
+  }
+
   // Build final config
   const config: ContentGeneratorConfig = {
     authType,
@@ -417,6 +435,23 @@ function resolveQwenOAuthConfig(
 
   // ---- Env override: QWEN_CODE_API_TIMEOUT_MS ----
   applyTimeoutEnvOverride(input.env, generationConfig, sources, modelProvider);
+
+  if (generationConfig.service_tier === undefined) {
+    const envServiceTier =
+      input.env['OPENAI_SERVICE_TIER'] || input.env['DEEPINFRA_SERVICE_TIER'];
+    if (envServiceTier) {
+      generationConfig.service_tier = envServiceTier;
+      const key = input.env['OPENAI_SERVICE_TIER']
+        ? 'OPENAI_SERVICE_TIER'
+        : 'DEEPINFRA_SERVICE_TIER';
+      sources['service_tier'] = { kind: 'env', envKey: key, detail: key };
+    }
+  }
+
+  if (input.cli?.serviceTier !== undefined) {
+    generationConfig.service_tier = input.cli.serviceTier;
+    sources['service_tier'] = cliSource('--service-tier');
+  }
 
   const config: ContentGeneratorConfig = {
     authType: AuthType.QWEN_OAUTH,
