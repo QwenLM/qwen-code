@@ -161,7 +161,11 @@ export function isHostedWorkspaceReadProfile(profile: unknown): boolean {
  * The options neither external lane admits. `sessionSkillsRef` is not one of
  * them: both external lanes serve the skill catalog as turn content, so the
  * worker accepts the reference while still refusing extensions, hooks, MCP,
- * agent definitions and every other lane the profiles never negotiate. The
+ * agent definitions and every other lane the profiles never negotiate. All
+ * three gates read this list — worker create/load, the cold-open frozen
+ * definition gate and recovery genesis — so an option removed here widens
+ * recovery too; recovery parses the reference on its own (it must, or it would
+ * admit a definition the resident load rejects). The
  * Shell lane differs on `captureBytes` alone: the files lane refuses it, while
  * the Shell lane requires it, and that requirement is checked where the
  * reservation is made.
