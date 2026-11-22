@@ -923,6 +923,88 @@ function singleLinkFileError(path, label) {
   return null;
 }
 
+function captureWriteRecord(path, label, next) {
+  const record = { path, label, next, previous: null, touched: false };
+  const leafError = singleLinkFileError(path, label);
+  if (leafError) return { error: leafError };
+  try {
+    record.parentReal = realpathSync(dirname(path));
+  } catch (error) {
+    return { error: `could not inspect the ${label} parent: ${error.message}` };
+  }
+  try {
+    record.previous = readFileSync(path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return {
+        error: `could not preserve the ${label} at ${path}: ${error.message}`,
+      };
+    }
+  }
+  return { record };
+}
+
+function writeRecordError(record) {
+  const leafError = singleLinkFileError(record.path, record.label);
+  if (leafError) return leafError;
+  try {
+    if (realpathSync(dirname(record.path)) !== record.parentReal) {
+      return `refusing to write the ${record.label} through a redirected parent directory: ${record.path}`;
+    }
+  } catch (error) {
+    return `could not inspect the ${record.label} parent: ${error.message}`;
+  }
+  return null;
+}
+
+function commitWriteRecords(records) {
+  const rollback = (cause) => {
+    const failures = [];
+    for (const record of records.toReversed()) {
+      if (!record.touched) continue;
+      try {
+        const pathError = writeRecordError(record);
+        if (pathError) throw new Error(pathError);
+        let current = null;
+        try {
+          current = readFileSync(record.path);
+        } catch (error) {
+          if (error.code !== 'ENOENT') throw error;
+        }
+        if (current === null && record.previous === null) continue;
+        if (
+          current !== null &&
+          record.previous !== null &&
+          current.equals(record.previous)
+        ) {
+          continue;
+        }
+        if (record.previous === null) rmSync(record.path, { force: true });
+        else writeFileSync(record.path, record.previous);
+      } catch (error) {
+        failures.push(`${record.label} ${record.path}: ${error.message}`);
+      }
+    }
+    return {
+      error: `${cause}${failures.length > 0 ? `; restore failed for ${failures.join('; ')}` : ''}`,
+    };
+  };
+  for (const record of records) {
+    const pathError = writeRecordError(record);
+    if (pathError) return rollback(pathError);
+    record.touched = true;
+    try {
+      if (record.next === null) rmSync(record.path, { force: true });
+      else writeFileSync(record.path, record.next);
+    } catch (error) {
+      return rollback(
+        `could not write the ${record.label} to ${record.path}: ${error.message}`,
+      );
+    }
+  }
+  return {};
+}
+
 function localTrustApproval(options, snapshot, owner, name) {
   const current = ghJson(['api', 'user'], 'current-user lookup');
   if (current.error) return current;
@@ -1239,44 +1321,19 @@ function main(argv) {
       }
     }
     // Structural fix (R5-1): the authoritative snapshot also goes to a host
-    // destination outside the clone (--context-out), so the trusted source the
-    // checker reads never depends on the PR-writable in-tree copy, which stays
-    // only as the checker's untrusted no---context default.
+    // destination outside the clone (--context-out). Validate its real parent
+    // before preserving any bytes; a failed prepare must leave the prior
+    // authority files untouched or restore them exactly.
     let reportedContextPath = contextPath;
+    let outPath = null;
     if (options.contextOut) {
-      // The host destination must be outside the PR-writable clone: step 1 runs
-      // with the clone as cwd, so a relative --context-out resolves inside it,
-      // where a PR-committed symlink would redirect this host-side write (R7-1).
-      // Apply the same containment + leaf guards the in-tree snapshot path uses.
-      const outPath = resolve(options.contextOut);
+      outPath = resolve(options.contextOut);
       const realRoot = realpathSync(root);
       if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
         return fail(
           3,
           `refusing to write the host snapshot inside the PR clone: ${outPath}`,
         );
-      }
-      try {
-        const st = lstatSync(outPath);
-        if (st.isSymbolicLink()) {
-          return fail(
-            3,
-            `refusing to write the host snapshot through a symlink: ${outPath}`,
-          );
-        }
-        if (!st.isFile() || st.nlink !== 1) {
-          return fail(
-            3,
-            `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
-          );
-        }
-      } catch (error) {
-        if (error.code !== 'ENOENT') {
-          return fail(
-            3,
-            `could not inspect the host snapshot path ${outPath}: ${error.message}`,
-          );
-        }
       }
       try {
         mkdirSync(dirname(outPath), { recursive: true });
@@ -1287,7 +1344,6 @@ function main(argv) {
             `refusing to write the host snapshot inside the PR clone: ${outPath}`,
           );
         }
-        writeFileSync(outPath, contextBytes);
       } catch (error) {
         return fail(
           3,
@@ -1296,30 +1352,9 @@ function main(argv) {
       }
       reportedContextPath = outPath;
     }
-    writeFileSync(contextPath, contextBytes);
-    // The digest binds the snapshot's content for the checker (--context-sha256):
-    // it is computed here host-side, before the round runs, so a later rewrite of
-    // the clone-side file cannot produce matching bytes (R2-1).
-    const contextSha256 = createHash('sha256')
-      .update(contextBytes, 'utf8')
-      .digest('hex');
     const artifactContextPath = join(artifacts, 'context.json');
-    const artifactContextError = singleLinkFileError(
-      artifactContextPath,
-      'artifact context',
-    );
-    if (artifactContextError) return fail(3, artifactContextError);
-    writeFileSync(
-      artifactContextPath,
-      `${JSON.stringify({
-        repo: slug,
-        pr: context.pr,
-        baseRefOid: context.base,
-        headRefOid: context.head,
-      })}\n`,
-    );
+    const boundaryPath = join(artifacts, 'boundary.json');
     if (executionApproval) {
-      const boundaryPath = join(artifacts, 'boundary.json');
       try {
         const st = lstatSync(boundaryPath);
         if (st.isSymbolicLink() || !st.isFile() || st.nlink !== 1) {
@@ -1336,18 +1371,60 @@ function main(argv) {
           );
         }
       }
-      try {
-        writeFileSync(
-          boundaryPath,
-          `${JSON.stringify(executionApproval, null, 2)}\n`,
-        );
-      } catch (error) {
-        return fail(
-          3,
-          `could not write the execution approval to ${boundaryPath}: ${error.message}`,
-        );
-      }
     }
+    const planned = [
+      { path: contextPath, label: 'host snapshot', next: contextBytes },
+      {
+        path: artifactContextPath,
+        label: 'artifact context',
+        next: `${JSON.stringify({
+          repo: slug,
+          pr: context.pr,
+          baseRefOid: context.base,
+          headRefOid: context.head,
+        })}\n`,
+      },
+      ...(executionApproval
+        ? [
+            {
+              path: boundaryPath,
+              label: 'execution approval',
+              next: `${JSON.stringify(executionApproval, null, 2)}\n`,
+            },
+          ]
+        : []),
+      {
+        path: reviewPath,
+        label: 'review snapshot',
+        next: review.state
+          ? `${JSON.stringify(review.state, null, 2)}\n`
+          : null,
+      },
+    ];
+    if (outPath) {
+      planned.unshift({
+        path: outPath,
+        label: 'host snapshot',
+        next: contextBytes,
+      });
+    }
+    const records = [];
+    for (const item of planned) {
+      const { record, error } = captureWriteRecord(
+        item.path,
+        item.label,
+        item.next,
+      );
+      if (error) return fail(3, error);
+      records.push(record);
+    }
+    const { error } = commitWriteRecords(records);
+    if (error) return fail(3, error);
+    // The digest binds the snapshot's content for the checker
+    // (--context-sha256): it is computed only after every write succeeded.
+    const contextSha256 = createHash('sha256')
+      .update(contextBytes, 'utf8')
+      .digest('hex');
     return { contextSha256, reportedContextPath };
   };
 
@@ -1370,15 +1447,8 @@ function main(argv) {
   const { contextSha256, reportedContextPath } = written;
 
   // Best-effort, like the lane: a missing review file means "unknown", so an
-  // earlier prepare's copy must not outlive a failed fetch.
-  try {
-    rmSync(reviewPath, { force: true });
-    if (review.state) {
-      writeFileSync(reviewPath, `${JSON.stringify(review.state, null, 2)}\n`);
-    }
-  } catch (error) {
-    return fail(3, `could not write the review snapshot: ${error.message}`);
-  }
+  // earlier prepare's copy must not outlive a failed fetch. Its replacement or
+  // removal participates in the same rollback group as the authority files.
 
   const isolation = detectIsolation();
   // The title comes from an untrusted fork, and a control character would reach

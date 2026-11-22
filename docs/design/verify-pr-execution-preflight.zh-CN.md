@@ -89,7 +89,7 @@ prepare 像现在一样先验证当前检出再写入。VM 或宿主批准有效
 
 产物中的 `boundary.json` 携带同一对象。发布使用与宿主 `executionApproval` 的深度严格对账，不是忽略额外字段的子集检查：声名字段键必须完全一致，评论批准还必须包括同一个 `registrationNonce`。prepare 打印的 context sha256 同时覆盖批准字节。
 
-`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。产物 `context.json` 同样必须不存在或是单链接普通文件，防止 symlink/hardlink 覆盖原物。`--context-out` containment 使用规范化 PR clone root 和父目录存在后的完整规范化父路径；不存在的新 leaf 不直接传给 `realpath`，真实父目录重定向回 clone 的 alias 在写批准字节前以 exit 3 拒绝。
+`verify-pr-check.mjs` 遇到 `vm` 或 `waived` 产物声明时，要求可信 `--context` 快照中经过验证的 `executionApproval` 与产物声明深度相等，并且其中的 `head` 等于可信 `headRefOid`。它还按快照的 author 与 `isCrossRepository` 重新验证 `basis`。与旧的可选 context-digest 警告不同，VM 和宿主发布必须提供 `--context-sha256` 且字节匹配，同时沿用现有的克隆外、非软链和单链接规则。PR 树内的快照副本绝不作为权威来源。写入任何 context 或批准文件之前，带时间戳的产物目录必须是真实目录（不是软链或其它文件），且其完整规范路径恰好是真实 `tmp/` 目录下预期的直接子目录。普通同秒重试仍可以复用已有的真实目录；重定向或非目录以 exit 3 拒绝，不写入其目标。产物 `context.json` 同样必须不存在或是单链接普通文件，防止 symlink/hardlink 覆盖原物。`--context-out` containment 使用规范化 PR clone root 和父目录存在后的完整规范化父路径；不存在的新 leaf 不直接传给 `realpath`，真实父目录重定向回 clone 的 alias 在写批准字节前以 exit 3 拒绝。外部与树内 context、产物坐标与批准、review 快照属于同一写入组。prepare 在首次改变前保存其旧字节；稍后的失败恢复这些字节并移除本组新创建的文件。若某项恢复失败，prepare 以 exit 3 明确点名，不宣称已恢复。
 
 容器与 CI lane 行为不变。缺少宿主记录的旧宿主或 VM 产物会被有意拒绝，不再呈现为已经预检批准的轮次。
 

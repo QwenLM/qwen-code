@@ -208,7 +208,11 @@ symlink or hard link cannot overwrite its origin. `--context-out` containment
 uses the canonical PR-clone root and the canonical parent directory after that
 parent exists; a nonexistent new leaf is not passed to `realpath`, and an alias
 whose real parent leads back into the clone exits 3 before approval bytes are
-written.
+written. The external and in-tree contexts, artifact coordinates and approval,
+and the review snapshot form one write group. Prepare preserves their previous
+bytes before the first mutation; a later failure restores those bytes and
+removes newly created members. It exits 3 and names any record it could not
+restore, rather than claiming a restored state.
 
 Container and CI-lane behavior remains unchanged. Older host or VM artifacts
 without the host-held record are deliberately refused rather than presented

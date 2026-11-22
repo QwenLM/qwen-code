@@ -1069,6 +1069,220 @@ describe.skipIf(process.platform === 'win32')(
       return { artifacts, checked, noContext, noDigest };
     };
 
+    const failedRetryWitness = (trust) => {
+      const { dir, base, head } = makeRepo();
+      const prepared = command({
+        trust,
+        approval: trust ? null : permalink,
+        head,
+        round: 1,
+      });
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        trust
+          ? {
+              user: { login: 'maintainer' },
+              permissions: { maintainer: { permission: 'maintain' } },
+            }
+          : {
+              comment: {
+                id: 900001,
+                issue_url:
+                  'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+                body: marker({
+                  head,
+                  round: 1,
+                  registrationNonce: prepared.registrationNonce,
+                }),
+                user: { login: 'approver' },
+              },
+              permissions: { approver: { permission: 'admin' } },
+            },
+      );
+      const clock = join(makeTmpDir(), `freeze-retry-${trust}.cjs`);
+      writeFileSync(
+        clock,
+        'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+      );
+      const frozen = { ...env, NODE_OPTIONS: `--require=${clock}` };
+      const first = runPrepare(dir, prepared.artifactArgs, frozen);
+      expect(first.status, first.stderr).toBe(0);
+      const artifacts = artifactsFrom(first);
+      const contextPath =
+        prepared.artifactArgs[
+          prepared.artifactArgs.indexOf('--context-out') + 1
+        ];
+      const recordPaths = [
+        contextPath,
+        join(dir, 'tmp', 'verify-context', 'pr42.json'),
+        join(artifacts, 'boundary.json'),
+        join(artifacts, 'context.json'),
+        join(dir, 'tmp', 'verify-context', 'pr42-review-threads.json'),
+      ];
+      const before = recordPaths.map((path) => readFileSync(path));
+      const contextSha256 = createHash('sha256')
+        .update(before[0])
+        .digest('hex');
+      const declaration = JSON.parse(before[2].toString('utf8'));
+      writeFileSync(
+        join(artifacts, 'report.md'),
+        `merge-ready · 1 passed · 0 failed · 1 total · ${head}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+      );
+      writeFileSync(join(artifacts, 'verdict.txt'), 'merge-ready\n');
+      writeFileSync(
+        join(artifacts, 'assertions.json'),
+        JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+      );
+      writeFileSync(join(artifacts, 'evidence', '01-ab-cells.png'), 'png');
+      const originalCheck = () =>
+        spawnSync(
+          process.execPath,
+          [
+            CHECK_SCRIPT,
+            '--context',
+            contextPath,
+            '--context-sha256',
+            contextSha256,
+            artifacts,
+          ],
+          { env: { ...gitEnv, QWEN_VERIFY_CONTEXT: '' }, encoding: 'utf8' },
+        );
+      expect(originalCheck().status).toBe(0);
+      const assertOriginal = () => {
+        recordPaths.forEach((path, index) => {
+          expect(readFileSync(path), path).toEqual(before[index]);
+        });
+        expect(originalCheck().status).toBe(0);
+      };
+      const retryArgs = [...prepared.artifactArgs];
+      retryArgs[retryArgs.indexOf('--reason') + 1] =
+        'second reason from retried approval';
+
+      // A path rejection must happen before any file in the valid group moves.
+      const earlyArgs = [...retryArgs];
+      const rejected = join(makeTmpDir(), 'rejected-context.json');
+      const rejectedOrigin = join(makeTmpDir(), 'rejected-origin.json');
+      writeFileSync(rejectedOrigin, 'ORIGINAL\n');
+      symlinkSync(rejectedOrigin, rejected);
+      earlyArgs[earlyArgs.indexOf('--context-out') + 1] = rejected;
+      const early = runPrepare(dir, earlyArgs, frozen);
+      expect(early.status).toBe(3);
+      assertOriginal();
+      expect(readFileSync(rejectedOrigin, 'utf8')).toBe('ORIGINAL\n');
+
+      // The boundary's read-only file fails after both context records moved.
+      // Every prior authority and review byte, and the original digest, must
+      // be restored before prepare returns its refusal.
+      const boundaryPath = join(artifacts, 'boundary.json');
+      chmodSync(boundaryPath, 0o444);
+      let second;
+      try {
+        second = runPrepare(dir, retryArgs, frozen);
+      } finally {
+        chmodSync(boundaryPath, 0o600);
+      }
+      expect(second.status, second.stderr).toBe(3);
+      expect(second.stderr).toContain('could not write the execution approval');
+      assertOriginal();
+
+      // Removing the fault permits a real new decision, whose three authority
+      // records and new digest all agree on the new reason.
+      const third = runPrepare(dir, retryArgs, frozen);
+      expect(third.status, third.stderr).toBe(0);
+      const current = JSON.parse(readFileSync(contextPath, 'utf8'));
+      const currentBoundary = JSON.parse(readFileSync(boundaryPath, 'utf8'));
+      expect(current.executionApproval).toEqual(currentBoundary);
+      expect(currentBoundary.reason).toBe(
+        'second reason from retried approval',
+      );
+      expect(currentBoundary.registrationNonce).toBe(
+        declaration.registrationNonce,
+      );
+      const newDigest = createHash('sha256')
+        .update(readFileSync(contextPath))
+        .digest('hex');
+      expect(newDigest).not.toBe(contextSha256);
+      const checked = spawnSync(
+        process.execPath,
+        [
+          CHECK_SCRIPT,
+          '--context',
+          contextPath,
+          '--context-sha256',
+          newDigest,
+          artifacts,
+        ],
+        { env: { ...gitEnv, QWEN_VERIFY_CONTEXT: '' }, encoding: 'utf8' },
+      );
+      expect(checked.status, checked.stdout).toBe(0);
+    };
+
+    it.skipIf(process.getuid?.() === 0)(
+      'restores an approved record when local-trust prepare fails after partial writes',
+      () => failedRetryWitness(true),
+    );
+    it.skipIf(process.getuid?.() === 0)(
+      'restores an approved record when comment prepare fails after partial writes',
+      () => failedRetryWitness(false),
+    );
+
+    it.skipIf(process.getuid?.() === 0)(
+      'removes newly created records when the first prepare fails partway',
+      () => {
+        const { dir, base, head } = makeRepo();
+        const env = installFakeGh(
+          {
+            ...snapshotFor({ base, head }),
+            author: { login: 'maintainer' },
+            isCrossRepository: true,
+          },
+          reviewPages(),
+          {
+            user: { login: 'maintainer' },
+            permissions: { maintainer: { permission: 'write' } },
+          },
+        );
+        const clock = join(makeTmpDir(), 'freeze-first-failure.cjs');
+        writeFileSync(
+          clock,
+          'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+        );
+        const artifacts = join(
+          dir,
+          'tmp',
+          artifactDirName(42, new Date(1700000000000)),
+        );
+        mkdirSync(artifacts, { recursive: true });
+        const boundaryPath = join(artifacts, 'boundary.json');
+        writeFileSync(boundaryPath, 'PREEXISTING\n');
+        chmodSync(boundaryPath, 0o444);
+        const { artifactArgs } = command({ round: 1 });
+        const contextPath =
+          artifactArgs[artifactArgs.indexOf('--context-out') + 1];
+        let result;
+        try {
+          result = runPrepare(dir, artifactArgs, {
+            ...env,
+            NODE_OPTIONS: `--require=${clock}`,
+          });
+        } finally {
+          chmodSync(boundaryPath, 0o600);
+        }
+        expect(result.status).toBe(3);
+        expect(existsSync(contextPath)).toBe(false);
+        expect(
+          existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json')),
+        ).toBe(false);
+        expect(existsSync(join(artifacts, 'context.json'))).toBe(false);
+        expect(readFileSync(boundaryPath, 'utf8')).toBe('PREEXISTING\n');
+      },
+    );
+
     it('accepts explicit local trust for an own fork and a same-repository PR', () => {
       for (const fixture of [
         { author: 'maintainer', cross: true, basis: 'own-pr' },
