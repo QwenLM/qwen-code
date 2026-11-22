@@ -1346,6 +1346,22 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(records[0]!.skills?.byName['helper-skill']?.count).toBe(1);
   });
 
+  it('preserves a covering rebuild across the exit-persist clock gap', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-covered-at-exit', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+      },
+      runRec('sess-covered-at-exit', 500, t0 + 60_000, t0 + 120_900),
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBe(true);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
   it('keeps a rebuild whose window and counters cover the live run', () => {
     const records = dedupBySessionId([
       {

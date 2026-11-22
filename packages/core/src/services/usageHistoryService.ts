@@ -765,8 +765,15 @@ let replayCache = new Map<string, ReplayCacheEntry>();
 function scopedProjectChatsDirs(
   records: readonly UsageSummaryRecord[],
   sessionIds: ReadonlySet<string> | undefined,
+  currentSessionId?: string,
+  projectRoot?: string,
 ): string[] | undefined {
   if (!sessionIds || sessionIds.size === 0) return undefined;
+  const callerVerifiedRoot =
+    projectRoot !== undefined &&
+    records
+      .filter((record) => sessionIds.has(record.sessionId))
+      .every((record) => record.project === projectRoot);
   const chatsDirs = new Map<string, string>();
   for (const sessionId of sessionIds) {
     const recordChatsDirs = new Set(
@@ -776,10 +783,24 @@ function scopedProjectChatsDirs(
           path.join(new Storage(record.project).getProjectDir(), 'chats'),
         ),
     );
+    // The caller supplies a verified workspace only for its active session.
+    // Unknown or unrelated ids must still use directory discovery.
+    if (
+      recordChatsDirs.size === 0 &&
+      sessionId === currentSessionId &&
+      projectRoot
+    ) {
+      recordChatsDirs.add(
+        path.join(new Storage(projectRoot).getProjectDir(), 'chats'),
+      );
+    }
     if (recordChatsDirs.size !== 1) return undefined;
     const chatsDir = [...recordChatsDirs][0]!;
     try {
-      if (!fs.existsSync(path.join(chatsDir, `${sessionId}.jsonl`))) {
+      if (
+        (!callerVerifiedRoot || sessionId === currentSessionId) &&
+        !fs.existsSync(path.join(chatsDir, `${sessionId}.jsonl`))
+      ) {
         // Persisted metadata can predate a transcript move. Retain discovery.
         return undefined;
       }
@@ -1010,7 +1031,13 @@ function rebuildCoversRun(
   rebuilt: UsageSummaryRecord,
   run: UsageSummaryRecord,
 ): boolean {
-  if (rebuilt.startTime > run.startTime || rebuilt.timestamp < run.timestamp) {
+  // A run is stamped when exit/clear persists it, just after the last
+  // transcript event. Narrowly account for that sampling gap; model/tool/file
+  // counters still have to cover the run before it can be replaced.
+  if (
+    rebuilt.startTime > run.startTime ||
+    rebuilt.timestamp + 1_000 < run.timestamp
+  ) {
     return false;
   }
   const fields = [
@@ -1196,6 +1223,7 @@ export async function loadUsageHistory(
   skipSessionInRebuild?: string,
   options?: {
     persistRebuild?: boolean;
+    projectRoot?: string;
     beforeMsBySession?: ReadonlyMap<string, number>;
   },
 ): Promise<UsageSummaryRecord[]> {
@@ -1212,7 +1240,11 @@ export async function loadUsageHistory(
   // An empty history needs the original full migration, not a scope limited
   // to the active session. That protects other old transcripts before the
   // in-progress session is excluded from durable migration.
-  if (!scoped && persisted.length > 0) {
+  if (
+    persisted.length > 0 &&
+    (!scoped ||
+      [...scope.onlySessionIds].every((id) => scope.skipSessionIds.has(id)))
+  ) {
     return dedupBySessionId(persisted);
   }
   const beforeMsBySession = new Map(scope.beforeMsBySession);
@@ -1227,10 +1259,16 @@ export async function loadUsageHistory(
     skipSessionIds: scope.skipSessionIds,
     onlySessionIds: scoped ? scope.onlySessionIds : undefined,
     projectChatsDirs: scoped
-      ? scopedProjectChatsDirs(persisted, scope.onlySessionIds)
+      ? scopedProjectChatsDirs(
+          persisted,
+          scope.onlySessionIds,
+          skipSessionInRebuild,
+          options?.projectRoot,
+        )
       : undefined,
     beforeMsBySession: beforeMsBySession.size ? beforeMsBySession : undefined,
-    persist: options?.persistRebuild ?? true,
+    // Scoped supplements are ephemeral, never an authoritative disk migration.
+    persist: scoped ? false : (options?.persistRebuild ?? true),
   });
   return dedupBySessionId([...rebuilt, ...persisted]);
 }
@@ -1252,6 +1290,8 @@ export async function loadUsageHistory(
  * established history does not pay a full cross-project replay on every load.
  */
 export async function loadUsageHistoryWithLive(options?: {
+  /** Verified workspace to consider when supplementing known transcript ids. */
+  projectRoot?: string;
   /**
    * Only replay transcripts touched at/after this epoch-ms. Defaults to a
    * {@link LIVE_REBUILD_WINDOW_DAYS}-day trailing window (covers the dashboard's
@@ -1283,6 +1323,15 @@ export async function loadUsageHistoryWithLive(options?: {
 
   const rebuilt = await rebuildFromSessionJsonl({
     persist: false,
+    projectChatsDirs:
+      scope.onlySessionIds.size > 0
+        ? scopedProjectChatsDirs(
+            persisted,
+            scope.onlySessionIds,
+            undefined,
+            options?.projectRoot,
+          )
+        : undefined,
     sinceMs,
     skipSessionIds: persistedIds,
     supplementalSessionIds: scope.onlySessionIds.size

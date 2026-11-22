@@ -155,6 +155,7 @@ describe('StatsDialog data loading', () => {
           },
         }),
         'resumed',
+        '/project',
       );
     } finally {
       unmount();

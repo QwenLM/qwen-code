@@ -591,6 +591,44 @@ describe('loadStatsData — per-request ledger accounting', () => {
     }
   });
 
+  it('attributes overnight spend identically in today and week views', async () => {
+    const now = Date.now();
+    const yesterday = now - DAY;
+    const day = dayKey(yesterday);
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'overnight',
+        timestamp: now,
+        startTime: yesterday,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 900,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 900,
+          },
+        },
+      }),
+    ]);
+    const daily: TokenUsageDailyByModel = new Map([
+      [day, ledgerDay({ requests: 1, inputTokens: 900 })],
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockImplementation(
+      async (since) => new Map([...daily].filter(([key]) => key >= since)),
+    );
+
+    const today = await loadStatsData('today');
+    const week = await loadStatsData('week');
+    expect(reportTokens(today.report)).toBe(0);
+    expect(today.heatmap[dayKey(now)]).toBeUndefined();
+    expect(reportTokens(week.report)).toBe(900);
+    expect(week.tokensPerDay).toEqual([
+      { date: day, model: 'qwen-max', tokens: 900 },
+    ]);
+  });
+
   it('replaces a ledger-covered day instead of adding the record copy', async () => {
     const now = Date.now();
     mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp: now })]);

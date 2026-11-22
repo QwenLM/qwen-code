@@ -231,6 +231,10 @@ history from an old unmarked record whose provenance is unknowable.
   overlap remains ambiguous and drops the reconstructed copy rather than
   guessing what to subtract. Multiple correlated whole-transcript snapshots
   remain last-wins.
+- **Exit clock sampling.** A run's persist-time end can follow its last
+  transcript event. Coverage tolerates up to 1,000 ms for that sampling gap,
+  while retaining the start-boundary and model/tool/file counter checks. A
+  larger, unexplained discrepancy keeps the conservative record basis.
 
 Both markers are optional, so every reader that filters `version === 1` keeps
 working without a schema migration.
@@ -258,10 +262,14 @@ boundary, rather than disabling caching across every transcript. Cache summaries
 never become warm candidates ahead of directory enumeration: duplicate session
 ids retain first-occurrence-by-directory-order independently of cache warmth.
 A scoped lookup may read exact known files without directory enumeration only
-when its ids unambiguously resolve to one verified project root, and the mapped
-transcripts exist. Missing, moved or multi-root identities retain full directory
-discovery rather than guessing; discovering new, unrecorded daemon sessions
-always requires bounded discovery. A boundary-limited read therefore cannot
+when its ids resolve to one verified project root with matching persisted
+project identities and the active mapped transcript exists. When the caller
+supplies that workspace, an absent transcript for another known run is skipped
+in place rather than triggering a full directory scan. Unknown, multi-root or
+caller-mismatched identities retain full directory discovery rather than
+guessing;
+discovering new, unrecorded daemon sessions always requires bounded discovery.
+A boundary-limited read therefore cannot
 borrow a cached whole-transcript summary or make ordinary unrelated sessions
 uncacheable.
 
@@ -319,8 +327,12 @@ rule to both the table and the delta; it does not invent an independent coverage
 interpretation. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
 column comes from the same source as the tokens.
 
-`loadStatsData` reads the ledger on every open, reaching back far enough for the
-previous range. It replaces the current report's `models`, `totalRequests` and
+`loadStatsData` reads the ledger on every open from the earlier of the earliest
+record's start day and the previous comparison window's first day. That makes
+replacement independent of the selected display range: an overnight run whose
+requests were yesterday cannot be reassigned to today merely because today has
+no ledger row yet. Only the window sum, not coverage discovery, is range-bound.
+It replaces the current report's `models`, `totalRequests` and
 `totalLatencyMs` with the shared token table. A completed-day side uses the
 ledger when every model-bearing record in it touches a ledger-covered day,
 including an ordinary weekend with no requests and no ledger keys. A genuinely

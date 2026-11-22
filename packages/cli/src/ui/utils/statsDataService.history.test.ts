@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,7 @@ import {
   persistSessionUsage,
   _resetReplayCacheForTest,
 } from '@qwen-code/qwen-code-core';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
   loadStatsData,
   _resetStatsLedgerCacheForTest,
@@ -48,7 +49,7 @@ const metrics = (tokens: number): SessionMetrics =>
     files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
   }) as unknown as SessionMetrics;
 
-function seedTranscript(home: string): void {
+function seedTranscript(home: string, chatsDir?: string): void {
   const started = Date.now() - 7_200_000;
   const time = (offset: number) => new Date(started + offset).toISOString();
   const records = [
@@ -92,7 +93,7 @@ function seedTranscript(home: string): void {
       message: { role: 'model', content: 'historical answer' },
     },
   ];
-  const dir = path.join(home, 'projects', 'main', 'chats');
+  const dir = chatsDir ?? path.join(home, 'projects', 'main', 'chats');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, `${B}.jsonl`),
@@ -172,5 +173,40 @@ describe('stats cross-session transcript reconstruction', () => {
       .split('\n')
       .map((line) => JSON.parse(line));
     expect(records.map((record) => record.sessionId)).toEqual([A]);
+  });
+
+  it('uses a supplied workspace root without enumerating projects', async () => {
+    const live = buildCurrentSessionRecord(
+      B,
+      new Date(Date.now() - 1_000),
+      home,
+      metrics(5),
+    );
+    const sourcePath = new SessionService(home, {
+      runtimeBaseDir: home,
+    }).getSessionTranscriptPath(B);
+    seedTranscript(home, path.dirname(sourcePath));
+    expect(fs.existsSync(sourcePath)).toBe(true);
+    const missingA = path.join(path.dirname(sourcePath), `${A}.jsonl`);
+    expect(fs.existsSync(missingA)).toBe(false);
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    try {
+      const first = await loadStatsData('all', live, B, home);
+      const second = await loadStatsData('all', live, B, home);
+      for (const data of [first, second]) {
+        expect(data.report.models['qwen-max']?.totalTokens).toBe(1105);
+        expect(data.report.sessionCount).toBe(3);
+      }
+      expect(directorySpy).not.toHaveBeenCalled();
+    } finally {
+      directorySpy.mockRestore();
+    }
+    expect(
+      fs
+        .readFileSync(path.join(home, 'usage_record.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line) as { sessionId: string }),
+    ).toEqual([expect.objectContaining({ sessionId: A })]);
   });
 });

@@ -153,7 +153,7 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
       config.getProjectRoot(),
       uiTelemetryService.getLiveMetrics(),
     );
-    loadStatsData(range, liveRecord, stats.sessionId)
+    loadStatsData(range, liveRecord, stats.sessionId, config.getProjectRoot())
       .then((d) => {
         if (!stale) {
           setData(d);

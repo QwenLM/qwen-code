@@ -304,9 +304,11 @@ export async function loadStatsData(
   range: TimeRange,
   currentSession?: UsageSummaryRecord,
   currentSessionId?: string,
+  projectRoot?: string,
 ): Promise<StatsData> {
   const sessionId = currentSession?.sessionId ?? currentSessionId;
   const persisted = await loadUsageHistory(sessionId, {
+    projectRoot: projectRoot ?? currentSession?.project,
     beforeMsBySession: currentSession
       ? new Map([[currentSession.sessionId, currentSession.startTime]])
       : undefined,
@@ -347,14 +349,21 @@ export async function loadStatsData(
       ? addLocalDays(prevEndKey!, -(completedDays - 1))
       : undefined;
 
-  // One accounting table for this surface and the daemon usage dashboard. The
-  // ledger window has to reach back far enough for the previous range too, or
-  // the delta would compare a ledger-backed current against a record-backed past.
-  const earliestKey =
+  // One accounting table for both surfaces. The previous comparison needs its
+  // own earlier days, and every record's spending day must be visible to the
+  // replacement predicate independently of the selected display range.
+  const comparisonStartKey =
     prevStartKey && prevStartKey < currentStartKey
       ? prevStartKey
       : currentStartKey;
-  const ledgerDaily = await loadLedgerShared(earliestKey);
+  const firstRecordStart = records.reduce(
+    (earliest, record) => Math.min(earliest, record.startTime),
+    start.getTime(),
+  );
+  const firstRecordKey = localDateKey(firstRecordStart);
+  const ledgerStartKey =
+    firstRecordKey < comparisonStartKey ? firstRecordKey : comparisonStartKey;
+  const ledgerDaily = await loadLedgerShared(ledgerStartKey);
   const sortedLedgerDays = [...ledgerDaily.keys()].sort();
   const table = buildUsageDayTable(records, ledgerDaily, sortedLedgerDays);
   const report = aggregateUsage(
