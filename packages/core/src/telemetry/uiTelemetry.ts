@@ -119,6 +119,7 @@ export interface ModelMetricsCore {
     totalRequests: number;
     totalErrors: number;
     totalLatencyMs: number;
+    totalErrorLatencyMs?: number;
   };
   tokens: {
     prompt: number;
@@ -261,8 +262,30 @@ const createInitialModelMetrics = (): ModelMetrics => ({
  * for every `bySource` map it touches. Every snapshot/restore clone goes
  * through here so the guard survives a replay rollback.
  */
+const executionIdsByMetrics = new WeakMap<SessionMetrics, Set<string>>();
+
+export function getRequestExecutionIds(
+  metrics: SessionMetrics,
+): ReadonlySet<string> | undefined {
+  return executionIdsByMetrics.get(metrics);
+}
+
+function recordRequestExecutionId(
+  metrics: SessionMetrics,
+  executionId: string | undefined,
+): void {
+  if (!executionId) return;
+  const ids = executionIdsByMetrics.get(metrics) ?? new Set<string>();
+  ids.add(executionId);
+  executionIdsByMetrics.set(metrics, ids);
+}
+
 const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
   const clone = structuredClone(metrics);
+  const executionIds = executionIdsByMetrics.get(metrics);
+  if (executionIds) {
+    executionIdsByMetrics.set(clone, new Set(executionIds));
+  }
   for (const model of Object.values(clone.models)) {
     model.bySource = Object.assign(
       Object.create(null) as Record<string, ModelMetricsCore>,
@@ -817,6 +840,7 @@ export class UiTelemetryService extends EventEmitter {
     event: ApiResponseEvent,
     sessionId?: string,
   ): void {
+    recordRequestExecutionId(metrics, event.execution_id);
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const statsModelMetrics = sessionId
       ? this.#getOrCreateStatsModelMetrics(metrics, event.model)
@@ -939,6 +963,7 @@ export class UiTelemetryService extends EventEmitter {
     event: ApiErrorEvent,
     sessionId?: string,
   ): void {
+    recordRequestExecutionId(metrics, event.execution_id);
     const modelMetrics = this.#getOrCreateModelMetrics(metrics, event.model);
     const statsModelMetrics = sessionId
       ? this.#getOrCreateStatsModelMetrics(metrics, event.model)
@@ -961,6 +986,8 @@ export class UiTelemetryService extends EventEmitter {
       bucket.api.totalRequests++;
       bucket.api.totalErrors++;
       bucket.api.totalLatencyMs += event.duration_ms;
+      bucket.api.totalErrorLatencyMs =
+        (bucket.api.totalErrorLatencyMs ?? 0) + event.duration_ms;
     }
     if (statsModelMetrics) {
       const kind =

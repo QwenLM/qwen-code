@@ -29,6 +29,8 @@ interface ModelTokens {
   thoughtsTokens: number;
   totalTokens: number;
   totalLatencyMs: number;
+  errors?: number;
+  errorLatencyMs?: number;
 }
 
 function rec(o: {
@@ -82,6 +84,7 @@ function ledgerDay(
     cachedTokens?: number;
     thoughtsTokens?: number;
     totalTokens?: number;
+    apiDurationMs?: number;
   },
 ): Map<string, TokenUsageDayModelTotals> {
   const outputTokens = o.outputTokens ?? 0;
@@ -95,7 +98,7 @@ function ledgerDay(
         cachedTokens: o.cachedTokens ?? 0,
         thoughtsTokens: o.thoughtsTokens ?? 0,
         totalTokens: o.totalTokens ?? o.inputTokens + outputTokens,
-        apiDurationMs: 0,
+        apiDurationMs: o.apiDurationMs ?? 0,
       },
     ],
   ]);
@@ -351,6 +354,124 @@ describe('loadUsageDashboard', () => {
     // Session-granular tiles the ledger cannot supply stay on the records.
     expect(dash.summary.sessions).toBe(1);
     expect(dash.summary.toolCalls).toBe(7);
+  });
+
+  it('retains failed requests and their duration beside successful ledger usage', () => {
+    const timestamp = Date.now();
+    const records = [
+      rec({
+        sessionId: 'success-and-failure',
+        timestamp,
+        model: {
+          requests: 2,
+          inputTokens: 120,
+          totalTokens: 120,
+          totalLatencyMs: 200,
+          errors: 1,
+          errorLatencyMs: 150,
+        },
+      }),
+    ];
+    const ledger: TokenUsageDailyByModel = new Map([
+      [
+        dayKey(timestamp),
+        ledgerDay('qwen-max', {
+          requests: 1,
+          inputTokens: 120,
+          apiDurationMs: 50,
+        }),
+      ],
+    ]);
+
+    const table = buildUsageDayTable(records, ledger);
+
+    expect(table.get(dayKey(timestamp))?.get('qwen-max')).toMatchObject({
+      requests: 2,
+      totalTokens: 120,
+      apiDurationMs: 200,
+    });
+    for (let i = 0; i < 3; i++) {
+      expect(
+        buildUsageDashboard(records, { range: 'today' }, ledger).summary
+          .requests,
+      ).toBe(2);
+    }
+    expect(ledger.get(dayKey(timestamp))?.get('qwen-max')).toMatchObject({
+      requests: 1,
+      totalTokens: 120,
+      apiDurationMs: 50,
+    });
+  });
+
+  it('keeps a cross-day record with failures when successful ledger coverage is absent', () => {
+    const timestamp = Date.now();
+    const record = rec({
+      sessionId: 'failure-without-success-coverage',
+      timestamp,
+      model: {
+        requests: 2,
+        inputTokens: 120,
+        totalTokens: 120,
+        totalLatencyMs: 200,
+        errors: 1,
+        errorLatencyMs: 75,
+      },
+    });
+    record.startTime = timestamp - MS_PER_DAY;
+
+    const table = buildUsageDayTable([record], new Map());
+
+    expect(table.get(dayKey(timestamp))?.get('qwen-max')).toMatchObject({
+      requests: 2,
+      totalTokens: 120,
+      apiDurationMs: 200,
+    });
+  });
+
+  it('counts supplemental API usage without inventing another ended run', () => {
+    const timestamp = Date.now();
+    const records = [
+      {
+        ...rec({ sessionId: 'ended-run', timestamp }),
+        runScoped: true,
+        durationMs: 1000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 100,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 100,
+          },
+        },
+      },
+      {
+        ...rec({ sessionId: 'ended-run', timestamp: timestamp + 1000 }),
+        transcriptRebuild: true,
+        transcriptSupplement: true,
+        durationMs: 10_000,
+        models: {
+          'qwen-max': {
+            requests: 1,
+            inputTokens: 500,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 500,
+          },
+        },
+      },
+    ];
+
+    const dashboard = buildUsageDashboard(records, { range: 'today' });
+
+    expect(dashboard.summary.sessions).toBe(1);
+    expect(dashboard.summary.requests).toBe(2);
+    expect(dashboard.summary.totalTokens).toBe(600);
+    expect(
+      dashboard.daily.find((d) => d.date === dayKey(timestamp))?.sessions,
+    ).toBe(1);
   });
 
   it('attributes tokens to the day each response happened, not the session end', () => {

@@ -9,7 +9,10 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
-import { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import {
+  getRequestExecutionIds,
+  UiTelemetryService,
+} from '../telemetry/uiTelemetry.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -68,6 +71,9 @@ export interface UsageSummaryRecord {
       thoughtsTokens: number;
       totalTokens: number;
       totalLatencyMs?: number;
+      /** Failed attempts, which the successful-response ledger does not contain. */
+      errors?: number;
+      errorLatencyMs?: number;
     }
   >;
   tools: {
@@ -100,6 +106,10 @@ export interface UsageSummaryRecord {
   runScoped?: boolean;
   /** True when built from a transcript's event-time telemetry records. */
   transcriptRebuild?: boolean;
+  /** Locally unique requests behind these counters; absent on older records. */
+  requestExecutionIds?: string[];
+  /** Ephemeral identified activity after known runs, not a fresh run write. */
+  transcriptSupplement?: boolean;
 }
 
 export interface PreparedUsageBeforeTranscriptDeletion {
@@ -212,6 +222,7 @@ export function metricsToUsageRecord(
   metrics: SessionMetrics,
 ): UsageSummaryRecord {
   const models: UsageSummaryRecord['models'] = {};
+  const requestExecutionIds = getRequestExecutionIds(metrics);
   let totalLatencyMs = 0;
   for (const [name, m] of Object.entries(metrics.models)) {
     totalLatencyMs += m.api.totalLatencyMs;
@@ -225,6 +236,12 @@ export function metricsToUsageRecord(
         m.tokens.total ||
         m.tokens.prompt + m.tokens.candidates + m.tokens.thoughts,
       totalLatencyMs: m.api.totalLatencyMs,
+      ...(m.api.totalErrors > 0
+        ? {
+            errors: m.api.totalErrors,
+            errorLatencyMs: m.api.totalErrorLatencyMs ?? 0,
+          }
+        : {}),
     };
   }
   const toolsByName: UsageSummaryRecord['tools']['byName'] = {};
@@ -255,6 +272,9 @@ export function metricsToUsageRecord(
       linesAdded: metrics.files.totalLinesAdded,
       linesRemoved: metrics.files.totalLinesRemoved,
     },
+    ...(requestExecutionIds
+      ? { requestExecutionIds: [...requestExecutionIds].sort() }
+      : {}),
     ...(metrics.skills
       ? {
           skills: {
@@ -453,8 +473,15 @@ function extractLastTopLevelTimestamp(line: string): string | undefined {
 async function summarizeTranscriptFile(
   filePath: string,
   beforeMs?: number,
-): Promise<{ sessionId: string; record: UsageSummaryRecord | null } | null> {
+  afterMs?: number,
+  excludedRequestIds?: ReadonlySet<string>,
+): Promise<TranscriptSummary> {
   const telemetry = new UiTelemetryService();
+  const supplementalRequests = new Map<
+    string,
+    { events: UiEvent[]; startTime: number; endTime: number }
+  >();
+  const collectSupplements = afterMs !== undefined && Number.isFinite(afterMs);
   let hasEvents = false;
   let header: ChatRecord | null = null;
   let lastLine = '';
@@ -509,12 +536,15 @@ async function summarizeTranscriptFile(
           // payload, so this is the record's timestamp even on huge tool-result
           // lines. Tolerant of non-compact writers (spaces around the colon).
           const ts = extractJsonStringField(line, 'timestamp');
-          if (beforeMs !== undefined) {
-            const timestamp = ts === undefined ? NaN : Date.parse(ts);
-            if (!Number.isFinite(timestamp) || timestamp >= beforeMs) continue;
+          const rowTime = ts === undefined ? NaN : Date.parse(ts);
+          const included =
+            beforeMs === undefined ||
+            (Number.isFinite(rowTime) && rowTime < beforeMs);
+          if (!included && !collectSupplements) continue;
+          if (included) {
+            lastLine = line;
+            if (ts !== undefined) lastTsFallback = ts;
           }
-          lastLine = line;
-          if (ts !== undefined) lastTsFallback = ts;
 
           if (!header) {
             const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
@@ -527,21 +557,56 @@ async function summarizeTranscriptFile(
               filePath,
             )) {
               if (
-                record.type === 'system' &&
-                record.subtype === 'ui_telemetry'
+                record.type !== 'system' ||
+                record.subtype !== 'ui_telemetry'
               ) {
-                const payload = record.systemPayload as
-                  | { uiEvent?: UiEvent }
-                  | undefined;
-                if (
-                  payload?.uiEvent &&
-                  payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-                  payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
-                  payload.uiEvent['event.name'] !== 'hook_lifecycle'
-                ) {
-                  telemetry.addEvent(payload.uiEvent);
-                  hasEvents = true;
-                }
+                continue;
+              }
+              const payload = record.systemPayload as
+                | { uiEvent?: UiEvent }
+                | undefined;
+              const event = payload?.uiEvent;
+              if (!event || typeof event !== 'object') continue;
+              const eventName = event['event.name'];
+              const usageEvent =
+                eventName !== 'request_lifecycle' &&
+                eventName !== 'tool_lifecycle' &&
+                eventName !== 'hook_lifecycle';
+              const eventTime = Date.parse(event['event.timestamp'] ?? '');
+              const effectiveTime = Number.isFinite(eventTime)
+                ? eventTime
+                : rowTime;
+              const isPostRunTool =
+                afterMs !== undefined &&
+                Number.isFinite(afterMs) &&
+                eventName === 'qwen-code.tool_call' &&
+                Number.isFinite(effectiveTime) &&
+                effectiveTime >= afterMs;
+              if (included && usageEvent && !isPostRunTool) {
+                telemetry.addEvent(event);
+                hasEvents = true;
+              }
+              if (!collectSupplements || afterMs === undefined) continue;
+              const executionId = (event as { execution_id?: unknown })
+                .execution_id;
+              if (
+                (eventName === 'qwen-code.api_response' ||
+                  eventName === 'qwen-code.api_error') &&
+                typeof executionId === 'string' &&
+                executionId.length > 0 &&
+                !excludedRequestIds?.has(executionId) &&
+                Number.isFinite(effectiveTime) &&
+                effectiveTime > afterMs
+              ) {
+                const request = supplementalRequests.get(executionId) ?? {
+                  events: [],
+                  startTime: effectiveTime,
+                  endTime: effectiveTime,
+                };
+                request.events.push(event);
+                request.startTime = Math.min(request.startTime, effectiveTime);
+                request.endTime = Math.max(request.endTime, effectiveTime);
+                supplementalRequests.set(executionId, request);
               }
             }
           }
@@ -574,7 +639,30 @@ async function summarizeTranscriptFile(
   if (!header) return null;
   const sessionId = header.sessionId;
   if (!sessionId) return null;
-  if (!hasEvents) return { sessionId, record: null };
+  const supplements = [...supplementalRequests.values()].map(
+    ({ events, startTime, endTime }) => {
+      const telemetry = new UiTelemetryService();
+      for (const event of events) telemetry.addEvent(event);
+      return {
+        ...metricsToUsageRecord(
+          sessionId,
+          header.cwd,
+          startTime,
+          endTime,
+          telemetry.getMetrics(),
+        ),
+        transcriptRebuild: true as const,
+        transcriptSupplement: true as const,
+      };
+    },
+  );
+  if (!hasEvents) {
+    return {
+      sessionId,
+      record: null,
+      ...(supplements.length > 0 ? { supplements } : {}),
+    };
+  }
 
   // Only parse a small trailing line (cheap `}{`-glued recovery). A large
   // trailing line is exactly the payload this scan exists to skip, so it is
@@ -608,23 +696,24 @@ async function summarizeTranscriptFile(
       ),
       transcriptRebuild: true,
     },
+    ...(supplements.length > 0 ? { supplements } : {}),
   };
 }
 
 /**
  * A run can replace a transcript only when its window covers the entire
- * transcript. Ordinary and already reconstructed sessions are cumulative.
+ * transcript. Ordinary cumulative records retain their legacy authority.
  */
 function isTranscriptAlreadyCovered(
   existing: UsageSummaryRecord,
   rebuilt: UsageSummaryRecord,
 ): boolean {
+  if (existing.sessionId !== rebuilt.sessionId) return false;
+  if (existing.runScoped !== true && existing.transcriptRebuild !== true)
+    return true;
   return (
-    existing?.sessionId === rebuilt.sessionId &&
-    (existing.runScoped !== true ||
-      existing.transcriptRebuild === true ||
-      (existing.startTime <= rebuilt.startTime &&
-        existing.timestamp >= rebuilt.timestamp))
+    existing.startTime <= rebuilt.startTime &&
+    existing.timestamp >= rebuilt.timestamp
   );
 }
 
@@ -737,17 +826,24 @@ interface RebuildFromSessionJsonlOptions {
   supplementalSessionIds?: ReadonlySet<string>;
   /** Reconcile only transcript rows before the earliest known run boundary. */
   beforeMsBySession?: ReadonlyMap<string, number>;
+  /** Preserve independently identified calls after the latest known run end. */
+  afterMsBySession?: ReadonlyMap<string, number>;
+  /** API calls already owned by known runs, for suppression of duplicate tails. */
+  knownRequestIdsBySession?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 type TranscriptSummary = {
   sessionId: string;
   record: UsageSummaryRecord | null;
+  supplements?: UsageSummaryRecord[];
 } | null;
 
 interface ReplayCacheEntry {
   mtimeMs: number;
   size: number;
   beforeMs?: number;
+  afterMs?: number;
+  excludedRequestIdsKey?: string;
   summarized: TranscriptSummary;
 }
 
@@ -833,6 +929,8 @@ async function rebuildFromSessionJsonl(
     onlySessionIds,
     supplementalSessionIds,
     beforeMsBySession,
+    afterMsBySession,
+    knownRequestIdsBySession,
   } = options;
   const projectsDir = path.join(Storage.getGlobalQwenDir(), 'projects');
   try {
@@ -937,25 +1035,42 @@ async function rebuildFromSessionJsonl(
       const { filePath, stats } = candidates[cursor++]!;
       try {
         let summarized: TranscriptSummary;
-        const beforeMs = beforeMsBySession?.get(
-          path.basename(filePath, '.jsonl'),
-        );
+        const sessionId = path.basename(filePath, '.jsonl');
+        const beforeMs = beforeMsBySession?.get(sessionId);
+        const afterMs = afterMsBySession?.get(sessionId);
+        const excludedRequestIds = knownRequestIdsBySession?.get(sessionId);
+        const excludedRequestIdsKey = excludedRequestIds
+          ? JSON.stringify([...excludedRequestIds].sort())
+          : undefined;
         const cached = useCache ? replayCache.get(filePath) : undefined;
         if (
           cached &&
           cached.mtimeMs === stats.mtimeMs &&
           cached.size === stats.size &&
-          cached.beforeMs === beforeMs
+          cached.afterMs === afterMs &&
+          cached.excludedRequestIdsKey === excludedRequestIdsKey &&
+          (cached.beforeMs === beforeMs ||
+            (cached.beforeMs === undefined &&
+              beforeMs !== undefined &&
+              cached.summarized?.record?.transcriptRebuild === true &&
+              cached.summarized.record.timestamp < beforeMs))
         ) {
           summarized = cached.summarized;
         } else {
-          summarized = await summarizeTranscriptFile(filePath, beforeMs);
+          summarized = await summarizeTranscriptFile(
+            filePath,
+            beforeMs,
+            afterMs,
+            excludedRequestIds,
+          );
         }
         if (nextCache) {
           nextCache.set(filePath, {
             mtimeMs: stats.mtimeMs,
             size: stats.size,
             beforeMs,
+            afterMs,
+            excludedRequestIdsKey,
             summarized,
           });
         }
@@ -980,8 +1095,8 @@ async function rebuildFromSessionJsonl(
     if (!summarized) continue;
     if (seenSessionIds.has(summarized.sessionId)) continue;
     seenSessionIds.add(summarized.sessionId);
-    if (!summarized.record) continue;
-    results.push(summarized.record);
+    if (summarized.record) results.push(summarized.record);
+    if (summarized.supplements) results.push(...summarized.supplements);
   }
 
   // Swap in the freshly-built cache so entries for transcripts that aged out
@@ -1000,6 +1115,7 @@ async function rebuildFromSessionJsonl(
       if (skipSessionInRebuild && record.sessionId === skipSessionInRebuild)
         continue;
       if (beforeMsBySession?.has(record.sessionId)) continue;
+      if (record.transcriptSupplement === true) continue;
       jsonl.writeLineSync(usagePath, record);
     }
   }
@@ -1027,19 +1143,52 @@ async function rebuildFromSessionJsonl(
  * reconstruction to events before the earliest run. Those supplements stay
  * in memory rather than becoming a new whole-session authority.
  */
+function requestIdsOverlap(
+  left: UsageSummaryRecord,
+  right: UsageSummaryRecord,
+): boolean | undefined {
+  if (!left.requestExecutionIds || !right.requestExecutionIds) return undefined;
+  const rightIds = new Set(right.requestExecutionIds);
+  return left.requestExecutionIds.some((id) => rightIds.has(id));
+}
+
+// Model execution identity does not prove best-effort tool/file telemetry survived.
+function toolsAndFilesCoverRun(
+  rebuilt: UsageSummaryRecord,
+  run: UsageSummaryRecord,
+): boolean {
+  return (
+    rebuilt.tools.totalCalls >= run.tools.totalCalls &&
+    rebuilt.tools.totalSuccess >= run.tools.totalSuccess &&
+    rebuilt.tools.totalFail >= run.tools.totalFail &&
+    Object.entries(run.tools.byName).every(([name, counters]) => {
+      const full = rebuilt.tools.byName[name];
+      return (
+        full &&
+        full.count >= counters.count &&
+        full.success >= counters.success &&
+        full.fail >= counters.fail
+      );
+    }) &&
+    rebuilt.files.linesAdded >= run.files.linesAdded &&
+    rebuilt.files.linesRemoved >= run.files.linesRemoved
+  );
+}
+
 function rebuildCoversRun(
   rebuilt: UsageSummaryRecord,
   run: UsageSummaryRecord,
 ): boolean {
-  // A run is stamped when exit/clear persists it, just after the last
-  // transcript event. Narrowly account for that sampling gap; model/tool/file
-  // counters still have to cover the run before it can be replaced.
-  if (
-    rebuilt.startTime > run.startTime ||
-    rebuilt.timestamp + 1_000 < run.timestamp
-  ) {
-    return false;
+  // Exit/persist is a separate clock from the last transcript event.
+  if (rebuilt.startTime > run.startTime) return false;
+  if (run.requestExecutionIds && rebuilt.requestExecutionIds) {
+    const available = new Set(rebuilt.requestExecutionIds);
+    return (
+      run.requestExecutionIds.every((id) => available.has(id)) &&
+      toolsAndFilesCoverRun(rebuilt, run)
+    );
   }
+  if (run.requestExecutionIds || rebuilt.requestExecutionIds) return false;
   const fields = [
     'requests',
     'inputTokens',
@@ -1048,17 +1197,11 @@ function rebuildCoversRun(
     'thoughtsTokens',
     'totalTokens',
   ] as const;
-  for (const [model, counters] of Object.entries(run.models)) {
-    const full = rebuilt.models[model];
-    if (!full) return false;
-    if (fields.some((field) => (full[field] ?? 0) < counters[field])) {
-      return false;
-    }
-  }
   return (
-    rebuilt.tools.totalCalls >= run.tools.totalCalls &&
-    rebuilt.files.linesAdded >= run.files.linesAdded &&
-    rebuilt.files.linesRemoved >= run.files.linesRemoved
+    Object.entries(run.models).every(([model, counters]) => {
+      const full = rebuilt.models[model];
+      return full && fields.every((field) => full[field] >= counters[field]);
+    }) && toolsAndFilesCoverRun(rebuilt, run)
   );
 }
 
@@ -1075,8 +1218,22 @@ export function dedupBySessionId(
   const out: UsageSummaryRecord[] = [];
   for (const group of groups.values()) {
     const runs = group.filter((r) => r.runScoped === true);
+    const rebuilt = group.filter(
+      (r) => r.transcriptRebuild === true && r.transcriptSupplement !== true,
+    );
+    const supplements = group.filter((r) => r.transcriptSupplement === true);
     if (runs.length === 0) {
-      out.push(group[group.length - 1]!);
+      const last = group[group.length - 1]!;
+      const newestRebuild = rebuilt.length
+        ? rebuilt.reduce((latest, record) =>
+            record.timestamp > latest.timestamp ? record : latest,
+          )
+        : undefined;
+      if (newestRebuild && newestRebuild.timestamp > last.timestamp) {
+        out.push(newestRebuild);
+      } else {
+        out.push(last);
+      }
       continue;
     }
     const kept: UsageSummaryRecord[] = [];
@@ -1087,19 +1244,33 @@ export function dedupBySessionId(
         // Exact windows, including zero-length ones, are duplicate copies.
         const sameWindow =
           k.startTime === r.startTime && k.timestamp === r.timestamp;
-        if (overlaps || sameWindow) {
+        if ((overlaps || sameWindow) && requestIdsOverlap(k, r) !== false) {
           kept.splice(i, 1);
         }
       }
       kept.push(r);
     }
-    const rebuilt = group.filter((r) => r.transcriptRebuild === true);
-    const latestRebuild = rebuilt[rebuilt.length - 1];
+    const latestRebuild = rebuilt.length
+      ? rebuilt.reduce((latest, record) =>
+          record.timestamp > latest.timestamp ? record : latest,
+        )
+      : undefined;
     if (latestRebuild) {
       const compatibleRuns: UsageSummaryRecord[] = [];
       const coveredRuns: UsageSummaryRecord[] = [];
       let canKeepRebuild = true;
       for (const run of kept) {
+        if (run.requestExecutionIds && latestRebuild.requestExecutionIds) {
+          if (rebuildCoversRun(latestRebuild, run)) {
+            coveredRuns.push(run);
+          } else if (requestIdsOverlap(latestRebuild, run) === false) {
+            compatibleRuns.push(run);
+          } else {
+            canKeepRebuild = false;
+            break;
+          }
+          continue;
+        }
         if (
           run.timestamp === latestRebuild.timestamp &&
           run.startTime === latestRebuild.startTime
@@ -1153,6 +1324,14 @@ export function dedupBySessionId(
     } else {
       out.push(...kept);
     }
+    for (const supplement of supplements) {
+      const alreadyCounted = out.some((record) =>
+        supplement.requestExecutionIds?.some((id) =>
+          record.requestExecutionIds?.includes(id),
+        ),
+      );
+      if (!alreadyCounted) out.push(supplement);
+    }
   }
 
   if (out.length < records.length) {
@@ -1167,39 +1346,62 @@ interface TranscriptReplayScope {
   onlySessionIds: Set<string>;
   skipSessionIds: Set<string>;
   beforeMsBySession: Map<string, number>;
+  afterMsBySession: Map<string, number>;
+  knownRequestIdsBySession: Map<string, Set<string>>;
 }
 
 function transcriptReplayScope(
   records: UsageSummaryRecord[],
   currentSessionId?: string,
+  refreshTranscriptSnapshots = false,
 ): TranscriptReplayScope {
   const scope: TranscriptReplayScope = {
     onlySessionIds: new Set(),
     skipSessionIds: new Set(),
     beforeMsBySession: new Map(),
+    afterMsBySession: new Map(),
+    knownRequestIdsBySession: new Map(),
   };
   const authoritativeIds = new Set(
-    records
-      .filter((record) => record.transcriptRebuild === true)
-      .map((record) => record.sessionId),
+    refreshTranscriptSnapshots
+      ? []
+      : records
+          .filter((record) => record.transcriptRebuild === true)
+          .map((record) => record.sessionId),
   );
   for (const record of records) {
     if (record.runScoped === true && !authoritativeIds.has(record.sessionId)) {
       scope.onlySessionIds.add(record.sessionId);
     }
-    if (record.transcriptRebuild === true) {
-      // A later run must not turn an already completed migration back into a
-      // condition needing another transcript scan.
+    if (authoritativeIds.has(record.sessionId)) {
       scope.skipSessionIds.add(record.sessionId);
       scope.onlySessionIds.delete(record.sessionId);
       scope.beforeMsBySession.delete(record.sessionId);
       continue;
     }
-    if (record.runScoped !== true && record.sessionId !== currentSessionId) {
+    if (record.runScoped === true && Number.isFinite(record.timestamp)) {
+      const previous = scope.afterMsBySession.get(record.sessionId);
+      if (previous === undefined || record.timestamp > previous) {
+        scope.afterMsBySession.set(record.sessionId, record.timestamp);
+      }
+      for (const id of record.requestExecutionIds ?? []) {
+        const known =
+          scope.knownRequestIdsBySession.get(record.sessionId) ??
+          new Set<string>();
+        known.add(id);
+        scope.knownRequestIdsBySession.set(record.sessionId, known);
+      }
+    }
+    if (
+      record.runScoped !== true &&
+      (record.transcriptRebuild !== true || !refreshTranscriptSnapshots) &&
+      record.sessionId !== currentSessionId
+    ) {
       scope.skipSessionIds.add(record.sessionId);
     }
     if (
       record.runScoped === true &&
+      (!refreshTranscriptSnapshots || !record.requestExecutionIds) &&
       !authoritativeIds.has(record.sessionId) &&
       Number.isFinite(record.startTime)
     ) {
@@ -1267,6 +1469,12 @@ export async function loadUsageHistory(
         )
       : undefined,
     beforeMsBySession: beforeMsBySession.size ? beforeMsBySession : undefined,
+    afterMsBySession: scope.afterMsBySession.size
+      ? scope.afterMsBySession
+      : undefined,
+    knownRequestIdsBySession: scope.knownRequestIdsBySession.size
+      ? scope.knownRequestIdsBySession
+      : undefined,
     // Scoped supplements are ephemeral, never an authoritative disk migration.
     persist: scoped ? false : (options?.persistRebuild ?? true),
   });
@@ -1290,8 +1498,6 @@ export async function loadUsageHistory(
  * established history does not pay a full cross-project replay on every load.
  */
 export async function loadUsageHistoryWithLive(options?: {
-  /** Verified workspace to consider when supplementing known transcript ids. */
-  projectRoot?: string;
   /**
    * Only replay transcripts touched at/after this epoch-ms. Defaults to a
    * {@link LIVE_REBUILD_WINDOW_DAYS}-day trailing window (covers the dashboard's
@@ -1309,7 +1515,7 @@ export async function loadUsageHistoryWithLive(options?: {
     );
   }
 
-  const scope = transcriptReplayScope(persisted);
+  const scope = transcriptReplayScope(persisted, undefined, true);
   const persistedIds = scope.skipSessionIds;
 
   // Even with run-scoped records, an incremental live merge still bounds
@@ -1323,15 +1529,6 @@ export async function loadUsageHistoryWithLive(options?: {
 
   const rebuilt = await rebuildFromSessionJsonl({
     persist: false,
-    projectChatsDirs:
-      scope.onlySessionIds.size > 0
-        ? scopedProjectChatsDirs(
-            persisted,
-            scope.onlySessionIds,
-            undefined,
-            options?.projectRoot,
-          )
-        : undefined,
     sinceMs,
     skipSessionIds: persistedIds,
     supplementalSessionIds: scope.onlySessionIds.size
@@ -1339,6 +1536,12 @@ export async function loadUsageHistoryWithLive(options?: {
       : undefined,
     beforeMsBySession: scope.beforeMsBySession.size
       ? scope.beforeMsBySession
+      : undefined,
+    afterMsBySession: scope.afterMsBySession.size
+      ? scope.afterMsBySession
+      : undefined,
+    knownRequestIdsBySession: scope.knownRequestIdsBySession.size
+      ? scope.knownRequestIdsBySession
       : undefined,
   });
 
@@ -1416,13 +1619,15 @@ export function aggregateUsage(
 
   for (const r of filtered) {
     if (!r.models || !r.tools?.byName || !r.files) continue;
-    totalDurationMs += r.durationMs;
+    if (r.transcriptSupplement !== true) {
+      totalDurationMs += r.durationMs;
+      totalCalls += r.tools.totalCalls;
+      totalSuccess += r.tools.totalSuccess;
+      totalFail += r.tools.totalFail;
+      linesAdded += r.files.linesAdded;
+      linesRemoved += r.files.linesRemoved;
+    }
     totalLatencyMs += r.totalLatencyMs ?? 0;
-    totalCalls += r.tools.totalCalls;
-    totalSuccess += r.tools.totalSuccess;
-    totalFail += r.tools.totalFail;
-    linesAdded += r.files.linesAdded;
-    linesRemoved += r.files.linesRemoved;
 
     for (const [name, m] of Object.entries(r.models)) {
       totalRequests += m.requests;
@@ -1440,24 +1645,26 @@ export function aggregateUsage(
       }
     }
 
-    for (const [name, stats] of Object.entries(r.tools.byName)) {
-      const existing = toolCounts.get(name);
-      if (existing) {
-        existing.count += stats.count;
-        existing.success += stats.success;
-        existing.fail += stats.fail;
-        existing.totalDurationMs += stats.totalDurationMs ?? 0;
-      } else {
-        toolCounts.set(name, {
-          count: stats.count,
-          success: stats.success,
-          fail: stats.fail,
-          totalDurationMs: stats.totalDurationMs ?? 0,
-        });
+    if (r.transcriptSupplement !== true) {
+      for (const [name, stats] of Object.entries(r.tools.byName)) {
+        const existing = toolCounts.get(name);
+        if (existing) {
+          existing.count += stats.count;
+          existing.success += stats.success;
+          existing.fail += stats.fail;
+          existing.totalDurationMs += stats.totalDurationMs ?? 0;
+        } else {
+          toolCounts.set(name, {
+            count: stats.count,
+            success: stats.success,
+            fail: stats.fail,
+            totalDurationMs: stats.totalDurationMs ?? 0,
+          });
+        }
       }
     }
 
-    if (r.skills) {
+    if (r.skills && r.transcriptSupplement !== true) {
       totalSkillCalls += r.skills.totalCalls;
       for (const [name, s] of Object.entries(r.skills.byName)) {
         const existing = skillCounts.get(name);
@@ -1481,13 +1688,14 @@ export function aggregateUsage(
     }
     const proj = projectMap.get(r.project);
     if (proj) {
-      proj.sessionCount++;
-      proj.totalDurationMs += r.durationMs;
+      proj.sessionCount += r.transcriptSupplement === true ? 0 : 1;
+      proj.totalDurationMs +=
+        r.transcriptSupplement === true ? 0 : r.durationMs;
       proj.totalTokens += sessionTokens;
     } else {
       projectMap.set(r.project, {
-        sessionCount: 1,
-        totalDurationMs: r.durationMs,
+        sessionCount: r.transcriptSupplement === true ? 0 : 1,
+        totalDurationMs: r.transcriptSupplement === true ? 0 : r.durationMs,
         totalTokens: sessionTokens,
       });
     }
@@ -1513,7 +1721,8 @@ export function aggregateUsage(
     timeRange: range,
     periodStart: start,
     periodEnd: end,
-    sessionCount: filtered.length,
+    sessionCount: filtered.filter((r) => r.transcriptSupplement !== true)
+      .length,
     totalDurationMs,
     totalLatencyMs,
     totalRequests,

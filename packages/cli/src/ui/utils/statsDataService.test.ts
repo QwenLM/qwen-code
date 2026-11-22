@@ -564,6 +564,44 @@ describe('loadStatsData — per-request ledger accounting', () => {
     expect(result.delta?.tokens).toBeCloseTo(10);
   });
 
+  it('retains failed attempts and duration when the ledger replaces successful usage', async () => {
+    const timestamp = Date.now();
+    mockedLoadUsageHistory.mockResolvedValue([
+      makeRecord({
+        sessionId: 'one-success-one-failure',
+        timestamp,
+        models: {
+          'qwen-max': {
+            requests: 2,
+            inputTokens: 120,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 120,
+            totalLatencyMs: 200,
+            errors: 1,
+            errorLatencyMs: 150,
+          },
+        },
+      }),
+    ]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(
+      new Map([
+        [
+          dayKey(timestamp),
+          ledgerDay({ requests: 1, inputTokens: 120, apiDurationMs: 50 }),
+        ],
+      ]),
+    );
+
+    const data = await loadStatsData('all');
+
+    expect(data.report.totalRequests).toBe(2);
+    expect(data.report.totalLatencyMs).toBe(200);
+    expect(reportTokens(data.report)).toBe(120);
+    expect(data.efficiency.avgLatencyMs).toBe(100);
+  });
+
   it('enumerates ledger days once across both comparison windows', async () => {
     const records = [];
     const daily: TokenUsageDailyByModel = new Map();

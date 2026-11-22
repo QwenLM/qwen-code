@@ -450,10 +450,11 @@ export async function loadTokenUsageDailyByModel(
         }
       }
       if (!monthTable) {
+        // A later append must invalidate this snapshot, not inherit its new signature.
+        const stats = await fs.promises.stat(filePath);
         monthTable = new Map();
         await accumulateMonthByDay(filePath, '', monthTable);
         completedMonthCache.set(filePath, monthTable);
-        const stats = await fs.promises.stat(filePath);
         const signatures =
           completedMonthSignatures.get(completedMonthCache) ?? new Map();
         signatures.set(filePath, stats);

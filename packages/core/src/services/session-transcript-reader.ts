@@ -289,6 +289,8 @@ export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
+  /** Original conversation clock, retained after the outer projection is consumed. */
+  conversationStartTime?: string;
   attributionSnapshot?: AttributionSnapshot;
   historyGaps?: HistoryGap[];
   recording: {

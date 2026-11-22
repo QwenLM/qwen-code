@@ -175,7 +175,10 @@ by `/clear`, successful session switches and the process-exit cleanup.
   conversation clock. On successful initialization of a different session id,
   the client binds `getSessionStartTime()` to the incoming conversation's own
   `conversation.startTime`, falling back to a fresh Date when that metadata is
-  absent or invalid. It does not carry the previous conversation's clock into
+  absent or invalid. A selective restore retains `SessionRestoreProjection.startTime`
+  in its runtime after the outer projection is consumed, without depending on the
+  full resumed-session data or rewinding the active run clock. It does not carry
+  the previous conversation's clock into
   the new one. If initialization or replay fails, the replay snapshot restores
   both the prior session and run clocks. `SessionStatsProvider` reads that clock
   after initialization rather than constructing an unrelated `new Date()` for
@@ -213,8 +216,10 @@ history from an old unmarked record whose provenance is unknowable.
 
 `dedupBySessionId` groups by sessionId and then:
 
-- **No run-scoped record in the group** -> last-wins, exactly as before. This is
-  what keeps existing history unchanged and keeps the #4994 duplicate protection.
+- **No run-scoped record in the group** -> ordinary cumulative copies retain
+  last-wins. A newer measured transcript reconstruction may replace an older
+  reconstruction snapshot by actual event time, so a persisted older snapshot
+  cannot hide later native daemon activity.
 - **Run-scoped records present** -> retain disjoint runs. Windows are half-open:
   a new run starting exactly when the previous one ended is retained. Equal
   `[startTime, endTime)` windows and partial overlaps are duplicates or
@@ -222,22 +227,62 @@ history from an old unmarked record whose provenance is unknowable.
   millisecond therefore survive.
 - **Provenance and window shape.** An ordinary unmarked cumulative record loses
   to run deltas because it may be another replay-inflated copy. A measured
-  transcript reconstruction survives beside disjoint runs. An exactly matching
-  window is a duplicate, not two spends. Otherwise, a reconstruction that wholly
-  covers a run's window and its model/tool/file counters may replace that run
-  without counting it twice. Transcript replay has no skill-invocation channel,
-  so skills cannot decide coverage: the known live skills from covered runs are
-  retained in the rebuilt summary instead of discarding its entire history. Partial
-  overlap remains ambiguous and drops the reconstructed copy rather than
-  guessing what to subtract. Multiple correlated whole-transcript snapshots
-  remain last-wins.
-- **Exit clock sampling.** A run's persist-time end can follow its last
-  transcript event. Coverage tolerates up to 1,000 ms for that sampling gap,
-  while retaining the start-boundary and model/tool/file counter checks. A
-  larger, unexplained discrepancy keeps the conservative record basis.
+  transcript reconstruction survives beside disjoint runs. New summaries carry
+  the API calls' local `execution_id` set, from both successful responses and
+  errors. When both sides have identities, a reconstruction replaces a run only
+  if its set contains all the run's ids, and if tool/file evidence covers it.
+  Disjoint, non-empty id sets are independent activity, not duplicate copies; a
+  partial intersection is ambiguous and retains the known run without adding
+  a possibly duplicated reconstruction. The same identity check prevents two
+  independent same-window runs from being collapsed. Replayed metrics never
+  enter this live set. The set lives beside the metrics object rather than in
+  its enumerable public shape, so headless JSON remains unchanged.
+  Older summaries without identities retain the bounded legacy coverage rules:
+  the start and model/tool/file evidence must cover the run, including tool
+  names and success/failure outcomes, but exact counter totals still cannot
+  establish universal cross-store event identity. Partial overlap retains the
+  known run rather than guessing what to subtract. Transcript replay has no
+  skill-invocation channel, so known live skills from covered runs are retained
+  in the rebuilt summary. The newest reconstruction is selected by actual event
+  time, including when runs are present.
+- **Different clocks.** A run's timestamp is the wall clock of exit, `/clear`
+  or a session swap, whereas a transcript reconstruction ends at its last
+  recorded event. A reading pause between them is normal, even when it lasts
+  minutes. Coverage never treats a direct comparison of those two clocks as
+  proof of a different spending event; identities or bounded legacy evidence
+  decide coverage instead. Incomplete or ambiguous reconstruction evidence
+  takes the conservative known-run basis.
 
-Both markers are optional, so every reader that filters `version === 1` keeps
-working without a schema migration.
+**Independent late evidence.** A complete reconstruction can be ambiguous
+because a public transcript shares only some ids with a run that also contains
+internal helper calls. The ambiguous main reconstruction is then not added
+again, but a new API response or error with an `execution_id` absent from the
+known run and a usable timestamp strictly after that run's persist clock is
+kept as an ephemeral `transcriptSupplement`. A supplement is not a new run
+and is never persisted as an authoritative full history. Tool/file counters do
+not have an execution-id join key. Late tool/file records therefore cannot be
+used as evidence for the known run's whole reconstruction; its own known counts
+are retained instead of being replaced by a later edit's duration or line delta.
+Supplements are collected per execution id, so a live call sharing a tail with
+an independent daemon call cannot cause that other call to be discarded. They
+contribute only model/API counters and latency, not sessions, run duration,
+tools/files or ended-run counts. Each supplement is discarded if another
+retained record already contains that api identity, including a full
+reconstruction that survived normal identity and non-model coverage.
+Old runs without identities keep their earliest-run prefix for disjoint history
+while still allowing such explicitly identified late calls; missing identities
+or unusable times outside this rule remain a disclosed, bounded join ambiguity,
+not proof of a new request.
+
+The minimum cache signature is the file's `(mtimeMs, size)`, exact `beforeMs`
+and `afterMs`, and the sorted known execution-id set. A new persisted run can
+therefore change reconciliation ownership without incorrectly retaining a
+cached supplement from the previous ownership. Boundary supplements never
+become durable copies merely because they were cached in memory.
+
+The provenance flags, optional `requestExecutionIds` array and optional failed-
+attempt count/latency metadata are additive. Every reader that filters
+`version === 1` keeps working without a schema migration or a history rewrite.
 
 **Deliberate trade:** an ordinary cumulative record spanning an upgrade loses to
 run deltas even if it covers earlier activity. Measured transcript rebuilds need
@@ -255,10 +300,19 @@ earliest run start are backfilled; later activity remains with its run.
 Boundary-limited supplements are ephemeral, never additional authoritative
 whole-session snapshots.
 
-A completed `transcriptRebuild` remains authoritative after subsequent live
-runs, regardless of record order. Ordinary unknown cumulative copies still lose
-to run deltas. Exact-run boundary caches use the file signature **and** temporal
-boundary, rather than disabling caching across every transcript. Cache summaries
+A targeted `loadUsageHistory` retains its fast path for an already completed
+`transcriptRebuild`, rather than reopening it merely because a later run is
+appended. Live discovery instead revalidates eligible recent transcripts and
+invalidates the old reconstruction when its `(mtimeMs, size)` signature changes.
+It always retains whole-file evidence for identity-bearing runs; an older run
+without identities uses its earliest-run boundary to recover only disjoint
+history without inventing a join that its aggregate counters cannot support. A cached
+whole-transcript summary may satisfy a later boundary only when its own last
+timestamp is strictly **before** that boundary: the response at the boundary is
+excluded, exactly as a real scan excludes it. Ordinary unknown cumulative copies
+still lose to run deltas. Exact-run boundary caches use the file signature
+**and** temporal boundary, rather than disabling caching across every transcript.
+Cache summaries
 never become warm candidates ahead of directory enumeration: duplicate session
 ids retain first-occurrence-by-directory-order independently of cache warmth.
 A scoped lookup may read exact known files without directory enumeration only
@@ -269,7 +323,11 @@ in place rather than triggering a full directory scan. Unknown, multi-root or
 caller-mismatched identities retain full directory discovery rather than
 guessing;
 discovering new, unrecorded daemon sessions always requires bounded discovery.
-A boundary-limited read therefore cannot
+That single-project fast path belongs only to `loadUsageHistory` with an
+explicit id allowlist. `loadUsageHistoryWithLive` does not pass
+`projectChatsDirs`: its unscoped discovery must still examine all project
+`chats` directories in directory order so never-persisted work in another
+project is not lost. A boundary-limited read therefore cannot
 borrow a cached whole-transcript summary or make ordinary unrelated sessions
 uncacheable.
 
@@ -299,10 +357,12 @@ run remains a separate `runScoped` record. The session-specific display can show
 restored parent history by design.
 
 Pre-deletion salvage checks coverage again in both `prepare` and `commit`, so
-the second check still handles a racing writer. An ordinary cumulative record,
-an actual reconstruction, or a run whose window covers the whole transcript
-suppresses a duplicate. A disjoint run does not: the reconstructed transcript
-is persisted too, then reduced with the run by provenance and window.
+the second check still handles a racing writer. An ordinary cumulative record
+retains its legacy authority. A prior reconstruction or run suppresses salvage
+only when its own window encloses the freshly rebuilt window; the marker alone
+cannot hide a later native API response. A disjoint run does not: the
+reconstructed transcript is persisted too, then reduced with the run by identity
+or bounded legacy evidence.
 
 **Session counts now count runs, not conversations.** Keeping every disjoint run
 means the sessions tile, the TUI Sessions number and the per-day session counts
@@ -324,8 +384,16 @@ The table build and window sum are now **shared exports** of
 `sumUsageWindowByModel(table, startKey, endKey)` — used by both surfaces, so the
 two cannot drift. `recordTouchesLedgerDays` supplies the exact span-coverage
 rule to both the table and the delta; it does not invent an independent coverage
-interpretation. `TokenUsageDayModelTotals` gained `apiDurationMs` so the latency
-column comes from the same source as the tokens.
+interpretation. `TokenUsageDayModelTotals` gained `apiDurationMs` so successful-
+response latency comes from the per-request ledger. Failed attempts stay in
+optional per-model run metadata (`errors`, `errorLatencyMs`), and the shared
+table supplements their count/duration only for a run covered by the successful
+ledger. It does not create an artificial zero-token ledger day that could
+otherwise authorize discarding older successful sessions. Failure day attribution
+remains session-record based; both surfaces use the same arithmetic. Each
+ledger day/model total is cloned before that supplementation, so rebuilding a
+dashboard repeatedly from cached sources cannot re-accumulate failure requests
+or durations.
 
 `loadStatsData` reads the ledger on every open from the earlier of the earliest
 record's start day and the previous comparison window's first day. That makes
@@ -341,7 +409,10 @@ rather than comparing incompatible measurements. Consecutive idle days never
 force fabrication of zero-token ledger rows. Concurrent opens of the same start
 day share one pending read. Completed-month aggregates are reused only while
 their file signatures remain unchanged; a late append forces a fresh read.
-Current and future month files are always streamed again. One sorted
+The signature is sampled **before** streaming, so an append during the read
+cannot pair old content with the newly appended file's signature. The next load
+must observe and re-read that change. Current and future month files are always
+streamed again. One sorted
 ledger-day array is shared by the day table and both comparison sides, rather
 than sorting once per record. The day/model table and subsequent report shapes
 are rebuilt on each load from those month aggregates. Token streaks count only

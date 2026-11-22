@@ -23,6 +23,7 @@ vi.mock('@qwen-code/qwen-code-core/telemetry/uiTelemetry.js', () => ({
     getLiveMetrics: mocks.getLiveMetrics,
     getRunStartTime: mocks.getRunStartTime,
   },
+  getRequestExecutionIds: () => undefined,
 }));
 vi.mock('../utils/statsDataService.js', () => ({
   loadStatsData: mocks.load,

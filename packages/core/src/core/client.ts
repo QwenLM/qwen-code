@@ -1008,7 +1008,9 @@ export class LlmClient {
     // Bind Wall Time only after a successful initialization; replay failure
     // restores the captured clock rather than keeping the incoming session's.
     if (previousSessionId !== sessionId) {
-      const recordedStart = resumedSessionData?.conversation.startTime;
+      const recordedStart =
+        resumedSessionData?.conversation.startTime ??
+        restoreRuntime?.conversationStartTime;
       const parsedStart = recordedStart ? new Date(recordedStart) : new Date();
       uiTelemetryService.setSessionStartTime(
         Number.isNaN(parsedStart.getTime()) ? new Date() : parsedStart,

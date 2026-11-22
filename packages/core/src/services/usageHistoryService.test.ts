@@ -33,6 +33,7 @@ import {
   aggregateUsage,
   dedupBySessionId,
   getTimeRangeBounds,
+  metricsToRunUsageRecord,
   loadUsageHistory,
   loadUsageHistoryWithLive,
   persistSessionUsage,
@@ -44,7 +45,8 @@ import {
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import { SessionService } from './sessionService.js';
 import { localDateKey } from './usage-dashboard-service.js';
-import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
+import { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { SessionMetrics, UiEvent } from '../telemetry/uiTelemetry.js';
 import type { UsageSummaryRecord } from './usageHistoryService.js';
 
 /** ToolCallDecision counts: accept, reject, modify, auto-accept. */
@@ -380,6 +382,7 @@ function writeTranscript(
     durationMs: number;
     tokens?: number;
     assistant?: boolean;
+    executionId?: string;
   },
 ): string {
   const dir = path.join(
@@ -416,6 +419,7 @@ function writeTranscript(
           'event.timestamp': at(1),
           response_id: 'r1',
           model: 'qwen-max',
+          ...(opts.executionId ? { execution_id: opts.executionId } : {}),
           duration_ms: opts.durationMs,
           input_token_count: tokens * 0.6,
           output_token_count: tokens * 0.3,
@@ -443,6 +447,43 @@ function writeTranscript(
     records.map((r) => JSON.stringify(r)).join('\n') + '\n',
   );
   return filePath;
+}
+
+function appendNativeResponse(
+  filePath: string,
+  sessionId: string,
+  timestamp: string,
+  executionId: string,
+  tokens = 500,
+): UiEvent {
+  const event = {
+    'event.name': 'qwen-code.api_response',
+    'event.timestamp': timestamp,
+    response_id: executionId,
+    execution_id: executionId,
+    model: 'qwen-max',
+    duration_ms: 700,
+    input_token_count: tokens * 0.6,
+    output_token_count: tokens * 0.3,
+    cached_content_token_count: 0,
+    thoughts_token_count: tokens * 0.1,
+    total_token_count: tokens,
+    prompt_id: executionId,
+  } as UiEvent;
+  fs.appendFileSync(
+    filePath,
+    JSON.stringify({
+      sessionId,
+      cwd: '/repro/project',
+      uuid: executionId,
+      parentUuid: 'u3',
+      timestamp,
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: { uiEvent: event },
+    }) + '\n',
+  );
+  return event;
 }
 
 // Regression coverage for issue #4994: opening /stats during the first-ever
@@ -670,6 +711,54 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(totalTokensOf(aggregateUsage(merged, 'all'))).toBe(1200);
   });
 
+  it('discovers never-persisted daemon usage beyond a known run project', async () => {
+    const knownSession = 'known-project-session';
+    const daemonSession = 'other-project-daemon';
+    const knownProject = '/a/project';
+    const service = new SessionService(knownProject, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    });
+    const knownTranscript = service.getSessionTranscriptPath(knownSession);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(knownTranscript))),
+      knownSession,
+      {
+        cwd: knownProject,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 1000,
+        assistant: true,
+      },
+    );
+    writeTranscript('other-daemon-project', daemonSession, {
+      cwd: '/other/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 500,
+      assistant: true,
+    });
+    const runStart = Date.parse('2026-06-12T00:00:00Z');
+    seedPersisted([
+      {
+        ...runRec(knownSession, 200, runStart, runStart + 60_000),
+        project: knownProject,
+      },
+    ]);
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    const report = aggregateUsage(records, 'all');
+
+    expect(report.sessionCount).toBe(3);
+    expect(totalTokensOf(report)).toBe(1700);
+    expect(
+      records.some(
+        (record) =>
+          record.sessionId === daemonSession && record.transcriptRebuild,
+      ),
+    ).toBe(true);
+    expect(usageLines()).toHaveLength(1);
+  });
+
   it('loadUsageHistory: rebuilds only known run-scoped transcripts without discovering other sessions', async () => {
     const sessionId = 'sess-known-run-history';
     plantChatJsonl(sessionId, 1000);
@@ -850,7 +939,382 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(usageLines()).toHaveLength(1);
   });
 
-  it('does not reopen an authoritative rebuild just because a later run follows it', async () => {
+  it('keeps later real daemon activity after an earlier reconstruction', async () => {
+    const sessionId = '77777777-7777-4777-8777-777777777777';
+    const project = '/live/project';
+    const service = new SessionService(project, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    });
+    const filePath = service.getSessionTranscriptPath(sessionId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(filePath))),
+      sessionId,
+      {
+        cwd: project,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 1000,
+        assistant: true,
+      },
+    );
+    expect(totalTokensOf(aggregateUsage(await loadUsageHistory(), 'all'))).toBe(
+      1000,
+    );
+    const response = {
+      sessionId,
+      cwd: project,
+      uuid: 'late-response-event',
+      parentUuid: 'u2',
+      timestamp: '2026-06-13T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-13T00:01:00.000Z',
+          response_id: 'late-response',
+          execution_id: 'late-execution',
+          prompt_id: 'late-prompt',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 300,
+          output_token_count: 150,
+          cached_content_token_count: 0,
+          thoughts_token_count: 50,
+          total_token_count: 500,
+        },
+      },
+    };
+    fs.appendFileSync(
+      filePath,
+      `${JSON.stringify(response)}\n${JSON.stringify({
+        sessionId,
+        cwd: project,
+        uuid: 'late-assistant',
+        parentUuid: 'late-response-event',
+        timestamp: '2026-06-13T00:02:00.000Z',
+        type: 'assistant',
+        message: { role: 'assistant', content: 'Later' },
+      })}\n`,
+    );
+
+    expect(fs.readFileSync(filePath, 'utf8')).toContain('late-response');
+    const originalOpen = fs.promises.open;
+    const opened: string[] = [];
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      file: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      opened.push(String(file));
+      return originalOpen(file, flags as number, mode);
+    }) as typeof fs.promises.open);
+    const preparedBeforeMerge =
+      await prepareUsageBeforeTranscriptDeletion(filePath);
+    const afterAppend = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    try {
+      expect(preparedBeforeMerge).not.toBeNull();
+      expect(preparedBeforeMerge?.record?.models['qwen-max']?.totalTokens).toBe(
+        1500,
+      );
+      expect(opened).toContain(filePath);
+      expect(afterAppend).toEqual([preparedBeforeMerge!.record]);
+      expect(totalTokensOf(aggregateUsage(afterAppend, 'all'))).toBe(1500);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const prepared = await prepareUsageBeforeTranscriptDeletion(filePath);
+    expect(prepared?.record?.models['qwen-max']?.totalTokens).toBe(1500);
+    expect(
+      prepared ? commitUsageBeforeTranscriptDeletion(prepared) : false,
+    ).toBe(true);
+    fs.rmSync(filePath);
+    expect(
+      totalTokensOf(
+        aggregateUsage(await loadUsageHistoryWithLive({ sinceMs: 0 }), 'all'),
+      ),
+    ).toBe(1500);
+  });
+
+  it('retains late native activity without charging shared and internal calls again', async () => {
+    const sessionId = 'sess-internal-and-late';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 100,
+      tokens: 100,
+      assistant: true,
+      executionId: 'shared-call',
+    });
+    seedPersisted([
+      {
+        ...runRec(
+          sessionId,
+          200,
+          Date.parse('2026-06-11T00:02:00.000Z'),
+          Date.parse('2026-06-11T00:04:00.000Z'),
+        ),
+        models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
+        requestExecutionIds: ['shared-call', 'internal-call'],
+      },
+    ]);
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:05:00.000Z',
+      'late-native-call',
+    );
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(700);
+    expect(aggregateUsage(records, 'all').totalRequests).toBe(3);
+    const supplement = records.find((r) => r.transcriptSupplement === true);
+    expect(supplement?.models['qwen-max']?.totalTokens).toBe(500);
+  });
+
+  it('retains identified activity after a legacy run without identities', async () => {
+    const sessionId = 'sess-legacy-and-late';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 100,
+      tokens: 50,
+      assistant: true,
+    });
+    seedPersisted([
+      runRec(
+        sessionId,
+        100,
+        Date.parse('2026-06-11T00:02:00.000Z'),
+        Date.parse('2026-06-11T00:04:00.000Z'),
+      ),
+    ]);
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:05:00.000Z',
+      'late-identified-call',
+    );
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(records).toHaveLength(3);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(650);
+    const supplement = records.find((r) => r.transcriptSupplement === true);
+    expect(supplement?.requestExecutionIds).toEqual(['late-identified-call']);
+    expect(supplement?.models['qwen-max']?.totalTokens).toBe(500);
+  });
+
+  it('keeps a later native call beside an identified run instead of truncating or choosing the old snapshot', async () => {
+    const sessionId = 'sess-native-after-run';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 1000,
+      assistant: true,
+      executionId: 'existing-run',
+    });
+    const [persisted] = await loadUsageHistory();
+    expect(persisted?.requestExecutionIds).toEqual(['existing-run']);
+    const timestamp = '2026-06-11T00:03:00.000Z';
+    fs.appendFileSync(
+      filePath,
+      JSON.stringify({
+        sessionId,
+        cwd: '/repro/project',
+        uuid: 'new-native-response',
+        parentUuid: 'u3',
+        timestamp,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': timestamp,
+            response_id: 'new-native-response',
+            execution_id: 'new-native-response',
+            model: 'qwen-max',
+            duration_ms: 700,
+            input_token_count: 300,
+            output_token_count: 150,
+            cached_content_token_count: 0,
+            thoughts_token_count: 50,
+            total_token_count: 500,
+            prompt_id: 'new-native-prompt',
+          },
+        },
+      }) + '\n',
+    );
+    seedPersisted([
+      persisted!,
+      {
+        ...runRec(
+          sessionId,
+          1000,
+          Date.parse('2026-06-11T00:00:30.000Z'),
+          Date.parse('2026-06-11T00:04:00.000Z'),
+        ),
+        requestExecutionIds: ['existing-run'],
+      },
+    ]);
+
+    const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(records).toHaveLength(1);
+    expect(records[0]?.models['qwen-max']?.requests).toBe(2);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1500);
+  });
+
+  it('keeps different late daemon ids beside current live usage without inflating run counts', async () => {
+    const sessionId = 'sess-live-and-daemon-tails';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 100,
+      tokens: 100,
+      assistant: true,
+      executionId: 'shared-call',
+    });
+    seedPersisted([
+      {
+        ...runRec(
+          sessionId,
+          200,
+          Date.parse('2026-06-11T00:02:00.000Z'),
+          Date.parse('2026-06-11T00:04:00.000Z'),
+        ),
+        project: '/repro/project',
+        models: { 'qwen-max': modelUsage(2, 200, 0, 200) },
+        requestExecutionIds: ['shared-call', 'internal-call'],
+      },
+    ]);
+    const liveService = new UiTelemetryService();
+    liveService.addEvent(
+      appendNativeResponse(
+        filePath,
+        sessionId,
+        '2026-06-11T00:05:00.000Z',
+        'current-live-call',
+        100,
+      ),
+    );
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:06:00.000Z',
+      'other-daemon-call',
+      200,
+    );
+    const current = metricsToRunUsageRecord(
+      sessionId,
+      '/repro/project',
+      Date.parse('2026-06-11T00:04:30.000Z'),
+      Date.parse('2026-06-11T00:05:30.000Z'),
+      liveService.getLiveMetrics(),
+    );
+    const history = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    const records = dedupBySessionId([...history, current]);
+    const report = aggregateUsage(records, 'all');
+
+    expect(records).toHaveLength(3);
+    expect(totalTokensOf(report)).toBe(500);
+    expect(report.totalRequests).toBe(4);
+    expect(report.sessionCount).toBe(2);
+    expect(report.totalDurationMs).toBe(180_000);
+    expect(report.projects).toEqual([
+      expect.objectContaining({
+        path: '/repro/project',
+        sessionCount: 2,
+        totalDurationMs: 180_000,
+        totalTokens: 500,
+      }),
+    ]);
+    expect(
+      records.find((r) => r.transcriptSupplement === true)?.requestExecutionIds,
+    ).toEqual(['other-daemon-call']);
+  });
+
+  it('does not let late tool telemetry overwrite the known run tools or files', async () => {
+    const sessionId = 'sess-late-tool-boundary';
+    const filePath = writeTranscript('repro-project', sessionId, {
+      cwd: '/repro/project',
+      day: '2026-06-11',
+      durationMs: 111,
+      tokens: 50,
+      assistant: true,
+      executionId: 'known-api',
+    });
+    seedPersisted([
+      {
+        ...runRec(
+          sessionId,
+          50,
+          Date.parse('2026-06-11T00:00:00.000Z'),
+          Date.parse('2026-06-11T00:04:00.000Z'),
+        ),
+        requestExecutionIds: ['known-api'],
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: {
+            edit: { count: 1, success: 1, fail: 0, totalDurationMs: 111 },
+          },
+        },
+        files: { linesAdded: 7, linesRemoved: 3 },
+      },
+    ]);
+    appendNativeResponse(
+      filePath,
+      sessionId,
+      '2026-06-11T00:05:00.000Z',
+      'late-api',
+    );
+    const toolTime = '2026-06-11T00:06:00.000Z';
+    fs.appendFileSync(
+      filePath,
+      JSON.stringify({
+        sessionId,
+        cwd: '/repro/project',
+        uuid: 'late-edit',
+        parentUuid: 'late-api',
+        timestamp: toolTime,
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.tool_call',
+            'event.timestamp': toolTime,
+            call_id: 'late-edit',
+            function_name: 'edit',
+            function_args: { path: '/repro/project/temporary.ts' },
+            duration_ms: 222,
+            success: true,
+            metadata: { model_added_lines: 9, model_removed_lines: 4 },
+            prompt_id: 'late-api',
+          },
+        },
+      }) + '\n',
+    );
+
+    const report = aggregateUsage(
+      await loadUsageHistoryWithLive({ sinceMs: 0 }),
+      'all',
+    );
+
+    expect(report.models['qwen-max']?.totalTokens).toBe(550);
+    expect(report.totalRequests).toBe(2);
+    expect(report.tools.totalCalls).toBe(1);
+    expect(report.tools.topTools[0]?.totalDurationMs).toBe(111);
+    expect(report.files).toEqual({ linesAdded: 7, linesRemoved: 3 });
+    expect(report.totalDurationMs).toBe(240_000);
+  });
+
+  it('revalidates a prior rebuild once and serves its later run refreshes from cache', async () => {
     const authoritativePath = plantChatJsonl('authoritative-session', 1000);
     await loadUsageHistory();
     const start = Date.parse('2026-06-12T00:00:00Z');
@@ -878,10 +1342,13 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       const calls = directorySpy.mock.calls.map(([entry]) => String(entry));
       expect(calls).not.toContain(directory);
       const records = await loadUsageHistoryWithLive({ sinceMs: 0 });
-      expect(
-        opened.filter((entry) => entry === authoritativePath),
-      ).toHaveLength(0);
+      const reads = opened.filter((entry) => entry === authoritativePath);
+      expect(reads).toHaveLength(1);
       expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(1100);
+      await loadUsageHistoryWithLive({ sinceMs: 0 });
+      expect(opened.filter((entry) => entry === authoritativePath)).toEqual(
+        reads,
+      );
     } finally {
       openSpy.mockRestore();
       directorySpy.mockRestore();
@@ -1327,9 +1794,11 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         startTime: t0,
         timestamp: t0 + 120_000,
         transcriptRebuild: true,
+        requestExecutionIds: ['request-with-skill'],
       },
       {
         ...runRec('sess-covered-skills', 500, t0 + 10_000, t0 + 20_000),
+        requestExecutionIds: ['request-with-skill'],
         skills: {
           totalCalls: 1,
           totalSuccess: 1,
@@ -1353,8 +1822,116 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         startTime: t0,
         timestamp: t0 + 120_000,
         transcriptRebuild: true,
+        requestExecutionIds: ['request-1'],
       },
-      runRec('sess-covered-at-exit', 500, t0 + 60_000, t0 + 120_900),
+      {
+        ...runRec('sess-covered-at-exit', 1000, t0 + 60_000, t0 + 120_900),
+        requestExecutionIds: ['request-1'],
+      },
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBe(true);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('keeps two independent calls with equal counters but different execution ids', () => {
+    const records = dedupBySessionId([
+      {
+        ...runRec('sess-distinct-calls', 100, t0, t0 + 60_000),
+        transcriptRebuild: true,
+        requestExecutionIds: ['request-2'],
+      },
+      {
+        ...runRec('sess-distinct-calls', 100, t0, t0 + 60_000),
+        requestExecutionIds: ['request-1'],
+      },
+    ]);
+
+    expect(records).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(200);
+  });
+
+  it('keeps same-window runs with independent request identities', () => {
+    const records = dedupBySessionId([
+      {
+        ...runRec('sess-parallel-runs', 100, t0, t0 + 300),
+        requestExecutionIds: ['run-a'],
+      },
+      {
+        ...runRec('sess-parallel-runs', 100, t0, t0 + 300),
+        requestExecutionIds: ['run-b'],
+      },
+    ]);
+
+    expect(records).toHaveLength(2);
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(200);
+  });
+
+  it('does not count a partial identity overlap as independent usage', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-internal-overlap', 100),
+        startTime: t0,
+        timestamp: t0 + 300,
+        transcriptRebuild: true,
+        requestExecutionIds: ['shared-response'],
+      },
+      {
+        ...runRec('sess-internal-overlap', 200, t0 + 100, t0 + 200),
+        requestExecutionIds: ['shared-response', 'internal-prompt'],
+      },
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBeUndefined();
+    expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(200);
+  });
+
+  it('keeps the run when unidentifiable tool details disagree', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-tool-mismatch', 100),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 0,
+          totalFail: 1,
+          byName: {
+            read_file: { count: 1, success: 0, fail: 1 },
+          },
+        },
+      },
+      {
+        ...runRec('sess-tool-mismatch', 100, t0, t0 + 210_000),
+        tools: {
+          totalCalls: 1,
+          totalSuccess: 1,
+          totalFail: 0,
+          byName: {
+            edit_file: { count: 1, success: 1, fail: 0 },
+          },
+        },
+      },
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBeUndefined();
+    expect(records[0]!.tools.byName['edit_file']?.success).toBe(1);
+    expect(records[0]!.tools.totalFail).toBe(0);
+  });
+
+  it('preserves a covering rebuild when the user exits after a reading pause', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-idle-exit', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+      },
+      runRec('sess-idle-exit', 1000, t0 + 60_000, t0 + 210_000),
     ]);
 
     expect(records).toHaveLength(1);
@@ -1369,8 +1946,12 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         startTime: t0,
         timestamp: t0 + 120_000,
         transcriptRebuild: true,
+        requestExecutionIds: ['request-covered'],
       },
-      runRec('sess-covered', 10, t0 + 10_000, t0 + 20_000),
+      {
+        ...runRec('sess-covered', 10, t0 + 10_000, t0 + 20_000),
+        requestExecutionIds: ['request-covered'],
+      },
     ]);
 
     expect(records).toHaveLength(1);
@@ -1591,6 +2172,26 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     const second = await loadUsageHistoryWithLive();
     expect(second).toEqual(first);
     expect(tokensOf(second, 'sess-stable')).toBe(1000);
+  });
+
+  it('does not reuse a whole cached response at an exclusive timestamp boundary', async () => {
+    const sessionId = 'sess-exclusive-boundary';
+    writeTranscript('cache-project', sessionId, {
+      cwd: '/cache/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 1000,
+    });
+    await loadUsageHistory(undefined, { persistRebuild: false });
+
+    const records = await loadUsageHistory(undefined, {
+      persistRebuild: false,
+      beforeMsBySession: new Map([
+        [sessionId, Date.parse('2026-06-11T00:01:00.000Z')],
+      ]),
+    });
+
+    expect(records).toEqual([]);
   });
 
   it('rescans a transcript when it grows so active sessions stay current', async () => {

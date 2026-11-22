@@ -207,7 +207,27 @@ export function buildUsageDayTable(
   }
   if (ledgerDaily) {
     for (const [day, byModel] of ledgerDaily) {
-      table.set(day, new Map(byModel));
+      table.set(
+        day,
+        new Map([...byModel].map(([model, totals]) => [model, { ...totals }])),
+      );
+    }
+  }
+  for (const record of records) {
+    if (!recordTouchesLedgerDays(record, ledgerDaily, ledgerDays)) continue;
+    const day = localDateKey(record.timestamp);
+    for (const [model, metrics] of Object.entries(record.models)) {
+      if (!metrics.errors) continue;
+      let byModel = table.get(day);
+      if (!byModel) {
+        byModel = new Map();
+        table.set(day, byModel);
+      }
+      const totals = byModel.get(model) ?? emptyDayModelTotals();
+      totals.requests += metrics.errors;
+      // Failure latency has session-record granularity, like duration.
+      totals.apiDurationMs += metrics.errorLatencyMs ?? 0;
+      byModel.set(model, totals);
     }
   }
   return table;
@@ -307,6 +327,7 @@ function buildDaily(
 ): UsageDailyPoint[] {
   const sessionByDay = new Map<string, number>();
   for (const r of records) {
+    if (r.transcriptSupplement === true) continue;
     const key = localDateKey(r.timestamp);
     sessionByDay.set(key, (sessionByDay.get(key) ?? 0) + 1);
   }

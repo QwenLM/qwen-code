@@ -28,6 +28,7 @@ import {
   recordTokenUsageFromApiResponseBestEffort,
   resetTokenUsageFailureLogging,
 } from './tokenUsageService.js';
+import type { TokenUsageDailyByModel } from './tokenUsageService.js';
 
 describe('tokenUsageService', () => {
   let tempDir: string;
@@ -708,6 +709,49 @@ describe('tokenUsageService', () => {
       sum(await loadTokenUsageDailyByModel('2026-04-01', completedMonths)),
     ).toBe(378);
     expect(readStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('invalidates a completed-month cache after an append during reading', async () => {
+    await recordUsage(fakeConfig(), 'past', 'first', usage(100, 10, 110), {
+      timestamp: '2026-04-20T10:00:00.000Z',
+    });
+    const filePath = getTokenUsageFilePath('2026-04');
+    const firstRow = JSON.parse(await readFile(filePath, 'utf8'));
+    const original = fs.createReadStream;
+    let injected = false;
+    const stream = vi
+      .spyOn(fs, 'createReadStream')
+      .mockImplementation((file, options) => {
+        const input = original(file, options as BufferEncoding);
+        if (String(file) === filePath && !injected) {
+          injected = true;
+          input.once('data', () => {
+            fs.appendFileSync(
+              filePath,
+              JSON.stringify({ ...firstRow, id: 'late-row' }) + '\n',
+            );
+          });
+        }
+        return input;
+      });
+    const total = (records: TokenUsageDailyByModel) =>
+      [...records.values()]
+        .flatMap((models) => [...models.values()])
+        .reduce((sum, model) => sum + model.totalTokens, 0);
+    const cache = new Map();
+
+    const firstRead = total(
+      await loadTokenUsageDailyByModel('2026-04-01', cache),
+    );
+    expect([110, 220]).toContain(firstRead);
+    expect(injected).toBe(true);
+    expect(total(await loadTokenUsageDailyByModel('2026-04-01', cache))).toBe(
+      220,
+    );
+    expect(total(await loadTokenUsageDailyByModel('2026-04-01', cache))).toBe(
+      220,
+    );
+    expect(stream).toHaveBeenCalledTimes(2);
   });
 
   it('does not reuse completed-month data across runtime directories', async () => {

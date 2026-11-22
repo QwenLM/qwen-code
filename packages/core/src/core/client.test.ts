@@ -1256,6 +1256,22 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('binds the retained selective-restore conversation clock separately from the run', async () => {
+      const start = '2019-05-06T07:08:09.000Z';
+      restoreFromRuntime({
+        apiHistory: [],
+        uiTelemetryEvents: [],
+        conversationStartTime: start,
+      });
+      mockUiTelemetryService.setSessionStartTime.mockClear();
+
+      await initializedClient();
+
+      expect(mockUiTelemetryService.setSessionStartTime).toHaveBeenCalledWith(
+        new Date(start),
+      );
+    });
+
     it('keeps the restored tool boundary through startup reminder refresh', async () => {
       const result = content('user', fnResponse('update_goal', {}, 'ended'));
       restoreFromRuntime({
