@@ -1230,6 +1230,20 @@ export interface ServeSessionWorkflowTaskStatus {
   error?: string;
 }
 
+export interface ServeSessionScheduledTaskStatus {
+  id: string;
+  /** 'cron' for session-scoped cron_create jobs, 'wakeup' for self-paced loop_wakeup. */
+  source: 'cron' | 'wakeup';
+  cronExpr: string;
+  prompt: string;
+  recurring: boolean;
+  createdAt: number;
+  expiresAt: number | null;
+  lastFiredAt: number | null;
+  nextRunAt: number | null;
+  gate?: string;
+}
+
 export type ServeSessionTaskStatus =
   | ServeSessionAgentTaskStatus
   | ServeSessionShellTaskStatus
@@ -1241,6 +1255,8 @@ export interface ServeSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: ServeSessionTaskStatus[];
+  /** Active in-memory session-scoped cron jobs and pending loop wakeups. */
+  scheduledTasks?: ServeSessionScheduledTaskStatus[];
 }
 
 /**

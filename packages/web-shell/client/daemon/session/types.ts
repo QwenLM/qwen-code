@@ -39,8 +39,8 @@ import type {
   DaemonSessionPrInfo,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionTaskRuntimeStatus,
-  DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
   DaemonSessionWorkflowTaskStatus,
   DaemonSessionWorkflowTasksStatus,
@@ -846,7 +846,7 @@ export interface DaemonSessionActions {
   ): Promise<DaemonSessionWorkflowTasksStatus>;
   cancelTask(
     taskId: string,
-    kind: DaemonSessionTaskWithWorkflowStatus['kind'],
+    kind: DaemonSessionCancelableTaskKind,
   ): Promise<{ cancelled: boolean }>;
   controlWorkflowTask(
     taskId: string,

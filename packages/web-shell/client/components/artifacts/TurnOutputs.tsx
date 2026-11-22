@@ -54,6 +54,7 @@ export interface TurnOutputScheduledTask {
   durable: boolean;
   workspaceId?: string;
   display?: string;
+  liveStatus?: 'active' | 'paused' | 'cancelled';
 }
 
 export type TurnOutputKind = 'file' | 'artifact' | 'scheduled_task';
@@ -588,8 +589,16 @@ function ScheduledTaskCard({
   onOpen: () => void;
 }) {
   const { t } = useI18n();
+  const statusLabel =
+    task.liveStatus === 'active'
+      ? t('environment.scheduledTasks.statusActive')
+      : task.liveStatus === 'paused'
+        ? t('environment.scheduledTasks.statusPaused')
+        : task.liveStatus === 'cancelled'
+          ? t('environment.scheduledTasks.statusCancelled')
+          : null;
   return (
-    <div className={styles.card}>
+    <div className={styles.card} data-scheduled-task-status={task.liveStatus}>
       <div className={styles.summary}>
         <span className={styles.icon} aria-hidden="true">
           <ClockIcon />
@@ -602,6 +611,7 @@ function ScheduledTaskCard({
               task.recurring
                 ? t('scheduledTasks.repeats')
                 : t('scheduledTasks.runsOnce'),
+              statusLabel,
             ]
               .filter(Boolean)
               .join(' · ')}

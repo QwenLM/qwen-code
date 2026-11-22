@@ -12188,9 +12188,39 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error).toBe(
-        '`kind` must be "agent", "shell", "monitor", or "workflow"',
+        '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
       );
       expect(bridge.cancelSessionTaskCalls).toEqual([]);
+    });
+
+    it('cancels a cron task through the bridge', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, primaryWorkspaceTrusted: true },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/tasks/cron-1/cancel')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ kind: 'cron' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ cancelled: true });
+      expect(bridge.cancelSessionTaskCalls).toEqual([
+        {
+          sessionId: 's-1',
+          taskId: 'cron-1',
+          taskKind: 'cron',
+          context: { clientId: 'client-1' },
+        },
+      ]);
     });
 
     it('cancels a workflow task through the bridge', async () => {

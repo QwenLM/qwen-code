@@ -187,6 +187,7 @@ import {
   type ComposerChipTask,
 } from './utils/composerTasks';
 import {
+  getScheduledTaskActivityKey,
   getTaskActivityKey,
   hasActiveTaskActivity,
 } from './utils/taskActivity';
@@ -494,6 +495,10 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
+import {
+  useSessionScheduledTasks,
+  type SessionScheduledTask,
+} from './hooks/useSessionScheduledTasks';
 import { useSubSessionTasks } from './hooks/useSubSessionTasks';
 import { extractErrorDetail } from './utils/errorDetail';
 import {
@@ -2017,6 +2022,7 @@ const DEFAULT_CHAT_HEADER_ITEMS: readonly WebShellChatHeaderItem[] = [
   'title',
   'environment',
   'rightPanel',
+  'scheduledTasks',
   'artifacts',
 ];
 const DEFAULT_RIGHT_PANEL_ITEMS: readonly WebShellRightPanelItem[] = [
@@ -2047,7 +2053,14 @@ const DRAFT_PANEL_KEY_PREFIX = 'draft\0';
  */
 const trajectoryTabId = (sessionId: string) => `trajectory:${sessionId}`;
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
+  [
+    'environment',
+    'sources',
+    'subagents',
+    'backgroundTasks',
+    'scheduledTasks',
+    'artifacts',
+  ];
 const ATTACHMENTS_REFRESH_INTERVAL_MS = 1000;
 const SESSION_AGENTS_REFRESH_INTERVAL_MS = 3000;
 const SESSION_AGENTS_MAX_RETRY_INTERVAL_MS = 30_000;
@@ -3948,6 +3961,8 @@ export function App({
   const titleHeaderItemVisible = chatHeaderItems.includes('title');
   const environmentHeaderItemVisible = chatHeaderItems.includes('environment');
   const rightPanelHeaderItemVisible = chatHeaderItems.includes('rightPanel');
+  const scheduledTasksHeaderItemVisible =
+    chatHeaderItems.includes('scheduledTasks');
   const artifactsHeaderItemVisible = chatHeaderItems.includes('artifacts');
   const tokenUsageHeaderItemVisible = chatHeaderItems.includes('tokenUsage');
   const contextUsageHeaderItemVisible =
@@ -9474,6 +9489,88 @@ export function App({
   );
   const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
     useState(0);
+  const scheduledTaskActivityKey = useMemo(
+    () => getScheduledTaskActivityKey(messages),
+    [messages],
+  );
+  const scheduledTaskWorkspaceTarget = useMemo(() => {
+    const registeredWorkspaces = workspace.capabilities?.workspaces;
+    if (!registeredWorkspaces || registeredWorkspaces.length === 0) {
+      return { workspaceId: undefined, resolvable: true };
+    }
+    if (!activeWorkspaceCwd) {
+      return { workspaceId: undefined, resolvable: false };
+    }
+    const matched = registeredWorkspaces.find(
+      (entry) => entry.cwd === activeWorkspaceCwd,
+    );
+    if (matched) {
+      return { workspaceId: matched.id, resolvable: true };
+    }
+    if (activeWorkspaceCwd === workspace.capabilities?.workspaceCwd) {
+      return { workspaceId: undefined, resolvable: true };
+    }
+    return { workspaceId: undefined, resolvable: false };
+  }, [activeWorkspaceCwd, workspace.capabilities]);
+  const sessionScheduledTasks = useSessionScheduledTasks({
+    sessionId: connection.sessionId,
+    workspaceId: scheduledTaskWorkspaceTarget.workspaceId,
+    connected: connection.status === 'connected' && !managedMode,
+    durableEnabled:
+      projectFeaturesAvailable &&
+      !managedMode &&
+      scheduledTaskWorkspaceTarget.resolvable,
+    activityKey: scheduledTaskActivityKey,
+    refreshTrigger: backgroundTasksRefreshTrigger,
+  });
+  const openSessionScheduledTaskDetail = useCallback(
+    (entry: SessionScheduledTask) => {
+      openScheduledTaskPanel(
+        {
+          id: entry.id,
+          toolCallId: `scheduled:${entry.scope}:${entry.id}`,
+          title: entry.title,
+          cron: entry.cronExpr,
+          prompt: entry.prompt,
+          recurring: entry.recurring,
+          durable: entry.scope === 'durable',
+          ...(entry.scope === 'durable' && entry.workspaceId
+            ? { workspaceId: entry.workspaceId }
+            : {}),
+        },
+        activeWorkspaceCwd,
+        entry.scope === 'durable' ? entry.workspaceId : undefined,
+        connection.sessionId,
+      );
+    },
+    [activeWorkspaceCwd, connection.sessionId, openScheduledTaskPanel],
+  );
+  const enrichedScheduledTasksByTurn = useMemo(() => {
+    if (scheduledTasksByTurn.size === 0) return scheduledTasksByTurn;
+    const { taskStatusById, hasLiveDurableSnapshot, hasLiveSessionSnapshot } =
+      sessionScheduledTasks;
+    if (!hasLiveDurableSnapshot && !hasLiveSessionSnapshot) {
+      return scheduledTasksByTurn;
+    }
+    const next = new Map<string, readonly TurnOutputScheduledTask[]>();
+    for (const [turnId, items] of scheduledTasksByTurn) {
+      next.set(
+        turnId,
+        items.map((item) => {
+          const live = taskStatusById.get(item.id);
+          if (live) return { ...item, liveStatus: live };
+          const snapshotReady = item.durable
+            ? hasLiveDurableSnapshot
+            : hasLiveSessionSnapshot;
+          if (snapshotReady) {
+            return { ...item, liveStatus: 'cancelled' as const };
+          }
+          return item;
+        }),
+      );
+    }
+    return next;
+  }, [scheduledTasksByTurn, sessionScheduledTasks]);
   const sessionTasks = useBackgroundTasks(
     connection.sessionId,
     taskActivityKey,
@@ -9481,6 +9578,7 @@ export function App({
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
     workflowsEnabled,
+    sessionScheduledTasks.syncSessionTasks,
   );
   // Bumped after a `/send` so its chip shows without waiting for the event.
   const [subSessionTasksRefresh, setSubSessionTasksRefresh] = useState(0);
@@ -23890,6 +23988,11 @@ export function App({
     persistEnvironmentPanelOpen(false);
     setEnvironmentPanelOpen(false);
   }, [persistEnvironmentPanelOpen]);
+  const [focusScheduledTasksNonce, setFocusScheduledTasksNonce] = useState(0);
+  const openEnvironmentScheduledTasks = useCallback(() => {
+    handleEnvironmentPanelOpenChange(true);
+    setFocusScheduledTasksNonce((n) => n + 1);
+  }, [handleEnvironmentPanelOpenChange]);
   const handleRightPanelOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -24341,6 +24444,11 @@ export function App({
     onSideTaskCreated: handleSideTaskCreated,
     onSideTaskTitleChange: handleSideTaskTitleChange,
     onSideTaskInitialPromptRefused: handleSideTaskInitialPromptRefused,
+    liveSessionScheduledTasks: sessionScheduledTasks.liveSessionTaskById,
+    hasLiveSessionScheduledSnapshot:
+      sessionScheduledTasks.hasLiveSessionSnapshot,
+    onCancelSessionScheduledTask: sessionScheduledTasks.cancelSessionTaskById,
+    onScheduledTasksMutated: sessionScheduledTasks.refresh,
     onNestedRightPanelOpen: handleTurnOutputOpen,
     onNestedArtifactsChange: handlePaneArtifactsChange,
     onOpenNestedSubagent: openSubagentPanelForSession,
@@ -25473,6 +25581,26 @@ export function App({
                                 connection.sessionId!,
                                 sessionActions,
                               )
+                          : undefined
+                      }
+                      scheduledTaskCount={
+                        scheduledTasksHeaderItemVisible
+                          ? sessionScheduledTasks.tasks.length
+                          : undefined
+                      }
+                      scheduledTaskActiveCount={
+                        scheduledTasksHeaderItemVisible
+                          ? sessionScheduledTasks.activeCount
+                          : undefined
+                      }
+                      scheduledTaskNextRunAt={
+                        scheduledTasksHeaderItemVisible
+                          ? sessionScheduledTasks.nextRunAt
+                          : undefined
+                      }
+                      onOpenScheduledTasks={
+                        scheduledTasksHeaderItemVisible && connection.sessionId
+                          ? openEnvironmentScheduledTasks
                           : undefined
                       }
                       {...artifactsHeaderEntry}
@@ -26818,7 +26946,7 @@ export function App({
                                 }
                                 turnScheduledTasks={
                                   visibleTurnOutputKinds.has('scheduled_task')
-                                    ? scheduledTasksByTurn
+                                    ? enrichedScheduledTasksByTurn
                                     : undefined
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
@@ -27357,6 +27485,14 @@ export function App({
                             onSelectTask={openComposerTask}
                             onExplainTask={explainComposerTask}
                             onReturnToInput={handleReturnToEditor}
+                            activeScheduledCount={
+                              sessionScheduledTasks.activeSessionCount
+                            }
+                            onOpenScheduledTasks={
+                              environmentPanelReachable
+                                ? openEnvironmentScheduledTasks
+                                : undefined
+                            }
                           />
                         )}
                         {(queuedPrompts.length > 0 ||
@@ -27878,6 +28014,9 @@ export function App({
                 }
                 tasks={sessionTasks}
                 agentTasks={environmentAgentTasks}
+                scheduledTasks={sessionScheduledTasks.tasks}
+                scheduledTaskBusyIds={sessionScheduledTasks.busyIds}
+                focusScheduledTasksNonce={focusScheduledTasksNonce}
                 attachments={
                   logicalSessionKey
                     ? (sessionAttachmentsBySessionRef.current.get(
@@ -27932,6 +28071,24 @@ export function App({
                   sessionAgentTraceSupported ? openAgentWorkflow : undefined
                 }
                 onOpenTask={openEnvironmentTask}
+                onOpenScheduledTask={openSessionScheduledTaskDetail}
+                onToggleScheduledTask={(entry) =>
+                  void sessionScheduledTasks.toggleDurableTask(entry)
+                }
+                onRunScheduledTask={(entry) =>
+                  void sessionScheduledTasks.runDurableTask(entry)
+                }
+                onDeleteScheduledTask={(entry) =>
+                  void sessionScheduledTasks.deleteDurableTask(entry)
+                }
+                onCancelSessionScheduledTask={(entry) =>
+                  void sessionScheduledTasks.cancelSessionTask(entry)
+                }
+                onManageAllScheduledTasks={
+                  projectFeaturesAvailable
+                    ? () => navigationRef.current?.openPage('scheduled-tasks')
+                    : undefined
+                }
                 onReadImage={readSessionImage}
                 onImagePreview={(src, alt, source) => {
                   if (environmentPanelOwner.isCurrent()) {

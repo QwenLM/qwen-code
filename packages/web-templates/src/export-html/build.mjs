@@ -76,11 +76,13 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // The schema-version narrowing capture adds a further 8 bytes.
 // Including the merged ChatSurface inputs, local builds and the CI merge tree
 // both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
-// Merged main through 68388f5d41 plus the focus-stable touch-control changes
-// measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
-// across independent local transcript/export builds. Keep the house margins:
-// warning = measurement + 713, hard ceiling = measurement + 1,713.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_286;
+// Merged main through 62b0d73b72 plus session scheduled-task UI copy (EN/ZH-CN
+// catalogs + TurnOutputs live status label) measures 2,157,886 renderer JS
+// bytes and 2,434,847 CSS bytes on 2026-11-22 with the same third-party input
+// mix and passing forbidden-input guard. Keep the house margins derived from
+// one measurement: warning = measurement + 713, hard ceiling = measurement + 1,713.
+const MEASURED_DOCUMENT_RUNTIME_BYTES = 2_157_886;
+const DOCUMENT_RUNTIME_WARNING_BYTES = MEASURED_DOCUMENT_RUNTIME_BYTES + 713;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -211,8 +213,8 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_156_286;
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// The latest measured shared tree also re-tracks this ceiling to 2,157,286,
-// which is 1,713 bytes above its 2,155,573-byte measurement, and stays coupled
+// The latest measured shared tree re-tracks this ceiling to 2,159,599,
+// which is 1,713 bytes above its 2,157,886-byte measurement, and stays coupled
 // to the warning threshold instead of becoming an independent literal.
 const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 

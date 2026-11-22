@@ -6346,6 +6346,74 @@ describe('ArtifactPanel binary document previews', () => {
     expect(download?.getAttribute('href')).toBe('blob:pdf-preview');
     expect(download?.download).toBe('Report.PDF');
   });
+
+  it('allows stopping an active session-scoped scheduled task from ArtifactPanel', async () => {
+    const onCancelSessionScheduledTask = vi.fn().mockResolvedValue(true);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const liveTask = {
+      id: 'cron-live-1',
+      source: 'cron' as const,
+      cronExpr: '*/5 * * * *',
+      prompt: 'Poll build status',
+      recurring: true,
+      createdAt: 1_000,
+      expiresAt: 100_000,
+      lastFiredAt: null,
+      nextRunAt: 60_000,
+    };
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ArtifactPanel
+            artifacts={[]}
+            tabs={[
+              {
+                id: 'scheduled-task:session:cron-live-1',
+                kind: 'scheduled_task',
+                title: 'Poll build status',
+                task: {
+                  id: 'cron-live-1',
+                  toolCallId: 'tool-cron-1',
+                  title: 'Poll build status',
+                  cron: '*/5 * * * *',
+                  prompt: 'Poll build status',
+                  recurring: true,
+                  durable: false,
+                },
+              },
+            ]}
+            activeTabId="scheduled-task:session:cron-live-1"
+            reviewChanges={[]}
+            selectedReviewPath={null}
+            onSelectTab={() => {}}
+            onCloseTab={() => {}}
+            onOpenFilePreview={() => {}}
+            onClose={() => {}}
+            liveSessionScheduledTasks={new Map([[liveTask.id, liveTask]])}
+            hasLiveSessionScheduledSnapshot
+            onCancelSessionScheduledTask={onCancelSessionScheduledTask}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain(
+      'Active in this session. Stopping cancels future runs immediately.',
+    );
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (btn) => btn.textContent === 'Stop task',
+    );
+    expect(stopButton).toBeDefined();
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith('cron-live-1');
+  });
 });
 
 describe('ArtifactPanel task explanation', () => {

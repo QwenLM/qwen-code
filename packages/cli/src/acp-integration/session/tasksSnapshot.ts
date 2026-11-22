@@ -19,6 +19,10 @@ import {
   type WorkflowSnapshot,
   type WorkflowTask,
 } from '@qwen-code/qwen-code-core';
+import {
+  nextCronJobFireMs,
+  type CronJob,
+} from '@qwen-code/qwen-code-core/services/cronScheduler.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import pLimit from 'p-limit';
@@ -27,6 +31,7 @@ import {
   type ServeSessionAgentsStatus,
   type ServeSessionAgentTaskStatus,
   type ServeSessionMonitorTaskStatus,
+  type ServeSessionScheduledTaskStatus,
   type ServeSessionShellTaskStatus,
   type ServeSessionTaskStatus,
   type ServeSessionTasksStatus,
@@ -327,6 +332,23 @@ function serializeWorkflowSnapshot(
   };
 }
 
+function serializeSessionScheduledTask(
+  job: CronJob,
+): ServeSessionScheduledTaskStatus {
+  return {
+    id: job.id,
+    source: job.cronExpr === '@wakeup' ? 'wakeup' : 'cron',
+    cronExpr: job.cronExpr,
+    prompt: job.prompt,
+    recurring: job.recurring,
+    createdAt: job.createdAt,
+    expiresAt: Number.isFinite(job.expiresAt) ? job.expiresAt : null,
+    lastFiredAt: job.lastFiredAt ?? null,
+    nextRunAt: nextCronJobFireMs(job),
+    ...optionalField('gate', job.gate),
+  };
+}
+
 export function buildSessionTasksStatus(
   sessionId: string,
   config: Config,
@@ -364,11 +386,20 @@ export function buildSessionTasksStatus(
       : []),
   ].sort((a, b) => a.startTime - b.startTime);
 
+  const scheduledTasks: ServeSessionScheduledTaskStatus[] =
+    config.isCronEnabled?.()
+      ? (config.getCronScheduler?.()?.list?.() ?? [])
+          .filter((job) => !job.durable)
+          .map(serializeSessionScheduledTask)
+          .sort((a, b) => a.createdAt - b.createdAt)
+      : [];
+
   return {
     v: STATUS_SCHEMA_VERSION,
     sessionId,
     now,
     tasks,
+    ...(scheduledTasks.length > 0 ? { scheduledTasks } : {}),
   };
 }
 

@@ -2895,11 +2895,11 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     req: BridgeSessionTurnIndexPageRequest,
   ): Promise<BridgeSessionTurnIndexPage>;
 
-  /** Cancel a background task in a live session. */
+  /** Cancel a background task or session-scoped cron/wakeup in a live session. */
   cancelSessionTask(
     sessionId: string,
     taskId: string,
-    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow',
+    taskKind: 'agent' | 'shell' | 'monitor' | 'workflow' | 'cron',
     context?: BridgeClientRequestContext,
   ): Promise<{ cancelled: boolean }>;
 

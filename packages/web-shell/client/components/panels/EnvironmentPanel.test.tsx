@@ -1058,4 +1058,114 @@ describe('EnvironmentPanel', () => {
       view.querySelectorAll('[data-testid="environment-file-list-skeleton"]'),
     ).toHaveLength(2);
   });
+
+  it('renders session scheduled tasks with scope badges and inline controls', () => {
+    const onOpenScheduledTask = vi.fn();
+    const onToggleScheduledTask = vi.fn();
+    const onRunScheduledTask = vi.fn();
+    const onDeleteScheduledTask = vi.fn();
+    const onCancelSessionScheduledTask = vi.fn();
+    const onManageAllScheduledTasks = vi.fn();
+
+    const durableEntry = {
+      scope: 'durable' as const,
+      id: 'd-1',
+      title: 'Nightly report',
+      prompt: 'Generate nightly summary',
+      cronExpr: '0 9 * * *',
+      recurring: true,
+      enabled: true,
+      createdAt: 1_000,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 10 * 60_000,
+      gate: null,
+      task: {
+        id: 'd-1',
+        name: 'Nightly report',
+        cron: '0 9 * * *',
+        prompt: 'Generate nightly summary',
+        recurring: true,
+        enabled: true,
+        createdAt: 1_000,
+        lastFiredAt: null,
+        nextRunAt: Date.now() + 10 * 60_000,
+        sessionId: 'session-1',
+        sessionMode: 'persistent',
+      },
+    };
+    const sessionEntry = {
+      scope: 'session' as const,
+      source: 'wakeup' as const,
+      id: 'wk-1',
+      title: 'Re-check CI run',
+      prompt: 'Re-check CI run',
+      cronExpr: '@wakeup',
+      recurring: false,
+      enabled: true as const,
+      createdAt: 2_000,
+      lastFiredAt: null,
+      nextRunAt: Date.now() + 3 * 60_000,
+      expiresAt: null,
+      task: {
+        id: 'wk-1',
+        source: 'wakeup' as const,
+        cronExpr: '@wakeup',
+        prompt: 'Re-check CI run',
+        recurring: false,
+        createdAt: 2_000,
+        expiresAt: null,
+        lastFiredAt: null,
+        nextRunAt: Date.now() + 3 * 60_000,
+      },
+    };
+
+    const view = mount({
+      scheduledTasks: [durableEntry, sessionEntry],
+      onOpenScheduledTask,
+      onToggleScheduledTask,
+      onRunScheduledTask,
+      onDeleteScheduledTask,
+      onCancelSessionScheduledTask,
+      onManageAllScheduledTasks,
+    });
+
+    const section = view.querySelector(
+      '[data-testid="environment-scheduled-tasks-section"]',
+    );
+    expect(section).not.toBeNull();
+    expect(section?.textContent).toContain('Nightly report');
+    expect(section?.textContent).toContain('Persistent');
+    expect(section?.textContent).toContain('Re-check CI run');
+    expect(section?.textContent).toContain('Loop');
+
+    const disableBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Disable"]',
+    );
+    const runBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Run now"]',
+    );
+    const deleteBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete"]',
+    );
+    const stopBtn = section?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Stop"]',
+    );
+    const manageAllBtn = Array.from(
+      section?.querySelectorAll('button') ?? [],
+    ).find((btn) => btn.textContent === 'Manage all');
+
+    act(() => {
+      disableBtn?.click();
+      runBtn?.click();
+      deleteBtn?.click();
+      stopBtn?.click();
+      manageAllBtn?.click();
+    });
+
+    expect(onToggleScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(onRunScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(onDeleteScheduledTask).toHaveBeenCalledWith(durableEntry);
+    expect(onCancelSessionScheduledTask).toHaveBeenCalledWith(sessionEntry);
+    expect(onManageAllScheduledTasks).toHaveBeenCalledOnce();
+  });
 });

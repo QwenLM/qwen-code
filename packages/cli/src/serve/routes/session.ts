@@ -9131,10 +9131,12 @@ export function registerSessionRoutes(
           kind !== 'agent' &&
           kind !== 'shell' &&
           kind !== 'monitor' &&
-          kind !== 'workflow'
+          kind !== 'workflow' &&
+          kind !== 'cron'
         ) {
           res.status(400).json({
-            error: '`kind` must be "agent", "shell", "monitor", or "workflow"',
+            error:
+              '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
           });
           return;
         }

@@ -4,7 +4,10 @@ import {
 } from '../daemon/availability-context.js';
 import { isDaemonUnavailableError } from '../daemon/availability.js';
 import { useEffect, useRef, useState } from 'react';
-import type { DaemonSessionTaskWithWorkflowStatus } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionScheduledTaskStatus,
+  DaemonSessionTaskWithWorkflowStatus,
+} from '@qwen-code/sdk/daemon';
 import {
   useActions,
   useDaemonSessionOwnerGuard,
@@ -38,6 +41,9 @@ export function useBackgroundTasks(
   connected: boolean,
   refreshTrigger = 0,
   workflowsEnabled = false,
+  onScheduledTasks?: (
+    tasks: readonly DaemonSessionScheduledTaskStatus[],
+  ) => void,
 ): DaemonSessionTaskWithWorkflowStatus[] {
   const available = useDaemonAvailability() === 'available';
   const availability = useDaemonAvailabilityController();
@@ -46,6 +52,8 @@ export function useBackgroundTasks(
   const ownerRef = useRef(ownerGuard.capture());
   if (!ownerRef.current?.isCurrent()) ownerRef.current = ownerGuard.capture();
   const owner = ownerRef.current;
+  const onScheduledTasksRef = useRef(onScheduledTasks);
+  onScheduledTasksRef.current = onScheduledTasks;
   const [tasks, setTasks] = useState<DaemonSessionTaskWithWorkflowStatus[]>([]);
   const tasksOwnerRef = useRef(owner);
   const [pollingActive, setPollingActive] = useState(false);
@@ -106,6 +114,7 @@ export function useBackgroundTasks(
           )
             return;
           setTasks(snapshot.tasks);
+          onScheduledTasksRef.current?.(snapshot.scheduledTasks ?? []);
           if (snapshot.tasks.length === 0) {
             if (taskActivityActive) return;
             emptyPollsRef.current += 1;

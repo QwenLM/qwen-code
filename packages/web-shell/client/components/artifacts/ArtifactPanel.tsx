@@ -2,6 +2,7 @@ import { useDaemonTargetOptional } from '../../config/daemon-target';
 import { hasReloadSurvivableDaemonToken } from '../../config/daemon';
 import type {
   DaemonSessionArtifact,
+  DaemonSessionScheduledTaskStatus,
   SessionSource,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -614,6 +615,13 @@ interface ArtifactPanelProps {
     canvasMode?: boolean;
   };
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
+  liveSessionScheduledTasks?: ReadonlyMap<
+    string,
+    DaemonSessionScheduledTaskStatus
+  >;
+  hasLiveSessionScheduledSnapshot?: boolean;
+  onCancelSessionScheduledTask?: (taskId: string) => Promise<boolean>;
+  onScheduledTasksMutated?: () => void;
   deferSubagentMount?: boolean;
   onClose: () => void;
   variant?: 'docked' | 'drawer';
@@ -793,6 +801,10 @@ export function ArtifactPanel({
   mountUnavailableModelTooltip,
   workflow,
   onImageIngestionNotice,
+  liveSessionScheduledTasks,
+  hasLiveSessionScheduledSnapshot = false,
+  onCancelSessionScheduledTask,
+  onScheduledTasksMutated,
   deferSubagentMount = false,
   onClose,
   variant = 'docked',
@@ -1942,6 +1954,10 @@ export function ArtifactPanel({
             key={activeTab.id}
             task={activeTab.task}
             actions={activeWorkspaceActions}
+            liveSessionTask={liveSessionScheduledTasks?.get(activeTab.task.id)}
+            hasLiveSessionSnapshot={hasLiveSessionScheduledSnapshot}
+            onCancelSessionTask={onCancelSessionScheduledTask}
+            onMutated={onScheduledTasksMutated}
           />
         )}
       </div>
@@ -2089,9 +2105,17 @@ function ArtifactDetailTab({
 function ScheduledTaskDetail({
   task,
   actions,
+  liveSessionTask,
+  hasLiveSessionSnapshot = false,
+  onCancelSessionTask,
+  onMutated,
 }: {
   task: TurnOutputScheduledTask;
   actions: ArtifactWorkspaceActions | undefined;
+  liveSessionTask?: DaemonSessionScheduledTaskStatus;
+  hasLiveSessionSnapshot?: boolean;
+  onCancelSessionTask?: (taskId: string) => Promise<boolean>;
+  onMutated?: () => void;
 }) {
   const { t } = useI18n();
   const [loadedTask, setLoadedTask] = useState<DaemonScheduledTask | null>(
@@ -2223,12 +2247,19 @@ function ScheduledTaskDetail({
   }, [loadTask]);
 
   const isSessionScoped = !task.durable;
+  const isSessionScopedActive = isSessionScoped && Boolean(liveSessionTask);
+  const isSessionScopedCancelled =
+    isSessionScoped && hasLiveSessionSnapshot && !liveSessionTask;
   const isDeleted = task.durable && !loading && !loadError && !loadedTask;
   const canEdit = Boolean(loadedTask);
+  const canCancelSession =
+    isSessionScopedActive && Boolean(onCancelSessionTask);
   const detailTitle = loadedTask?.name || loadedTask?.prompt || task.title;
-  const detailPrompt = loadedTask?.prompt ?? task.prompt;
-  const detailCron = loadedTask?.cron ?? task.cron;
-  const detailRecurring = loadedTask?.recurring ?? task.recurring;
+  const detailPrompt =
+    loadedTask?.prompt ?? liveSessionTask?.prompt ?? task.prompt;
+  const detailCron = loadedTask?.cron ?? liveSessionTask?.cronExpr ?? task.cron;
+  const detailRecurring =
+    loadedTask?.recurring ?? liveSessionTask?.recurring ?? task.recurring;
   const detailEnabled = loadedTask?.enabled;
 
   const openEdit = useCallback(() => {
@@ -2281,6 +2312,7 @@ function ScheduledTaskDetail({
       setPrompt(updated.prompt);
       setBuilder(parseCronToBuilder(updated.cron));
       setShowForm(false);
+      onMutated?.();
     } catch (err) {
       if (isCurrentRequest(request, actions, taskId, workspaceId)) {
         setFormError(err instanceof Error ? err.message : String(err));
@@ -2296,6 +2328,7 @@ function ScheduledTaskDetail({
     isCurrentRequest,
     loadedTask,
     name,
+    onMutated,
     prompt,
     t,
     task.id,
@@ -2319,6 +2352,7 @@ function ScheduledTaskDetail({
       );
       if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
       setLoadedTask(updated);
+      onMutated?.();
     } catch (err) {
       if (isCurrentRequest(request, actions, taskId, workspaceId)) {
         setFormError(err instanceof Error ? err.message : String(err));
@@ -2328,7 +2362,14 @@ function ScheduledTaskDetail({
         setBusy(false);
       }
     }
-  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
+  }, [
+    actions,
+    isCurrentRequest,
+    loadedTask,
+    onMutated,
+    task.id,
+    task.workspaceId,
+  ]);
 
   const handleDelete = useCallback(async () => {
     if (!loadedTask || !actions) return;
@@ -2342,6 +2383,7 @@ function ScheduledTaskDetail({
       if (!isCurrentRequest(request, actions, taskId, workspaceId)) return;
       setLoadedTask(null);
       setShowDeleteConfirm(false);
+      onMutated?.();
     } catch (err) {
       if (isCurrentRequest(request, actions, taskId, workspaceId)) {
         setFormError(err instanceof Error ? err.message : String(err));
@@ -2351,7 +2393,27 @@ function ScheduledTaskDetail({
         setBusy(false);
       }
     }
-  }, [actions, isCurrentRequest, loadedTask, task.id, task.workspaceId]);
+  }, [
+    actions,
+    isCurrentRequest,
+    loadedTask,
+    onMutated,
+    task.id,
+    task.workspaceId,
+  ]);
+
+  const handleCancelSessionTask = useCallback(async () => {
+    if (!onCancelSessionTask || !liveSessionTask) return;
+    setBusy(true);
+    setFormError(null);
+    try {
+      await onCancelSessionTask(liveSessionTask.id);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }, [liveSessionTask, onCancelSessionTask]);
 
   const previewCron = buildCron(builder);
   const previewLabel = previewCron ? describeCron(previewCron, t) : null;
@@ -2369,7 +2431,11 @@ function ScheduledTaskDetail({
       )}
       {isSessionScoped && (
         <div className={styles.empty}>
-          {t('scheduledTasks.sessionScopedSnapshot')}
+          {isSessionScopedActive
+            ? t('scheduledTasks.sessionScopedActive')
+            : isSessionScopedCancelled
+              ? t('scheduledTasks.sessionScopedCancelled')
+              : t('scheduledTasks.sessionScopedSnapshot')}
         </div>
       )}
       {!isDeleted && (
@@ -2387,7 +2453,9 @@ function ScheduledTaskDetail({
               {t('scheduledTasks.schedule')}
             </span>
             <span className={styles.fieldValue}>
-              {describeCron(detailCron, t)}
+              {detailCron === '@wakeup'
+                ? t('environment.scheduledTasks.scopeWakeup')
+                : describeCron(detailCron, t)}
             </span>
             <span className={styles.fieldLabel}>Cron</span>
             <span className={styles.fieldValue}>{detailCron}</span>
@@ -2425,32 +2493,45 @@ function ScheduledTaskDetail({
       {formError && <div className={taskStyles.formError}>{formError}</div>}
 
       <div className={styles.actionsRow}>
-        <button
-          type="button"
-          className={taskStyles.primaryButton}
-          disabled={!canEdit || busy}
-          onClick={openEdit}
-        >
-          {t('scheduledTasks.edit')}
-        </button>
-        <button
-          type="button"
-          className={taskStyles.secondaryButton}
-          disabled={!canEdit || busy}
-          onClick={() => void handleToggle()}
-        >
-          {loadedTask?.enabled
-            ? t('scheduledTasks.disable')
-            : t('scheduledTasks.enable')}
-        </button>
-        <button
-          type="button"
-          className={taskStyles.secondaryButton}
-          disabled={!canEdit || busy}
-          onClick={() => setShowDeleteConfirm(true)}
-        >
-          {t('scheduledTasks.delete')}
-        </button>
+        {isSessionScoped && canCancelSession ? (
+          <button
+            type="button"
+            className={taskStyles.secondaryButton}
+            disabled={busy}
+            onClick={() => void handleCancelSessionTask()}
+          >
+            {t('scheduledTasks.stopSessionTask')}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              className={taskStyles.primaryButton}
+              disabled={!canEdit || busy}
+              onClick={openEdit}
+            >
+              {t('scheduledTasks.edit')}
+            </button>
+            <button
+              type="button"
+              className={taskStyles.secondaryButton}
+              disabled={!canEdit || busy}
+              onClick={() => void handleToggle()}
+            >
+              {loadedTask?.enabled
+                ? t('scheduledTasks.disable')
+                : t('scheduledTasks.enable')}
+            </button>
+            <button
+              type="button"
+              className={taskStyles.secondaryButton}
+              disabled={!canEdit || busy}
+              onClick={() => setShowDeleteConfirm(true)}
+            >
+              {t('scheduledTasks.delete')}
+            </button>
+          </>
+        )}
       </div>
 
       {showDeleteConfirm && loadedTask && (

@@ -80,3 +80,40 @@ export function hasActiveTaskActivity(
   });
   return active;
 }
+
+function isScheduledTaskToolCall(tool: ACPToolCall): boolean {
+  const name = tool.toolName.toLowerCase();
+  return (
+    name === 'cron_create' || name === 'cron_delete' || name === 'loop_wakeup'
+  );
+}
+
+/**
+ * Change-detection key for cron/loop activity in a session's transcript.
+ * Covers tool invocations and cron/loop-triggered user turns so live session
+ * scheduled task views re-sync after creates, deletes, wakeups, and fires.
+ */
+export function getScheduledTaskActivityKey(
+  messages: readonly Message[],
+): string {
+  const parts: string[] = [];
+  const visit = (tools: readonly ACPToolCall[]) => {
+    for (const tool of tools) {
+      if (isScheduledTaskToolCall(tool)) {
+        parts.push(`${tool.callId}:${tool.status}`);
+      }
+      if (tool.subTools) visit(tool.subTools);
+    }
+  };
+  for (const message of messages) {
+    if (message.role === 'tool_group') {
+      visit(message.tools);
+    } else if (
+      message.role === 'user' &&
+      (message.source === 'cron' || message.source === 'loop')
+    ) {
+      parts.push(`turn:${message.id}:${message.source}`);
+    }
+  }
+  return parts.join('|');
+}

@@ -14199,11 +14199,12 @@ class QwenAgent implements Agent {
           taskKind !== 'agent' &&
           taskKind !== 'shell' &&
           taskKind !== 'monitor' &&
-          taskKind !== 'workflow'
+          taskKind !== 'workflow' &&
+          taskKind !== 'cron'
         ) {
           throw RequestError.invalidParams(
             undefined,
-            'taskKind must be "agent", "shell", "monitor", or "workflow"',
+            'taskKind must be "agent", "shell", "monitor", "workflow", or "cron"',
           );
         }
         debugLogger.info(
@@ -14308,6 +14309,30 @@ class QwenAgent implements Agent {
               `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} status=${task.status}`,
             );
             return { cancelled: true, status: task.status };
+          }
+          case 'cron': {
+            if (!config.isCronEnabled?.()) {
+              return { cancelled: false, reason: 'disabled' };
+            }
+            const scheduler = config.getCronScheduler?.();
+            const job = scheduler?.list?.().find((item) => item.id === taskId);
+            if (!job) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=not_found`,
+              );
+              return { cancelled: false, reason: 'not_found' };
+            }
+            if (job.durable) {
+              debugLogger.info(
+                `sessionTaskCancel skipped sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} reason=not_session_scoped`,
+              );
+              return { cancelled: false, reason: 'not_session_scoped' };
+            }
+            const deleted = await scheduler!.delete(taskId);
+            debugLogger.info(
+              `sessionTaskCancel completed sessionId=${sessionId} taskId=${taskId} taskKind=${taskKind} deleted=${deleted}`,
+            );
+            return { cancelled: deleted };
           }
           default: {
             const exhaustive: never = taskKind;

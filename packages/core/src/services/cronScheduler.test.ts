@@ -5,6 +5,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildMissedCronNotification,
   CronScheduler,
+  nextCronJobFireMs,
   nextDurableFireMs,
   type CronJob,
 } from './cronScheduler.js';
@@ -2347,5 +2348,56 @@ describe('nextDurableFireMs', () => {
 
   it('returns null for a cron that cannot be projected', () => {
     expect(nextDurableFireMs(recurring({ cron: 'not a cron' }))).toBeNull();
+  });
+});
+
+describe('nextCronJobFireMs', () => {
+  const anchor = Date.parse('2026-06-01T08:00:00Z');
+
+  it('returns fireAtMs verbatim for wakeup jobs', () => {
+    expect(
+      nextCronJobFireMs({
+        id: 'wk-1',
+        cronExpr: '@wakeup',
+        recurring: false,
+        createdAt: anchor,
+        jitterMs: 0,
+        fireAtMs: anchor + 120_000,
+      }),
+    ).toBe(anchor + 120_000);
+  });
+
+  it('projects recurring session cron jobs from lastFiredAt with jitter', () => {
+    const first = nextCronJobFireMs({
+      id: 'cron-1',
+      cronExpr: '*/5 * * * *',
+      recurring: true,
+      createdAt: anchor,
+      lastFiredAt: anchor,
+      jitterMs: 3_000,
+    });
+    const later = nextCronJobFireMs({
+      id: 'cron-1',
+      cronExpr: '*/5 * * * *',
+      recurring: true,
+      createdAt: anchor,
+      lastFiredAt: anchor + 5 * 60_000,
+      jitterMs: 3_000,
+    });
+    expect(first).not.toBeNull();
+    expect(later).not.toBeNull();
+    expect(later!).toBeGreaterThan(first!);
+  });
+
+  it('returns null for unparseable cron expressions', () => {
+    expect(
+      nextCronJobFireMs({
+        id: 'bad-1',
+        cronExpr: 'not valid',
+        recurring: true,
+        createdAt: anchor,
+        jitterMs: 0,
+      }),
+    ).toBeNull();
   });
 });

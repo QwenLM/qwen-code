@@ -201,6 +201,7 @@ export type WebShellChatHeaderItem =
   | 'title'
   | 'environment'
   | 'rightPanel'
+  | 'scheduledTasks'
   | 'artifacts'
   | 'tokenUsage'
   | 'contextUsage';
@@ -231,6 +232,7 @@ export type WebShellEnvironmentPanelItem =
   | 'sources'
   | 'subagents'
   | 'backgroundTasks'
+  | 'scheduledTasks'
   /** Legacy attachment-only view in the Sources section. */
   | 'attachments'
   | 'artifacts';

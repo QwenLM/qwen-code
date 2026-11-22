@@ -751,4 +751,17 @@ describe('ComposerTaskChips', () => {
       expect(document.activeElement).toBe(chips()[0]);
     });
   });
+
+  it('renders a scheduled-task chip when activeScheduledCount > 0 and opens on click', () => {
+    const onOpenScheduledTasks = vi.fn();
+    render([], { activeScheduledCount: 2, onOpenScheduledTasks });
+
+    const scheduledChip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-scheduled-chip"]',
+    );
+    expect(scheduledChip).not.toBeNull();
+    expect(scheduledChip?.textContent).toContain('2 scheduled tasks');
+    act(() => scheduledChip?.click());
+    expect(onOpenScheduledTasks).toHaveBeenCalledOnce();
+  });
 });

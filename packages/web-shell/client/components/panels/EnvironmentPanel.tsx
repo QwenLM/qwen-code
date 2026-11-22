@@ -8,6 +8,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import {
   BotIcon,
+  CalendarClockIcon,
   ChevronRightIcon,
   CircleCheckIcon,
   CirclePauseIcon,
@@ -17,13 +18,27 @@ import {
   FolderClosedIcon,
   GitBranchIcon,
   LoaderCircleIcon,
+  PauseIcon,
+  PlayIcon,
+  RefreshCwIcon,
   SquareActivityIcon,
   SquareTerminalIcon,
   NetworkIcon,
+  Trash2Icon,
   WorkflowIcon,
 } from 'lucide-react';
 import type { WebShellEnvironmentPanelItem } from '../../customization';
 import { useI18n } from '../../i18n';
+import { useSharedNow } from '../../hooks/useSharedNow';
+import type {
+  SessionDurableScheduledTask,
+  SessionScheduledTask,
+  SessionScopedScheduledTask,
+} from '../../hooks/useSessionScheduledTasks';
+import {
+  describeCron,
+  formatCountdown,
+} from '../dialogs/scheduledTasksSchedule';
 import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
 import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { isComposerTask } from '../../utils/composerTasks';
@@ -49,6 +64,9 @@ interface EnvironmentPanelProps {
   gitStatus?: DaemonWorkspaceGitStatus;
   tasks: readonly DaemonSessionTaskWithWorkflowStatus[];
   agentTasks?: readonly EnvironmentAgentTask[];
+  scheduledTasks?: readonly SessionScheduledTask[];
+  scheduledTaskBusyIds?: ReadonlySet<string>;
+  focusScheduledTasksNonce?: number;
   attachments?: readonly DaemonSessionAttachmentReference[];
   attachmentsLoading?: boolean;
   attachmentsError?: string;
@@ -63,6 +81,12 @@ interface EnvironmentPanelProps {
   onOpenAgent?: (task: DaemonSessionAgentTaskStatus) => void;
   onOpenAgentWorkflow?: () => void;
   onOpenTask: (task: DaemonSessionTaskWithWorkflowStatus) => void;
+  onOpenScheduledTask?: (task: SessionScheduledTask) => void;
+  onToggleScheduledTask?: (task: SessionDurableScheduledTask) => void;
+  onRunScheduledTask?: (task: SessionDurableScheduledTask) => void;
+  onDeleteScheduledTask?: (task: SessionDurableScheduledTask) => void;
+  onCancelSessionScheduledTask?: (task: SessionScopedScheduledTask) => void;
+  onManageAllScheduledTasks?: () => void;
   /** Resolve an attachment to a displayable `data:` URL. */
   onReadImage?: (attachmentId: string) => Promise<string>;
   onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
@@ -78,7 +102,14 @@ export type EnvironmentAgentTask = DaemonSessionAgentTaskStatus & {
 };
 
 const DEFAULT_ENVIRONMENT_PANEL_ITEMS: readonly WebShellEnvironmentPanelItem[] =
-  ['environment', 'sources', 'subagents', 'backgroundTasks', 'artifacts'];
+  [
+    'environment',
+    'sources',
+    'subagents',
+    'backgroundTasks',
+    'scheduledTasks',
+    'artifacts',
+  ];
 const AGENT_COLORS: Readonly<Record<string, string>> = {
   red: '#e5484d',
   blue: 'var(--agent-blue-500)',
@@ -168,6 +199,9 @@ export function EnvironmentPanel({
   gitStatus,
   tasks,
   agentTasks,
+  scheduledTasks,
+  scheduledTaskBusyIds,
+  focusScheduledTasksNonce,
   attachments,
   attachmentsLoading = false,
   attachmentsError,
@@ -182,6 +216,12 @@ export function EnvironmentPanel({
   onOpenAgent,
   onOpenAgentWorkflow,
   onOpenTask,
+  onOpenScheduledTask,
+  onToggleScheduledTask,
+  onRunScheduledTask,
+  onDeleteScheduledTask,
+  onCancelSessionScheduledTask,
+  onManageAllScheduledTasks,
   onReadImage,
   onImagePreview,
   onAttachmentPreview,
@@ -202,10 +242,28 @@ export function EnvironmentPanel({
   const [environmentExpanded, setEnvironmentExpanded] = useState(true);
   const [agentsExpanded, setAgentsExpanded] = useState(true);
   const [tasksExpanded, setTasksExpanded] = useState(true);
+  const [scheduledTasksExpanded, setScheduledTasksExpanded] = useState(true);
   const [artifactsExpanded, setArtifactsExpanded] = useState(true);
+  const scheduledSectionRef = useRef<HTMLElement | null>(null);
+  const hasVisibleScheduledCountdown =
+    !hidden &&
+    scheduledTasksExpanded &&
+    Boolean(
+      scheduledTasks?.some((task) => task.enabled && task.nextRunAt !== null),
+    );
+  const now = useSharedNow(hasVisibleScheduledCountdown);
   const [branchPickerOpen, setBranchPickerOpen] = useState(false);
   const [sourceDialogOpen, setSourceDialogOpen] = useState(false);
   const activeBranch = branch ?? gitStatus?.branch;
+
+  useEffect(() => {
+    if (!focusScheduledTasksNonce) return;
+    setScheduledTasksExpanded(true);
+    const sectionEl = scheduledSectionRef.current;
+    if (sectionEl && typeof sectionEl.scrollIntoView === 'function') {
+      sectionEl.scrollIntoView({ block: 'nearest' });
+    }
+  }, [focusScheduledTasksNonce]);
 
   useEffect(() => {
     if (hidden || !environmentExpanded || !gitWorkspaceCwd || !activeBranch) {
@@ -490,6 +548,182 @@ export function EnvironmentPanel({
           )}
         </section>
       )}
+
+      {items.includes('scheduledTasks') &&
+        scheduledTasks &&
+        scheduledTasks.length > 0 && (
+          <section
+            ref={scheduledSectionRef}
+            className={styles.section}
+            data-testid="environment-scheduled-tasks-section"
+          >
+            <div className={styles.sectionHeaderRow}>
+              <button
+                type="button"
+                className={styles.sectionHeader}
+                aria-expanded={scheduledTasksExpanded}
+                onClick={() =>
+                  setScheduledTasksExpanded((expanded) => !expanded)
+                }
+              >
+                <span>{t('environment.scheduledTasks')}</span>
+                {!scheduledTasksExpanded && <ChevronRightIcon />}
+              </button>
+              {onManageAllScheduledTasks && (
+                <button
+                  type="button"
+                  className={styles.sectionHeaderAction}
+                  onClick={onManageAllScheduledTasks}
+                >
+                  {t('environment.scheduledTasks.viewAll')}
+                </button>
+              )}
+            </div>
+            {scheduledTasksExpanded && (
+              <ul className={styles.scheduledList}>
+                {scheduledTasks.map((entry) => {
+                  const busy = scheduledTaskBusyIds?.has(entry.id) === true;
+                  const scopeLabel =
+                    entry.scope === 'durable'
+                      ? t('environment.scheduledTasks.scopeDurable')
+                      : entry.source === 'wakeup'
+                        ? t('environment.scheduledTasks.scopeWakeup')
+                        : t('environment.scheduledTasks.scopeSession');
+                  const scheduleText =
+                    entry.scope === 'session' && entry.source === 'wakeup'
+                      ? t('environment.scheduledTasks.scopeWakeup')
+                      : describeCron(entry.cronExpr, t);
+                  const countdown =
+                    entry.enabled && entry.nextRunAt !== null
+                      ? formatCountdown(entry.nextRunAt - now, t)
+                      : null;
+                  const metaText = [
+                    scheduleText,
+                    !entry.enabled
+                      ? t('environment.scheduledTasks.statusPaused')
+                      : countdown
+                        ? t('environment.scheduledTasks.nextRun', {
+                            when: countdown,
+                          })
+                        : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+
+                  return (
+                    <li
+                      key={`${entry.scope}:${entry.id}`}
+                      className={styles.scheduledItem}
+                      data-testid="environment-scheduled-task"
+                      data-scope={entry.scope}
+                      data-enabled={entry.enabled ? 'true' : 'false'}
+                    >
+                      <button
+                        type="button"
+                        className={styles.scheduledItemMain}
+                        onClick={() => onOpenScheduledTask?.(entry)}
+                        disabled={!onOpenScheduledTask}
+                      >
+                        <span className={styles.taskIcon} aria-hidden="true">
+                          {entry.scope === 'session' &&
+                          entry.source === 'wakeup' ? (
+                            <RefreshCwIcon />
+                          ) : (
+                            <CalendarClockIcon />
+                          )}
+                        </span>
+                        <span className={styles.scheduledItemBody}>
+                          <span className={styles.scheduledItemTitleRow}>
+                            <span
+                              className={styles.taskName}
+                              title={entry.title}
+                            >
+                              {entry.title}
+                            </span>
+                            <span className={styles.agentTag}>
+                              {scopeLabel}
+                            </span>
+                          </span>
+                          <span
+                            className={styles.scheduledItemMeta}
+                            title={entry.cronExpr}
+                          >
+                            {metaText}
+                          </span>
+                        </span>
+                      </button>
+                      <div className={styles.scheduledItemActions}>
+                        {entry.scope === 'durable' ? (
+                          <>
+                            {onToggleScheduledTask && (
+                              <button
+                                type="button"
+                                className={styles.scheduledIconButton}
+                                aria-label={
+                                  entry.enabled
+                                    ? t('scheduledTasks.disable')
+                                    : t('scheduledTasks.enable')
+                                }
+                                title={
+                                  entry.enabled
+                                    ? t('scheduledTasks.disable')
+                                    : t('scheduledTasks.enable')
+                                }
+                                disabled={busy}
+                                onClick={() => onToggleScheduledTask(entry)}
+                              >
+                                {entry.enabled ? <PauseIcon /> : <PlayIcon />}
+                              </button>
+                            )}
+                            {onRunScheduledTask && entry.enabled && (
+                              <button
+                                type="button"
+                                className={styles.scheduledIconButton}
+                                aria-label={t('scheduledTasks.runNow')}
+                                title={t('scheduledTasks.runNow')}
+                                disabled={busy}
+                                onClick={() => onRunScheduledTask(entry)}
+                              >
+                                <RefreshCwIcon />
+                              </button>
+                            )}
+                            {onDeleteScheduledTask && (
+                              <button
+                                type="button"
+                                className={styles.scheduledIconButton}
+                                aria-label={t('scheduledTasks.delete')}
+                                title={t('scheduledTasks.delete')}
+                                disabled={busy}
+                                onClick={() => onDeleteScheduledTask(entry)}
+                              >
+                                <Trash2Icon />
+                              </button>
+                            )}
+                          </>
+                        ) : (
+                          onCancelSessionScheduledTask && (
+                            <button
+                              type="button"
+                              className={styles.scheduledIconButton}
+                              aria-label={t('environment.scheduledTasks.stop')}
+                              title={t('environment.scheduledTasks.stop')}
+                              disabled={busy}
+                              onClick={() =>
+                                onCancelSessionScheduledTask(entry)
+                              }
+                            >
+                              <CircleStopIcon />
+                            </button>
+                          )
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </section>
+        )}
 
       {items.includes('artifacts') && (
         <section className={styles.section}>

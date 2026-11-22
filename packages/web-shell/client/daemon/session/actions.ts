@@ -23,7 +23,7 @@ import type {
   DaemonRewindResult,
   DaemonSessionRecapResult,
   DaemonRewindSnapshotInfo,
-  DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionCancelableTaskKind,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
@@ -3807,10 +3807,7 @@ export function createDaemonSessionActions({
       }
     },
 
-    async cancelTask(
-      taskId: string,
-      kind: DaemonSessionTaskWithWorkflowStatus['kind'],
-    ) {
+    async cancelTask(taskId: string, kind: DaemonSessionCancelableTaskKind) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,

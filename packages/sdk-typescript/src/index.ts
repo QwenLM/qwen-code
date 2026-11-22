@@ -308,6 +308,8 @@ export {
   type DaemonSessionSummary,
   type DaemonSessionShellTaskRuntime,
   type DaemonSessionSupportedCommandsStatus,
+  type DaemonSessionCancelableTaskKind,
+  type DaemonSessionScheduledTaskStatus,
   type DaemonSessionTaskLifecycleStatus,
   type DaemonSessionTaskRuntimeStatus,
   type DaemonSessionTaskStatus,

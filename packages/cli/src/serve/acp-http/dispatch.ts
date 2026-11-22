@@ -4321,14 +4321,15 @@ export class AcpDispatcher {
               kind !== 'agent' &&
               kind !== 'shell' &&
               kind !== 'monitor' &&
-              kind !== 'workflow'
+              kind !== 'workflow' &&
+              kind !== 'cron'
             ) {
               if (id !== undefined) {
                 conn.sendConn(
                   error(
                     id,
                     RPC.INVALID_PARAMS,
-                    '`kind` must be "agent", "shell", "monitor", or "workflow"',
+                    '`kind` must be "agent", "shell", "monitor", "workflow", or "cron"',
                   ),
                 );
               }

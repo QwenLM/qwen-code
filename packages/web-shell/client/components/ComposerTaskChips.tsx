@@ -11,6 +11,7 @@ import {
 } from 'react';
 import {
   BotIcon,
+  CalendarClockIcon,
   CircleAlertIcon,
   CircleHelpIcon,
   CirclePauseIcon,
@@ -48,6 +49,10 @@ export interface ComposerTaskChipsProps {
   onExplainTask?: (task: DaemonSessionTaskWithWorkflowStatus) => void;
   /** Hand focus back to the composer, optionally with a typed character. */
   onReturnToInput?: (text?: string) => void;
+  /** Count of active in-memory session-scoped cron jobs and pending wakeups. */
+  activeScheduledCount?: number;
+  /** Opens the environment panel's scheduled-tasks section. */
+  onOpenScheduledTasks?: () => void;
 }
 
 const LABEL_KEYS: Record<ComposerTaskChipKind, [string, string]> = {
@@ -123,7 +128,15 @@ export const ComposerTaskChips = forwardRef<
   ComposerTaskChipsHandle,
   ComposerTaskChipsProps
 >(function ComposerTaskChips(
-  { tasks, includeAgents, onSelectTask, onExplainTask, onReturnToInput },
+  {
+    tasks,
+    includeAgents,
+    onSelectTask,
+    onExplainTask,
+    onReturnToInput,
+    activeScheduledCount = 0,
+    onOpenScheduledTasks,
+  },
   ref,
 ) {
   const { t } = useI18n();
@@ -205,7 +218,7 @@ export const ComposerTaskChips = forwardRef<
       document.removeEventListener('pointerdown', closeOnOutsidePointerDown);
   }, [openGroup]);
 
-  if (groups.length === 0) return null;
+  if (groups.length === 0 && activeScheduledCount <= 0) return null;
 
   const selectTask = (task: ComposerChipTask) => {
     chipRefs.current.get(task.kind)?.focus({ preventScroll: true });
@@ -448,6 +461,25 @@ export const ComposerTaskChips = forwardRef<
             </span>
           );
         })}
+        {activeScheduledCount > 0 && (
+          <span className={styles.chipWrap}>
+            <button
+              type="button"
+              className={styles.chip}
+              data-kind="scheduled"
+              data-testid="composer-scheduled-chip"
+              onClick={onOpenScheduledTasks}
+              disabled={!onOpenScheduledTasks}
+            >
+              <span className={styles.state} aria-hidden="true">
+                <CalendarClockIcon />
+              </span>
+              <span className={styles.chipLabel}>
+                {t('tasks.pill.scheduled', { count: activeScheduledCount })}
+              </span>
+            </button>
+          </span>
+        )}
       </div>
     </div>
   );

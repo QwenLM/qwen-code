@@ -2404,3 +2404,36 @@ export function nextDurableFireMs(
   nextDurableFireCache.set(key, result);
   return result;
 }
+
+/**
+ * Next effective fire time (epoch ms) for an in-memory {@link CronJob}
+ * (including `@wakeup` one-shots, which carry an exact `fireAtMs`).
+ */
+export function nextCronJobFireMs(
+  job: Pick<
+    CronJob,
+    | 'id'
+    | 'cronExpr'
+    | 'recurring'
+    | 'createdAt'
+    | 'lastFiredAt'
+    | 'jitterMs'
+    | 'fireAtMs'
+  >,
+): number | null {
+  if (job.fireAtMs !== undefined) {
+    return Number.isFinite(job.fireAtMs) ? job.fireAtMs : null;
+  }
+  const anchor = job.recurring
+    ? (job.lastFiredAt ?? job.createdAt)
+    : job.createdAt;
+  const key = `${job.id}\x00${job.cronExpr}\x00${job.recurring ? 1 : 0}\x00${anchor}\x00${job.jitterMs}`;
+  const cached = nextDurableFireCache.get(key);
+  if (cached !== undefined) return cached;
+  const result = computeNextFireMs(job.cronExpr, anchor, job.jitterMs);
+  if (nextDurableFireCache.size >= NEXT_DURABLE_FIRE_CACHE_MAX) {
+    nextDurableFireCache.clear();
+  }
+  nextDurableFireCache.set(key, result);
+  return result;
+}

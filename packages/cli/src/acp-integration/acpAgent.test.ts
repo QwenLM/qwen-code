@@ -18845,7 +18845,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         taskKind: 'invalid',
       }),
     ).rejects.toThrow(
-      'taskKind must be "agent", "shell", "monitor", or "workflow"',
+      'taskKind must be "agent", "shell", "monitor", "workflow", or "cron"',
     );
 
     mockConnectionState.resolve();
@@ -19167,6 +19167,82 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     ).resolves.toEqual({ cancelled: true, status: 'cancelled' });
     expect(cancelStarting).toHaveBeenCalledWith('wf-retrying');
     expect(cancel).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('cancels session-scoped cron/wakeup tasks and refuses durable tasks via sessionTaskCancel', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const deleteCron = vi.fn().mockResolvedValue(true);
+    Object.assign(innerConfig, {
+      isCronEnabled: vi.fn().mockReturnValue(true),
+      getCronScheduler: vi.fn().mockReturnValue({
+        list: vi.fn().mockReturnValue([
+          {
+            id: 'session-cron-1',
+            cronExpr: '*/5 * * * *',
+            prompt: 'poll',
+            recurring: true,
+            durable: false,
+            createdAt: 100,
+            expiresAt: Infinity,
+            jitterMs: 0,
+          },
+          {
+            id: 'durable-1',
+            cronExpr: '0 9 * * *',
+            prompt: 'daily',
+            recurring: true,
+            durable: true,
+            createdAt: 100,
+            expiresAt: Infinity,
+            jitterMs: 0,
+          },
+        ]),
+        delete: deleteCron,
+      }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'session-cron-1',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: true });
+    expect(deleteCron).toHaveBeenCalledWith('session-cron-1');
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'durable-1',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: false, reason: 'not_session_scoped' });
+    expect(deleteCron).not.toHaveBeenCalledWith('durable-1');
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionTaskCancel, {
+        sessionId,
+        taskId: 'missing-cron',
+        taskKind: 'cron',
+      }),
+    ).resolves.toEqual({ cancelled: false, reason: 'not_found' });
 
     mockConnectionState.resolve();
     await agentPromise;
