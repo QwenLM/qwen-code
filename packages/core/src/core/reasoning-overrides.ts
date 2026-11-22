@@ -286,8 +286,7 @@ export function validateReasoningCapabilities(
     (toggleOnly &&
       (input.efforts !== undefined || input.defaultEffort !== undefined)) ||
     (!toggleOnly && (!efforts || !defaultEffort)) ||
-    (profile === 'gemini' &&
-      efforts?.some((tier) => tier === 'xhigh' || tier === 'max'))
+    (profile === 'gemini' && efforts?.includes('max'))
   )
     return invalidReasoning(route);
   const result = {
