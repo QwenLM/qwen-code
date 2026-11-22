@@ -19,6 +19,7 @@ import {
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
 import { getBuiltinGeminiReasoning } from './gemini-reasoning.js';
+import { getBuiltinKimiK3Reasoning } from './kimi-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
 import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 import {
@@ -160,7 +161,9 @@ export function validateReasoningCapabilities(
       };
     }
     return (
-      getBuiltinDeepSeekReasoning(route) ?? getBuiltinGeminiReasoning(route)
+      getBuiltinDeepSeekReasoning(route) ??
+      getBuiltinGeminiReasoning(route) ??
+      getBuiltinKimiK3Reasoning(route)
     );
   }
   const input = validateReasoningDeclaration(route, declaration);
@@ -177,7 +180,9 @@ export function validateReasoningCapabilities(
     provider?.models?.find((candidate) => candidate.id === route.model) ??
     provider?.models?.find((candidate) => candidate.id === model)
   )?.capabilities?.reasoning;
-  const inherited = parseModelReasoningCapabilities(known);
+  const inherited = parseModelReasoningCapabilities(
+    known ?? getBuiltinKimiK3Reasoning(route),
+  );
   if (!input.profile && inherited?.toggleOnly) {
     if (input.efforts || input.defaultEffort) return invalidReasoning(route);
     return parseModelReasoningCapabilities({ ...inherited, ...input });

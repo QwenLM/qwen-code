@@ -819,6 +819,41 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('projects Kimi K3 reasoning for a custom OpenAI-compatible route', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'kimi-k3.1-pro' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'kimi-k3.1-pro',
+            baseUrl: 'https://gateway.example.test/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'kimi-k3.1-pro');
+
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'max',
+        options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'max',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
+  });
+
   it.each([
     {
       persisted: 'medium' as const,

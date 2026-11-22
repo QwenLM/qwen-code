@@ -197,6 +197,62 @@ describe('reasoning declarations', () => {
   });
 
   it.each([
+    'kimi-k3',
+    'kimi-k3.1-pro',
+    'k3.1-pro',
+    'k3.1-pro-highspeed',
+    'moonshot/kimi-k3-1-pro-highspeed',
+  ])('infers Kimi K3 capabilities for custom OpenAI route %s', (modelId) => {
+    const target = { ...route, model: modelId };
+    const resolved = resolveReasoningCapabilities(target, undefined);
+    expect(resolved).toMatchObject({
+      profile: 'openai-effort',
+      thinking: true,
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'max',
+      canDisable: false,
+      disableField: 'reasoning_effort',
+    });
+    expect(
+      getEffectiveReasoning(
+        { ...target, reasoning: { effort: 'xhigh' } },
+        resolved,
+      ),
+    ).toEqual({ effort: 'max' });
+  });
+
+  it.each([
+    { ...route, model: 'kimi-k2.7-code' },
+    {
+      ...route,
+      model: 'kimi-k3.1-pro',
+      authType: AuthType.USE_ANTHROPIC,
+    },
+    {
+      ...route,
+      model: 'kimi-k3.1-pro',
+      authType: AuthType.USE_OPENAI_RESPONSES,
+    },
+  ])('does not infer Kimi K3 capabilities for %j', (target) => {
+    expect(resolveReasoningCapabilities(target, undefined)).toBeUndefined();
+  });
+
+  it('inherits Kimi K3 wire behavior in a partial declaration', () => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'kimi-k3.1-pro' },
+        { defaultEffort: 'high' },
+      ),
+    ).toMatchObject({
+      profile: 'openai-effort',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+      canDisable: false,
+      disableField: 'reasoning_effort',
+    });
+  });
+
+  it.each([
     ['https://api.deepseek.com/v1', 'deepseek-flash', 'low', 'low'],
     ['https://api.deepseek.com/v1', 'deepseek-flash', 'xhigh', 'high'],
     [
