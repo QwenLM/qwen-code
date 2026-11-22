@@ -1074,16 +1074,26 @@ describe('ToolCallEmitter', () => {
       ToolNames.LS,
       ToolNames.GREP,
       ToolNames.GLOB,
+      ToolNames.SHELL,
     ])('reports machine framing for %s', (toolName) => {
       expect(emitter.isMachineTitleTool(toolName)).toBe(true);
     });
 
-    it.each(['run_shell_command', 'agent', 'todo_write', ''])(
+    it.each(['agent', 'todo_write', ''])(
       'leaves %s to the display fallback',
       (toolName) => {
         expect(emitter.isMachineTitleTool(toolName)).toBe(false);
       },
     );
+
+    it('leaves a shell title carrying model prose to the display fallback', () => {
+      expect(
+        emitter.isMachineTitleTool(ToolNames.SHELL, {
+          command: 'npm test',
+          description: 'شغّل الاختبارات',
+        }),
+      ).toBe(false);
+    });
   });
 
   describe('resolveToolMetadata', () => {
@@ -1136,6 +1146,48 @@ describe('ToolCallEmitter', () => {
         );
       },
     );
+
+    it('stamps machine text for a shell description core decorated', async () => {
+      // core appends ` [timeout: …ms]`, ` [in …]` and ` [background]` to the
+      // command, and the approval card shows that whole title, so the producer
+      // must own its provenance rather than the browser re-deriving it.
+      const mockTool = createMockTool({ displayName: 'Shell' });
+      vi.mocked(mockTool.build).mockReturnValue({
+        getDescription: () => 'npm test [timeout: 60000ms]',
+        toolLocations: () => [],
+      } as unknown as AnyToolInvocation);
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      await emitter.emitStart({
+        toolName: ToolNames.SHELL,
+        callId: 'shell-decorated',
+        args: { command: 'npm test', timeout: 60000 },
+      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Shell: npm test [timeout: 60000ms]',
+          _meta: expect.objectContaining({ titleIsMachine: true }),
+        }),
+      );
+    });
+
+    it('leaves a shell title carrying model prose to the prose path', async () => {
+      const mockTool = createMockTool({ displayName: 'Shell' });
+      vi.mocked(mockTool.build).mockReturnValue({
+        getDescription: () => 'npm test (شغّل الاختبارات)',
+        toolLocations: () => [],
+      } as unknown as AnyToolInvocation);
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+      await emitter.emitStart({
+        toolName: ToolNames.SHELL,
+        callId: 'shell-prose',
+        args: { command: 'npm test', description: 'شغّل الاختبارات' },
+      });
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          _meta: expect.objectContaining({ titleIsMachine: false }),
+        }),
+      );
+    });
 
     it('marks a failed built-in invocation’s explicit replacement as prose', async () => {
       const mockTool = createMockTool({ displayName: 'Edit' });

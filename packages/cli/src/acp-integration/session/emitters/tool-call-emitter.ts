@@ -41,8 +41,9 @@ import { associateAcpToolResultArtifact } from '../../../nonInteractive/tool-res
 
 const debugLogger = createDebugLogger('TOOL_CALL_EMITTER');
 
-// These built-in descriptions render paths/patterns with machine framing,
-// not authored prose. Other tool titles keep the legacy display fallback.
+// These built-in descriptions render paths/patterns/commands with machine
+// framing, not authored prose. Other tool titles keep the legacy display
+// fallback.
 const MACHINE_TITLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.READ_FILE,
   ToolNames.WRITE_FILE,
@@ -50,6 +51,7 @@ const MACHINE_TITLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.LS,
   ToolNames.GREP,
   ToolNames.GLOB,
+  ToolNames.SHELL,
 ]);
 
 const KIND_MAP: Record<Kind, ToolKind> = {
@@ -492,7 +494,9 @@ export class ToolCallEmitter extends BaseEmitter {
         }));
         // Pass tool name to handle special cases like exit_plan_mode -> switch_mode
         kind = this.mapToolKind(tool.kind, toolName);
-        if (MACHINE_TITLE_TOOLS.has(toolName)) titleIsMachine = true;
+        if (MACHINE_TITLE_TOOLS.has(toolName)) {
+          titleIsMachine = this.isMachineTitleTool(toolName, args);
+        }
       } catch {
         // Fallback: use the description arg directly if available
         if (typeof args['description'] === 'string') {
@@ -513,8 +517,16 @@ export class ToolCallEmitter extends BaseEmitter {
     };
   }
 
-  isMachineTitleTool(toolName: string): boolean {
-    return MACHINE_TITLE_TOOLS.has(toolName);
+  isMachineTitleTool(
+    toolName: string,
+    args?: Record<string, unknown>,
+  ): boolean {
+    // core appends the model's own prose to a shell description, so that title
+    // is not machine text even though the command it decorates is.
+    return (
+      MACHINE_TITLE_TOOLS.has(toolName) &&
+      !(toolName === ToolNames.SHELL && args?.['description'])
+    );
   }
 
   /**

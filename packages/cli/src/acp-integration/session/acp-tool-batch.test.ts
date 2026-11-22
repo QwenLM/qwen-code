@@ -24,6 +24,13 @@ import {
   runAcpToolBatch,
   type AcpToolBatchHost,
 } from './acp-tool-batch.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
+
+// The emitter's own predicate: a hand-listed copy would only pin the mock.
+const machineTitleEmitter = new ToolCallEmitter({
+  sessionId: 'session',
+  sendUpdate: vi.fn(),
+});
 
 type SchedulerOptions = {
   onToolCallsUpdate: (calls: unknown[]) => void;
@@ -87,6 +94,24 @@ const invocation = {
   getDescription: () => 'Writing to a.txt',
   toolLocations: () => [],
 };
+const shell: ToolCallRequestInfo = {
+  callId: 'call_shell',
+  name: 'run_shell_command',
+  args: { command: 'npm test', timeout: 60000 },
+  isClientInitiated: false,
+  prompt_id: 'prompt',
+};
+const shellInvocation = {
+  getDescription: () => 'npm test [timeout: 60000ms]',
+  toolLocations: () => [],
+};
+const execDetails = (onConfirm = vi.fn().mockResolvedValue(undefined)) => ({
+  type: 'exec' as const,
+  title: 'Shell',
+  command: 'npm test',
+  rootCommand: 'npm',
+  onConfirm,
+});
 const editDetails = (onConfirm = vi.fn().mockResolvedValue(undefined)) => ({
   type: 'edit' as const,
   title: 'Edit',
@@ -180,15 +205,8 @@ describe('runAcpToolBatch', () => {
         emitError: record('error'),
         emitLifecycle: record('lifecycle'),
         mapToolKind: () => 'edit',
-        isMachineTitleTool: (name: string) =>
-          [
-            'read_file',
-            'write_file',
-            'edit',
-            'list_directory',
-            'grep_search',
-            'glob',
-          ].includes(name),
+        isMachineTitleTool: (name: string, args?: Record<string, unknown>) =>
+          machineTitleEmitter.isMachineTitleTool(name, args),
       },
       messageEmitter: { emitAgentMessage: record('message') },
       sendUpdate: record('update'),
@@ -535,6 +553,78 @@ describe('runAcpToolBatch', () => {
         answers: undefined,
       },
     );
+  });
+
+  it('stamps machine provenance on a decorated shell approval', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    batch.run = async () => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: shell,
+          tool: { kind: 'execute' },
+          invocation: shellInvocation,
+          confirmationDetails: execDetails(onConfirm),
+        },
+      ]);
+      await vi.waitFor(() => expect(onConfirm).toHaveBeenCalled());
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [shell],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    expect(log[0]).toEqual([
+      'permission',
+      expect.objectContaining({
+        toolCall: expect.objectContaining({
+          toolCallId: 'call_shell',
+          title: 'npm test [timeout: 60000ms]',
+          _meta: expect.objectContaining({
+            toolName: 'run_shell_command',
+            titleIsMachine: true,
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  it('leaves a shell approval carrying model prose without machine provenance', async () => {
+    const proseShell: ToolCallRequestInfo = {
+      ...shell,
+      args: { command: 'npm test', description: 'شغّل الاختبارات' },
+    };
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    batch.run = async () => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: proseShell,
+          tool: { kind: 'execute' },
+          invocation: {
+            getDescription: () => 'npm test (شغّل الاختبارات)',
+            toolLocations: () => [],
+          },
+          confirmationDetails: execDetails(onConfirm),
+        },
+      ]);
+      await vi.waitFor(() => expect(onConfirm).toHaveBeenCalled());
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [proseShell],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    const [, request] = log[0] as [string, { toolCall: { _meta: object } }];
+    expect(request.toolCall._meta).not.toHaveProperty('titleIsMachine');
   });
 
   it('stops the rest of the batch when the user cancels an approval', async () => {

@@ -19469,7 +19469,7 @@ export class Session implements SessionContext {
                   // frame already ships _meta.toolName; mirror it here.
                   _meta: {
                     toolName,
-                    ...(this.toolCallEmitter.isMachineTitleTool(toolName)
+                    ...(this.toolCallEmitter.isMachineTitleTool(toolName, args)
                       ? { titleIsMachine: true }
                       : {}),
                     ...interactionMetaFields(confirmationDetails),

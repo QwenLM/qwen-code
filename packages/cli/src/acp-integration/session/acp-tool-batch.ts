@@ -298,7 +298,10 @@ export async function runAcpToolBatch(
         rawInput: request.args,
         _meta: {
           toolName: request.name,
-          ...(host.toolCallEmitter.isMachineTitleTool(request.name)
+          ...(host.toolCallEmitter.isMachineTitleTool(
+            request.name,
+            request.args,
+          )
             ? { titleIsMachine: true }
             : {}),
           ...interactionMetaFields(details),

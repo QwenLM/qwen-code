@@ -2369,6 +2369,29 @@ describe('ToolApproval RTL description isolation', () => {
     );
   });
 
+  it('isolates a decorated shell command the producer stamped as machine text', () => {
+    // core decorates the command with ` [timeout: …ms]` / ` [in …]` /
+    // ` [background]`; the card shows that whole title, so the provenance the
+    // producer stamps must isolate it rather than the browser re-deriving it.
+    render(
+      undefined,
+      {
+        ...request,
+        toolName: 'run_shell_command',
+        title: 'npm test [timeout: 60000ms]',
+        titleIsMachine: true,
+        rawInput: { command: 'npm test', timeout: 60000 },
+      },
+      [],
+      'ar',
+    );
+    container!.dir = 'rtl';
+    const desc = container!.querySelector(`.${styles.desc}`)!;
+    expect(desc.querySelector('bdi[dir="ltr"]')?.textContent).toBe(
+      'npm test [timeout: 60000ms]',
+    );
+  });
+
   it('keeps the description unisolated when the producer says it is prose', () => {
     render(
       undefined,
