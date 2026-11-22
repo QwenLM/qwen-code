@@ -603,7 +603,7 @@ public class JdbcManagedActionStore
                                     + " operation_id = ?",
                             now, now, tenantId, sessionId,
                             existing.operationId());
-                    AgentTurnExecution.unparkActionTurns(jdbc, tenantId, sessionId, now);
+                    AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
                     return new OperationAdmission(
                             sessions.findOperation(tenantId, sessionId,
                                     existing.operationId()).orElseThrow(),
@@ -737,7 +737,7 @@ public class JdbcManagedActionStore
                 ManagedSchemaKeys.receiptKey(ReceiptNamespace.ACTION_DECISION, tenantId, ReceiptScope.SESSION, actionScope, actionId),
                 ManagedSchemaKeys.key(tenantId), tenantId, actionScope, actionScope, actionId, ManagedSchemaKeys.key(actionId), decision,
                 sessionId, actionId, o.path("inputRevision").asLong(), operationKey, now, now);
-        AgentTurnExecution.unparkActionTurns(jdbc, tenantId, sessionId, now);
+        AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
 
         return new OperationAdmission(
                 sessions.findOperation(tenantId, sessionId, op).orElseThrow(), false);

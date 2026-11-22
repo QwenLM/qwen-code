@@ -76,6 +76,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final AgentLifecycleOperations lifecycleOperations;
     private final AgentSessionAdmissions sessionAdmissions;
     private final AgentTurnExecution turnExecution;
+    private final AgentActionParking actionParking;
     private final AgentExecutionOperations executionOperations;
 
     public ManagedAgentStore(JdbcTemplate jdbc, ObjectMapper objectMapper, Clock clock,
@@ -151,6 +152,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.lifecycleOperations = new AgentLifecycleOperations(eventJournal, sessionCommands, sessionPolicies, sessionQueries, storeRows, jdbc, lifecycle, objectMapper, clock, workspaces, workspaceFilesEnabled, lifecycleHandoffMillis);
         this.sessionAdmissions = new AgentSessionAdmissions(eventJournal, sessionCommands, sessionPolicies, storeRows, configRecords, jdbc, clock, approvalMode, workspaces, agentRevision, modelCatalog, definitions, creationSkills, sessionWorktrees, extensionPackages, workspaceFilesEnabled, workspaceShellEnabled, workspaceChildAgentsEnabled, managedExtensionExecutionEnabled, workspaceMounts, createdRoots, modelConfigs);
         this.turnExecution = new AgentTurnExecution(eventJournal, messageProjection, sessionCommands, storeRows, jdbc, objectMapper, clock, journalPacks);
+        this.actionParking = new AgentActionParking(storeRows, jdbc, clock);
         this.executionOperations = new AgentExecutionOperations(eventJournal, lifecycleOperations, sessionPolicies, sessionQueries, storeRows, worktreeFiles, jdbc, clock, workspaces, workspaceFilesEnabled, journalPacks);
     }
 
@@ -901,7 +903,7 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public boolean parkTurnForAction(String tenantId, String sessionId,
             String turnId, String owner) {
-        return turnExecution.parkTurnForAction(tenantId, sessionId, turnId, owner);
+        return actionParking.parkTurnForAction(tenantId, sessionId, turnId, owner);
     }
 
     @Override
