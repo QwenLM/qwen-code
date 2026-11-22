@@ -103,10 +103,12 @@ claim to mirror the gate's full trigger:
    battery, reading that container's own `$HOME/.qwen-verify-nonce`. The
    offline battery runs in a different container than the seed/gate, so it
    cannot read the gate container's plaintext and cannot mint
-   `mode:"container"`. Per the skill's step 5, a round whose battery cannot run
-   in the gate container declares `mode:"waived"` with the maintainer's
-   approval — a gate-container attestation is not a substitute for the
-   battery's own boundary (R3-6).
+   `mode:"container"`. Per the skill's step 5, when the battery cannot run in
+   the gate container, stop rather than declaring a waiver by hand: release
+   any in-flight registration and re-run prepare with `--execution host` and
+   its approval arguments before any seed, model turn or battery executes PR
+   code. A gate-container attestation is not a substitute for the battery's
+   own boundary (R3-6).
 2. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
    lifecycle, so any plugin execution the PR binds to `compile` or `test`
@@ -230,24 +232,34 @@ claim to mirror the gate's full trigger:
    round never receives the Docker socket — that would hand untrusted PR
    code host-root while `--require-isolation` still exits 0 (the gate
    inspects environment and credential signals, not sockets).
-4. **Declaration.** The operator writes the declaration after the gate
-   passes — the same operator-owned rule as the JS recipe, not the round
-   itself. The gate run (`--require-isolation --artifact-dir <round-dir>`)
-   writes the `boundary-gate.json` record in the seed container. Because the
-   offline battery runs in a _separate_ container that cannot read the seed
+4. **Declaration.** The gate run
+   (`--require-isolation --artifact-dir <round-dir>`) still writes the
+   `boundary-gate.json` record in the seed container. Because the offline
+   battery runs in a _separate_ container that cannot read the seed
    container's `$HOME/.qwen-verify-nonce`, it cannot echo a `container-nonce:`
-   line hashing to the gate record's `nonceSha256` (step 1), so the round
-   declares `mode:"waived"` with the maintainer's approval — not
-   `mode:"container"` (R4-2). The declaration carries `by` (the maintainer),
-   `reason`, and an `approval` permalink, and names **every** container the
-   round uses in `detail` — including the seed container, the only one with
-   outbound egress and the one in which PR-authored Maven plugins execute: the
-   seed container (mirror-only egress), the offline battery container, and,
-   when the round uses a model, the proxy-connected container that runs the
-   model turns, each with its image and network policy, e.g.
-   `{"mode":"waived","by":"<maintainer>","reason":"Java battery runs in a separate offline container that cannot echo the seed gate's nonce","approval":"https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>","detail":"seed: maven:3.9.11-eclipse-temurin-21, mirror-only egress; battery: same image, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free"}`.
-   A round with no model turns names the seed and battery containers; the
-   declaration is incomplete if it omits the seed.
+   line hashing to the gate record's `nonceSha256` (step 1), so this round
+   cannot declare `mode:"container"` (R4-2). Instead, before any seed, model
+   turn or battery executes PR code, run prepare with `--execution host`,
+   `--round <n>`, `--reason <text>`, `--context-out <host snapshot>` and the
+   applicable explicit approval path; prepare authors `boundary.json`. Never
+   hand-write a waiver after the gate or battery.
+
+   The prepare `--reason` names **every** container the round uses — including
+   the seed container, the only one with outbound egress and the one in which
+   PR-authored Maven plugins execute: the seed container (mirror-only egress),
+   the offline battery container, and, when the round uses a model, the
+   proxy-connected container that runs the model turns, each with its image
+   and network policy. For example:
+
+   ```text
+   --reason 'Java battery cannot echo the seed gate nonce; seed: maven:3.9.11-eclipse-temurin-21, mirror-only egress; battery: same image, --network none, offline m2; model turns: node:22-bookworm via host proxy; credential-free'
+   ```
+
+   A round with no model turns names the seed and battery containers. Do not
+   add a separate `detail` field or otherwise edit prepare's artifact
+   declaration: publication
+   deep-compares it with the host-held `executionApproval`, whose schema has
+   no such field.
 
 ## Design decisions and rationale
 
@@ -375,8 +387,8 @@ claim to mirror the gate's full trigger:
 - A Java round can complete without any host execution of PR code, and its
   report's `**Boundary.**` line names every container the round used, each
   with its image and network policy.
-- The waiver path remains available and recorded for rounds that cannot use
-  the recipe (e.g. a database-dependent repro).
+- The prepare-authored waiver path remains available and recorded for rounds
+  that cannot use the recipe (e.g. a database-dependent repro).
 
 ## Open questions
 

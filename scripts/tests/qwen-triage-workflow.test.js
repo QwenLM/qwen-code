@@ -6827,7 +6827,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'no `--artifact-dir`, because prepare has not printed the directory yet',
     );
     expect(manualSlice).toContain(
-      'a release alone leaves the head unregistered',
+      'A release alone leaves the head unregistered',
     );
     expect(manualSlice).toContain(
       'Do not `git checkout` the named head under the old marker',
@@ -6839,18 +6839,22 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`',
     );
-    // R1-1 (round 2): the manual recovery also pairs release with a restart.
+    // R1-11: the manual ladder has the same same-round approval reuse and
+    // fresh-marker requirement for r+1 as the watch prompt.
     expect(manualSlice).toContain(
-      'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+      'After the release, restart at the SAME `<r>` (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`) and retry prepare',
     );
-    // Deferred (round 7): a transient prepare failure leaves the marker intact —
-    // retry-without-release recovers `H`; release+restart is for a dead round.
     expect(manualSlice).toContain(
-      'retrying prepare against it and completing at the original round recovers `H` with no release',
+      'To restart at `<r+1>` instead, first ask the maintainer for a fresh comment marker at `<r+1>` when using `--approval`',
     );
-    // R3-2: the restarted round's number becomes this round's number.
     expect(manualSlice).toContain(
-      "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
+      'prepare reads the watch state only to validate an `--approval` registration',
+    );
+    expect(manualSlice).toContain(
+      'retrying prepare at the original round and completing there recovers `H` with no release',
+    );
+    expect(manualSlice).toContain(
+      "The restarted round's number (`<r>` for the same approval, or `<r+1>` with a fresh one) becomes this round's number — repeat that value in `--complete`",
     );
     // R3-1: the manual inconclusive-recovery prohibition (colon variant).
     expect(manualSlice).toContain(
@@ -7100,27 +7104,36 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`',
     );
-    // R1-1 (round 2): the recovery pairs the release with a restart — a
-    // release alone files only a push-order hint and leaves the head
-    // unregistered. Removing the restart clause reds this pin.
+    // R1-11: a release/restart keeps a comment approval only when the new
+    // registration uses the SAME round; r+1 needs a fresh marker as well.
     expect(flat).toContain(
-      'then start the head again (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`) and retry prepare',
+      'then start the head again at the SAME round (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`) and retry prepare',
     );
-    // Deferred (round 7): a transient prepare failure leaves the marker intact
-    // (prepare never reads the watch state) — retry-without-release recovers the
-    // head with no unregistered window; release+restart is for a dead round.
     expect(promptSlice).toContain(
-      'retrying prepare against it and completing at the original round recovers the head with no release',
+      'To restart at `<r+1>` instead, ask the maintainer for a fresh approval marker at `<r+1>` before retrying prepare',
+    );
+    // Prepare reads watch state only for --approval identity validation.
+    expect(promptSlice).toContain(
+      'prepare reads the watch state only to validate an `--approval` registration',
+    );
+    expect(promptSlice).toContain(
+      'retrying prepare at the original round and completing there recovers the head with no release',
     );
     // R4-2: these sentences exist verbatim in both sections — pin the prompt's
     // own copy so deleting it reds this block while the manual stays green.
     expect(promptSlice).toContain(
-      'a release alone leaves the head unregistered',
+      'A release alone leaves the head unregistered',
     );
-    // R3-2: the restarted round's number becomes this round's number; the
-    // completion must repeat <r+1>, not the original <r>.
+    // Completion repeats the restart's actual round, whether the approval was
+    // reused at r or re-issued at r+1.
     expect(promptSlice).toContain(
-      "The restarted round's number (`<r+1>`) becomes this round's number — repeat that value in `--complete`",
+      "The restarted round's number (`<r>` for the same approval, or `<r+1>` with a fresh one) becomes this round's number — repeat that value in `--complete`",
+    );
+    expect(flat.match(/A comment-backed approval is bound to/g)).toHaveLength(
+      2,
+    );
+    expect(flat.match(/prepare reads the watch state only to/g)).toHaveLength(
+      2,
     );
     expect(promptSlice).toContain(
       'Do not `git checkout` the named head under the old marker',
@@ -7335,10 +7348,13 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('The boundary is a declaration, not a vibe');
     expect(flat).toContain('`boundary.json` must be in the artifact directory');
     expect(flat).toContain('the checker refuses a round without it');
-    // The boundary's operator owns the declaration, not the inner round —
-    // container, CI lane, and VM alike.
-    expect(flat).toContain("the boundary's operator writes it");
-    expect(flat).toContain("the VM's operator for a VM boundary");
+    // Prepare authors host/VM declarations before execution; an operator
+    // authors only the container/lane declaration in its documented step.
+    expect(flat).toContain('**prepare** writes the approved declaration');
+    expect(flat).toContain('the round never hand-writes it');
+    expect(flat).toContain(
+      "the boundary's operator writes the container declaration",
+    );
     // R16-4: the VM path runs no --require-isolation gate (no observed
     // marker exists to pass, and mode:"vm" needs no gate record); the
     // scratch HOME protects the round itself, and the home/env gate checks
@@ -7354,7 +7370,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'a VM boundary takes the same trusted copy but runs **no `--require-isolation` gate**',
     );
     expect(flat).toContain(
-      'there is no in-boundary gate command and no `boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above',
+      'there is no in-boundary gate command and no `boundary-gate.json` to produce. Select `--execution vm` and its approval arguments in prepare before the battery; prepare writes the declaration. Never hand-write it afterward.',
     );
     expect(flat).toContain(
       'The VM round still runs under a **scratch `HOME`**',
@@ -7418,6 +7434,15 @@ describe('qwen-triage verify hardening round 2', () => {
     // own and same-repository local trust deliberately needs no public URL.
     expect(flat).toContain('**they**, never the round, post the PR comment');
     expect(flat).toContain('verify-pr-boundary-approval:');
+    expect(flat).toContain(
+      'node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"',
+    );
+    expect(flat).toContain(
+      "--attestation 'nothing mounted, no host credentials'",
+    );
+    expect(flat).not.toContain(
+      "--attestation '<nothing mounted, no host credentials>'",
+    );
     expect(flat).not.toContain('or the round, under the local publish path');
     // The trusted snapshot remains external to the PR-writable artifact
     // context; its deep-equal record and digest back the waiver at publication.

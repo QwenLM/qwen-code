@@ -24,6 +24,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   completeRound,
   duplicateHead,
+  hasInFlightRegistration,
   readState,
   releaseRound,
   sameCommit,
@@ -1397,6 +1398,47 @@ describe('readState', () => {
     expect(res.status).toBe(1);
     expect(res.stderr).toMatch(/no state-bearing entry/);
     expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(body);
+  });
+});
+
+describe('hasInFlightRegistration', () => {
+  it('uses normalized legacy entries, commit prefixes and exact current rounds', () => {
+    expect(
+      hasInFlightRegistration(
+        { inFlightHeads: [{ head: HEAD.slice(0, 12), round: 2 }] },
+        HEAD,
+        2,
+      ),
+    ).toBe(true);
+    expect(
+      hasInFlightRegistration({ inFlightHead: HEAD, round: 2 }, HEAD, 2),
+    ).toBe(true);
+    expect(
+      hasInFlightRegistration(
+        { inFlightHeads: [{ head: HEAD, round: 1 }] },
+        HEAD,
+        2,
+      ),
+    ).toBe(false);
+    expect(
+      hasInFlightRegistration(
+        { inFlightHeads: [{ head: HEAD, round: 2 }] },
+        PREV,
+        2,
+      ),
+    ).toBe(false);
+    expect(
+      hasInFlightRegistration(
+        {
+          inFlightHeads: [
+            { head: HEAD, round: 2 },
+            { head: PREV, round: 2 },
+          ],
+        },
+        HEAD,
+        2,
+      ),
+    ).toBe(false);
   });
 });
 

@@ -495,12 +495,12 @@ export function containerNonceErrors(boundaryText, gateText, roundDir) {
     if (found) return [];
     if (bounded) {
       return [
-        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if execution must move to a host or VM, stop, release any in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
       ];
     }
   }
   return [
-    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if the battery ran on the host, declare mode:"waived" with the maintainer\'s approval (a waiver is not a free bypass)',
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if execution must move to a host or VM, stop, release any in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
   ];
 }
 
@@ -545,7 +545,7 @@ export function checkBoundary(
   if (text === null || text === undefined || text.trim() === '') {
     return {
       errors: [
-        'boundary.json is missing: every round declares where the untrusted PR code ran — {"mode":"container","detail":…} once the isolation gate passes, or {"mode":"waived","by":…,"approval":…,"reason":…} for a host round the maintainer explicitly approved',
+        'boundary.json is missing: every round declares where the untrusted PR code ran — for a container, write {"mode":"container","detail":…} only after the isolation gate passes; for host/VM execution, stop, release any in-flight registration and re-run prepare with --execution host|vm and its approval arguments before the battery instead of hand-writing a declaration',
       ],
     };
   }

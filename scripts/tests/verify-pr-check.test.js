@@ -1777,18 +1777,18 @@ describe('executionApproval host binding', () => {
       approval: APPROVAL,
       reason: 'why',
     };
-    expect(executionApprovalErrors(JSON.stringify(legacy), null)).toMatchObject(
-      [/host-held --context/],
-    );
+    expect(executionApprovalErrors(JSON.stringify(legacy), null)).toEqual([
+      expect.stringMatching(/host-held --context/),
+    ]);
     expect(
       executionApprovalErrors(JSON.stringify(legacy), snapshot(null), {
         contextProvided: true,
         contextDigestVerified: false,
       }),
-    ).toMatchObject([/--context-sha256/]);
+    ).toEqual([expect.stringMatching(/--context-sha256/)]);
     expect(
       executionApprovalErrors(JSON.stringify(legacy), snapshot(null), verified),
-    ).toMatchObject([/no executionApproval object/]);
+    ).toEqual([expect.stringMatching(/no executionApproval object/)]);
   });
 
   it('rejects declaration tampering and a moved head', () => {
@@ -1800,14 +1800,16 @@ describe('executionApproval host binding', () => {
         context,
         verified,
       ),
-    ).toMatchObject([/differs from the host-held executionApproval/]);
+    ).toEqual([
+      expect.stringMatching(/differs from the host-held executionApproval/),
+    ]);
     expect(
       executionApprovalErrors(
         JSON.stringify(original),
         { ...context, headRefOid: 'c'.repeat(40) },
         verified,
       ),
-    ).toMatchObject([/mode\/head does not match/]);
+    ).toEqual([expect.stringMatching(/mode\/head does not match/)]);
   });
 
   it('rejects local trust by another fork even when artifact and record agree', () => {
@@ -1815,7 +1817,9 @@ describe('executionApproval host binding', () => {
     const forged = { ...snapshot(local), author: { login: 'someone-else' } };
     expect(
       executionApprovalErrors(JSON.stringify(local), forged, verified),
-    ).toMatchObject([/local-trust executionApproval does not match/]);
+    ).toEqual([
+      expect.stringMatching(/local-trust executionApproval does not match/),
+    ]);
   });
 
   it('validates the comment record instead of only comparing JSON', () => {
@@ -1827,7 +1831,7 @@ describe('executionApproval host binding', () => {
     ]) {
       expect(
         executionApprovalErrors(JSON.stringify(bad), snapshot(bad), verified),
-      ).toMatchObject([/comment executionApproval needs/]);
+      ).toEqual([expect.stringMatching(/comment executionApproval needs/)]);
     }
     const malformed = localTrustApproval({ round: 0 });
     expect(
@@ -1836,7 +1840,7 @@ describe('executionApproval host binding', () => {
         snapshot(malformed),
         verified,
       ),
-    ).toMatchObject([/valid round and permission/]);
+    ).toEqual([expect.stringMatching(/valid round and permission/)]);
   });
 
   it('does not add host requirements to container declarations', () => {
@@ -2828,9 +2832,12 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
       join(dir, 'harness.log'),
       'x'.repeat(65 * 1024 * 1024) + `\ncontainer-nonce: ${NONCE}\n`,
     );
-    expect(containerNonceErrors(boundary, gateWith(), dir).join('\n')).toMatch(
-      /hit its resource bound/,
-    );
+    const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
+    expect(message).toMatch(/hit its resource bound/);
+    expect(message).toMatch(/--execution host\|vm/);
+    expect(message).toMatch(/BEFORE the battery/);
+    expect(message).toMatch(/never hand-write the declaration/);
+    expect(message).not.toMatch(/declare mode:"waived"/);
   });
 
   // R4-4: directories count against the entry cap, so a planted forest of empty
@@ -2918,11 +2925,13 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
     );
   });
 
-  it('names maintainer approval for a waiver, not a free bypass (D17-2)', () => {
+  it('names prepare-authored host/VM approval before the battery (D17-2)', () => {
     const dir = dirWithLog(null);
     const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
-    expect(message).toMatch(/maintainer's approval/);
-    expect(message).toMatch(/not a free bypass/);
+    expect(message).toMatch(/release any in-flight registration/);
+    expect(message).toMatch(/--execution host\|vm/);
+    expect(message).toMatch(/BEFORE the battery/);
+    expect(message).toMatch(/never hand-write the declaration/);
   });
 
   it('exempts the ci-lane record and non-container modes', () => {
@@ -3274,6 +3283,42 @@ describe('R17-1 / R2-1 trust-boundary witnesses', () => {
         dir,
       ]);
       expect(res.status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a genuine host-held approval without a context digest through the CLI',
+    () => {
+      const { base, clone, dir } = cloneLayout('verify-pr-approval-digest-');
+      const approval = localTrustApproval();
+      writeFileSync(join(dir, 'boundary.json'), JSON.stringify(approval));
+      const host = join(base, 'genuine-host-approval.json');
+      const trustedText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 7,
+        headRefOid: HEAD,
+        author: { login: 'maintainer' },
+        isCrossRepository: true,
+        executionApproval: approval,
+      });
+      writeFileSync(host, trustedText);
+
+      const noDigest = run(['--context', host, '--context-root', clone, dir]);
+      expect(noDigest.status).toBe(1);
+      expect(noDigest.stdout).toMatch(
+        /boundary\.json mode waived needs --context-sha256 matching the host snapshot's bytes/,
+      );
+
+      const control = run([
+        '--context',
+        host,
+        '--context-sha256',
+        sha256(trustedText),
+        '--context-root',
+        clone,
+        dir,
+      ]);
+      expect(control.status).toBe(0);
     },
   );
 

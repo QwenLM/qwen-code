@@ -182,10 +182,14 @@ trigger the sandboxed `@qwen-code /verify` lane instead.
 
 **The boundary is a declaration, not a vibe.** Whatever the answer,
 `boundary.json` must be in the artifact directory — the checker refuses a
-round without it. On a waived host run the round writes it before any PR
-code runs; otherwise the boundary's operator writes it: the recipe's host
-check step for a container, the CI publish job for the lane, and the VM's
-operator for a VM boundary. A `mode:"container"` declaration must also be
+round without it. For a waived host run or an attested VM, **prepare** writes
+the approved declaration before any PR code runs; the round never hand-writes
+it. If a container battery cannot run, stop, release any in-flight
+registration and re-run prepare with `--execution host|vm` and its approval
+arguments before the battery; never convert the round by hand-writing a
+legacy waiver afterward. Otherwise the boundary's operator writes the
+container declaration in the recipe's host check step, and the CI publish job
+writes the lane declaration. A `mode:"container"` declaration must also be
 backed by `boundary-gate.json` — the record a passing
 `--require-isolation --artifact-dir <round-dir>` gate run writes. The
 record lives in the PR-writable artifact tree and `--publish-lane` is an
@@ -229,7 +233,7 @@ requirement. The shapes:
 - On an attested VM or a waived host: select `--execution vm` or
   `--execution host` and give prepare exactly one approval path, plus
   `--round <n>`, `--reason <text>` and `--context-out <fresh host snapshot>`.
-  VM also needs `--attestation '<nothing mounted, no host credentials>'`.
+  VM also needs `--attestation 'nothing mounted, no host credentials'`.
   A fresh **local-trust** round without a marker uses round 1; each new
   invocation includes the explicit trust flag. A comment approval must use
   the trusted watch registration below, including for a fresh round. Prepare
@@ -249,9 +253,14 @@ requirement. The shapes:
   branch name or origin looks familiar, never infer it just from authorship,
   and never let an unattended watch apply it to unknown future heads.
 - **Approval comment for any other fork:** first register an unused positive
-  round with `verify-pr-watch-state --start --head <40hex> --round <r> --repo
-<owner>/<repo> --state-root "<trusted-dir>"`, even on a fresh round. A
-  first local registration may use round 1; later executions need their own
+  round, even on a fresh round:
+
+  ```text
+  node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"
+  ```
+
+  Registration stays outside the PR clone and precedes any PR-code execution.
+  A first local registration may use round 1; later executions need their own
   allocated round, not the old round just because no marker is currently in
   flight. Then ask once, in words. If the maintainer approves this exact
   execution, **they**, never the round, post the PR comment. It carries
@@ -347,8 +356,10 @@ Docker recipe below mounts that copy at
 `/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary takes the same trusted
 copy but runs **no `--require-isolation` gate** (a VM carries no observed
 container marker), so there is no in-boundary gate command and no
-`boundary-gate.json` to produce — declare `mode:"vm"` per the VM bullet above.
-A container marker alone does not pass: the CLI's own Docker/Podman launcher mounts
+`boundary-gate.json` to produce. Select `--execution vm` and its approval
+arguments in prepare before the battery; prepare writes the declaration.
+Never hand-write it afterward. A container marker alone does not pass: the
+CLI's own Docker/Podman launcher mounts
 `~/.config/gcloud`, the ADC file and every model API key it can see, so the
 check also requires `QWEN_VERIFY_CREDENTIAL_FREE=1` — set it only after
 confirming the boundary mounts nothing — and refuses when a known credential
@@ -619,9 +630,10 @@ authority to certify the round.
    `mode:"container"` declaration to execution inside this container — a
    battery run on the host cannot read the container-local nonce, and the
    record's hash does not reveal it. If the battery cannot run in this
-   container (e.g. a Java-heavy
-   round whose image carries no JDK), do NOT declare `mode:"container"`:
-   declare `mode:"waived"` with the maintainer's approval instead.
+   container (e.g. a Java-heavy round whose image carries no JDK), stop: do
+   NOT declare `mode:"container"`, and do not hand-write a waiver. Release
+   any in-flight registration, then re-run prepare with `--execution host|vm`
+   and its approval arguments **before** the battery.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -829,21 +841,26 @@ refuses, compare the head it names (the "not PR head …" in its refusal) with
 `<headSha>` — a differing head is the moved-head case below, not a transient
 failure. If prepare fails after `--start`, recover with
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`,
-then start the head again
-(`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r+1> --repo <owner>/<repo>`)
-and retry prepare — a release alone leaves the head unregistered (it files only
-a push-order hint, not a deferral) and no probe fire will deliver it again.
-A transient prepare failure (the round still runs) leaves the marker intact —
-prepare never reads the watch state — so retrying prepare against it and
-completing at the original round recovers the head with no release; the
-release + restart is for a round that died, and a kill between its two commands
-would re-open the silent drop. `--repo` is required on both: `--start` recorded
-it, and every verb refuses an omitted `--repo` once a repo is recorded. The
-restarted round's number (`<r+1>`) becomes this round's number — repeat that
-value in `--complete`. Do not recover with `--complete inconclusive` instead —
-only that verdict increments the retry counter whose cap is the terminal
-not-covered state, so two transient prepare failures would retire a head no
-round examined. If prepare refuses because the head it names is not the head
+then start the head again at the SAME round
+(`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`)
+and retry prepare. A comment-backed approval is bound to `<r>` on BOTH the
+registration and the marker, so this same-round restart keeps the existing
+approval valid. To restart at `<r+1>` instead, ask the maintainer for a fresh
+approval marker at `<r+1>` before retrying prepare. A release alone leaves the
+head unregistered (it files only a push-order hint, not a deferral) and no
+probe fire will deliver it again. A transient prepare failure (the round still
+runs) leaves the marker intact — prepare reads the watch state only to
+validate an `--approval` registration — so retrying prepare at the original
+round and completing there recovers the head with no release; do not increment
+the round without a fresh comment approval. The release + restart is for a
+round that died, and a kill between its two commands would re-open the silent
+drop. `--repo` is required on both: `--start` recorded it, and every verb
+refuses an omitted `--repo` once a repo is recorded. The restarted round's
+number (`<r>` for the same approval, or `<r+1>` with a fresh one) becomes this
+round's number — repeat that value in `--complete`. Do not recover with
+`--complete inconclusive` instead — only that verdict increments the retry
+counter whose cap is the terminal not-covered state, so two transient prepare
+failures would retire a head no round examined. If prepare refuses because the head it names is not the head
 this round registered — moved forward or force-pushed; prepare tests exact
 equality and states no ordering — the registered head can never prepare:
 `--release --head <headSha> --round <r> --repo <owner>/<repo>` it and do not
@@ -1103,19 +1120,24 @@ ambiguous rather than verify a guessed PR. Then, in order:
    file that head's evidence under `<H>`. A differing head is the moved-head
    case below: release this round's marker and run neither the battery nor
    `--complete`. If prepare fails after `--start`, recover with
-   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`,
-   then start the head again
-   (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r+1> --repo <owner>/<repo>`)
-   and retry prepare — a release alone leaves the head unregistered and no
-   probe fire will deliver it again (`--repo` is required once `--start`
-   recorded it). A transient prepare failure (the round still runs) leaves the
-   marker intact — prepare never reads the watch state — so retrying prepare
-   against it and completing at the original round recovers `H` with no
-   release; the release + restart is for a round that died. The restarted
-   round's number (`<r+1>`) becomes this round's number — repeat that value in
-   `--complete`. Do not recover with `--complete
-inconclusive` instead: it increments the retry counter whose cap is the
-   terminal not-covered state. If prepare refuses because the head it names is
+   `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`.
+   A release alone leaves the head unregistered and no probe fire will deliver
+   it again (`--repo` is required once `--start` recorded it). After the
+   release, restart at the SAME `<r>`
+   (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`)
+   and retry prepare. A comment-backed approval is bound to `<r>` on BOTH the
+   registration and the marker, so the same-round restart keeps the existing
+   approval valid. To restart at `<r+1>` instead, first ask the maintainer for
+   a fresh comment marker at `<r+1>` when using `--approval`. A transient
+   prepare failure (the round still runs) leaves the marker intact — prepare
+   reads the watch state only to validate an `--approval` registration — so
+   retrying prepare at the original round and completing there recovers `H`
+   with no release; do not increment the round without a fresh comment
+   approval. The release + restart is for a round that died. The restarted
+   round's number (`<r>` for the same approval, or `<r+1>` with a fresh one)
+   becomes this round's number — repeat that value in `--complete`. Do not
+   recover with `--complete inconclusive` instead: it increments the retry
+   counter whose cap is the terminal not-covered state. If prepare refuses because the head it names is
    not the head this round registered — moved forward or force-pushed; prepare
    tests exact equality and states no ordering — the registered head can never
    prepare: `--release --head <H> --round <r> --repo <owner>/<repo>` it and do

@@ -109,11 +109,13 @@ this flag on its own.
 
 ### Approval comment for another fork
 
-For any other fork, even a fresh round first uses
-`verify-pr-watch-state --start` with the 40-hex head, an unused positive
-round and an absolute trusted `--state-root` outside the PR clone. The round
-continues using the existing complete/release commands. Prepare requires one
-actual in-flight entry for that repo, PR, head and round, in a single-link
+For any other fork, even a fresh round first runs
+`node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`
+with an unused positive round and an absolute trusted state root outside the
+PR clone. Registration remains outside the PR clone and precedes PR-code
+execution. The round continues using the existing complete/release commands.
+Prepare requires one actual in-flight entry for that repo, PR, head and round,
+in a single-link
 regular state file whose fully canonicalized path is outside the PR clone,
 including every intermediate `.qwen/tmp` directory. A completed or released registration cannot authorize a
 new invocation. This distinguishes a retry while the original round is still

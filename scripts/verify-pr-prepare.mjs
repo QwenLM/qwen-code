@@ -66,6 +66,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 import { checkBoundary } from './verify-pr-check.mjs';
 import {
+  hasInFlightRegistration,
   readState as readWatchState,
   statePath as watchStatePath,
 } from './verify-pr-watch-state.mjs';
@@ -765,16 +766,11 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
   } catch (error) {
     return { error: `could not read the watch registration: ${error.message}` };
   }
-  const flights = Array.isArray(state?.inFlightHeads)
-    ? state.inFlightHeads
-    : [];
   if (
     state?.pr !== snapshot.number ||
     typeof state?.repo !== 'string' ||
     state.repo.toLowerCase() !== `${owner}/${name}`.toLowerCase() ||
-    flights.length !== 1 ||
-    flights[0]?.head !== snapshot.headRefOid ||
-    flights[0]?.round !== options.round
+    !hasInFlightRegistration(state, snapshot.headRefOid, options.round)
   ) {
     return {
       error: `--approval needs one in-flight registration for ${owner}/${name}#${snapshot.number} at head ${snapshot.headRefOid}, round ${options.round}; register before waiting, then use the matching fresh round instead of reusing a completed approval`,
@@ -1302,15 +1298,12 @@ function main(argv) {
       'The path is the in-container one: the gate runs from the read-only',
       "/trusted-scripts mount, never the PR head's own copy of the script,",
       'and the record lands in the mounted artifact directory so it survives',
-      'the container. A VM boundary takes the same trusted copy but runs',
-      'NO --require-isolation gate (a VM carries no observed container marker):',
-      'there is no in-boundary gate command and no boundary-gate.json for a VM.',
-      'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
-      'reason, attestation (what the operator confirmed: nothing mounted,',
-      'no host credentials), and approval using the local-trust or',
-      'maintainer-comment path above. The container gate writes',
-      'boundary-gate.json into the artifact directory; the checker requires',
-      'that record alongside the container declaration.',
+      'the container. For host or VM execution, stop and release any in-flight',
+      'registration, then re-run prepare BEFORE the battery with --execution',
+      'host|vm and its approval arguments; prepare writes boundary.json.',
+      'Never hand-write a host/VM declaration after the battery. The container',
+      'gate writes boundary-gate.json into the artifact directory; the checker',
+      'requires that record alongside the container declaration.',
     ]);
   } else if (options.execution === 'vm') {
     report([

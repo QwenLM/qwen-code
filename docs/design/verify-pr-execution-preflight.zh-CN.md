@@ -60,7 +60,7 @@ coordinate path 的 `--execution` 默认为 `container`，使旧 watch prompt �
 
 ### 他人 fork 的批准评论
 
-对于其他 fork，即使是新轮次，也先以 40 位 head、未使用的正整数轮次和位于 PR 克隆外的可信绝对 `--state-root` 调用 `verify-pr-watch-state --start`。轮次继续使用现有 complete/release 命令。prepare 要求单链接普通状态文件中存在该仓库、PR、head 和 round 的唯一实际 in-flight 条目，并且包括每个中间 `.qwen/tmp` 目录在内的完整规范化路径都位于 PR 克隆之外。完成或释放的注册不能授权新的调用。这把原轮次仍在 in-flight 时的重试与把其评论当作后续执行的重放区分开。
+对于其他 fork，即使是新轮次，也先以 40 位 head 和未使用的正整数轮次运行 `node <trusted-clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <40hex> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"`，其中 state root 必须是位于 PR 克隆外的可信绝对目录；注册留在 PR 克隆外，并先于任何 PR 代码执行。轮次继续使用现有 complete/release 命令。prepare 要求单链接普通状态文件中存在该仓库、PR、head 和 round 的唯一实际 in-flight 条目，并且包括每个中间 `.qwen/tmp` 目录在内的完整规范化路径都位于 PR 克隆之外。完成或释放的注册不能授权新的调用。这把原轮次仍在 in-flight 时的重试与把其评论当作后续执行的重放区分开。
 
 然后由维护者而不是轮次在 PR 上发布评论。评论包含一个精确标记和人类可读的批准文字：
 

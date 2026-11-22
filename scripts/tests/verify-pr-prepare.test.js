@@ -757,6 +757,47 @@ describe('parseArgs', () => {
         'container',
       ]).error,
     ).toMatch(/not --require-isolation/);
+
+    const hostArgs = [
+      '42',
+      '--repo',
+      REPO,
+      '--execution',
+      'host',
+      '--round',
+      '2',
+      '--reason',
+      'why',
+      '--context-out',
+      '/tmp/host-pr.json',
+      '--trust-pr-head',
+    ];
+    const without = (args, ...flags) => {
+      const copy = [...args];
+      for (const flag of flags) {
+        const index = copy.indexOf(flag);
+        copy.splice(index, 2);
+      }
+      return copy;
+    };
+    const vmArgs = hostArgs.map((arg) => (arg === 'host' ? 'vm' : arg));
+    for (const [args, expected] of [
+      [
+        without(hostArgs, '--round', '--reason'),
+        /--execution vm \| host needs --round and --reason/,
+      ],
+      [
+        without(hostArgs, '--context-out'),
+        /--execution vm \| host needs --context-out/,
+      ],
+      [vmArgs, /--execution vm needs --attestation/],
+      [
+        [...hostArgs, '--attestation', 'not valid on host'],
+        /--attestation applies only to --execution vm/,
+      ],
+    ]) {
+      expect(parseArgs(args).error).toMatch(expected);
+    }
   });
 });
 
@@ -943,6 +984,7 @@ describe.skipIf(process.platform === 'win32')(
           permission: 'maintain',
           head,
           round: 1,
+          reason: 'fixture needs a host runtime',
         });
         expect(declaration).not.toHaveProperty('approval');
         const context = JSON.parse(
@@ -1041,11 +1083,152 @@ describe.skipIf(process.platform === 'win32')(
         attestation: 'nothing mounted, no host credentials',
         head,
         round: 2,
+        reason: 'fixture needs a host runtime',
       });
       // The same in-flight head/round may retry prepare; only a completed
       // cycle needs a different registered round.
       const retry = runPrepare(dir, artifactArgs, env);
       expect(retry.status).toBe(0);
+    });
+
+    it('accepts a marked maintainer-comment approval for host execution', () => {
+      const { dir, base, head } = makeRepo();
+      const body = marker({ head });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body,
+          user: { login: 'approver' },
+        },
+        permission: { permission: 'write' },
+      });
+      const { artifactArgs } = command({
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(0);
+      const declaration = JSON.parse(
+        readFileSync(join(artifactsFrom(result), 'boundary.json'), 'utf8'),
+      );
+      expect(declaration).toMatchObject({
+        mode: 'waived',
+        source: 'comment',
+        by: 'approver',
+        basis: 'maintainer-comment',
+        permission: 'write',
+        approval: permalink,
+        comment: {
+          id: 900001,
+          bodySha256: createHash('sha256').update(body).digest('hex'),
+        },
+        head,
+        round: 2,
+        reason: 'fixture needs a host runtime',
+      });
+      expect(declaration).not.toHaveProperty('attestation');
+      const contextPath =
+        artifactArgs[artifactArgs.indexOf('--context-out') + 1];
+      expect(
+        JSON.parse(readFileSync(contextPath, 'utf8')).executionApproval,
+      ).toEqual(declaration);
+    });
+
+    it.each([
+      { registration: 'short', description: 'short-head' },
+      { registration: 'legacy', description: 'legacy' },
+    ])(
+      'accepts $description in-flight registration through the owner semantics',
+      ({ registration }) => {
+        const { dir, base, head } = makeRepo();
+        const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+          comment: {
+            id: 900001,
+            issue_url:
+              'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+            body: marker({ head }),
+            user: { login: 'approver' },
+          },
+          permission: { permission: 'admin' },
+        });
+        const { artifactArgs, stateRoot } = command({
+          trust: false,
+          approval: permalink,
+          head: registration === 'short' ? head.slice(0, 12) : head,
+        });
+        if (registration === 'legacy') {
+          writeFileSync(
+            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+            JSON.stringify({
+              pr: 42,
+              repo: REPO,
+              inFlightHead: head,
+              round: 2,
+            }),
+          );
+        }
+        const result = runPrepare(dir, artifactArgs, env);
+        expect(result.status, registration).toBe(0);
+        const declaration = JSON.parse(
+          readFileSync(join(artifactsFrom(result), 'boundary.json'), 'utf8'),
+        );
+        expect(declaration.head).toBe(head);
+        expect(declaration.round).toBe(2);
+      },
+    );
+
+    it('reuses a comment approval only after a same-round release and restart', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body: marker({ head }),
+          user: { login: 'approver' },
+        },
+        permission: { permission: 'admin' },
+      });
+      const { artifactArgs, stateRoot } = command({
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
+      const restart = (releaseRound, startRound = releaseRound) => {
+        for (const [verb, round] of [
+          ['--release', releaseRound],
+          ['--start', startRound],
+        ]) {
+          const result = spawnSync(
+            process.execPath,
+            [
+              WATCH_STATE_SCRIPT,
+              '42',
+              verb,
+              '--head',
+              head,
+              '--round',
+              String(round),
+              '--repo',
+              REPO,
+              '--state-root',
+              stateRoot,
+            ],
+            { encoding: 'utf8', env: gitEnv },
+          );
+          expect(result.status, `${verb} round ${round}`).toBe(0);
+        }
+      };
+      restart(2);
+      expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
+
+      restart(2, 3);
+      artifactArgs[artifactArgs.indexOf('--round') + 1] = '3';
+      const oldApproval = runPrepare(dir, artifactArgs, env);
+      expect(oldApproval.status).toBe(3);
+      expect(oldApproval.stderr).toMatch(/mode, head and round matching/);
     });
 
     it('refuses a comment approval replay after its registered round completes', () => {
@@ -1094,67 +1277,83 @@ describe.skipIf(process.platform === 'win32')(
       expect(readdirSync(join(dir, 'tmp'))).toEqual(before);
     });
 
-    it('fails closed on wrong targets, markers, permissions and missing comments', () => {
-      const cases = [
-        {
-          name: 'another PR in the permalink',
-          approval:
-            'https://github.com/QwenLM/qwen-code/pull/43#issuecomment-900001',
-          expected: /--approval must be an issue-comment permalink on this PR/,
-        },
-        {
-          name: 'missing comment response',
-          comment: null,
-          expected: /approval comment lookup failed/,
-        },
-        {
-          name: 'stale marker head',
-          body: () => marker({ head: OID('0'), round: 2 }),
-          expected: /mode, head and round matching/,
-        },
-        {
-          name: 'wrong marker round',
-          body: (head) => marker({ head, round: 1 }),
-          expected: /mode, head and round matching/,
-        },
-        {
-          name: 'duplicate marker',
-          body: (head) => `${marker({ head })}\n${marker({ head })}`,
-          expected: /exactly one well-formed/,
-        },
-        {
-          name: 'read-only approver',
-          permission: 'read',
-          expected: /not admin \| maintain \| write/,
-        },
-      ];
-      for (const testCase of cases) {
-        const { dir, base, head } = makeRepo();
-        const body = testCase.body ? testCase.body(head) : marker({ head });
-        const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
-          comment:
-            testCase.comment === null
-              ? undefined
-              : {
-                  id: 900001,
-                  issue_url:
-                    'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
-                  body,
-                  user: { login: 'approver' },
-                },
-          permission: { permission: testCase.permission ?? 'admin' },
-        });
-        const { artifactArgs, hostDir } = command({
-          trust: false,
-          approval: testCase.approval ?? permalink,
-          head,
-        });
-        const result = runPrepare(dir, artifactArgs, env);
-        expect(result.status, testCase.name).toBe(3);
-        expect(result.stderr, testCase.name).toMatch(testCase.expected);
-        expect(existsSync(join(dir, 'tmp')), testCase.name).toBe(false);
-        expect(existsSync(join(hostDir, 'pr.json')), testCase.name).toBe(false);
-      }
+    const refusalCases = [
+      {
+        name: 'another PR in the permalink',
+        approval:
+          'https://github.com/QwenLM/qwen-code/pull/43#issuecomment-900001',
+        expected: /--approval must be an issue-comment permalink on this PR/,
+      },
+      {
+        name: 'issue_url names another PR',
+        issueUrl: 'https://api.github.com/repos/QwenLM/qwen-code/issues/43',
+        expected: /approval comment does not belong to this PR/,
+      },
+      {
+        name: 'missing comment response',
+        comment: null,
+        expected: /approval comment lookup failed/,
+      },
+      {
+        name: 'stale marker head',
+        body: () => marker({ head: OID('0'), round: 2 }),
+        expected: /mode, head and round matching/,
+      },
+      {
+        name: 'wrong marker round',
+        body: (head) => marker({ head, round: 1 }),
+        expected: /mode, head and round matching/,
+      },
+      {
+        name: 'host marker incorrectly used for VM',
+        execution: 'vm',
+        body: (head) => marker({ mode: 'host', head }),
+        expected: /mode, head and round matching/,
+      },
+      {
+        name: 'short approval marker head',
+        body: (head) => marker({ head: head.slice(0, 12) }),
+        expected: /mode, head and round matching/,
+      },
+      {
+        name: 'duplicate marker',
+        body: (head) => `${marker({ head })}\n${marker({ head })}`,
+        expected: /exactly one well-formed/,
+      },
+      {
+        name: 'read-only approver',
+        permission: 'read',
+        expected: /not admin \| maintain \| write/,
+      },
+    ];
+    it.each(refusalCases)('refuses $name', (testCase) => {
+      const { dir, base, head } = makeRepo();
+      const body = testCase.body ? testCase.body(head) : marker({ head });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment:
+          testCase.comment === null
+            ? undefined
+            : {
+                id: 900001,
+                issue_url:
+                  testCase.issueUrl ??
+                  'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+                body,
+                user: { login: 'approver' },
+              },
+        permission: { permission: testCase.permission ?? 'admin' },
+      });
+      const { artifactArgs, hostDir } = command({
+        execution: testCase.execution ?? 'host',
+        trust: false,
+        approval: testCase.approval ?? permalink,
+        head,
+      });
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status, testCase.name).toBe(3);
+      expect(result.stderr, testCase.name).toMatch(testCase.expected);
+      expect(existsSync(join(dir, 'tmp')), testCase.name).toBe(false);
+      expect(existsSync(join(hostDir, 'pr.json')), testCase.name).toBe(false);
     });
 
     it('refuses a state-root alias that redirects registration into the PR clone', () => {
@@ -1238,6 +1437,54 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
+    it('refuses symlink and hardlink aliases at boundary.json', () => {
+      for (const alias of ['symlink', 'hardlink']) {
+        const { dir, base, head } = makeRepo();
+        const env = installFakeGh(
+          {
+            ...snapshotFor({ base, head }),
+            author: { login: 'maintainer' },
+            isCrossRepository: true,
+          },
+          reviewPages(),
+          {
+            user: { login: 'maintainer' },
+            permission: { permission: 'write' },
+          },
+        );
+        const clock = join(makeTmpDir(), `freeze-clock-${alias}.cjs`);
+        writeFileSync(
+          clock,
+          'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+        );
+        const artifacts = join(
+          dir,
+          'tmp',
+          artifactDirName(42, new Date(1700000000000)),
+        );
+        mkdirSync(artifacts, { recursive: true });
+        const boundaryPath = join(artifacts, 'boundary.json');
+        const target =
+          alias === 'hardlink'
+            ? join(dir, 'head.txt')
+            : join(makeTmpDir(), 'target.json');
+        const before = alias === 'hardlink' ? 'head\n' : 'do not replace\n';
+        if (alias === 'symlink') writeFileSync(target, before);
+        if (alias === 'hardlink') linkSync(target, boundaryPath);
+        else symlinkSync(target, boundaryPath);
+        const { artifactArgs } = command({ round: 1 });
+        const result = runPrepare(dir, artifactArgs, {
+          ...env,
+          NODE_OPTIONS: `--require=${clock}`,
+        });
+        expect(result.status, alias).toBe(3);
+        expect(result.stderr, alias).toMatch(
+          /execution approval through a non-single-link file/,
+        );
+        expect(readFileSync(target, 'utf8'), alias).toBe(before);
+      }
+    });
+
     it('preserves the legacy container form without minting a host waiver', () => {
       const { dir, base, head } = makeRepo();
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages());
@@ -1255,6 +1502,9 @@ describe.skipIf(process.platform === 'win32')(
       );
       expect(result.stdout).toContain('--require-isolation');
       expect(result.stdout).toContain('execution  container');
+      expect(result.stdout).not.toContain('Declare mode:"vm"');
+      expect(result.stdout).toContain('--execution');
+      expect(result.stdout).toContain('host|vm and its approval arguments');
     });
   },
 );
@@ -1304,26 +1554,19 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toMatch(
       /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
     );
-    // R3-4: the printed VM guidance must carry the same scoping as the skill —
-    // a VM runs no --require-isolation gate, so there is no in-boundary gate
-    // command and no boundary-gate.json (naming an --artifact-dir invocation
-    // without the gate would dead-end the operator at parseArgs' exit 2) — and
-    // name the FULL mode:"vm" shape with the attestation gloss the checker
-    // requires (what the operator confirmed: nothing mounted, no host
-    // credentials), never the inverted "what the VM mounts".
+    // A failed container setup must not teach the operator to mint a host/VM
+    // declaration after the battery. Host/VM approval belongs to prepare,
+    // before execution, and any live registration is released first.
     expect(result.stdout).toContain(
-      'A VM boundary takes the same trusted copy',
-    );
-    expect(result.stdout).toContain('NO --require-isolation gate');
-    expect(result.stdout).toContain('no boundary-gate.json for a VM');
-    expect(result.stdout).toContain(
-      'Declare mode:"vm" per the VM bullet above with by (the maintainer),',
+      'For host or VM execution, stop and release any in-flight',
     );
     expect(result.stdout).toContain(
-      'attestation (what the operator confirmed: nothing mounted,',
+      'host|vm and its approval arguments; prepare writes boundary.json.',
     );
-    expect(result.stdout).toContain('no host credentials), and approval');
-    expect(result.stdout).not.toContain('what the VM mounts');
+    expect(result.stdout).toContain(
+      'Never hand-write a host/VM declaration after the battery.',
+    );
+    expect(result.stdout).not.toContain('Declare mode:"vm"');
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');
