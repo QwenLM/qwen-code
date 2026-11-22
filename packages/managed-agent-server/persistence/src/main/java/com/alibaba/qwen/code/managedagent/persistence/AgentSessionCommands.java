@@ -75,7 +75,7 @@ final class AgentSessionCommands {
         // installation and physical fencing, and nothing later in this
         // transaction takes the guard. The Session lock comes first, so this
         // transaction's snapshot is taken after it.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         sessionPolicies.requirePublicChildImmutable(session);
         // A bound Session's later Turn needs the same deployment opt-in as
         // its initial one; the service admits any caller holding OPERATOR
@@ -100,6 +100,9 @@ final class AgentSessionCommands {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+                sessionPolicies.requireExternalTurnAllowed(tenantId, actorId, sessionId, session, input);
+            }
             if (sessionPolicies.isSshWorkspace(session.workspace())) {
                 AgentSessionPolicies.requireSshToolProfile(session.toolProfile());
                 if (sessionPolicies.hasMcpServers(session)) {
@@ -167,7 +170,7 @@ final class AgentSessionCommands {
     Admission insertCancelCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String actorId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !workspaceFilesEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -254,7 +257,7 @@ final class AgentSessionCommands {
         // No tenant guard, as in changeSessionModel: settlement writes no delivery row, so no
         // operation range is locked. The Session lock comes first, so the replay probe's snapshot
         // follows it; a racing Session reusing the key loses on the receipt's unique key.
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, false);
         if (previous.isPresent() && sessionId.equals(previous.get().sessionId())) {
             requireRenameReplayOwner(session, previous.get(), actorId);
@@ -288,7 +291,7 @@ final class AgentSessionCommands {
         // read that misses gap-locks the tenant-shared receipt index, and concurrent admissions
         // of different keys would deadlock inserting into that gap. A racing Session reusing the
         // tenant-scoped key loses on the receipt's unique key instead (see insertCommand below).
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -365,7 +368,7 @@ final class AgentSessionCommands {
     SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null && !boundRenameAllowed(kind)) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
@@ -414,10 +417,13 @@ final class AgentSessionCommands {
                         "metadata", Map.of("title", title));
             }
             // An archived Session was closed first, so it stays closed.
-            case UNARCHIVE -> jdbc.update("UPDATE ma_session SET"
-                            + " status = 'CLOSED', gmt_modified = ?, version ="
-                            + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
-                    now, tenantId, sessionId);
+            case UNARCHIVE -> {
+                jdbc.update("UPDATE ma_session SET"
+                                + " status = 'CLOSED', gmt_modified = ?, version ="
+                                + " version + 1 WHERE tenant_id = ? AND" + " session_id = ?",
+                        now, tenantId, sessionId);
+                JdbcManagedUserMessageStore.retireQueued(jdbc, tenantId, sessionId);
+            }
         }
         jdbc.update(
                 "UPDATE ma_request_receipt SET state = 'COMPLETED', gmt_modified = ? WHERE"
@@ -432,7 +438,6 @@ final class AgentSessionCommands {
 
     void abandonSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId) {
-        storeRows.requireLegacyMutation(tenantId, sessionId);
         // Keep the digest and receipt for replay and concurrent completion.
         // A completed outcome must never be overwritten by a failing sibling.
         jdbc.update("UPDATE ma_request_receipt SET state = 'FAILED',"
@@ -463,15 +468,14 @@ final class AgentSessionCommands {
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.valueOf(kind.name()),
                 scope, target, operationId);
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                "INSERT INTO ma_operation (operation_key, scope_key,"
                     + " target_kind, target_key, target_id, phase, request_json,"
                     + " idempotency_digest, tenant_id, session_id, operation_id, operation_kind,"
                     + " actor_key, idempotency_key, request_digest, state, admission_stage,"
                     + " delivery_state, session_status_before, available_at, gmt_create,"
-                    + " gmt_modified) VALUES (?, ?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
+                    + " gmt_modified) VALUES (?, ?, 'TURN', ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?,"
                     + " ?, ?, ?, 'PENDING', 'JAVA_DURABLE', 'PENDING', ?, ?, ?, ?)",
                 operationKey,
-                scope,
                 scope,
                 target,
                 turnId,
@@ -636,6 +640,13 @@ final class AgentSessionCommands {
                         row.sessionStatusBefore(), row.actorKey(), row.createdAt(), row.updatedAt()));
     }
 
+    private static final String TURN_SESSION_PROJECTION_GUARD = " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
+            + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
+            + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
+            + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1')"
+            + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+            + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
+
     void insertTurn(String tenantId, String sessionId,
             String turnId, String promptId, List<Map<String, Object>> input,
             String payloadDigest, long now) {
@@ -644,25 +655,13 @@ final class AgentSessionCommands {
                         + " status, gmt_create, gmt_modified, model_id, model_revision, approval_mode, approval_revision, is_plan_enabled, permission_rules_json) SELECT"
                         + " ?, ?, ?, ?, ?, ?, 'ACCEPTED', ?, ?, model_id,"
                         + " CASE WHEN model_id IS NULL THEN NULL ELSE model_revision END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4')"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4')"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN approval_revision ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4')"
-                        + " THEN is_plan_enabled ELSE NULL END,"
-                        + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
-                        + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
-                        + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4')"
+                        + TURN_SESSION_PROJECTION_GUARD
+                        + " THEN CASE WHEN tool_profile = 'hosted-workspace-external-files/1' THEN FALSE ELSE is_plan_enabled END ELSE NULL END,"
+                        + TURN_SESSION_PROJECTION_GUARD
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, storeRows.writeJson(input),
@@ -750,7 +749,7 @@ final class AgentSessionCommands {
 
     // Automation-verb session boot-id bind (#14548); fill only when still empty.
     void bindSessionHarness(String tenantId, String sessionId, String harnessBootId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (harnessBootId.equals(session.harnessBootId())) {
             return;
         }

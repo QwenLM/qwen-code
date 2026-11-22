@@ -35,6 +35,14 @@ export const MANAGED_MCP_DEFINITIONS_WORKER_ROUTE = Object.freeze({
   requestBodyLimitBytes: 4096,
 } as const);
 
+/** Broker-only: closes an idle parked owner's connections. */
+export const MANAGED_MCP_RECLAIM_WORKER_ROUTE = Object.freeze({
+  ...MANAGED_MCP_WORKER_ROUTE,
+  key: 'mcp-reclaim',
+  path: `${MANAGED_MCP_ROUTE}/reclaim`,
+  requestBodyLimitBytes: 4096,
+} as const);
+
 export function registerManagedMcpRoutes(
   app: Application,
   identity: ManagedRuntimeRequestIdentity,
@@ -67,6 +75,44 @@ export function registerManagedMcpRoutes(
             request['tenantId'] as string,
             request['workspaceId'] as string,
           ),
+        });
+      } catch (cause) {
+        res.status(409).json({
+          code:
+            cause instanceof ManagedMcpError
+              ? cause.code
+              : 'managed_mcp_unavailable',
+        });
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
+  app.post(
+    MANAGED_MCP_RECLAIM_WORKER_ROUTE.path,
+    managedRuntimeNoStore,
+    authorizeManagedRuntime(identity),
+    managedRuntimeJsonBody(
+      MANAGED_MCP_RECLAIM_WORKER_ROUTE.requestBodyLimitBytes,
+    ),
+    async (req: Request, res: Response) => {
+      const request = req.body as Record<string, unknown> | undefined;
+      if (
+        !request ||
+        Object.keys(request).sort().join(',') !==
+          'protocolVersion,runtimeSessionId' ||
+        request['protocolVersion'] !== 1 ||
+        typeof request['runtimeSessionId'] !== 'string' ||
+        !request['runtimeSessionId']
+      ) {
+        res.status(400).json({ code: 'managed_mcp_invalid' });
+        return;
+      }
+      try {
+        await runtime.drainSession(request['runtimeSessionId']);
+        res.json({
+          protocolVersion: 1,
+          runtimeSessionId: request['runtimeSessionId'],
+          reclaimed: true,
         });
       } catch (cause) {
         res.status(409).json({

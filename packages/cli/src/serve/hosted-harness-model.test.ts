@@ -22,6 +22,7 @@ import { getRuntimeContentGenerator } from '@qwen-code/qwen-code-core/agents/run
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
 import type { Content, Part } from '@google/genai';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import type { ConfigInitializeOptions } from '@qwen-code/qwen-code-core/config/config.js';
 import {
   HookEventName,
@@ -890,6 +891,12 @@ describe('Hosted Harness model boundary', () => {
       expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
         modelConfiguration: generation,
       });
+      expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1]).toMatchObject({
+        acp: true,
+      });
+      expect(
+        vi.mocked(loadCliConfig).mock.calls.at(-1)?.[1],
+      ).not.toHaveProperty('channel');
       expect(switchModel).not.toHaveBeenCalled();
     },
   );
@@ -1551,6 +1558,17 @@ describe('Hosted Harness model boundary', () => {
     const model = config([{ type: LlmEventType.Finished }]);
     const history: ChatRecord[] = [
       {
+        uuid: 'cancelled-source',
+        parentUuid: null,
+        sessionId: input.sessionId,
+        timestamp: '2026-10-22T00:00:00.000Z',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        type: 'user',
+        daemonPromptId: 'cancelled-prompt',
+        message: { role: 'user', parts: [{ text: 'cancelled secret' }] },
+      },
+      {
         uuid: 'compaction',
         parentUuid: null,
         sessionId: input.sessionId,
@@ -1571,7 +1589,7 @@ describe('Hosted Harness model boundary', () => {
             { role: 'user', parts: [{ text: 'cancelled secret' }] },
             { role: 'model', parts: [{ text: 'partial answer' }] },
           ],
-          promptIds: [null, null, 'cancelled-prompt', null],
+          promptIds: [null, null, 'legacy-record:cancelled-source', null],
           summaryPrefixLength: 2,
         },
       },
@@ -1587,8 +1605,129 @@ describe('Hosted Harness model boundary', () => {
   });
 
   it.each([false, true])(
-    'preserves compression around a recovered tool round without duplicating its pending response (current snapshot=%s)',
-    async (currentSnapshot) => {
+    'excludes cancelled compressed tools and guidance through the next prompt (guidance marked=%s)',
+    async (marked) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const hooks = hostedHooks();
+      const prefix: Content[] = [
+        { role: 'user', parts: [{ text: 'compressed summary' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
+      const kept: Content[] = [
+        { role: 'user', parts: [{ text: 'next request' }] },
+        { role: 'model', parts: [{ text: 'next answer' }] },
+      ];
+      const history: ChatRecord[] = [
+        ...[
+          ['cancelled-source', 'cancelled-prompt', 'cancelled instruction'],
+          ['guidance-source', 'cancelled-prompt', 'cancelled queued guidance'],
+          ['next-source', 'next-prompt', 'next request'],
+        ].map(([uuid, daemonPromptId, text]) => ({
+          uuid: uuid!,
+          parentUuid: null,
+          sessionId: input.sessionId,
+          timestamp: '2026-10-30T00:00:00.000Z',
+          cwd: input.cwd,
+          version: 'hosted-harness/1',
+          type: 'user' as const,
+          daemonPromptId,
+          message: { role: 'user', parts: [{ text }] },
+        })),
+        {
+          uuid: 'compression-with-cancelled-tools',
+          parentUuid: null,
+          sessionId: input.sessionId,
+          timestamp: '2026-10-30T00:00:00.000Z',
+          cwd: input.cwd,
+          version: 'test',
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: {
+              compressionStatus: CompressionStatus.COMPRESSED,
+              originalTokenCount: 100,
+              newTokenCount: 10,
+            },
+            compressedHistory: [
+              ...prefix,
+              { role: 'user', parts: [{ text: 'cancelled instruction' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'cancelled partial answer' },
+                  { functionCall: { id: 'cancelled-call', name: 'agent' } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'cancelled-call',
+                      name: 'agent',
+                      response: { output: 'cancelled result' },
+                    },
+                  },
+                ],
+              },
+              { role: 'user', parts: [{ text: 'cancelled queued guidance' }] },
+              {
+                role: 'model',
+                parts: [{ text: 'cancelled continued answer' }],
+              },
+              ...kept,
+            ],
+            promptIds: [
+              null,
+              null,
+              'legacy-record:cancelled-source',
+              null,
+              null,
+              marked ? 'legacy-record:guidance-source' : null,
+              null,
+              'legacy-record:next-source',
+              null,
+            ],
+            summaryPrefixLength: prefix.length,
+          },
+        },
+      ];
+      const original = structuredClone(history);
+      await runHostedHarnessTextTurn({
+        ...input,
+        history,
+        excludedPromptIds: new Set(['cancelled-prompt']),
+        hooks: hooks.session,
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPromptHookRunner: () => undefined,
+        },
+      });
+      expect(structuredClone(model.setHistory.mock.calls[0]![0])).toEqual([
+        ...prefix,
+        ...kept,
+      ]);
+      const start = hooks.fire.mock.calls.find(
+        ([event]) => event === HookEventName.SessionStart,
+      );
+      expect(start?.[2]['messages']).toEqual([
+        ...prefix,
+        ...kept,
+        { role: 'user', parts: [{ text: input.prompt }] },
+      ]);
+      expect(history).toEqual(original);
+    },
+  );
+
+  it.each([
+    { currentSnapshot: false, retainedOperation: false },
+    { currentSnapshot: true, retainedOperation: false },
+    { currentSnapshot: true, retainedOperation: true },
+  ])(
+    'preserves compression around a recovered tool round without duplicating its pending response (%j)',
+    async ({ currentSnapshot, retainedOperation }) => {
       const model = config([{ type: LlmEventType.Finished }]);
       state.config['getEffectiveInputModalities'] = () => ({ image: true });
       const response: Part = {
@@ -1664,7 +1803,15 @@ describe('Hosted Harness model boundary', () => {
                 },
               ]
             : prefix,
-          summaryPrefixLength: prefix.length,
+          promptIds: [
+            ...prefix.map((_, index) =>
+              retainedOperation && index === prefix.length - 1
+                ? 'retained-owner'
+                : null,
+            ),
+            ...(currentSnapshot ? ['pending-owner'] : []),
+          ],
+          summaryPrefixLength: prefix.length - (retainedOperation ? 1 : 0),
           completedToolCallIds: ['old-call'],
         },
       };
@@ -1674,13 +1821,25 @@ describe('Hosted Harness model boundary', () => {
         ...input,
         history,
         resumeFromToolResults: [response],
+        toolTurn: {
+          execute: vi.fn(),
+          consumeResults: vi.fn(),
+          declarations: vi.fn().mockResolvedValue([]),
+        },
       });
       const restored = model.setHistory.mock.calls[0]![0] as Content[];
-      expect(restored).toEqual(
-        currentSnapshot ? prefix : [...prefix, call.message],
+      expect(JSON.stringify(restored)).toBe(
+        JSON.stringify(currentSnapshot ? prefix : [...prefix, call.message]),
       );
       expect(JSON.stringify(restored)).not.toContain(
         '"functionResponse":{"id":"current-call"',
+      );
+      expect(restored.map(getApiHistoryPromptId)).toEqual(
+        restored.map((_, index) =>
+          retainedOperation && index === prefix.length - 1
+            ? 'retained-owner'
+            : undefined,
+        ),
       );
       expect(model.requests[0]).toEqual([response]);
       expect(history).toEqual(original);

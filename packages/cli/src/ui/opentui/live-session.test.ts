@@ -23,6 +23,7 @@ import { createRestoreToolResponseBinding } from '../utils/restore-tool-response
 import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import {
   mkdtemp,
   readdir,
@@ -974,10 +975,10 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    // OpenTUI offers the band and reply rows, raises prompt.submit and runs
+    // OpenTUI offers the band and transcript rows, raises prompt.submit and runs
     // the prompts the Mods submit.
     expect(initializeMods).toHaveBeenCalledExactlyOnceWith(
-      ['AbovePrompt', 'AssistantMessage'],
+      ['AbovePrompt', 'AssistantMessage', 'Thinking'],
       {
         prompts: true,
         runsPrompts: true,
@@ -4377,9 +4378,13 @@ describe.each([false, true])(
         );
 
     it('sends the same requests and yields the same events as the current path', async () => {
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       const runs = [];
       let sharedConfig: Config | undefined;
       for (const onShared of [false, true]) {
+        // Assert per arm so the legacy arm losing its entry log is caught,
+        // not masked by the shared arm's call in an accumulated spy.
+        entrySpy.mockClear();
         const send = oneToolBatchStream({
           callId: 't1',
           name: 'test_tool',
@@ -4393,6 +4398,7 @@ describe.each([false, true])(
             promptId: 'p1',
           }),
         );
+        expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'opentui');
         runs.push({
           events,
           requests: send.mock.calls.map(([parts, , promptId, options]) => ({
@@ -4419,6 +4425,7 @@ describe.each([false, true])(
       expect(kernelCalls.every(([surface]) => surface === 'opentui')).toBe(
         true,
       );
+      entrySpy.mockRestore();
     });
 
     it.each(['retry', 'model_fallback'])(

@@ -8,10 +8,8 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.HarnessPlacementStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -55,12 +53,11 @@ public class JdbcHarnessPlacementStore
     }
 
     public Map<String, Object> releaseReceipt(String tenant, String session, long epoch, String operationId) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String key = ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch));
         var saved = jdbc.query("SELECT b.inline_bytes, b.sha256 FROM ma_session_record r JOIN ma_resource b"
-                + " ON b.session_scope_key = r.session_scope_key AND b.resource_id = r.record_resource_id"
+                + " ON b.resource_id = r.record_resource_id"
                 + " AND b.tenant_id = r.tenant_id AND b.workspace_id = r.workspace_id AND b.session_id = r.session_id"
-                + " WHERE r.session_scope_key = ? AND r.record_key = ? AND r.tenant_id = ? AND r.session_id = ?"
+                + " WHERE r.tenant_id = ? AND r.session_id = ? AND r.record_key = ?"
                 + " AND r.domain = 'hosted_harness_release' AND r.record_kind = 'DOMAIN'"
                 + " AND b.kind = ? AND b.schema_version = 1 AND b.state = 'REFERENCED'"
                 + " AND b.storage_kind = 'MYSQL_INLINE' AND b.byte_length BETWEEN 1 AND 16384 AND LENGTH(b.inline_bytes) = b.byte_length",
@@ -70,7 +67,7 @@ public class JdbcHarnessPlacementStore
                         throw blocked("harness_release_receipt_corrupt");
                     }
                     return ManagedExtensionRecordStore.parse(new String(bytes, StandardCharsets.UTF_8));
-                }, scope, key, tenant, session, "managed-hosted_harness_release");
+                }, tenant, session, key, "managed-hosted_harness_release");
         if (saved.isEmpty()) {
             return null;
         }
@@ -150,13 +147,12 @@ public class JdbcHarnessPlacementStore
         }
         var heads = jdbc.query("SELECT state, writer_lease_until, activation_phase, activation_expires_at,"
                 + " activation_head_revision, journal_revision, activation_epoch"
-                + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
-                + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                + " FROM ma_session_head WHERE tenant_id = ? AND"
+                + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 (row, index) -> new Object[] {row.getString(1), row.getObject(2, Long.class),
                         row.getString(3), row.getObject(4, Long.class), row.getObject(5, Long.class),
                         row.getLong(6), row.getLong(7)},
-                RuntimeAdmissionFences.harnessDrainKey(tenant),
-                RuntimeAdmissionFences.harnessDrainKey(session), tenant, session);
+                tenant, session);
         if (!heads.isEmpty()) {
             Object[] head = heads.getFirst();
             long now = now(jdbc);
@@ -210,11 +206,11 @@ public class JdbcHarnessPlacementStore
     }
 
     static boolean released(JdbcTemplate jdbc, String tenant, String session, long epoch) {
-        return !jdbc.query("SELECT record_id FROM ma_session_record WHERE session_scope_key = ?"
-                + " AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_kind = 'DOMAIN'",
-                (row, index) -> row.getString(1), ManagedSessionStore.sessionScopeKey(tenant, session),
+        return !jdbc.query("SELECT record_id FROM ma_session_record WHERE tenant_id = ? AND session_id = ?"
+                + " AND record_key = ? AND domain = ? AND record_kind = 'DOMAIN'",
+                (row, index) -> row.getString(1), tenant, session,
                 ManagedExtensionProjection.recordKey(session, RELEASE_DOMAIN, releaseId(epoch)),
-                tenant, session, RELEASE_DOMAIN).isEmpty();
+                RELEASE_DOMAIN).isEmpty();
     }
 
     private Placement lockEligible(String tenant, String session, OperationRecord operation) {
@@ -231,11 +227,10 @@ public class JdbcHarnessPlacementStore
             case ARCHIVE -> "ARCHIVING";
             default -> "CLOSING";
         };
-        var admission = jdbc.query("SELECT status, session_kind, workspace_id, is_csi_guard FROM ma_session"
+        var admission = jdbc.query("SELECT status, session_kind, workspace_id FROM ma_session"
                 + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE", (row, index) ->
                 pendingStatus.equals(row.getString(1))
-                        && ("PUBLIC".equals(row.getString(2)) || row.getString(3) != null)
-                        && !row.getBoolean(4), tenant, session);
+                        && ("PUBLIC".equals(row.getString(2)) || row.getString(3) != null), tenant, session);
         if (admission.isEmpty() || !admission.getFirst()) {
             throw blocked("harness_placement_not_admitted");
         }
@@ -252,12 +247,10 @@ public class JdbcHarnessPlacementStore
                 + " o.lifecycle_protocol_version, f.phase, f.operation_id FROM ma_operation o JOIN ma_session_head f"
                 + " ON f.tenant_id = o.tenant_id AND f.harness_session_id = o.session_id"
                 + " WHERE o.tenant_id = ? AND o.session_id = ? AND o.operation_id = ? AND o.operation_kind = ?"
-                + " AND f.tenant_key = ? AND f.harness_key = ? FOR UPDATE",
+                + " FOR UPDATE",
                 (row, index) -> new Object[] {row.getLong(1), row.getLong(2), row.getString(3), row.getString(4),
                         row.getInt(5), row.getString(6), row.getString(7)},
-                operation.tenantId(), operation.sessionId(), operation.operationId(), operation.kind().name(),
-                RuntimeAdmissionFences.harnessDrainKey(operation.tenantId()),
-                RuntimeAdmissionFences.harnessDrainKey(operation.sessionId()));
+                operation.tenantId(), operation.sessionId(), operation.operationId(), operation.kind().name());
         if (rows.size() != 1) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }

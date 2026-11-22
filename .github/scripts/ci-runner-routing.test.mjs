@@ -63,7 +63,11 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // label, unwrapped here to the array it names. Any term the substitutions
 // do not recognise fails loud, so an edited expression is re-read here
 // instead of silently outgrowing the matrix.
-function evalRunsOn(
+// Substitutes the routing inputs into a real workflow expression and evaluates
+// the remaining &&/||/parenthesis skeleton. Shared by every runs-on matrix and
+// the routed `timeout-minutes` ceilings, so a lane and its ceiling are priced
+// by the same terms: a ceiling that stops matching its selector fails here.
+function evalExpression(
   expression,
   {
     ecsDisabled,
@@ -143,8 +147,12 @@ function evalRunsOn(
     /github\.|vars\.|contains\(|fromJSON\(/,
     `routing expression carries a term the matrix does not model: ${expr}`,
   );
-  const selected = new Function(`return (${expr});`)();
-  assert.ok(Array.isArray(selected), `no runner label selected: ${expr}`);
+  return new Function(`return (${expr});`)();
+}
+
+function evalRunsOn(expression, inputs) {
+  const selected = evalExpression(expression, inputs);
+  assert.ok(Array.isArray(selected), `no runner label selected: ${expression}`);
   return selected;
 }
 
@@ -1217,19 +1225,23 @@ describe('credential-free jobs on the disposable pool', () => {
     );
   });
 
-  it('web-shell-managed-host.yml build: only PR events ride the disposable pool', () => {
-    // Same credential-free boundary as the capture, but this lane also runs on
-    // post-merge push and manual dispatch, and those witnesses must stay
-    // hosted. Assert the effect per event rather than comparing the selector
-    // text to a copy of itself: flipping the event term and updating a pinned
-    // literal in the same commit leaves a text-only pin green. The pool label
-    // comes from the same config the capture case reads, so a config-only
-    // rename reds this lane too instead of leaving it requesting a label no
-    // runner advertises.
+  it('web-shell-managed-host.yml build: PR events split on trust, other events stay hosted', () => {
+    // Same credential-free boundary on both self-hosted arms, but the
+    // disposable pool is sized for untrusted forks: a trusted PR queueing
+    // there delays a fork job that has nowhere else to run. Trusted PRs take
+    // the persistent x64 fleet the rest of their CI already uses, and only
+    // untrusted fork PRs keep the disposable pool. Post-merge push and manual
+    // dispatch must stay hosted so the merged tree keeps its witness.
+    // Assert the effect per event rather than comparing the selector text to
+    // a copy of itself: flipping a term and updating a pinned literal in the
+    // same commit leaves a text-only pin green. The pool label comes from the
+    // same config the capture case reads, so a config-only rename reds this
+    // lane too instead of leaving it requesting a label no runner advertises.
     const doc = parse(
       readFileSync(join(workflowsDir, 'web-shell-managed-host.yml'), 'utf8'),
     );
     const runsOn = String(doc.jobs.build['runs-on']);
+    const timeout = String(doc.jobs.build['timeout-minutes']);
     for (const eventName of ['push', 'workflow_dispatch', 'merge_group']) {
       for (const ecsDisabled of [false, true]) {
         assert.deepEqual(
@@ -1239,28 +1251,144 @@ describe('credential-free jobs on the disposable pool', () => {
         );
       }
     }
-    // The selector carries no sameRepo term: same-repository and fork PRs are
-    // both PR events, so pin both arms instead of only the same-repo one.
     for (const sameRepo of [true, false]) {
-      assert.deepEqual(
-        evalRunsOn(runsOn, {
-          eventName: 'pull_request',
-          ecsDisabled: false,
-          sameRepo,
-        }),
-        EPHEMERAL,
-        `managed-host PR builds ride the disposable pool sameRepo=${sameRepo}`,
-      );
-      assert.deepEqual(
-        evalRunsOn(runsOn, {
-          eventName: 'pull_request',
-          ecsDisabled: true,
-          sameRepo,
-        }),
-        JSON.parse(HOSTED),
-        `kill-switch must revert managed-host PR builds to hosted sameRepo=${sameRepo}`,
-      );
+      for (const assoc of ASSOCIATIONS) {
+        const trusted = sameRepo || TRUSTED.includes(assoc);
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo,
+            assoc,
+          }),
+          trusted ? JSON.parse(ECS) : EPHEMERAL,
+          `managed-host PR routing sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+        // Where repository variables are visible the kill-switch must return
+        // every PR arm to hosted, trusted or not.
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            eventName: 'pull_request',
+            ecsDisabled: true,
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          `kill-switch must revert managed-host PR builds to hosted sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+      }
     }
+    // The ceiling must be priced by the arm actually selected: 90 buys the
+    // disposable pool's cold install, while the warm persistent fleet and the
+    // hosted witnesses keep 20. A trusted fork PR is trusted on the selector,
+    // so it must lose the cold-pool ceiling too. Evaluated through the same
+    // substitution matrix as runs-on, so a routing change that forgets the
+    // ceiling reds here instead of silently pricing the wrong pool.
+    for (const sameRepo of [true, false]) {
+      for (const assoc of ASSOCIATIONS) {
+        const trusted = sameRepo || TRUSTED.includes(assoc);
+        assert.equal(
+          evalExpression(timeout, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo,
+            assoc,
+          }),
+          trusted ? 20 : 90,
+          `managed-host ceiling sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+        // The kill switch reverts the arm to hosted, so the ceiling must
+        // follow it: dropping the `vars` term leaves a reverted PR priced at
+        // 90 minutes on a GitHub-hosted runner.
+        assert.equal(
+          evalExpression(timeout, {
+            eventName: 'pull_request',
+            ecsDisabled: true,
+            sameRepo,
+            assoc,
+          }),
+          20,
+          `kill-switch must price managed-host PR builds as hosted sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+      }
+    }
+    for (const eventName of ['push', 'workflow_dispatch', 'merge_group']) {
+      for (const ecsDisabled of [false, true]) {
+        // Price the non-PR cells on both head shapes: dropping the event term
+        // leaves a push or dispatch priced at 90 by the trust clause, which
+        // the same-repo-only cell above cannot see.
+        for (const [sameRepo, assoc] of [
+          [true, 'OWNER'],
+          [false, 'NONE'],
+        ]) {
+          assert.equal(
+            evalExpression(timeout, {
+              eventName,
+              ecsDisabled,
+              sameRepo,
+              assoc,
+            }),
+            20,
+            `managed-host ${eventName} keeps the hosted ceiling sameRepo=${sameRepo} assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
+          );
+        }
+      }
+    }
+  });
+
+  it('managed-agent-loop.yml managed-loop: PR events split on the same trust rule', () => {
+    // Both Managed paths build and execute PR code with a read-only token and
+    // no secrets, so either self-hosted arm is inside the same boundary. The
+    // split is about capacity, not trust: the disposable pool is sized for
+    // untrusted forks, and a trusted PR parked there delays a fork job that
+    // cannot be routed anywhere else. Two matrix legs per run makes this lane
+    // the pool's largest same-repo consumer, so it follows ci.yml's rule.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'managed-agent-loop.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs['managed-loop']['runs-on']);
+    for (const eventName of [
+      'push',
+      'workflow_dispatch',
+      'merge_group',
+      'schedule',
+    ]) {
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, { eventName, ecsDisabled, sameRepo: true }),
+          JSON.parse(HOSTED),
+          `managed-loop ${eventName} must stay hosted ecsDisabled=${ecsDisabled}`,
+        );
+      }
+    }
+    for (const sameRepo of [true, false]) {
+      for (const assoc of ASSOCIATIONS) {
+        const trusted = sameRepo || TRUSTED.includes(assoc);
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            eventName: 'pull_request',
+            ecsDisabled: false,
+            sameRepo,
+            assoc,
+          }),
+          trusted ? JSON.parse(ECS) : EPHEMERAL,
+          `managed-loop PR routing sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+        assert.deepEqual(
+          evalRunsOn(runsOn, {
+            eventName: 'pull_request',
+            ecsDisabled: true,
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          `kill-switch must revert managed-loop to hosted sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
+      }
+    }
+    // The lane must not request the generic ARM64 label: the disposable pool
+    // deliberately omits it so broad ARM64 selectors cannot admit fork jobs.
+    assert.doesNotMatch(runsOn, /"arm64"/);
   });
 });
 
@@ -1898,6 +2026,18 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     assert.equal(doc.jobs.publish['runs-on'], 'ubuntu-latest');
   });
 
+  it('release-managed-agent-reference.yml tracks the seed helper for PRs', () => {
+    const doc = parse(
+      readFileSync(
+        join(workflowsDir, 'release-managed-agent-reference.yml'),
+        'utf8',
+      ),
+    );
+    assert.ok(
+      doc.on.pull_request.paths.includes('.github/scripts/maven-cache-seed.sh'),
+    );
+  });
+
   it('release-managed-agent-reference.yml build is safe on a shared pool host', () => {
     const text = readFileSync(
       join(workflowsDir, 'release-managed-agent-reference.yml'),
@@ -1921,12 +2061,19 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     const run = (name) => build.steps.find((s) => s.name === name).run;
     const buildJava = run('Build Java components');
     assert.match(buildJava, /-Dmaven\.repo\.local=/);
-    assert.match(buildJava, /find "\$\{repo\}" -depth -type d/);
-    assert.match(
-      buildJava,
-      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*'/,
+    assert.ok(buildJava.includes('source "${seed_helper}"'));
+    assert.ok(buildJava.includes('unavailable at workflow revision'));
+    assert.doesNotMatch(buildJava, /seed_mount_guard\(\) \{/);
+    const seedHelper = readFileSync(
+      '.github/scripts/maven-cache-seed.sh',
+      'utf8',
     );
-    assert.match(buildJava, /-exec rm -rf \{\} \+/);
+    assert.match(seedHelper, /find -P "\$\{repo\}" -xdev -depth/);
+    assert.match(
+      seedHelper,
+      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwencode-sdk\/\*' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*\/\*'/,
+    );
+    assert.match(seedHelper, /-delete \|\| exit 1/);
     assert.match(
       run('Assemble reference distribution'),
       /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,

@@ -182,8 +182,9 @@ label set matching the actual CI route. The current ARM64 pool registers only
 `self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
 unrelated ARM64 jobs out of this pool. Validate the existing
 CI jobs with these formal labels rather than a separate smoke workflow. The
-example runs one slot; hz4 currently maintains thirty fixed slots, and the
-manager accepts up to 64 slots per host. Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
+example runs one slot; the manager accepts up to 64 slots per host, and the
+pools on hz4 and hz5 run twenty slots each as of 2026-11-15 (hz4 maintained
+thirty when this was written). Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
 If the host requires an HTTP proxy for external access (GitHub, npm, etc.),
@@ -364,7 +365,13 @@ run PR code with a read-only token. Web-shell Visuals capture uses this pool for
 every PR, and the Managed Host bundle build uses it on `pull_request` events
 only — its post-merge push and manual runs, and the credential-bearing Visuals
 publisher, stay GitHub-hosted. Size the pool for these lanes as well: they now
-arrive on same-repository PRs, not only untrusted forks. Their rollback lever is
+arrive on same-repository PRs, not only untrusted forks.
+
+Update 2026-11-15: the Managed loop lane and the Managed Host bundle build no
+longer send same-repository or OWNER/MEMBER/COLLABORATOR pull requests here —
+those run on the persistent x64 fleet, and only untrusted fork pull requests
+keep this pool. Web-shell Visuals capture still uses it for every PR. Size the
+pool for untrusted fork traffic, not for a same-repository share. Their rollback lever is
 `MAINTAINER_ECS_RUNNER_DISABLED=true`, which the `ci.yml` `pr_test_runner`
 selector below does not control. Details:
 [disposable container runners design](../../../docs/design/2026-11-07-ephemeral-container-runners.md).

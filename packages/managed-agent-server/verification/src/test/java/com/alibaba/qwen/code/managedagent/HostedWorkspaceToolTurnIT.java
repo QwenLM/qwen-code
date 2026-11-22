@@ -13,8 +13,8 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
@@ -34,12 +34,14 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.support.AbstractBeanDefinition;
 import org.springframework.boot.builder.SpringApplicationBuilder;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 
@@ -255,6 +257,15 @@ class HostedWorkspaceToolTurnIT {
                 context.getBean(ToolPublicationStore.class), context.getBean(JdbcManagedSessionStore.class),
                 context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
                 new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
+        context.registerBean("managedToolVerificationScheduler", ThreadPoolTaskScheduler.class, () -> {
+            var scheduler = new ThreadPoolTaskScheduler();
+            scheduler.setPoolSize(1);
+            scheduler.setThreadNamePrefix("unicode-tool-verification-");
+            return scheduler;
+        }, definition -> ((AbstractBeanDefinition) definition).setDefaultCandidate(false));
+        context.registerBean("unicodeVerifier", ToolPublicationVerifier.class,
+                () -> new ToolPublicationVerifier(context.getBean(ToolPublicationDataStore.class), 2),
+                definition -> definition.setDestroyMethodName("close"));
         context.registerBean("unicodePublicationController", ToolPublicationController.class, () -> {
             var properties = context.getBean(ManagedAgentProperties.class);
             properties.getToolPublication().setEntryConcurrency(4);
@@ -788,8 +799,8 @@ class HostedWorkspaceToolTurnIT {
         for (JsonNode resource : target.path("resources")) {
             // Led by the indexed session scope key, as in HostedGateTestSupport:
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
-            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    ManagedSessionStore.sessionScopeKey(tenant, sessionId), resource.path("resourceId").asText(), tenant, sessionId);
+            List<Map<String, Object>> stored = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    tenant, sessionId, resource.path("resourceId").asText(), tenant, sessionId);
             if (!applied) {
                 if (resource.has("bytesBase64")) {
                     assertThat(stored).as(fault + " rolled-back resource").isEmpty();
@@ -810,7 +821,7 @@ class HostedWorkspaceToolTurnIT {
             }
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref f"
-                + " LEFT JOIN ma_resource r ON r.session_scope_key = f.session_scope_key"
+                + " LEFT JOIN ma_resource r ON r.tenant_id = f.tenant_id AND r.session_id = f.session_id"
                 + " AND r.resource_id = f.resource_id LEFT JOIN ma_session_journal_tx t"
                 + " ON t.tenant_id = f.tenant_id AND t.session_id = f.session_id AND t.journal_revision = f.journal_revision"
                 + " WHERE f.owner_kind = 'JOURNAL' AND f.tenant_id = ? AND f.session_id = ?"
@@ -871,8 +882,8 @@ class HostedWorkspaceToolTurnIT {
         assertThat(head.get("last_commit_digest")).isEqualTo(digest);
         assertThat(head.get("latest_checkpoint_resource_id")).isEqualTo(checkpointId);
         byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
-                ManagedSessionStore.sessionScopeKey(tenant, sessionId), checkpointId, tenant, sessionId);
+                + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?", byte[].class,
+                tenant, sessionId, checkpointId, tenant, sessionId);
         String phase = mapper.readTree(checkpoint).path("continuation").path("phase").asText();
         if (fault.startsWith("result-")) {
             assertThat(phase).isEqualTo("await_runtime");

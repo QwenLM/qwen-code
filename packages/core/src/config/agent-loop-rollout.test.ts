@@ -7,17 +7,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AGENT_LOOP_SURFACES,
+  logAgentLoopEntry,
   resolveAgentLoopEnvOverride,
   resolveAgentLoopSwitch,
   resetAgentLoopEnvWarnings,
   type AgentLoopSurface,
 } from './agent-loop-rollout.js';
 
-const { warnMock } = vi.hoisted(() => ({ warnMock: vi.fn() }));
+const { warnMock, debugMock } = vi.hoisted(() => ({
+  warnMock: vi.fn(),
+  debugMock: vi.fn(),
+}));
 vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => ({
     warn: warnMock,
-    debug: vi.fn(),
+    debug: debugMock,
     info: vi.fn(),
     error: vi.fn(),
   }),
@@ -270,5 +274,32 @@ describe('resolveAgentLoopEnvOverride warning dedup', () => {
     expect(warnMock).toHaveBeenCalledWith(
       `ignoring unknown agent-loop surface token "headles" in ${VE}`,
     );
+  });
+});
+
+describe('logAgentLoopEntry', () => {
+  beforeEach(() => debugMock.mockClear());
+
+  it('logs the surface and the resolved path', () => {
+    logAgentLoopEntry({ getAgentLoopPath: () => 'legacy' }, 'headless');
+    expect(debugMock).toHaveBeenCalledWith('headless legacy');
+  });
+
+  it('logs each path spelling', () => {
+    logAgentLoopEntry({ getAgentLoopPath: () => 'shared' }, 'ink');
+    logAgentLoopEntry({ getAgentLoopPath: () => 'kernel' }, 'acp');
+    expect(debugMock).toHaveBeenCalledWith('ink shared');
+    expect(debugMock).toHaveBeenCalledWith('acp kernel');
+  });
+
+  it('resolves the path for the given surface', () => {
+    const getAgentLoopPath = vi.fn(() => 'legacy' as const);
+    logAgentLoopEntry({ getAgentLoopPath }, 'opentui');
+    expect(getAgentLoopPath).toHaveBeenCalledWith('opentui');
+  });
+
+  it('does not log when the config has no getAgentLoopPath', () => {
+    logAgentLoopEntry({}, 'headless');
+    expect(debugMock).not.toHaveBeenCalled();
   });
 });

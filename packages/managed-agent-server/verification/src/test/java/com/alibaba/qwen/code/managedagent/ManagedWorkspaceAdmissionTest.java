@@ -99,6 +99,9 @@ class ManagedWorkspaceAdmissionTest {
     private JdbcManagedWorkspaceRegistry registry;
 
     @Autowired
+    private ManagedAgentProperties contextProperties;
+
+    @Autowired
     @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
@@ -178,6 +181,76 @@ class ManagedWorkspaceAdmissionTest {
                 .publicChildrenSupported(true)
                 .build()));
         assertThat(disabled.requireSession(tenant, fresh.sessionId()).publicChildAgentsVersion()).isZero();
+    }
+
+    @Test
+    void sshRootAdmitsBuiltinPublicChildrenWithoutExtensionExecution() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-ssh-child", "storage-ssh-child", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-ssh-child", "actor-a", true);
+        // An open (unfenced) SSH storage registration naming the granted node.
+        jdbc.update("INSERT INTO ma_storage"
+                        + " (alias_key,tenant_id,storage_id,storage_kind,registration_json,fence_operation_id)"
+                        + " VALUES (?,?,?,?,?,NULL)",
+                RuntimeAdmissionFences.storageAliasKey(tenant, "storage-ssh-child"),
+                tenant, "storage-ssh-child", "SSH_LOCAL", "{\"nodeId\":\"remote\"}");
+        var node = new com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings.Node(
+                "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
+                List.of("/work"), 41270, "0.25.1",
+                List.of(new com.alibaba.qwen.code.managedagent.config.SshRuntimeSettings.Access(
+                        tenant, "actor-a")));
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        // D5′: the SSH arm of admitsPublicChildAgents — provisioner, a
+        // configured node and session isolation; extension execution stays off.
+        properties.getRuntimeBroker().setProvisioner("ssh-process");
+        properties.getRuntimeBroker().getSsh().setEnabled(true);
+        properties.getRuntimeBroker().getSsh().setNodes(List.of(node));
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        // The autowired registry reads the context's SSH settings live; grant
+        // the node access there for this test and restore afterwards.
+        var contextSsh = contextProperties.getRuntimeBroker().getSsh();
+        contextSsh.setEnabled(true);
+        contextSsh.setNodes(List.of(node));
+        try {
+            var sshStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper,
+                    Clock.systemUTC(), ignored -> {}, registry, properties,
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            var tx = new TransactionTemplate(transactionManager);
+            var selection = new WorkspaceSelection("ws-ssh-child", ".");
+            var parent = tx.execute(status -> sshStore.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor-a")
+                    .idempotencyKey("ssh-public")
+                    .requestDigest("ssh-public-digest")
+                    .agentId("qwen-code")
+                    .selection(selection)
+                    .approvalSelectionSupported(true)
+                    .planModeSupported(true)
+                    .publicChildrenSupported(true)
+                    .build()));
+            assertThat(sshStore.requireSession(tenant, parent.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+            var lineage = new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(
+                    parent.sessionId(), parent.sessionId(), "run-ssh", 1);
+            var snapshot = mapper.readTree("""
+                    {"version":1,"sourcePromptId":"source-1","approvalMode":"default","approvalRevision":0,
+                     "modelId":"launch-model","modelRevision":1,"skillsRef":null,
+                     "modelRoute":{"authType":"openai","endpointDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                     "providerPin":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}
+                    """);
+            var child = tx.execute(status -> sshStore.insertPublicChildSessionCommand(tenant, parent.sessionId(),
+                    "ssh-launch", "ssh-launch-digest", "child",
+                    List.<Map<String, Object>>of(Map.of("type", "text", "text", "write a file")),
+                    "payload", lineage, snapshot));
+            assertThat(sshStore.requireSession(tenant, child.sessionId()).publicChildAgentsVersion()).isEqualTo(1);
+            assertThat(sshStore.requireSession(tenant, child.sessionId()).approvalMode()).isEqualTo("default");
+        } finally {
+            contextSsh.setEnabled(false);
+            contextSsh.setNodes(List.of());
+        }
     }
 
     @ParameterizedTest
@@ -422,6 +495,8 @@ class ManagedWorkspaceAdmissionTest {
             public boolean isAvailable() { return true; }
             @Override
             public boolean isWorkspaceFilesAvailable() { return true; }
+            @Override
+            public boolean supportsInputAttachments() { return true; }
         };
         var coordinator = mock(com.alibaba.qwen.code.managedagent.session.HarnessCoordinator.class);
         ManagedAgentService admitted = new ManagedAgentService(enabled, new RequestDigests(), coordinator, harness, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
@@ -448,6 +523,7 @@ class ManagedWorkspaceAdmissionTest {
                 .isInstanceOf(ManagedAgentException.class);
         var capabilities = stopped.getWebShellSession(tenant, "actor-a", session).capabilities();
         assertThat(capabilities.workspaceTurns()).isTrue();
+        assertThat(capabilities.inputAttachments()).isTrue();
         assertThat(capabilities.foregroundShell()).isFalse();
         assertThat(capabilities.sessionClose()).isFalse();
         assertThat(capabilities.sessionDelete()).isFalse();
@@ -493,6 +569,19 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(stopped.getPublicSession(tenant, "actor-a", files).capabilities().foregroundShell()).isNull();
         var fileTurn = transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "files-turn", files, input));
         assertThat(fileTurn).isNotNull();
+        // A bound Session whose Workspace files admission is off must not
+        // borrow the unbound arm: reds if the workspace()==null guard is
+        // deleted from the capability disjunct.
+        UnavailableHarnessConnector filesOffAttachments = new UnavailableHarnessConnector() {
+            @Override
+            public boolean isAvailable() { return true; }
+            @Override
+            public boolean isWorkspaceFilesAvailable() { return false; }
+            @Override
+            public boolean supportsInputAttachments() { return true; }
+        };
+        ManagedAgentService filesOff = new ManagedAgentService(disabled, new RequestDigests(), coordinator, filesOffAttachments, registry, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        assertThat(filesOff.getWebShellSession(tenant, "actor-a", files).capabilities().inputAttachments()).isFalse();
     }
 
     @Test
@@ -2243,7 +2332,7 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     @Test
-    void compressionCapabilityAllowsResidentWorkspacesAndRequiresTheOperatorAndFrozenFacts() {
+    void compressionCapabilityRequiresTheOperatorAndFrozenFacts() {
         String tenant = "tenant-" + UUID.randomUUID();
         String session = boundSession(tenant);
         grant(tenant, "ws-a", "operator2", true);
@@ -2894,11 +2983,9 @@ class ManagedWorkspaceAdmissionTest {
 
     private void fenceStorage(String tenant, String storageId) {
         jdbc.update("INSERT INTO ma_storage"
-                        + " (alias_key,tenant_key,storage_key,tenant_id,storage_id,fence_operation_id)"
-                        + " VALUES (?,?,?,?,?,?)",
+                        + " (alias_key,tenant_id,storage_id,fence_operation_id)"
+                        + " VALUES (?,?,?,?)",
                 RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
-                RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey(storageId),
                 tenant, storageId, UUID.randomUUID().toString());
     }
 
@@ -2961,13 +3048,13 @@ class ManagedWorkspaceAdmissionTest {
         String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
         String target = ManagedSchemaKeys.key(sessionId);
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key,"
-                        + " session_scope_key, operation_id, operation_kind,"
+                        + " operation_id, operation_kind,"
                         + " tenant_id, session_id, target_kind, target_key,"
                         + " target_id, actor_digest, idempotency_key,"
                         + " idempotency_digest, request_digest, request_json,"
                         + " state, phase, admission_stage, delivery_state,"
                         + " session_status_before, available_at, gmt_create,"
-                        + " gmt_modified, completed_at) VALUES (?, ?, ?,"
+                        + " gmt_modified, completed_at) VALUES (?, ?,"
                         + " 'op-del', 'DELETE', ?, ?, 'SESSION', ?, ?, '',"
                         + " 'delete', ?, 'delete-digest', '{}', 'COMPLETED',"
                         + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', ?, 0, 0,"
@@ -2975,7 +3062,7 @@ class ManagedWorkspaceAdmissionTest {
                 ManagedSchemaKeys.operationKey(
                         ManagedSchemaContract.OperationKind.DELETE, scope,
                         target, "op-del"),
-                scope, scope, tenant, sessionId, target, sessionId,
+                scope, tenant, sessionId, target, sessionId,
                 ManagedSchemaKeys.key("delete"), statusBefore);
         jdbc.update("UPDATE ma_session SET status = 'DELETED',"
                         + " deleted_at = 1, gmt_modified = 1, version ="

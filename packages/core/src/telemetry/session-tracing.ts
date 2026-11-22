@@ -95,8 +95,9 @@ export interface LLMRequestMetadata {
   durationMs?: number;
   error?: string;
   /**
-   * Internal time from the streaming wrapper's existing wall-clock start to
-   * the first chunk containing user-visible content (text / functionCall /
+   * Internal time from the provider's first request dispatch (the streaming
+   * wrapper's wall-clock start when the provider reports none) to the first
+   * chunk containing user-visible content (text / functionCall /
    * inlineData / executableCode / thought). Undefined for non-streaming
    * requests, requests aborted before the first user-visible chunk, and any
    * path that does not pass through LoggingContentGenerator's stream wrapper.
@@ -108,6 +109,12 @@ export interface LLMRequestMetadata {
    * See docs/design/telemetry-llm-request-timing-design.md (D1).
    */
   ttftMs?: number;
+  /**
+   * Time from the streaming wrapper's wall-clock start to the request
+   * dispatch that `ttftMs` starts from. `durationMs` covers it, so sampling
+   * time subtracts it.
+   */
+  requestBuildMs?: number;
   /**
    * Time from `retryWithBackoff` entry to THIS attempt's start (ms). On a
    * successful-attempt span this doubles as the total retry overhead before
@@ -920,14 +927,17 @@ export function endLLMRequestSpan(
       // `Date.now() - spanCtx.startTime`, and startTime is captured when
       // `startLLMRequestSpan` runs — which is AFTER `requestSetupMs` worth of
       // overhead has already passed. So the span's `duration_ms` only covers
-      // `ttft + sampling`, never the preceding setup. Subtracting `setup` again
-      // is wrong. In Phase 4a, `requestSetupMs` was always undefined so the
+      // `requestBuild + ttft + sampling`, never the preceding setup.
+      // Subtracting `setup` again is wrong. In Phase 4a, `requestSetupMs` was always undefined so the
       // bug was masked (0 subtraction). Phase 4b populates `requestSetupMs`
       // with cumulative retry overhead, which would have clamped sampling_ms
       // to 0 for every retried request — wiping out output-throughput data
       // exactly when operators need it most. Fixed here.
       if (metadata.ttftMs !== undefined) {
-        const samplingMs = Math.max(0, duration - metadata.ttftMs);
+        const samplingMs = Math.max(
+          0,
+          duration - (metadata.requestBuildMs ?? 0) - metadata.ttftMs,
+        );
         endAttributes['sampling_ms'] = samplingMs;
         // Derived: output tokens per second during sampling. Undefined when
         // sampling_ms is 0 (avoid divide-by-zero) or when outputTokens missing.
@@ -998,7 +1008,10 @@ export function endLLMRequestSpan(
         }
         const breakdownSamplingMs =
           metadata.ttftMs !== undefined
-            ? Math.max(0, duration - metadata.ttftMs)
+            ? Math.max(
+                0,
+                duration - (metadata.requestBuildMs ?? 0) - metadata.ttftMs,
+              )
             : undefined;
         if (breakdownSamplingMs !== undefined && breakdownSamplingMs > 0) {
           recordApiRequestBreakdown(metadata.config, breakdownSamplingMs, {
@@ -1538,6 +1551,8 @@ export interface StartHookSpanOptions {
 export interface HookSpanMetadata {
   /** Whether the hook fire site completed without throwing. */
   success?: boolean;
+  /** The turn stopped waiting before the hook outcome was available. */
+  waitInterrupted?: boolean;
   /** PreToolUse: false means the hook blocked tool execution. */
   shouldProceed?: boolean;
   /** PostToolUse: true means the hook stopped further processing. */
@@ -1633,6 +1648,8 @@ export function endHookSpan(span: Span, metadata?: HookSpanMetadata): void {
     if (metadata) {
       if (metadata.success !== undefined)
         endAttributes['success'] = metadata.success;
+      if (metadata.waitInterrupted !== undefined)
+        endAttributes['wait_interrupted'] = metadata.waitInterrupted;
       if (metadata.shouldProceed !== undefined)
         endAttributes['should_proceed'] = metadata.shouldProceed;
       if (metadata.shouldStop !== undefined)

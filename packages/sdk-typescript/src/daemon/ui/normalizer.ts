@@ -12,9 +12,14 @@ import type {
   DaemonSessionArtifactChange,
 } from '../types.js';
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
-import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
+import {
+  asKnownDaemonEvent,
+  isModLogData,
+  isSettingsChangedData,
+} from '../events.js';
 import type {
   DaemonAgentIdentity,
+  DaemonInputSourceAnnotation,
   DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -352,6 +357,23 @@ export function normalizeDaemonEvent(
       return [{ ...base, type: 'status', text }];
     }
 
+    case 'mod_log': {
+      if (!isModLogData(event.data))
+        return normalizeUnrecognizedEvent(event, base);
+      const { plugin, text } = event.data;
+      return [
+        {
+          ...base,
+          type: 'status',
+          source: 'mod_log',
+          text: `[Mod ${plugin}] ${text}`,
+          data: { plugin, text },
+          // A line a Mod writes mid-reply sits below it, not inside it.
+          clearActiveText: false,
+        },
+      ];
+    }
+
     case 'replay_complete': {
       const replayedCount = numberField(event.data, 'replayedCount') ?? 0;
       // D4: prefer the canonical `lastReplayedEventId`; fall back to the
@@ -446,6 +468,18 @@ export function normalizeDaemonEvent(
 
     case 'artifact_changed':
       return normalizeArtifactChanged(event, base);
+
+    case 'sub_session_task_changed': {
+      const sessionId = getString(event.data, 'sessionId');
+      if (!sessionId) {
+        return fallbackDebug(
+          event,
+          base,
+          'malformed sub_session_task_changed payload',
+        );
+      }
+      return [{ ...base, type: 'session.sub_session_task.changed', sessionId }];
+    }
 
     // ── Auth device-flow events (RFC 8628) ─────────────────
     case 'auth_device_flow_started':
@@ -1230,6 +1264,30 @@ function extractUpdateMeta(
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   if (!meta) return undefined;
   const { qwenTranscript: _qwenTranscript, ...displayMeta } = meta;
+  const annotations = displayMeta['inputAnnotations'];
+  if (Array.isArray(annotations)) {
+    const references = annotations.filter((annotation: unknown) => {
+      if (!isRecord(annotation) || annotation['type'] !== 'source') return true;
+      const sessionId = getString(annotation, 'sessionId');
+      const workspaceCwd = getString(annotation, 'workspaceCwd');
+      const title = getString(annotation, 'title');
+      if (sessionId && workspaceCwd && !displayMeta['sourceAnnotation']) {
+        const source: DaemonInputSourceAnnotation = {
+          type: 'source',
+          sessionId,
+          workspaceCwd,
+          ...(title !== undefined ? { title } : {}),
+        };
+        displayMeta['sourceAnnotation'] = source;
+      }
+      return false;
+    });
+    if (references.length === 0 && annotations.length > 0) {
+      delete displayMeta['inputAnnotations'];
+    } else if (references.length !== annotations.length) {
+      displayMeta['inputAnnotations'] = references;
+    }
+  }
   return Object.keys(displayMeta).length > 0 ? displayMeta : undefined;
 }
 

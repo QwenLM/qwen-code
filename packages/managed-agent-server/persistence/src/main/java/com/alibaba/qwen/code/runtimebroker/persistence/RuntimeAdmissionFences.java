@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -84,12 +82,12 @@ public final class RuntimeAdmissionFences {
         }
         try (PreparedStatement statement =
                 connection.prepareStatement(
-                        "SELECT physical_key, mount_state, storage_kind"
+                        "SELECT storage_key, mount_state, storage_kind"
                                 + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
             statement.setString(1, key);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()
-                        || !key.equals(row.getString("physical_key"))
+                        || !key.equals(row.getString("storage_key"))
                         || !"LOCAL".equals(row.getString("storage_kind"))
                         || !"READY".equals(row.getString("mount_state"))) {
                     throw new RuntimeBrokerException(
@@ -107,24 +105,16 @@ public final class RuntimeAdmissionFences {
                 false);
     }
 
-    public static String harnessDrainKey(String value) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(value);
-    }
-
     static boolean hasHarnessDrain(Connection connection, String tenantId, String harnessSessionId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?")) {
-            statement.setString(1, harnessDrainKey(tenantId));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
+                                + " tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet result = statement.executeQuery()) {
                 if (!result.next()) {
                     return false;
-                }
-                if (!tenantId.equals(result.getString("tenant_id"))
-                        || !harnessSessionId.equals(result.getString("harness_session_id"))) {
-                    throw new IllegalStateException("Harness drain hash collision");
                 }
                 return !"OPEN".equals(result.getString("phase"));
             }
@@ -146,9 +136,9 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement fence =
                 connection.prepareStatement(
                         "SELECT operation_id FROM ma_session_head"
-                                + " WHERE tenant_key = ? AND harness_key = ?")) {
-            fence.setString(1, harnessDrainKey(scope.getTenantId()));
-            fence.setString(2, harnessDrainKey(harnessSessionId));
+                                + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(fence, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(fence, 2, harnessSessionId);
             try (ResultSet row = fence.executeQuery()) {
                 if (!row.next() || row.getString(1) == null) {
                     return false;
@@ -161,10 +151,10 @@ public final class RuntimeAdmissionFences {
                             + " JOIN ma_operation o ON o.operation_kind IN ('CLOSE',"
                             + " 'ARCHIVE', 'DELETE') AND o.tenant_id = f.tenant_id AND"
                             + " o.session_id = f.harness_session_id AND o.operation_id"
-                            + " = f.operation_id WHERE f.tenant_key = ? AND"
-                            + " f.harness_key = ?")) {
-            statement.setString(1, harnessDrainKey(scope.getTenantId()));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
+                            + " = f.operation_id WHERE f.tenant_id = ? AND"
+                            + " f.harness_session_id = ?")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     throw admissionClosed();
@@ -223,32 +213,12 @@ public final class RuntimeAdmissionFences {
         if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
             BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         } else if (!"session".equals(scope.getIsolationClass())
-                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)
                 && !(WorkspaceExecutionProfile.isBoundWorkspaceScope(scope) && harnessSessionId != null
                         && authority != null)) {
             if (authority != null) {
                 throw admissionClosed();
             }
             return;
-        }
-        if (ResidentWorkspaceProfile.selects(scope)) {
-            try (PreparedStatement session = connection.prepareStatement(
-                    "SELECT status, workspace_id, workspace_generation, context_config_ref, tool_profile"
-                            + " FROM ma_session WHERE tenant_id = ? AND session_id = ?")) {
-                JdbcRepositorySupport.setIdentity(session, 1, scope.getTenantId());
-                JdbcRepositorySupport.setIdentity(session, 2, harnessSessionId);
-                try (ResultSet row = session.executeQuery()) {
-                    if (!row.next() || !scope.getWorkspaceId().equals(row.getString("workspace_id"))
-                            || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
-                            || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))
-                            || !"hosted-workspace-files/1".equals(row.getString("tool_profile"))
-                            || !(authority == null && !cleanup && !retirement && !legacyHook
-                                    ? "ACTIVE".equals(row.getString("status"))
-                                    : List.of("CLOSING", "DELETING").contains(row.getString("status")))) {
-                        throw admissionClosed();
-                    }
-                }
-            }
         }
         String claimLock = "";
         if (authority != null) {
@@ -259,19 +229,15 @@ public final class RuntimeAdmissionFences {
         try (PreparedStatement statement = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase, operation_id,"
                                 + " claim_generation, claim_lease_until FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?" + claimLock)) {
-            statement.setString(1, harnessDrainKey(scope.getTenantId()));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
+                                + " tenant_id = ? AND harness_session_id = ?" + claimLock)) {
+            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
             try (ResultSet row = statement.executeQuery()) {
                 if (!row.next()) {
                     if (authority != null) {
                         throw admissionClosed();
                     }
                     return;
-                }
-                if (!scope.getTenantId().equals(row.getString("tenant_id"))
-                        || !harnessSessionId.equals(row.getString("harness_session_id"))) {
-                    throw admissionClosed();
                 }
                 if ("OPEN".equals(row.getString("phase"))) {
                     if (authority != null) {
@@ -303,13 +269,11 @@ public final class RuntimeAdmissionFences {
     public static void beginHarnessLifecycle(Connection connection, String tenantId, String sessionId, String operationId)
             throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
-                        "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'LIFECYCLE_ONLY', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'LIFECYCLE_ONLY' OR operation_id IS NULL OR operation_id <> VALUES(operation_id) THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'LIFECYCLE_ONLY', operation_id = VALUES(operation_id)")) {
-            statement.setString(1, harnessDrainKey(tenantId));
-            statement.setString(2, harnessDrainKey(sessionId));
-            JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
-            JdbcRepositorySupport.setIdentity(statement, 4, sessionId);
-            JdbcRepositorySupport.setIdentity(statement, 5, sessionId);
-            JdbcRepositorySupport.setIdentity(statement, 6, operationId);
+                        "INSERT INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, phase, operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', 'LIFECYCLE_ONLY', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'LIFECYCLE_ONLY' OR operation_id IS NULL OR operation_id <> VALUES(operation_id) THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'LIFECYCLE_ONLY', operation_id = VALUES(operation_id)")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 3, sessionId);
+            JdbcRepositorySupport.setIdentity(statement, 4, operationId);
             statement.executeUpdate();
         }
     }
@@ -319,21 +283,16 @@ public final class RuntimeAdmissionFences {
                 409, "runtime_admission_closed", "Session admission is closed", false);
     }
 
-    public static String storageFenceKey(String value) {
-        return JdbcRepositorySupport.valueKey(value);
-    }
-
     public static String storageAliasKey(String tenantId, String storageId) {
-        return WorkspaceCsiRegistration.aliasKey(tenantId, storageId);
+        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("qwen-csi-alias/1", tenantId, storageId);
     }
 
     static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
         try (PreparedStatement statement =
                 connection.prepareStatement(
                         "SELECT tenant_id, storage_id, fence_operation_id"
-                                + " FROM ma_storage WHERE tenant_key = ? AND storage_key = ?")) {
-            statement.setString(1, storageFenceKey(tenantId));
-            statement.setString(2, storageFenceKey(storageId));
+                                + " FROM ma_storage WHERE alias_key = ?")) {
+            statement.setString(1, storageAliasKey(tenantId, storageId));
             try (ResultSet rows = statement.executeQuery()) {
                 if (!rows.next()) {
                     return null;
@@ -364,26 +323,5 @@ public final class RuntimeAdmissionFences {
             }
         }
         return false;
-    }
-
-    static void requireResidentWorkspaceAdmission(Connection connection,
-            RuntimeProvisionRequest request) throws SQLException {
-        if (!ResidentWorkspaceProfile.selects(request)) {
-            return;
-        }
-        var scope = request.getScope();
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT workspace_generation, storage_id, state FROM ma_workspace"
-                        + " WHERE tenant_id = ? AND workspace_id = ?")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !"ACTIVE".equals(row.getString("state"))
-                        || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
-                        || !request.getStorageId().equals(row.getString("storage_id"))) {
-                    throw admissionClosed();
-                }
-            }
-        }
     }
 }

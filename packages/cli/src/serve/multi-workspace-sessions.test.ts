@@ -28,6 +28,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
+  setSessionTranscriptIndexBuildCompleteHookForTest,
+  setSessionTranscriptIndexCacheMaxBytesForTest,
+} from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import {
   InvalidRewindTargetError,
   SessionBusyError,
   SessionNotFoundError,
@@ -136,6 +140,11 @@ interface FakeBridge extends AcpSessionBridge {
   readonly setModelCalls: Array<{
     sessionId: string;
     req: { modelId?: unknown; sessionId?: unknown };
+    context?: BridgeClientRequestContext;
+  }>;
+  readonly feedbackCalls: Array<{
+    sessionId: string;
+    req: { promptId: string; rating: 'up' | 'down' };
     context?: BridgeClientRequestContext;
   }>;
   readonly setApprovalModeCalls: Array<{
@@ -507,6 +516,7 @@ function makeBridge(
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const feedbackCalls: FakeBridge['feedbackCalls'] = [];
   const setApprovalModeCalls: FakeBridge['setApprovalModeCalls'] = [];
   const metadataCalls: FakeBridge['metadataCalls'] = [];
   const recapCalls: FakeBridge['recapCalls'] = [];
@@ -549,6 +559,7 @@ function makeBridge(
     listCalls,
     summaryCalls,
     setModelCalls,
+    feedbackCalls,
     setApprovalModeCalls,
     metadataCalls,
     recapCalls,
@@ -715,6 +726,14 @@ function makeBridge(
     ) {
       setModelCalls.push({ sessionId, req, ...(context ? { context } : {}) });
       return { sessionId, modelId: req.modelId, _meta: { applied: true } };
+    },
+    async rateSessionTurn(
+      sessionId: string,
+      req: { promptId: string; rating: 'up' | 'down' },
+      context?: BridgeClientRequestContext,
+    ) {
+      feedbackCalls.push({ sessionId, req, ...(context ? { context } : {}) });
+      return { recorded: true };
     },
     async setSessionApprovalMode(
       sessionId: string,
@@ -1129,6 +1148,7 @@ function makeDaemonLog(): DaemonLogger {
     warn: vi.fn(),
     error: vi.fn(),
     raw: vi.fn(),
+    setPort: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
     getStatus: () => ({
@@ -3804,6 +3824,60 @@ describe('multi-workspace session dispatch', () => {
     expect(primaryBridge.setModelCalls).toEqual([]);
   });
 
+  it('routes POST /session/:id/feedback to the owning non-primary workspace bridge', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+      .set('Host', host())
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ promptId: 'prompt-1', rating: 'up' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ recorded: true });
+    expect(secondaryBridge.feedbackCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        req: { promptId: 'prompt-1', rating: 'up' },
+        context: { clientId: 'client-1' },
+      },
+    ]);
+    expect(primaryBridge.feedbackCalls).toEqual([]);
+  });
+
+  it('rejects invalid feedback bodies before reaching the bridge', async () => {
+    const { app, secondaryBridge } = makeHarness();
+    const invalid = [
+      { rating: 'up' },
+      { promptId: '', rating: 'up' },
+      { promptId: 42, rating: 'up' },
+      { promptId: 'prompt-1', rating: 'fine' },
+      { promptId: 'prompt-1', rating: null },
+      { promptId: 'prompt-1' },
+    ];
+    for (const body of invalid) {
+      const res = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+        .set('Host', host())
+        .send(body);
+      expect(res.status).toBe(400);
+    }
+    expect(secondaryBridge.feedbackCalls).toEqual([]);
+  });
+
+  it('rejects feedback on an untrusted non-primary session', async () => {
+    const { app, secondaryBridge } = makeHarness({ secondaryTrusted: false });
+
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/feedback')
+      .set('Host', host())
+      .send({ promptId: 'prompt-1', rating: 'down' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(secondaryBridge.feedbackCalls).toEqual([]);
+  });
+
   it('routes POST /session/:id/approval-mode to the owning non-primary workspace bridge', async () => {
     const { app, primaryBridge, secondaryBridge } = makeHarness();
 
@@ -4156,7 +4230,7 @@ describe('multi-workspace session dispatch', () => {
         .set('X-Qwen-Client-Id', 'secondary-client')
         .send({ pr });
       expect(res.status).toBe(200);
-      expect(res.body.prs).toEqual([pr]);
+      expect(res.body.prs).toEqual([{ ...pr, source: 'create' }]);
       expect(secondaryBridge.metadataCalls[0]?.metadata).toEqual({ pr });
 
       const persisted = await readSessionPrs(secondaryPath);
@@ -5932,6 +6006,53 @@ describe('multi-workspace session dispatch', () => {
       expect(expired.status).toBe(400);
       expect(expired.body.code).toBe('invalid_transcript_cursor');
       expect(expired.body.sessionId).toBe(sessionId);
+    });
+  });
+
+  it('reuses the cached transcript index across workspace requests', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440273';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:00:00.000Z',
+        prompt: 'first page',
+        mtime: new Date('2026-07-08T00:00:00.000Z'),
+      });
+      const transcriptPath = path.join(
+        new Storage(SECONDARY_CWD).getProjectDir(),
+        'chats',
+        `${sessionId}.jsonl`,
+      );
+      const { app } = makeHarness({ secondaryTrusted: false });
+      let builds = 0;
+      setSessionTranscriptIndexBuildCompleteHookForTest((builtPath) => {
+        if (builtPath === transcriptPath) builds++;
+      });
+      // A 1-byte shared budget lands the index in the oversized class, so
+      // the reuse pinned here is the oversized-class retention of #17889.
+      setSessionTranscriptIndexCacheMaxBytesForTest(1);
+      try {
+        await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        expect(builds).toBe(1);
+        const repeat = await request(app)
+          .get(
+            `/workspaces/secondary-id/session/${sessionId}/transcript?limit=1`,
+          )
+          .set('Host', host())
+          .expect(200);
+        // The second request hits the daemon-local index cache: no rebuild.
+        expect(builds).toBe(1);
+        expect(repeat.body.events).toHaveLength(1);
+      } finally {
+        setSessionTranscriptIndexBuildCompleteHookForTest(() => {});
+        setSessionTranscriptIndexCacheMaxBytesForTest(64 * 1024 * 1024);
+      }
     });
   });
 

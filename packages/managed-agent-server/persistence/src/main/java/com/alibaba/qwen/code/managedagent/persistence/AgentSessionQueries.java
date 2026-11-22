@@ -15,7 +15,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowCallbackHandler;
@@ -250,7 +249,16 @@ final class AgentSessionQueries {
         Map<String, JdbcSessionWorktreeStore.Row> worktrees = new LinkedHashMap<>();
         List<SessionRecord> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", COALESCE(es.last_sequence, 0) AS list_last_sequence,"
+                        "SELECT ma_session.tenant_id, ma_session.session_id, ma_session.agent_id,"
+                            + " ma_session.agent_revision, ma_session.title, ma_session.status,"
+                            + " ma_session.harness_boot_id, ma_session.harness_event_epoch, ma_session.harness_last_event_id,"
+                            + " ma_session.gmt_create, ma_session.gmt_modified, ma_session.deleted_at, ma_session.version,"
+                            + " ma_session.approval_mode, ma_session.tool_profile, ma_session.agent_definition_digest,"
+                            + " ma_session.public_child_agents_version, ma_session.model_config_digest, ma_session.memory_store_id,"
+                            + " ma_session.owner_only, ma_session.preview, ma_session.workspace_id, ma_session.workspace_generation,"
+                            + " ma_session.workspace_storage_id, ma_session.workspace_config_ref, ma_session.workspace_policy_ref,"
+                            + " ma_session.context_config_ref, ma_session.context_revision, ma_session.cwd_relative,"
+                            + " COALESCE(es.last_sequence, 0) AS list_last_sequence,"
                             + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence,"
                             + " w.tenant_id AS worktree_tenant_id, w.session_id AS worktree_session_id,"
                             + " w.workspace_id AS worktree_workspace_id, w.worktree_id AS worktree_worktree_id,"
@@ -368,7 +376,8 @@ final class AgentSessionQueries {
                                 + ") AND accepted.event_type = 'turn.accepted' GROUP BY"
                                 + " accepted.session_id) latest ON latest.session_id ="
                                 + " event.session_id AND latest.max_sequence ="
-                                + " event.sequence_id WHERE event.tenant_id = ?)"
+                                + " event.sequence_id WHERE event.tenant_id = ? AND event.stream_kind = 'SESSION'"
+                                + " AND event.stream_id = X'')"
                                 + " latest_turn ON latest_turn.session_id ="
                                 + " turn_record.session_id AND latest_turn.turn_id ="
                                 + " turn_record.turn_id WHERE turn_record.tenant_id ="
@@ -456,13 +465,16 @@ final class AgentSessionQueries {
             String promptId) {
         var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.is_plan_enabled, t.permission_rules_json,"
                         + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
-                        + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
+                        + " s.workspace_id, s.tool_profile, s.parent_session_id, s.public_child_agents_version FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
                         + " WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?", (row, index) -> {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(row.getString("tool_profile"))
+                                    ? "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
+                                            && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
+                                    : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V3.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V4.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {

@@ -41,7 +41,12 @@ jobs:
   managed-loop:
     name: 'Managed loop (${{ matrix.loop }})'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The disposable pool is sized for untrusted forks, which have no other
+    # self-hosted home. Same-repo PRs and PRs authored by OWNER/MEMBER/
+    # COLLABORATOR already run the rest of CI on the persistent x64 fleet, so
+    # they belong there too instead of queueing ahead of fork jobs that cannot
+    # be routed anywhere else. Mirrors ci.yml's classify_pr trust rule.
+    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && ((github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'')) || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -52,6 +57,29 @@ jobs:
       MANAGED_LOOP_REPORT_DIR: '${{ github.workspace }}/test-results/managed-loop'
       QWEN_SANDBOX: 'false'
     steps:
+      # The persistent fleet this lane now joins reuses workspaces between
+      # jobs; the disposable pool it came from starts fresh and never needed
+      # either heal. Root-owned leftovers fail git clean and send checkout
+      # into its recreate path, which dies in its own auth cleanup (run
+      # 43621213542, kernel leg). A leftover sparse index makes checkout's
+      # clean/reset skip the excluded paths, and `sparse-checkout disable`
+      # then exits without materialising them, leaving no .github/actions/ on
+      # disk. Same pair as ci.yml/e2e.yml, pinned by
+      # qwen-runner-checkout-workflow.test.js.
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           persist-credentials: false
@@ -63,6 +91,18 @@ jobs:
       - name: 'Use pre-installed Node.js'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+      # The fleet hosts run other lanes' jobs too, so a host at or near its
+      # disk or inode floor must fail here, before this lane installs and
+      # builds twice, instead of surfacing as an opaque build error or as a
+      # `Require both paths to have passed` failure on the lane whose job is
+      # telling a real managed-loop regression from a host fault. Same gate
+      # and constants as the sibling Managed Host lane.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        env:
+          DISK_FLOOR_MIN_FREE_KB: '8388608'
+          DISK_FLOOR_MAX_USED_PCT: '85'
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
       - name: 'Cache pnpm store'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: './.github/actions/pnpm-store-cache'

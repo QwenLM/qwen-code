@@ -91,6 +91,64 @@ class ManagedMcpSettingsStoreTest {
         assertThatThrownBy(() -> ManagedMcpSettings.find(jdbc, "tenant", id)).isInstanceOf(RuntimeException.class);
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"key", "tenant", "session", "domain", "id"})
+    void findRequiresTheCanonicalRecordKeyAndAllRawScopeFields(String mismatch) throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        ObjectNode first = settings(1, "enabled", null);
+        var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(first.toString()));
+        String key = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(id, ManagedMcpSettings.DOMAIN, ManagedMcpSettings.RECORD_ID);
+        String update = switch (mismatch) {
+            case "key" -> "UPDATE ma_session_record SET record_key = ?";
+            case "tenant" -> "UPDATE ma_session_record SET tenant_id = ?";
+            case "session" -> "UPDATE ma_session_record SET session_id = ?";
+            case "domain" -> "UPDATE ma_session_record SET domain = ?";
+            case "id" -> "UPDATE ma_session_record SET record_id = ?";
+            default -> throw new AssertionError(mismatch);
+        };
+        jdbc.update(update + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?", "c".repeat(64), "tenant", id, key);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isNull();
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"missing", "tenant", "session", "workspace", "length", "digest", "revision"})
+    void canonicalLookupStillRejectsCorruptOrUnjoinedSettingsResources(String corruption) throws Exception {
+        String id = UUID.randomUUID().toString();
+        var journal = publicJournal(id);
+        ObjectNode first = settings(1, "enabled", null);
+        var request = journal.requestOrdinary(first.path("operationId").asText(), "config_install", first,
+                event -> {}, records -> records, 0);
+        journal.commit(request);
+        journal.committed(request);
+        assertThat(ManagedMcpSettings.find(jdbc, "tenant", id)).isEqualTo(json.readTree(first.toString()));
+        String resource = ExtensionRecordJournal.resourceId(ExtensionRecordJournal.bytes(first));
+        switch (corruption) {
+            case "missing" -> jdbc.update("UPDATE ma_session_record SET record_resource_id = 'missing'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND domain = ?", "tenant", id, ManagedMcpSettings.DOMAIN);
+            case "tenant" -> jdbc.update("UPDATE ma_resource SET tenant_id = 'other-tenant'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "session" -> jdbc.update("UPDATE ma_resource SET session_id = 'other-session'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "workspace" -> jdbc.update("UPDATE ma_resource SET workspace_id = 'other-workspace'"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "length" -> jdbc.update("UPDATE ma_resource SET byte_length = byte_length + 1"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "tenant", id, resource);
+            case "digest" -> jdbc.update("UPDATE ma_resource SET sha256 = ?"
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?", "c".repeat(64), "tenant", id, resource);
+            case "revision" -> jdbc.update("UPDATE ma_session_record SET revision = revision + 1"
+                    + " WHERE tenant_id = ? AND session_id = ? AND domain = ?", "tenant", id, ManagedMcpSettings.DOMAIN);
+            default -> throw new AssertionError(corruption);
+        }
+        assertThatThrownBy(() -> ManagedMcpSettings.find(jdbc, "tenant", id))
+                .isInstanceOf(ManagedExtensionRecords.InvalidRecordException.class);
+    }
+
     @Test
     void legacySettingsRevisionsReplaceTheirProjectionRowInsteadOfAccumulating() throws Exception {
         String id = UUID.randomUUID().toString();

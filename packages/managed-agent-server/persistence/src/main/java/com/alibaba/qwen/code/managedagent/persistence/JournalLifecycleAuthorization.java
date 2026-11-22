@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -70,12 +69,9 @@ final class JournalLifecycleAuthorization {
         } else if (!"DRAINING"
                 .equals(
                         jdbc.queryForObject(
-                                "SELECT phase FROM ma_session_head WHERE tenant_key = ? AND"
-                                    + " harness_key = ? AND tenant_id = ? AND harness_session_id ="
-                                    + " ?",
+                                "SELECT phase FROM ma_session_head WHERE tenant_id = ? AND"
+                                    + " harness_session_id = ?",
                                 String.class,
-                                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                                 tenantId,
                                 sessionId))) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");
@@ -129,17 +125,22 @@ final class JournalLifecycleAuthorization {
         }
         authorizeOrdinary(tenantId, sessionId, writerToken, request);
         var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
-                + " approval_mode, selected_approval_mode, approval_revision, permission_rules_json FROM ma_session"
+                + " parent_session_id, public_child_agents_version, approval_mode, selected_approval_mode, approval_revision, permission_rules_json FROM ma_session"
                 + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
         if (rows.size() != 1) {
             throw JournalStoreRows.conflict("managed_session_scope_conflict", "The Managed Session is missing.");
         }
         var row = rows.getFirst();
         String profile = (String) row.get("tool_profile");
+        int publicChildAgentsVersion = ((Number) row.get("public_child_agents_version")).intValue();
         if (row.get("workspace_id") == null
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
-                || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                        ? "qwen-code".equals(row.get("agent_id")) && row.get("agent_definition_digest") == null
+                                && row.get("parent_session_id") == null
+                                && (publicChildAgentsVersion == 0 || publicChildAgentsVersion == 1)
+                        : com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V4.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
@@ -158,7 +159,7 @@ final class JournalLifecycleAuthorization {
         if (row.get("permission_rules_json") != null) {
             try {
                 var rules = harnessRules.nonEmptyPermissionRules(harnessRules.permissionRules(
-                        JournalStoreRows.CSI_JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
+                        JournalStoreRows.JSON.readValue((String) row.get("permission_rules_json"), java.util.Map.class)));
                 if (rules != null) {
                     result.put("permissionRules", rules);
                 }
