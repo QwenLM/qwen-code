@@ -126,7 +126,8 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   precedence is unchanged.
 
 The status dot precedence is unchanged: green while a turn runs, amber for
-background-only, blue for other active work.
+background-only, and green for other active work (updated from blue in #18072
+so blue stays reserved for completed-unread sessions).
 
 ## Design decisions and rationale
 
@@ -232,8 +233,9 @@ row. No page errors.
    session stays deletable. Bulk Archive follows the flag as it changes after a
    row is ticked; a row that turns busy after selection is unchecked, stops
    being counted, and is dropped from the request.
-5. Dot precedence, the touch layout, and the existing hover contracts are
-   unchanged.
+5. Dot precedence (turn running > background-only amber > other active work,
+   with active work sharing the running green per #18072 and blue reserved for
+   completed-unread), the touch layout, and the existing hover contracts hold.
 6. Every assertion above dies under the corresponding mutation.
 
 ## Open questions / follow-ups

@@ -903,6 +903,10 @@ class ToolPublicationStoreTest {
         assertThat(blockedPublic.path("artifacts")).isEmpty();
         String objectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
                 + " WHERE slot_key = X'61646d697373696f6e'", String.class);
+        assertThat(objectKey).isEqualTo("managed-tool-results/tenant-1/workspace-1/session-1/pub-1/admission");
+        String terminalObjectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
+                + " WHERE slot_key = X'7465726d696e616c'", String.class);
+        assertThat(terminalObjectKey).isEqualTo("managed-tool-results/tenant-1/workspace-1/session-1/pub-1/terminal");
         objects.get(objectKey)[0] = 'z';
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
@@ -1219,6 +1223,8 @@ class ToolPublicationStoreTest {
         String damagedSlot = contentBody ? "content:stdout" : "segment:stdout:0";
         String damagedKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource WHERE slot_key = ?",
                 String.class, damagedSlot);
+        assertThat(damagedKey).isEqualTo(
+                "managed-tool-results/tenant-1/workspace-1/session-1/pub-1/" + damagedSlot);
         objects.get(damagedKey)[0] = 'z';
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
@@ -2199,7 +2205,7 @@ class ToolPublicationStoreTest {
         secondRequest.set("binding", second);
         assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
         assertThat(aggregates).hasSize(2);
-        assertThat(aggregates.getFirst()).contains("tenant_key = ?", "AS used");
+        assertThat(aggregates.getFirst()).contains("tenant_id = ?", "AS used");
         assertThat(aggregates.getLast()).contains("scope_key = ?", "AS retained", "producer_phase <> 'FINISHING'");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isEqualTo(1);
     }
@@ -2347,7 +2353,7 @@ class ToolPublicationStoreTest {
             store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                     new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
             reserve();
-            Map<String, Object> keys = jdbc.queryForMap("SELECT tenant_key, scope_key FROM ma_output_capture");
+            Map<String, Object> keys = jdbc.queryForMap("SELECT scope_key FROM ma_output_capture");
             // Distinct numbers: the capture holds 10 bytes less than an
             // allocation, has used 3, and now belongs to another Session.
             jdbc.update("UPDATE ma_output_capture SET capture_held_bytes = capture_held_bytes - 10,"
@@ -2363,7 +2369,8 @@ class ToolPublicationStoreTest {
             store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                     new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 1));
             assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "active_captures");
-            String identity = " tenant=" + keys.get("tenant_key") + " scope=" + keys.get("scope_key");
+            String identity = " tenant=" + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1")
+                    + " scope=" + keys.get("scope_key");
             String held = " held=" + (ALLOCATION - 10) + " used=3 requested=" + ALLOCATION;
             assertThat(logged.list).extracting(ILoggingEvent::getFormattedMessage).containsExactly(
                     "Tool publication reservation refused limit=tenant_bytes retained=false" + identity + held
@@ -2518,10 +2525,10 @@ class ToolPublicationStoreTest {
 
     // Another open capture of the same Session, as a reservation leaves it.
     private void copyCapture(String from, String to) {
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
-                + " producer_held_bytes, admission_held_bytes, is_write_evidence) SELECT scope_key, tenant_key,"
+                + " producer_held_bytes, admission_held_bytes, is_write_evidence) SELECT scope_key,"
                 + " tenant_id, workspace_id, session_id, ?, ?, ?, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
                 + " producer_held_bytes, admission_held_bytes, is_write_evidence FROM ma_output_capture"
@@ -3622,9 +3629,9 @@ class ToolPublicationStoreTest {
                     (row, index) -> new String[] {row.getString(1), row.getString(2)});
             for (var row : rows) {
                 jdbc.update(
-                                        "DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
-                                                + " AND owner_kind = 'ARTIFACT' AND owner_key = ?",
-                        row[0], com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(row[0], row[1]));
+                                        "DELETE FROM ma_resource_ref WHERE"
+                                                + " owner_kind = 'ARTIFACT' AND owner_key = ?",
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(row[0], row[1]));
                 jdbc.update(
                                         "DELETE FROM ma_artifact WHERE scope_key = ? AND"
                                                 + " artifact_id = ?", row[0], row[1]);

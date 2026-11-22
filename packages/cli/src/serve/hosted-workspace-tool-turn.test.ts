@@ -13166,7 +13166,7 @@ it('registers the Session capture lane for a background turn in publication mode
   // installed on the Runtime, fed this call's register, and its
   // settleAttached is the hook the attach arm drives — it fires right
   // after the attach, without any client retry anywhere in the turn.
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(broker.registerPublisher).toHaveBeenCalledTimes(1);
   const register = lane.publisher!.register as ReturnType<typeof vi.fn>;
   expect(register).toHaveBeenCalledTimes(1);
@@ -13243,7 +13243,7 @@ it('picks the background lane from the input a PreToolUse Hook left, not the mod
   expect(result[0]?.functionResponse?.response).toMatchObject({
     executionStatus: 'success',
   });
-  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor);
+  expect(broker.registerPublisher).toHaveBeenCalledWith(descriptor, 1);
   expect(register).toHaveBeenCalledOnce();
   expect(register.mock.calls[0]![0]).toMatchObject({
     capture: { background: true },

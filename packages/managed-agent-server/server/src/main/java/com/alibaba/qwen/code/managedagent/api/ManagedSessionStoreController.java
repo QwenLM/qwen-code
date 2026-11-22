@@ -55,6 +55,10 @@ public class ManagedSessionStoreController {
     @org.springframework.beans.factory.annotation.Value("${qwen.managed-agent.wake-dispatch.enabled:false}")
     private boolean wakeDispatch;
 
+    @org.springframework.beans.factory.annotation.Value(
+            "${qwen.managed-agent.runtime-observation.enabled:false}")
+    private boolean runtimeObservation;
+
     public ManagedSessionStoreController(JdbcManagedSessionStore store, JdbcManagedUserMessageStore userMessages,
             ManagedNativeJournalSnapshots snapshots,
             com.alibaba.qwen.code.managedagent.persistence.JdbcSessionResourceObjects resourceObjects) {
@@ -164,7 +168,11 @@ public class ManagedSessionStoreController {
     }
 
     private WriterGrant advertise(WriterGrant grant) {
-        return wakeDispatch && grant != null ? grant.withWakeDispatch() : grant;
+        if (grant == null) {
+            return null;
+        }
+        WriterGrant advertised = wakeDispatch ? grant.withWakeDispatch() : grant;
+        return runtimeObservation ? advertised.withRuntimeObservation() : advertised;
     }
 
     @PostMapping("/writers:seal")

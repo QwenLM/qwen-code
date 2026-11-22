@@ -84,6 +84,7 @@ export class LocalManagedSessionResourceStore
   async publish(
     kind: string,
     bytes: Buffer,
+    resourceId?: string,
   ): Promise<ManagedSessionDurableRef> {
     if (
       kind === 'managed-local-journal-snapshot' ||
@@ -93,7 +94,7 @@ export class LocalManagedSessionResourceStore
         'Native snapshot resources use their dedicated publisher.',
       );
     }
-    return this.publishBytes(kind, bytes, randomUUID(), false);
+    return this.publishBytes(kind, bytes, resourceId ?? randomUUID(), false);
   }
 
   publishJournalSnapshot(

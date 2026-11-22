@@ -241,10 +241,10 @@ class ManagedSnapshotNumericPagingTest {
             for (int index = Math.max(1, count - 3); index <= count; index++) {
                 String resourceId = "numeric-parts-" + index;
                 String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
-                jdbc.update("INSERT INTO ma_resource(resource_key,session_scope_key,tenant_id,session_id,"
+                jdbc.update("INSERT INTO ma_resource(resource_key,tenant_id,session_id,"
                                 + "resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
-                                + " VALUES(?,?,'tenant','session',?,'managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0)",
-                        resourceKey, scope, resourceId, WorkspaceEvidenceResources.digest(bytes), bytes);
+                                + " VALUES(?,'tenant','session',?,'managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0)",
+                        resourceKey, resourceId, WorkspaceEvidenceResources.digest(bytes), bytes);
                 jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", resourceKey, id(index));
             }
             project();
