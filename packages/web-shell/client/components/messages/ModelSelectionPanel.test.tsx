@@ -629,5 +629,358 @@ describe('ModelSelectionPanel unit tests', () => {
 
       fetchSpy.mockRestore();
     });
+
+    it('sorts table asc and desc when clicking Quant header', async () => {
+      const deepinfraProvider: DaemonAuthProviderDescriptor = {
+        id: 'deepinfra',
+        label: 'DeepInfra',
+        description: 'DeepInfra provider',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepinfra.com/v1/openai',
+        steps: ['models'],
+      };
+
+      const mockModels = [
+        {
+          model_name: 'model-fp8',
+          type: 'text-generation',
+          max_tokens: 32768,
+          quantization: 'fp8',
+        },
+        {
+          model_name: 'model-bf16',
+          type: 'text-generation',
+          max_tokens: 32768,
+          quantization: 'bf16',
+        },
+        {
+          model_name: 'model-fp4',
+          type: 'text-generation',
+          max_tokens: 32768,
+          quantization: 'fp4',
+        },
+      ];
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        json: async () => mockModels,
+      } as Response);
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={deepinfraProvider}
+              value=""
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      // Quant header is the 3rd sortable header (index 2: Model=0, Context=1, Quant=2)
+      const quantHeaderBtn = container.querySelectorAll('th button')[2];
+      expect(quantHeaderBtn?.textContent).toContain('Quant');
+
+      // Click Quant header for ascending: bf16, fp4, fp8
+      await act(async () => {
+        (quantHeaderBtn as HTMLButtonElement).click();
+      });
+
+      let rows = container.querySelectorAll('tbody tr');
+      expect(rows[0]?.textContent).toContain('model-bf16');
+      expect(rows[1]?.textContent).toContain('model-fp4');
+      expect(rows[2]?.textContent).toContain('model-fp8');
+
+      // Click Quant header again for descending: fp8, fp4, bf16
+      await act(async () => {
+        (quantHeaderBtn as HTMLButtonElement).click();
+      });
+
+      rows = container.querySelectorAll('tbody tr');
+      expect(rows[0]?.textContent).toContain('model-fp8');
+      expect(rows[1]?.textContent).toContain('model-fp4');
+      expect(rows[2]?.textContent).toContain('model-bf16');
+
+      fetchSpy.mockRestore();
+    });
+
+    it('routes daemon proxy fetch to daemonBaseUrl when provided', async () => {
+      const deepinfraProvider: DaemonAuthProviderDescriptor = {
+        id: 'deepinfra',
+        label: 'DeepInfra',
+        description: 'DeepInfra provider',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepinfra.com/v1/openai',
+        steps: ['models'],
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        json: async () => [
+          {
+            model_name: 'daemon-model',
+            type: 'text-generation',
+            max_tokens: 32768,
+          },
+        ],
+      } as Response);
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={deepinfraProvider}
+              daemonBaseUrl="https://daemon.example.org:9000"
+              value=""
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://daemon.example.org:9000/workspace/auth/deepinfra-models',
+        expect.any(Object),
+      );
+      expect(container.textContent).toContain('daemon-model');
+
+      fetchSpy.mockRestore();
+    });
+
+    it('shows error state with retry button when upstream fetch fails', async () => {
+      const deepinfraProvider: DaemonAuthProviderDescriptor = {
+        id: 'deepinfra',
+        label: 'DeepInfra',
+        description: 'DeepInfra provider',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepinfra.com/v1/openai',
+        steps: ['models'],
+      };
+
+      let attempt = 0;
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async () => {
+          attempt++;
+          if (attempt <= 2) {
+            return { ok: false, status: 500 } as Response;
+          }
+          return {
+            ok: true,
+            json: async () => [
+              {
+                model_name: 'recovered-model',
+                type: 'text-generation',
+                max_tokens: 32768,
+              },
+            ],
+          } as Response;
+        });
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={deepinfraProvider}
+              value=""
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      expect(container.textContent).toContain('Failed to load models catalog');
+      const retryBtn = container.querySelector(
+        '[class*="retryButton"]',
+      ) as HTMLButtonElement | null;
+      expect(retryBtn).not.toBeNull();
+
+      // Click retry
+      await act(async () => {
+        retryBtn?.click();
+      });
+
+      expect(container.textContent).toContain('recovered-model');
+      expect(container.textContent).not.toContain(
+        'Failed to load models catalog',
+      );
+
+      fetchSpy.mockRestore();
+    });
+
+    it('toggles aria-pressed on filter buttons', async () => {
+      const deepinfraProvider: DaemonAuthProviderDescriptor = {
+        id: 'deepinfra',
+        label: 'DeepInfra',
+        description: 'DeepInfra provider',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepinfra.com/v1/openai',
+        steps: ['models'],
+      };
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        json: async () => [],
+      } as Response);
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={deepinfraProvider}
+              value=""
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const buttons = Array.from(
+        container.querySelectorAll('button[class*="filterButton"]'),
+      ) as HTMLButtonElement[];
+      const featuredBtn = buttons.find((b) =>
+        b.textContent?.includes('Featured'),
+      )!;
+
+      expect(featuredBtn.getAttribute('aria-pressed')).toBe('false');
+
+      await act(async () => {
+        featuredBtn.click();
+      });
+      expect(featuredBtn.getAttribute('aria-pressed')).toBe('true');
+
+      await act(async () => {
+        featuredBtn.click();
+      });
+      expect(featuredBtn.getAttribute('aria-pressed')).toBe('false');
+
+      fetchSpy.mockRestore();
+    });
+
+    it('handles fractional discounts and ignores expired discounts', async () => {
+      const deepinfraProvider: DaemonAuthProviderDescriptor = {
+        id: 'deepinfra',
+        label: 'DeepInfra',
+        description: 'DeepInfra provider',
+        protocol: 'openai',
+        baseUrl: 'https://api.deepinfra.com/v1/openai',
+        steps: ['models'],
+      };
+
+      const futureDate = new Date(Date.now() + 86400000).toISOString();
+      const pastDate = new Date(Date.now() - 86400000).toISOString();
+
+      const mockModels = [
+        {
+          model_name: 'active-discount-model',
+          type: 'text-generation',
+          max_tokens: 32768,
+          pricing: {
+            discount: 0.375,
+            discount_ends_at: futureDate,
+          },
+        },
+        {
+          model_name: 'expired-discount-model',
+          type: 'text-generation',
+          max_tokens: 32768,
+          pricing: {
+            discount: 0.5,
+            discount_ends_at: pastDate,
+          },
+        },
+      ];
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+        ok: true,
+        json: async () => mockModels,
+      } as Response);
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={deepinfraProvider}
+              value=""
+              onChange={vi.fn()}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      // Active model has discount icon with 37.5% off
+      const activeRow = Array.from(container.querySelectorAll('tbody tr')).find(
+        (r) => r.textContent?.includes('active-discount-model'),
+      );
+      expect(activeRow).toBeDefined();
+      const discountTag = activeRow?.querySelector(
+        'svg[aria-label="Discount available"]',
+      );
+      expect(discountTag).not.toBeNull();
+      expect(discountTag?.parentElement?.getAttribute('title')).toBe(
+        'Discounted (37.5% off)',
+      );
+
+      // Expired model does NOT have discount icon
+      const expiredRow = Array.from(
+        container.querySelectorAll('tbody tr'),
+      ).find((r) => r.textContent?.includes('expired-discount-model'));
+      expect(expiredRow).toBeDefined();
+      expect(
+        expiredRow?.querySelector('svg[aria-label="Discount available"]'),
+      ).toBeNull();
+
+      fetchSpy.mockRestore();
+    });
+
+    it('renders native button with aria-label for chip removal', async () => {
+      const handleChange = vi.fn();
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={mockProvider}
+              value="model-a"
+              onChange={handleChange}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const removeBtn = container.querySelector(
+        'button[aria-label="Remove model-a"]',
+      ) as HTMLButtonElement | null;
+      expect(removeBtn).not.toBeNull();
+
+      await act(async () => {
+        removeBtn?.click();
+      });
+
+      expect(handleChange).toHaveBeenCalledWith('');
+    });
+
+    it('notifies onModelSpecsChange with contextWindowSize for selected models', async () => {
+      const handleModelSpecsChange = vi.fn();
+
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <ModelSelectionPanel
+              provider={mockProvider}
+              value="model-a, model-b"
+              onChange={vi.fn()}
+              onModelSpecsChange={handleModelSpecsChange}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      expect(handleModelSpecsChange).toHaveBeenCalledWith([
+        { id: 'model-a', contextWindowSize: 128000 },
+        { id: 'model-b', contextWindowSize: 32000 },
+      ]);
+    });
   });
 });
