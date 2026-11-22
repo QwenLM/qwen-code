@@ -1874,6 +1874,20 @@ function readProviderAdvancedConfig(
     record['maxTokens'],
     'advancedConfig.maxTokens',
   );
+  if (
+    record['service_tier'] !== undefined &&
+    (typeof record['service_tier'] !== 'string' ||
+      !record['service_tier'].trim())
+  ) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Invalid advancedConfig.service_tier: expected non-empty string',
+    );
+  }
+  const serviceTier =
+    typeof record['service_tier'] === 'string' && record['service_tier'].trim()
+      ? record['service_tier'].trim()
+      : undefined;
 
   const advancedConfig: NonNullable<ProviderSetupInputs['advancedConfig']> = {
     ...(typeof record['enableThinking'] === 'boolean'
@@ -1882,6 +1896,7 @@ function readProviderAdvancedConfig(
     ...(Object.keys(multimodal).length > 0 ? { multimodal } : {}),
     ...(contextWindowSize ? { contextWindowSize } : {}),
     ...(maxTokens ? { maxTokens } : {}),
+    ...(serviceTier ? { service_tier: serviceTier } : {}),
   };
 
   return Object.keys(advancedConfig).length > 0 ? advancedConfig : undefined;
@@ -1939,6 +1954,9 @@ function readExistingAdvancedConfig(
   }
   if (typeof generationConfig['contextWindowSize'] === 'number') {
     advancedConfig['contextWindowSize'] = generationConfig['contextWindowSize'];
+  }
+  if (typeof generationConfig['service_tier'] === 'string') {
+    advancedConfig['service_tier'] = generationConfig['service_tier'];
   }
   return Object.keys(advancedConfig).length > 0 ? advancedConfig : undefined;
 }
@@ -2177,12 +2195,33 @@ function readProviderSetupInputs(
 
   const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
 
+  const rawModelSpecs = Array.isArray(params['modelSpecs'])
+    ? params['modelSpecs']
+    : undefined;
+  const modelSpecs = rawModelSpecs
+    ?.map((spec) => {
+      if (!spec || typeof spec !== 'object') return null;
+      const specObj = spec as Record<string, unknown>;
+      const id = typeof specObj['id'] === 'string' ? specObj['id'].trim() : '';
+      if (!id) return null;
+      const cw = readPositiveNumber(
+        specObj['contextWindowSize'] ?? specObj['max_tokens'],
+        'modelSpecs.contextWindowSize',
+      );
+      return {
+        id,
+        ...(cw !== undefined ? { contextWindowSize: cw } : {}),
+      };
+    })
+    .filter((s): s is NonNullable<typeof s> => s !== null);
+
   return {
     ...(protocol ? { protocol } : {}),
     ...(wireApi ? { wireApi } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
+    ...(modelSpecs?.length ? { modelSpecs } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
