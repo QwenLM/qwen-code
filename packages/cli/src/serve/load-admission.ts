@@ -178,7 +178,7 @@ export function createLoadAdmissionMonitor(
         gapLatched = true;
       }
       const overloaded = gapLatched || cpu.overloaded || lag.overloaded;
-      const verdict = {
+      const verdict: LoadAdmissionSnapshot = {
         enabled: true,
         overloaded,
         reason: gapLatched
