@@ -109,17 +109,17 @@ describe('workspace-input-history', () => {
     expect(new Set(snap.entries).size).toBe(20);
   });
 
-  it('shares Storage.getHistoryFilePath() in newest-first format for shell history', async () => {
+  it('shares Storage.getHistoryFilePath() in the TUI oldest-first format', async () => {
     const shellFile = new Storage(workspaceA).getHistoryFilePath();
     expect(getWorkspaceInputHistoryFilePath(workspaceA, 'shell')).toBe(
       shellFile,
     );
 
-    // Pre-populate as TUI's useShellHistory does (newest-first on disk).
+    // TUI useShellHistory loads oldest-first JSON and reverses it for Up key.
     await fs.mkdir(path.dirname(shellFile), { recursive: true });
     await fs.writeFile(
       shellFile,
-      JSON.stringify(['git status', 'ls -la']),
+      JSON.stringify(['ls -la', 'git status']),
       'utf8',
     );
 
@@ -130,22 +130,71 @@ describe('workspace-input-history', () => {
     const after = await readWorkspaceInputHistory(workspaceA, 'shell');
     expect(after.entries).toEqual(['ls -la', 'git status', 'npm test']);
 
-    // Disk representation remains newest-first for TUI compatibility.
+    // TUI reload sees npm test as the newest command on the first Up key.
     const rawOnDisk = JSON.parse(await fs.readFile(shellFile, 'utf8'));
-    expect(rawOnDisk).toEqual(['npm test', 'git status', 'ls -la']);
+    expect(rawOnDisk).toEqual(['ls -la', 'git status', 'npm test']);
   });
 
-  it('recovers gracefully from malformed history files', async () => {
+  it('preserves legacy line-based shell history including continuations', async () => {
+    const shellFile = getWorkspaceInputHistoryFilePath(workspaceA, 'shell');
+    await fs.mkdir(path.dirname(shellFile), { recursive: true });
+    await fs.writeFile(shellFile, 'echo start\nprintf "a\\\nb"\n', 'utf8');
+
+    expect(
+      (await readWorkspaceInputHistory(workspaceA, 'shell')).entries,
+    ).toEqual(['echo start', 'printf "a b"']);
+    await appendWorkspaceInputHistory(workspaceA, 'shell', 'npm test');
+    expect(JSON.parse(await fs.readFile(shellFile, 'utf8'))).toEqual([
+      'echo start',
+      'printf "a b"',
+      'npm test',
+    ]);
+  });
+
+  it('refuses to overwrite a malformed prompt history file', async () => {
     const filePath = getWorkspaceInputHistoryFilePath(workspaceA, 'prompt');
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, '{not valid json', 'utf8');
 
-    const read = await readWorkspaceInputHistory(workspaceA, 'prompt');
-    expect(read.entries).toEqual([]);
+    await expect(
+      readWorkspaceInputHistory(workspaceA, 'prompt'),
+    ).rejects.toThrow();
+    await expect(
+      appendWorkspaceInputHistory(workspaceA, 'prompt', 'new entry'),
+    ).rejects.toThrow();
+    await expect(fs.readFile(filePath, 'utf8')).resolves.toBe(
+      '{not valid json',
+    );
 
-    await appendWorkspaceInputHistory(workspaceA, 'prompt', 'recovered');
-    const after = await readWorkspaceInputHistory(workspaceA, 'prompt');
-    expect(after.entries).toEqual(['recovered']);
+    const invalidShape = JSON.stringify(['valid prompt', { bad: true }]);
+    await fs.writeFile(filePath, invalidShape, 'utf8');
+    await expect(
+      appendWorkspaceInputHistory(workspaceA, 'prompt', 'also rejected'),
+    ).rejects.toThrow(/Invalid workspace input history file/);
+    await expect(fs.readFile(filePath, 'utf8')).resolves.toBe(invalidShape);
+  });
+
+  it('reports append failure only to the caller and later recovers', async () => {
+    const filePath = getWorkspaceInputHistoryFilePath(workspaceA, 'prompt');
+    await fs.mkdir(filePath, { recursive: true });
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      await expect(
+        appendWorkspaceInputHistory(workspaceA, 'prompt', 'first'),
+      ).rejects.toThrow();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+
+      await fs.rmdir(filePath);
+      await appendWorkspaceInputHistory(workspaceA, 'prompt', 'recovered');
+      expect(
+        (await readWorkspaceInputHistory(workspaceA, 'prompt')).entries,
+      ).toEqual(['recovered']);
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
   });
 
   it('extracts submittedPrompt first and falls back to text blocks', () => {

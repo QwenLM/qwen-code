@@ -26,14 +26,15 @@ Web Shell stores composer input history (prompt history and shell-mode command h
 Each workspace stores up to `100` unique entries per kind under `Storage(workspaceCwd).getProjectTempDir()`:
 
 - `kind = 'prompt'`: `<project-temp>/input_history.json` — JSON `string[]` ordered **oldest-to-newest** (matching Web Shell's `useInputHistory`).
-- `kind = 'shell'`: reuses `Storage(workspaceCwd).getHistoryFilePath()` (`<project-temp>/shell_history`) — JSON `string[]` ordered **newest-first** on disk (matching `packages/cli/src/ui/hooks/useShellHistory.ts`). Read/write helpers convert cleanly at the boundary so the HTTP API always returns `entries` oldest-to-newest.
+- `kind = 'shell'`: reuses `Storage(workspaceCwd).getHistoryFilePath()` (`<project-temp>/shell_history`) — JSON `string[]` ordered **oldest-to-newest** on disk, matching the TUI's load-then-reverse behavior. The shared read/append helper preserves both JSON and legacy line-based formats and serializes TUI/daemon mutations across processes; the HTTP API returns `entries` oldest-to-newest.
 
 Persistence invariants:
 
 - Trim input; ignore empty strings and entries exceeding `32_768` characters.
 - Deduplicate by moving an existing identical entry to the newest position and capping to the newest `100` entries.
 - Serialize writes per file path via an in-process promise queue and write atomically (`0o600` temp file in the same directory + `rename`).
-- Tolerate missing (`ENOENT`) or malformed files by returning `[]`.
+- Return `[]` only for a missing (`ENOENT`) file. Preserve legacy line-based shell history; reject malformed prompt history instead of overwriting it.
+- Serialize prompt appends per process and shell appends with the shared TUI/daemon interprocess lock; both producers reread under the lock before an atomic write.
 - Compute a lightweight `revision` (short SHA-256 hex digest of the canonical entries payload) for `ETag` / `If-None-Match` (`304 Not Modified`).
 
 ### 2. Automatic Server-Side Recording

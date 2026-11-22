@@ -26,14 +26,15 @@
 每个工作区在 `Storage(workspaceCwd).getProjectTempDir()` 下按类型最多保存 `100` 条去重历史：
 
 - `kind = 'prompt'`：`<project-temp>/input_history.json`，JSON `string[]`，按**从旧到新**排列（与 Web Shell `useInputHistory` 一致）。
-- `kind = 'shell'`：复用 `Storage(workspaceCwd).getHistoryFilePath()`（`<project-temp>/shell_history`），磁盘上保持**最新在前**（与 `packages/cli/src/ui/hooks/useShellHistory.ts` 一致）。读写辅助函数在边界处完成顺序转换，HTTP 接口统一返回从旧到新的 `entries`。
+- `kind = 'shell'`：复用 `Storage(workspaceCwd).getHistoryFilePath()`（`<project-temp>/shell_history`），磁盘上保持**从旧到新**（TUI 加载后按上键需要再反转）。共享的读取/追加辅助函数保留 JSON 与旧式行式格式，并在跨进程锁内合并 TUI 与 daemon 写入；HTTP 接口统一返回从旧到新的 `entries`。
 
 持久化约束：
 
 - 对输入做 `trim`，忽略空字符串及超过 `32_768` 字符的超大条目。
 - 去重时将已有相同条目移至最新位置，并截断至最近 `100` 条。
 - 按文件路径维护进程内 Promise 写队列，并通过同目录 `0o600` 临时文件 + `rename` 原子写入。
-- 文件不存在（`ENOENT`）或 JSON 损坏时安全返回 `[]`。
+- 仅在文件不存在（`ENOENT`）时返回 `[]`。保留旧式行式 Shell 历史；对损坏的 Prompt 历史拒绝覆盖。
+- Prompt 追加按进程串行化；Shell 追加使用 TUI 与 daemon 共享的跨进程锁，两个生产者均在锁内重读后再原子写入。
 - 基于规范化结果计算轻量 `revision`（短 SHA-256 摘要），支持 `ETag` / `If-None-Match`（`304 Not Modified`）。
 
 ### 2. 服务端自动记录

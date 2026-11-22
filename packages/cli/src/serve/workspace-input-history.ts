@@ -8,6 +8,11 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { atomicWriteFile } from '@qwen-code/qwen-code-core/atomicFileWrite';
+import {
+  appendShellHistoryFile,
+  readShellHistoryFile,
+} from '../utils/shell-history-file.js';
 
 export type WorkspaceInputHistoryKind = 'prompt' | 'shell';
 
@@ -94,25 +99,22 @@ async function readRawEntriesOldestFirst(
     ) {
       return { entries: [], fileExists: false };
     }
-    return { entries: [], fileExists: false };
+    throw error;
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    return { entries: [], fileExists: true };
+  if (kind === 'shell') {
+    return { entries: readShellHistoryFile(filePath), fileExists: true };
   }
 
-  if (!Array.isArray(parsed)) {
-    return { entries: [], fileExists: true };
+  const parsed = JSON.parse(content) as unknown;
+  if (
+    !Array.isArray(parsed) ||
+    !parsed.every((entry) => typeof entry === 'string')
+  ) {
+    throw new Error(`Invalid workspace input history file: ${filePath}`);
   }
-
-  // `shell_history` is shared with the CLI's `useShellHistory` hook, which
-  // stores entries newest-first. Convert to oldest-first at the read boundary.
-  const ordered = kind === 'shell' ? [...parsed].reverse() : parsed;
   return {
-    entries: normalizeOldestFirst(ordered, MAX_WORKSPACE_INPUT_HISTORY_ENTRIES),
+    entries: normalizeOldestFirst(parsed, MAX_WORKSPACE_INPUT_HISTORY_ENTRIES),
     fileExists: true,
   };
 }
@@ -121,22 +123,11 @@ async function writeAtomicJson(
   filePath: string,
   payload: readonly string[],
 ): Promise<void> {
-  const dir = path.dirname(filePath);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  const tempPath = path.join(
-    dir,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`,
-  );
-  try {
-    await fs.writeFile(tempPath, JSON.stringify(payload, null, 2), {
-      encoding: 'utf8',
-      mode: 0o600,
-    });
-    await fs.rename(tempPath, filePath);
-  } catch (error) {
-    await fs.unlink(tempPath).catch(() => {});
-    throw error;
-  }
+  await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  await atomicWriteFile(filePath, JSON.stringify(payload, null, 2), {
+    mode: 0o600,
+    forceMode: true,
+  });
 }
 
 function serializeByPath<T>(
@@ -146,11 +137,18 @@ function serializeByPath<T>(
   const previous = writeQueueByPath.get(filePath) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(task);
   writeQueueByPath.set(filePath, next);
-  void next.finally(() => {
-    if (writeQueueByPath.get(filePath) === next) {
-      writeQueueByPath.delete(filePath);
-    }
-  });
+  void next.then(
+    () => {
+      if (writeQueueByPath.get(filePath) === next) {
+        writeQueueByPath.delete(filePath);
+      }
+    },
+    () => {
+      if (writeQueueByPath.get(filePath) === next) {
+        writeQueueByPath.delete(filePath);
+      }
+    },
+  );
   return next;
 }
 
@@ -191,6 +189,10 @@ export async function appendWorkspaceInputHistory(
 
   const filePath = getWorkspaceInputHistoryFilePath(workspaceCwd, kind);
   return serializeByPath(filePath, async () => {
+    if (kind === 'shell') {
+      const entries = appendShellHistoryFile(filePath, trimmed);
+      return { kind, entries, revision: computeRevision(entries) };
+    }
     const { entries, fileExists } = await readRawEntriesOldestFirst(
       filePath,
       kind,
@@ -210,8 +212,7 @@ export async function appendWorkspaceInputHistory(
             nextEntries.length - MAX_WORKSPACE_INPUT_HISTORY_ENTRIES,
           )
         : nextEntries;
-    const diskEntries = kind === 'shell' ? [...bounded].reverse() : bounded;
-    await writeAtomicJson(filePath, diskEntries);
+    await writeAtomicJson(filePath, bounded);
     return {
       kind,
       entries: bounded,
