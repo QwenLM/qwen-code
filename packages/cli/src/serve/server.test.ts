@@ -304,6 +304,20 @@ vi.mock('node:os', async (importOriginal) => {
     tmpdir: () => mockTmpdir.value ?? actual.tmpdir(),
   };
 });
+const { exportSessionTranscriptSpy } = vi.hoisted(() => ({
+  exportSessionTranscriptSpy: vi.fn(),
+}));
+
+// Delegates to the real exporter by default so existing export suites keep
+// their end-to-end behavior; individual cases can stub one call to observe
+// the config the daemon wiring passes down.
+vi.mock('./server/session-export.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./server/session-export.js')>();
+  exportSessionTranscriptSpy.mockImplementation(actual.exportSessionTranscript);
+  return { ...actual, exportSessionTranscript: exportSessionTranscriptSpy };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
@@ -48242,6 +48256,46 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it('passes the boot-resolved export channel into the standalone service', async () => {
+    // Pins the createServeApp -> StandaloneSessionService wiring: dropping
+    // exportChannel from that construction must red this case, not just the
+    // service-level one (which builds its own harness).
+    const setup = setupLiveRuntime();
+    const sid = '22222222-2222-4222-8222-222222222222';
+    vi.spyOn(
+      SessionService.prototype,
+      'findSessionIdIgnoringCase',
+    ).mockResolvedValue(sid);
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'active',
+    );
+    vi.spyOn(
+      SessionService.prototype,
+      'readCreationMetadataIfReadable',
+    ).mockResolvedValue({ sourceType: 'standalone' });
+    exportSessionTranscriptSpy.mockResolvedValueOnce({
+      format: 'json',
+      mimeType: 'application/json',
+      filename: 'session.json',
+      content: '{}',
+      metadata: {},
+    });
+    const pending = request(setup.app)
+      .get(`/standalone/sessions/${sid}/export?format=json`)
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .then((response) => response);
+    await vi.waitFor(() => {
+      expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+    });
+    setup.resolveCreation();
+    const res = await pending;
+    expect(res.status).toBe(200);
+    const call = exportSessionTranscriptSpy.mock.calls.at(-1)?.[0] as {
+      config?: { getChannel?: () => string | undefined };
+    };
+    expect(call?.config?.getChannel?.()).toBe('daemon');
+  });
 
   it.each([
     ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],

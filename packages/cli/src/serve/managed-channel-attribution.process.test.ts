@@ -36,7 +36,7 @@
 // scrubs loader vars otherwise), mirroring scripts/dev.js.
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -258,12 +258,19 @@ describe.skipIf(process.platform !== 'linux')(
       // Drain stdout so a chatty daemon cannot stall on a full pipe buffer.
       child.stdout?.resume();
       child.once('exit', () => {
+        // Keep the full boot log outside the per-test tmp root so boot
+        // failures stay diagnosable after cleanup.
+        try {
+          writeFileSync(
+            `/tmp/rig-stderr-${pid}.log`,
+            Buffer.concat(stderrChunks).toString('utf8'),
+          );
+        } catch {
+          // best effort diagnostics only
+        }
         if (child.exitCode !== 0 && child.exitCode !== null) {
-          // Surface boot failures instead of a bare waitFor timeout.
           process.stderr.write(
-            `[rig daemon ${pid} exit ${child.exitCode}] ` +
-              Buffer.concat(stderrChunks).toString('utf8').slice(-4000) +
-              '\n',
+            `[rig daemon ${pid} exit ${child.exitCode}] see /tmp/rig-stderr-${pid}.log\n`,
           );
         }
       });
@@ -313,7 +320,8 @@ describe.skipIf(process.platform !== 'linux')(
           },
           body: JSON.stringify({ cwd: workspace }),
         });
-        if (created.status !== 504) break;
+        // 504 = child initialize budget; 503 = runtime still starting.
+        if (created.status !== 504 && created.status !== 503) break;
         await new Promise((resolve) => setTimeout(resolve, 5000));
       }
       expect([200, 201]).toContain(created?.status);
