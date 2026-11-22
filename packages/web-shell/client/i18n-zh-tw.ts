@@ -4201,6 +4201,7 @@ export const ZH_TW: Record<string, MessageValue> = {
   'rightPanel.restoreFailed': (v) => `面板恢復失敗：${v?.error ?? '未知錯誤'}`,
   'userMessage.showMore': '顯示更多',
   'userMessage.showLess': '收起',
+  'userMessage.automatic.title': '自動觸發',
   'userMessage.sendFailed': '傳送失敗',
   'userMessage.retrySend': '重新傳送訊息',
   'userMessage.edit': '編輯訊息',

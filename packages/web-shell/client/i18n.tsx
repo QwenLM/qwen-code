@@ -4415,6 +4415,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `Failed to restore panel: ${v?.error ?? 'Unknown error'}`,
   'userMessage.showMore': 'Show more',
   'userMessage.showLess': 'Collapse',
+  'userMessage.automatic.title': 'Automatic trigger',
   'userMessage.sendFailed': 'Failed to send',
   'userMessage.retrySend': 'Retry sending message',
   'userMessage.edit': 'Edit message',
