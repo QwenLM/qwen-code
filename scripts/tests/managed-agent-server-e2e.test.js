@@ -360,6 +360,7 @@ const classifierDelegation = (text) => {
     answers.push({ clause, fake });
     sites.push({
       clause,
+      fake,
       line: file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1,
       text: node.getText(file).slice(0, 80),
     });
@@ -496,7 +497,9 @@ const classifierDelegation = (text) => {
       (a) => a.clause === 'no-loop-hand-built' && inArm(a),
     ),
     nestedFakes,
-    sites,
+    // The diagnostic names only what the pin judges: a hit in a fake outside
+    // the arm set is not a violation, so it must not appear in the message.
+    sites: sites.filter(inArm),
   };
 };
 
@@ -4609,6 +4612,16 @@ describe('managed-agent-server e2e runner', () => {
     }
     expect(nonArray[0].line).not.toBe(computedKey[0].line);
     expect(nonArray[0].text).not.toBe(computedKey[0].text);
+    // The diagnostic names only what the pin judges. A fake outside the arm
+    // set answers legitimately, so its hit is recorded during the walk but
+    // must not survive into the message.
+    expect(
+      classifierDelegation(
+        good +
+          '\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+          "return { toolCalls: [fakeToolCall('respond_in_schema', { title: 't' }, 'other-title')] };\n});",
+      ).sites,
+    ).toEqual([]);
     // Behaviour-preserving rewrites of the same wiring must stay green.
     const equivalent = [
       // The fire arm placed before the skill arm.
