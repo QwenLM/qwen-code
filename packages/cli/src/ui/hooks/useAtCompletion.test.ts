@@ -135,6 +135,89 @@ describe('useAtCompletion', () => {
       );
     });
 
+    it('should find nested files when pattern contains an escaped spaced directory prefix', async () => {
+      const structure: FileSystemStructure = {
+        'my folder': {
+          'readme.md': '',
+          'sub note.md': '',
+        },
+      };
+      testRootDir = await createTmpDir(structure);
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'my\\ folder/read',
+          mockConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toContain(
+          'my\\ folder/readme.md',
+        );
+      });
+    });
+
+    it('stops after the first candidate when literal search already returns matches', async () => {
+      const mockSearch = vi.fn().mockResolvedValue(['dir/#v2/file.txt']);
+      vi.spyOn(FileSearchFactory, 'create').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        search: mockSearch,
+      } as unknown as FileSearch);
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'dir\\#v2/file',
+          mockConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.label)).toEqual([
+          'dir/#v2/file.txt',
+        ]);
+      });
+      expect(mockSearch).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not search the unescaped fallback candidate after the search is aborted', async () => {
+      let resolveFirstSearch!: (value: string[]) => void;
+      const mockSearch = vi.fn(
+        () =>
+          new Promise<string[]>((resolve) => {
+            resolveFirstSearch = resolve;
+          }),
+      );
+      vi.spyOn(FileSearchFactory, 'create').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        search: mockSearch,
+      } as unknown as FileSearch);
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+
+      const { unmount } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'my\\ folder/read',
+          mockConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(mockSearch).toHaveBeenCalledTimes(1);
+      });
+      unmount();
+      await act(async () => {
+        resolveFirstSearch([]);
+      });
+      expect(mockSearch).toHaveBeenCalledTimes(1);
+    });
+
     it('should append a trailing slash to directory paths in suggestions', async () => {
       const structure: FileSystemStructure = {
         'file.txt': '',

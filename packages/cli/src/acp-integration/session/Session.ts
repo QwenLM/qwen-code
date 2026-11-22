@@ -487,6 +487,7 @@ import {
   getSlashCommandFirstToken,
   isSlashCommand,
 } from '../../ui/utils/commandUtils.js';
+import { getAtPathCandidates } from '../../ui/utils/at-path-candidates.js';
 import {
   CommandKind,
   type NonInteractiveSlashCommandPolicy,
@@ -21143,7 +21144,18 @@ export class Session implements SessionContext {
           if (sshWorkspace) return { text: part.text };
           collectExtensionMentionRefs(part.text, extensionMentions);
           collectMcpServerMentionRefs(part.text, mcpServerMentions);
-          for (const pathSpec of extractAtPathCommands(part.text)) {
+          for (const rawPathSpec of extractAtPathCommands(part.text)) {
+            const candidates = getAtPathCandidates(rawPathSpec);
+            const pathSpec =
+              candidates.length > 1
+                ? (candidates.find(
+                    (candidate) =>
+                      path.isAbsolute(candidate) &&
+                      resolveExistingFile(
+                        path.resolve(this.config.getProjectRoot(), candidate),
+                      ) !== undefined,
+                  ) ?? rawPathSpec)
+                : rawPathSpec;
             if (!path.isAbsolute(pathSpec)) continue;
             const resolved = path.resolve(
               this.config.getProjectRoot(),

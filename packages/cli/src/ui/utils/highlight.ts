@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { SHELL_SPECIAL_CHARS } from '@qwen-code/qwen-code-core/utils/paths.js';
 import type { SlashCommand } from '../commands/types.js';
 import { findSlashCommandTokens } from './commandUtils.js';
 import { cpLen, cpSlice } from './textUtils.js';
@@ -17,12 +18,12 @@ export type HighlightToken = {
 // hooks/atCommandProcessor.ts, or the input box paints a different span than
 // the parser will actually consume. A URL ref (`@https://…`) runs through the
 // full RFC 3986 charset — `%`, `?`, `&`, `=` are structural in a presigned
-// URL — while a filesystem ref keeps the narrower path charset. The `\\ `
-// alternative and the `\` in the class mirror the parser's backslash-escape
-// branch, which runs for URL refs too — an escaped span must stay painted
-// rather than split the token.
-const HIGHLIGHT_REGEX =
-  /(^\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\s)\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@[hH][tT][tT][pP][sS]?:\/\/(?:\\ |[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%\\])+)|(@(?:\\ |[a-zA-Z0-9_.:/-])+)/g;
+// URL — while a filesystem ref keeps the narrower path charset plus backslash-
+// escaped SHELL_SPECIAL_CHARS emitted by escapePath (`\ `, `\(`, `\)`, etc.).
+const HIGHLIGHT_REGEX = new RegExp(
+  `(^\\/[a-zA-Z][a-zA-Z0-9:_-]*)|((?<=\\s)\\/[a-zA-Z][a-zA-Z0-9:_-]*)|(@[hH][tT][tT][pP][sS]?:\\/\\/(?:\\\\ |[A-Za-z0-9\\-._~:/?#[\\]@!$&'()*+,;=%\\\\])+)|(@(?:\\\\${SHELL_SPECIAL_CHARS.source}|[a-zA-Z0-9_.:/-])+)`,
+  'g',
+);
 
 // Mirrors the parser's trailing-punctuation trim: '.'/','/';'/':'/'!'/'?' at
 // the very end of a URL are prose, not part of the ref.

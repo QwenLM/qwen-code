@@ -703,39 +703,151 @@ describe('handleAtCommand', () => {
     });
   });
 
-  it.skipIf(process.platform === 'win32')(
-    'should correctly unescape paths with escaped spaces',
-    async () => {
-      const fileContent = 'This is the file content.';
-      const filePath = await createTestFile(
-        path.join(testRootDir, 'path', 'to', 'my file.txt'),
-        fileContent,
-      );
-      const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
-      const query = `@${escapedpath}`;
+  it('should correctly unescape paths with escaped spaces', async () => {
+    const fileContent = 'This is the file content.';
+    const filePath = await createTestFile(
+      path.join(testRootDir, 'path', 'to', 'my file.txt'),
+      fileContent,
+    );
+    const escapedpath = path.join(testRootDir, 'path', 'to', 'my\\ file.txt');
+    const query = `@${escapedpath}`;
 
-      const result = await handleAtCommand({
-        query,
-        config: mockConfig,
-        onDebugMessage: mockOnDebugMessage,
-        messageId: 125,
-        signal: abortController.signal,
-      });
+    const result = await handleAtCommand({
+      query,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 125,
+      signal: abortController.signal,
+    });
 
-      expect(result.processedQuery).toEqual([
-        { text: `@${filePath}` },
-        { text: '\n--- Content from referenced files ---' },
-        { text: `\nContent from ${filePath}:\n` },
-        { text: fileContent },
-        { text: '\n--- End of content ---' },
-      ]);
-      expect(result.shouldProceed).toBe(true);
-      // toolDisplays should be returned for caller to add to UI history
-      expect(result.toolDisplays).toBeDefined();
-      expect(result.toolDisplays).toHaveLength(1);
-      expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
-    },
-  );
+    expect(result.processedQuery).toEqual([
+      { text: `@${filePath}` },
+      { text: '\n--- Content from referenced files ---' },
+      { text: `\nContent from ${filePath}:\n` },
+      { text: fileContent },
+      { text: '\n--- End of content ---' },
+    ]);
+    expect(result.shouldProceed).toBe(true);
+    // toolDisplays should be returned for caller to add to UI history
+    expect(result.toolDisplays).toBeDefined();
+    expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
+  it('resolves escaped spaces and parentheses from @ completion', async () => {
+    const spaceContent = 'Spaced Chinese doc content';
+    const parensContent = 'Parens doc content';
+    await createTestFile(path.join(testRootDir, '测试 文档.md'), spaceContent);
+    await createTestFile(
+      path.join(testRootDir, '设计稿 (终版).md'),
+      parensContent,
+    );
+
+    const result = await handleAtCommand({
+      query: '@测试\\ 文档.md @设计稿\\ \\(终版\\).md 总结',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1251,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual(
+      expect.arrayContaining(['测试 文档.md', '设计稿 (终版).md']),
+    );
+    expect(JSON.stringify(result.processedQuery)).toContain(spaceContent);
+    expect(JSON.stringify(result.processedQuery)).toContain(parensContent);
+  });
+
+  it('prefers an existing literal folder name starting with a shell metacharacter over unescaping', async () => {
+    const literalContent = 'Literal folder content';
+    const fallbackContent = 'Unescaped sibling content';
+    const literalPath = await createTestFile(
+      path.join(testRootDir, 'dir', '#v2', 'file.txt'),
+      literalContent,
+    );
+    await createTestFile(
+      path.join(testRootDir, 'dir#v2', 'file.txt'),
+      fallbackContent,
+    );
+
+    const queryPath = path.join(testRootDir, 'dir', '#v2', 'file.txt');
+    const result = await handleAtCommand({
+      query: `@${queryPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1252,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toEqual([literalPath]);
+    expect(JSON.stringify(result.processedQuery)).toContain(literalContent);
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      fallbackContent,
+    );
+  });
+
+  it('does not bypass ignore rules by falling back when an ignored literal file exists', async () => {
+    await fsPromises.mkdir(path.join(testRootDir, '.git'), {
+      recursive: true,
+    });
+    await createTestFile(
+      path.join(testRootDir, '.gitignore'),
+      'dir/#v2/secret.txt\n',
+    );
+    await createTestFile(
+      path.join(testRootDir, 'dir', '#v2', 'secret.txt'),
+      'IGNORED_LITERAL_SECRET',
+    );
+    await createTestFile(
+      path.join(testRootDir, 'dir#v2', 'secret.txt'),
+      'SIBLING_FALLBACK_CONTENT',
+    );
+    mockConfig = {
+      ...mockConfig,
+      getFileService: () => new FileDiscoveryService(testRootDir),
+    } as unknown as Config;
+
+    const queryPath = path.join('dir', '#v2', 'secret.txt');
+    const result = await handleAtCommand({
+      query: `@${queryPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1255,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toBeUndefined();
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      'IGNORED_LITERAL_SECRET',
+    );
+    expect(JSON.stringify(result.processedQuery)).not.toContain(
+      'SIBLING_FALLBACK_CONTENT',
+    );
+  });
+
+  it('leaves the original path unchanged when neither candidate exists', async () => {
+    const result = await handleAtCommand({
+      query: 'Check @missing\\ file.md please',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 1253,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.filesRead).toBeUndefined();
+    expect(result.processedQuery).toEqual([
+      {
+        text:
+          process.platform === 'win32'
+            ? 'Check @missing\\ file.md please'
+            : 'Check @missing file.md please',
+      },
+    ]);
+  });
 
   it('should handle multiple @file references', async () => {
     const content1 = 'Content file1';
@@ -1326,37 +1438,34 @@ describe('handleAtCommand', () => {
       });
     });
 
-    it.skipIf(process.platform === 'win32')(
-      'should still handle escaped spaces in paths before punctuation',
-      async () => {
-        const fileContent = 'Spaced file content';
-        const filePath = await createTestFile(
-          path.join(testRootDir, 'spaced file.txt'),
-          fileContent,
-        );
-        const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
-        const query = `Check @${escapedPath}, it has spaces.`;
+    it('should still handle escaped spaces in paths before punctuation', async () => {
+      const fileContent = 'Spaced file content';
+      const filePath = await createTestFile(
+        path.join(testRootDir, 'spaced file.txt'),
+        fileContent,
+      );
+      const escapedPath = path.join(testRootDir, 'spaced\\ file.txt');
+      const query = `Check @${escapedPath}, it has spaces.`;
 
-        const result = await handleAtCommand({
-          query,
-          config: mockConfig,
-          onDebugMessage: mockOnDebugMessage,
-          messageId: 412,
-          signal: abortController.signal,
-        });
+      const result = await handleAtCommand({
+        query,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 412,
+        signal: abortController.signal,
+      });
 
-        expect(result).toMatchObject({
-          processedQuery: [
-            { text: `Check @${filePath}, it has spaces.` },
-            { text: '\n--- Content from referenced files ---' },
-            { text: `\nContent from ${filePath}:\n` },
-            { text: fileContent },
-            { text: '\n--- End of content ---' },
-          ],
-          shouldProceed: true,
-        });
-      },
-    );
+      expect(result).toMatchObject({
+        processedQuery: [
+          { text: `Check @${filePath}, it has spaces.` },
+          { text: '\n--- Content from referenced files ---' },
+          { text: `\nContent from ${filePath}:\n` },
+          { text: fileContent },
+          { text: '\n--- End of content ---' },
+        ],
+        shouldProceed: true,
+      });
+    });
 
     it('should not break file paths with periods in extensions', async () => {
       const fileContent = 'TypeScript content';

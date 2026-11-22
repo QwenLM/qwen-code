@@ -953,6 +953,42 @@ describe('useTextBuffer', () => {
       expect(getBufferState(result).text).toBe(filePaths);
     });
 
+    it('should recognize already-escaped paths with spaces when pasted', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === 'C:\\Users\\demo\\my file.txt',
+        }),
+      );
+      act(() =>
+        result.current.insert('C:\\Users\\demo\\my\\ file.txt', {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@C:\\Users\\demo\\my\\ file.txt ',
+      );
+    });
+
+    it('should prefer an existing literal path over unescaping when both match isValidPath', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'C:\\Users\\demo\\dir\\#v2\\file.txt' ||
+            p === 'C:\\Users\\demo\\dir#v2\\file.txt',
+        }),
+      );
+      act(() =>
+        result.current.insert('C:\\Users\\demo\\dir\\#v2\\file.txt', {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@C:\\Users\\demo\\dir\\#v2\\file.txt ',
+      );
+    });
+
     it('should handle Windows drive-letter paths', () => {
       // Suggestion 6 (wenshao #4544): test drive-letter branch of looksLikePath
       const { result } = renderHook(() =>

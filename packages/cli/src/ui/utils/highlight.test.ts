@@ -206,6 +206,15 @@ describe('parseInputForHighlighting', () => {
     ]);
   });
 
+  it('should highlight file paths with escaped shell metacharacters from @ completion', () => {
+    const text = 'see @report\\ \\(1\\)\\[v2\\]\\&final.md now';
+    expect(parseInputForHighlighting(text, 0)).toEqual([
+      { text: 'see ', type: 'default' },
+      { text: '@report\\ \\(1\\)\\[v2\\]\\&final.md', type: 'file' },
+      { text: ' now', type: 'default' },
+    ]);
+  });
+
   it('should paint a URL ref with a backslash-escaped span in full', () => {
     // The parser's escape branch runs for URL refs too, so the highlighter
     // must not split the token at the backslash.

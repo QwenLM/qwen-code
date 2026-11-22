@@ -46,6 +46,7 @@ import {
   matchMcpServerByRef,
   parseMcpServerRef,
 } from '../../utils/mcp-server-mention.js';
+import { getAtPathCandidates } from '../utils/at-path-candidates.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -191,6 +192,35 @@ export function extractAtPathCommands(query: string): string[] {
   );
 }
 
+async function selectAtPathCandidate(
+  pathName: string,
+  workspaceDirs: readonly string[],
+): Promise<string> {
+  const candidates = getAtPathCandidates(pathName);
+  if (candidates.length === 1) {
+    return pathName;
+  }
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate)) {
+      try {
+        await fs.lstat(candidate);
+        return candidate;
+      } catch {
+        continue;
+      }
+    }
+    for (const dir of workspaceDirs) {
+      try {
+        await fs.lstat(path.resolve(dir, candidate));
+        return candidate;
+      } catch {
+        // Try next workspace directory.
+      }
+    }
+  }
+  return pathName;
+}
+
 /**
  * Detect an `@server:uri` MCP resource reference. Returns the parsed
  * `{ serverName, uri }` ONLY when `pathName` is prefixed by a configured MCP
@@ -331,7 +361,7 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    const pathName = originalAtPath.substring(1);
+    let pathName = originalAtPath.substring(1);
 
     // URL media reference (`@https://…`): detected BEFORE every other
     // parser — a URL can't be an extension/session/MCP ref, and without
@@ -436,6 +466,10 @@ export async function resolveAtCommandQuery({
 
     // Check if path should be ignored based on filtering options
     const workspaceContext = config.getWorkspaceContext();
+    pathName = await selectAtPathCandidate(
+      pathName,
+      workspaceContext.getDirectories(),
+    );
 
     // Check if path is in project temp directory
     const absolutePathName = path.isAbsolute(pathName)
