@@ -503,6 +503,9 @@ describe('variant-tagged model ids', () => {
       'gpt-oss-20b-gguf',
     );
     expect(tokenLimit('hf.co/ggml-org/gpt-oss-20b-GGUF:MXFP4')).toBe(131_072);
+    expect(tokenLimit('hf.co/ggml-org/gpt-oss-20b-GGUF:MXFP4', 'output')).toBe(
+      32_768,
+    );
   });
 
   it('only strips a quantization tag at the end of the id', () => {

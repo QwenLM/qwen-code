@@ -363,6 +363,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   // OpenAI
   [/^gpt-5/, LIMITS['128k']], // GPT-5.x: 128K
+  [/^gpt-oss/, LIMITS['32k']], // gpt-oss: 32K
   [/^gpt-/, LIMITS['16k']], // GPT fallback: 16K
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
