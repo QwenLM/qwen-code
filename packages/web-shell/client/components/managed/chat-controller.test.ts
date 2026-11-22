@@ -364,6 +364,53 @@ describe('managed chat-controller mappings', () => {
       ]),
     ).toBeNull();
 
+    // R2-2: (a) optional blank answer skips cleanly, (b) single-select with
+    // allowText: false rejects non-matching text, and (c) exactly 8192 chars is accepted.
+    const optionalAndStrict = questionAction({
+      questions: [
+        {
+          id: 'opt',
+          prompt: 'Optional note?',
+          required: false,
+          multiple: false,
+          allowText: true,
+          options: [],
+        },
+        {
+          id: 'strict',
+          prompt: 'Pick strictly',
+          required: true,
+          multiple: false,
+          allowText: false,
+          options: [{ id: 'a', label: 'A' }],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(optionalAndStrict, [
+        { questionId: 'opt', value: '   ' },
+        { questionId: 'strict', value: 'A' },
+      ]),
+    ).toEqual([
+      { questionId: 'opt' },
+      { questionId: 'strict', optionIds: ['a'] },
+    ]);
+    expect(
+      normalizeManagedQuestionAnswers(optionalAndStrict, [
+        { questionId: 'strict', value: 'custom words' },
+      ]),
+    ).toBeNull();
+    const exactLimitText = 'z'.repeat(MAX_MANAGED_QUESTION_TEXT_LENGTH);
+    expect(
+      normalizeManagedQuestionAnswers(action, [
+        { questionId: '0', value: exactLimitText },
+        { questionId: '1', value: 'Dry run' },
+      ]),
+    ).toEqual([
+      { questionId: 'env', text: exactLimitText },
+      { questionId: 'notes', optionIds: ['dry'] },
+    ]);
+
     // R1-5: single text over 8192 chars -> null (both single- and multi-select);
     // combined payload over 32 KiB -> null.
     expect(
@@ -454,7 +501,8 @@ describe('managed chat-controller mappings', () => {
         { questionId: '0', value: 'Verbose, but only for the parser' },
       ]),
     ).toEqual([{ questionId: 'q', text: 'Verbose, but only for the parser' }]);
-    // Non-boundary prefix ("No way") and space-joined option labels ("No Verbose") stay pure text.
+    // Non-boundary prefix ("No way"), space-joined option labels ("No Verbose"),
+    // and mixed option + free text ("Dry run, --a, --b") stay verbatim text (G3).
     expect(
       normalizeManagedQuestionAnswers(withText, [
         { questionId: '0', value: 'No way' },
@@ -465,6 +513,83 @@ describe('managed chat-controller mappings', () => {
         { questionId: '0', value: 'No Verbose' },
       ]),
     ).toEqual([{ questionId: 'q', text: 'No Verbose' }]);
+    expect(
+      normalizeManagedQuestionAnswers(withText, [
+        { questionId: '0', value: 'Dry run, --a, --b' },
+      ]),
+    ).toEqual([{ questionId: 'q', text: 'Dry run, --a, --b' }]);
+
+    // R1-2: join collision ("Alpha" + "Beta" vs "Alpha, Beta") and duplicate
+    // option labels ("Same, label" on two ids) must fail closed (never guess).
+    const collidingMulti = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Pick',
+          required: true,
+          multiple: true,
+          allowText: true,
+          options: [
+            { id: 'a', label: 'Alpha' },
+            { id: 'b', label: 'Beta' },
+            { id: 'c', label: 'Alpha, Beta' },
+          ],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(collidingMulti, [
+        { questionId: '0', value: 'Alpha, Beta' },
+      ]),
+    ).toBeNull();
+
+    const dupLabelMulti = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Pick',
+          required: true,
+          multiple: true,
+          allowText: true,
+          options: [
+            { id: 'q1o1', label: 'Same, label' },
+            { id: 'q1o2', label: 'Same, label' },
+          ],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(dupLabelMulti, [
+        { questionId: '0', value: 'Same, label' },
+      ]),
+    ).toBeNull();
+
+    const dupLabelSingle = questionAction({
+      questions: [
+        {
+          id: 'q',
+          prompt: 'Pick one',
+          required: true,
+          multiple: false,
+          allowText: true,
+          options: [
+            { id: 'q1o1', label: 'Same, label' },
+            { id: 'q1o2', label: 'Same, label' },
+          ],
+        },
+      ],
+    });
+    expect(
+      normalizeManagedQuestionAnswers(dupLabelSingle, [
+        { questionId: '0', value: 'Same, label' },
+      ]),
+    ).toBeNull();
+    // Explicit option id remains unambiguous even when labels collide.
+    expect(
+      normalizeManagedQuestionAnswers(dupLabelSingle, [
+        { questionId: '0', value: 'q1o2' },
+      ]),
+    ).toEqual([{ questionId: 'q', optionIds: ['q1o2'] }]);
 
     // allowText: false still accepts comma-containing option labels and rejects non-option text.
     const noText = questionAction({
@@ -934,6 +1059,186 @@ describe('createManagedChatController', () => {
     const afterRej = await h.controller.respondApproval('act-c21', 'allow');
     expect(afterRej.admission).toBe('accepted');
     expect(afterRej.outcome).toBe('unsettled');
+
+    // R2-1 (1): idle-side guard — emitting a settlement while nothing is in
+    // flight must NOT buffer it for a subsequent retry on the same action id.
+    h.setPendingActions([
+      permissionAction({ actionId: 'act-idle' }),
+      permissionAction({ actionId: 'act-acc-drain' }),
+      permissionAction({ actionId: 'act-catch-drain' }),
+    ]);
+    await h.controller.respondApproval('act-idle', 'allow');
+    h.emitAction({ actionId: 'act-idle', outcome: 'failed' });
+    // Now idle (inFlightDispatches === 0); re-delivered 'resolved' must not buffer.
+    h.emitAction({ actionId: 'act-idle', outcome: 'resolved' });
+    const afterIdle = await h.controller.respondApproval('act-idle', 'allow');
+    expect(afterIdle.admission).toBe('accepted');
+    expect(afterIdle.outcome).toBe('unsettled');
+    expect(
+      h.controller.operations.find(
+        (op) => op.kind === 'approval' && op.target.requestId === 'act-idle',
+      )?.state,
+    ).toBe('pending');
+
+    // R2-1 (2): accepted-path pruneBuffers() — an orphan action failure buffered
+    // while another dispatch is in flight must clear when that dispatch resolves
+    // accepted, so the action's later approval starts unsettled and can establish.
+    const dAccHold = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(dAccHold.promise);
+    const accHold = h.controller.submit({ text: 'hold for accepted drain' });
+    h.emitAction({ actionId: 'act-acc-drain', outcome: 'failed' });
+    dAccHold.resolve({
+      admission: 'accepted',
+      operationId: 'op-acc-drain',
+      turnId: 't-acc-drain',
+    });
+    await accHold;
+    const afterAccDrain = await h.controller.respondApproval(
+      'act-acc-drain',
+      'allow',
+    );
+    expect(afterAccDrain.admission).toBe('accepted');
+    expect(afterAccDrain.outcome).toBe('unsettled');
+    h.emitAction({ actionId: 'act-acc-drain', outcome: 'resolved' });
+    expect(
+      h.controller.operations.find(
+        (op) =>
+          op.kind === 'approval' && op.target.requestId === 'act-acc-drain',
+      )?.state,
+    ).toBe('established');
+
+    // R2-1 (3): thrown-transport catch pruneBuffers() — an orphan buffered during
+    // a throwing dispatch must clear when the catch runs.
+    const dThrowHold = deferred<ManagedTransportAdmission>();
+    h.submitPrompt.mockReturnValueOnce(dThrowHold.promise);
+    const throwHold = h.controller.submit({ text: 'hold for catch drain' });
+    h.emitAction({ actionId: 'act-catch-drain', outcome: 'failed' });
+    dThrowHold.reject(new Error('boom'));
+    expect((await throwHold).admission).toBe('unknown');
+    const afterCatchDrain = await h.controller.respondApproval(
+      'act-catch-drain',
+      'allow',
+    );
+    expect(afterCatchDrain.admission).toBe('accepted');
+    expect(afterCatchDrain.outcome).toBe('unsettled');
+  });
+
+  it('settles an in-flight cancel even when the shared submit row is still pending, and establishes submit on cancelled turn (G1 / B1 / R2-3)', async () => {
+    const h = createHarness();
+    // G1 / cell B1: submit is admitted and still PENDING (not terminal yet);
+    // cancel(t1) is in flight when turn t1 settles 'completed' and sessionPhase
+    // becomes 'completed' -> cancel must fail and phase must return to 'idle'.
+    h.setPhase('agent_running');
+    h.setActiveTurnId('t1');
+    await h.controller.submit({ text: 'running turn' });
+    expect(
+      h.controller.operations.find((op) => op.kind === 'submit')?.state,
+    ).toBe('pending');
+
+    const dCan = deferred<ManagedTransportAdmission>();
+    h.cancelTurn.mockReturnValueOnce(dCan.promise);
+    const cancelPromise = h.controller.cancel();
+    expect(h.controller.phase).toBe('cancelling');
+
+    h.emitTurn({ turnId: 't1', outcome: 'completed' });
+    h.setPhase('completed');
+    h.setActiveTurnId(undefined);
+    dCan.resolve({ admission: 'accepted', operationId: 'op-can-b1' });
+
+    const cancelRes = await cancelPromise;
+    expect(cancelRes.admission).toBe('accepted');
+    expect(cancelRes.outcome).toBe('failed');
+    expect(
+      h.controller.operations.find((op) => op.kind === 'submit')?.state,
+    ).toBe('established');
+    expect(
+      h.controller.operations.find((op) => op.kind === 'cancel')?.state,
+    ).toBe('failed');
+    expect(h.controller.phase).toBe('idle');
+
+    // R2-3: submit × cancelled turn settles the submit row as 'established'.
+    h.submitPrompt.mockResolvedValueOnce({
+      admission: 'accepted',
+      operationId: 'op-sub-can',
+      turnId: 't-can',
+    });
+    await h.controller.submit({ text: 'will be cancelled' });
+    h.emitTurn({ turnId: 't-can', outcome: 'cancelled' });
+    expect(
+      h.controller.operations.find((op) => op.kind === 'submit')?.state,
+    ).toBe('established');
+  });
+
+  it('filters expired managed actions from projection and rejects responses to them (R2-4)', async () => {
+    let nowMs = 10_000;
+    const h = createHarness({ now: () => nowMs });
+    h.setPendingActions([
+      permissionAction({ actionId: 'perm-exp', expiresAt: 10_000 }),
+      permissionAction({ actionId: 'perm-live', expiresAt: 10_001 }),
+      questionAction({ actionId: 'q-exp', expiresAt: 9_999 }),
+      questionAction({ actionId: 'q-live', expiresAt: 10_001 }),
+    ]);
+
+    expect(h.controller.pendingApprovals.map((a) => a.id)).toEqual([
+      'perm-live',
+    ]);
+    expect(h.controller.pendingQuestions.map((q) => q.id)).toEqual(['q-live']);
+
+    const expApp = await h.controller.respondApproval('perm-exp', 'allow');
+    expect(expApp.admission).toBe('rejected');
+    expect(expApp.outcome).toBeUndefined();
+    const expQ = await h.controller.respondQuestion('q-exp', [
+      { questionId: '0', value: 'Dev' },
+      { questionId: '1', value: 'Dry run' },
+    ]);
+    expect(expQ.admission).toBe('rejected');
+    expect(expQ.outcome).toBeUndefined();
+    expect(h.submitApproval).not.toHaveBeenCalled();
+    expect(h.submitQuestion).not.toHaveBeenCalled();
+
+    // Advancing clock past 10_001 expires the remaining actions too.
+    nowMs = 10_001;
+    expect(h.controller.pendingApprovals).toEqual([]);
+    expect(h.controller.pendingQuestions).toEqual([]);
+
+    // Default clock (omitting deps.now) also filters already-expired actions.
+    const defaultClock = createHarness();
+    defaultClock.setPendingActions([
+      questionAction({ actionId: 'q-past', expiresAt: Date.now() - 60_000 }),
+    ]);
+    expect(defaultClock.controller.pendingQuestions).toEqual([]);
+  });
+
+  it('refuses a second decision while an accepted approval or question row is still non-terminal (R2-5)', async () => {
+    const h = createHarness();
+    h.setPendingActions([
+      permissionAction({ actionId: 'act-live' }),
+      questionAction({ actionId: 'q-live' }),
+    ]);
+
+    // Approval accepted, settlement not yet received -> second click rejected.
+    const firstApp = await h.controller.respondApproval('act-live', 'allow');
+    expect(firstApp.admission).toBe('accepted');
+    expect(firstApp.outcome).toBe('unsettled');
+    const secondApp = await h.controller.respondApproval('act-live', 'deny');
+    expect(secondApp.admission).toBe('rejected');
+    expect(secondApp.outcome).toBeUndefined();
+    expect(h.submitApproval).toHaveBeenCalledTimes(1);
+
+    // Question accepted, settlement not yet received -> second submit rejected.
+    const firstQ = await h.controller.respondQuestion('q-live', [
+      { questionId: '0', value: 'Dev' },
+      { questionId: '1', value: 'Dry run' },
+    ]);
+    expect(firstQ.admission).toBe('accepted');
+    expect(firstQ.outcome).toBe('unsettled');
+    const secondQ = await h.controller.respondQuestion('q-live', [
+      { questionId: '0', value: 'Prod' },
+      { questionId: '1', value: 'Verbose' },
+    ]);
+    expect(secondQ.admission).toBe('rejected');
+    expect(secondQ.outcome).toBeUndefined();
+    expect(h.submitQuestion).toHaveBeenCalledTimes(1);
   });
 
   it('releases settlement subscriptions on AbortSignal abort and skips subscribing when already aborted', () => {

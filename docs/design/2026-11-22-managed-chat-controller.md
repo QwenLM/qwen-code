@@ -77,10 +77,13 @@ actions, and Java command operations into `SessionChatController`:
   kind: a turn completing on its own fails a bound `cancel`), or
   `subscribeActionSettlement` (`resolved` → `'established'`,
   `expired`/`superseded`/`failed` → `'failed'`). Already-terminal rows never
-  absorb a later settlement; settlements that arrive while any transport
-  dispatch is in flight and match no active row are buffered by
-  operation/turn/action id, consumed on bind (for operation and action ids), and
-  cleared when all in-flight dispatches drain.
+  absorb a later settlement; operation settlements that match no active row
+  while a dispatch is in flight are buffered by `operationId`, and turn/action
+  settlements (whose ids are shared across a submit and a cancel, or across
+  attempts) are buffered whenever any dispatch is in flight so an unbound
+  in-flight cancel or retry still receives the settlement even if a prior row
+  was still active. Buffered operation/action entries are consumed on bind, and
+  all three buffers are cleared whenever all in-flight dispatches drain.
 - **Turn-scoped cancel with per-target retention.** `cancel()` fails closed when
   `deps.activeTurnId` is `undefined` (managed cancel requires a `turnId`),
   captures `cancelTarget = deps.activeTurnId` at dispatch time, keeps the
@@ -90,22 +93,31 @@ actions, and Java command operations into `SessionChatController`:
   `question`, matching the daemon adapter), and stamps `turnId: cancelTarget`
   onto the returned `IntentResult.target` copy so `ChatSurface`'s turn-scoped
   cancel guard works identically for managed sessions.
-- **Pending permissions and questions.** Permission actions (`kind !== 'question'`)
-  reuse `toManagedPermissionRequest(action, messages)`. Question actions
+- **Pending permissions and questions.** Expired actions (`expiresAt <= now`,
+  using optional `deps.now` defaulting to `Date.now`) are filtered out at both
+  projection getters and rejected by `respondApproval`/`respondQuestion`.
+  Permission actions (`kind !== 'question'`) reuse
+  `toManagedPermissionRequest(action, messages)`. Question actions
   (`kind === 'question'`) project through `toManagedQuestionPermissionRequest`
   into the `PermissionRequest` shape consumed by `ChatSurface`'s shared
   `AskUserQuestion` card with only the `allow_once` `'submit'` option (the
   managed question wire format carries no string-option dismiss variant, so
   `respondApproval` fails closed on question actions). Both `respondApproval`
-  and `respondQuestion` fail closed on unknown action ids, invalid options,
-  concurrent duplicate dispatches for the same `actionId`, or invalid/missing
-  required/over-cap question answers (`normalizeManagedQuestionAnswers` accepts
-  both decimal question indices and explicit question ids, requires an exact
-  longest-first comma-boundary cover of option labels/ids for multi-select
-  options so comma-containing labels decode intact while free text starting with
-  a label stays verbatim text, enforces `allowText`, `required`, the 8192-char
-  per-answer text limit, and routes through `canonicalQuestionAnswers` for
-  canonical ordering and the 32 KiB `MAX_MANAGED_QUESTION_ANSWER_BYTES` cap).
+  and `respondQuestion` fail closed on unknown or expired action ids, invalid
+  options, in-flight or live non-terminal decision rows for the same `actionId`
+  (`hasLiveAction`, matching the daemon adapter's `hasLiveDecision` so an
+  action cannot be decided twice while a terminal `failed` row still permits
+  retry), or invalid/ambiguous/missing required/over-cap question answers
+  (`normalizeManagedQuestionAnswers` accepts both decimal question indices and
+  explicit question ids, requires a unique option match for single-select and a
+  unique full cover via bounded O(k·|options|) DP over comma boundaries for
+  multi-select — failing closed on duplicate option labels and join collisions
+  like `Alpha` + `Beta` vs `Alpha, Beta`, while keeping free text or mixed
+  flat-string `option, free text` payloads verbatim as `text` when `allowText`
+  is true or failing closed when false until slice 3c carries structured option
+  ids — enforces `required`, the 8192-char per-answer text limit, and routes
+  through `canonicalQuestionAnswers` for canonical ordering and the 32 KiB
+  `MAX_MANAGED_QUESTION_ANSWER_BYTES` cap).
 - **Snapshot stability and lifetime.** `operations` is memoized into a frozen
   array rebuilt only when tracked state changes. All settlement subscriptions
   are released when `deps.signal` aborts, and skipped synchronously if

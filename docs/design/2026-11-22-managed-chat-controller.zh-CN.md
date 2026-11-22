@@ -71,9 +71,10 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `'unsettled'`）、`subscribeTurnSettlement`（按操作类型投影：回合自行完成使绑定
   的 `cancel` 转为 `'failed'`）或 `subscribeActionSettlement`（`resolved` →
   `'established'`，`expired`/`superseded`/`failed` → `'failed'`）。已终态行永不
-  吸收后续结算；存在在飞派发且未命中活跃行时，先到达的结算按 operation/turn/action
-  id 缓冲，在绑定时消费删除（针对 operation 与 action id），并在所有在飞派发排空时
-  清空。
+  吸收后续结算；存在在飞派发时，未命中活跃行的 operation 结算按 `operationId` 缓
+  冲，而 turn 与 action 结算（其 id 在 submit 与 cancel 或多次尝试间共享）只要有在
+  飞派发即缓冲，使尚未绑定的在飞 cancel 或重试即使在前序行仍活跃时也能收到结算；
+  operation/action 缓冲在绑定时消费删除，且三者均在所有在飞派发排空时清空。
 - **回合作用域取消与按目标保留。** `deps.activeTurnId` 为 `undefined` 时 `cancel()`
   fail-closed 返回 `rejected`（Managed 取消要求 `turnId`）；派发时捕获
   `cancelTarget = deps.activeTurnId`，保留在 `controller.operations` 中的操作目标
@@ -82,18 +83,24 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   条，与 daemon 适配器一致），并将 `turnId: cancelTarget` 写入返回的
   `IntentResult.target` 副本，使 `ChatSurface` 的回合级取消守卫对 Managed 会话同样
   生效。
-- **待审批与待提问投影。** 权限动作（`kind !== 'question'`）复用既有
+- **待审批与待提问投影。** 已过期动作（`expiresAt <= now`，使用可选 `deps.now`，默
+  认 `Date.now`）在两处投影 getter 中过滤并在 `respondApproval`/`respondQuestion`
+  入口拒绝。权限动作（`kind !== 'question'`）复用既有
   `toManagedPermissionRequest(action, messages)`；提问动作（`kind === 'question'`）
   经 `toManagedQuestionPermissionRequest` 投影为共享 `AskUserQuestion` 卡片所需的
   `PermissionRequest`，仅投影 `allow_once` `'submit'` 选项（Managed 提问协议无字符
   串选项忽略变体，故 `respondApproval` 对提问动作直接 fail-closed 返回 `rejected`）。
-  `respondApproval` 与 `respondQuestion` 对未知动作 id、非法选项、同一 `actionId`
-  的并发重复派发、以及非法、缺失必填项或超体积上限的回答均 fail-closed 返回
-  `rejected`（`normalizeManagedQuestionAnswers` 同时接受十进制索引与显式问题 id，
-  对多选要求逗号边界最长前缀精确覆盖选项才解码为 `optionIds`，既完整解码含逗号标签及
-  混合选择又绝不把带逗号自由文本误拆成虚构选项，严格校验 `allowText`、`required`、
-  单条 8192 字符上限，并经由 `canonicalQuestionAnswers` 实施规范排序与 32 KiB
-  `MAX_MANAGED_QUESTION_ANSWER_BYTES` 上限）。
+  `respondApproval` 与 `respondQuestion` 对未知或已过期动作 id、非法选项、同一
+  `actionId` 的在飞或活跃非终态决策行（`hasLiveAction`，与 daemon 适配器的
+  `hasLiveDecision` 对齐，既防止同一动作被决策两次又允许终态 `failed` 行重试）、以及
+  非法、有歧义、缺失必填项或超体积上限的回答均 fail-closed 返回 `rejected`
+  （`normalizeManagedQuestionAnswers` 同时接受十进制索引与显式问题 id，单选要求唯
+  一选项命中、多选经按逗号边界的有界 O(k·|options|) DP 要求唯一完整覆盖——对重复选
+  项标签与 `Alpha`+`Beta` 撞 `Alpha, Beta` 的拼接碰撞均 fail-closed 返回 `null`，
+  在切片 3c 传入结构化选项 id 前，自由文本或扁平字符串混合「选项 + 文本」在
+  `allowText: true` 时原样保留为 `text`、`allowText: false` 时拒绝——严格校验
+  `required`、单条 8192 字符上限，并经由 `canonicalQuestionAnswers` 实施规范排序与
+  32 KiB `MAX_MANAGED_QUESTION_ANSWER_BYTES` 上限）。
 - **快照稳定与生命周期。** `operations` 记忆化为冻结数组，仅在追踪状态变化时重建。
   `deps.signal` 触发 abort 时释放全部结算订阅；构造时若 `deps.signal?.aborted` 已为
   `true` 则同步跳过订阅。

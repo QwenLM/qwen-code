@@ -24,7 +24,11 @@ import type {
   SessionChatController,
   SessionOpsController,
 } from '../../chat-core/contract.js';
-import { deriveChatPhase, retainOperations } from '../../chat-core/intent.js';
+import {
+  deriveChatPhase,
+  isTerminalOperation,
+  retainOperations,
+} from '../../chat-core/intent.js';
 import type {
   ManagedAgentPendingAction,
   ManagedAgentPendingQuestionAction,
@@ -74,6 +78,9 @@ export interface ManagedChatControllerDeps {
 
   // Live pending actions (permissions and questions) for this session.
   readonly pendingActions: readonly ManagedAgentPendingAction[];
+
+  // Optional clock used to filter expired actions (defaults to Date.now).
+  readonly now?: () => number;
 
   // Pass-through status and capability facts.
   readonly statusFacts: ChatStatusFacts;
@@ -190,45 +197,88 @@ export function toManagedQuestionPermissionRequest(
 
 const DECIMAL_INDEX_RE = /^(0|[1-9]\d*)$/;
 
-function matchExactMultiSelectOptions(
+type MultiSelectMatch =
+  | { readonly kind: 'unique'; readonly optionIds: string[] }
+  | { readonly kind: 'ambiguous' }
+  | { readonly kind: 'none' };
+
+function matchUniqueMultiSelectOptions(
   raw: string,
   options: readonly { id: string; label: string }[],
-): string[] | null {
-  // Match option labels/ids longest-first at comma boundaries. Require an exact
-  // cover of the entire value so free text that happens to start with an option
-  // label followed by a comma (e.g. "Verbose, but only for the parser") is
-  // never misread as selecting that option and amputating the text.
-  const candidates: Array<{ token: string; id: string }> = [];
-  for (const option of options) {
-    if (option.label.length > 0) {
-      candidates.push({ token: option.label, id: option.id });
+): MultiSelectMatch {
+  // Bounded DP over comma-delimited segment boundaries (O(k * |options|)):
+  // requires a unique full cover of the rendered value so duplicate labels
+  // (e.g. two options labelled "Same, label") and join collisions (e.g.
+  // "Alpha" + "Beta" vs "Alpha, Beta") fail closed instead of silently
+  // recording a different option than the user clicked.
+  const segStarts: number[] = [];
+  const segEnds: number[] = [];
+  let cursor = 0;
+  while (cursor <= raw.length) {
+    const comma = raw.indexOf(',', cursor);
+    const sliceEnd = comma === -1 ? raw.length : comma;
+    let s = cursor;
+    let e = sliceEnd;
+    while (s < e && /\s/.test(raw[s]!)) s++;
+    while (e > s && /\s/.test(raw[e - 1]!)) e--;
+    if (e > s) {
+      segStarts.push(s);
+      segEnds.push(e);
     }
-    if (option.id.length > 0 && option.id !== option.label) {
-      candidates.push({ token: option.id, id: option.id });
-    }
+    if (comma === -1) break;
+    cursor = comma + 1;
   }
-  candidates.sort((a, b) => b.token.length - a.token.length);
+  const k = segStarts.length;
+  if (k === 0) return { kind: 'none' };
 
-  const optionIds: string[] = [];
-  let pos = 0;
-  while (pos < raw.length) {
-    while (pos < raw.length && (raw[pos] === ',' || /\s/.test(raw[pos]!))) {
-      pos++;
+  const candidates: Array<{ token: string; spanLen: number; id: string }> = [];
+  for (const option of options) {
+    const seenTokens = new Set<string>();
+    for (const token of [option.label, option.id]) {
+      const trimmed = token.trim();
+      if (trimmed.length === 0 || seenTokens.has(trimmed)) continue;
+      seenTokens.add(trimmed);
+      const spanLen = trimmed
+        .split(',')
+        .filter((part) => part.trim().length > 0).length;
+      if (spanLen === 0) continue;
+      candidates.push({ token: trimmed, spanLen, id: option.id });
     }
-    if (pos >= raw.length) break;
-    const remaining = raw.slice(pos);
-    const matched = candidates.find(({ token }) => {
-      if (!remaining.startsWith(token)) return false;
-      const trimmedAfter = remaining.slice(token.length).trimStart();
-      return trimmedAfter.length === 0 || trimmedAfter.startsWith(',');
-    });
-    if (!matched) return null;
-    if (!optionIds.includes(matched.id)) optionIds.push(matched.id);
-    pos += matched.token.length;
-    while (pos < raw.length && /\s/.test(raw[pos]!)) pos++;
-    if (pos < raw.length && raw[pos] === ',') pos++;
   }
-  return optionIds.length > 0 ? optionIds : null;
+
+  // count[i] is capped at 2: 0 = unreachable, 1 = unique cover, 2 = ambiguous.
+  const count = new Uint8Array(k + 1);
+  const cover: Array<string[] | undefined> = new Array(k + 1);
+  count[0] = 1;
+  cover[0] = [];
+
+  for (let i = 0; i < k; i++) {
+    const c = count[i]!;
+    if (c === 0) continue;
+    for (const candidate of candidates) {
+      const j = i + candidate.spanLen;
+      if (j > k) continue;
+      if (raw.slice(segStarts[i]!, segEnds[j - 1]!) !== candidate.token) {
+        continue;
+      }
+      if (count[j] === 0) {
+        count[j] = c;
+        if (c === 1) {
+          const prev = cover[i]!;
+          cover[j] = prev.includes(candidate.id)
+            ? prev
+            : [...prev, candidate.id];
+        }
+      } else {
+        count[j] = 2;
+        cover[j] = undefined;
+      }
+    }
+  }
+
+  if (count[k] === 0) return { kind: 'none' };
+  if (count[k] > 1) return { kind: 'ambiguous' };
+  return { kind: 'unique', optionIds: cover[k]! };
 }
 
 export function normalizeManagedQuestionAnswers(
@@ -257,14 +307,15 @@ export function normalizeManagedQuestionAnswers(
     }
 
     if (question.multiple) {
-      const matchedOptionIds = matchExactMultiSelectOptions(
+      const match = matchUniqueMultiSelectOptions(
         entry.value,
         question.options,
       );
-      if (matchedOptionIds !== null) {
+      if (match.kind === 'ambiguous') return null;
+      if (match.kind === 'unique') {
         byQuestionId.set(question.id, {
           questionId: question.id,
-          optionIds: matchedOptionIds,
+          optionIds: match.optionIds,
         });
       } else if (question.allowText) {
         byQuestionId.set(question.id, {
@@ -275,17 +326,22 @@ export function normalizeManagedQuestionAnswers(
         return null;
       }
     } else {
-      const matched = question.options.find(
-        (option) =>
-          option.id === entry.value ||
-          option.label === entry.value ||
-          option.id === trimmed ||
-          option.label === trimmed,
+      const byId = question.options.filter(
+        (option) => option.id === entry.value || option.id === trimmed,
       );
-      if (matched) {
+      const byLabel = question.options.filter(
+        (option) => option.label === entry.value || option.label === trimmed,
+      );
+      const uniqueMatches = new Set([
+        ...byId.map((option) => option.id),
+        ...byLabel.map((option) => option.id),
+      ]);
+      if (uniqueMatches.size > 1) return null;
+      if (uniqueMatches.size === 1) {
+        const [onlyId] = uniqueMatches;
         byQuestionId.set(question.id, {
           questionId: question.id,
-          optionIds: [matched.id],
+          optionIds: [onlyId!],
         });
       } else if (question.allowText) {
         byQuestionId.set(question.id, {
@@ -349,8 +405,11 @@ function projectTurnOutcomeForKind(
   return outcome === 'failed' ? 'failed' : 'established';
 }
 
-function isTerminal(state: OperationState): boolean {
-  return state === 'established' || state === 'failed';
+function isActionExpired(
+  action: ManagedAgentPendingAction,
+  nowMs: number,
+): boolean {
+  return action.expiresAt <= nowMs;
 }
 
 export function createManagedChatController(
@@ -375,6 +434,8 @@ export function createManagedChatController(
   let cachedOperations: readonly ChatOperation[] = Object.freeze([]);
   let dirty = false;
 
+  const getNow = (): number => (deps.now ? deps.now() : Date.now());
+
   const pruneBuffers = (): void => {
     if (inFlightDispatches === 0) {
       bufferedOperationSettlement.clear();
@@ -382,6 +443,14 @@ export function createManagedChatController(
       bufferedActionOutcome.clear();
     }
   };
+
+  const hasLiveAction = (actionId: string): boolean =>
+    tracked.some(
+      (entry) =>
+        (entry.kind === 'approval' || entry.kind === 'question') &&
+        entry.target.requestId === actionId &&
+        !isTerminalOperation(entry.state),
+    );
 
   const target = (extra?: Omit<IntentTarget, 'sessionId'>): IntentTarget =>
     Object.freeze({ sessionId: deps.sessionId, ...extra });
@@ -413,7 +482,7 @@ export function createManagedChatController(
     entry: TrackedOperation,
     next: Exclude<OperationState, 'pending'>,
   ): void => {
-    if (isTerminal(entry.state)) return;
+    if (isTerminalOperation(entry.state)) return;
     if (entry.state !== next) {
       entry.state = next;
       dirty = true;
@@ -425,7 +494,7 @@ export function createManagedChatController(
     let matched = false;
     for (const entry of tracked) {
       if (entry.backendOperationId !== event.operationId) continue;
-      if (isTerminal(entry.state)) continue;
+      if (isTerminalOperation(entry.state)) continue;
       matched = true;
       applyState(entry, next);
     }
@@ -435,14 +504,15 @@ export function createManagedChatController(
   };
 
   const settleByTurnId = (event: ManagedTurnSettlement): void => {
-    let matched = false;
     for (const entry of tracked) {
       if (entry.boundTurnId !== event.turnId) continue;
-      if (isTerminal(entry.state)) continue;
-      matched = true;
+      if (isTerminalOperation(entry.state)) continue;
       applyState(entry, projectTurnOutcomeForKind(entry.kind, event.outcome));
     }
-    if (!matched && inFlightDispatches > 0) {
+    // Turn ids are shared across submit and cancel: buffer whenever any
+    // dispatch is in flight so an unbound cancel awaiting transport still
+    // receives the terminal turn outcome even when the submit row was active.
+    if (inFlightDispatches > 0) {
       bufferedTurnOutcome.set(event.turnId, event.outcome);
     }
   };
@@ -450,14 +520,14 @@ export function createManagedChatController(
   const settleByActionId = (event: ManagedActionSettlement): void => {
     const next: 'established' | 'failed' =
       event.outcome === 'resolved' ? 'established' : 'failed';
-    let matched = false;
     for (const entry of tracked) {
       if (entry.boundActionId !== event.actionId) continue;
-      if (isTerminal(entry.state)) continue;
-      matched = true;
+      if (isTerminalOperation(entry.state)) continue;
       applyState(entry, next);
     }
-    if (!matched && inFlightDispatches > 0) {
+    // Buffer whenever any dispatch is in flight so an unbound decision awaiting
+    // transport still receives the settlement even if a prior row was active.
+    if (inFlightDispatches > 0) {
       bufferedActionOutcome.set(event.actionId, event.outcome);
     }
   };
@@ -600,7 +670,7 @@ export function createManagedChatController(
       if (base === 'cancelling') return 'cancelling';
       if (base === 'running') {
         const cancelling = ops.some(
-          (op) => op.kind === 'cancel' && !isTerminal(op.state),
+          (op) => op.kind === 'cancel' && !isTerminalOperation(op.state),
         );
         return cancelling ? 'cancelling' : 'running';
       }
@@ -646,8 +716,12 @@ export function createManagedChatController(
     },
     get pendingApprovals(): readonly PendingApproval[] {
       const messages = deps.messages;
+      const nowMs = getNow();
       return deps.pendingActions
-        .filter((action) => action.kind !== 'question')
+        .filter(
+          (action) =>
+            action.kind !== 'question' && !isActionExpired(action, nowMs),
+        )
         .map((action) => ({
           id: action.actionId,
           status: 'pending' as const,
@@ -655,10 +729,11 @@ export function createManagedChatController(
         }));
     },
     get pendingQuestions(): readonly PendingQuestion[] {
+      const nowMs = getNow();
       return deps.pendingActions
         .filter(
           (action): action is ManagedAgentPendingQuestionAction =>
-            action.kind === 'question',
+            action.kind === 'question' && !isActionExpired(action, nowMs),
         )
         .map((action) => ({
           id: action.actionId,
@@ -676,7 +751,9 @@ export function createManagedChatController(
       if (
         !action ||
         action.kind === 'question' ||
+        isActionExpired(action, getNow()) ||
         inFlightActionIds.has(requestId) ||
+        hasLiveAction(requestId) ||
         !action.options.some((option) => option.id === optionId)
       ) {
         return {
@@ -715,7 +792,12 @@ export function createManagedChatController(
         (candidate): candidate is ManagedAgentPendingQuestionAction =>
           candidate.actionId === requestId && candidate.kind === 'question',
       );
-      if (!action || inFlightActionIds.has(requestId)) {
+      if (
+        !action ||
+        isActionExpired(action, getNow()) ||
+        inFlightActionIds.has(requestId) ||
+        hasLiveAction(requestId)
+      ) {
         return {
           admission: 'rejected',
           target: opTarget,
