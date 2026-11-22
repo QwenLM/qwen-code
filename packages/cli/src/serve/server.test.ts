@@ -309,6 +309,20 @@ vi.mock('node:os', async (importOriginal) => {
     tmpdir: () => mockTmpdir.value ?? actual.tmpdir(),
   };
 });
+const { exportSessionTranscriptSpy } = vi.hoisted(() => ({
+  exportSessionTranscriptSpy: vi.fn(),
+}));
+
+// Delegates to the real exporter by default so existing export suites keep
+// their end-to-end behavior; individual cases can stub one call to observe
+// the config the daemon wiring passes down.
+vi.mock('./server/session-export.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./server/session-export.js')>();
+  exportSessionTranscriptSpy.mockImplementation(actual.exportSessionTranscript);
+  return { ...actual, exportSessionTranscript: exportSessionTranscriptSpy };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   const wrapped = ((...args: [fs.PathLike, fs.EncodingOption?]) =>
@@ -35447,21 +35461,79 @@ describe('createServeApp', () => {
     ])('exports %s format', async (format, mimeType, marker) => {
       const sid = `55555555-bbbb-cccc-dddd-${format.padEnd(12, '0')}`;
       await writeExportSession(sid);
-      const app = createExportApp();
+      // The export label is resolved from the launch environment frozen at
+      // createServeApp entry, so the marker-free ambient must be pinned
+      // BEFORE the app is built, not after.
+      const attributionKeys = [
+        'QWEN_CODE_MANAGED_RUNTIME',
+        'QWEN_CODE_DESKTOP',
+        'QWEN_CODE_SERVE',
+      ];
+      const saved: Record<string, string | undefined> = {};
+      for (const key of attributionKeys) {
+        saved[key] = process.env[key];
+        delete process.env[key];
+      }
+      try {
+        const app = createExportApp();
+        const res = await request(app)
+          .get(`/session/${sid}/export?format=${format}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
 
-      const res = await request(app)
-        .get(`/session/${sid}/export?format=${format}`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`);
-
-      expect(res.status).toBe(200);
-      expect(res.headers['content-type']).toContain(mimeType);
-      expect(res.headers['content-disposition']).toContain(`.${format}"`);
-      expect(res.text).toContain(marker);
-      expect(res.text).toContain('hello export');
-      if (format === 'json') {
-        expect(res.body.metadata.channel).toBe('daemon');
+        expect(res.status).toBe(200);
+        expect(res.headers['content-type']).toContain(mimeType);
+        expect(res.headers['content-disposition']).toContain(`.${format}"`);
+        expect(res.text).toContain(marker);
+        expect(res.text).toContain('hello export');
+        if (format === 'json') {
+          expect(res.body.metadata.channel).toBe('daemon');
+        }
+      } finally {
+        for (const key of attributionKeys) {
+          if (saved[key] === undefined) delete process.env[key];
+          else process.env[key] = saved[key];
+        }
       }
     });
+
+    it.each([
+      ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+      ['daemon', {}],
+    ])(
+      'labels the export channel %s from the daemon launch markers',
+      async (channel, markers) => {
+        const sid = `55555555-bbbb-cccc-dddd-${channel.padEnd(12, '0')}`;
+        await writeExportSession(sid);
+        const keys = [
+          'QWEN_CODE_MANAGED_RUNTIME',
+          'QWEN_CODE_DESKTOP',
+          'QWEN_CODE_SERVE',
+        ];
+        const saved: Record<string, string | undefined> = {};
+        for (const key of keys) {
+          saved[key] = process.env[key];
+          delete process.env[key];
+        }
+        Object.assign(process.env, markers);
+        try {
+          // The export label is resolved once per daemon at boot (desktop
+          // launcher marker → desktop, else daemon); the hosted-harness
+          // label is pinned by the resolveDaemonExportChannel unit cases
+          // because its public API is gated by the private managed contract.
+          const app = createExportApp();
+          const res = await request(app)
+            .get(`/session/${sid}/export?format=json`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`);
+          expect(res.status).toBe(200);
+          expect(res.body.metadata.channel).toBe(channel);
+        } finally {
+          for (const key of keys) {
+            if (saved[key] === undefined) delete process.env[key];
+            else process.env[key] = saved[key];
+          }
+        }
+      },
+    );
 
     it('rejects invalid export format', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -48349,6 +48421,7 @@ describe('Live conversation runtime lifecycle', () => {
       inodeVerifiable: boolean;
     }> = {},
     serveOverrides: Partial<ServeOptions> = {},
+    daemonEnvOverrides: NodeJS.ProcessEnv = {},
   ) {
     const primaryBridge = fakeBridge();
     const registry = createWorkspaceRegistry([
@@ -48459,7 +48532,7 @@ describe('Live conversation runtime lifecycle', () => {
       voiceCoordinator: new WorkspaceVoiceCoordinator(),
       getSessionBridges: () =>
         registry.listManaged().map((runtime) => runtime.bridge),
-      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1' },
+      daemonEnv: { QWEN_SERVE_ACP_HTTP: '1', ...daemonEnvOverrides },
       runtimePlatform: 'darwin',
       webShellDir: path.join(os.tmpdir(), 'qwen-live-web-shell'),
     } as Parameters<typeof createServeApp>[2]);
@@ -48492,6 +48565,54 @@ describe('Live conversation runtime lifecycle', () => {
       },
     };
   }
+
+  it.each([
+    ['desktop', { QWEN_CODE_DESKTOP: '1' }],
+    ['daemon', {}],
+  ] as const)(
+    'passes the boot-resolved export channel (%s) into the standalone service',
+    async (expectedChannel, daemonEnvOverrides) => {
+      // Pins the createServeApp -> StandaloneSessionService wiring: dropping
+      // exportChannel from that construction, or hardcoding it to 'daemon',
+      // must red this case, not just the service-level one (which builds its
+      // own harness).
+      const setup = setupLiveRuntime({}, {}, {}, daemonEnvOverrides);
+      const sid = '22222222-2222-4222-8222-222222222222';
+      vi.spyOn(
+        SessionService.prototype,
+        'findSessionIdIgnoringCase',
+      ).mockResolvedValue(sid);
+      vi.spyOn(
+        SessionService.prototype,
+        'getSessionLocation',
+      ).mockResolvedValue('active');
+      vi.spyOn(
+        SessionService.prototype,
+        'readCreationMetadataIfReadable',
+      ).mockResolvedValue({ sourceType: 'standalone' });
+      exportSessionTranscriptSpy.mockResolvedValueOnce({
+        format: 'json',
+        mimeType: 'application/json',
+        filename: 'session.json',
+        content: '{}',
+        metadata: {},
+      });
+      const pending = request(setup.app)
+        .get(`/standalone/sessions/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .then((response) => response);
+      await vi.waitFor(() => {
+        expect(setup.createWorkspaceRuntime).toHaveBeenCalledOnce();
+      });
+      setup.resolveCreation();
+      const res = await pending;
+      expect(res.status).toBe(200);
+      const call = exportSessionTranscriptSpy.mock.calls.at(-1)?.[0] as {
+        config?: { getChannel?: () => string | undefined };
+      };
+      expect(call?.config?.getChannel?.()).toBe(expectedChannel);
+    },
+  );
 
   it.each([
     ['qwen3.8-max(qwen-subscription)', 'standalone-client', 200],

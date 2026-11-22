@@ -34,6 +34,7 @@ describe('buildDashScopeSourceConfig', () => {
     ['CLI', 'qwen-code-cli'],
     ['ACP', 'qwen-code-cli'],
     ['daemon', 'qwen-code-cli'],
+    ['managed', 'qwen-code-cli'],
     ['vscode', 'qwen-code-cli'],
     ['desktop', 'qwen-code-desktop'],
   ])('attributes runtime channel %s on both plans', (runtimeChannel, t1) => {
