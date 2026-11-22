@@ -46,6 +46,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 
 import javax.net.ssl.SSLContext;
 
+import java.io.FilterInputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -55,11 +57,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
 public class QwenHostedHarnessConnector implements HarnessConnector {
+    private static final System.Logger LOGGER = System.getLogger(QwenHostedHarnessConnector.class.getName());
     private static final ObjectMapper LIFECYCLE_JSON =
             new ObjectMapper();
     private final ManagedAgentSettings settings;
@@ -973,11 +977,42 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             Map<String, Object> descriptor = owner.prepareManagedPackage(metadata, source);
             Map<String, Object> scope = new LinkedHashMap<>(metadata);
             scope.remove("input");
-            return new PreparedPackage(descriptor,
-                    owner.managedPackageArchive((String) descriptor.get("preparationId"), scope));
+            Map<String, Object> preparationScope = Map.copyOf(scope);
+            String preparationId = (String) descriptor.get("preparationId");
+            try {
+                return new PreparedPackage(descriptor, new FilterInputStream(
+                        owner.managedPackageArchive(preparationId, preparationScope)) {
+                    private final AtomicBoolean closed = new AtomicBoolean();
+
+                    @Override
+                    public void close() throws IOException {
+                        if (closed.compareAndSet(false, true)) {
+                            try {
+                                super.close();
+                            } finally {
+                                releasePreparation(owner, preparationId, preparationScope);
+                            }
+                        }
+                    }
+                });
+            } catch (RuntimeException error) {
+                releasePreparation(owner, preparationId, preparationScope);
+                throw error;
+            }
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
+        }
+    }
+
+    private static void releasePreparation(HostedHarnessClient owner, String preparationId,
+            Map<String, Object> scope) {
+        try {
+            // Keep the original pool member and scope; a replacement Harness does not own this artifact.
+            owner.releaseManagedPackage(preparationId, scope);
+        } catch (RuntimeException error) {
+            LOGGER.log(System.Logger.Level.WARNING,
+                    "Managed package preparation cleanup failed; TTL cleanup remains available", error);
         }
     }
 

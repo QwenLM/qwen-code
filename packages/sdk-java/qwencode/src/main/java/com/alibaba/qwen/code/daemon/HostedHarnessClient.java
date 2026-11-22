@@ -267,6 +267,27 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /** Releases an owned preparation after persistence or abandonment; repeat calls are safe. */
+    public void releaseManagedPackage(String preparationId, Map<String, Object> scope) {
+        ensureOpen();
+        String id = requireUuid(preparationId, "preparationId");
+        String path = "/internal/hosted-harness/v1/managed-packages/" + id + "?scope="
+                + encodeQuery(JsonSupport.encode(scope));
+        String operation = "Release managed package preparation";
+        try {
+            var raw = httpClient.send(sessionRequestBuilder(path, (String) null)
+                    .timeout(Duration.ofSeconds(5)).DELETE().build(), HttpSupport.bodyHandler(64 * 1024));
+            validateGeneration(raw.headers(), raw.statusCode());
+            var response = HttpSupport.consume(raw, operation);
+            DaemonClient.requireStatus(response, 204, operation);
+        } catch (IOException error) {
+            throw new DaemonTransportException(operation + " transport failed", error);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new DaemonTransportException(operation + " was interrupted", error);
+        }
+    }
+
     private static final class PackageInputStream extends java.io.FilterInputStream {
         private long remaining = 100L * 1024 * 1024;
         private ScheduledFuture<?> deadline;
