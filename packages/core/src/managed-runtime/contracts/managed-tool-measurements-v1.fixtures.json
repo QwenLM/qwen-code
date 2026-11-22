@@ -1,0 +1,307 @@
+{
+  "cases": [
+    {
+      "id": "model-and-applied",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "zero-duration",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": null
+      }
+    },
+    {
+      "id": "maximum-safe-integer",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 9007199254740991,
+        "executionOutcome": "success",
+        "file": null
+      }
+    },
+    {
+      "id": "integral-decimal",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 1.0,
+        "executionOutcome": "success",
+        "file": null
+      }
+    },
+    {
+      "id": "not-started",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": null,
+        "executionOutcome": "not_started",
+        "file": null
+      }
+    },
+    {
+      "id": "unknown",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": null,
+        "executionOutcome": "unknown",
+        "file": null
+      }
+    },
+    {
+      "id": "read",
+      "valid": true,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "read",
+          "status": "measured",
+          "modelLinesAdded": null,
+          "modelLinesRemoved": null,
+          "appliedLinesAdded": null,
+          "appliedLinesRemoved": null
+        }
+      }
+    },
+    {
+      "id": "negative",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": -1,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "fractional",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 1.5,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "unsafe",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 9007199254740992,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "opaque",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        },
+        "arguments": {
+          "path": "private"
+        }
+      }
+    },
+    {
+      "id": "wrong-protocol",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/2",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "file-without-success",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "error",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "read-with-lines",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "read",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "unchanged-with-delta",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "unchanged",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "unmeasured-with-applied",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "unmeasured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": 1,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    },
+    {
+      "id": "missing-pair",
+      "valid": false,
+      "measurements": {
+        "protocol": "managed-tool-measurements/1",
+        "executionDurationMs": 0,
+        "executionOutcome": "success",
+        "file": {
+          "operation": "edit",
+          "status": "measured",
+          "modelLinesAdded": 3,
+          "modelLinesRemoved": null,
+          "appliedLinesAdded": 2,
+          "appliedLinesRemoved": 1
+        }
+      }
+    }
+  ],
+  "evidence": {
+    "schemaVersion": 1,
+    "invocationId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "executionCallId": "调用-1",
+    "modelProposal": "original",
+    "resultDigest": "86e7d29ce46bee137e680bc1852cb5c6b00df8fea57eb971804e92746d213a19",
+    "measurements": {
+      "protocol": "managed-tool-measurements/1",
+      "executionDurationMs": 0,
+      "executionOutcome": "success",
+      "file": {
+        "operation": "edit",
+        "status": "measured",
+        "modelLinesAdded": 3,
+        "modelLinesRemoved": 1,
+        "appliedLinesAdded": 2,
+        "appliedLinesRemoved": 1
+      }
+    }
+  },
+  "wire": {
+    "executionProtocol": 2,
+    "result": {
+      "executionStatus": "success",
+      "responseParts": [
+        {
+          "type": "text",
+          "text": "完成 ✓"
+        }
+      ]
+    },
+    "measurements": {
+      "protocol": "managed-tool-measurements/1",
+      "executionDurationMs": 0,
+      "executionOutcome": "success",
+      "file": {
+        "operation": "edit",
+        "status": "measured",
+        "modelLinesAdded": 3,
+        "modelLinesRemoved": 1,
+        "appliedLinesAdded": 2,
+        "appliedLinesRemoved": 1
+      }
+    }
+  },
+  "resultDigest": "86e7d29ce46bee137e680bc1852cb5c6b00df8fea57eb971804e92746d213a19"
+}

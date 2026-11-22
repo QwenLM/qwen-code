@@ -71,12 +71,19 @@ Following the established precedent (`hosted-harness-process.ts`,
 - `integration-tests/helpers/hosted-shell-quote.ts` — `quotePosix(value)`.
   Four call sites swap their local const for the import.
 
-### Java: one package-private test-support class
+### Java: one shared test-support class
 
-`com.alibaba.qwen.code.managedagent.HostedGateTestSupport` (final class,
-static methods, test scope), joining the existing test-support precedent
-(`CoordinatorTestSupport`):
+`com.alibaba.qwen.code.managedagent.HostedGateTestSupport` (public final
+class, static methods, test scope), joining the existing test-support
+precedent (`CoordinatorTestSupport`). It was package-private until the
+connector-owner resolver below had to be shared with a gate in the `harness`
+subpackage; only that resolver is public, the rest stay package-private:
 
+- `connectorOwning(HarnessConnector)` — walks the delegate chain to the
+  connector that owns the private state the gates read, because the wired
+  bean is a decorator rather than that connector. `attachmentsOf` and the
+  pool gate's concrete-type lookup both go through it, so there is one walk
+  rather than a copy per read site.
 - `authentication(String tenant, String fixtureName)` — the
   `FilterRegistrationBean` factory; both probes delegate, the fixture name is
   the only parameter.

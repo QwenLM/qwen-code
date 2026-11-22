@@ -144,6 +144,23 @@ it('re-exports the published setting item ids from the public entry', async () =
   expect(WEB_SHELL_SETTING_ITEM_IDS.length).toBeGreaterThan(0);
 });
 
+it('hides the view without detaching providers through the public wrapper', async () => {
+  const container = render(<WebShellWithProviders sessionId="session-1" />);
+  const { root } = mounted[mounted.length - 1];
+  expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
+  await act(async () => {
+    root.render(<WebShellWithProviders sessionId="session-1" viewHidden />);
+  });
+  expect(container.querySelector('[data-testid="app-ok"]')).toBeNull();
+  expect(sessionUnmounted).not.toHaveBeenCalled();
+  expect(sessionProviderProps.at(-1)?.sessionId).toBe('session-1');
+  await act(async () => {
+    root.render(<WebShellWithProviders sessionId="session-1" />);
+  });
+  expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
+  expect(sessionUnmounted).not.toHaveBeenCalled();
+});
+
 describe('WebShellWithProviders top-level boundary', () => {
   it('exports the readonly transcript entry', () => {
     const container = render(<WebShellTranscript blocks={[]} />);

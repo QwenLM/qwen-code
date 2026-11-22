@@ -31,6 +31,8 @@
 
 ## 与 main 输入来源的整合
 
+[剪贴板与来源生命周期批次](2026-10-24-opentui-clipboard-source-lifetime.zh-CN.md)在现有所有权事务上补齐共享的 Ink 模型归因、原始 human 文本、Linux offered-text 回退及保留来源的队列合并。待完成的文本粘贴继续使用已认领草稿捕获的映射，后继使用独立映射。该批次仍在实现，候选验证单独记录；下文旧结果保留历史范围。
+
 本次 normal merge 固定 main `8545558a25db342683cb84a6814e591c6fcf6c67`，
 保留 #14876 的 workflow 关闭设置、human-input 描述、显示/历史取回文本分离与
 粘贴展开快照。元数据随现有结构化提交流经 composer、shell 延后、live 队列及

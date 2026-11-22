@@ -92,6 +92,12 @@ describe('Mod tool host operations through the real worker', () => {
       'ask',
       { decision: 'allow' },
     ],
+    [
+      'an ask with a written setting',
+      `return {decision:'ask', reason:'mine', setting:'permissions.other'};`,
+      'allow',
+      { decision: 'ask', reason: 'mine', plugin: 'mod' },
+    ],
   ] as const)(
     'names the plugin behind %s only when it owns the ask',
     async (_case, check, verdict, expected) => {

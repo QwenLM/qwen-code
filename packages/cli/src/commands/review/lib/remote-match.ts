@@ -74,7 +74,7 @@ export function isAoneCanonicalHost(host: string | undefined): boolean {
  *  detection and then be refused by a gate that normalized differently. */
 export function isAoneHostFamily(host: string | undefined): boolean {
   if (!host) return false;
-  const h = host.toLowerCase().replace(/:\d+$/, '').replace(/\.$/, '');
+  const h = normalizeHostSpelling(host);
   return (
     h === 'gitlab.alibaba-inc.com' ||
     h === 'code.alibaba-inc.com' ||

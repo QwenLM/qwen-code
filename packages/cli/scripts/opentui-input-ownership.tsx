@@ -23,6 +23,7 @@ const b = join(scratch, 'b.png');
 let saveImage = async (): Promise<string | null> => a;
 let accepted = false;
 const submissions: Array<Parameters<InputPromptProps['onSubmit']>> = [];
+const notices: string[] = [];
 let setup: Awaited<ReturnType<typeof testRender>> | undefined;
 const nodes = (node: Renderable): Renderable[] => [
   node,
@@ -64,6 +65,7 @@ try {
     setup = await testRender(
       <OpenTuiInputPrompt
         userMessages={[]}
+        onNotice={(message) => notices.push(message)}
         onSubmit={(...args) => {
           submissions.push(args);
           return accepted;

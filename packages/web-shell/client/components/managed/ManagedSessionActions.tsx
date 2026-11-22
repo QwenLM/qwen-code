@@ -50,6 +50,7 @@ export function ManagedSessionActions({
   onAction,
   onExport,
   onConfirm,
+  onRename,
 }: {
   session: ManagedAgentSessionSummary;
   sidebar?: boolean;
@@ -62,13 +63,14 @@ export function ManagedSessionActions({
   ) => void;
   onExport?: (sessionId: string, format: 'html' | 'md') => void;
   onConfirm: (sessionId: string) => void;
+  onRename?: () => void;
 }) {
   const { t } = useI18n();
   const actions = lifecycle ? managedSessionActions(session) : [];
   const canManage = Object.entries(session.capabilities).some(
     ([key, value]) => key.startsWith('session') && value === true,
   );
-  if (!actions.length && !onExport && !state) return null;
+  if (!actions.length && !onExport && !state && !onRename) return null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -96,6 +98,14 @@ export function ManagedSessionActions({
         align="end"
         className={onExport ? 'w-72 max-w-[calc(100vw-1rem)]' : undefined}
       >
+        {onRename && (
+          <DropdownMenuItem
+            disabled={Boolean(state?.canConfirm || state?.busy)}
+            onSelect={onRename}
+          >
+            {t('sidebar.rename')}
+          </DropdownMenuItem>
+        )}
         {exporting && (
           <DropdownMenuItem disabled>{t('managed.exporting')}</DropdownMenuItem>
         )}

@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { truncateToolOutput } from './truncation.js';
+import {
+  MAX_SESSION_BYTES,
+  truncateToolOutput,
+  WEB_FETCH_SAVED_TEXT_PREFIX,
+  WEB_FETCH_URL_PREFIX,
+} from './truncation.js';
 import { measureToolOutput, type ToolOutputSize } from './tool-output-size.js';
 import { LRUCache } from 'mnemonist';
+import { rm } from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import {
   fetchWithPolicy,
@@ -16,7 +22,6 @@ import {
   isPrivateHost,
 } from '../utils/fetch.js';
 import type { Storage } from '../config/storage.js';
-import { MAX_SESSION_BYTES } from './truncation.js';
 import {
   formatByteSize,
   isBinaryContentType,
@@ -349,8 +354,8 @@ To fetch the redirected content, call ${WebFetchTool.Name} again with:
   private buildMetadataHeader(entry: CacheEntry): string {
     const urlLine =
       entry.finalUrl !== this.params.url
-        ? `URL: ${this.params.url} (final: ${entry.finalUrl})`
-        : `URL: ${this.params.url}`;
+        ? `${WEB_FETCH_URL_PREFIX}${this.params.url} (final: ${entry.finalUrl})`
+        : `${WEB_FETCH_URL_PREFIX}${this.params.url}`;
     return `${urlLine}
 Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.contentType || 'unknown'} | Size: ${entry.byteLength.toLocaleString('en-US')} bytes`;
   }
@@ -516,13 +521,27 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
 
       content = '';
       if (sniff.extension === 'pdf' && persistedPath) {
-        const pdfText = await extractPDFText(persistedPath, { signal });
-        if (pdfText.success && pdfText.text.trim()) {
-          content = pdfText.text;
-        } else if (!pdfText.success) {
-          this.debugLogger.debug(
-            `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
-          );
+        try {
+          const pdfText = await extractPDFText(persistedPath, { signal });
+          signal.throwIfAborted();
+          if (pdfText.success && pdfText.text.trim()) {
+            content = pdfText.text;
+          } else if (!pdfText.success) {
+            this.debugLogger.debug(
+              `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
+            );
+          }
+        } catch (error) {
+          try {
+            await rm(persistedPath, { force: true });
+            this.config.trackToolResultBytes(-response.body.length);
+          } catch (cleanupError) {
+            this.debugLogger.error(
+              '[WebFetchTool] Failed to remove unused PDF',
+              cleanupError,
+            );
+          }
+          throw error;
         }
       }
     } else if (contentType.includes('text/html')) {
@@ -613,7 +632,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       const header =
         this.buildMetadataHeader(entry) +
         (entry.persistedTextPath
-          ? `\nFull extracted text saved to: ${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
+          ? `\n${WEB_FETCH_SAVED_TEXT_PREFIX}${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
           : '');
       const binaryNote = entry.persistedPath
         ? `\n\n[Binary content (${entry.persistedMime || entry.contentType || 'unknown'}, ${formatByteSize(entry.persistedSize ?? entry.byteLength)}) saved to ${entry.persistedPath}.${readHintForPath(entry.persistedPath)}]`
@@ -670,6 +689,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
+      const persistedOutputFiles = entry.persistedTextPath
+        ? [entry.persistedTextPath]
+        : entry.reduced
+          ? []
+          : undefined;
       const fallbackPrompt = `The user requested the following: "${this.params.prompt}".
 
 I have fetched the content from ${this.params.url}. Fetch metadata:
@@ -729,6 +753,7 @@ ${entry.content}
           llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
           rawOutputSize: entry.rawOutputSize,
+          persistedOutputFiles,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -743,11 +768,13 @@ ${entry.content}
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
         rawOutputSize: entry.rawOutputSize,
+        persistedOutputFiles,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),
       };
     } catch (e) {
+      if (signal.aborted) throw e;
       // e may be a non-Error abort reason (throwIfAborted rethrows whatever
       // the aborting caller passed — e.g. a plain string, or null).
       const errorMessage = `Error during fetch for ${this.params.url}: ${getErrorMessage(e)}`;

@@ -510,6 +510,8 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     const { messaging: m, submitted } = await start(ApprovalMode.DEFAULT, {
       ownsSessionId: (id) => hosted.has(id),
     });
+    expect(process.env[MESSAGING_SOCKET_ENV]).toBeUndefined();
+    expect(process.env[MESSAGING_TOKEN_ENV]).toBeUndefined();
 
     const mine = peerFrame({
       content: 'for session-b',
@@ -833,6 +835,92 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     );
     expect(m.drainQueuedFrame({ msgId: 'm2' })).toBe(true);
     expect(m.drainQueuedFrame(undefined)).toBe(true);
+  });
+
+  it('serves a host of several sessions: routes accepts, refuses holds, expires what was never read', async () => {
+    const sender = await startSenderInbox();
+    const queued: PeerQueuedDelivery[] = [];
+    const started = await PeerMessaging.start({
+      socketPath: path.join(tmpDir, 'socks', 'self.sock'),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getPolicySetting: () => undefined,
+      updateSessionRegistryIpcPath: async () => {},
+      ipcToken: TEST_TOKEN,
+      ownsSessionId: (id) => id === 'session-a',
+      presentsHolds: false,
+      // A real meter: the repeat window is what the correction has to
+      // give back.
+      admission: new PeerAdmission(),
+      submit: (_modelText, _displayText, delivery) => {
+        if (delivery) queued.push(delivery);
+        return true;
+      },
+    });
+    if (!started) throw new Error('peer messaging failed to start');
+    messaging = started;
+    const statusesOf = (msgId: string) =>
+      receipts
+        .filter((receipt) => receipt.type === 'control')
+        .filter((receipt) => receipt.origMsgId === msgId)
+        .map((receipt) => receipt.status);
+
+    const accepted = peerFrame({
+      content: 'build finished',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    // No review class asserted: a host that can show holds would park it.
+    const wouldHold = buildUserFrame({
+      content: 'unclassed',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, accepted);
+    await send(started.socketPath!, wouldHold);
+    await settle();
+    expect(queued.map((delivery) => delivery.msgId)).toEqual([accepted.msgId]);
+    expect(queued[0]!.toSessionId).toBe('session-a');
+    expect(started.getHeld()).toEqual([]);
+    expect(statusesOf(wouldHold.msgId)).toEqual(['refused']);
+
+    await started.expireQueued(queued);
+    await settle();
+    expect(statusesOf(accepted.msgId)).toEqual(['delivered', 'expired']);
+
+    // The same words again, under a fresh id, land rather than being
+    // turned away as a repeat of a message nobody read.
+    const again = peerFrame({
+      content: 'build finished',
+      from: sender.socketPath,
+      toSessionId: 'session-a',
+    });
+    await send(started.socketPath!, again);
+    await settle();
+    expect(statusesOf(again.msgId)).toEqual(['delivered']);
+    expect(queued).toHaveLength(2);
+
+    await started.close([queued[1]!]);
+    await settle();
+    expect(statusesOf(again.msgId)).toEqual(['delivered', 'expired']);
+  });
+
+  it('sends an independent expiry while a previous receiver is slow', async () => {
+    const slow = await startSlowSenderInbox(800);
+    const sender = await startSenderInbox();
+    const { messaging: m } = await start(ApprovalMode.DEFAULT);
+    const slowDone = vi.fn();
+    const first = m
+      .expireQueued([{ msgId: 'slow', from: slow.socketPath }])
+      .then(slowDone);
+    try {
+      await m.expireQueued([{ msgId: 'ready', from: sender.socketPath }]);
+      expect(receipts).toContainEqual(
+        expect.objectContaining({ status: 'expired', origMsgId: 'ready' }),
+      );
+      expect(slowDone).not.toHaveBeenCalled();
+    } finally {
+      await first;
+    }
   });
 
   it('holds a message when the receiver bypasses prompts and the sender says nothing', async () => {
@@ -1874,9 +1962,8 @@ describe.skipIf(isWindows)('held message expiry', () => {
     const sender = await startSenderInbox();
     const { messaging, submitted } = await start(ApprovalMode.YOLO, {
       getPolicySetting: () => 'hold',
-      // Real timers: the assertions below straddle a socket round trip,
-      // so the window has to outlast `settle()` and still be short
-      // enough to wait out.
+      // Real timers: the waits below outlast this window, so it only has
+      // to be short, not exact.
       getHeldExpiryMs: () => 250,
     });
 
@@ -1885,18 +1972,18 @@ describe.skipIf(isWindows)('held message expiry', () => {
       buildUserFrame({ content: 'anyone there?', from: sender.socketPath }),
       { authToken: TEST_TOKEN },
     );
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(1);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(1));
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await settle();
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(0));
 
-    expect(messaging.getHeld()).toHaveLength(0);
     expect(submitted).toHaveLength(0);
-    const statuses = receipts
-      .filter((frame) => frame.type === 'control')
-      .map((frame) => (frame as { status: string }).status);
-    expect(statuses).toContain('expired');
+    await vi.waitFor(() =>
+      expect(
+        receipts
+          .filter((frame) => frame.type === 'control')
+          .map((frame) => (frame as { status: string }).status),
+      ).toContain('expired'),
+    );
   });
 
   it('does not call a listing stale when only an expiry removed an entry', async () => {
@@ -1917,14 +2004,11 @@ describe.skipIf(isWindows)('held message expiry', () => {
       buildUserFrame({ content: 'first', from: sender.socketPath }),
       { authToken: TEST_TOKEN },
     );
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(1);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(1));
     messaging.recordHeldListing(messaging.getHeld());
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    await settle();
-    expect(messaging.getHeld()).toHaveLength(0);
+    await vi.waitFor(() => expect(messaging.getHeld()).toHaveLength(0));
 
     expect(messaging.heldSetChangedSinceListing()).toBe(false);
   });

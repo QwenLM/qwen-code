@@ -56,6 +56,9 @@ setTimeout(() => {}, 120_000);`;
       await expect(
         InteractiveSession.start({
           command: { bin: process.execPath, args: ['-e', stub] },
+          onStartupFailure: () => {
+            throw new Error('capture failed');
+          },
         }).then((s) => {
           session = s;
         }),
@@ -98,6 +101,29 @@ setTimeout(() => {}, 120_000);`;
     await expect(attempt).rejects.toThrow('CLI exited during startup (code 3');
     await expect(attempt).rejects.toThrow('BOOTCRASH_MARKER');
     expect(Date.now() - startedAt).toBeLessThan(30_000);
+  });
+
+  it('preserves raw startup output beyond the error tail', async () => {
+    let captured = '';
+    const boot = '\x1b[31mBOOT_PREFIX\n' + 'boot detail\n'.repeat(100);
+    const attempt = InteractiveSession.start({
+      command: {
+        bin: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(boot)} + '\\x1b[0mBOOT_END');
+setTimeout(() => process.exit(3), 500);`,
+        ],
+      },
+      onStartupFailure: (output) => {
+        captured = output;
+      },
+    });
+    await expect(attempt).rejects.toThrow('CLI exited during startup (code 3');
+    expect(captured).toContain('\x1b[31mBOOT_PREFIX');
+    expect(captured).toContain('\x1b[0mBOOT_END');
+    expect(captured.length).toBeGreaterThan(500);
+    await expect(attempt).rejects.not.toThrow('BOOT_PREFIX');
   });
 
   it('words an immediate post-prompt death from the captured output', async () => {
@@ -144,5 +170,67 @@ setTimeout(() => {}, 120_000);`;
     await session.close();
     await settled;
     expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it('forwards only the loop switches into the isolated child env', async () => {
+    // The nightly loop arms export the two switches; an inheritEnv:false suite
+    // must still receive them, but not the rest of the operator environment.
+    // Removing the pass-through reds the two switch assertions.
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_LOOP_PROBE_OPERATOR_VAR', 'should-not-leak');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-interactive-session-'));
+    const envFile = join(dir, 'env.json');
+    const stub = `require('node:fs').writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({
+  unified: process.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP ?? null,
+  kernel: process.env.QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP ?? null,
+  operator: process.env.QWEN_LOOP_PROBE_OPERATOR_VAR ?? null,
+}));
+console.log('Type your message');
+setTimeout(() => {}, 120_000);`;
+    try {
+      session = await InteractiveSession.start({
+        command: { bin: process.execPath, args: ['-e', stub] },
+        inheritEnv: false,
+      });
+      const captured = JSON.parse(readFileSync(envFile, 'utf8'));
+      expect(captured.unified).toBe('1');
+      expect(captured.kernel).toBe('1');
+      expect(captured.operator).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lets a test own env override the forwarded loop switches', async () => {
+    // The parity suites pin their control arm by setting the switch in
+    // options.env; that value must win over the forwarded ambient one, or the
+    // control arm re-arms on the nightly legs. Removing the options.env spread
+    // after baseEnv reds this case.
+    vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+    vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-interactive-session-'));
+    const envFile = join(dir, 'env.json');
+    const stub = `require('node:fs').writeFileSync(${JSON.stringify(envFile)}, JSON.stringify({
+  unified: process.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP ?? null,
+  kernel: process.env.QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP ?? null,
+}));
+console.log('Type your message');
+setTimeout(() => {}, 120_000);`;
+    try {
+      session = await InteractiveSession.start({
+        command: { bin: process.execPath, args: ['-e', stub] },
+        inheritEnv: false,
+        env: {
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '',
+          QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: '',
+        },
+      });
+      const captured = JSON.parse(readFileSync(envFile, 'utf8'));
+      expect(captured.unified).toBe('');
+      expect(captured.kernel).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

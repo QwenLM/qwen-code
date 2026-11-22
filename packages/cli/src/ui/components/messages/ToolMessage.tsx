@@ -42,8 +42,9 @@ import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME, ICON } from '../../constants.js';
-import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
-import { localizeToolDisplayName } from '../../../i18n/index.js';
+import { isCollapsibleTool } from '../../utils/tool-group-summary.js';
+import { t, localizeToolDisplayName } from '../../../i18n/index.js';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
@@ -937,7 +938,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     ? sanitizedDetailedDisplay
     : visionBridgeNoticeDisplay
       ? undefined
-      : resultDisplay;
+      : ((status === ToolCallStatus.Error
+          ? formatSubscriptionQuotaDisplay(resultDisplay, t)
+          : undefined) ?? resultDisplay);
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the

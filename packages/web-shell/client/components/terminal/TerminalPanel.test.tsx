@@ -10,6 +10,36 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const workspace = vi.hoisted(() => ({ baseUrl: 'http://localhost' }));
+const availabilityMock = vi.hoisted(() => ({
+  enabled: false,
+  available: true,
+  resumes: new Set<() => void>(),
+  listeners: new Set<() => void>(),
+  controller: {
+    getSnapshot: () =>
+      availabilityMock.available ? 'available' : 'unavailable',
+    subscribe: (listener: () => void) => {
+      availabilityMock.listeners.add(listener);
+      return () => availabilityMock.listeners.delete(listener);
+    },
+    check: vi.fn(async () => {}),
+    waitUntilAvailable: vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          availabilityMock.resumes.add(resolve);
+        }),
+    ),
+  },
+}));
+vi.mock('../../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+vi.mock('../../daemon/availability', () => ({
+  findDaemonAvailability: () =>
+    availabilityMock.enabled ? availabilityMock.controller : undefined,
+}));
+
 const fit = vi.hoisted(() => vi.fn());
 const { terminal, terminalInstances, createMockTerminal } = vi.hoisted(() => {
   const createMockTerminal = () => ({
@@ -127,6 +157,10 @@ describe('TerminalPanel', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    availabilityMock.enabled = false;
+    availabilityMock.available = true;
+    availabilityMock.resumes.clear();
+    availabilityMock.listeners.clear();
     terminalInstances.length = 0;
     workspace.baseUrl = 'http://localhost';
     FakeWebSocket.instances.length = 0;
@@ -154,7 +188,7 @@ describe('TerminalPanel', () => {
     vi.unstubAllGlobals();
   });
 
-  function render(active = true): FakeWebSocket {
+  async function render(active = true): Promise<FakeWebSocket> {
     act(() => {
       root.render(
         <TerminalPanel
@@ -164,11 +198,147 @@ describe('TerminalPanel', () => {
         />,
       );
     });
+    await act(async () => vi.dynamicImportSettled());
     return FakeWebSocket.instances[0]!;
   }
 
+  it('releases a terminal closed before its runtime loads without attaching', async () => {
+    act(() => root.render(<TerminalPanel terminalId="terminal:one" />));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+
+    act(() => {
+      releaseWebTerminal('terminal:one');
+      root.render(null);
+    });
+    await act(async () => vi.dynamicImportSettled());
+
+    expect(terminalInstances).toHaveLength(0);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(
+      new URL(FakeWebSocket.instances[0]!.url).searchParams.get('release'),
+    ).toBe('1');
+  });
+
+  it('waits for shared recovery without rebuilding the terminal and releases detached PTYs on recovery', async () => {
+    availabilityMock.enabled = true;
+    availabilityMock.available = false;
+    await render();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    releaseDetachedWebTerminal('http://localhost', 'detached');
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(terminalInstances).toHaveLength(1);
+    expect(terminal.writeln).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('Connection lost'),
+    );
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(
+      new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+    ).toBe('1');
+    expect(terminalInstances).toHaveLength(1);
+    expect(terminal.dispose).not.toHaveBeenCalled();
+  });
+
+  it('closes a live socket when the shared daemon becomes unavailable', async () => {
+    availabilityMock.enabled = true;
+    const ws = await render();
+    ws.open();
+    act(() => {
+      availabilityMock.available = false;
+      for (const listener of availabilityMock.listeners) listener();
+    });
+    expect(ws.close).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it('checks an unexpected close once and parks websocket retries until shared recovery', async () => {
+    availabilityMock.enabled = true;
+    const ws = await render();
+    ws.open();
+    availabilityMock.controller.check.mockImplementationOnce(async () => {
+      availabilityMock.available = false;
+    });
+    await act(async () => {
+      ws.closeWith(1006);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+    });
+    expect(availabilityMock.controller.check).toHaveBeenCalledTimes(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(terminalInstances).toHaveLength(1);
+  });
+
+  it.each([false, true])(
+    'preserves a release across outage and component removal (late close: %s)',
+    async (lateClose) => {
+      availabilityMock.enabled = true;
+      const ws = await render();
+      ws.open();
+      availabilityMock.available = false;
+      if (lateClose) ws.close();
+      else {
+        await act(async () => ws.closeWith(1006));
+        await act(async () => vi.advanceTimersByTimeAsync(500));
+      }
+      act(() => {
+        releaseWebTerminal('terminal:one');
+        root.render(null);
+      });
+      if (lateClose) await act(async () => ws.closeWith(1006));
+      await act(async () => vi.advanceTimersByTimeAsync(60_000));
+      expect(FakeWebSocket.instances).toHaveLength(1);
+      await act(async () => {
+        availabilityMock.available = true;
+        for (const resume of availabilityMock.resumes) resume();
+        availabilityMock.resumes.clear();
+      });
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(
+        new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+      ).toBe('1');
+    },
+  );
+
+  it('parks a failed detached release and finishes it once the daemon recovers', async () => {
+    availabilityMock.enabled = true;
+    releaseDetachedWebTerminal(
+      'http://localhost',
+      'terminal:detached',
+      '/workspace',
+    );
+    availabilityMock.controller.check.mockImplementationOnce(async () => {
+      availabilityMock.available = false;
+    });
+    await act(async () => FakeWebSocket.instances[0]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    await act(async () => {
+      availabilityMock.available = true;
+      for (const resume of availabilityMock.resumes) resume();
+      availabilityMock.resumes.clear();
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    await act(async () => FakeWebSocket.instances[1]!.closeWith(4004));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
   it('keeps binary PTY output distinct from text control frames', async () => {
-    const ws = render();
+    const ws = await render();
     act(() => ws.open());
     act(() => {
       ws.message(
@@ -207,7 +377,7 @@ describe('TerminalPanel', () => {
   it.each(['held\r\n', ''])(
     'replays failed-session output %j without a protocol mismatch',
     async (output) => {
-      const ws = render();
+      const ws = await render();
       act(() => {
         ws.open();
         ws.message(
@@ -249,7 +419,7 @@ describe('TerminalPanel', () => {
   it.each([4000, 4001, 4002, 4004])(
     'does not reconnect after non-retryable close code %s',
     async (code) => {
-      const ws = render();
+      const ws = await render();
       act(() => ws.open());
       act(() => ws.closeWith(code));
       await act(async () => vi.advanceTimersByTimeAsync(30_000));
@@ -257,19 +427,24 @@ describe('TerminalPanel', () => {
     },
   );
 
-  it('releases a connecting socket without reconnecting afterward', async () => {
-    const ws = render();
+  it('confirms an unacknowledged connecting release without reconnecting a PTY', async () => {
+    const ws = await render();
     act(() => releaseWebTerminal('terminal:one'));
 
     act(() => ws.open());
     expect(ws.send).toHaveBeenCalledWith('\x00{"type":"release"}');
     act(() => ws.closeWith(1000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(
+      new URL(FakeWebSocket.instances[1]!.url).searchParams.get('release'),
+    ).toBe('1');
+    await act(async () => FakeWebSocket.instances[1]!.closeWith(4004));
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
-    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 
   it('keeps the old terminal interactive until reconnect replay finishes', async () => {
-    const ws = render();
+    const ws = await render();
     act(() => ws.open());
     act(() => ws.closeWith(1006));
 
@@ -314,8 +489,8 @@ describe('TerminalPanel', () => {
     ).toBe('live reply');
   });
 
-  it('allows first-connection queries and leaves DA to the browser without a server responder', () => {
-    const ws = render();
+  it('allows first-connection queries and leaves DA to the browser without a server responder', async () => {
+    const ws = await render();
     act(() => {
       ws.open();
       ws.message(
@@ -332,8 +507,8 @@ describe('TerminalPanel', () => {
     );
   });
 
-  it('disposes an interrupted replay and ignores its late write callback', () => {
-    const ws = render();
+  it('disposes an interrupted replay and ignores its late write callback', async () => {
+    const ws = await render();
     act(() => {
       ws.open();
       ws.message(
@@ -349,8 +524,8 @@ describe('TerminalPanel', () => {
     expect(next.onData).not.toHaveBeenCalled();
   });
 
-  it('rejects an old server that does not mark the snapshot boundary', () => {
-    const ws = render();
+  it('rejects an old server that does not mark the snapshot boundary', async () => {
+    const ws = await render();
     act(() => {
       ws.open();
       ws.message(new TextEncoder().encode('unmarked history').buffer);
@@ -360,6 +535,7 @@ describe('TerminalPanel', () => {
       ws.close.mock.invocationCallOrder[0]!,
     );
     expect(ws.close).toHaveBeenCalledWith(4002, 'Terminal protocol mismatch');
+    act(() => ws.closeWith(4002));
     // The localized restart notice is a named deliverable; without pinning it
     // the mock's `?? key` fallback would silently render the raw key instead.
     expect(terminal.writeln).toHaveBeenCalledWith(
@@ -374,8 +550,8 @@ describe('TerminalPanel', () => {
     expect(terminal.write).not.toHaveBeenCalled();
   });
 
-  it('sends an explicit release control when the tab is closed', () => {
-    const ws = render();
+  it('sends an explicit release control when the tab is closed', async () => {
+    const ws = await render();
     act(() => ws.open());
 
     act(() => releaseWebTerminal('terminal:one'));
@@ -395,7 +571,7 @@ describe('TerminalPanel', () => {
     );
   });
 
-  it('does not connect a restored inactive terminal until it is enabled', () => {
+  it('does not connect a restored inactive terminal until it is enabled', async () => {
     act(() => {
       root.render(
         <TerminalPanel
@@ -418,6 +594,7 @@ describe('TerminalPanel', () => {
         />,
       );
     });
+    await act(async () => vi.dynamicImportSettled());
     expect(FakeWebSocket.instances).toHaveLength(1);
     expect(
       new URL(FakeWebSocket.instances[0]!.url).searchParams.has('release'),
@@ -444,7 +621,7 @@ describe('TerminalPanel', () => {
   });
 
   it('releases an exited session through a release handshake', async () => {
-    const ws = render();
+    const ws = await render();
     act(() => ws.open());
     act(() => ws.closeWith(4000));
 
@@ -460,7 +637,7 @@ describe('TerminalPanel', () => {
   });
 
   it('retries a failed release handshake a bounded number of times', async () => {
-    const ws = render();
+    const ws = await render();
     act(() => ws.open());
     act(() => ws.closeWith(4000));
     act(() => releaseWebTerminal('terminal:one'));
@@ -472,10 +649,16 @@ describe('TerminalPanel', () => {
     expect(
       new URL(FakeWebSocket.instances[2]!.url).searchParams.get('release'),
     ).toBe('1');
+    await act(async () => FakeWebSocket.instances[2]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(500));
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    await act(async () => FakeWebSocket.instances[3]!.closeWith(1006));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(FakeWebSocket.instances).toHaveLength(4);
   });
 
-  it('sends the connection contract and initial terminal size', () => {
-    const ws = render();
+  it('sends the connection contract and initial terminal size', async () => {
+    const ws = await render();
 
     expect(ws.binaryType).toBe('arraybuffer');
     const url = new URL(ws.url);
@@ -490,9 +673,9 @@ describe('TerminalPanel', () => {
     );
   });
 
-  it('uses the configured daemon origin and base path', () => {
+  it('uses the configured daemon origin and base path', async () => {
     workspace.baseUrl = 'https://daemon.example/qwen/';
-    const ws = render();
+    const ws = await render();
     const url = new URL(ws.url);
 
     expect(url.origin).toBe('wss://daemon.example');
@@ -500,7 +683,7 @@ describe('TerminalPanel', () => {
   });
 
   it('does not reconnect after an exit control frame', async () => {
-    const ws = render();
+    const ws = await render();
     act(() => ws.open());
 
     act(() => ws.message('\x00{"type":"exit","exitCode":0}'));
@@ -513,8 +696,8 @@ describe('TerminalPanel', () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it('restores focus when its terminal tab becomes active', () => {
-    const ws = render(false);
+  it('restores focus when its terminal tab becomes active', async () => {
+    const ws = await render(false);
     act(() => ws.open());
     terminal.focus.mockClear();
     terminal.refresh.mockClear();
@@ -535,8 +718,8 @@ describe('TerminalPanel', () => {
     );
   });
 
-  it('blurs and suppresses input while its terminal tab is inactive', () => {
-    const ws = render();
+  it('blurs and suppresses input while its terminal tab is inactive', async () => {
+    const ws = await render();
     act(() => ws.open());
     const handleInput = terminal.onData.mock.calls.at(-1)?.[0];
 
@@ -556,11 +739,11 @@ describe('TerminalPanel', () => {
     expect(ws.send).not.toHaveBeenCalled();
   });
 
-  it('passes a visible selection background to xterm in the light theme', () => {
+  it('passes a visible selection background to xterm in the light theme', async () => {
     // xterm falls back to white rgba(255,255,255,0.3) for an unset
     // selectionBackground, which blends into the white terminal background
     // and leaves text selection invisible in the light theme.
-    render();
+    await render();
 
     expect(Terminal).toHaveBeenCalledWith(
       expect.objectContaining({

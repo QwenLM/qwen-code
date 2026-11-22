@@ -22,7 +22,7 @@ import { WebShellWithProviders } from '@qwen-code/web-shell';
 
 ## Layout overview
 
-Home-only hosts show branding, New task, projects, archived sessions and the collapse control in one column. Configuring another available primary entry or footer action adds a 56px icon rail beside the default 300px secondary column. Primary entries live in the rail; footer actions and version live in More. Custom renderers remain in the wide Home column. There is no public layout option.
+Home-only hosts show branding, New session, workspaces, archived sessions and the collapse control in one column. Configuring another available primary entry or footer action adds a 56px icon rail beside the default 300px secondary column. Primary entries live in the rail; footer actions and version live in More. Custom renderers remain in the wide Home column. There is no public layout option.
 
 **Breaking change:** previously an omitted `sidebar` hid the sidebar, and omitted navigation/footer item lists exposed all built-ins when the sidebar was enabled. Hosts must now pass `sidebar={false}` to retain the former hidden default, or explicitly list the entries they need. Standalone Web Shell explicitly configures its full menu. `branding.hideWhenCompact` now defaults to `false`; set it to `true` to preserve a hidden brand in the compact drawer.
 
@@ -68,7 +68,7 @@ sidebar={{
 
 ```ts
 type WebShellSidebarPrimaryNavItem =
-  | 'newTask' // ✏️ New Task button
+  | 'newTask' // ✏️ New session button
   | 'plugins' // 🧩 Plugins button
   | 'channels' // Channel sessions and settings
   | 'live' // Live sessions and settings; requires showLive
@@ -85,14 +85,14 @@ interface WebShellSidebarPrimaryNavOptions {
 
 The primary navigation area contains built-in buttons controlled by `items`:
 
-- Only New task is shown when `items` is not specified; Home always exists
+- Only New session is shown when `items` is not specified; Home always exists
 - Only the listed buttons are shown when `items` is provided
 - Custom content can be added via `render()` after the built-in buttons
 
 | Value                                      | Effect                                                |
 | ------------------------------------------ | ----------------------------------------------------- |
-| `undefined` (default)                      | Home with New task                                    |
-| `{ items: ['plugins'] }`                   | Home and Plugins; no New task button                  |
+| `undefined` (default)                      | Home with New session                                 |
+| `{ items: ['plugins'] }`                   | Home and Plugins; no New session button               |
 | `{ items: ['plugins', 'scheduledTasks'] }` | Home + Plugins + Scheduled Tasks                      |
 | `{ items: [], render: () => ... }`         | Home with custom content; no built-in primary buttons |
 
@@ -175,7 +175,7 @@ interface WebShellSidebarOptions {
   showLive?: boolean; // show daemon-owned Live conversations (default: false)
   branding?: false | WebShellSidebarBranding;
   primaryNav?: WebShellSidebarPrimaryNavOptions;
-  hideProjectHeader?: boolean; // hide "Projects" header row (default: false = shown)
+  hideProjectHeader?: boolean; // hide "Workspaces" header row (default: false = shown)
   sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
 }
@@ -213,14 +213,14 @@ sidebar={{
 
 Without the `live` primary entry, `showLive: true` retains the existing Live group in Home and settings under Experimental. With the entry, Live opens its own session column and settings page.
 
-### ③ Project Header — `hideProjectHeader`
+### ③ Workspace Header — `hideProjectHeader`
 
-Controls visibility of the "Projects" header row (the row with the collapse
+Controls visibility of the "Workspaces" header row (the row with the collapse
 toggle, search icon, and add workspace button). Defaults to `false` (shown).
 
 ```tsx
 sidebar={{
-  hideProjectHeader: true,  // hide the "项目 ▼ [🔍] [＋]" row
+  hideProjectHeader: true,  // hide the "工作区 ▼ [🔍] [＋]" row
 }}
 ```
 
@@ -233,11 +233,13 @@ the header row with its action buttons and the session search bar are removed.
 type WebShellSidebarSessionActionItem =
   | 'details' // 📝 Details (dropdown sub-menu)
   | 'rename' // ✏️ Rename (dropdown menu)
+  | 'bindPr' // 🔗 Bind a GitHub PR (dropdown menu)
   | 'group' // 📁 Group/Move to folder (dropdown menu)
   | 'export' // 📤 Export chat history (dropdown menu)
   | 'delete' // 🗑 Delete session (dropdown menu)
-  | 'pin' // 📌 Pin/Unpin (inline button)
-  | 'archive'; // 📦 Archive (dropdown menu)
+  | 'pin' // 📌 Pin/Unpin (More by default)
+  | 'archive' // 📦 Archive (dropdown menu)
+  | 'split'; // ◫ Add to Split View (dropdown menu)
 
 /** Subset with working inline (hover-button) handlers. */
 type WebShellSidebarSessionInlineActionItem =
@@ -248,29 +250,38 @@ type WebShellSidebarSessionInlineActionItem =
 
 interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[]; // which actions to show (default: all)
-  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: ['pin'])
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: [])
 }
 ```
 
 Controls which action buttons appear on session rows:
 
-- **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, and `'archive'` are dropdown-only.
+- **`items`**: Master availability control for both inline and dropdown actions. Standard rows hide items excluded from this list; Recent keeps its fixed action slot and represents excluded items as disabled controls rather than enabling them.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `[]`, so optional actions such as Pin appear in the More menu by default. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. On coarse-pointer devices, all optional actions stay in More regardless of this option. `'details'`, `'bindPr'`, `'group'`, `'archive'`, and `'split'` are dropdown-only on standard rows.
+- **`bindPr` built-in condition**: shown only when the session supports metadata mutation — the current session in a primary or locked workspace, or any other session with the `workspace_session_metadata` capability (plus `workspace_qualified_rest_core` when that session is in a locked or restricted secondary workspace) — and the row is not a standalone session (including recents rows) — standalone metadata routes only accept a display name. It is independent of the `rename` item: a host may whitelist `bindPr` without `rename`.
 
-**Visibility priority**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
+Archived rows in Settings use Export conversation and Restore as inline buttons, with Rename and Delete in More. Their actions still follow `items` and built-in availability restrictions; `inlineItems` does not change this layout. The existing styles reveal these buttons on hover or keyboard focus and keep them visible on touch devices. Rows loaded by the Recent section keep dedicated Pin and Archive buttons on desktop. On coarse-pointer devices, they use a More menu with the same actions and disabled-state guards instead. Recent reserves that fixed action slot and renders excluded or unavailable actions as disabled instead of hiding the slot.
 
-| Value                                   | Effect                            |
-| --------------------------------------- | --------------------------------- |
-| `undefined` (default)                   | All actions shown, pin as inline  |
-| `{ inlineItems: ['pin', 'delete'] }`    | Pin + delete as inline buttons    |
-| `{ inlineItems: [] }`                   | No inline buttons at all          |
-| `{ inlineItems: ['rename', 'export'] }` | Rename + export as inline buttons |
+**Visibility priority on standard rows**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
+
+| Value                                   | Effect                             |
+| --------------------------------------- | ---------------------------------- |
+| `undefined` (default)                   | All optional actions shown in More |
+| `{ inlineItems: ['pin', 'delete'] }`    | Pin + delete as inline buttons     |
+| `{ inlineItems: [] }`                   | No inline buttons on standard rows |
+| `{ inlineItems: ['rename', 'export'] }` | Rename + export as inline buttons  |
 
 The dropdown trigger (⋮) is automatically hidden when no dropdown items
 are enabled. Inline buttons are only shown when both
 their capability condition and `items` include them. Archive is disabled on
 the current session and on any session with a running turn, because the daemon
 closes the live session when it archives.
+
+`'split'` is default-enabled like the other items, but it only takes effect
+when the host wires `onAddSessionToSplitView`. The sidebar also reads its
+`splitSessionIds` prop for capacity: a session that is already open in the
+split renders the item disabled with an explanatory title, as does the
+pane-limit case and the current session while the split is closed.
 
 ```tsx
 sidebar={{
@@ -283,7 +294,7 @@ sidebar={{
 
 ## Non-customizable areas
 
-### Projects / Workspaces (inside session list)
+### Workspaces (inside session list)
 
 When the session list is visible, the following sub-areas are rendered but
 **not individually customizable**:
@@ -320,11 +331,11 @@ These `WebShellProps` affect sidebar behavior indirectly:
 
 ## Collapsed and mobile states
 
-| State     | Behavior                                                                                                             |
-| --------- | -------------------------------------------------------------------------------------------------------------------- |
-| Expanded  | Full sidebar with text labels                                                                                        |
-| Collapsed | Home-only: existing 56px strip and hover sessions; with rail: only the 56px primary rail                             |
-| Mobile    | Drawer uses 70% of its container, within width limits, with backdrop and a close control at the owning column bottom |
+| State     | Behavior                                                                                                 |
+| --------- | -------------------------------------------------------------------------------------------------------- |
+| Expanded  | Full sidebar with text labels                                                                            |
+| Collapsed | Home-only: existing 56px strip and hover sessions; with rail: only the 56px primary rail                 |
+| Mobile    | Touch drawers use 85% of their container, within width limits; constrained non-touch drawers stay at 70% |
 
 Collapse state is persisted in `localStorage` under the key
 `qwen-code-web-shell-sidebar-collapsed`.

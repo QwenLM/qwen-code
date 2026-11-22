@@ -112,6 +112,11 @@ async function checkForUpdates(
 }
 
 export async function activate(context: vscode.ExtensionContext) {
+  await vscode.commands.executeCommand(
+    'setContext',
+    'qwen-code.subscriptionEnabled',
+    true,
+  );
   outputChannel = vscode.window.createOutputChannel('Qwen Code Companion');
   createLogger(outputChannel, redactLogCredentials);
   logger.info('Extension activated');

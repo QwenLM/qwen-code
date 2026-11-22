@@ -1127,6 +1127,28 @@ impl Tool for ClickTool {
                 .await;
                 match ax_result {
                     Ok(Ok(Some(kAXErrorSuccess))) => {
+                        crate::cursor::overlay::send_command(
+                            cursor_key.clone(),
+                            cursor_overlay::OverlayCommand::PinAbove(hit_test_wid as u64),
+                        );
+                        crate::cursor::overlay::animate_cursor_to(
+                            cursor_key.clone(),
+                            screen_x,
+                            screen_y,
+                        )
+                        .await;
+                        self.state
+                            .cursor_registry
+                            .update_position(&cursor_key, screen_x, screen_y);
+                        if !focus_only {
+                            crate::cursor::overlay::send_command(
+                                cursor_key.clone(),
+                                cursor_overlay::OverlayCommand::ClickPulse {
+                                    x: screen_x,
+                                    y: screen_y,
+                                },
+                            );
+                        }
                         let label = if focus_only { "focused" } else { "pressed" };
                         return ToolResult::text(format!(
                             "✅ PX hit-test {label} the background element via AX."
@@ -1593,7 +1615,12 @@ pub(super) async fn invoke_app_click(state: Arc<ToolState>, args: Value) -> Tool
     };
     let point = element_rect.map(|[x, y, width, height]| (x + width / 2.0, y + height / 2.0));
     if let Some((x, y)) = pointer_target.map(|target| target.0).or(point) {
+        crate::cursor::overlay::send_command(
+            cursor_key.clone(),
+            cursor_overlay::OverlayCommand::PinAbove(window_id as u64),
+        );
         crate::cursor::overlay::animate_cursor_to(cursor_key.clone(), x, y).await;
+        state.cursor_registry.update_position(&cursor_key, x, y);
         crate::cursor::overlay::send_command(
             cursor_key,
             cursor_overlay::OverlayCommand::ClickPulse { x, y },

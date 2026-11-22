@@ -2,13 +2,21 @@
 
 [English](background-notification-turns.md) | [简体中文](background-notification-turns.zh-CN.md)
 
+## 实时回放合并 — 已合入
+
+**已合入：** [PR #17862](https://github.com/QwenLM/qwen-code/pull/17862)，squash 提交为 [`48ff083de4e5c328598293d4d86c13014dd73357`](https://github.com/QwenLM/qwen-code/commit/48ff083de4e5c328598293d4d86c13014dd73357)。来自同一后台执行的兼容消息与思考 chunk 现在会在 live journal 中合并。合并边界是完整规范化后的 background-turn 描述符：不同描述符、非法描述符和未知扩展字段都保持离散，避免后一个 chunk 的 metadata 替换较早的可选归属信息。
+
+[真实 HTTP 与完整 CI 补充报告](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7028422487)报告 150 条脚本断言，覆盖独立编译的 base/head 回放对照、五个被杀死的生产守卫变异，以及真实 daemon 的 full/summary `/load` 检查；完整描述符一直保留到终态 compaction 后。同目录的 `compactionEngine.test.ts` 单测文件通过 152/152。[引擎与身份变异账本](https://github.com/QwenLM/qwen-code/pull/17862#issuecomment-7027993738)另报告 186 条脚本断言通过。二者范围重叠且夹具不同，不能相加当成互不重复的覆盖量。journal 上限和自适应预算策略没有移除，默认上限对照仍会报告截断。
+
+**延期事项：** base 已有的终态 slot 路径仍可能跨不同 background-turn 身份合并并丢失较早的 metadata，本 PR 没有修复该行为。[issue #17914](https://github.com/QwenLM/qwen-code/issues/17914)、[原始非阻塞评审线程](https://github.com/QwenLM/qwen-code/pull/17862#discussion_r4637214828)和[关联该 issue 的线程回复](https://github.com/QwenLM/qwen-code/pull/17862#discussion_r4639238655)共同跟踪这项独立工作，不表示它已经修复。
+
 ## 问题
 
 后台结果会进入 Session 队列，但处理结果的自动执行没有进入 bridge 的 prompt 生命周期。通知可能在前一个 RPC 的终态事件发布前继承其 prompt ID，后续输出又丢失外层 prompt ID，live-state 则在实际执行期间报告空闲。因此，用户插入的消息可能被提升为中断当前执行的新 prompt。原有用户输入和停止路径还会丢弃排队中的结果。
 
 ## 行为
 
-后台子智能体保留发起它的执行 ID 和工具调用 ID。如果结果属于当前正在执行的 turn，就在模型的安全边界从同一个通知队列中消费，此后不会再触发重复的自动 turn。其他执行活跃时，来自更早 turn 的结果继续等待。任务完成的展示独立于结果消费。空闲时，每条结果启动一次使用共享会话历史的独立自动执行。
+后台任务保留用于归属结果的标识。任何来源 turn 与当前正在执行的 turn 相同的结果，都会在模型的安全边界从同一个通知队列中消费，此后不会再触发重复的自动 turn。其他执行活跃时，来自更早 turn 的结果继续等待。任务完成的展示独立于结果消费。空闲时，每条结果启动一次使用共享会话历史的独立自动执行。
 
 自动执行期间发送的用户输入使用现有 mid-turn 队列。在执行结束边界到达的输入，会在最终边界前消费，或通过现有用户 prompt 路径提升为后续执行。显式停止取消当前执行，并暂停通知消费，直到新的用户 prompt 开始执行；待处理结果会保留。
 
@@ -34,7 +42,7 @@ Session 负责通知消费，bridge 负责传输层执行状态的可见性。�
 
 ## 决策
 
-用户消息与模型执行 ID 是不同概念：mid-turn 指导是当前执行中的真实用户消息。后台任务活动与主模型执行也是独立状态；仅有排队或仍在运行的任务不会使 hasActivePrompt 变为 true。Shell、monitor 和 workflow 通知共用自动执行生命周期；同执行注入仅适用于带来源元数据的子智能体。旧数据缺少来源元数据时，回退到排队自动投递，不猜测其是否属于当前 turn。bridge 重启后若子进程仍存活，可靠恢复必须使用现有 load/运行时快照路径，不能仅凭历史启动记录推断正在运行。
+用户消息与模型执行 ID 是不同概念：mid-turn 指导是当前执行中的真实用户消息。后台任务活动与主模型执行也是独立状态；仅有排队或仍在运行的任务不会使 hasActivePrompt 变为 true。Shell、monitor 和 workflow 通知共用自动执行生命周期；同执行注入适用于来源 turn 等于当前 turn 的所有通知（agent、shell、monitor、workflow），缺少来源元数据时仍回退到排队自动投递，不猜测其是否属于当前 turn。bridge 重启后若子进程仍存活，可靠恢复必须使用现有 load/运行时快照路径，不能仅凭历史启动记录推断正在运行。
 
 ## 对话展示
 

@@ -246,6 +246,39 @@ export async function resolveRipgrep(
   return null;
 }
 
+// execFile's abort callback can run before the child has exited.
+function probeRipgrepUntilClosed(
+  command: string,
+  signal: AbortSignal,
+): Promise<{ stdout: string; code: number }> {
+  return new Promise((resolve, reject) => {
+    let output = '';
+    let failure: Error | null = null;
+    const child = execFile(
+      command,
+      ['--version'],
+      {
+        encoding: 'utf8',
+        timeout: RIPGREP_TEST_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
+      },
+      (error, stdout) => {
+        failure = error;
+        output = stdout;
+      },
+    );
+    const abort = () => child.kill('SIGKILL');
+    child.once('close', (code) => {
+      signal.removeEventListener('abort', abort);
+      if (signal.aborted) reject(signal.reason);
+      else if (failure) reject(failure);
+      else resolve({ stdout: output, code: code ?? 1 });
+    });
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) abort();
+  });
+}
+
 /**
  * Ensures that ripgrep is healthy by checking its version.
  * @param selection The ripgrep selection to check.
@@ -253,7 +286,9 @@ export async function resolveRipgrep(
  */
 export async function ensureRipgrepHealthy(
   selection: RipgrepSelection,
+  signal?: AbortSignal,
 ): Promise<void> {
+  signal?.throwIfAborted();
   if (
     cachedHealth &&
     cachedHealth.selection.command === selection.command &&
@@ -265,13 +300,11 @@ export async function ensureRipgrepHealthy(
   let probeOutput = '';
   let probeCode = -1;
   try {
-    const { stdout, code } = await execCommand(
-      selection.command,
-      ['--version'],
-      {
-        timeout: RIPGREP_TEST_TIMEOUT_MS,
-      },
-    );
+    const { stdout, code } = signal
+      ? await probeRipgrepUntilClosed(selection.command, signal)
+      : await execCommand(selection.command, ['--version'], {
+          timeout: RIPGREP_TEST_TIMEOUT_MS,
+        });
     probeOutput = stdout;
     probeCode = code;
     working = code === 0 && stdout.startsWith('ripgrep');
@@ -329,16 +362,19 @@ export async function ensureMacBinarySigned(
  */
 async function resolveHealthyRipgrep(
   useBuiltin: boolean,
+  signal?: AbortSignal,
 ): Promise<RipgrepSelection | null> {
+  signal?.throwIfAborted();
   const selection = await resolveRipgrep(useBuiltin);
   if (!selection) {
     return null;
   }
 
   try {
-    await ensureRipgrepHealthy(selection);
+    await ensureRipgrepHealthy(selection, signal);
     return selection;
   } catch (error) {
+    signal?.throwIfAborted();
     if (selection.mode !== 'builtin') {
       throw error;
     }
@@ -350,9 +386,10 @@ async function resolveHealthyRipgrep(
     try {
       fallback = await resolveRipgrep(false);
       if (fallback) {
-        await ensureRipgrepHealthy(fallback);
+        await ensureRipgrepHealthy(fallback, signal);
       }
     } catch (fallbackError) {
+      signal?.throwIfAborted();
       // System rg is unusable too. The bundled failure is the root cause, but
       // keep the system reason visible or it is lost entirely.
       debugLogger.warn(`System rg is unusable as well: ${fallbackError}`);
@@ -376,8 +413,9 @@ async function resolveHealthyRipgrep(
  */
 export async function canUseRipgrep(
   useBuiltin: boolean = true,
+  signal?: AbortSignal,
 ): Promise<boolean> {
-  const selection = await resolveHealthyRipgrep(useBuiltin);
+  const selection = await resolveHealthyRipgrep(useBuiltin, signal);
   return selection !== null;
 }
 

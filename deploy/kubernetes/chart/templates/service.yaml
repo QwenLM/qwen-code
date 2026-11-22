@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "managed-agent.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: application
+  ports:
+    - name: api
+      port: 8080
+      targetPort: api
+    {{- if .Values.web.enabled }}
+    - name: web
+      port: 4171
+      targetPort: web
+    {{- end }}

@@ -15,6 +15,7 @@ import {
   type ManagedSession,
 } from './managed-session-assembly.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   LocalManagedRuntimeOutcomes,
   unresolvedRuntimeWorkReason,
@@ -22,6 +23,7 @@ import {
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import * as gitUtils from '../utils/gitUtils.js';
 import { ManagedSessionMessageProjection } from './managed-session-message-projection.js';
+import { resetManagedRuntimeDispatchGatesForTest } from './managed-runtime-dispatch-gate.js';
 
 vi.mock('../utils/gitUtils.js', async (importOriginal) => {
   const original =
@@ -43,20 +45,17 @@ const sessionKeyOf = (id: string) => ({
 
 const roots = new Set<string>();
 afterEach(async () => {
+  // The module-level dispatch gates survive a timed-out attempt; without a
+  // reset, every vitest retry of a once-run test would collide on its first
+  // claim with 'runtime invocation already dispatched.'
+  resetManagedRuntimeDispatchGatesForTest();
   for (const root of roots) await fs.rm(root, { recursive: true, force: true });
   roots.clear();
 });
 
-async function resource(value: string) {
-  const { createHash } = await import('node:crypto');
-  return {
-    resourceId: `ref-${value}`,
-    kind: value,
-    schemaVersion: 1,
-    byteLength: Buffer.byteLength(value),
-    digest: createHash('sha256').update(value).digest('hex'),
-  };
-}
+// Vitest retries rerun the test body in the same worker, so this counter
+// survives across attempts of the paged-Turn test.
+let pagedOutcomesAttempt = 0;
 
 interface OpenedSession {
   readonly session: ManagedSession;
@@ -69,6 +68,10 @@ async function openSession(root: string, id: string): Promise<OpenedSession> {
   const transcriptPath = path.join(runtimeBaseDir, 'chats', `${id}.jsonl`);
   await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
   const sessionKey = sessionKeyOf(id);
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir,
+    sessionKey,
+  });
   const lease = await LocalManagedSessionAuthority.acquireWriter({
     runtimeBaseDir,
     sessionId: id,
@@ -85,8 +88,8 @@ async function openSession(root: string, id: string): Promise<OpenedSession> {
     activationLeaseDurationMs: 60_000,
     lease,
     create: {
-      definitionRef: await resource('definition'),
-      rootSnapshotRef: await resource('root'),
+      definitionRef: await resources.publish('definition', Buffer.from('{}')),
+      rootSnapshotRef: await resources.publish('root', Buffer.from('{}')),
       createdBy: 'test',
     },
   });
@@ -137,7 +140,11 @@ describe('LocalManagedRuntimeOutcomes', () => {
       path.join(os.tmpdir(), 'qwen-paged-outcomes-'),
     );
     roots.add(root);
-    const opened = await openSession(root, 'session-paged-outcomes');
+    // Each attempt gets its own session id: vitest does not cancel the
+    // timed-out attempt, and while it keeps running under the same session
+    // key it can claim into — or settle() against — the retry's gate.
+    const sessionId = `session-paged-outcomes-${pagedOutcomesAttempt++}`;
+    const opened = await openSession(root, sessionId);
     let session = opened.session;
     try {
       const outcomes = new LocalManagedRuntimeOutcomes(session);
@@ -156,7 +163,7 @@ describe('LocalManagedRuntimeOutcomes', () => {
       expect(physical.storageProfile).toBe('managed-checkpoint-paged/1');
       expect(physical.history.toolCount).toBe(32);
       await opened.seal();
-      session = (await openSession(root, 'session-paged-outcomes')).session;
+      session = (await openSession(root, sessionId)).session;
       const restored = new LocalManagedRuntimeOutcomes(session);
       await restored.recoverCommittedReceipts();
       expect(
@@ -947,75 +954,92 @@ describe('restored runtime block', () => {
     }
   });
 
-  it('re-records a settled result whose outcome body no longer reads, as an error', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
-    roots.add(root);
-    const sessionId = 'session-lost-outcome';
-    {
-      const { session, seal } = await openSession(root, sessionId);
-      const outcomes = new LocalManagedRuntimeOutcomes(session);
-      await outcomes.admit(admission('call-a'));
-      await outcomes.settle({
-        functionCallId: 'call-a',
-        executionStatus: 'success',
-        payload: {
+  it.each(['live', 'sealed'] as const)(
+    'handles a corrupted outcome in a %s Session',
+    async (state) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+      roots.add(root);
+      const sessionId = 'session-lost-outcome';
+      const { session: restored, seal } = await openSession(root, sessionId);
+      {
+        const session = restored;
+        const outcomes = new LocalManagedRuntimeOutcomes(session);
+        await outcomes.admit(admission('call-a'));
+        await outcomes.settle({
+          functionCallId: 'call-a',
           executionStatus: 'success',
-          responseParts: [{ type: 'text', text: 'the answer' }],
-        },
-      });
-      await seal();
-      // The outcome blob is lost after the close — truncated, rotated away.
-      const outcomesDir = path.join(
-        root,
-        'runtime',
-        'resources',
-        sessionId,
-        'managed-tool-outcome',
-      );
-      let blanked = 0;
-      for (const file of await fs.readdir(outcomesDir)) {
-        if (file.startsWith('.')) continue;
-        await fs.writeFile(path.join(outcomesDir, file), Buffer.alloc(0));
-        blanked += 1;
+          payload: {
+            executionStatus: 'success',
+            responseParts: [{ type: 'text', text: 'the answer' }],
+          },
+        });
+        if (state === 'sealed') await seal();
+        // The recorded outcome is corrupted, either during execution or after seal.
+        const outcomesDir = path.join(
+          root,
+          'runtime',
+          'resources',
+          sessionId,
+          'managed-tool-outcome',
+        );
+        let blanked = 0;
+        for (const file of await fs.readdir(outcomesDir)) {
+          if (file.startsWith('.')) continue;
+          await fs.writeFile(path.join(outcomesDir, file), Buffer.alloc(0));
+          blanked += 1;
+        }
+        expect(blanked).toBeGreaterThan(0);
       }
-      expect(blanked).toBeGreaterThan(0);
-    }
 
-    const { session: restored } = await openSession(root, sessionId);
-    try {
-      // The record the model's history needs exists either way: without it
-      // the assistant's functionCall pairs with nothing, and the provider
-      // rejects the next request as malformed with no gate left to say why.
-      await expect(
-        new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
-      ).resolves.toBeUndefined();
-      const resultsRecorded = events(restored, 'message.committed').filter(
-        (event) => event.payload['role'] === 'tool_result',
-      );
-      expect(resultsRecorded).toHaveLength(1);
-      const body = await restored.resources.read(
-        resultsRecorded[0]!.payload['contentRef'] as never,
-      );
-      const record = JSON.parse(body.toString()) as {
-        message?: { parts?: Array<Record<string, unknown>> };
-        toolCallResult?: {
-          callId?: string;
-          status?: string;
-          error?: unknown;
+      if (state === 'sealed') {
+        const transcript = path.join(
+          root,
+          'runtime',
+          'chats',
+          `${sessionId}.jsonl`,
+        );
+        const before = await fs.readFile(transcript);
+        await expect(openSession(root, sessionId)).rejects.toThrow(
+          /bytes on disk/,
+        );
+        expect(await fs.readFile(transcript)).toEqual(before);
+        return;
+      }
+      try {
+        // The record the model's history needs exists either way: without it
+        // the assistant's functionCall pairs with nothing, and the provider
+        // rejects the next request as malformed with no gate left to say why.
+        await expect(
+          new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
+        ).resolves.toBeUndefined();
+        const resultsRecorded = events(restored, 'message.committed').filter(
+          (event) => event.payload['role'] === 'tool_result',
+        );
+        expect(resultsRecorded).toHaveLength(1);
+        const body = await restored.resources.read(
+          resultsRecorded[0]!.payload['contentRef'] as never,
+        );
+        const record = JSON.parse(body.toString()) as {
+          message?: { parts?: Array<Record<string, unknown>> };
+          toolCallResult?: {
+            callId?: string;
+            status?: string;
+            error?: unknown;
+          };
         };
-      };
-      expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
-        id: 'call-a',
-        name: 'read_file',
-        response: { error: expect.stringContaining('cannot be read') },
-      });
-      expect(record.toolCallResult?.callId).toBe('call-a');
-      expect(record.toolCallResult?.status).toBe('error');
-      expect(record.toolCallResult?.error).toBeDefined();
-    } finally {
-      await restored.close();
-    }
-  });
+        expect(record.message?.parts?.[0]?.['functionResponse']).toMatchObject({
+          id: 'call-a',
+          name: 'read_file',
+          response: { error: expect.stringContaining('cannot be read') },
+        });
+        expect(record.toolCallResult?.callId).toBe('call-a');
+        expect(record.toolCallResult?.status).toBe('error');
+        expect(record.toolCallResult?.error).toBeDefined();
+      } finally {
+        await restored.close();
+      }
+    },
+  );
 
   it('recovers a cancelled outcome with the cancellation the live path reports', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
@@ -1457,51 +1481,76 @@ describe('restored runtime block', () => {
     }
   });
 
-  it('answers a reason for a checkpoint that cannot be read', async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
-    roots.add(root);
-    {
-      const { session, seal } = await openSession(root, 'session-gone-state');
-      const outcomes = new LocalManagedRuntimeOutcomes(session);
-      await outcomes.admit(admission('call-a'));
-      await seal();
-      // A checkpoint whose state no longer exists on disk.
-      const stateRoot = path.join(
+  it.each(['live', 'sealed'] as const)(
+    'handles an unreadable checkpoint in a %s Session',
+    async (state) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));
+      roots.add(root);
+      const { session: restored, seal } = await openSession(
         root,
-        'runtime',
-        'resources',
         'session-gone-state',
       );
-      let removed = 0;
-      for (const kind of await fs.readdir(stateRoot)) {
-        const dir = path.join(stateRoot, kind);
-        for (const file of await fs.readdir(dir)) {
-          if (file.startsWith('.')) continue;
-          const candidate = path.join(dir, file);
-          const content = await fs.readFile(candidate);
-          removed += content.includes('ckpt-') ? 1 : 0;
-          if (content.includes('ckpt-')) {
-            await fs.writeFile(candidate, Buffer.alloc(0));
+      {
+        const session = restored;
+        const outcomes = new LocalManagedRuntimeOutcomes(session);
+        await outcomes.admit(admission('call-a'));
+        if (state === 'sealed') await seal();
+        // A checkpoint whose state no longer exists on disk.
+        const stateRoot = path.join(
+          root,
+          'runtime',
+          'resources',
+          'session-gone-state',
+        );
+        let removed = 0;
+        for (const kind of await fs.readdir(stateRoot)) {
+          const dir = path.join(stateRoot, kind);
+          for (const file of await fs.readdir(dir)) {
+            if (file.startsWith('.')) continue;
+            const candidate = path.join(dir, file);
+            const content = await fs.readFile(candidate);
+            removed += content.includes('ckpt-') ? 1 : 0;
+            if (content.includes('ckpt-')) {
+              await fs.writeFile(candidate, Buffer.alloc(0));
+            }
           }
         }
+        expect(removed).toBeGreaterThan(0);
       }
-      expect(removed).toBeGreaterThan(0);
-    }
 
-    const { session: restored } = await openSession(root, 'session-gone-state');
-    try {
-      // The restore repair leaves an unreadable checkpoint to the gate: it
-      // no-ops rather than failing the open the gate is about to block.
-      await expect(
-        new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
-      ).resolves.toBeUndefined();
-      await expect(
-        unresolvedRuntimeWorkReason(restored.authority),
-      ).resolves.toContain('cannot be read');
-    } finally {
-      await restored.close();
-    }
-  });
+      if (state === 'sealed') {
+        const transcript = path.join(
+          root,
+          'runtime',
+          'chats',
+          'session-gone-state.jsonl',
+        );
+        const before = await fs.readFile(transcript);
+        await expect(openSession(root, 'session-gone-state')).rejects.toThrow(
+          /bytes on disk/,
+        );
+        expect(await fs.readFile(transcript)).toEqual(before);
+        return;
+      }
+      try {
+        await expect(restored.authority.readCheckpointState()).rejects.toThrow(
+          /bytes on disk/,
+        );
+        // A live authority still has its parsed checkpoint cached.
+        await expect(
+          restored.authority.readParsedCheckpointState(),
+        ).resolves.toMatchObject({ ok: true });
+        await expect(
+          new LocalManagedRuntimeOutcomes(restored).recoverCommittedReceipts(),
+        ).resolves.toBeUndefined();
+        await expect(
+          unresolvedRuntimeWorkReason(restored.authority),
+        ).resolves.toContain('never settled');
+      } finally {
+        await restored.close();
+      }
+    },
+  );
 
   it('answers a reason for a checkpoint it cannot parse', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outcomes-'));

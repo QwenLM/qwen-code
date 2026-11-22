@@ -22,7 +22,7 @@ describe('keepWorkspaceSplitSessionIds', () => {
         undefined,
         ['workspace-session'],
       ),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual({ kept: [], transientFailures: [] });
     expect(getStandaloneSession).not.toHaveBeenCalled();
   });
 
@@ -35,11 +35,11 @@ describe('keepWorkspaceSplitSessionIds', () => {
         { features: [] } as unknown as DaemonCapabilities,
         ['one', 'one', 'two'],
       ),
-    ).resolves.toEqual(['one', 'two']);
+    ).resolves.toEqual({ kept: ['one', 'two'], transientFailures: [] });
     expect(getStandaloneSession).not.toHaveBeenCalled();
   });
 
-  it('keeps only ids proven absent from the standalone registry', async () => {
+  it('keeps only ids proven absent and reports transient failures', async () => {
     const getStandaloneSession = vi.fn(async (sessionId: string) => {
       if (sessionId === 'standalone') {
         return { state: 'creating', sessionId };
@@ -60,6 +60,20 @@ describe('keepWorkspaceSplitSessionIds', () => {
         capable,
         ['standalone', 'workspace', 'unknown'],
       ),
-    ).resolves.toEqual(['workspace']);
+    ).resolves.toEqual({ kept: ['workspace'], transientFailures: ['unknown'] });
+  });
+
+  it('uses the injected classifier verbatim', async () => {
+    const classify = vi.fn(async () => 'workspace' as const);
+
+    await expect(
+      keepWorkspaceSplitSessionIds(
+        { getStandaloneSession: vi.fn() } as unknown as DaemonClient,
+        capable,
+        ['one'],
+        classify,
+      ),
+    ).resolves.toEqual({ kept: ['one'], transientFailures: [] });
+    expect(classify).toHaveBeenCalledExactlyOnceWith('one');
   });
 });

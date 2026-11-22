@@ -5,6 +5,7 @@
  */
 
 import type { Server } from 'node:http';
+import type { Duplex } from 'node:stream';
 import type { Application } from 'express';
 import { conversationRuntimeUnavailableError } from './conversations/conversation-runtime-errors.js';
 
@@ -50,6 +51,12 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
   private sealed = false;
   private closePending?: Promise<void>;
   private appDrain?: () => Promise<void>;
+  private readonly additionalAppDrains: Array<() => Promise<void>> = [];
+  // closeAllConnections() does not reach sockets detached by an upgrade, so
+  // the shutdown force timer destroys whatever is still tracked here. Track
+  // from 'connection', not 'upgrade': any 'upgrade' listener suppresses
+  // Node's no-listener fall-through to the request handler (hidden 404).
+  private readonly openSockets = new Set<Duplex>();
   private hostDrain?: () => Promise<void>;
   private bootStarter?: () => Promise<void> | void;
   private bootPending?: Promise<void>;
@@ -67,11 +74,15 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     this.server = server;
     this.hostDrain = options.drainHost;
     this.startupReady = options.startupReady === undefined;
+    server.on('connection', (socket) => {
+      this.openSockets.add(socket);
+      socket.once('close', () => this.openSockets.delete(socket));
+    });
     server.once('listening', () => {
       this.listenerReady = true;
       if (this.sealed) {
         server.close();
-        server.closeAllConnections();
+        this.forceCloseConnections(server);
         return;
       }
       this.openAdmissionIfReady();
@@ -112,6 +123,10 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
 
   setAppDrain(drain: () => Promise<void>): void {
     this.appDrain = drain;
+  }
+
+  addAppDrain(drain: () => Promise<void>): void {
+    this.additionalAppDrains.push(drain);
   }
 
   setBootStarter(starter: () => Promise<void> | void): void {
@@ -194,6 +209,7 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     this.seal();
     const drains = [
       this.startDrain(this.appDrain),
+      ...this.additionalAppDrains.map((drain) => this.startDrain(drain)),
       this.startDrain(this.hostDrain),
       this.bootPending?.catch(() => undefined),
     ].filter((value): value is Promise<void> => value !== undefined);
@@ -226,6 +242,12 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
     }
   }
 
+  private forceCloseConnections(server: Server): void {
+    server.closeAllConnections();
+    for (const socket of this.openSockets) socket.destroy();
+    this.openSockets.clear();
+  }
+
   private closeListener(timeoutMs: number): Promise<void> {
     if (
       !this.server ||
@@ -242,7 +264,7 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
       let secondaryTimer: NodeJS.Timeout | undefined;
       const forceTimer = setTimeout(
         () => {
-          server.closeAllConnections();
+          this.forceCloseConnections(server);
           secondaryTimer = setTimeout(() => {
             reject(new Error('The serve listener did not confirm shutdown.'));
           }, SECONDARY_CLOSE_TIMEOUT_MS);
@@ -278,7 +300,7 @@ export class ServeAppLifecycleController implements ServeAppLifecycle {
       };
       const forceTimer = setTimeout(
         () => {
-          server.closeAllConnections();
+          this.forceCloseConnections(server);
           secondaryTimer = setTimeout(() => {
             server.off('close', onClose);
             reject(new Error('The serve listener did not confirm shutdown.'));

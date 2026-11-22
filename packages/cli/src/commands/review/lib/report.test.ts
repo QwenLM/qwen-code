@@ -45,6 +45,31 @@ function planReportOf(
 }
 
 describe('buildPlanReport', () => {
+  it('records the old path of a rename, and nothing for a file that was not renamed', () => {
+    // build-test reads it to keep every suite whole across a rename.
+    const rename =
+      [
+        'diff --git a/old.ts b/new.ts',
+        'similarity index 95%',
+        'rename from old.ts',
+        'rename to new.ts',
+        '--- a/old.ts',
+        '+++ b/new.ts',
+        '@@ -1 +1 @@',
+        '-a',
+        '+b',
+      ].join('\n') + '\n';
+    const report = planReportOf(rename + editFile('src/a.ts', 3, 2), () => 3);
+    expect(report.files.map((f) => [f.path, f.renameFrom])).toEqual([
+      ['new.ts', 'old.ts'],
+      ['src/a.ts', undefined],
+    ]);
+    expect(Object.keys(report.files[1])).not.toContain('renameFrom');
+    expect(JSON.parse(stringifyPlanReport(report)).files[0].renameFrom).toBe(
+      'old.ts',
+    );
+  });
+
   it('resolves the post-image through the injected dependency', () => {
     const asked: string[] = [];
     const report = planReportOf(editFile('src/a.ts', 3, 2), (p) => {

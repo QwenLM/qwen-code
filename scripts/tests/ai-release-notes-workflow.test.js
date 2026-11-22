@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
@@ -173,6 +176,81 @@ describe('stable release notes workflow', () => {
     expect(step).toContain('grep -qF "${marker}" <<<"${existing}"');
     expect(step).toContain('gh pr comment "${num}" --body "${body}"');
   });
+
+  it.each([
+    ['new', '', 0, ['list', 'create', 'update-branch']],
+    ['open', 'OPEN', 0, ['list', 'update-branch']],
+    ['merged retry', 'MERGED', 0, ['list']],
+    ['update conflict', 'OPEN', 1, ['list', 'update-branch']],
+  ])(
+    'refreshes the release PR safely: %s',
+    (_name, state, updateStatus, calls) => {
+      const dir = mkdtempSync(join(tmpdir(), 'finalize-release-'));
+      const output = join(dir, 'output');
+      const log = join(dir, 'calls');
+      const url = 'https://github.com/QwenLM/qwen-code/pull/15468';
+      const step = getStep(
+        finalizeWorkflow,
+        'Create PR to merge release branch into main',
+      );
+      const script = step.split('        run: |-\n')[1].replace(/^ {10}/gm, '');
+      try {
+        writeFileSync(output, '');
+        writeFileSync(log, '');
+        writeFileSync(
+          join(dir, 'gh'),
+          `#!/bin/bash
+set -euo pipefail
+[[ "$1" == pr ]]
+printf '%s\\n' "$2" >> "$CALL_LOG"
+case "$2" in
+  list)
+    if [[ -n "$PR_STATE" ]]; then
+      printf '%s\\t%s\\n' "$PR_URL" "$PR_STATE"
+    fi
+    ;;
+  create) printf '%s\\n' "$PR_URL" ;;
+  update-branch)
+    [[ "$#" == 3 && "$3" == "$PR_URL" ]]
+    [[ ! -s "$GITHUB_OUTPUT" ]]
+    exit "$UPDATE_STATUS"
+    ;;
+  *) exit 99 ;;
+esac
+`,
+          { mode: 0o755 },
+        );
+        writeFileSync(join(dir, 'sleep'), '#!/bin/bash\nexit 0\n', {
+          mode: 0o755,
+        });
+        const result = spawnSync('bash', ['-e', '-c', script], {
+          cwd: dir,
+          encoding: 'utf8',
+          timeout: 5000,
+          env: {
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_OUTPUT: output,
+            CALL_LOG: log,
+            PR_URL: url,
+            PR_STATE: state,
+            UPDATE_STATUS: String(updateStatus),
+            RELEASE_BRANCH: 'release/v0.26.1',
+            RELEASE_TAG: 'v0.26.1',
+          },
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(updateStatus);
+        expect(readFileSync(log, 'utf8').trim().split('\n')).toEqual(calls);
+        expect(readFileSync(output, 'utf8')).toBe(
+          updateStatus === 0
+            ? `PR_URL=${url}\nSHOULD_MERGE=${state !== 'MERGED'}\n`
+            : '',
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('does not recreate an already merged release PR during retries', () => {
     const pr = getStep(

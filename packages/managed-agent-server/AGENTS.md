@@ -86,7 +86,14 @@ cross-language changes.
 
 ### Maven and MySQL checks
 
-Use JDK 21 and Maven 3.8.9 or newer; run Maven from this directory.
+Use JDK 21 and Maven 3.8.9 or newer; run Maven from this directory. This is the
+reactor parent. Production modules compile independently; all tests and fixtures
+live in `verification`. Preserve the dependency matrix in the
+[Maven modules design](../../docs/design/2026-10-29-managed-agent-maven-modules.md).
+Checkstyle and SpotBugs apply to every production module. Test reports and
+aggregate coverage live under `verification/target`; executable artifacts live
+under `server/target`. The verification module must never be installed or
+published.
 
 Before testing, check the toolchain and that the installed sibling SDK matches
 the source being tested. Reuse a valid build; otherwise install it once into
@@ -144,11 +151,9 @@ work follows this module's budget; CI retains the full cross-language gates.
 Documentation-only changes need formatting and reference checks and do not
 invalidate unchanged Java test results.
 
-Maven report output under `target/` (javadoc `reports/apidocs`, JaCoCo
-`site/jacoco`) contains generated JavaScript that the repository-root ESLint
-sweep does not ignore, so a root `npm run lint` fails while those directories
-exist. Run `mvn clean` or delete the `target/` directories before running root
-checks in the same checkout.
+Maven output under every module's `target/` is ignored by Git, ESLint and
+Prettier. Keep these exclusions when adding modules so generated reports and
+packaged fixtures are not linted or committed as source.
 
 ## Code Review
 
@@ -160,7 +165,7 @@ checks in the same checkout.
   idempotency and writer lease/generation checks across restarts: a stale owner
   must not commit durable state or release a newer owner's resources.
 - Server and Broker use the
-  [shared schema baseline](src/main/resources/db/managed-schema/V1__managed_schema.sql).
+  [shared schema baseline](persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql).
   Until the first formal Managed Agent release, edit this V1 baseline in place;
   do not add V2+ migrations or increment the database schema version. Recreate
   development catalogs after baseline changes rather than maintaining upgrades.
@@ -169,7 +174,7 @@ checks in the same checkout.
   migrations or use Flyway repair/history edits to bypass that refusal. Follow
   the README's current schema policy rather than assuming an upgrade path.
 - Public and WebShell API changes must keep the
-  [OpenAPI contract](src/main/resources/openapi/managed-agent-public-api.openapi.json),
+  [OpenAPI contract](contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json),
   mapped routes, `SurfaceRegistry`, and contract tests consistent. Run
   `ManagedAgentApiContractTest` and `SurfaceRegistryGateTest` for those changes.
   Regenerate WebShell types from the repository root with

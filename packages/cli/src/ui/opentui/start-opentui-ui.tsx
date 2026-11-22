@@ -25,6 +25,7 @@ import {
   createElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -45,6 +46,7 @@ import {
   useRenderer,
 } from '@opentui/react';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { modBandInput } from '../utils/mod-band-tree.js';
 import type { PartListUnion } from '@google/genai';
 import {
   createDebugLogger,
@@ -79,9 +81,19 @@ import {
   SessionStatsProvider,
   useSessionStats,
 } from '../contexts/SessionContext.js';
-import { MessageType, type HistoryItemWithoutId } from '../types.js';
+import {
+  MessageType,
+  type HistoryItem,
+  type HistoryItemWithoutId,
+} from '../types.js';
 import { useUpdateNoticeFlush } from './use-update-notice-flush.js';
 import { applyOpenTuiTheme } from './theme.js';
+import {
+  ScreenReaderOutputWriter,
+  resolveScreenReaderPolicy,
+  screenReaderRendererOptions,
+} from './a11y-screen-reader.js';
+import { ScreenReaderPresentation } from './screen-reader-presentation.js';
 import { getActiveOpenTuiTheme } from './theme-parity.js';
 import { useLogger } from '../hooks/useLogger.js';
 import { useVim, type VimBuffer } from '../hooks/vim.js';
@@ -94,14 +106,26 @@ import { useTerminalFocus } from './focus-tracking.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import { OpenTuiRuntime } from './opentui-runtime.js';
 import { OpenTuiTranscriptView } from './transcript-view.js';
-import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
+import {
+  foldBatch,
+  useOpenTuiLiveTurn,
+  type OpenTuiSubmitOptions,
+  type ForegroundShellOwner,
+} from './live-turn.js';
+import type { LiveHistoryItem } from './live-session-model.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { ensureConfigInitialized } from './live-session.js';
 import { consumeLastRenderError } from './opentui-error-boundary.js';
 import { createExitGuard, exitGuardHint } from './exit-guard.js';
-import { EXIT_CODE_INTERRUPT, exitSession } from './exit-lifecycle.js';
+import { exitSession } from './exit-lifecycle.js';
+import { OpenTuiSlashGateway } from './slash-gateway.js';
 import { Command, matchesCommand } from './key-map.js';
-import type { OpenTuiComposerHandle } from './input-submission.js';
-import { resumeEventsFromConfig } from './resume-session.js';
+import {
+  returnToComposer,
+  type OpenTuiComposerSlot,
+} from './input-submission.js';
+import { buildUiHistoryItems } from './session-switch.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
 import {
   armCapturedInputInjection,
   drainCapturedInputAsText,
@@ -120,11 +144,13 @@ interface OpenTuiEntryAppProps {
   settings: LoadedSettings;
   runtime: OpenTuiRuntime;
   startupWarnings: readonly string[];
+  startupHistory: HistoryItem[];
   extensionRefreshState?: ExtensionRefreshState;
   /** Decoded early-captured keystrokes; injected into the composer once. */
   capturedText: string;
   /** Boot-computed auth auto-open request (U-6); null when none. */
   initialDialog: OpenTuiDialogRequest | null;
+  screenReaderPresentation?: ScreenReaderPresentation;
 }
 
 function OpenTuiEntryApp({
@@ -132,9 +158,11 @@ function OpenTuiEntryApp({
   settings,
   runtime,
   startupWarnings,
+  startupHistory,
   extensionRefreshState,
   capturedText,
   initialDialog,
+  screenReaderPresentation,
 }: OpenTuiEntryAppProps) {
   const { width, height } = useTerminalDimensions();
   const { toggleVimEnabled } = useVimModeActions();
@@ -148,12 +176,58 @@ function OpenTuiEntryApp({
   }, [config, renderer, width]);
   const { stats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, config.getSessionId());
+  // A prompt handed back while a dialog has the composer unmounted waits in
+  // the slot's `returned`.
+  const composerHandle: OpenTuiComposerSlot =
+    useRef<OpenTuiComposerSlot['current']>(null);
   const live = useOpenTuiLiveTurn({
     config,
+    logger,
     dualOutput: runtime.dualOutputBridge,
+    onPromptReturned: (submission) =>
+      returnToComposer(composerHandle, submission),
   });
-  const { applyEvent, submit, interrupt, resetTranscript, settleWaitingCall } =
-    live;
+  const {
+    applyEvent,
+    submit,
+    interrupt,
+    resetTranscript: resetLiveTranscript,
+    settleWaitingCall,
+  } = live;
+  const liveItemsRef = useRef(live.items);
+  liveItemsRef.current = live.items;
+  const appendTranscript = useCallback(
+    (event: OpenTuiStreamEvent) => {
+      const items = applyEvent(event);
+      if (items) liveItemsRef.current = items;
+      return items;
+    },
+    [applyEvent],
+  );
+  // The session the transcript belongs to, taken each time it is replaced:
+  // a session switch replaces it after the core adopted the new session.
+  const [transcriptSessionId, setTranscriptSessionId] = useState(() =>
+    config.getSessionId(),
+  );
+  const resetTranscript = useCallback(
+    (events: OpenTuiStreamEvent[]) => {
+      resetLiveTranscript(events);
+      setTranscriptSessionId(config.getSessionId());
+    },
+    [config, resetLiveTranscript],
+  );
+  // The Mods' band above the prompt. OpenTUI has no session survey.
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
+        columns: width,
+        rows: height,
+        isFullscreen: renderer.screenMode === 'alternate-screen',
+        hasSurvey: false,
+        isWorking: live.streaming,
+      }),
+    );
+  }, [config, renderer, width, height, live.streaming]);
 
   const userMessagesRef = useRef<readonly string[]>([]);
   const userMessages = useMemo(() => {
@@ -227,7 +301,6 @@ function OpenTuiEntryApp({
   const getSessionStats = useCallback(() => statsRef.current, []);
 
   // --- early-input injection (ink initialCapturedInput parity) -------------
-  const composerHandle = useRef<OpenTuiComposerHandle | null>(null);
   const vimComposerBuffer = useRef<VimBuffer | null>(null);
   const vimBuffer = useMemo(
     () => createVimBuffer(() => vimComposerBuffer.current!),
@@ -247,8 +320,9 @@ function OpenTuiEntryApp({
 
   // --- startup warnings + resume replay --------------------------------------
   useEffect(() => {
-    const resumeEvents = resumeEventsFromConfig(config);
-    if (resumeEvents) resetTranscript(resumeEvents);
+    if (startupHistory.length) {
+      resetTranscript(projectHistoryToStreamEvents(startupHistory, { config }));
+    }
     for (const warning of startupWarnings) {
       applyEvent({ type: 'warning', text: warning });
     }
@@ -282,6 +356,7 @@ function OpenTuiEntryApp({
   useUpdateNoticeFlush(addUpdateItem, setUpdateInfo, isIdleRef, live.streaming);
 
   // --- two-press exit guard (ink useDoublePress parity) ---------------------
+  const slashGateway = useMemo(() => new OpenTuiSlashGateway(), []);
   const [exitHint, setExitHint] = useState<string | null>(null);
   const exitGuard = useMemo(
     () => createExitGuard({ onWindowExpired: () => setExitHint(null) }),
@@ -309,17 +384,18 @@ function OpenTuiEntryApp({
   useKeyboard((key: KeyEvent) => {
     if (
       key.eventType === 'release' ||
-      !key.ctrl ||
-      (key.name !== 'c' && key.name !== 'd')
+      (!matchesCommand(Command.QUIT, key) && !matchesCommand(Command.EXIT, key))
     )
       return;
+    if (slashGateway.isCommitInProgress()) return;
     if (key.name === 'd' && composerHandle.current?.getText()) return;
     const guardKey = key.name === 'd' ? 'ctrl-d' : 'ctrl-c';
     const parked = waitingCallsRef.current[0];
     // Ink pre-arms C before cleanup; D only arms at an idle/confirmation boundary.
     if (key.name === 'c' || parked || !streamingRef.current) {
       if (exitGuard.press(guardKey) === 'exit') {
-        void exitSession(config, EXIT_CODE_INTERRUPT);
+        if (slashGateway.isBusy()) slashGateway.cancel();
+        void exitSession(config, 0);
         return;
       }
       setExitHint(exitGuardHint(guardKey));
@@ -341,13 +417,27 @@ function OpenTuiEntryApp({
   });
 
   // --- seams handed to the shell ---------------------------------------------
-  const renderMain = useCallback(
-    () => (
-      <box flexDirection="column">
+  const modsEnabled = settings.merged.experimental?.mods === true;
+  const modRows = useMemo(
+    () =>
+      modsEnabled ? { config, sessionId: transcriptSessionId } : undefined,
+    [config, modsEnabled, transcriptSessionId],
+  );
+  // The quit summary shares this seam: the screen-reader reseed matches
+  // spoken rows by rendered text, so divergent display options would
+  // re-announce the whole window before exit.
+  const renderTranscript = useCallback(
+    (
+      items: readonly LiveHistoryItem[],
+      shell?: { owner: ForegroundShellOwner | null; focused: boolean },
+    ) => (
+      <box id="screen-reader-history" flexDirection="column">
         {/* The transcript box carries two columns of margin on each side, so
             its content budget is 4 short of the terminal width. */}
         <OpenTuiTranscriptView
-          items={live.items}
+          screenReader={Boolean(screenReaderPresentation)}
+          items={items}
+          modRows={modRows}
           availableWidth={Math.max(0, width - 4)}
           availableTerminalHeight={height}
           thoughtsExpanded={thoughtsExpanded}
@@ -358,10 +448,25 @@ function OpenTuiEntryApp({
           }
           mouseTracking={settings.merged.ui?.mouseTracking !== false}
           awaitingCallId={live.waitingCalls[0]?.callId}
+          activeShellCallId={shell?.owner?.callId}
+          focusedShellCallId={shell?.focused ? shell.owner?.callId : undefined}
         />
       </box>
     ),
-    [live.items, live.waitingCalls, width, height, thoughtsExpanded, settings],
+    [
+      live.waitingCalls,
+      width,
+      height,
+      thoughtsExpanded,
+      settings,
+      modRows,
+      screenReaderPresentation,
+    ],
+  );
+  const renderMain = useCallback(
+    (shell?: { owner: ForegroundShellOwner | null; focused: boolean }) =>
+      renderTranscript(live.items, shell),
+    [renderTranscript, live.items],
   );
 
   const handleRenderError = useCallback(
@@ -392,27 +497,93 @@ function OpenTuiEntryApp({
     [submit],
   );
 
-  const handleQuit = useCallback(() => {
-    void exitSession(config, 0);
-  }, [config]);
+  const [quittingItems, setQuittingItems] = useState<
+    readonly LiveHistoryItem[] | null
+  >(null);
+  const screenReaderOwner = useMemo(
+    () => [config, transcriptSessionId],
+    [config, transcriptSessionId],
+  );
+  useLayoutEffect(() => {
+    screenReaderPresentation?.setHistory(
+      screenReaderOwner,
+      quittingItems ?? live.items,
+      quittingItems !== null,
+    );
+  }, [screenReaderPresentation, screenReaderOwner, live.items, quittingItems]);
+
+  const quitRequested = useRef(false);
+  const handleQuit = useCallback(
+    (messages: readonly HistoryItem[], invocationItemId?: number) => {
+      if (quitRequested.current) return;
+      quitRequested.current = true;
+      if (!messages.length) {
+        void exitSession(config, 0);
+        return;
+      }
+      let items = foldBatch(
+        projectHistoryToStreamEvents(messages, {
+          config,
+          stats: getSessionStats(),
+        }),
+      );
+      if (screenReaderPresentation && invocationItemId !== undefined) {
+        const invocation = liveItemsRef.current.find(
+          (item) =>
+            item.kind === 'user' &&
+            (item.canonicalHistoryItem?.id ?? item.historyId) ===
+              invocationItemId,
+        );
+        const closingUser = messages[0];
+        if (invocation && closingUser?.type === 'user') {
+          items = items.map((item) =>
+            item.kind === 'user' && item.historyId === closingUser.id
+              ? invocation
+              : item,
+          );
+        }
+      }
+      setQuittingItems(items);
+      config.getLlmClient()?.requestShutdown();
+    },
+    [config, getSessionStats, screenReaderPresentation],
+  );
+  useEffect(() => {
+    if (quittingItems === null) return;
+    const timer = setTimeout(() => {
+      void exitSession(config, 0);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [config, quittingItems]);
+
+  if (quittingItems !== null) {
+    return renderTranscript(quittingItems);
+  }
 
   return (
     <OpenTuiApp
+      screenReader={Boolean(screenReaderPresentation)}
       config={config}
       settings={settings}
       logger={logger}
+      startupHistory={startupHistory}
       getSessionStats={getSessionStats}
       sessionStats={stats}
       runtime={runtime}
+      slashGateway={slashGateway}
       extensionRefreshState={extensionRefreshState}
       initialDialog={initialDialog}
       renderMain={renderMain}
       onSubmitPrompt={handleSubmitPrompt}
+      onScheduleTool={live.scheduleTool}
+      onRunModPrompt={live.runModPrompt}
+      onRetryPrompt={live.retryLastPrompt}
+      onInputProcessed={live.notifyInputProcessed}
       onQuit={handleQuit}
       onToggleVim={toggleVimEnabled}
       vimMode={vimEnabled ? vimMode : undefined}
       onTranscriptReset={resetTranscript}
-      onTranscriptEvent={applyEvent}
+      onTranscriptEvent={appendTranscript}
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
       exitHint={exitHint}
@@ -421,9 +592,13 @@ function OpenTuiEntryApp({
       isReceivingContent={live.isReceivingContent}
       onInterrupt={interrupt}
       userMessages={userMessages}
+      historyItems={live.items}
+      isCurrentHistory={live.isCurrentHistory}
+      onRewindTranscript={live.rewindTranscript}
       approvalMode={config.getApprovalMode()}
       messageQueue={live.messageQueue}
       onPopQueue={live.popQueue}
+      foregroundShellControl={live}
       waitingToolCalls={live.waitingCalls}
       onToolCallSettled={live.settleWaitingCall}
       onRenderError={handleRenderError}
@@ -465,6 +640,7 @@ export async function startOpenTuiUI(
     debugLogger.warn('Shell AST parser warm-up failed:', err);
   });
 
+  const screenReader = config.getScreenReader();
   let renderer: CliRenderer;
   try {
     renderer = await createCliRenderer({
@@ -482,7 +658,18 @@ export async function startOpenTuiUI(
       ],
       // ink's ui.mouseTracking gate: off means no SGR mouse mode, so the
       // terminal keeps native right-click menus and OSC 8 link clicks.
-      useMouse: settings.merged.ui?.mouseTracking !== false,
+      useMouse: !screenReader && settings.merged.ui?.mouseTracking !== false,
+      ...(screenReader
+        ? {
+            ...screenReaderRendererOptions(
+              resolveScreenReaderPolicy({ screenReader }),
+            ),
+            bufferedOutput: 'memory' as const,
+            externalOutputMode: 'passthrough' as const,
+            consoleMode: 'disabled' as const,
+            clearOnShutdown: false,
+          }
+        : {}),
     });
   } catch (err) {
     debugLogger.error('OpenTUI renderer initialization failed:', err);
@@ -501,13 +688,28 @@ export async function startOpenTuiUI(
   // to ink instead of crashing the process (B2).
   const root = createRoot(renderer);
   let runtime: OpenTuiRuntime | null = null;
+  const presentation = screenReader
+    ? new ScreenReaderPresentation(
+        new ScreenReaderOutputWriter(
+          (text) => {
+            process.stdout.write(text);
+          },
+          () => process.stdout.columns ?? 80,
+        ),
+      )
+    : undefined;
+  const detachScreenReader = presentation?.observeFrames(
+    renderer,
+    () => renderer.root,
+  );
   try {
     // Start the one shared initialization flight before anything can load
     // commands or submit; the turn path and the registry loader both await
     // (or join) this same flight via ensureConfigInitialized.
-    void ensureConfigInitialized(config);
+    const initialization = ensureConfigInitialized(config);
     const version = await getCliVersion();
     if (
+      !screenReader &&
       !settings.merged.ui?.hideWindowTitle &&
       settings.merged.ui?.showStatusInTitle !== false
     ) {
@@ -521,21 +723,28 @@ export async function startOpenTuiUI(
     await runtime.writeRuntimeSidecar();
     runtime.startPressureMonitor();
 
+    let resumedSession = config.getResumedSessionData();
+    if (resumedSession) {
+      await initialization;
+      resumedSession = config.getResumedSessionData();
+    }
+
     // Drain the early-captured input exactly once, before the renderer takes
     // over stdin; the decoded text is injected into the composer after mount.
     const capturedText = drainCapturedInputAsText();
 
-    // U-6: ink's boot auto-open is "unauthenticated" (useAuth initial state)
-    // plus the one-shot startup authError (useInitializationAuthError);
-    // shouldOpenAuthDialog is never read in ink's production code, so the
-    // behavior contract is exactly these two.
     const initialDialog: OpenTuiDialogRequest | null =
-      initializationResult.authError || config.getAuthType() === undefined
+      !initializationResult.skipStartupAuthDialog &&
+      (initializationResult.authError || config.getAuthType() === undefined)
         ? {
             dialog: 'auth',
             initialError: initializationResult.authError ?? undefined,
           }
         : null;
+
+    const startupHistory = resumedSession
+      ? buildUiHistoryItems(resumedSession, { config, settings })
+      : [];
 
     root.render(
       // children must sit in the props object: the provider declares it as a
@@ -550,9 +759,11 @@ export async function startOpenTuiUI(
               settings={settings}
               runtime={runtime}
               startupWarnings={startupWarnings}
+              startupHistory={startupHistory}
               extensionRefreshState={options.extensionRefreshState}
               capturedText={capturedText}
               initialDialog={initialDialog}
+              screenReaderPresentation={presentation}
             />
           </VimModeProvider>
         ),
@@ -569,6 +780,8 @@ export async function startOpenTuiUI(
 
     registerCleanup(async () => {
       runtime!.dualOutputBridge?.finalizeAssistantMessage();
+      detachScreenReader?.();
+      presentation?.dispose();
       root.unmount();
       renderer.destroy();
       await runtime!.shutdown();
@@ -636,6 +849,8 @@ export async function startOpenTuiUI(
     );
     try {
       runtime?.dualOutputBridge?.finalizeAssistantMessage();
+      detachScreenReader?.();
+      presentation?.dispose();
       root.unmount();
       renderer.destroy();
       if (runtime) await runtime.shutdown();

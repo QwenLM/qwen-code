@@ -232,7 +232,7 @@ describe('hosted background launch recovery (#13847)', () => {
             'managed-action-options',
             Buffer.from(
               JSON.stringify({
-                v: 1,
+                v: 3,
                 requestId: ACTION_ID,
                 turnId: PROMPT_ID,
                 functionCallId: 'call-1',
@@ -575,6 +575,18 @@ describe('hosted background launch recovery (#13847)', () => {
     try {
       // No children funnel: the started answer cannot be proven, so the
       // takeover keeps the typed decline instead of minting a never-ran.
+      const outcome = await takeoverRaw(replacement, {});
+      expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
+      expect(await unsettledTurnIds(replacement)).toContain(PROMPT_ID);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('declines a park whose owed workflow call lacks the child ledger', async () => {
+    await parkYoloWithOwedCall('workflow');
+    const replacement = await open('boot-2', false);
+    try {
       const outcome = await takeoverRaw(replacement, {});
       expect(outcome).toEqual({ kind: 'declined', reason: 'model_start' });
       expect(await unsettledTurnIds(replacement)).toContain(PROMPT_ID);

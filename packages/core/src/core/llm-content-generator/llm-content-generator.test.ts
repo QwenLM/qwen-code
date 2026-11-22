@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { LlmContentGenerator } from './llm-content-generator.js';
+import { observeRequestDispatch } from '../loggingContentGenerator/request-dispatch.js';
 import { GoogleGenAI } from '@google/genai';
 import type { GenerateContentConfig, Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
@@ -159,6 +160,67 @@ describe('LlmContentGenerator', () => {
       });
     },
   );
+
+  it.each([
+    ['uses the built-in Gemini 4 default', undefined, 'HIGH'],
+    ['honors an explicit Gemini 4 low tier', { effort: 'low' } as const, 'LOW'],
+    [
+      'honors an explicit Gemini 4 medium tier',
+      { effort: 'medium' } as const,
+      'MEDIUM',
+    ],
+    [
+      'clamps a persisted legacy Gemini 4 tier',
+      { effort: 'max' } as const,
+      'HIGH',
+    ],
+  ])('%s', async (_title, reasoning, thinkingLevel) => {
+    const config = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({}),
+    } as unknown as Config;
+    const builtIn = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      { model: 'gemini-4-neon', authType: 'gemini' as AuthType, reasoning },
+      config,
+    );
+    await builtIn.generateContent(
+      { model: 'gemini-4-neon', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({
+      thinkingConfig: { includeThoughts: true, thinkingLevel },
+    });
+  });
+
+  it('does not override thinking off on a built-in Gemini 4 route', async () => {
+    const config = {
+      getResolvedModelConfig: vi.fn().mockReturnValue({}),
+    } as unknown as Config;
+    const builtIn = new LlmContentGenerator(
+      { apiKey: 'dummy' },
+      {
+        model: 'gemini-4-neon',
+        authType: 'gemini' as AuthType,
+        reasoning: false,
+      },
+      config,
+    );
+    const requestOptOut = () => ({ includeThoughts: false, thinkingBudget: 0 });
+    await builtIn.generateContent(
+      { model: 'gemini-4-neon', contents: [] },
+      'prompt',
+    );
+    expectSentConfig({ thinkingConfig: { includeThoughts: false } });
+    await builtIn.generateContent(
+      {
+        model: 'gemini-4-neon',
+        contents: [],
+        config: { thinkingConfig: requestOptOut() },
+      },
+      'prompt',
+    );
+    expectSentConfig({ thinkingConfig: requestOptOut() });
+  });
 
   it('should merge customHeaders into existing httpOptions.headers', async () => {
     vi.mocked(GoogleGenAI).mockClear();
@@ -358,6 +420,22 @@ describe('LlmContentGenerator', () => {
     });
   });
 
+  it('reports the request dispatch before the SDK call', async () => {
+    mockGoogleGenAI.models.generateContentStream.mockResolvedValue(
+      streamOf({ responseId: '1' }),
+    );
+    const onDispatch = vi.fn();
+
+    await observeRequestDispatch(onDispatch, () =>
+      generator.generateContentStream(flashReq(), 'prompt-id'),
+    );
+
+    expect(onDispatch).toHaveBeenCalledTimes(1);
+    expect(onDispatch.mock.invocationCallOrder[0]).toBeLessThan(
+      mockGoogleGenAI.models.generateContentStream.mock.invocationCallOrder[0],
+    );
+  });
+
   it('forwards stream return without pre-consuming the SDK stream', async () => {
     const next = vi.fn();
     const close = vi.fn().mockResolvedValue({ done: true, value: undefined });
@@ -420,10 +498,13 @@ describe('LlmContentGenerator', () => {
   it('should prioritize contentGeneratorConfig samplingParams over request config', async () => {
     await withCg({
       model: 'gemini-1.5-flash',
-      samplingParams: { temperature: 0.1, top_p: 0.2 },
-    }).generateContent(flashReq({ temperature: 0.9, topP: 0.9 }), 'prompt-id');
+      samplingParams: { temperature: 0.1, top_p: 0.2, seed: 42 },
+    }).generateContent(
+      flashReq({ temperature: 0.9, topP: 0.9, seed: 1 }),
+      'prompt-id',
+    );
 
-    expectSentConfig({ temperature: 0.1, topP: 0.2 });
+    expectSentConfig({ temperature: 0.1, topP: 0.2, seed: 42 });
   });
 
   it.each([

@@ -20,10 +20,15 @@ import {
   isNegationExcluded,
   affectedWorkspaces,
   buildSetFor,
+  dependencyClosure,
+  chainsCommands,
+  declaredBuildHeapMb,
   hasUnmodeledWorkspaceGlob,
   readWorkspaceGlobs,
   readRootPackage,
   readWorkspacePackages,
+  reverseDependencyClosure,
+  rootBuildFanOutScript,
   scriptFansOut,
   type WorkspacePackage,
 } from './workspaces.js';
@@ -436,6 +441,309 @@ describe('scriptFansOut', () => {
     expect(scriptFansOut(42)).toBe(false);
     expect(scriptFansOut(null)).toBe(false);
   });
+
+  it("detects pnpm's -r/--recursive, and flags that end at a quote", () => {
+    for (const script of [
+      'pnpm -r run build',
+      'corepack pnpm -r ${filter} run build',
+      'pnpm --recursive test',
+      "execSync('npm run build --workspaces')",
+    ]) {
+      expect(scriptFansOut(script)).toBe(true);
+    }
+    for (const script of [
+      'pnpm run build',
+      'pnpm --filter @x/core run build',
+      'pnpm exec mocha -r ts-node/register',
+      'rm -r dist',
+      "execSync('vitest run --workspaces=false')",
+      // The flag as data, not as an argument a command is given.
+      "if (process.argv.includes('--workspaces')) fanOut()",
+    ]) {
+      expect(scriptFansOut(script)).toBe(false);
+    }
+  });
+});
+
+describe('chainsCommands', () => {
+  it('sees every way a script runs a second command', () => {
+    for (const script of [
+      'pnpm -r run build && node scripts/gen.js',
+      'pnpm -r run build || true',
+      'pnpm -r run build; node scripts/gen.js',
+      'pnpm -r run build | tee build.log',
+      'pnpm -r run build & wait',
+      'pnpm -r run build\nnode scripts/gen.js',
+    ]) {
+      expect(chainsCommands(script)).toBe(true);
+    }
+    for (const script of ['pnpm -r run build', 'node scripts/build.js ', '']) {
+      expect(chainsCommands(script)).toBe(false);
+    }
+  });
+});
+
+describe('rootBuildFanOutScript', () => {
+  const withRoot = (files: Record<string, string>): string => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    for (const [rel, text] of Object.entries(files)) {
+      mkdirSync(join(root, rel, '..'), { recursive: true });
+      writeFileSync(join(root, rel), text);
+    }
+    return root;
+  };
+
+  it('names the local build script a `node <file>` hands off to when it fans out', () => {
+    // This repo's own root build: the fan-out lives in scripts/build.js,
+    // between a license header and comments of its own.
+    const root = withRoot({
+      'scripts/build.js': [
+        '/**',
+        ' * @license',
+        ' */',
+        '// build all workspaces/packages in dependency order',
+        "execSync(`corepack pnpm -r ${filter} run build`, { stdio: 'inherit' });",
+        "execSync('node scripts/generate-settings-schema.ts'); // root's own",
+      ].join('\n'),
+    });
+    expect(
+      rootBuildFanOutScript(
+        root,
+        'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
+      ),
+    ).toBe('scripts/build.js');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("is undefined for a build script that compiles the root's own sources", () => {
+    const root = withRoot({
+      'scripts/build.js': "execSync('tsc -p tsconfig.json');",
+    });
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/build.js'),
+    ).toBeUndefined();
+    expect(rootBuildFanOutScript(root, 'tsc -p .')).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not count a fan-out that only a comment mentions', () => {
+    const root = withRoot({
+      'scripts/line.js': [
+        '// was: pnpm -r run build — too slow',
+        "execSync('tsc -p tsconfig.json');",
+      ].join('\n'),
+      'scripts/block.js': [
+        '/* not `npm run build --workspaces`: one package only */',
+        "execSync('tsc -p tsconfig.json');",
+      ].join('\n'),
+      'scripts/url.js':
+        "fetch('https://example.com/x'); execSync('pnpm -r run build');",
+      // Flush against the code, with no space before the `//`.
+      'scripts/flush.js':
+        "execSync('tsc -p tsconfig.json');// pnpm -r run build",
+    });
+    expect(rootBuildFanOutScript(root, 'node scripts/line.js')).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/flush.js'),
+    ).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/block.js'),
+    ).toBeUndefined();
+    // A `//` that is not a comment leaves the line alone.
+    expect(rootBuildFanOutScript(root, 'node scripts/url.js')).toBe(
+      'scripts/url.js',
+    );
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("steps over node's flags, a preload's value included, to the script itself", () => {
+    const root = withRoot({
+      'scripts/build.js': "execSync('corepack pnpm -r run build');",
+      'hooks.js': "execSync('corepack pnpm -r run build');",
+    });
+    for (const build of [
+      'node --max-old-space-size=6144 scripts/build.js',
+      'node --import tsx/esm scripts/build.js',
+      // The preload fans out too, and is still not the script the build runs.
+      'node --require ./hooks.js scripts/build.js',
+      'node -r ./hooks.js scripts/build.js',
+    ]) {
+      expect(rootBuildFanOutScript(root, build)).toBe('scripts/build.js');
+    }
+    expect(
+      rootBuildFanOutScript(root, `node -e "require('./hooks.js')"`),
+    ).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('sees a fan-out between two globs, whose `/*` and `*/` are not a comment', () => {
+    const root = withRoot({
+      'scripts/build.js': [
+        "const dirs = globSync('packages/*/src');",
+        "execSync('pnpm -r run build');",
+        "const files = globSync('scripts/**/*.js');",
+      ].join('\n'),
+    });
+    expect(rootBuildFanOutScript(root, 'node scripts/build.js')).toBe(
+      'scripts/build.js',
+    );
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads nothing outside the root, and treats an unreadable script as no fan-out', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'ws-'));
+    const root = join(parent, 'repo');
+    mkdirSync(join(root, 'scripts'), { recursive: true });
+    writeFileSync(join(parent, 'outside.js'), "execSync('pnpm -r run build');");
+    expect(rootBuildFanOutScript(root, 'node ../outside.js')).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, `node ${join(parent, 'outside.js')}`),
+    ).toBeUndefined();
+    // A link whose own path stays inside the root, to a file that does not.
+    symlinkSync(join(parent, 'outside.js'), join(root, 'scripts', 'link.js'));
+    expect(rootBuildFanOutScript(root, 'node scripts/link.js')).toBeUndefined();
+    expect(
+      rootBuildFanOutScript(root, 'node scripts/missing.js'),
+    ).toBeUndefined();
+    expect(rootBuildFanOutScript(root, undefined)).toBeUndefined();
+    rmSync(parent, { recursive: true, force: true });
+  });
+
+  it("follows a link that stays inside the root, and reads no file of more than a script's size", () => {
+    const root = withRoot({
+      'tools/build.js': "execSync('pnpm -r run build');",
+      // The fan-out is at the start, so only the size can turn it away.
+      'scripts/big.js':
+        "execSync('pnpm -r run build');\n" + '//'.repeat(600 * 1024),
+    });
+    symlinkSync(join(root, 'tools', 'build.js'), join(root, 'build.js'));
+    expect(rootBuildFanOutScript(root, 'node build.js')).toBe('build.js');
+    expect(rootBuildFanOutScript(root, 'node scripts/big.js')).toBeUndefined();
+    // A directory is not a script.
+    mkdirSync(join(root, 'dir.js'));
+    expect(rootBuildFanOutScript(root, 'node dir.js')).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('counts only a command the script runs, not text it prints or tests for', () => {
+    const root = withRoot({
+      'scripts/log.js': [
+        "console.error('if this fails, run pnpm -r run build by hand');",
+        "execSync('tsc -b');",
+      ].join('\n'),
+      // A quote inside a regex literal throws the comment pass off, so the
+      // comment after it survives; it still runs nothing.
+      'scripts/regex.js': [
+        `const q = src.replace(/'/g, '"'); // old: pnpm -r run build`,
+        "execSync('tsc -b');",
+      ].join('\n'),
+      'scripts/flag.js':
+        "if (process.argv.includes('--workspaces')) execSync('tsc -b');",
+      // An argv split out of the command is not read: the build runs as
+      // written.
+      'scripts/argv.js': "spawnSync('pnpm', ['-r', 'run', 'build']);",
+      'scripts/spawn.js':
+        "spawnSync('npm run build --workspaces', { shell: true });",
+    });
+    for (const file of ['log', 'regex', 'flag', 'argv']) {
+      expect(
+        rootBuildFanOutScript(root, `node scripts/${file}.js`),
+      ).toBeUndefined();
+    }
+    expect(rootBuildFanOutScript(root, 'node scripts/spawn.js')).toBe(
+      'scripts/spawn.js',
+    );
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads a TypeScript hand-off, run by node or tsx, past a flag whose value is a path', () => {
+    const root = withRoot({
+      'scripts/build.ts': "execSync('pnpm -r run build');",
+      'scripts/build.js': "execSync('pnpm -r run build');",
+    });
+    expect(rootBuildFanOutScript(root, 'node scripts/build.ts')).toBe(
+      'scripts/build.ts',
+    );
+    expect(rootBuildFanOutScript(root, 'tsx scripts/build.ts')).toBe(
+      'scripts/build.ts',
+    );
+    expect(
+      rootBuildFanOutScript(
+        root,
+        'node --redirect-warnings warn.log scripts/build.js',
+      ),
+    ).toBe('scripts/build.js');
+    // A second line is a second command, with its own runner.
+    expect(
+      rootBuildFanOutScript(
+        root,
+        'node scripts/setup.js\nnode scripts/build.js',
+      ),
+    ).toBe('scripts/build.js');
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe('declaredBuildHeapMb', () => {
+  const rootWithBuild = (build: string): string => {
+    const root = mkdtempSync(join(tmpdir(), 'ws-'));
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({ name: 'r', scripts: { build } }),
+    );
+    return root;
+  };
+
+  it("reads the heap the root's build script declares", () => {
+    const root = rootWithBuild(
+      'cross-env NODE_OPTIONS="--max-old-space-size=6144" node scripts/build.js',
+    );
+    expect(declaredBuildHeapMb(root)).toBe(6144);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads it only from a NODE_OPTIONS assignment, which is what reaches the compilers', () => {
+    for (const [build, mb] of [
+      [
+        "NODE_OPTIONS='--enable-source-maps --max-old-space-size=8192' tsc -b",
+        8192,
+      ],
+      ['NODE_OPTIONS=--max-old-space-size=4096 tsc -b', 4096],
+      // A child's argument, a usage string, a comment's worth of text, and a
+      // flag that sizes only the build script's own process.
+      ['node scripts/x.js --max-old-space-size=1024', undefined],
+      ['echo "usage: build [--max-old-space-size=1024]" && tsc -b', undefined],
+      ['node --max-old-space-size=2048 scripts/build.js', undefined],
+    ] as const) {
+      const root = rootWithBuild(build);
+      expect(declaredBuildHeapMb(root)).toBe(mb);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('takes the largest of several declarations, in any spelling V8 accepts', () => {
+    for (const [build, mb] of [
+      [
+        'NODE_OPTIONS=--max-old-space-size=1024 node a.js && NODE_OPTIONS=--max-old-space-size=8192 tsc -b',
+        8192,
+      ],
+      ['NODE_OPTIONS=--max_old_space_size=3072 tsc -b', 3072],
+      ['NODE_OPTIONS="$NODE_OPTIONS --max-old-space-size=6144" tsc -b', 6144],
+    ] as const) {
+      const root = rootWithBuild(build);
+      expect(declaredBuildHeapMb(root)).toBe(mb);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('is undefined when the root build declares no heap, or there is no root build', () => {
+    const root = rootWithBuild('tsc --build');
+    expect(declaredBuildHeapMb(root)).toBeUndefined();
+    rmSync(root, { recursive: true, force: true });
+    const empty = mkdtempSync(join(tmpdir(), 'ws-'));
+    expect(declaredBuildHeapMb(empty)).toBeUndefined();
+    rmSync(empty, { recursive: true, force: true });
+  });
 });
 
 describe('hasUnmodeledWorkspaceGlob', () => {
@@ -510,6 +818,17 @@ const PKGS: WorkspacePackage[] = [
   },
 ];
 
+describe('dependencyClosure', () => {
+  it('takes what a package depends on, and none of its consumers', () => {
+    expect(dependencyClosure(['packages/bridge'], PKGS)).toEqual([
+      'packages/bridge',
+      'packages/core',
+    ]);
+    // `buildSetFor` of the same package adds its consumer.
+    expect(buildSetFor(['packages/bridge'], PKGS)).toContain('packages/leaf');
+  });
+});
+
 describe('buildSetFor', () => {
   it('orders dependencies before the package that needs them', () => {
     const set = buildSetFor(['packages/leaf'], PKGS);
@@ -573,5 +892,38 @@ describe('buildSetFor', () => {
 
   it('ignores an affected dir that is not a workspace', () => {
     expect(buildSetFor(['docs'], PKGS)).toEqual([]);
+  });
+
+  it('reads a dependency on a name the root shares with a member as one on the member', () => {
+    // This repo's shape: the root and packages/cli are both
+    // `@qwen-code/qwen-code`, and the IDE companion depends on that name.
+    const root: WorkspacePackage = {
+      dir: '.',
+      name: '@x/cli',
+      scripts: ['build'],
+      deps: [],
+    };
+    const cli: WorkspacePackage = {
+      dir: 'packages/cli',
+      name: '@x/cli',
+      scripts: ['build'],
+      deps: [],
+    };
+    const ide: WorkspacePackage = {
+      dir: 'packages/ide',
+      name: '@x/ide',
+      scripts: ['build'],
+      deps: ['@x/cli'],
+    };
+    for (const graph of [
+      [root, cli, ide],
+      [cli, ide, root],
+    ]) {
+      expect(reverseDependencyClosure(['.'], graph)).toEqual(['.']);
+      expect(reverseDependencyClosure(['packages/cli'], graph)).toEqual([
+        'packages/cli',
+        'packages/ide',
+      ]);
+    }
   });
 });

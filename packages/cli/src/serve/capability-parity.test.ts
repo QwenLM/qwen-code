@@ -19,6 +19,7 @@ import {
 } from './capability-parity.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import {
+  HOSTED_CRON_CREATE_TOOL,
   HOSTED_MEMBER_BOARD_TOOLS,
   HOSTED_MEMBER_COMMAND_TOOL_NAMES,
   HOSTED_WORKFLOW_TOOL,
@@ -34,11 +35,12 @@ import {
 const REPO = resolve(import.meta.dirname, '../../../..');
 const MANAGED_SURFACE_FILE = resolve(
   REPO,
-  'packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt',
+  'packages/managed-agent-server/verification/src/test/resources/capability-parity/managed-surface.txt',
 );
 const ROUTE_METHODS: ReadonlySet<string> = new Set([
   'GET',
   'POST',
+  'PUT',
   'PATCH',
   'DELETE',
 ]);
@@ -63,6 +65,7 @@ const HOSTED_TOOLS = new Set([
   ...toolNames(HOSTED_TEAM_TOOLS),
   HOSTED_TEAM_PLAN_TOOL.name,
   HOSTED_WORKFLOW_TOOL.name,
+  HOSTED_CRON_CREATE_TOOL.name,
 ]);
 
 /** The twin `label method template surface`, read without a Java build. */
@@ -176,6 +179,89 @@ describe('capability parity matrix', () => {
       'web_shell_brand',
     );
   });
+
+  it('preserves the BTW/recap integrated-acceptance caveat in the linked bilingual design', () => {
+    expect(
+      readFileSync(
+        resolve(REPO, 'docs/design/2026-11-19-managed-web-ui-parity.md'),
+        'utf8',
+      ),
+    ).toContain(
+      'Integrated acceptance of BTW and recap remains pending; preserve the [existing BTW and recap design](2026-11-09-managed-btw-recap.md)',
+    );
+    expect(
+      readFileSync(
+        resolve(REPO, 'docs/design/2026-11-19-managed-web-ui-parity.zh-CN.md'),
+        'utf8',
+      ),
+    ).toContain(
+      'BTW 与 recap 的完整集成验收仍待完成；保留[既有 BTW 与 recap 设计](2026-11-09-managed-btw-recap.zh-CN.md)',
+    );
+  });
+
+  it.each([
+    [
+      'session_btw',
+      { standing: 'managed', evidence: 'surface:SIDE_QUERY_CREATE' },
+    ],
+    [
+      'session_btw_stream',
+      { standing: 'managed', evidence: 'surface:SIDE_QUERY_STREAM' },
+    ],
+    [
+      'session_recap',
+      { standing: 'managed', evidence: 'surface:SIDE_QUERY_CREATE' },
+    ],
+    [
+      'workspace_archived_session_export',
+      { standing: 'managed', evidence: 'surface:ITEM_LIST' },
+    ],
+    [
+      'session_worktree_persistence_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed persists Session-owned worktrees, but its descriptor has no per-response persisted-v1 attestation',
+      },
+    ],
+    [
+      'session_worktree_reset_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed worktree inspect and cleanup do not transfer checkout ownership to a fresh replacement Session',
+      },
+    ],
+    [
+      'session_worktree_branch_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed allocates an initial branch during worktree creation, but has no post-create create-branch-here operation',
+      },
+    ],
+    [
+      'session_worktree_handoff_v1',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed has no operation that moves a Session and its work between its worktree and the local checkout',
+      },
+    ],
+    [
+      'workspace_git_worktrees',
+      {
+        standing: 'absent',
+        evidence:
+          'Managed lists, inspects and cleans up its own Session worktrees, not the repository-wide Git worktree set',
+      },
+    ],
+  ] as const)(
+    '%s records its #17717 correction without overstating parity',
+    (tag, row) => {
+      expect(CAPABILITY_PARITY[tag]).toEqual(row);
+    },
+  );
 
   it('derives the managed-only column from uncited route labels', () => {
     const cited = new Set(

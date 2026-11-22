@@ -11,7 +11,9 @@ import type {
   Message,
   PermissionRequest,
   TodoItem,
+  ToolGroupMessage,
 } from '../adapters/types';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { CompactModeContext } from '../WebShellContexts';
 import type {
   WebShellAssistantFeedbackRating,
@@ -29,10 +31,10 @@ import {
   isCompletedAskUserQuestion,
 } from './messages/toolFormatting';
 import {
-  AssistantMessage,
   ThinkingMessage,
   type SessionContentGenerator,
 } from './messages/AssistantMessage';
+import { AssistantMessageRow } from './messages/AssistantMessageRow';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import type { TurnOutputOpenRequest } from './artifacts/TurnOutputs';
@@ -47,12 +49,20 @@ import type {
   DaemonAssistantMessage,
 } from '../adapters/messageTypes';
 import { isTurnCallsPrompt, useOpenTurnCalls } from '../turnCallsContext';
+import { HookStatistics } from './messages/HookStatistics';
+import type { HookStatisticsTurn } from './messages/hook-statistics-context';
 
 interface MessageItemProps {
+  hookTurn?: HookStatisticsTurn;
   message: Message;
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -82,6 +92,7 @@ interface MessageItemProps {
   onBranchSession?: (branchRecordId?: string) => void | Promise<void>;
   branchRecordId?: string;
   showAssistantActions?: boolean;
+  assistantFooterAlwaysVisible?: boolean;
   showAssistantBranch?: boolean;
   /** Turn id marks are keyed by; unset hides the marks for this message. */
   assistantFeedbackTurnId?: string;
@@ -104,6 +115,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
@@ -122,6 +134,8 @@ export const MessageItem = memo(function MessageItem({
   onBranchSession,
   branchRecordId,
   showAssistantActions = false,
+  hookTurn,
+  assistantFooterAlwaysVisible = false,
   showAssistantBranch = false,
   assistantFeedbackTurnId,
   assistantFeedbackPromptId,
@@ -206,6 +220,7 @@ export const MessageItem = memo(function MessageItem({
         return (
           <UserMessage
             content={message.content}
+            source={message.source}
             images={message.images}
             files={message.files}
             inputAnnotations={message.inputAnnotations}
@@ -219,11 +234,15 @@ export const MessageItem = memo(function MessageItem({
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
             author={message.author}
+            sentFrom={message.sentFrom}
+            sentTo={message.agentMessage?.sentTo}
           />
         );
       case 'assistant':
         return (
-          <AssistantMessage
+          <AssistantMessageRow
+            messageId={message.id}
+            hookTurn={hookTurn}
             content={message.content}
             author={message.author}
             agentMessage={message.agentMessage}
@@ -231,6 +250,7 @@ export const MessageItem = memo(function MessageItem({
             timestamp={message.timestamp}
             onBranchSession={boundBranchSession}
             showFooterActions={showAssistantActions}
+            footerAlwaysVisible={assistantFooterAlwaysVisible}
             showBranchAction={showAssistantBranch}
             showAssistantFeedback={assistantFeedbackPromptId !== undefined}
             assistantFeedbackRating={assistantFeedbackRating}
@@ -247,6 +267,7 @@ export const MessageItem = memo(function MessageItem({
             content={message.content}
             author={message.author}
             isStreaming={message.isStreaming}
+            fromSubagent={message.parentToolCallId !== undefined}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
             generateContent={generateContent}
@@ -302,6 +323,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onOpenMemoryFile={onOpenMemoryFile}
             onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
@@ -383,6 +405,11 @@ export const MessageItem = memo(function MessageItem({
   const selectableSafeBody = (
     <div data-user-selectable="true" style={{ display: 'contents' }}>
       {safeBody}
+      {hookTurn && message.role !== 'assistant' && (
+        <div className="flex items-center pb-6">
+          <HookStatistics turn={hookTurn} />
+        </div>
+      )}
     </div>
   );
 
@@ -480,6 +507,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onOpenMemoryFile !== next.onOpenMemoryFile) return false;
   if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
     return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
@@ -500,6 +528,14 @@ function areMessageItemPropsEqual(
   if (prev.onBranchSession !== next.onBranchSession) return false;
   if (prev.branchRecordId !== next.branchRecordId) return false;
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
+  if (
+    prev.hookTurn?.sessionId !== next.hookTurn?.sessionId ||
+    prev.hookTurn?.promptId !== next.hookTurn?.promptId ||
+    prev.hookTurn?.recordId !== next.hookTurn?.recordId
+  )
+    return false;
+  if (prev.assistantFooterAlwaysVisible !== next.assistantFooterAlwaysVisible)
+    return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.assistantFeedbackTurnId !== next.assistantFeedbackTurnId)
     return false;
@@ -565,6 +601,25 @@ function agentMessagesEqual(
   );
 }
 
+function stableFilesEqual(
+  prev: Extract<Message, { role: 'user' }>['files'] | undefined,
+  next: Extract<Message, { role: 'user' }>['files'] | undefined,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next || prev.length !== next.length) return false;
+  return prev.every((file, index) => {
+    const other = next[index];
+    return (
+      other !== undefined &&
+      file.name === other.name &&
+      file.mimeType === other.mimeType &&
+      file.text === other.text &&
+      file.attachmentId === other.attachmentId &&
+      file.data === other.data
+    );
+  });
+}
+
 function areMessagesEqual(prev: Message, next: Message): boolean {
   if (prev === next) return true;
   if (prev.id !== next.id || prev.role !== next.role) return false;
@@ -580,7 +635,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
         next.role === 'user' &&
         prev.content === next.content &&
         prev.source === next.source &&
-        stableImagesEqual(prev.images, next.images)
+        stableImagesEqual(prev.images, next.images) &&
+        stableFilesEqual(prev.files, next.files)
       );
     case 'assistant':
       return (
@@ -593,7 +649,8 @@ function areMessagesEqual(prev: Message, next: Message): boolean {
       return (
         next.role === 'thinking' &&
         prev.content === next.content &&
-        prev.isStreaming === next.isStreaming
+        prev.isStreaming === next.isStreaming &&
+        prev.parentToolCallId === next.parentToolCallId
       );
     case 'system':
       return (
@@ -688,28 +745,18 @@ function areToolCallsEqual(
 }
 
 function areToolGroupThoughtsEqual(
-  prev:
-    | Array<{
-        content: string;
-        isStreaming?: boolean;
-        beforeToolCallId?: string;
-      }>
-    | undefined,
-  next:
-    | Array<{
-        content: string;
-        isStreaming?: boolean;
-        beforeToolCallId?: string;
-      }>
-    | undefined,
+  prev: ToolGroupMessage['thoughts'],
+  next: ToolGroupMessage['thoughts'],
 ): boolean {
   if (prev === next) return true;
   if (!prev || !next || prev.length !== next.length) return false;
   return prev.every(
     (thought, index) =>
+      thought.id === next[index]?.id &&
       thought.content === next[index]?.content &&
       thought.isStreaming === next[index]?.isStreaming &&
-      thought.beforeToolCallId === next[index]?.beforeToolCallId,
+      thought.beforeToolCallId === next[index]?.beforeToolCallId &&
+      thought.parentToolCallId === next[index]?.parentToolCallId,
   );
 }
 
@@ -725,13 +772,28 @@ function areToolListsEqual(
 const jsonCache = new WeakMap<object, string>();
 
 function stableImagesEqual(
-  a: Array<{ data: string; mimeType: string }> | undefined,
-  b: Array<{ data: string; mimeType: string }> | undefined,
+  a:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
+  b:
+    | Array<{
+        data: string;
+        mimeType: string;
+        attachmentId?: string;
+      }>
+    | undefined,
 ): boolean {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;
   return a.every(
-    (img, i) => img.data === b[i].data && img.mimeType === b[i].mimeType,
+    (img, i) =>
+      img.data === b[i].data &&
+      img.mimeType === b[i].mimeType &&
+      img.attachmentId === b[i].attachmentId,
   );
 }
 

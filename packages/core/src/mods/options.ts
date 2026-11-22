@@ -49,7 +49,7 @@ const field = z
     );
   });
 const schema = z.record(z.string().regex(/^[A-Za-z_]\w*$/), field);
-const storedOptions = z.record(option);
+const storedOptions = z.record(z.string(), option);
 
 function* pluginConfigurations(
   scopes: readonly unknown[],

@@ -574,6 +574,11 @@ export class NodeReplKernelManager {
         '--experimental-vm-modules',
         '--experimental-import-meta-resolve',
         resolveKernelPath(),
+        ...process.argv
+          .slice(2)
+          .filter((argument) =>
+            ['--no-overlay', '--no-pip'].includes(argument),
+          ),
       ],
       {
         cwd: this.options.cwd,

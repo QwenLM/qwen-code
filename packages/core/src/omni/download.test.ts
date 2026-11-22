@@ -125,7 +125,7 @@ const respondWith = (body: BodyInit | null, init?: ResponseInit) =>
   vi.fn(async () => new Response(body, init)) as unknown as typeof fetch;
 
 function fetchOk(
-  body: Buffer | string,
+  body: Buffer<ArrayBuffer> | string,
   headers: Record<string, string> = {},
 ): typeof fetch {
   return vi.fn(async () => new Response(body, { status: 200, headers }));

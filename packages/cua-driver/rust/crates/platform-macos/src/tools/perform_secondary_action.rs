@@ -54,12 +54,10 @@ fn resolve_advertised_action(actions: &[String], requested: &str) -> Result<Stri
         return Err("empty");
     }
     let mut matches = actions.iter().filter(|action| {
-        let alias = action
-            .strip_prefix("AX")
-            .unwrap_or(action)
-            .to_ascii_lowercase();
+        let alias = action.strip_prefix("AX").unwrap_or(action);
         action.as_str() == requested
             || alias == requested
+            || alias.to_ascii_lowercase() == requested
             || (action.as_str() == "AXShowMenu" && requested == "show_menu")
     });
     let Some(action) = matches.next() else {
@@ -194,6 +192,31 @@ mod tests {
         assert_eq!(resolve_advertised_action(&actions, "press"), Err("missing"));
         assert_eq!(
             resolve_advertised_action(&["AXRaise".into(), "raise".into()], "raise"),
+            Err("ambiguous")
+        );
+    }
+
+    #[test]
+    fn actions_accept_the_case_preserved_alias_displayed_by_the_tree() {
+        let actions = vec!["AXCancel".into(), "AXShowMenu".into()];
+        assert_eq!(
+            resolve_advertised_action(&actions, "Cancel"),
+            Ok("AXCancel".into())
+        );
+        assert_eq!(
+            resolve_advertised_action(&actions, "ShowMenu"),
+            Ok("AXShowMenu".into())
+        );
+        assert_eq!(
+            resolve_advertised_action(&actions, "cancel"),
+            Ok("AXCancel".into())
+        );
+        assert_eq!(
+            resolve_advertised_action(&actions, "CANCEL"),
+            Err("missing")
+        );
+        assert_eq!(
+            resolve_advertised_action(&["AXCancel".into(), "Cancel".into()], "Cancel"),
             Err("ambiguous")
         );
     }

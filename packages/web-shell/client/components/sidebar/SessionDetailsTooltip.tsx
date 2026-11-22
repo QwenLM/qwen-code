@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ReactElement,
+  type ReactNode,
 } from 'react';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
@@ -41,6 +42,7 @@ interface SessionDetailsTooltipProps {
   completedUnread: boolean;
   statusLabel?: string;
   workspaceLabel?: string;
+  details?: ReactNode;
   openOnClick?: boolean;
   ownerToken?: string;
   open?: boolean;
@@ -56,6 +58,7 @@ export function SessionDetailsTooltip({
   completedUnread,
   statusLabel,
   workspaceLabel,
+  details,
   openOnClick = false,
   ownerToken,
   open: controlledOpen,
@@ -93,7 +96,8 @@ export function SessionDetailsTooltip({
       : resolveSessionDetailsCollisionBoundary(anchorRef.current)
     : null;
   const folderPath = session.workspaceCwd;
-  const branch = session.worktree?.branch ?? session.branch?.name;
+  const branch =
+    session.worktree?.branch || session.worktree?.slug || session.branch?.name;
   const prs = openableSessionPrs([...(session.prs ?? [])].reverse());
   // Stacked PRs can close the same issue; list it once, under its newest PR.
   const seenIssueUrls = new Set<string>();
@@ -105,20 +109,30 @@ export function SessionDetailsTooltip({
         !seenIssueUrls.has(issue.url) &&
         seenIssueUrls.add(issue.url),
     );
+  // A turn in flight hides the row's background dot and the blocked states
+  // outrank it, so this status is where background work still gets named.
+  // Blocked-state precedence is pinned. The unread arm mirrors the row's dot
+  // precedence — the unread dot outranks the running/active-work dots, the
+  // background dot outranks unread — and carries the suffix for the same
+  // hidden-background reason. The background-only arm already names it and
+  // must not repeat it.
+  const backgroundSuffix = session.hasRunningBackgroundTasks
+    ? ` · ${t('background.running')}`
+    : '';
   const status = session.isWaitingForPermission
-    ? t('sessionsOverview.status.needsApproval')
+    ? `${t('sessionsOverview.status.needsApproval')}${backgroundSuffix}`
     : session.isWaitingForUserQuestion
-      ? t('sessionsOverview.status.askUserQuestion')
-      : session.hasActivePrompt
-        ? t('sidebar.running')
-        : session.hasRunningBackgroundTasks
-          ? t('background.running')
-          : session.activeWorkState === 'active'
-            ? t('sidebar.activeWork')
-            : session.activeWorkState === 'unknown'
-              ? t('sidebar.activityUnknown')
-              : completedUnread
-                ? t('sidebar.completedUnread')
+      ? `${t('sessionsOverview.status.askUserQuestion')}${backgroundSuffix}`
+      : !session.hasActivePrompt && session.hasRunningBackgroundTasks
+        ? t('background.running')
+        : completedUnread
+          ? `${t('sidebar.completedUnread')}${backgroundSuffix}`
+          : session.hasActivePrompt
+            ? `${t('sidebar.running')}${backgroundSuffix}`
+            : session.activeWorkState === 'active'
+              ? t('sidebar.activeWork')
+              : session.activeWorkState === 'unknown'
+                ? t('sidebar.activityUnknown')
                 : `${t('sessionsOverview.status.idle')} · ${t('sidebar.clients', { count: session.clientCount ?? 0 })}`;
 
   useEffect(() => {
@@ -345,8 +359,13 @@ export function SessionDetailsTooltip({
           })}
           <div className={styles.sessionDetailsRow}>
             <RadioTowerIcon aria-hidden="true" />
-            <span>{statusLabel ?? status}</span>
+            {/* An override replaces the line but must keep naming hidden
+                background work: the row hides that dot in these states. */}
+            <span>
+              {statusLabel ? `${statusLabel}${backgroundSuffix}` : status}
+            </span>
           </div>
+          {details}
           <div className={styles.sessionDetailsIdRow}>
             <span
               className="!whitespace-normal break-all"

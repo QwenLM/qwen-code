@@ -26,7 +26,10 @@ import {
   statusFilePathFor,
   type ShellTaskRegistration,
 } from './backgroundShellRegistry.js';
-import { todoWorkChainContext } from '../utils/promptIdContext.js';
+import {
+  promptIdContext,
+  todoWorkChainContext,
+} from '../utils/promptIdContext.js';
 import { escapeXml } from '../utils/xml.js';
 import { stripDisplayControlChars } from '../utils/terminalSafe.js';
 
@@ -329,6 +332,36 @@ describe('BackgroundShellRegistry', () => {
         status: 'completed',
         exitCode: 0,
       });
+    });
+
+    it('carries the registering turn on the completion notification', () => {
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      promptIdContext.run('turn-42', () =>
+        reg.register(makeEntry({ shellId: 'a' })),
+      );
+      reg.complete('a', 0, 2000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      // The consumer gate (Session.#takeCurrentTurnBackgroundParts) drops any
+      // queued item whose sourceTurnId is not the current turn, so a shell
+      // that finishes mid-turn is only delivered mid-turn if the producer
+      // stamps the registering turn here.
+      expect(callback.mock.calls[0]![2].sourceTurnId).toBe('turn-42');
+    });
+
+    it('leaves the turn unattributed when registration has no turn context', () => {
+      // Adjacent behaviour this fix must not break: with no turn context the
+      // producer neither invents an attribution nor drops the result. The
+      // item stays unattributed and the end-of-turn drain — which does not
+      // filter on sourceTurnId — delivers it.
+      const callback = vi.fn();
+      reg.setNotificationCallback(callback);
+      reg.register(makeEntry({ shellId: 'b' }));
+      reg.complete('b', 0, 2000);
+
+      expect(callback).toHaveBeenCalledTimes(1);
+      expect(callback.mock.calls[0]![2].sourceTurnId).toBeUndefined();
     });
 
     it('truncates long commands for display, summary, and model XML', () => {

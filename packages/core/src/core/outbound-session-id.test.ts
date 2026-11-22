@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { retryContext } from '../utils/retryContext.js';
 import {
   buildSessionAwareFetch,
   buildSessionIdHeaders,
@@ -150,6 +151,40 @@ describe('outbound session ID', () => {
 
     const headers = new Headers(runtimeFetch.mock.calls[0][1]?.headers);
     expect(headers.get(SESSION_ID_HEADER)).toBe('session-1');
+  });
+
+  it.each([
+    'https://api.openai.com/v1/chat/completions',
+    'https://routify-pub.alibaba-inc.com/protocol/openai/v1/chat/completions',
+  ])('rejects redirects only on single-attempt requests to %s', async (url) => {
+    const fetchStub = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(),
+    );
+    const fetch = buildSessionAwareFetch(fetchStub, config());
+    const init: RequestInit = { method: 'POST', redirect: 'follow' };
+
+    await retryContext.run(
+      {
+        attempt: 1,
+        retryTotalDelayMs: 0,
+        requestSetupMs: 0,
+        singleAttempt: true,
+      },
+      () => fetch(url, init),
+    );
+    await fetch(url, init);
+
+    expect(fetchStub).toHaveBeenNthCalledWith(
+      1,
+      url,
+      expect.objectContaining({ method: 'POST', redirect: 'error' }),
+    );
+    expect(fetchStub).toHaveBeenNthCalledWith(
+      2,
+      url,
+      expect.objectContaining({ method: 'POST', redirect: 'follow' }),
+    );
   });
 
   it('falls back to globalThis.fetch when no runtime fetch exists', async () => {

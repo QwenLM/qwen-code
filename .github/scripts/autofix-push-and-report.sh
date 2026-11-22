@@ -679,7 +679,7 @@ if [[ "${OUTCOME}" == "fixed" ]]; then
     echo "---"
     echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
-    echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+    echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
     # Regression accounting (af-157). Two distinct facts, both keyed to the
     # eval marker's window so the consecutive-failure walk reads them with
@@ -742,7 +742,7 @@ else
     echo "---"
     echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`${CLI_DISPLAY}"
     echo
-    echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+    echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->"
     echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
     # No autofix-push marker: a no-op round pushed nothing that could
     # regress. The regression it OBSERVED still has to be recorded here.
@@ -798,9 +798,9 @@ for attempt in 1 2 3; do
         # no number makes the NEXT round reuse it (the brake's
         # regression-round walk then charges two rounds as one).
         if [[ -n "${PUSHED_HEAD:-}" ]]; then
-          echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+          echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->"
         else
-          echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+          echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} run=${GITHUB_RUN_ID} -->"
         fi
         if [[ -n "${PUSHED_HEAD:-}" ]]; then
           echo "<!-- autofix-push round=${NEXT_ROUND} head=${PUSHED_HEAD} pre=${PUSH_PRE} key=${WINDOW:-none} -->"
@@ -838,7 +838,7 @@ if [[ "${OUTCOME}" == "fixed" && "${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}" ]] 
       [.[] | select((.user.login // "") == $ab)
            | select((.body // "") | contains("<!-- autofix-eval "))
            | select(
-               ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
+               ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))?(?: run=[^ ]+)? -->")) ] | map(.[0] // "none")) as $wins
                | ($wins | length) > 0 and (($wins | last) == $win))]
       | sort_by(.created_at) | .[]
       | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"

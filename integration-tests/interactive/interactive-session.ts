@@ -84,8 +84,15 @@ export interface InteractiveSessionOptions {
   args?: string[];
   /** Spawn this instead of the built CLI bundle (drives stub processes in tests). */
   command?: { bin: string; args: string[] };
-  /** Replace inherited environment for deterministic, credential-free fixtures. */
+  /**
+   * Replace inherited environment for deterministic, credential-free
+   * fixtures. The two agent-loop switches are still forwarded from the parent
+   * so the nightly loop legs reach the child; a test pins its own arm by
+   * setting them in `env`, which overrides the forwarded values.
+   */
   inheritEnv?: boolean;
+  /** Preserve raw startup evidence when no session can be returned. */
+  onStartupFailure?: (output: string) => void;
 }
 
 export class InteractiveSession {
@@ -145,6 +152,18 @@ export class InteractiveSession {
 
     const baseEnv = options?.inheritEnv === false ? {} : { ...process.env };
     delete baseEnv['NO_COLOR'];
+    // The nightly loop arms export these two switches. Forward just them into
+    // the isolated env so the shared-loop/kernel legs reach the suites that
+    // keep the operator environment out (inheritEnv: false); a test's own
+    // options.env still overrides them below.
+    if (options?.inheritEnv === false) {
+      for (const key of [
+        'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+        'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+      ]) {
+        if (process.env[key] !== undefined) baseEnv[key] = process.env[key];
+      }
+    }
     // The renderer matrix pins QWEN_TUI_RENDERER last so a test's own env
     // cannot silently switch the renderer mid-matrix.
     const env = {
@@ -212,9 +231,13 @@ export class InteractiveSession {
       // start() must not orphan the child, pty, and terminal it refuses to
       // hand out.
       try {
-        await session.close();
+        try {
+          options?.onStartupFailure?.(session.output());
+        } finally {
+          await session.close();
+        }
       } catch {
-        // Cleanup must not mask the startup failure.
+        // Evidence capture and cleanup must not mask the startup failure.
       }
       throw err;
     }

@@ -10,6 +10,7 @@ import type {
   QuickJSRuntime,
   QuickJSWASMModule,
 } from 'quickjs-emscripten-core';
+import { MAX_STATE_BYTES } from './runtime-contract.js';
 import type { InputValues, UiEvent, UiPatch } from './runtime-contract.js';
 
 const MAX_BATCH_SIZE = 16_000;
@@ -24,10 +25,22 @@ const BRIDGE = `(() => {
   const stringify = JSON.stringify;
   const create = Object.create;
   const freeze = Object.freeze;
+  const objectPrototype = Object.prototype;
+  const getPrototypeOf = Object.getPrototypeOf;
+  const setPrototypeOf = Object.setPrototypeOf;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const ownKeys = Reflect.ownKeys;
+  const isArray = Array.isArray;
+  const isFinite = Number.isFinite;
+  const WeakMapType = WeakMap;
+  const mapGet = WeakMap.prototype.get;
+  const mapSet = WeakMap.prototype.set;
   const apply = Reflect.apply;
   const charCodeAt = String.prototype.charCodeAt;
   const hasOwn = Object.prototype.hasOwnProperty;
   const ErrorType = Error;
+  const TypeErrorType = TypeError;
+  const RangeErrorType = RangeError;
   const then = Promise.prototype.then;
   const resolve = Promise.resolve;
   const PromiseType = Promise;
@@ -38,6 +51,8 @@ const BRIDGE = `(() => {
   let outputBytes = 2;
   let count = 0;
   let failed = false;
+  let state = 'null';
+  let stateSet = false;
   function fail() {
     failed = true;
     throw new ErrorType('Invalid UI operation or output limit exceeded.');
@@ -103,6 +118,49 @@ const BRIDGE = `(() => {
     if (inputs[id]) inputs[id].value = value;
     else inputs[id] = {value: value, checked: false};
   };
+  function stateCopy(value, seen) {
+    if (value === null || typeof value === 'string' ||
+        typeof value === 'boolean' || isFinite(value)) return value;
+    if (typeof value !== 'object') throw new TypeErrorType(stateValueError);
+    const previous = apply(mapGet, seen, [value]);
+    if (previous) return previous;
+
+    const array = isArray(value);
+    const proto = getPrototypeOf(value);
+    if (!array && proto !== objectPrototype && proto !== null)
+      throw new TypeErrorType(stateValueError);
+    const names = ownKeys(value);
+    const length = array ? getOwnPropertyDescriptor(value, 'length').value : names.length;
+    if (array && names.length !== length + 1)
+      throw new TypeErrorType(stateValueError);
+
+    // Read only data properties and give the copy no inherited toJSON hooks.
+    const copy = array ? setPrototypeOf([], null) : create(null);
+    apply(mapSet, seen, [value, copy]);
+    for (let i = 0; i < length; i++) {
+      const key = array ? i : names[i];
+      const field = getOwnPropertyDescriptor(value, key);
+      if (typeof key === 'symbol' || !field?.enumerable ||
+          !apply(hasOwn, field, ['value'])) throw new TypeErrorType(stateValueError);
+      copy[key] = stateCopy(field.value, seen);
+    }
+    return copy;
+  }
+  const stateValueError = 'ui.state.set needs a JSON value.';
+  const uiState = create(null);
+  uiState.get = function() {
+    if (failed) fail();
+    return parse(state);
+  };
+  uiState.set = function(value) {
+    if (failed) fail();
+    const json = stringify(stateCopy(value, new WeakMapType()));
+    if (byteLength(json) > ${MAX_STATE_BYTES})
+      throw new RangeErrorType('ui.state.set value exceeds 16 KiB.');
+    state = json;
+    stateSet = true;
+  };
+  ui.state = freeze(uiState);
   Object.defineProperty(globalThis, 'ui', {value: freeze(ui)});
   return function(command, payload) {
     if (failed) fail();
@@ -112,6 +170,9 @@ const BRIDGE = `(() => {
       for (const id in parsed) {
         if (apply(hasOwn, parsed, [id])) inputs[id] = parsed[id];
       }
+    } else if (command === 'state') {
+      parse(payload);
+      state = payload;
     } else if (command === 'event') {
       const event = parse(payload);
       const handler = handlers[event.id + ':' + event.type];
@@ -124,14 +185,91 @@ const BRIDGE = `(() => {
       }
       return false;
     } else {
-      const result = output + ']';
+      const result = '{"patches":' + output + ']' +
+        (stateSet ? ',"state":' + stringify(state) : '') + '}';
       output = '[';
       outputBytes = 2;
       count = 0;
+      stateSet = false;
       return result;
     }
   };
 })()`;
+
+// Reads a native error's own data properties without invoking guest getters or
+// toString hooks; anything else describes as ''. Evaluated before generated
+// code runs, so later changes to globals cannot reach these references.
+const DESCRIBE = `(() => {
+  'use strict';
+  const getPrototypeOf = Object.getPrototypeOf;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const natives = [Error.prototype, EvalError.prototype, RangeError.prototype,
+    ReferenceError.prototype, SyntaxError.prototype, TypeError.prototype,
+    URIError.prototype];
+  function isNative(prototype) {
+    for (let i = 0; i < natives.length; i++) if (natives[i] === prototype) return true;
+    return false;
+  }
+  function data(object, key) {
+    let current = object;
+    for (let depth = 0; current !== null && depth < 8; depth++) {
+      const descriptor = getOwnPropertyDescriptor(current, key);
+      if (descriptor) return typeof descriptor.value === 'string' ? descriptor.value : '';
+      if (isNative(current)) return '';
+      current = getPrototypeOf(current);
+    }
+    return '';
+  }
+  return function (error) {
+    if (error === null || typeof error !== 'object') return '';
+    let current = getPrototypeOf(error);
+    let native = false;
+    for (let depth = 0; current !== null && depth < 8; depth++) {
+      if (isNative(current)) { native = true; break; }
+      current = getPrototypeOf(current);
+    }
+    if (!native) return '';
+    const line = getOwnPropertyDescriptor(error, 'lineNumber');
+    return data(error, 'name').slice(0, 40) + '\\n' +
+      data(error, 'message').slice(0, 300) + '\\n' +
+      data(error, 'stack').slice(0, 300) + '\\n' +
+      (line && typeof line.value === 'number' ? String(line.value) : '');
+  };
+})()`;
+
+const RUNTIME_LIMIT =
+  'Generated JavaScript failed or exceeded a runtime limit.';
+const SOURCE_NAME = 'generated-ui.js';
+const SCRIPT_ERRORS = new Set([
+  'Error',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+]);
+
+/**
+ * Formats an error description from DESCRIBE. Only ordinary script errors are
+ * named; QuickJS InternalError (stack or memory exhaustion) and thrown
+ * non-errors keep the generic runtime-limit message.
+ */
+export function formatScriptError(description: string): string | undefined {
+  const [name = '', message = '', stack = '', line = ''] =
+    description.split('\n');
+  if (!SCRIPT_ERRORS.has(name)) return undefined;
+  const location = /generated-ui\.js:(\d+)(?::(\d+))?/.exec(stack);
+  const lineNumber = location?.[1] ?? (/^\d+$/.test(line) ? line : undefined);
+  const where = lineNumber
+    ? ` (line ${lineNumber}${location?.[2] ? `, column ${location[2]}` : ''})`
+    : '';
+  let detail = message.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\s]+/gu, ' ').trim();
+  if (detail.length > 160) detail = `${detail.slice(0, 159)}…`;
+  detail = detail.replace(/[.。]+$/u, '');
+  const label = name === 'Error' ? detail || name : `${name}: ${detail}`;
+  return `Script error: ${label.replace(/: $/, '')}${where}.`;
+}
 
 function serializeInputs(inputs: InputValues): string {
   if (
@@ -162,10 +300,27 @@ function serializeInputs(inputs: InputValues): string {
   return json;
 }
 
+function serializeState(state: string): string {
+  if (
+    typeof state !== 'string' ||
+    new TextEncoder().encode(state).length > MAX_STATE_BYTES
+  )
+    throw new Error('Invalid saved view state.');
+  JSON.parse(state);
+  return state;
+}
+
+export interface RoundResult {
+  patches: UiPatch[];
+  /** JSON text of the state the round set, when it called ui.state.set. */
+  state?: string;
+}
+
 export class UiRuntime {
   private readonly runtime: QuickJSRuntime;
   private readonly vm: QuickJSContext;
   private bridge?: QuickJSHandle;
+  private describer?: QuickJSHandle;
   private deadline = Infinity;
   private interrupted = false;
   private initialized = false;
@@ -180,10 +335,15 @@ export class UiRuntime {
       return this.interrupted;
     });
     this.vm = this.runtime.newContext();
+    this.describer = this.take(this.vm.evalCode(DESCRIBE, 'ui-describe.js'));
     this.bridge = this.take(this.vm.evalCode(BRIDGE, 'ui-bridge.js'));
   }
 
-  initialize(javascript: string, inputs: InputValues): UiPatch[] {
+  initialize(
+    javascript: string,
+    inputs: InputValues,
+    state: string | null = null,
+  ): RoundResult {
     return this.round(() => {
       if (this.initialized)
         throw new Error('UI runtime is already initialized.');
@@ -196,8 +356,9 @@ export class UiRuntime {
         throw new Error('Generated JavaScript source limit exceeded.');
       }
       this.call('inputs', serializeInputs(inputs)).dispose();
+      if (state !== null) this.call('state', serializeState(state)).dispose();
       this.take(
-        this.vm.evalCode(javascript, 'generated-ui.js', { type: 'global' }),
+        this.vm.evalCode(javascript, SOURCE_NAME, { type: 'global' }),
       ).dispose();
     });
   }
@@ -205,9 +366,9 @@ export class UiRuntime {
   dispatch(
     event: UiEvent,
     inputs: InputValues,
-  ): { patches: UiPatch[]; handled: boolean } {
+  ): RoundResult & { handled: boolean } {
     let handled = false;
-    const patches = this.round(() => {
+    const outcome = this.round(() => {
       if (!this.initialized) throw new Error('UI runtime is not initialized.');
       if (
         !event ||
@@ -227,25 +388,53 @@ export class UiRuntime {
         result.dispose();
       }
     });
-    return { patches, handled };
+    return { ...outcome, handled };
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.bridge?.dispose();
+    this.describer?.dispose();
     this.vm.dispose();
     this.runtime.dispose();
   }
 
   private take(result: ReturnType<QuickJSContext['evalCode']>): QuickJSHandle {
     if (result.error) {
+      const message = this.describe(result.error) ?? RUNTIME_LIMIT;
       result.error.dispose();
-      throw new Error(
-        'Generated JavaScript failed or exceeded a runtime limit.',
-      );
+      throw new Error(message);
     }
     return result.value;
+  }
+
+  private describe(error: QuickJSHandle): string | undefined {
+    if (!this.describer || this.interrupted) return undefined;
+    // Describing must not extend a round past its time budget.
+    const deadline = this.deadline;
+    this.deadline = Math.min(deadline, performance.now() + 50);
+    try {
+      const result = this.vm.callFunction(
+        this.describer,
+        this.vm.undefined,
+        error,
+      );
+      if (result.error) {
+        result.error.dispose();
+        return undefined;
+      }
+      try {
+        return formatScriptError(this.vm.getString(result.value));
+      } finally {
+        result.value.dispose();
+      }
+    } catch {
+      return undefined;
+    } finally {
+      this.interrupted = false;
+      this.deadline = deadline;
+    }
   }
 
   private call(command: string, payload = ''): QuickJSHandle {
@@ -266,7 +455,7 @@ export class UiRuntime {
     }
   }
 
-  private round(execute: () => void): UiPatch[] {
+  private round(execute: () => void): RoundResult {
     if (this.disposed) throw new Error('UI runtime is stopped.');
     this.deadline = performance.now() + 250;
     this.interrupted = false;
@@ -291,7 +480,7 @@ export class UiRuntime {
       if (this.interrupted || performance.now() >= this.deadline) {
         throw new Error('Generated JavaScript execution time limit exceeded.');
       }
-      return JSON.parse(json) as UiPatch[];
+      return JSON.parse(json) as RoundResult;
     } catch (error) {
       const timedOut = this.interrupted || performance.now() >= this.deadline;
       try {

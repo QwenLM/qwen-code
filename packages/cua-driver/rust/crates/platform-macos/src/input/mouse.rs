@@ -12,7 +12,7 @@
 
 use core_graphics::{
     event::{CGEvent, CGEventFlags, CGEventType, CGMouseButton},
-    event_source::{CGEventSource, CGEventSourceStateID},
+    event_source::CGEventSource,
     geometry::CGPoint,
 };
 use foreign_types::ForeignType;
@@ -140,7 +140,7 @@ fn click_at_xy_desktop_inner(
 ) -> anyhow::Result<()> {
     use core_graphics::display::CGDisplay;
     use core_graphics::event::CGEventTapLocation;
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let prior = if preserve_cursor {
         Some(
@@ -362,7 +362,7 @@ fn click_at_xy_inner(
 ) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let point = CGPoint::new(x, y);
     let flags = parse_modifier_flags(modifiers);
@@ -503,7 +503,7 @@ pub fn click_at_xy_chromium(
 ) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let target = CGPoint::new(screen_x, screen_y);
     let off_screen = CGPoint::new(-1.0, -1.0);
@@ -691,7 +691,7 @@ where
     use core_graphics::event::CGEventTapLocation;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let flags = parse_modifier_flags(modifiers);
 
@@ -851,7 +851,7 @@ where
     use core_graphics::display::CGDisplay;
     use core_graphics::event::CGEventTapLocation;
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let flags = parse_modifier_flags(modifiers);
     let (cg_button, down_type, dragged_type, up_type) = match button {
@@ -1030,7 +1030,7 @@ fn right_click_at_xy_inner(
         _ => (CGEventType::RightMouseDown, CGEventType::RightMouseUp, 1),
     };
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     let point = CGPoint::new(x, y);
     let flags = parse_modifier_flags(modifiers);
@@ -1277,7 +1277,7 @@ pub fn scroll_wheel_at_xy(
     // gesture. Background windows can retain a stale hit-test location; a
     // nested overflow scroller then receives the wheel nowhere even though
     // the event is successfully posted to the target pid.
-    let primer_source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+    let primer_source = crate::input::new_event_source()
         .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
     post_mouse_moved_primer(
         pid,
@@ -1296,7 +1296,7 @@ pub fn scroll_wheel_at_xy(
 
     for _ in 0..ticks.max(1) {
         // Fresh source per event, matching the click primitives.
-        let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+        let source = crate::input::new_event_source()
             .map_err(|_| anyhow::anyhow!("CGEventSource::new failed"))?;
         // wheel_count = 2 → both axes carried (vertical = wheel1/axis-1,
         // horizontal = wheel2/axis-2). Convert the driver's pixel-tuned step

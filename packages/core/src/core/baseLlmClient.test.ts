@@ -24,10 +24,13 @@ import type { ContentGenerator } from './contentGenerator.js';
 import type { Config } from '../config/config.js';
 import { AuthType } from './contentGenerator.js';
 import { reportError } from '../utils/errorReporting.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { getFunctionCalls } from '../utils/generateContentResponseUtilities.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { ModelsConfig } from '../models/modelsConfig.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
+import { DEFAULT_OPENAI_BASE_URL } from './openaiContentGenerator/constants.js';
 import {
   content,
   fnCall,
@@ -65,10 +68,17 @@ vi.mock('./contentGenerator.js', async (importOriginal) => {
 });
 
 const mockBuildAgentContentGeneratorConfig = vi.fn();
-vi.mock('../models/content-generator-config.js', () => ({
-  buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
-    mockBuildAgentContentGeneratorConfig(...args),
-}));
+vi.mock('../models/content-generator-config.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../models/content-generator-config.js')
+    >();
+  return {
+    ...actual,
+    buildAgentContentGeneratorConfig: (...args: unknown[]): unknown =>
+      mockBuildAgentContentGeneratorConfig(...args),
+  };
+});
 
 const mockGenerateContent = vi.fn();
 const mockGenerateContentStream = vi.fn();
@@ -270,6 +280,22 @@ describe('BaseLlmClient', () => {
 
       expect(retryWithBackoff).toHaveBeenCalledTimes(1);
       expectRetriedWith({ maxAttempts: 3 });
+    });
+
+    it('keeps explicitly bounded JSON requests out of persistent retries', async () => {
+      vi.mocked(isUnattendedMode).mockReturnValue(true);
+      try {
+        await generateJsonWith(
+          { color: 'cyan' },
+          { maxAttempts: 1, boundedRetries: true },
+        );
+        expectRetriedWith({ maxAttempts: 1, persistentMode: false });
+        vi.mocked(retryWithBackoff).mockClear();
+        await generateJsonWith({ color: 'blue' });
+        expectRetriedWith({ persistentMode: true });
+      } finally {
+        vi.mocked(isUnattendedMode).mockReturnValue(false);
+      }
     });
 
     it('should call retryWithBackoff with default maxAttempts when not provided', async () => {
@@ -811,6 +837,241 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('returns the main generator for a provider-qualified selector naming the main model', async () => {
+      const mainBaseUrl = 'https://main.invalid/v1';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'main-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mainBaseUrl,
+      });
+      registerOnly(AuthType.USE_OPENAI, 'main-model', { id: 'main-model' });
+
+      const resolved = await resolve('openai:main-model');
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.model).toBe('main-model');
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    it('returns the main generator for an endpoint-pinned selector matching the main base URL', async () => {
+      const mainBaseUrl = 'https://main.invalid/v1';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'main-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: mainBaseUrl,
+      });
+      registerOnly(
+        AuthType.USE_OPENAI,
+        'main-model',
+        { id: 'main-model' },
+        mainBaseUrl,
+      );
+
+      const resolved = await resolve(`openai:main-model\0${mainBaseUrl}`);
+
+      expect(resolved.contentGenerator).toBe(mockContentGenerator);
+      expect(resolved.model).toBe('main-model');
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
+    describe('isolated endpoint resolution', () => {
+      beforeEach(async () => {
+        const actual = await vi.importActual<
+          typeof import('../models/content-generator-config.js')
+        >('../models/content-generator-config.js');
+        mockBuildAgentContentGeneratorConfig.mockImplementation(
+          actual.buildAgentContentGeneratorConfig,
+        );
+        for (const key of [
+          'OPENAI_BASE_URL',
+          'GOOGLE_GENAI_USE_ENTERPRISE',
+          'GOOGLE_GENAI_USE_VERTEXAI',
+        ]) {
+          vi.stubEnv(key, undefined);
+        }
+      });
+
+      afterEach(() => vi.unstubAllEnvs());
+
+      it.each([
+        ['MOD_PINNED_KEY', 'pinned-key'],
+        ['MOD_MAIN_KEY', 'main-key'],
+      ])(
+        'uses the pinned registry row when it shares the active URL (%s)',
+        async (envKey, apiKey) => {
+          const authType = AuthType.USE_OPENAI;
+          const model = 'main-model';
+          const baseUrl = DEFAULT_OPENAI_BASE_URL;
+          const models = new ModelsConfig({
+            modelProvidersConfig: {
+              openai: [
+                { id: model, envKey: 'MOD_MAIN_KEY' },
+                { id: model, baseUrl, envKey },
+              ],
+            },
+          });
+          vi.stubEnv(envKey, apiKey);
+          crossProviderConfig.getModelsConfig.mockReturnValue(models);
+          crossProviderConfig.getContentGeneratorConfig.mockReturnValue({
+            authType,
+            model,
+            baseUrl,
+            reasoningRouteBaseUrl: null,
+            apiKey: 'main-key',
+            apiKeyEnvKey: 'MOD_MAIN_KEY',
+            customHeaders: { authorization: 'main-header' },
+          });
+          const selector = `openai:${model}\0${baseUrl}`;
+
+          const ordinary = await perModelClient().resolveForModel(selector);
+          expect(ordinary.contentGenerator).toBe(mockContentGenerator);
+
+          const isolated = await perModelClient().resolveForModel(selector, {
+            isolatedRoute: true,
+          });
+          expect(isolated.contentGenerator).toBe(fastContentGenerator);
+          expect(isolated.contentGeneratorConfig).toMatchObject({
+            apiKey,
+            apiKeyEnvKey: envKey,
+            reasoningRouteBaseUrl: baseUrl,
+          });
+          expect(isolated.contentGeneratorConfig.customHeaders).toBeUndefined();
+
+          crossProviderConfig.getContentGeneratorConfig.mockReturnValue(
+            isolated.contentGeneratorConfig,
+          );
+          const alreadyActive = await perModelClient().resolveForModel(
+            selector,
+            {
+              isolatedRoute: true,
+            },
+          );
+          expect(alreadyActive.contentGenerator).toBe(mockContentGenerator);
+          expect(mockCreateContentGenerator).toHaveBeenCalledOnce();
+        },
+      );
+
+      it.each([
+        [AuthType.USE_OPENAI, 'OPENAI_API_KEY', DEFAULT_OPENAI_BASE_URL],
+        [AuthType.USE_OPENAI_RESPONSES, 'OPENAI_API_KEY', ''],
+        [AuthType.USE_GEMINI, 'GEMINI_API_KEY', ''],
+        [AuthType.USE_VERTEX_AI, 'GOOGLE_API_KEY', ''],
+      ])(
+        'shares the default credential on the native %s endpoint',
+        async (authType, envKey, baseUrl) => {
+          const apiKey = 'native-key';
+          vi.stubEnv(envKey, apiKey);
+          const primaryBaseUrl =
+            authType === AuthType.USE_OPENAI ? baseUrl : undefined;
+          const { config } = resolveModelConfig({
+            authType,
+            env: { [envKey]: apiKey },
+            cli: { model: 'main-model', baseUrl: primaryBaseUrl },
+          });
+          expect(config.baseUrl).toBe(primaryBaseUrl);
+          crossProviderConfig.getContentGeneratorConfig.mockReturnValue(config);
+          crossProviderConfig.getModelsConfig.mockReturnValue(
+            new ModelsConfig({
+              modelProvidersConfig: { [authType]: [{ id: fastModel }] },
+            }),
+          );
+
+          const resolved = await perModelClient().resolveForModel(
+            `${authType}:${fastModel}`,
+            { isolatedRoute: true },
+          );
+
+          expect(resolved.contentGeneratorConfig).toMatchObject({
+            authType,
+            model: fastModel,
+            apiKey,
+            baseUrl,
+          });
+        },
+      );
+
+      it('uses the target default key without inheriting settings from a different credential slot', async () => {
+        const apiKey = 'shared-key';
+        const primary = {
+          id: 'main-model',
+          envKey: 'MOD_MAIN_KEY',
+          baseUrl: DEFAULT_OPENAI_BASE_URL,
+          generationConfig: {
+            customHeaders: { authorization: 'primary-header' },
+            extra_body: { user: 'primary' },
+          },
+        };
+        vi.stubEnv('OPENAI_API_KEY', apiKey);
+        const { config } = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          env: { MOD_MAIN_KEY: apiKey, OPENAI_API_KEY: apiKey },
+          modelProvider: primary,
+        });
+        crossProviderConfig.getContentGeneratorConfig.mockReturnValue(config);
+        crossProviderConfig.getModelsConfig.mockReturnValue(
+          new ModelsConfig({
+            modelProvidersConfig: { openai: [primary, { id: fastModel }] },
+          }),
+        );
+
+        const { contentGeneratorConfig } =
+          await perModelClient().resolveForModel(`openai:${fastModel}`, {
+            isolatedRoute: true,
+          });
+
+        expect(contentGeneratorConfig.apiKey).toBe(apiKey);
+        expect(contentGeneratorConfig.apiKeyEnvKey).toBeUndefined();
+        expect(contentGeneratorConfig.customHeaders).toBeUndefined();
+        expect(contentGeneratorConfig.extra_body).toBeUndefined();
+      });
+
+      it.each([
+        [
+          AuthType.USE_OPENAI,
+          'OPENAI_API_KEY',
+          'OPENAI_BASE_URL',
+          'https://proxy.example/v1',
+        ],
+        [
+          AuthType.USE_GEMINI,
+          'GEMINI_API_KEY',
+          'GOOGLE_GENAI_USE_VERTEXAI',
+          'true',
+        ],
+        [
+          AuthType.USE_GEMINI,
+          'GEMINI_API_KEY',
+          'GOOGLE_GENAI_USE_ENTERPRISE',
+          'true',
+        ],
+      ])(
+        'does not move the primary %s key from an ambient route onto the native route',
+        async (authType, envKey, overrideKey, override) => {
+          const apiKey = 'ambient-key';
+          vi.stubEnv(envKey, apiKey);
+          vi.stubEnv(overrideKey, override);
+          const { config } = resolveModelConfig({
+            authType,
+            cli: { model: 'main-model' },
+            env: { [envKey]: apiKey, [overrideKey]: override },
+          });
+          crossProviderConfig.getContentGeneratorConfig.mockReturnValue(config);
+          crossProviderConfig.getModelsConfig.mockReturnValue(
+            new ModelsConfig({
+              modelProvidersConfig: { [authType]: [{ id: fastModel }] },
+            }),
+          );
+
+          await expect(
+            perModelClient().resolveForModel(`${authType}:${fastModel}`, {
+              isolatedRoute: true,
+            }),
+          ).rejects.toThrow('cannot use the primary model');
+          expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+        },
+      );
+    });
+
     it('returns the active runtime generator when model matches the runtime view', async () => {
       const runtimeContentGenerator = bareGenerator();
       crossProviderConfig.getContentGenerator = vi
@@ -1052,6 +1313,103 @@ describe('BaseLlmClient', () => {
       await c.resolveForModel(fastModel);
 
       expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses cached-only OAuth for isolated requests and never sends after setup is cancelled', async () => {
+      const oauthModel = 'coder-model';
+      vi.mocked(crossProviderConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'main-model',
+      });
+      registerOnly(AuthType.QWEN_OAUTH, oauthModel, {
+        id: oauthModel,
+        authType: AuthType.QWEN_OAUTH,
+      });
+      const c = perModelClient();
+      const selector = `qwen-oauth:${oauthModel}`;
+      await c.resolveForModel(selector);
+
+      let finishSetup!: (generator: ContentGenerator) => void;
+      const setup = new Promise<ContentGenerator>((resolve) => {
+        finishSetup = resolve;
+      });
+      mockCreateContentGenerator.mockReturnValueOnce(setup);
+      const controller = new AbortController();
+      const request = askHi(
+        {
+          model: selector,
+          isolatedRequest: true,
+          abortSignal: controller.signal,
+        },
+        c,
+      );
+      expect(mockCreateContentGenerator).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() =>
+        expect(mockCreateContentGenerator).toHaveBeenCalledTimes(2),
+      );
+      expect(mockCreateContentGenerator).toHaveBeenLastCalledWith(
+        expect.objectContaining({ apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN' }),
+        crossProviderConfig,
+        true,
+      );
+      controller.abort();
+      finishSetup(fastContentGenerator);
+
+      await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+      expect(fastGenerateContent).not.toHaveBeenCalled();
+      expect(mockGenerateContent).not.toHaveBeenCalled();
+    });
+
+    describe('isolated Vertex route credentials', () => {
+      const selector = 'vertex-ai:vertex-model';
+      const target = {
+        id: 'vertex-model',
+        authType: AuthType.USE_VERTEX_AI,
+        generationConfig: {},
+      };
+
+      beforeEach(async () => {
+        vi.stubEnv('GOOGLE_CLOUD_PROJECT', 'test-project');
+        vi.mocked(
+          crossProviderConfig.getContentGeneratorConfig,
+        ).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'main-model',
+          apiKey: 'primary-key',
+        });
+        registerOnly(target.authType, target.id, target);
+        const actual = await vi.importActual<
+          typeof import('../models/content-generator-config.js')
+        >('../models/content-generator-config.js');
+        mockBuildAgentContentGeneratorConfig.mockImplementation(
+          actual.buildAgentContentGeneratorConfig,
+        );
+      });
+
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('rejects an implicit primary key instead of switching to ADC', async () => {
+        vi.stubEnv('GOOGLE_API_KEY', 'primary-key');
+        await expect(
+          perModelClient().resolveForModel(selector, { isolatedRoute: true }),
+        ).rejects.toThrow('cannot use the primary model');
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it.each([undefined, 'target-key'])(
+        'allows an ADC route or its own implicit key (%s)',
+        async (apiKey) => {
+          vi.stubEnv('GOOGLE_API_KEY', apiKey);
+          await perModelClient().resolveForModel(selector, {
+            isolatedRoute: true,
+          });
+          expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+            expect.objectContaining({ isolatedRoute: true, apiKey }),
+            crossProviderConfig,
+            true,
+          );
+        },
+      );
     });
 
     it('clearPerModelGeneratorCache forces a rebuild on the next call', async () => {

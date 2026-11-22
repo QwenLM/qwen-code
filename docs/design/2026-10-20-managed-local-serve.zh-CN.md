@@ -174,11 +174,21 @@ runtime，后续调用可以重试。已有显式、相邻或已安装的 payloa
 应用凭据、数据或服务子进程之前。
 
 独立的受保护发行 workflow 从已存在的 CLI release tag 构建，检查 package 版本，
-并使用 Java 21 验证 Java SDK 和服务。服务 JAR 沿用 SDK 的 Central 签名发布约定，
-以独立 Maven 坐标 `com.alibaba:qwen-managed-agent-server:<cli-version>` 发布，
-同时提供源码和 Javadoc。辅助运维可执行 JAR 不附加到这次发布。完全相同的主 JAR
-和校验文件附加到 CLI GitHub Release，再复制到现有版本化 OSS 前缀，位于
-standalone archive 允许列表之外。可重现时间戳和校验和比较防止重试时用不同字节
+并使用 Java 21 验证 Java SDK 和服务。完整验证通过后，可执行服务 JAR 和校验文件
+附加到 CLI GitHub Release，再复制到现有版本化 OSS 前缀，位于 standalone archive
+允许列表之外。workflow 优先选择 `-exec.jar` 构建产物，对旧 tag 回退到主 JAR；
+公开的版本化 JAR 名称保持不变。workflow 将两个公开渠道的制品与暂存字节核对。runtime 分发不探测
+服务坐标在 Maven Central 上是否存在，不向 Central 发布或等待该发布完成。Central
+发布授权与制品同步状态不再阻塞安装器实际使用的渠道交付。分发需要 OSS 凭据和
+GitHub release 权限，无需加载 Central 发布凭据或 GPG 私钥。
+
+Java 编译与正常 Maven 依赖解析、完整 SDK/server 验证、测试 fork 隔离和现有
+`central-release` 构建 profile 保持不变。验证时跳过 GPG 签名；该 profile 在 Maven deploy 阶段之前不会
+执行发布。需要服务于 Maven 使用者时，仍可通过该 profile 独立签名发布
+`com.alibaba:qwen-managed-agent-server:<cli-version>`，包含源码和 Javadoc，
+排除辅助运维 JAR。该操作与 runtime 分发独立，分发 workflow 不依赖它。
+
+可重现时间戳和校验和比较防止重试时用不同字节
 替换已有版本。dry-run 只构建和验证，不发布。生产凭据与发布操作继续受现有
 `production-release` environment 保护。
 
@@ -246,7 +256,7 @@ CLI 的生命周期验收。十五项选择检查通过，包括 JAVA_HOME/PATH 
 本地验收分别记录，不代表当前 main 分支状态。上述结果属于拆分前试验；当前
 拆分 head 的验证和限制记录在 PR 测试报告中。
 
-首次下载路径使用真实 Java 21 服务与 Hosted Harness，通过十四项 built-bundle 场景：首次安装、离线重启、OSS 转 GitHub 回退、中断下载后重试，以及无效下载和选中 payload 拒绝。测试在精确生产 URL 处拦截 transport，提供本地构建的 JAR；公开生产产物尚未发布或验证。发布 profile 已在本地构建主可执行 JAR、源码与 Javadoc；Central 签名发布及受保护的 GitHub/OSS 上传仍需执行生产发行。
+首次下载路径使用真实 Java 21 服务与 Hosted Harness，通过十四项 built-bundle 场景：首次安装、离线重启、OSS 转 GitHub 回退、中断下载后重试，以及无效下载和选中 payload 拒绝。测试在精确生产 URL 处拦截 transport，提供本地构建的 JAR；公开生产产物尚未发布或验证。发布 profile 已在本地构建主可执行 JAR、源码与 Javadoc。runtime 分发改动仍需受保护的 GitHub/OSS 生产发行及空缓存首装验收；Central 签名发布独立进行。
 
 ## 未决问题
 

@@ -265,6 +265,7 @@ export type StandaloneSessionLookup =
   | StandaloneSessionCreating;
 
 export interface ListStandaloneSessionsOptions {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   cursor?: string;
   size?: number;
   archiveState?: SessionArchiveState;
@@ -300,6 +301,12 @@ export interface RestoredStandaloneSession extends BridgeRestoredSession {
 
 export interface StandaloneSessionServiceOptions {
   daemonLog?: Pick<DaemonLogger, 'warn'>;
+  /**
+   * Channel label for standalone transcript exports, resolved once per
+   * daemon at boot (same value as the workspace-session export route) so
+   * both export surfaces bucket identically.
+   */
+  exportChannel?: string;
   ensureRuntime(): Promise<WorkspaceRuntime>;
   assertRuntimeCurrent(runtime: WorkspaceRuntime): void;
   quarantineRuntime(runtime: WorkspaceRuntime): Promise<void>;
@@ -720,6 +727,7 @@ export class StandaloneSessionService {
         runtime.workspaceCwd,
         {
           conversationKind: 'standalone-top-level',
+          ...(options.sortBy !== undefined ? { sortBy: options.sortBy } : {}),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
           ...(options.size !== undefined ? { size: options.size } : {}),
           ...(options.archiveState !== undefined
@@ -938,6 +946,7 @@ export class StandaloneSessionService {
           format,
           archiveState: durable.location,
           runtimeBaseDir: runtime.sessionRuntimeBaseDir,
+          config: { getChannel: () => this.options.exportChannel },
         });
       });
     });

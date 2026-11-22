@@ -40,9 +40,11 @@ vi.mock('../agents/forkedAgent.js', async (importOriginal) => {
 });
 
 import {
+  _setWordSegmenterForTest,
   generatePromptSuggestion,
   getFilterReason,
   shouldFilterSuggestion,
+  SUGGESTION_PROMPT,
 } from './suggestionGenerator.js';
 
 const conversationHistory: Content[] = [
@@ -92,19 +94,24 @@ describe('generatePromptSuggestion', () => {
     sessionId = 'test-session',
     enableCacheSharing = true,
     signal = new AbortController().signal,
+    model,
+    history = conversationHistory,
   }: {
     fastModel?: string;
     sessionId?: string;
     enableCacheSharing?: boolean;
     signal?: AbortSignal;
+    model?: string;
+    history?: Content[];
   } = {}) {
     const config = {
       getFastModel: vi.fn(() => fastModel),
       getModel: vi.fn(() => 'main-model'),
       getSessionId: vi.fn(() => sessionId),
     } as unknown as Config;
-    return generatePromptSuggestion(config, conversationHistory, signal, {
+    return generatePromptSuggestion(config, history, signal, {
       enableCacheSharing,
+      model,
     });
   }
 
@@ -119,11 +126,14 @@ describe('generatePromptSuggestion', () => {
     );
   });
 
-  it('passes the fast model in cache mode when one is configured', async () => {
+  it('uses a compact side query when the fast model differs from the cached model', async () => {
     mockCacheFork();
+    mockBaseLlm();
     await suggest({ fastModel: 'openai:fast-model' });
 
-    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery).toHaveBeenCalledWith(
+      expect.anything(),
       expect.objectContaining({ model: 'openai:fast-model' }),
     );
   });
@@ -169,13 +179,351 @@ describe('generatePromptSuggestion', () => {
     expect(result.suggestion).toBe('from base llm');
   });
 
-  it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
+  it('keeps the cached fork when the fast model matches the cached model', async () => {
     mockCacheFork();
-    await suggest({ fastModel: 'different-fast-model' });
+    await suggest({ fastModel: 'main-model' });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ preserveTools: false }),
+      expect.objectContaining({ preserveTools: true, model: 'main-model' }),
     );
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('lets an explicit model override the fast model and use the same-model fork', async () => {
+    mockCacheFork();
+    await suggest({ fastModel: 'fast-model', model: 'main-model' });
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ model: 'main-model', preserveTools: true }),
+    );
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('uses the explicit different model without inheriting parent context', async () => {
+    const snapshot = {
+      ...cacheSafeParams(),
+      history: [{ role: 'user', parts: [{ text: 'parent-only history' }] }],
+      generationConfig: {
+        systemInstruction: 'parent-only system prompt',
+        tools: [{ functionDeclarations: [{ name: 'parent_tool' }] }],
+      },
+    };
+    mockGetCacheSafeParams.mockReturnValue(snapshot);
+    mockBaseLlm();
+    await suggest({ fastModel: 'fast-model', model: 'explicit-model' });
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    const request = mockRunSideQuery.mock.calls[0][1];
+    expect(request.model).toBe('explicit-model');
+    expect(request.maxAttempts).toBe(1);
+    expect(JSON.stringify(request)).not.toContain('parent-only');
+    expect(JSON.stringify(request)).not.toContain('parent_tool');
+    expect(snapshot.history[0].parts[0].text).toBe('parent-only history');
+  });
+
+  it('uses the current main model when a snapshot belongs to a previous model', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      ...cacheSafeParams(),
+      model: 'previous-main-model',
+    });
+    mockBaseLlm();
+    await suggest();
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery.mock.calls[0][1].model).toBe('main-model');
+  });
+
+  it('uses a compact side query when no cache snapshot exists', async () => {
+    mockGetCacheSafeParamsSessionId.mockReturnValue(undefined);
+    mockBaseLlm();
+    await suggest();
+
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+    expect(mockRunSideQuery.mock.calls[0][1].contents).toEqual([
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'User: fix this\n\nUser: anything else?\n\nAssistant: You could run tests.',
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
+    ]);
+  });
+
+  it.each(['English context ', '中文上下文'])(
+    'bounds long %s while retaining the latest request and answer ends',
+    async (padding) => {
+      mockBaseLlm();
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: 'Original: analyze only, do not edit.' }],
+        },
+        { role: 'model', parts: [{ text: 'Earlier answer.' }] },
+        ...Array.from(
+          { length: 10 },
+          (_, index): Content => ({
+            role: 'user',
+            parts: [
+              { text: `Earlier user ${index}: ${padding.repeat(1_000)}` },
+            ],
+          }),
+        ),
+        {
+          role: 'user',
+          parts: [
+            { text: `Latest request: ${padding.repeat(1_000)}No deployment.` },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              text: `Answer beginning: ${padding.repeat(2_000)}Final next step: inspect the report.`,
+            },
+          ],
+        },
+      ];
+      const before = structuredClone(history);
+      await suggest({ history, enableCacheSharing: false });
+
+      const request = mockRunSideQuery.mock.calls[0][1];
+      const context = request.contents[0].parts[0].text as string;
+      expect(context.length).toBeLessThanOrEqual(4_000);
+      expect(context).toContain('Latest request:');
+      expect(context).toContain('No deployment.');
+      expect(context).toContain('Answer beginning:');
+      expect(context).toContain('Final next step: inspect the report.');
+      expect(context).toContain('Earlier user 9:');
+      expect(context).not.toContain('Earlier answer.');
+      expect(context.indexOf('Earlier user 9:')).toBeLessThan(
+        context.indexOf('Latest request:'),
+      );
+      expect(context.indexOf('Latest request:')).toBeLessThan(
+        context.indexOf('Answer beginning:'),
+      );
+      expect(request.contents[1].parts[0].text).toBe(SUGGESTION_PROMPT);
+      expect(history).toEqual(before);
+    },
+  );
+
+  it('keeps a recent earlier user constraint when space is available', async () => {
+    mockBaseLlm();
+    const history: Content[] = [
+      {
+        role: 'user',
+        parts: [{ text: 'Only analyze the failure. Do not edit or deploy.' }],
+      },
+      { role: 'model', parts: [{ text: 'I will inspect the data.' }] },
+      { role: 'user', parts: [{ text: 'Focus on the slow query.' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'The query plan identifies the issue.' }],
+      },
+    ];
+    await suggest({ history, enableCacheSharing: false });
+
+    expect(
+      mockRunSideQuery.mock.calls[0][1].contents[0].parts[0].text,
+    ).toContain('Do not edit or deploy.');
+  });
+
+  it.each(['before', 'after'] as const)(
+    'retains the latest request with a tool response %s its text',
+    async (position) => {
+      mockBaseLlm();
+      const response = {
+        functionResponse: {
+          name: 'repaired_tool',
+          response: { output: 'same-entry tool payload' },
+        },
+      };
+      const text = { text: 'Latest request: inspect only; do not deploy.' };
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'Old request' }] },
+        { role: 'model', parts: [{ text: 'Old answer' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'old_tool',
+                response: { error: 'old-turn evidence' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: position === 'before' ? [response, text] : [text, response],
+        },
+        { role: 'model', parts: [{ text: 'I will inspect the report.' }] },
+      ];
+      const before = structuredClone(history);
+      await suggest({ history, enableCacheSharing: false });
+
+      const context = mockRunSideQuery.mock.calls[0][1].contents[0].parts[0]
+        .text as string;
+      expect(context).toContain(`User: ${text.text}`);
+      expect(context).not.toMatch(/old_tool|old-turn evidence/);
+      expect(context).not.toContain('same-entry tool payload');
+      expect(history).toEqual(before);
+    },
+  );
+
+  it('summarizes only current-turn tool results without forwarding protocol blocks or large payloads', async () => {
+    mockBaseLlm();
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Old request' }] },
+      { role: 'model', parts: [{ text: 'Old answer' }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'old_tool',
+              response: { error: 'stale error' },
+            },
+          },
+        ],
+      },
+      { role: 'user', parts: [{ text: 'Diagnose without editing.' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: 'run_shell_command',
+              args: { command: 'private command arguments' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: {
+                output: `raw body ${'x'.repeat(50_000)}important output tail`,
+              },
+            },
+          },
+          {
+            functionResponse: {
+              name: 'run_shell_command',
+              response: {
+                error: `details ${'y'.repeat(50_000)}permission denied`,
+              },
+            },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [{ text: 'The command failed; assess the permission.' }],
+      },
+    ];
+    await suggest({ history, enableCacheSharing: false });
+
+    const request = mockRunSideQuery.mock.calls[0][1];
+    const context = request.contents[0].parts[0].text as string;
+    expect(context).toContain('Diagnose without editing.');
+    expect(context).toContain('Tool read_file: completed');
+    expect(context).toContain('important output tail');
+    expect(context).toContain('Tool run_shell_command: error');
+    expect(context).toContain('permission denied');
+    expect(context).not.toContain('old_tool');
+    expect(context).not.toContain('private command arguments');
+    expect(context).not.toContain('x'.repeat(500));
+    expect(context.indexOf('Tool read_file:')).toBeLessThan(
+      context.indexOf('Tool run_shell_command:'),
+    );
+    expect(
+      request.contents.every((entry: Content) =>
+        entry.parts?.every((part) => typeof part.text === 'string'),
+      ),
+    ).toBe(true);
+  });
+
+  it('excludes thinking, reminders, memory metadata and image payloads', async () => {
+    mockBaseLlm();
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'Original request' }] },
+      { role: 'model', parts: [{ text: 'Hidden thinking', thought: true }] },
+      {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>Internal memory</system-reminder>Latest real request',
+          },
+          {
+            inlineData: { mimeType: 'image/png', data: 'private image bytes' },
+          },
+          { fileData: { mimeType: 'text/plain', fileUri: 'private file URI' } },
+          {
+            text: 'Internal memory catalog',
+            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+          },
+        ],
+      },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Secret reasoning', thought: true },
+          { text: 'Visible final answer' },
+        ],
+      },
+    ];
+    await suggest({ history, enableCacheSharing: false });
+
+    const context = mockRunSideQuery.mock.calls[0][1].contents[0].parts[0]
+      .text as string;
+    expect(context).toContain('Original request');
+    expect(context).toContain('Latest real request');
+    expect(context).toContain('Visible final answer');
+    expect(context).not.toMatch(
+      /Hidden thinking|Secret reasoning|Internal memory|private|system-reminder/,
+    );
+  });
+
+  it('skips an empty visible context without making a model request', async () => {
+    await suggest({
+      enableCacheSharing: false,
+      history: [
+        { role: 'model', parts: [{ text: 'thinking 1', thought: true }] },
+        { role: 'model', parts: [{ text: 'thinking 2', thought: true }] },
+      ],
+    });
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+  });
+
+  it('skips an already cancelled request', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await suggest({ signal: controller.signal });
+
+    expect(result).toEqual({ suggestion: null });
+    expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
+    expect(mockRunSideQuery).not.toHaveBeenCalled();
+    expect(mockRunForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('discards a late suggestion after cancellation', async () => {
+    const controller = new AbortController();
+    mockRunSideQuery.mockImplementation(async () => {
+      controller.abort();
+      return { text: 'run tests' };
+    });
+    const result = await suggest({
+      signal: controller.signal,
+      enableCacheSharing: false,
+    });
+
+    expect(result).toEqual({ suggestion: null });
   });
 });
 
@@ -219,6 +567,125 @@ describe('shouldFilterSuggestion', () => {
 
   it('allows slash commands as single word', () => {
     expect(shouldFilterSuggestion('/commit')).toBe(false);
+  });
+
+  it('uses character bounds for CJK suggestions', () => {
+    expect(shouldFilterSuggestion('运行测试')).toBe(false);
+    expect(shouldFilterSuggestion('テストを実行')).toBe(false);
+    expect(shouldFilterSuggestion('테스트실행')).toBe(false);
+    expect(getFilterReason('好')).toBe('too_few_words');
+    expect(getFilterReason('运'.repeat(31))).toBe('too_many_words');
+  });
+
+  it('counts words with a segmenter for Thai, Lao, Khmer and Myanmar suggestions', () => {
+    // These scripts are written without spaces between words, so a whole
+    // suggestion is one whitespace-delimited "word".
+    expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull(); // Thai
+    expect(getFilterReason('แก้บั๊กนี้ให้หน่อย')).toBeNull(); // Thai
+    expect(getFilterReason('ແລ່ນການທົດສອບ')).toBeNull(); // Lao
+    expect(getFilterReason('ដំណើរការតេស្ត')).toBeNull(); // Khmer
+    expect(getFilterReason('စမ်းသပ်မှုလုပ်ပါ')).toBeNull(); // Myanmar
+    expect(getFilterReason('ใช่')).toBeNull(); // "yes"
+    // Long but within 12 words: the CJK 30-char cap would reject these.
+    expect(getFilterReason('ช่วยรันเทสต์ทั้งหมดอีกครั้งหนึ่ง')).toBeNull();
+    expect(
+      getFilterReason('ช่วยรันเทสต์ทั้งหมด แล้ว commit ให้หน่อย'),
+    ).toBeNull();
+    expect(getFilterReason('ก')).toBe('too_few_words');
+    expect(
+      getFilterReason(
+        'ช่วยรันเทสต์ทั้งหมดอีกครั้งแล้วแก้บั๊กที่เจอและอธิบายสาเหตุให้ละเอียด',
+      ),
+    ).toBe('too_many_words');
+    // Cases where the word count and the 60-character fallback disagree, so
+    // they fail if the segmenter is silently disabled.
+    // 37 characters, 13 words: over the 12-word window.
+    expect(getFilterReason('กดปุ่มนี้แล้วรอสักครู่นะครับผมจะไปเอง')).toBe(
+      'too_many_words',
+    );
+    // 76 characters, 11 words: over the fallback cap, within the window.
+    expect(
+      getFilterReason(
+        'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี',
+      ),
+    ).toBeNull();
+  });
+
+  // Thai mixed with paths or commands: few whitespace words, but many
+  // segments and over the 60-character fallback.
+  const MIXED_WITH_SPACES = [
+    'รันเทสต์ใน packages/core/src/followup และ packages/cli/src/ui ให้หน่อย',
+    'รัน npx vitest run src/followupแล้วรายงานผลให้ฟังหน่อยนะครับ',
+  ];
+
+  it('keeps the slash command exemption for these scripts', () => {
+    // 61 characters and 15 segments: over both bounds without the exemption.
+    const slash =
+      '/อธิบายโค้ดส่วนนี้ให้ละเอียดหน่อยนะครับผมอยากเข้าใจมันมากขึ้น';
+    expect(getFilterReason(slash)).toBeNull();
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason(slash)).toBeNull();
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('keeps whitespace bounds for these scripts when the suggestion has spaces', () => {
+    for (const suggestion of MIXED_WITH_SPACES) {
+      expect(getFilterReason(suggestion)).toBeNull();
+    }
+    _setWordSegmenterForTest(null);
+    try {
+      for (const suggestion of MIXED_WITH_SPACES) {
+        expect(getFilterReason(suggestion)).toBeNull();
+      }
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('falls back to a character bound for these scripts without full ICU', () => {
+    _setWordSegmenterForTest(null);
+    try {
+      expect(getFilterReason('รันเทสต์อีกครั้ง')).toBeNull();
+      expect(getFilterReason('ก')).toBe('too_few_words');
+      expect(getFilterReason('ก'.repeat(61))).toBe('too_many_words');
+    } finally {
+      _setWordSegmenterForTest(undefined);
+    }
+  });
+
+  it('does not create a segmenter on a small-icu build', () => {
+    // process.config.variables is frozen, but process.config itself is
+    // reconfigurable (see withIcuSmall in packages/cli/src/startup/icu-check.test.ts).
+    const original = Object.getOwnPropertyDescriptor(process, 'config')!;
+    const withIcuSmall = (value: unknown, fn: () => void) => {
+      const variables = {
+        ...(original.value as { variables: Record<string, unknown> }).variables,
+        icu_small: value,
+      };
+      Object.defineProperty(process, 'config', {
+        ...original,
+        value: { ...(original.value as object), variables },
+      });
+      _setWordSegmenterForTest(undefined);
+      try {
+        fn();
+      } finally {
+        Object.defineProperty(process, 'config', original);
+        _setWordSegmenterForTest(undefined);
+      }
+    };
+    // 76 characters, 11 words: only the segmenter lets it through.
+    const long =
+      'ปรับปรุงประสิทธิภาพการประมวลผลฐานข้อมูลอิเล็กทรอนิกส์ของมหาวิทยาลัยเทคโนโลยี';
+    withIcuSmall(true, () => {
+      expect(getFilterReason(long)).toBe('too_many_words');
+    });
+    withIcuSmall(false, () => {
+      expect(getFilterReason(long)).toBeNull();
+    });
   });
 
   it('filters too many words', () => {

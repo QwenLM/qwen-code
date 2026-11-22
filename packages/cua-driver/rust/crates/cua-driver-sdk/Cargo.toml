@@ -27,6 +27,7 @@ cursor-overlay = { path = "../cursor-overlay" }
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../platform-macos" }
 core-foundation = "0.10"
+pip-preview = { path = "../pip-preview" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 platform-windows = { path = "../platform-windows" }

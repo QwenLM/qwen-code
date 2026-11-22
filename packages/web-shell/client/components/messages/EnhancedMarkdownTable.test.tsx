@@ -523,6 +523,16 @@ function touchEvent(
 }
 
 describe('EnhancedMarkdownTable', () => {
+  it('avoids scroll writes when mounting a table without a saved position', () => {
+    const setScrollTop = vi.spyOn(Element.prototype, 'scrollTop', 'set');
+    const setScrollLeft = vi.spyOn(Element.prototype, 'scrollLeft', 'set');
+    const container = renderTable();
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    expect(scroller).not.toBeNull();
+    expect(setScrollTop.mock.contexts).not.toContain(scroller);
+    expect(setScrollLeft.mock.contexts).not.toContain(scroller);
+  });
+
   it('preserves table state and scroll position through fullscreen and restores focus', async () => {
     const container = renderTable();
     click(button(container, 'Sort by Score'));
@@ -3276,6 +3286,9 @@ describe('EnhancedMarkdownTable', () => {
 
     dragCells(dataCell(container, 0, 1), dataCell(container, 2, 1));
 
+    const statistics = container.querySelector<HTMLElement>('[role="group"]');
+    expect(statistics?.getAttribute('aria-label')).toBe('数值选区统计');
+    expect(statistics?.tabIndex).toBe(0);
     expect(container.textContent).toContain('已选 3');
     expect(container.textContent).toContain('非空 3');
     expect(container.textContent).toContain('数值 3');
@@ -3302,8 +3315,8 @@ describe('EnhancedMarkdownTable', () => {
 
     dragColumn(container, 'Move Score', 'Move Team');
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
-    expect(scroller).not.toBeNull();
+    const scroller = container.querySelector('table')?.parentElement;
+    expect(scroller).toBeDefined();
     const { event, setData } = dispatchCopy(scroller!);
 
     expect(event.defaultPrevented).toBe(true);
@@ -3656,8 +3669,8 @@ describe('EnhancedMarkdownTable', () => {
     outsideButton.focus();
 
     dragCells(dataCell(container, 0, 0), dataCell(container, 1, 1));
-    const scroller = container.querySelector<HTMLElement>('div[tabindex="0"]');
-    expect(scroller).not.toBeNull();
+    const scroller = container.querySelector('table')?.parentElement;
+    expect(scroller).toBeDefined();
     expect(document.activeElement).toBe(scroller);
     const { event, setData } = dispatchCopy(document.activeElement!);
 

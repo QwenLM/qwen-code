@@ -397,6 +397,109 @@ describe('writeWorktreeSession', () => {
     await writeJson({ ...sample, supersedes: null });
     await expectStrictInvalid();
   });
+
+  it('round-trips the worktreeBase creation-base field (R5-4)', async () => {
+    const withBase: WorktreeSession = {
+      ...sample,
+      worktreeBase: 'c'.repeat(40),
+    };
+    await writeWorktreeSession(filePath, withBase);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withBase,
+    });
+  });
+
+  it('rejects a sidecar with a non-string worktreeBase', async () => {
+    await writeJson({ ...sample, worktreeBase: 42 });
+    await expectStrictInvalid();
+  });
+
+  it('round-trips the carriedEntries overlay field (R9-6)', async () => {
+    const withOverlay: WorktreeSession = {
+      ...sample,
+      carriedEntries: [
+        { path: 'README.md', hash: 'a'.repeat(40), executable: false },
+        { path: 'sub/a.txt', hash: null, executable: false },
+        { path: 'run.sh', hash: 'b'.repeat(40), executable: true },
+      ],
+    };
+    await writeWorktreeSession(filePath, withOverlay);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withOverlay,
+    });
+  });
+
+  it('accepts a sidecar without carriedEntries (legacy back-compat, R9-6)', async () => {
+    await writeWorktreeSession(filePath, sample);
+    const read = await strictRead();
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      expect(read.session.carriedEntries).toBeUndefined();
+    }
+  });
+
+  it('rejects a sidecar with a wrong-typed carriedEntries (R9-6)', async () => {
+    await writeJson({ ...sample, carriedEntries: 'README.md' });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedEntries: 42 });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedEntries: ['README.md', 7] });
+    await expectStrictInvalid();
+
+    await writeJson({
+      ...sample,
+      carriedEntries: [{ path: 'README.md', hash: 7, executable: false }],
+    });
+    await expectStrictInvalid();
+
+    await writeJson({
+      ...sample,
+      carriedEntries: [{ path: 'README.md', hash: null }],
+    });
+    await expectStrictInvalid();
+  });
+
+  it('drops an oversized carriedEntries so the sidecar stays readable (R9-6)', async () => {
+    const entries = Array.from({ length: 800 }, (_, i) => ({
+      path: `some/long/path/file-${i}.txt`,
+      hash: 'a'.repeat(40),
+      executable: false,
+    }));
+    const big: WorktreeSession = { ...sample, carriedEntries: entries };
+    await writeWorktreeSession(filePath, big);
+    const read = await strictRead();
+    expect(read.state).toBe('valid');
+    if (read.state === 'valid') {
+      // The exemption metadata is dropped (the reaper snapshots the work),
+      // but the binding itself stays readable rather than orphaned.
+      expect(read.session.carriedEntries).toBeUndefined();
+      expect(read.session.slug).toBe(sample.slug);
+    }
+  });
+
+  it('round-trips the carriedFrom carry-source field (R5-14)', async () => {
+    const withSource: WorktreeSession = {
+      ...sample,
+      carriedFrom: '/repo-sibling',
+    };
+    await writeWorktreeSession(filePath, withSource);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withSource,
+    });
+  });
+
+  it('rejects a sidecar with a non-string carriedFrom (R5-14)', async () => {
+    await writeJson({ ...sample, carriedFrom: 42 });
+    await expectStrictInvalid();
+
+    await writeJson({ ...sample, carriedFrom: null });
+    await expectStrictInvalid();
+  });
 });
 
 describe('createWorktreeSession', () => {
@@ -471,6 +574,22 @@ describe('createWorktreeSession', () => {
         name.startsWith('test.worktree.json.'),
       ),
     ).toEqual([]);
+  });
+
+  it('drops an oversized carriedEntries overlay so the created sidecar stays readable (round-6)', async () => {
+    const entries = Array.from({ length: 800 }, (_, i) => ({
+      path: `some/long/path/file-${i}.txt`,
+      hash: 'a'.repeat(40),
+      executable: false,
+    }));
+    await createWorktreeSession(filePath, {
+      ...sample,
+      carriedEntries: entries,
+    });
+    const read = await readWorktreeSession(filePath);
+    expect(read).not.toBeNull();
+    expect(read!.carriedEntries).toBeUndefined();
+    expect(read!.slug).toBe(sample.slug);
   });
 });
 
@@ -608,6 +727,10 @@ describe('isSessionRuntimeActive', () => {
     pid: number,
     state: string,
     killImpl?: () => never,
+    procStart: string | null = null,
+    tokenUnreadable = false,
+    recordPidNs: number | null | undefined = undefined,
+    localNsIno: number | null = 100,
   ) {
     const repoRoot = path.join(tmpDir, `repo-${state}-${pid}`);
     await fs.mkdir(repoRoot, { recursive: true });
@@ -616,6 +739,7 @@ describe('isSessionRuntimeActive', () => {
     vi.doMock('node:fs', async (importOriginal) => {
       const actual = await importOriginal<typeof import('node:fs')>();
       const statPath = `/proc/${pid}/stat`;
+      const bootIdPath = '/proc/sys/kernel/random/boot_id';
       // Fields 4..22, so the state token sits at field 3 right after the
       // parenthesised `comm`. The parser anchors on the last ')'.
       // prettier-ignore
@@ -624,14 +748,33 @@ describe('isSessionRuntimeActive', () => {
         '0', '10', '20', '30', '40', '20', '0', '1', '0', '1000',
       ];
       const statLine = `4242 (node) ${state} ${fields.join(' ')} 1000 2000 3000\n`;
-      const readFileSync = ((p: unknown, ...rest: unknown[]) =>
-        String(p) === statPath
-          ? statLine
-          : (actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown)(
-              p,
-              ...rest,
-            )) as typeof actual.readFileSync;
-      return { ...actual, readFileSync };
+      const readFileSync = ((p: unknown, ...rest: unknown[]) => {
+        if (tokenUnreadable && String(p) === statPath) {
+          throw Object.assign(new Error('permission denied'), {
+            code: 'EACCES',
+          });
+        }
+        if (String(p) === statPath) return statLine;
+        if (String(p) === bootIdPath) return 'deadbeef\n';
+        return (
+          actual.readFileSync as (a: unknown, ...r: unknown[]) => unknown
+        )(p, ...rest);
+      }) as typeof actual.readFileSync;
+      // readPidNamespaceId stats /proc/self/ns/pid; pin the local namespace so
+      // the cross-namespace guard is deterministic on every CI platform.
+      const statSync = ((p: unknown, ...rest: unknown[]) => {
+        if (String(p) === '/proc/self/ns/pid') {
+          if (localNsIno === null) {
+            throw Object.assign(new Error('no such file'), { code: 'ENOENT' });
+          }
+          return { ino: localNsIno };
+        }
+        return (actual.statSync as (a: unknown, ...r: unknown[]) => unknown)(
+          p,
+          ...rest,
+        );
+      }) as typeof actual.statSync;
+      return { ...actual, readFileSync, statSync };
     });
     vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
     if (killImpl) {
@@ -651,12 +794,22 @@ describe('isSessionRuntimeActive', () => {
     ScopedStorage.setRuntimeBaseDir(path.join(tmpDir, 'runtime'));
     onTestFinished(() => ScopedStorage.setRuntimeBaseDir(null));
 
-    await writeRuntimeStatus(
+    // The writer needs the same module graph for the same reason: the
+    // statically imported copy stats the real `/proc/self/ns/pid`, so on a
+    // Linux runner it would record the runner's own namespace while the mocked
+    // reader sees `localNsIno`, making every record look foreign.
+    const { writeRuntimeStatus: writeScopedRuntimeStatus } = await import(
+      '../utils/runtimeStatus.js'
+    );
+
+    await writeScopedRuntimeStatus(
       new ScopedStorage(repoRoot).getRuntimeStatusPath('owner-session'),
       {
         sessionId: 'owner-session',
         workDir: repoRoot,
         pid,
+        procStart,
+        pidNs: recordPidNs,
       },
     );
 
@@ -682,6 +835,125 @@ describe('isSessionRuntimeActive', () => {
   it('still reports a running pid as active', async () => {
     // Guards the harness itself: the same fake `/proc`, one field different.
     const probe = await probeWithFakeProc(process.pid, 'S');
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('reports a recycled pid as inactive when proc_start differs', async () => {
+    // Same boot prefix, different start ticks: a same-boot PID reuse. Using a
+    // different boot here would let a ticks-only comparison pass too, so the
+    // boot-id segment of the token must be pinned by a separate case below.
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('reports a cross-boot pid as inactive when the boot prefix differs', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'previous-boot:1000',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('still reports a running pid active when proc_start matches', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+    );
+
+    await expect(probe.liveness()).resolves.toBe('active');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('treats a record from a different PID namespace as unknown, not dead', async () => {
+    // The recorded token would match if compared, but the record was written
+    // in namespace 200 while the reader lives in 100: its PID names a different
+    // process here, so the guard must short-circuit to the safe 'unknown'
+    // (active) instead of judging the foreign session dead (#16128 review).
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      false,
+      200,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('treats a namespaced record as unknown when the local namespace is unreadable', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      false,
+      200,
+      null,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('unknown');
+    await expect(probe.isActive()).resolves.toBe(true);
+  });
+
+  it('still judges a same-namespace recycled pid as inactive', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+      false,
+      100,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('falls back to proc_start for a legacy record without pid_ns', async () => {
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:9999',
+      false,
+      null,
+      100,
+    );
+
+    await expect(probe.liveness()).resolves.toBe('inactive');
+    await expect(probe.isActive()).resolves.toBe(false);
+  });
+
+  it('degrades to plain liveness when the identity token is unreadable', async () => {
+    // A record written with a real token can be read back where `/proc` is no
+    // longer readable (hidepid=2, EIO). Only a readable mismatch proves reuse,
+    // so this must stay active instead of declaring a live session dead.
+    const probe = await probeWithFakeProc(
+      process.pid,
+      'S',
+      undefined,
+      'deadbeef:1000',
+      true,
+    );
 
     await expect(probe.liveness()).resolves.toBe('active');
     await expect(probe.isActive()).resolves.toBe(true);
@@ -791,6 +1063,25 @@ describe('restoreWorktreeContext', () => {
     expect(result.contextMessage).toContain(live.worktreeBranch);
     // Sidecar should remain on disk so subsequent reads still see it.
     expect(await readWorktreeSession(filePath)).toEqual(live);
+  });
+
+  it('names detached HEAD in the context message when the branch is empty', async () => {
+    const live = await liveSession('repo-detached', { worktreeBranch: '' });
+    await writeWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(live.worktreePath, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
+
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain('(detached HEAD)');
+    expect(result.contextMessage).not.toContain('(branch:');
   });
 
   it('restores a sidecar caught in the link-then-unlink publish window', async () => {

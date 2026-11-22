@@ -71,9 +71,15 @@ describe('Managed Agent gate scope', () => {
     'integration-tests/helpers/hosted-harness-process.ts',
     'integration-tests/vitest.hosted.config.ts',
     'scripts/run-managed-agent-server-e2e.ts',
+    'scripts/run-managed-pr-watch-e2e.mjs',
+    'packages/channels/github/src/managed-github-adapter.ts',
+    'packages/cli/src/commands/channel.ts',
+    'packages/cli/src/commands/channel/managed-channel-client.ts',
     '.github/workflows/sdk-java.yml',
     '.github/workflows/managed-agent-gate.yml',
     '.github/scripts/managed-agent-gate-scope.mjs',
+    '.github/scripts/managed-agent-gate-tier.sh',
+    '.github/scripts/maven-cache-seed.sh',
   ])('runs the suite for %s', (path) => {
     expect(touchesManagedAgent(['README.md', path])).toBe(true);
   });
@@ -295,13 +301,23 @@ describe('Managed Agent gate triggers', () => {
 describe('Managed Agent gate required check', () => {
   const name = (event, tier, touched) =>
     evaluate(gate.jobs.gate.name, {
-      github: github(event),
+      github: github(
+        event,
+        event === 'pull_request_review'
+          ? {
+              review: { state: 'approved' },
+              pull_request: { state: 'open' },
+            }
+          : {},
+      ),
       needs: { scope: { outputs: { tier, touched } } },
     });
 
   it.each([
     ['pull_request', 'none', 'false', 'Managed Agent gate'],
-    ['pull_request', 'fast', 'true', 'Managed Agent fast tier'],
+    ['pull_request', 'fast', 'true', 'Managed Agent gate'],
+    ['pull_request', 'none', 'true', 'Managed Agent review (no full run)'],
+    ['pull_request', '', 'true', 'Managed Agent gate'],
     ['pull_request_review', 'full', 'true', 'Managed Agent gate'],
     [
       'pull_request_review',
@@ -310,6 +326,7 @@ describe('Managed Agent gate required check', () => {
       'Managed Agent review (no full run)',
     ],
     ['pull_request_review', 'none', 'false', 'Managed Agent gate'],
+    ['pull_request_review', '', 'true', 'Managed Agent gate'],
     ['push', 'fast', 'true', 'Managed Agent gate'],
     ['merge_group', 'fast', 'true', 'Managed Agent gate'],
     // A failed tier selection leaves the outputs empty and must still
@@ -325,14 +342,16 @@ describe('Managed Agent gate required check', () => {
 
   it.each([
     ['pull_request', 'fast', false, true],
-    ['pull_request', 'fast', true, false],
+    ['pull_request', 'fast', true, true],
     ['pull_request', 'full', true, true],
-    ['pull_request_review', 'full', true, true],
     ['push', 'fast', true, true],
     ['merge_group', 'fast', true, true],
     ['pull_request', '', false, true],
-    ['pull_request', '', true, false],
-    ['pull_request', 'none', true, false],
+    ['pull_request', '', true, true],
+    ['pull_request', 'none', true, true],
+    // A cancelled full run must still report, so the next approval retries
+    // the suite under this name.
+    ['pull_request_review', 'full', true, true],
   ])(
     '%s %s tier with workflow cancelled=%s reports=%s',
     (event, tier, cancelled, expected) => {
@@ -356,8 +375,10 @@ describe('Managed Agent gate required check', () => {
   );
 
   // A review that is not an approval can never select a tier above `none`
-  // (Choose the tier), so starting a run for it buys two runner slots and
-  // publishes a check nothing reads. Both jobs must skip instead.
+  // (Choose the tier), so starting a run for it buys two runner slots only to
+  // repeat a no-suite result. Both jobs must skip instead. Because a skipped
+  // job leaves this workflow's computed name unevaluated, it cannot publish a
+  // passing check under the required `Managed Agent gate` context.
   it.each(['commented', 'changes_requested'])(
     'a %s review starts no job',
     (state) => {
@@ -447,9 +468,10 @@ describe('Managed Agent gate required check', () => {
   );
 
   it.each([
-    // A superseding push cancels the in-flight fast tier: the check then
-    // means "replaced by a newer run", so it reports neutral, not failure.
-    ['pull_request', 'fast', 'cancelled', 0],
+    // A superseding push cancels the in-flight fast tier. The old head no
+    // longer matters, but the check stays red so a cancellation without a
+    // newer push cannot green the required context.
+    ['pull_request', 'fast', 'cancelled', 1],
     // Every other cancellation stays red: a full run's so the next approval
     // retries the suite instead of deduping against a green check, and a
     // push/merge-group arm's because nothing there cancels in progress — a
@@ -477,30 +499,39 @@ describe('Managed Agent gate required check', () => {
 
 describe('Managed Agent gate tier selection', () => {
   const step = gate.jobs.scope.steps.find((s) => s.name === 'Choose the tier');
+  expect(step.run).toBe('bash .github/scripts/managed-agent-gate-tier.sh');
+  const tierScript = readFileSync(
+    '.github/scripts/managed-agent-gate-tier.sh',
+    'utf8',
+  );
   const dir = mkdtempSync(join(tmpdir(), 'managed-agent-gate-'));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
-  // A stand-in gh: check-runs prints FAKE_URLS; a run lookup prints the
-  // event and pull request numbers recorded for that id in FAKE_EVENTS
-  // ("id=event:pr ..."), tab-separated as the step's @tsv read expects; a
-  // jobs lookup prints whether that id is listed in FAKE_FULL, standing in
-  // for a run whose callee actually executed the full suite.
+  // A stand-in gh: check-runs prints FAKE_URLS (approval dedup) or
+  // FAKE_ALL_URLS (the pull_request scan); a run lookup prints event, pull
+  // request numbers and head branch from FAKE_EVENTS ("id=event:prs:branch");
+  // a direct PR lookup supplies the fork fallback's head sha (HEAD_SHA unless
+  // FAKE_PR_HEAD_SHA) and head ref; a jobs lookup reports FAKE_FULL
+  // membership.
   writeFileSync(
     join(dir, 'gh'),
     [
       '#!/usr/bin/env bash',
+      'if [[ -n "${FAKE_FAIL:-}" && "$2" == *"${FAKE_FAIL}"* ]]; then exit 22; fi',
       'case "$2" in',
+      '  */check-runs*filter=all*) printf "%s" "${FAKE_ALL_URLS}" ;;',
       '  */check-runs*) printf "%s" "${FAKE_URLS}" ;;',
+      '  */pulls/*) printf \'%s\\t%s\\n\' "${FAKE_PR_HEAD_SHA:-${HEAD_SHA}}" "${FAKE_HEAD_REF:-feature}" ;;',
       '  */actions/runs/*/jobs*) id="${2%/jobs*}"; id="${id##*/}"; [[ " ${FAKE_FULL:-} " == *" ${id} "* ]] && echo true || echo false ;;',
-      '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; printf \'%s\\t%s\\n\' "${rec%%:*}" "${rec#*:}"; fi; done ;;',
+      '  */actions/runs/*) id="${2##*/}"; for p in ${FAKE_EVENTS}; do if [[ "${p%%=*}" == "${id}" ]]; then rec="${p#*=}"; event="${rec%%:*}"; rest="${rec#*:}"; if [[ "${rest}" == *:* ]]; then prs="${rest%%:*}"; branch="${rest#*:}"; else prs="${rest}"; branch=""; fi; [[ -n "${prs}" ]] || prs=-; printf \'%s\\t%s\\t%s\\n\' "${event}" "${prs}" "${branch}"; fi; done ;;',
       'esac',
     ].join('\n'),
   );
   chmodSync(join(dir, 'gh'), 0o755);
 
-  const tier = (env) => {
+  const runTier = (env) => {
     const output = join(dir, 'output');
     writeFileSync(output, '');
-    const result = spawnSync('bash', ['-c', step.run], {
+    const result = spawnSync('bash', ['-c', tierScript], {
       env: {
         PATH: `${dir}:${process.env.PATH}`,
         GITHUB_OUTPUT: output,
@@ -512,17 +543,34 @@ describe('Managed Agent gate tier selection', () => {
         REVIEW_AUTHOR_ASSOCIATION: 'MEMBER',
         TOUCHED: 'true',
         FAKE_URLS: '',
+        FAKE_ALL_URLS: '',
         FAKE_EVENTS: '',
         FAKE_FULL: '',
         ...env,
       },
       encoding: 'utf8',
     });
+    return { result, output: readFileSync(output, 'utf8').trim() };
+  };
+  const tier = (env) => {
+    const { result, output } = runTier(env);
     expect(result.status, result.stderr).toBe(0);
-    return readFileSync(output, 'utf8').trim();
+    return output;
   };
   const url = (run) =>
     `https://github.com/QwenLM/qwen-code/actions/runs/${run}/job/9`;
+
+  it('grants the scope token every API scope the tier script reads', () => {
+    // The fork approval fallback reads `pulls/{n}`; without
+    // `pull-requests: read` it fails closed and reds the required check on a
+    // second approval of an already-verified head.
+    expect(gate.jobs.scope.permissions).toEqual({
+      actions: 'read',
+      checks: 'read',
+      contents: 'read',
+      'pull-requests': 'read',
+    });
+  });
 
   it.each(['pull_request', 'push', 'merge_group'])(
     'runs the fast tier for a touched %s',
@@ -531,6 +579,37 @@ describe('Managed Agent gate tier selection', () => {
       expect(tier({ EVENT_NAME: event, TOUCHED: 'false' })).toBe('tier=none');
     },
   );
+
+  it('does not let a rerun fast tier overwrite a full result on the same head', () => {
+    expect(
+      tier({
+        EVENT_NAME: 'pull_request',
+        FAKE_ALL_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review:7',
+        FAKE_FULL: '42',
+      }),
+    ).toBe('tier=none');
+  });
+
+  it('keeps a fork head full result when its run omits pull request numbers', () => {
+    expect(
+      tier({
+        EVENT_NAME: 'pull_request',
+        FAKE_ALL_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review:',
+        FAKE_FULL: '42',
+      }),
+    ).toBe('tier=none');
+  });
+
+  it('fails tier selection when a prior full-run lookup fails', () => {
+    const { result } = runTier({
+      EVENT_NAME: 'pull_request',
+      FAKE_ALL_URLS: url(42),
+      FAKE_FAIL: 'actions/runs/42',
+    });
+    expect(result.status).not.toBe(0);
+  });
 
   it('runs the full suite on the first approval of a touched head', () => {
     const approve = {
@@ -577,7 +656,7 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_FULL: '42',
       }),
     ).toBe('tier=none');
-    // An unaffected-change pass from the PR push run is no full run.
+    // A fast-tier or unaffected-change pass from the PR push run is no full run.
     expect(
       tier({ ...approve, FAKE_URLS: url(42), FAKE_EVENTS: '42=pull_request:' }),
     ).toBe('tier=full');
@@ -600,13 +679,45 @@ describe('Managed Agent gate tier selection', () => {
         FAKE_FULL: '42',
       }),
     ).toBe('tier=full');
-    // A review run that reported the required name without running the
-    // callee (an untouched classification) is no coverage either.
+    // Fast-tier PR runs and untouched reviews now share the required name,
+    // but only an approval run with the full callee is coverage.
     expect(
       tier({
         ...approve,
         FAKE_URLS: url(42),
         FAKE_EVENTS: '42=pull_request_review:7',
+      }),
+    ).toBe('tier=full');
+    // Fork review runs omit pull_requests; the fallback also matches the run's
+    // head branch to the current PR after confirming its head SHA.
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review::feature',
+        FAKE_FULL: '42',
+        FAKE_HEAD_REF: 'feature',
+      }),
+    ).toBe('tier=none');
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review::other-branch',
+        FAKE_FULL: '42',
+        FAKE_HEAD_REF: 'feature',
+      }),
+    ).toBe('tier=full');
+    // The branch alone is not enough: a PR that has since moved to another
+    // head cannot let this candidate run pass for it.
+    expect(
+      tier({
+        ...approve,
+        FAKE_URLS: url(42),
+        FAKE_EVENTS: '42=pull_request_review::feature',
+        FAKE_FULL: '42',
+        FAKE_HEAD_REF: 'feature',
+        FAKE_PR_HEAD_SHA: 'h2',
       }),
     ).toBe('tier=full');
   });

@@ -2,6 +2,8 @@
 
 [中文](README.zh-CN.md)
 
+> **Historical deployment template.** The Kubernetes EndpointSlice pool discovery described here has been removed from the Java control plane and cold-archived under [`packages/sdk-java/managed-kubernetes-archive/`](../../../sdk-java/managed-kubernetes-archive/). Java now supports only `discovery: static` with an explicit `instances` list; startup refuses `discovery: kubernetes` and the `namespace`/`service-name`/`service-uid`/`port-name` properties with `Harness pool discovery must be static`, and `discovery-rbac.yaml` / `discovery-role-binding.yaml` are no longer read by any code. The EndpointSlice sections below are preserved for restoring the archived discovery; follow-up issue [#17427](https://github.com/QwenLM/qwen-code/issues/17427) tracks retiring or adapting this package. For a current pool, configure static instances as shown under "Build and configure".
+
 This opt-in package runs the Hosted Harness as a private, horizontally expandable pool. Java retains tenant/actor admission, durable placement and subscriptions. Session RPCs target the selected EndpointSlice Pod address and exact instance/boot; the Service is a discovery anchor. The existing local-process deployment does not enable the pool environment variable or Java pool configuration.
 
 See the [design](../../../../docs/design/2026-10-21-managed-harness-kubernetes.md) for ownership, fencing and the acceptance matrix. These files are deployment templates. No cluster, certificate issuer, metrics adapter or production capacity has been validated by adding them.
@@ -11,13 +13,15 @@ See the [design](../../../../docs/design/2026-10-21-managed-harness-kubernetes.m
 - Kubernetes 1.33+ with native sidecars, NetworkPolicy enforcement, an existing Java control plane, durable Session Store and Runtime Broker. Use matching Server/Broker builds and a fresh single-V1 catalog containing the placement columns; earlier development catalogs require a separate fresh database and state directory rather than an upgrade. Harness Pods have no Kubernetes API token or tenant workspace mount.
 - Build and publish an immutable Harness image, and pin both container images to verified digests in `harness-pool.yaml`. The example Envoy version is 1.39.4; validate the configuration with the selected image before rollout.
 - Fill `settings.example.yaml` with the same capability digest required by Java, an HTTPS Broker URL and the approved model provider. Settings are operator-owned and shared; tenant files must never become operator HOME, settings or working directory.
-- Create Secret `qwen-harness-secrets` from files named `harness-token`, `broker-token`, `model-api-key` and `outbound-ca.crt`. The first three contain only their respective credential. The CA file trusts the actual HTTPS Store/Broker/model gateways. The launcher reads files and passes credentials through the child environment; Deployment arguments contain no secrets.
+- Create Secret `qwen-harness-secrets` from files named `harness-token`, `broker-token`, `model-api-key` and `outbound-ca.crt`. The first three contain only their respective credential. The CA file trusts the actual HTTPS Store/Broker/model gateways. The launcher reads files and passes credentials through the child environment; Deployment arguments contain no secrets. The Broker URL and token reach `qwen serve` as `QWEN_MANAGED_RUNTIME_BROKER_URL` and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`, the environment variables `qwen serve` reads when `--managed-runtime-broker-url` and `--managed-runtime-broker-token` are absent. The pool's `--profile hosted-harness` launch always reaches the full serve handler, which removes both from its environment at startup, so no process it starts inherits the token. The environment `qwen serve` started with stays readable in `/proc/<pid>/environ` to any process in the container running as the same user, so the Broker must not treat the token as hidden from the work the pool runs. The `v0.26.1` manifest names the URL `QWEN_HOSTED_HARNESS_BROKER_URL`, which nothing reads any more. Rename it to `QWEN_MANAGED_RUNTIME_BROKER_URL` in the same `kubectl apply` that moves the Harness image to a later digest; a later image that still finds the old name exits and names the rename. The reverse mix, the new name with the `v0.26.1` image, is what a rename applied alone or an image rollback produces. Its new Pods crash-loop with only `Hosted Harness configuration or secret files are invalid.`, and with `maxUnavailable: 0` the old Pods keep serving while the rollout stalls. A rollback to `v0.26.1` therefore restores the old name together with the old image.
 - Create Secret `qwen-harness-tls` with `tls.crt`, `tls.key` and `client-ca.crt`. Envoy verifies the Java client CA and exact URI SAN `spiffe://qwen.internal/managed-agent-server`; change this allowlist to the actual approved identity. Java must present that client identity and trust the Harness server CA.
 - **Endpoint TLS identity is a deployment prerequisite:** Java connects to concrete Pod IPs and retains normal HTTPS hostname verification. Every selected Pod IP must appear as an IP SAN in its presented certificate. Supply a per-Pod certificate projection/issuer, or an operator-managed shared certificate covering all actual endpoint IPs and their replacements. A Service DNS certificate alone cannot validate these connections. The Secret mount in the template is an input for that mechanism; it does not issue certificates. Do not deploy with hostname verification disabled.
 - Bind `discovery-rbac.yaml` to the actual Java service account/namespace. Discovery reads the named Service and lists EndpointSlices only in the configured namespace, verifying the exact Service UID, named port, Pod UID and readiness. Harness processes have no cluster discovery role.
 - The ingress NetworkPolicy assumes Java Pods share the Harness namespace. For a separate Java namespace, add the approved `namespaceSelector` alongside `podSelector` in the same ingress peer. Adapt egress destinations and ports to the actual HTTPS gateways. If a Service maps port `443` to target port `8443`, the CNI may evaluate the backend port; allow that target port only for the approved Store/Broker peers and verify connectivity from an actual Harness Pod. The tested Terway deployment required this explicit backend-port rule.
 
 ## Build and configure
+
+The optional [qualification tools](qualification/README.md) build matching Harness/Java-worker images, render templates restricted to existing business nodes, and exercise signed public multi-user/tool/SSE scenarios. They keep deployment readiness, public execution, owner/fault acceptance and capacity results separate; generating the bundle does not apply it or purchase resources.
 
 Build from a clean source checkout at the repository root. The Dockerfile-specific ignore file excludes local settings, credentials, logs and build outputs:
 
@@ -29,7 +33,7 @@ Publish the image through the deployment system and replace `qwen-harness:replac
 
 Create the Envoy ConfigMap from the reviewed configuration, then apply the filled settings, RBAC and pool manifests in the Harness namespace through your normal deployment workflow:
 
-Each manifest contains one resource. Apply the Deployment in `harness-pool.yaml` together with `harness-service.yaml`, `harness-pdb.yaml` and `harness-network-policy.yaml`. Java discovery requires both `discovery-rbac.yaml` and `discovery-role-binding.yaml`.
+Each manifest contains one resource. Apply the Deployment in `harness-pool.yaml` together with `harness-service.yaml`, `harness-pdb.yaml` and `harness-network-policy.yaml`. The archived EndpointSlice discovery additionally required `discovery-rbac.yaml` and `discovery-role-binding.yaml`; static discovery does not use them.
 
 ```sh
 kubectl create configmap qwen-harness-envoy --from-file=envoy.yaml=packages/managed-agent-server/distribution/kubernetes/envoy.yaml --dry-run=client -o yaml
@@ -45,11 +49,10 @@ qwen:
     harness:
       pool:
         enabled: true
-        discovery: kubernetes
-        namespace: YOUR_HARNESS_NAMESPACE
-        service-name: qwen-harness
-        service-uid: YOUR_ACTUAL_SERVICE_UID
-        port-name: https
+        discovery: static
+        instances:
+          - instance-id: YOUR_HARNESS_INSTANCE_ID
+            base-url: https://YOUR_HARNESS_ENDPOINT:8443
         key-store-file: /etc/java-tls/client.p12
         key-store-password-file: /etc/java-tls/client-password
         trust-store-file: /etc/java-tls/trust.p12

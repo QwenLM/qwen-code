@@ -18,11 +18,15 @@ public final class LoadHarnessSession {
     private Map<String, Object> lifecycleAuthority;
     private int lifecycleProtocolVersion = 1;
     private Map<String, Object> agentDefinition;
+    private String modelConfigDigest;
+    private String memoryStoreId;
     private Map<String, Object> sessionSkillsRef;
+    private Map<String, Object> initialSelection;
     private List<Map<String, Object>> mcpServers;
     private Map<String, Object> hookCatalog;
     private int publicChildAgentsVersion;
     private Map<String, Object> publicChildModelRoute;
+    private Map<String, Object> publicChildExtensionAgent;
     private boolean stopMessages;
     private boolean foregroundOnly;
     private String recoveryCleanupPromptId;
@@ -64,6 +68,11 @@ public final class LoadHarnessSession {
     /** #13753 I3: with child Workspaces, the control plane serves snapshots too. */
     private boolean childSnapshots;
 
+    public LoadHarnessSession withPublicChildExtensionAgent(Map<String, Object> value) {
+        this.publicChildExtensionAgent = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
     public LoadHarnessSession withPublicChildModelRoute(Map<String, Object> value) {
         this.publicChildModelRoute = value == null ? null : Map.copyOf(value);
         return this;
@@ -84,6 +93,24 @@ public final class LoadHarnessSession {
 
     public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
         this.agentDefinition = value == null ? null : Map.copyOf(value);
+        return this;
+    }
+
+    public LoadHarnessSession withMemoryStoreId(String value) {
+        if (value != null && (managedSessionStore == null || !value.matches("[A-Za-z0-9_-]{1,128}"))) {
+            throw new IllegalArgumentException("Invalid personal memory binding");
+        }
+        this.memoryStoreId = value;
+        return this;
+    }
+
+    public LoadHarnessSession withModelConfigDigest(String value) {
+        this.modelConfigDigest = value == null ? null : HostedHarnessClient.requireDigest(value, "modelConfigDigest");
+        return this;
+    }
+
+    public LoadHarnessSession withInitialSelection(Map<String, Object> value) {
+        this.initialSelection = value == null ? null : Map.copyOf(value);
         return this;
     }
 
@@ -121,7 +148,10 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
+        copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
+        copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
@@ -134,6 +164,7 @@ public final class LoadHarnessSession {
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
         copy.publicChildModelRoute = publicChildModelRoute;
+        copy.publicChildExtensionAgent = publicChildExtensionAgent;
         return copy;
     }
 
@@ -144,7 +175,10 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
+        copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
+        copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
@@ -157,6 +191,7 @@ public final class LoadHarnessSession {
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
         copy.publicChildModelRoute = publicChildModelRoute;
+        copy.publicChildExtensionAgent = publicChildExtensionAgent;
         return copy;
     }
 
@@ -179,7 +214,10 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
+        copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
+        copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
@@ -192,6 +230,7 @@ public final class LoadHarnessSession {
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
         copy.publicChildModelRoute = publicChildModelRoute;
+        copy.publicChildExtensionAgent = publicChildExtensionAgent;
         return copy;
     }
 
@@ -203,7 +242,10 @@ public final class LoadHarnessSession {
                 suppressChildAgents);
         copy.harnessPlacement = harnessPlacement;
         copy.agentDefinition = agentDefinition;
+        copy.modelConfigDigest = modelConfigDigest;
+        copy.memoryStoreId = memoryStoreId;
         copy.sessionSkillsRef = sessionSkillsRef;
+        copy.initialSelection = initialSelection;
         copy.mcpServers = mcpServers;
         copy.hookCatalog = hookCatalog;
         copy.lifecycleAuthority = lifecycleAuthority;
@@ -216,6 +258,7 @@ public final class LoadHarnessSession {
         copy.cancellationPromptId = cancellationPromptId;
         copy.publicChildAgentsVersion = publicChildAgentsVersion;
         copy.publicChildModelRoute = publicChildModelRoute;
+        copy.publicChildExtensionAgent = publicChildExtensionAgent;
         return copy;
     }
 
@@ -306,6 +349,9 @@ public final class LoadHarnessSession {
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
         }
+        if (publicChildExtensionAgent != null) {
+            result.put("publicChildExtensionAgent", publicChildExtensionAgent);
+        }
         if (publicChildModelRoute != null) {
             result.put("publicChildModelRoute", publicChildModelRoute);
         }
@@ -329,6 +375,15 @@ public final class LoadHarnessSession {
         }
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
+        }
+        if (modelConfigDigest != null) {
+            result.put("modelConfigDigest", modelConfigDigest);
+        }
+        if (memoryStoreId != null) {
+            result.put("memoryStoreId", memoryStoreId);
+        }
+        if (initialSelection != null) {
+            result.put("initialSelection", initialSelection);
         }
         if (sessionSkillsRef != null) {
             result.put("sessionSkillsRef", sessionSkillsRef);

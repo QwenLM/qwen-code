@@ -116,6 +116,14 @@ jobs:
             || { echo "::error::Missing Desktop installer matching *.AppImage"; exit 1; }
           find . -maxdepth 1 -name '*.deb' -print -quit | grep -q . \
             || { echo "::error::Missing Desktop installer matching *.deb"; exit 1; }
+          # A fresh build must publish both rpm roots. Re-mirroring an older
+          # release stays tolerant because those releases predate rpm.
+          if [ "$SOURCE" != 'release' ]; then
+            for suffix in linux-x64-rpm-fedora44 linux-x64-rpm-rhel10; do
+              find . -maxdepth 1 -name "*-${suffix}.rpm" -print -quit | grep -q . \
+                || { echo "::error::Missing Desktop rpm for ${suffix}"; exit 1; }
+            done
+          fi
           rm -f desktop-latest.json SHA256SUMS.txt
           # Mirroring an existing GitHub release has to be able to reproduce the
           # feed that release actually shipped, so a platform added later (arm64
