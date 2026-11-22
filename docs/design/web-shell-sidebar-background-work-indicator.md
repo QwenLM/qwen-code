@@ -130,10 +130,13 @@ Reuse the existing trailing busy marker instead of adding a new indicator:
   outranks it, and blocked-state precedence is unchanged (#18070).
 
 The status dot precedence mirrors that chain (#18070): the live-starting
-spinner replaces the dots; the background dot outranks the unread dot; the
-unread dot outranks the running and active-work dots. Tints: green while a
-turn runs or other work is active (#18072 unified the active-work tint with
-running), amber for background-only, blue for unread.
+spinner replaces the dots; the background-only dot
+(`!hasActivePrompt && hasRunningBackgroundTasks`) outranks the unread dot; the
+unread dot outranks the running and active-work dots (an in-flight turn gates
+off the background-only dot). Tints: green while a turn runs or other work is
+active (updated from blue in #18072 so blue stays reserved for
+completed-unread sessions), amber for background-only, blue for
+completed-unread.
 
 ## Design decisions and rationale
 
@@ -241,9 +244,11 @@ row. No page errors.
    session stays deletable. Bulk Archive follows the flag as it changes after a
    row is ticked; a row that turns busy after selection is unchecked, stops
    being counted, and is dropped from the request.
-5. Dot precedence mirrors the hover chain (unread over running/active-work,
-   background over unread, starting spinner over all); the touch layout and
-   the existing hover contracts are unchanged.
+5. Dot precedence mirrors the hover chain (starting spinner over all,
+   background-only amber over unread, unread over running/active-work, with an
+   in-flight turn gating off the background-only dot and active work sharing
+   the running green per #18072 so blue stays reserved for completed-unread);
+   the touch layout and the existing hover contracts hold.
 6. Every pinned assertion dies under its corresponding mutation: the tooltip
    matrix (including per-arm suffix occurrence counts and the
    unread-over-running row) covers the composed chains, and the row-side

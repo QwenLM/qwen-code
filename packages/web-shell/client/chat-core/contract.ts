@@ -135,6 +135,10 @@ export interface SessionChatController {
   readonly kind: 'daemon' | 'managed';
   readonly sessionId: string;
   readonly storageKey: string;
+  // Opaque identifier of the active (FIFO-head) live turn, when known. Lets
+  // the surface distinguish a delayed stop settlement for an older turn from a
+  // newer turn running in the same session.
+  readonly activeTurnId?: string;
 
   // In-flight and recently settled intents, observable across refresh.
   // Retention is bounded: at most the latest terminal entry per kind and
@@ -144,6 +148,10 @@ export interface SessionChatController {
 
   readonly messages: readonly Message[];
   readonly transcriptState: 'loading' | 'ready' | 'error';
+  readonly hasOlderHistory?: boolean;
+  readonly loadingOlderHistory?: boolean;
+  readonly historyCapacityReached?: boolean;
+  readonly historyPaginationError?: boolean;
   loadOlder?(options?: { force?: boolean }): Promise<void>;
 
   // `cancelling` is derived from an unestablished cancel operation and

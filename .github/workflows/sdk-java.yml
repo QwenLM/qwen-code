@@ -307,29 +307,23 @@ jobs:
           MATRIX_JAVA: '${{ matrix.java }}'
           TIER: '${{ inputs.tier }}'
         run: |-
-          # Seed from the host-shared repo so a warm host still starts warm.
-          # The seed only reads the host cache and is best-effort, so it takes
-          # no lock and cannot delay the lane.
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # Shared helper rebuilds the disposable job-local repo before
+          # Maven. Current callers fail closed if it is unexpectedly absent.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
           # The suite resolves from the job-local copy above, so it does not
           # touch host-shared state and must not hold the per-host lock.
           # On 2026-10-22 run 39771949573's fast tier failed at its
@@ -387,6 +381,16 @@ jobs:
               echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
             fi
           }
+          writeback_host_root="${HOME}"
+          if [ -d "${HOME}/.m2/repository" ]; then
+            writeback_host_root="${HOME}/.m2/repository"
+          elif [ -d "${HOME}/.m2" ]; then
+            writeback_host_root="${HOME}/.m2"
+          fi
+          writeback_device_host="$(stat -Lc '%d' "${writeback_host_root}" || true)"
+          writeback_device_job="$(stat -Lc '%d' "${RUNNER_TEMP}/m2-repo" || true)"
+          # Publication needs a hardlink-compatible host, but host-local
+          # cleanup still belongs in the locked stanza below.
           lock_setup_fault() {
             echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
             mvn_report_failed_suite
@@ -468,9 +472,15 @@ jobs:
           # already decided.
           write_back=0
           mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
-          find "${HOME}/.m2/repository" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 9>&- || write_back=$?
+          find -P "${HOME}/.m2/repository" -xdev -depth \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*' \) \
+            -delete 9>&- || write_back=$?
+          if [ -z "${writeback_device_host}" ] || [ "${writeback_device_host}" != "${writeback_device_job}" ]; then
+            [ "${write_back}" -eq 0 ] || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+            echo "::warning::Maven cache write-back skipped: hard links are unavailable between the job and host filesystems"
+            mvn_report_failed_suite
+            exit "${mvn_status}"
+          fi
           cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
           timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
@@ -987,28 +997,27 @@ jobs:
           set -o pipefail
           # Seed from the host-shared repo (cache-restored on hosted runners)
           # so it and the egress proxy keep paying off for the job-local copy.
-          # The seed only reads the host cache and is best-effort, so it takes
-          # no lock and cannot delay the lane.
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # The host-copy attempt is best-effort, but reconstructing a safe
+          # local directory must succeed before Maven uses it. It takes no lock.
+          # Never follow a repository alias into state outside this job.
+          # Quarantine the disposable prior tree before Maven writes, so nested
+          # directory aliases cannot redirect a subsequent cp or Maven write.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
+          # The shared helper performs the safe job-local reconstruction.
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -1059,6 +1068,16 @@ jobs:
               echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
             fi
           }
+          writeback_host_root="${HOME}"
+          if [ -d "${HOME}/.m2/repository" ]; then
+            writeback_host_root="${HOME}/.m2/repository"
+          elif [ -d "${HOME}/.m2" ]; then
+            writeback_host_root="${HOME}/.m2"
+          fi
+          writeback_device_host="$(stat -Lc '%d' "${writeback_host_root}" || true)"
+          writeback_device_job="$(stat -Lc '%d' "${RUNNER_TEMP}/m2-repo" || true)"
+          # Publication needs a hardlink-compatible host, but host-local
+          # cleanup still belongs in the locked stanza below.
           lock_setup_fault() {
             echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
             mvn_report_failed_suite
@@ -1146,9 +1165,15 @@ jobs:
           # already decided.
           write_back=0
           mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
-          find "${HOME}/.m2/repository" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 9>&- || write_back=$?
+          find -P "${HOME}/.m2/repository" -xdev -depth \
+            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwencode-sdk/*' -o -path '*/com/alibaba/qwen-managed-agent-*' -o -path '*/com/alibaba/qwen-managed-agent-*/*' \) \
+            -delete 9>&- || write_back=$?
+          if [ -z "${writeback_device_host}" ] || [ "${writeback_device_host}" != "${writeback_device_job}" ]; then
+            [ "${write_back}" -eq 0 ] || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+            echo "::warning::Maven cache write-back skipped: hard links are unavailable between the job and host filesystems"
+            mvn_report_failed_suite
+            exit "${mvn_status}"
+          fi
           cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
           timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-runtime-external' -o -path '*/com/alibaba/qwen-managed-agent-runtime-host' -o -path '*/com/alibaba/qwen-managed-agent-runtime-http' -o -path '*/com/alibaba/qwen-managed-agent-runtime-local' -o -path '*/com/alibaba/qwen-managed-agent-runtime-ssh' -o -path '*/com/alibaba/qwen-managed-agent-runtime-static' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' -o -path '*/com/alibaba/qwen-managed-agent-*' \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
@@ -2013,26 +2038,25 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # Never follow a repository alias into state outside this job.
+          # Quarantine the disposable prior tree before Maven writes, so nested
+          # directory aliases cannot redirect a subsequent cp or Maven write.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
+          # The shared helper performs the safe job-local reconstruction.
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -2321,26 +2345,25 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          if [ -d "${HOME}/.m2/repository" ]; then
-            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          # Never follow a repository alias into state outside this job.
+          # Quarantine the disposable prior tree before Maven writes, so nested
+          # directory aliases cannot redirect a subsequent cp or Maven write.
+          repo="${RUNNER_TEMP}/m2-repo"
+          seed_helper="${GITHUB_WORKSPACE}/.github/scripts/maven-cache-seed.sh"
+          if [ ! -f "${seed_helper}" ]; then
+            # The helper must follow this workflow revision. Older immutable
+            # release checkouts may predate it; acquire that same revision
+            # rather than falling back to the unsafe host repository.
+            seed_helper="$(mktemp "${RUNNER_TEMP}/maven-cache-seed.XXXXXX")" || exit 1
+            curl --fail --silent --show-error --location --connect-timeout 10 --max-time 60 \
+              "https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/scripts/maven-cache-seed.sh" \
+              -o "${seed_helper}" || {
+              echo "::error::Maven cache seed helper is unavailable at workflow revision ${GITHUB_SHA}"
+              exit 1
+            }
           fi
-          # Drop resolver tracking markers, version metadata and checksums,
-          # *.tmp transfer files, and older Resolver *.part / *.part.lock
-          # residue. Unlocked runs must not inherit mutable resolver state;
-          # Maven recreates them job-locally. Best-effort like the copy
-          # above: an entry the prune cannot delete must not abort the step
-          # before Maven, which would then re-resolve from the network.
-          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
-          fi
-          # Both in-house coordinates are fixed release versions this job
-          # builds locally, so a seeded copy is only a hardlink the unlocked
-          # Maven runs would rewrite through into the host cache. Drop them
-          # at any depth, including the legacy nested tree, so the install
-          # writes fresh inodes.
-          find "${RUNNER_TEMP}/m2-repo" -depth -type d \
-            \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-*' \) \
-            -exec rm -rf {} + 2>/dev/null || true
+          source "${seed_helper}"
+          # The shared helper performs the safe job-local reconstruction.
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host

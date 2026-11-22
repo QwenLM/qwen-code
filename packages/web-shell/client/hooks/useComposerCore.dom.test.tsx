@@ -5097,6 +5097,21 @@ describe('useComposerCore prepareSubmit gate', () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
+  it('keeps a desktop slash followup on the normal submit path', async () => {
+    const { onSubmit } = await mount({
+      followupState: {
+        isVisible: true,
+        shownAt: 0,
+        suggestion: '/clear',
+      },
+    });
+
+    act(() => latest!.submitText());
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0]).toBe('/clear');
+  });
+
   it('recomputes the follow-up completion after preparation inserts text', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {

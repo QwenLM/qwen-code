@@ -1163,6 +1163,7 @@ describe('qwen daemon command', () => {
         QWEN_SERVER_TOKEN: 'old',
         QWEN_CODE_SESSION_ID: 'sid',
         QWEN_CODE_SERVE: '1',
+        QWEN_CODE_MANAGED_RUNTIME: '1',
         QWEN_DAEMON_TOKEN: 'daemon',
         QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'capability',
       },
@@ -1172,6 +1173,7 @@ describe('qwen daemon command', () => {
     expect(env['QWEN_SERVER_TOKEN']).toBe('new-token');
     expect(env['QWEN_CODE_SESSION_ID']).toBeUndefined();
     expect(env['QWEN_CODE_SERVE']).toBeUndefined();
+    expect(env['QWEN_CODE_MANAGED_RUNTIME']).toBeUndefined();
     expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
   });

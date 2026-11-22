@@ -100,10 +100,11 @@
   completed-unread 支与行圆点同序：优先于 running/active-work/unknown 支，
   「仅后台」支优先于它；等待态的优先级不变（#18070）。
 
-状态圆点优先级与该链一致（#18070）：live 启动 Spinner 顶替圆点；background 圆点
-优先于 unread 圆点；unread 圆点优先于 running 与 active-work 圆点。配色：回合在跑
-或其他活跃工作为绿色（#18072 将 active-work 配色并入 running），仅后台为琥珀色，
-unread 为蓝色。
+状态圆点优先级与该链一致（#18070）：live 启动 Spinner 顶替圆点；仅后台圆点
+（`!hasActivePrompt && hasRunningBackgroundTasks`）优先于 unread 圆点；
+unread 圆点优先于 running 与 active-work 圆点（回合进行中时门控关闭仅后台圆
+点）。配色：回合在跑或其他活跃工作均为绿色（#18072 将 active-work 从蓝色改为复
+用运行绿色，使蓝色仅保留给完成未读会话），仅后台任务为琥珀色，完成未读为蓝色。
 
 ## 设计决策与理由
 
@@ -186,8 +187,10 @@ task sidebar indicator visible on hover and prioritizes the prompt spinner」。
    Session Overview 卡片上都不提供归档与删除，删除弹窗亦然。空闲的当前会话仍
    可删除。批量归档要跟随勾选之后标志的变化；勾选后才变忙的行要被取消勾选、
    不再计入计数，并从请求中剔除。
-5. 圆点优先级与 hover 链一致（unread 优先于 running/active-work，background 优先
-   于 unread，启动 Spinner 优先于全部）；触屏布局、既有悬停契约不变。
+5. 圆点优先级与 hover 链一致（启动 Spinner 优先于全部，仅后台琥珀色优先于
+   unread，unread 优先于 running/active-work，回合进行中门控关闭仅后台圆点，
+   且其他活跃工作按 #18072 复用运行绿色、蓝色仅保留给完成未读）；触屏布局与
+   既有悬停契约均成立。
 6. 每条被钉住的断言在对应变异下都会失败：tooltip 矩阵（含逐支后缀出现计数与
    unread 优先于 running 行）覆盖组合链；行侧见证以控制相钉住 running→idle
    晋升与 background 优先于 unread 的槽位。行上 unread 优先于 running 的守卫
