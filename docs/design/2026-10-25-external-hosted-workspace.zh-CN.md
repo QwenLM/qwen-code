@@ -244,11 +244,11 @@ mount root 归属、不返回 `rootDevice`/`rootInode` receipt。这些属于 wo
 
 ### 已实现边界
 
-A 建立元数据/授权；step 3a 提供已登记的放置；B0 提供原 worker 原生 drain；B1 接通生命周期关闭与 SQL 归属；B2 开启公开文件工具/default 审批。精确档案为 `hosted-workspace-external-files/1`，仅含 `read_file`、`write_file`、`edit` 和 `glob`。门禁通过后，公开发现与 Session 创建现在允许该档案，不再一律拒绝 EXTERNAL 放置。
+A 建立元数据/授权；step 3a 提供已登记的放置；B0 提供原 worker 原生 drain；B1 接通生命周期关闭与 SQL 归属；B2 开启公开文件工具/default 审批。精确档案为 `hosted-workspace-external-files/1`，包含 `read_file`、`write_file`、`edit` 和 `glob`；当 Session 钉了 skill 目录时，额外声明一个只读内容的 `skill` 工具。门禁通过后，公开发现与 Session 创建现在允许该档案，不再一律拒绝 EXTERNAL 放置。
 
 准入要求选择 `external-workspace` kind、`workspaceFilesEnabled=true`、启用 Harness/session store/Broker、有效的外部 provider 配置、session 隔离且不开 create-warm，以及协商得到的特性 token `hosted-workspace-external-files/1`、生命周期协议 `1` 和 Workspace close 支持。登记、provider 与根绑定仍须匹配。配置满足条件不等于协商就绪或 worker 证明。指定 E2E 使用 `default` 审批，不认证所有审批模式。
 
-选项保持闭合：不支持 shell、`monitor`、capture、skills、hooks/extensions、MCP、child agents/workspaces/snapshots、plan mode、rewind 或输入附件。本地 mounts/import、SSH 与 verified/operator/trusted-local-reboot recovery 开关必须保持关闭。这不是完整 Hosted 工具档案。见[配置](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java)、[准入](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedWorkspaceRegistry.java)与[闭合 Harness 选项](../../packages/cli/src/serve/hosted-workspace-profiles.ts)。
+选项保持闭合：不支持 shell、`monitor`、capture、hooks/extensions、MCP、child agents/workspaces/snapshots、plan mode、rewind 或输入附件。Session skills 是本里程碑唯一放开的通道：创建时 caller 目录进入不可变回执，Session 钉住的目录以资源引用发布，带目录的 Turn 声明 `skill` 工具——它只注入钉住的内容，不向 Workspace 写任何东西。本地 mounts/import、SSH 与 verified/operator/trusted-local-reboot recovery 开关必须保持关闭。这不是完整 Hosted 工具档案。见[配置](../../packages/managed-agent-server/server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java)、[准入](../../packages/managed-agent-server/contracts/src/main/java/com/alibaba/qwen/code/managedagent/repository/ManagedWorkspaceRegistry.java)与[闭合 Harness 选项](../../packages/cli/src/serve/hosted-workspace-profiles.ts)。
 
 ### 关闭与归属
 
@@ -284,7 +284,7 @@ remote191 上指定的公开 files/close E2E（`ExternalPublicFilesE2E`，随第
 
 准入要求：选中的 kind 是 `external-workspace`、session 隔离、持久化的已登记外部存储（临时 sandbox 目录直接拒绝——它拿不出 drain 证明）、显式预留 `captureBytes`，以及协商到位的 feature token。它由自己的开关控制——`QWEN_MANAGED_AGENT_EXTERNAL_WORKSPACE_SHELL_ENABLED`，默认 **false**——与 files 开关相互独立，因此打开 files 绝不会顺带打开 Shell。`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED` 是本地 `hosted-workspace-shell/1` 的开关，不控制该档案。
 
-本档案上仍然关闭的能力：后台 Shell（`is_background`）、`monitor`、`web_fetch`、skills、hooks/extensions、MCP、子 agent/workspace/snapshot、teams、messages、session commands、plan mode、rewind、memory、automations、channels。Harness 在 Session 准入处拒绝，Broker 在每次 dispatch 再拒一次，worker 自己的前台 ledger 门第三次拒绝。这三道拒绝刻意相互独立：任何一道单独成立就能让这个 placement 保持诚实。
+本档案上仍然关闭的能力：后台 Shell（`is_background`）、`monitor`、`web_fetch`、hooks/extensions、MCP、子 agent/workspace/snapshot、teams、messages、session commands、plan mode、rewind、memory、automations、channels。Harness 在 Session 准入处拒绝，Broker 在每次 dispatch 再拒一次，worker 自己的前台 ledger 门第三次拒绝。这三道拒绝刻意相互独立：任何一道单独成立就能让这个 placement 保持诚实。Session skills 是唯一例外：钉住 skill 目录的 Turn 声明与 files 档案相同的只读内容 `skill` 工具，目录内容从 Session 的定义引用提供。
 
 `READY` 仍是 Broker 本地谓词——`state == RUNNING`、continuity 为 `confirms`，**并且** publication readiness 探针能在精确的 lease、storage revision 与 incarnation 下探通 worker 自己的 publication 协议。wire 上依旧只有 `RUNNING`/`STARTING`/`UNKNOWN`/`GONE`。探针刻意命名一个不可能存在的 channel，所以 worker 自己的「通道已关闭」拒绝才是肯定回答；传输失败或身份不符属于**缺少证据**，绝不等于「worker 已经没了」。continuity 为 `denies` 是永久拒绝；`unknown` 保留归属、丢掉 readiness；`GONE` 既不 adopt 也不 replace；provider 的 `release` 仍是无操作。
 
