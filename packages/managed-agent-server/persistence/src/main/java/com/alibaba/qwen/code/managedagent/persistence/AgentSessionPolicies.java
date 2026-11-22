@@ -305,9 +305,9 @@ final class AgentSessionPolicies {
         Map<String, Object> initial = creationSkills.initialSelection(tenantId, sessionId);
         if (initial != null) {
             if (initial.get("operationId").equals(body.path("command").path("operationId").asText())) {
-                boolean beforeModel = jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE tenant_id=? AND session_id=?", Integer.class,
-                        tenantId, sessionId) <= 1
-                        && jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE",
+                // Failed pre-admission Turns do not consume initial configuration.
+                // The locked Session and actual model-submission fence remain authoritative.
+                boolean beforeModel = jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id=? AND session_id=? AND is_submission_attempted=TRUE LIMIT 1 FOR UPDATE",
                                 tenantId, sessionId).isEmpty();
                 if (!beforeModel || !isBootstrapRevision(body)
                         || !objectMapper.valueToTree(initial).equals(body.path("command"))) {
@@ -687,6 +687,13 @@ final class AgentSessionPolicies {
 
     void requireExternalTurnAllowed(String tenantId, String actorId, String sessionId,
             SessionRecord session, List<Map<String, Object>> input) {
+        if (WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                && workspaces.externalExtensionsAllowed(session.workspace())
+                && "qwen-code".equals(session.agentId()) && session.agentDefinitionDigest() == null
+                && sessionQueries.findChildLineage(tenantId, sessionId) == null
+                && workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()) {
+            return;
+        }
         if (!WorkspaceToolProfiles.isExternal(session.toolProfile())
                 || !ExternalWorkspaceSessionPolicies.externalProfileAllowedOrRefuse(workspaces,
                         session.workspace(), session.toolProfile())

@@ -30,13 +30,20 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         validate(settings);
         var broker = settings.getRuntimeBroker();
         boolean workspace = ExternalRuntimeKinds.isWorkspace(broker.getProvisioner());
+        if (settings.isExternalWorkspaceExecutionConfigured()) {
+            if (!(transport instanceof com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport http)) {
+                throw new IllegalStateException("External extension execution requires HTTP Runtime transport");
+            }
+            http.withManagedExtensionCacheDirectory(settings.getManagedExtensions().getCacheDirectory(), null);
+        }
         ExternalStorageRegistry storage = workspace ? dependencies.externalStorage() : null;
         ExternalHttpRuntimeClient client = new ExternalHttpRuntimeClient(
                 URI.create(broker.getExternalProviderUrl()), broker.getExternalProviderToken(),
                 broker.getExternalRequestTimeout());
         return workspace
                 ? new ExternalWorkspaceProvisioner(client, storage, broker.getExternalProviderId(),
-                        broker.getExternalStartupTimeout())
+                        broker.getExternalStartupTimeout(), settings.isExternalWorkspaceExecutionConfigured()
+                                ? settings.getManagedExtensions().getCacheDirectory() : null)
                 : new ExternalRuntimeProvisioner(client, broker.getExternalProviderId(),
                         broker.getExternalStartupTimeout());
     }
@@ -84,15 +91,16 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
         boolean workspace = ExternalRuntimeKinds.isWorkspace(provisioner);
         // The external foreground-Shell profile (#15512 slice C) is admitted
         // only behind its own switch and on top of eligible external files.
-        // The local Shell switch stays refused either way: it would open
-        // background commands and monitors an external worker cannot serve.
+        // General Shell execution requires the complete extension configuration;
+        // the legacy external foreground-Shell lane keeps its own eligibility gate.
         boolean externalShell = workspace && harness.isExternalWorkspaceShellEnabled();
+        boolean execution = settings.isExternalWorkspaceExecutionConfigured();
         // Only the Shell lane's own extras are checked here. Calling
         // settings.isExternalWorkspaceFilesConfigured() would re-enter this
         // method through its own factory.validate() and recurse forever; the
         // rest of this method already is the external-files eligibility rule.
         if (harness.isWorkspaceFilesEnabled() && !workspace
-                || harness.isWorkspaceShellEnabled()
+                || harness.isWorkspaceShellEnabled() && !execution
                 || externalShell && (!settings.getToolPublication().isEnabled()
                         || harness.getApprovalMode() == null
                         || !Set.of("default", "auto-edit")
@@ -100,7 +108,7 @@ public final class ExternalRuntimeProviderFactory implements RuntimeProviderFact
                 // Control-plane package management and source import do not execute on the
                 // external Worker, so only worker-side execution is restricted.
                 || workspace && (settings.getManagedExtensions().isEnabled()
-                        && !"content-only".equals(settings.getManagedExtensions().getMode()))
+                        && !"content-only".equals(settings.getManagedExtensions().getMode()) && !execution)
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
                 || runtimeBroker.isLocalDirectoryImportEnabled()

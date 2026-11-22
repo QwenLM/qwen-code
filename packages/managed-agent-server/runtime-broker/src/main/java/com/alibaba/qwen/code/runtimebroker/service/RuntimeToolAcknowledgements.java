@@ -42,7 +42,9 @@ final class RuntimeToolAcknowledgements {
     CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
         boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
         boolean externalShell = WorkspaceExecutionProfile.isExternalShellRequest(binding.getRequest());
-        if (external && !externalShell && (!execution.isSettled() || execution.getResult() == null
+        if (external && !externalShell
+                && !WorkspaceExecutionProfile.isExternalWorkspaceExecutionRequest(binding.getRequest())
+                && (!execution.isSettled() || execution.getResult() == null
                 || execution.getResult().containsKey("capture")
                 || !execution.getReference().keySet().equals(
                         Set.of("sessionId", "promptId", "callId", "argsDigest", "dispatchMode"))

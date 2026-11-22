@@ -327,6 +327,7 @@ export function registerManagedContextRoutes(
   mount = new ManagedContextMount(bootDocument.mountRoot),
   ledger?: ManagedRuntimeLedger,
   sshForegroundOnly = false,
+  extensionAgentsEnabled = true,
 ): ManagedToolExecutor {
   const boot = parseManagedContextBoot(bootDocument);
   if (isCsiFilesCapability(boot.capabilityDigest))
@@ -614,9 +615,9 @@ export function registerManagedContextRoutes(
     backgroundSupervisor,
     backgroundRegistry,
     monitorRegistry,
-    { ledger, sshForegroundOnly },
+    { ledger, sshForegroundOnly: foregroundOnly },
   );
-  if (!sshForegroundOnly) {
+  if (!foregroundOnly) {
     registerManagedShellRoutes(
       app,
       boot,
@@ -680,7 +681,7 @@ export function registerManagedContextRoutes(
             isActive,
           };
     },
-    sshForegroundOnly,
+    foregroundOnly,
   );
 
   if (extensionConfiguration && mcp && hooks && extensionProcesses) {
@@ -711,6 +712,7 @@ export function registerManagedContextRoutes(
       ReturnType<typeof stageManagedExtensionManifests>
     >();
     extensionRuntime = new ManagedExtensionRuntime({
+      agentsEnabled: extensionAgentsEnabled,
       directory: configurationDirectory,
       executionMode: extensionConfiguration.mode,
       ownerJournalId: extensionProcesses.journalId,

@@ -27,6 +27,7 @@ it('inherits only execution essentials and the selected extension settings', () 
     USERPROFILE: '/workspace/session',
     SELECTED_SECRET: 'selected',
     QWEN_EXTENSION_ROOT: '/private/package',
+    PYTHONDONTWRITEBYTECODE: '1',
   });
   expect(inherited.HOME).toBe('/private/operator');
 });

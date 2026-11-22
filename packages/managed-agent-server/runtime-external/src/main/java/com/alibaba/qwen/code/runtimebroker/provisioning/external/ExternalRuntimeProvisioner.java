@@ -126,11 +126,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
             Placement retained = admitPlacement(request, seed, knownHandle, true);
             RuntimeResourceHandle original = knownHandle != null ? knownHandle : retained.handle();
             RuntimeResourceHandle handle = original != null ? original
-                    : new RuntimeResourceHandle(kind(), handleVersion(request), Map.of(
-                            "providerId", providerId,
-                            "provisionRequestId", seed.getProvisionRequestId(),
-                            "identity", identity(request, seed),
-                            "provider", Map.of("requestId", seed.getProvisionRequestId())));
+                    : new RuntimeResourceHandle(kind(), handleVersion(request), resourceHandleValue(request, seed));
             savePlacement(new Placement(request, seed, handle, retained.endpoint()));
             return handle;
         }, executor);
@@ -586,14 +582,28 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private void validateHandleFields(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle) {
         if (!supportsStartupRecovery(handle) || handle.getVersion() != handleVersion(request)
-                || handle.getValue().size() != 4
+                || handle.getValue().size() != 4 + handleConfiguration(request).size()
                 || !providerId.equals(handle.getValue().get("providerId"))
                 || !seed.getProvisionRequestId().equals(handle.getValue().get("provisionRequestId"))) {
             throw conflict();
         }
-        if (!Map.of("requestId", seed.getProvisionRequestId()).equals(handle.getValue().get("provider"))) {
+        if (!Map.of("requestId", seed.getProvisionRequestId()).equals(handle.getValue().get("provider"))
+                || !handle.getValue().entrySet().containsAll(handleConfiguration(request).entrySet())) {
             throw conflict();
         }
+    }
+
+    protected Map<String, Object> handleConfiguration(RuntimeProvisionRequest request) {
+        return Map.of();
+    }
+
+    private Map<String, Object> resourceHandleValue(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        Map<String, Object> value = new LinkedHashMap<>(handleConfiguration(request));
+        value.put("providerId", providerId);
+        value.put("provisionRequestId", seed.getProvisionRequestId());
+        value.put("identity", identity(request, seed));
+        value.put("provider", Map.of("requestId", seed.getProvisionRequestId()));
+        return Map.copyOf(value);
     }
 
     private String identity(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {

@@ -1967,14 +1967,21 @@ public final class JdbcRuntimeBindingRepository
                         + "AND (provision_request_id IS NULL OR provision_seed_ciphertext IS NULL OR credential_key_id IS NULL))))) "
                         + "AND (storage_id IS NULL "
                         + "OR CAST(storage_id AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
-                        + "OR CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        // A registered ephemeral Worker owns a distinct container filesystem.
+                        // Equal paths in another container do not identify its physical storage.
+                        // Same storage/workspace and unknown-storage blockers remain below/above.
+                        + "OR (CAST(canonical_cwd AS BINARY(2048)) = CAST(? AS BINARY(2048)) "
+                        + "AND NOT EXISTS (SELECT 1 FROM ma_storage target_storage WHERE target_storage.alias_key = ? "
+                        + "AND target_storage.storage_kind = 'EPHEMERAL' AND target_storage.registration_state = 'REGISTERED')) "
                         + "OR CAST(workspace_id AS BINARY(2048)) = CAST(? AS BINARY(2048))) LIMIT 1")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 3, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
             JdbcRepositorySupport.setIdentity(statement, 4, request.getStorageId());
             JdbcRepositorySupport.setIdentity(statement, 5, scope.getCanonicalCwd());
-            JdbcRepositorySupport.setIdentity(statement, 6, scope.getWorkspaceId());
+            statement.setString(6, WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                    ? storageAliasKey(scope.getTenantId(), request.getStorageId()) : null);
+            JdbcRepositorySupport.setIdentity(statement, 7, scope.getWorkspaceId());
             try (ResultSet result = statement.executeQuery()) {
                 if (result.next()) {
                     throw new RuntimeBrokerException(409, "runtime_placement_recovery_required",

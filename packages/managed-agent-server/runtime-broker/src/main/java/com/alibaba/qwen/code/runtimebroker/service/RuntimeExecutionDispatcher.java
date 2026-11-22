@@ -174,6 +174,7 @@ final class RuntimeExecutionDispatcher {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
                 context.binding().getRequest())
                 && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && !WorkspaceExecutionProfile.isExternalWorkspaceExecutionRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null

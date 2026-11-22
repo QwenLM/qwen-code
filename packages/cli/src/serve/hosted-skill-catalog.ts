@@ -328,8 +328,12 @@ export class HostedSkillCatalog {
         'Extension commands require the durable command expansion pipeline.',
       );
     const skill = this.skills.find((entry) => entry.name === name)!;
-    return skill.asset_directory
-      ? `Base directory for this skill: ${skill.asset_directory}\nResolve asset paths relative to this directory with the Workspace tools.\n\n${skill.body}\n`
-      : `Base directory for this skill relative to the Session working directory: ${skill.base_directory ?? '.'}\nResolve asset paths relative to this directory with the Workspace tools.\n\n${skill.body}\n`;
+    if (skill.asset_directory) {
+      const [, extensionId, relative] = /^extension:\/\/([^/]+)\/(.*)$/u.exec(
+        skill.asset_directory,
+      )!;
+      return `Base directory for this skill: ${skill.asset_directory}\nFor read_file/glob, select the exact extension_source pin for ${extensionId} and resolve package-relative paths from this directory. For run_shell_command, select the same pin in extension_context; the skill directory is $QWEN_EXTENSION_ROOT/${relative}. Use this runtime path in place of installation paths shown in the skill instructions (such as ~/.qwen/extensions). The Shell working directory remains the Session workspace.\n\n${skill.body}\n`;
+    }
+    return `Base directory for this skill relative to the Session working directory: ${skill.base_directory ?? '.'}\nResolve asset paths relative to this directory with the Workspace tools.\n\n${skill.body}\n`;
   }
 }

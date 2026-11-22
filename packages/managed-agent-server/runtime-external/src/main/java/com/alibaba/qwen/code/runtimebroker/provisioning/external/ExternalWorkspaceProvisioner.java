@@ -59,13 +59,39 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     private final ExternalStorageRegistry registry;
     private final ExternalRuntimeClient client;
     private final String provider;
+    private final String extensionCacheDirectory;
 
     public ExternalWorkspaceProvisioner(ExternalRuntimeClient client, ExternalStorageRegistry registry,
             String providerId, Duration startupTimeout) {
+        this(client, registry, providerId, startupTimeout, null);
+    }
+
+    public ExternalWorkspaceProvisioner(ExternalRuntimeClient client, ExternalStorageRegistry registry,
+            String providerId, Duration startupTimeout, String extensionCacheDirectory) {
         super(client, providerId, startupTimeout);
         this.registry = Objects.requireNonNull(registry, "registry");
         this.client = client;
         this.provider = providerId;
+        this.extensionCacheDirectory = extensionCacheDirectory;
+        if (extensionCacheDirectory != null) {
+            this.transport.withManagedExtensionCacheDirectory(extensionCacheDirectory, null);
+        }
+    }
+
+    private static boolean executable(RuntimeProvisionRequest request) {
+        return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                .equals(request.getScope().getCapabilityDigest());
+    }
+
+    private Map<String, Object> extensionConfiguration(RuntimeProvisionRequest request) {
+        return executable(request) ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(
+                request.getScope().getCapabilityDigest(), extensionCacheDirectory, null) : null;
+    }
+
+    @Override
+    protected Map<String, Object> handleConfiguration(RuntimeProvisionRequest request) {
+        return executable(request)
+                ? Map.of("managedExtensions", extensionConfiguration(request)) : Map.of();
     }
 
     @Override
@@ -184,7 +210,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         try {
             validatedSavedBoot(binding);
-            return !binding(binding.getRequest()).ephemeral();
+            return !binding(binding.getRequest()).ephemeral() || executable(binding.getRequest());
         } catch (RuntimeBrokerException failure) {
             if (failure.isRetryable()) {
                 throw failure;
@@ -201,7 +227,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
             if (binding == null || !binding.isDrainRequested()) {
                 throw refuse("workspace_close_identity_unverified", "External Workspace drain is not authorized.");
             }
-            if (binding(binding.getRequest()).ephemeral()) {
+            if (binding(binding.getRequest()).ephemeral() && !executable(binding.getRequest())) {
                 throw refuse("ephemeral_workspace_recovery_required",
                         "Ephemeral Workspace cannot be remounted.");
             }
@@ -245,6 +271,9 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
 
     @Override
     protected void validateProfile(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        if (executable(request) && extensionCacheDirectory == null) {
+            throw refuse("external_extension_execution_unavailable", "External extension execution is not configured.");
+        }
         if (!request.isManagedContext()) {
             throw refuse("external_workspace_storage_required",
                     "External Workspace provisioning requires a registered storage binding.");
@@ -259,7 +288,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     @Override
     protected Map<String, Object> bootDocument(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         ExternalStorageRegistry.RegisteredExternalStorage storage = binding(request);
-        Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed));
+        Map<String, Object> boot = new LinkedHashMap<>(ManagedContextProtocol.boot(request, seed, extensionConfiguration(request)));
         boot.put("storage", storage.bootStorage(seed));
         return Map.copyOf(boot);
     }

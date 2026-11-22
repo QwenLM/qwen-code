@@ -58,7 +58,8 @@ public final class WorkspaceExecutionProfile {
 
     /** The capability digests a registered external Workspace placement admits. */
     public static boolean admitsExternalWorkspaceDigest(String digest) {
-        return CAPABILITY_DIGEST.equals(digest) || isExternalShell(digest);
+        return CAPABILITY_DIGEST.equals(digest) || isExternalShell(digest)
+                || ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST.equals(digest);
     }
 
     /** Whether Workspace execution may run under this Runtime isolation class. */
@@ -98,6 +99,13 @@ public final class WorkspaceExecutionProfile {
                         || "workspace".equals(request.getScope().getIsolationClass())
                                 && request.getIsolationKey() == null)
                 && request.getScope().getWorkspaceId().equals(request.getStorageId());
+    }
+
+    /** Full extension execution on registered external storage; not execution authority. */
+    public static boolean isExternalWorkspaceExecutionRequest(RuntimeProvisionRequest request) {
+        return isExternalWorkspaceRequest(request)
+                && ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                        .equals(request.getScope().getCapabilityDigest());
     }
 
     /** Saved identity only; this predicate never admits execution or replacement provisioning. */

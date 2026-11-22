@@ -318,7 +318,7 @@ public class ManagedExtensionManagementService {
             if (components == null) {
                 continue;
             }
-            if (!components.isArray() || components.size() > 2) {
+            if (!components.isArray() || components.size() > 3) {
                 throw corrupt();
             }
             if (components.isEmpty()) {
@@ -326,13 +326,13 @@ public class ManagedExtensionManagementService {
             }
             Set<String> seen = new HashSet<>();
             for (JsonNode component : components) {
-                if (!component.isTextual() || !Set.of("mcp", "hooks").contains(component.asText())
+                if (!component.isTextual() || !Set.of("agents", "mcp", "hooks").contains(component.asText())
                         || !seen.add(component.asText())) {
                     throw corrupt();
                 }
             }
             ArrayNode list = degraded.putArray(entry.path("pin").path("extensionId").asText());
-            for (String component : List.of("mcp", "hooks")) {
+            for (String component : List.of("agents", "mcp", "hooks")) {
                 if (seen.contains(component)) {
                     list.add(component);
                 }

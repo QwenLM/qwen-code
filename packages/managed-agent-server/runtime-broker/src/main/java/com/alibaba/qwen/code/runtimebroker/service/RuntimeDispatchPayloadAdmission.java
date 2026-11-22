@@ -104,6 +104,7 @@ final class RuntimeDispatchPayloadAdmission {
                         "External Shell requires a foreground Tool v3 Shell payload");
             }
         } else if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                && !WorkspaceExecutionProfile.isExternalWorkspaceExecutionRequest(context.binding().getRequest())
                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
             executionRepository.settlePrepared(record, Map.of(

@@ -8,6 +8,18 @@ public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
     public boolean isExternalWorkspaceFilesConfigured();
+    /** Full execution on a registered external Worker; never inferred from files alone. */
+    public default boolean isExternalWorkspaceExecutionConfigured() {
+        return "external-workspace".equals(getRuntimeBroker().getProvisioner())
+                && getRuntimeBroker().isEnabled() && getHarness().isEnabled() && getSessionStore().isEnabled()
+                && getHarness().isWorkspaceFilesEnabled() && getHarness().isWorkspaceShellEnabled()
+                && getManagedExtensions().isEnabled()
+                && "developer-process-group".equals(getManagedExtensions().getMode())
+                && getExtensions().isEnabled() && getToolPublication().isEnabled()
+                && "session".equals(getRuntimeBroker().getIsolationClass())
+                && ("session".equals(getRuntimeBroker().getBoundSessionIsolationClass())
+                        || "workspace".equals(getRuntimeBroker().getBoundSessionIsolationClass()));
+    }
     /**
      * Static configuration eligibility for the external foreground-Shell
      * profile (#15512 slice C). Separate from the files verdict: it requires

@@ -212,6 +212,14 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
             String sessionId, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord expected, String digest, Path archive) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
         var binding = extensionBindings.findById(expected.getBindingId());
+        // Content-addressed archives belong to the Worker cache. Workspace-shared
+        // external Workers keep configuration and process owners per Harness Session;
+        // installing the archive does not make the caller the sole Worker owner.
+        boolean sharedExternalExecution = binding != null
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
+                && com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                        .equals(binding.getRequest().getScope().getCapabilityDigest())
+                && com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
         if (binding == null || binding.getGeneration() != expected.getGeneration()
                 || !binding.getRequest().equals(expected.getRequest())
                 || !java.util.Objects.equals(binding.getProvisionSeed(), expected.getProvisionSeed())
@@ -220,8 +228,9 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
                 || binding.isDrainRequested() || binding.getLease() == null || session.workspace() == null
                 || !tenantId.equals(binding.getRequest().getScope().getTenantId())
                 || !session.workspace().getWorkspaceId().equals(binding.getRequest().getScope().getWorkspaceId())
-                || !"session".equals(binding.getRequest().getScope().getIsolationClass())
-                || !sessionId.equals(binding.getRequest().getIsolationKey())) {
+                || !sharedExternalExecution
+                        && (!"session".equals(binding.getRequest().getScope().getIsolationClass())
+                                || !sessionId.equals(binding.getRequest().getIsolationKey()))) {
             return CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable());
         }
         return extensionTransport.installExtensionPackage(binding, digest, archive).thenApply(result -> {

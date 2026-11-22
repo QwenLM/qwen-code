@@ -6,6 +6,7 @@
 
 import { createHash, randomBytes } from 'node:crypto';
 import { managedToolDigest } from '../tools/managed-tool-protocol.js';
+import { parseManagedExtensionPin } from './managed-extension-package.js';
 import {
   assertManagedSessionDigest,
   assertManagedSessionDurableRef,
@@ -382,7 +383,7 @@ export function assertToolPublicationPayload(
   // payloads beside the foreground Shell; each family keeps its own closed
   // input shape.
   if (toolName === 'run_shell_command') {
-    assertShellPublicationInput(input);
+    assertShellPublicationInput(input, parsed.sessionKey.sessionId);
   } else if (toolName === 'monitor') {
     assertMonitorPublicationInput(input);
   } else {
@@ -397,7 +398,21 @@ export function assertToolPublicationPayload(
 
 function assertShellPublicationInput(
   input: Record<string, ManagedSessionJsonValue>,
+  sessionId: string,
 ): void {
+  if (input['managedExtension'] !== undefined) {
+    const context = closed(input['managedExtension'], [
+      'harnessSessionId',
+      'configRevision',
+      'pin',
+    ]);
+    requireValue(
+      context['harnessSessionId'] === sessionId &&
+        Number.isSafeInteger(context['configRevision']) &&
+        Number(context['configRevision']) > 0,
+    );
+    parseManagedExtensionPin(context['pin']);
+  }
   requireValue(
     typeof input['command'] === 'string' &&
       input['command'].length > 0 &&
@@ -408,6 +423,7 @@ function assertShellPublicationInput(
           'description',
           'is_background',
           'directory',
+          'managedExtension',
         ].includes(key),
       ) &&
       (input['timeout'] === undefined ||

@@ -31,6 +31,7 @@ public class JdbcManagedWorkspaceRegistry
     private com.alibaba.qwen.code.managedagent.settings.SshSettings ssh;
     private java.util.function.BooleanSupplier externalFilesActivation = () -> false;
     private java.util.function.BooleanSupplier externalShellActivation = () -> false;
+    private java.util.function.BooleanSupplier externalExecutionActivation = () -> false;
     private ExternalStorageRegistrationStore externalRegistrations;
     private com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings properties;
 
@@ -41,6 +42,14 @@ public class JdbcManagedWorkspaceRegistry
             org.springframework.beans.factory.ObjectProvider<com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer> warmers) {
         this.properties = settings;
         this.externalRegistrations = registrations;
+        this.externalExecutionActivation = () -> {
+            var harness = harnesses.getIfAvailable();
+            var warmer = warmers.getIfAvailable();
+            String profile = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.SHELL;
+            return settings.isExternalWorkspaceExecutionConfigured() && harness != null && warmer != null
+                    && harness.supportsLifecycle(profile) && harness.supportsSessionExtensions()
+                    && warmer.supportsWorkspaceClose(profile);
+        };
         this.externalFilesActivation = () -> {
             if (!settings.isExternalWorkspaceFilesConfigured()) {
                 return false;
@@ -74,6 +83,14 @@ public class JdbcManagedWorkspaceRegistry
         return externalShellActivation.getAsBoolean();
     }
 
+    public boolean externalExtensionsAvailable() {
+        return externalExecutionActivation.getAsBoolean();
+    }
+
+    public boolean externalExtensionsAllowed(ContextBinding binding) {
+        return externalExtensionsAvailable() && externalBindingCurrent(binding);
+    }
+
     public boolean isExternal(ContextBinding binding) {
         return com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership.externalStorage(jdbc, binding);
     }
@@ -94,7 +111,7 @@ public class JdbcManagedWorkspaceRegistry
      */
     public boolean externalExecutionAllowed(ContextBinding binding) {
         return externalFilesAllowed(binding)
-                || externalShellAvailable() && externalBindingCurrent(binding);
+                || (externalShellAvailable() || externalExtensionsAvailable()) && externalBindingCurrent(binding);
     }
 
     private boolean externalBindingCurrent(ContextBinding binding) {
@@ -528,7 +545,7 @@ public class JdbcManagedWorkspaceRegistry
             throw new ManagedAgentException(404, "workspace_not_found", "Workspace not found.");
         }
         if (isExternal(binding)
-                && (!(externalFilesAvailable() || externalShellAvailable())
+                && (!(externalFilesAvailable() || externalShellAvailable() || externalExtensionsAvailable())
                         || !externalBindingCurrent(binding)
                         || !".".equals(binding.getCwdRelative()))) {
             throw new ManagedAgentException(HttpStatus.CONFLICT.value(), "workspace_unavailable", "External Workspace execution is unavailable.");

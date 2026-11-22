@@ -78,7 +78,7 @@ export interface ManagedExtensionPackageView {
   readonly pin: ManagedExtensionPin;
   readonly assetRoot: string;
   readonly contributionsRef: ManagedSessionDurableRef;
-  readonly degradedComponents?: ReadonlyArray<'mcp' | 'hooks'>;
+  readonly degradedComponents?: ReadonlyArray<'agents' | 'mcp' | 'hooks'>;
 }
 
 export interface ManagedExtensionEffectiveBundle {
@@ -100,7 +100,7 @@ export interface ManagedExtensionPreparedPackage {
   readonly pin: ManagedExtensionPin;
   readonly assetRoot: string;
   readonly contributions: ManagedPackageContributions;
-  readonly degradedComponents?: ReadonlyArray<'mcp' | 'hooks'>;
+  readonly degradedComponents?: ReadonlyArray<'agents' | 'mcp' | 'hooks'>;
 }
 
 export interface ManagedExtensionPrepareResult {
@@ -419,18 +419,21 @@ function mcpChange(value: unknown): ManagedExtensionMcpChange {
   };
 }
 
-function degradedComponents(value: unknown): ReadonlyArray<'mcp' | 'hooks'> {
+function degradedComponents(
+  value: unknown,
+): ReadonlyArray<'agents' | 'mcp' | 'hooks'> {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > 2) invalid('package degradation');
+  if (!Array.isArray(value) || value.length > 3) invalid('package degradation');
   const declared = new Set<unknown>(value);
   if (
     declared.size !== value.length ||
     [...declared].some(
-      (component) => component !== 'mcp' && component !== 'hooks',
+      (component) =>
+        component !== 'agents' && component !== 'mcp' && component !== 'hooks',
     )
   )
     invalid('package degradation');
-  return (['mcp', 'hooks'] as const).filter((component) =>
+  return (['agents', 'mcp', 'hooks'] as const).filter((component) =>
     declared.has(component),
   );
 }

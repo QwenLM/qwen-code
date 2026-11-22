@@ -174,7 +174,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     void configureExternalFiles(ManagedAgentSettings properties) {
         externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
                 .equals(properties.getRuntimeBroker().getProvisioner());
+        externalExecutionConfiguration = properties.isExternalWorkspaceExecutionConfigured();
     }
+
+    private boolean externalExecutionConfiguration;
 
     @Autowired(required = false)
     void setRuntimeWarmer(RuntimeWarmer runtimeWarmer) {
@@ -408,7 +411,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String tenantId, String actorId, String agentId) {
         requireModelActor(actorId);
         var options = store.workspaceSessionOptions(tenantId, agentId);
-        if (externalFilesConfiguration) {
+        if (externalFilesConfiguration && !externalExecutionConfiguration) {
             return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
                     false, false, false, "qwen-code".equals(agentId)
                             && (workspaces.externalFilesAvailable() || workspaces.externalShellAvailable())
@@ -666,9 +669,10 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (profile == null) {
             return;
         }
-        if (!WorkspaceToolProfiles.isExternal(profile) || !"qwen-code".equals(agentId)) {
+        if (!(WorkspaceToolProfiles.isExternal(profile)
+                || externalExecutionConfiguration && WorkspaceToolProfiles.SHELL.equals(profile)) || !"qwen-code".equals(agentId)) {
             throw new ManagedAgentException(400, "invalid_tool_profile",
-                    "Only the external Hosted Workspace profiles may be requested, for the built-in Agent.");
+                    "Only negotiated external Workspace profiles may be requested, for the built-in Agent.");
         }
     }
 
@@ -843,7 +847,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         requireToolProfileAvailability(requestedToolProfile);
         requireMemoryConfiguration(memoryStoreId);
         requireModelConfiguration(modelConfig);
-        if (externalFilesConfiguration && !workspaces.externalFilesAvailable()
+        if (externalFilesConfiguration && !workspaces.externalFilesAvailable() && !externalExecutionConfiguration
                 && !(WorkspaceToolProfiles.EXTERNAL_SHELL.equals(requestedToolProfile)
                         && workspaces.externalShellAvailable())) {
             throw new ManagedAgentException(409, "workspace_unavailable", "External Workspace creation is unavailable.");

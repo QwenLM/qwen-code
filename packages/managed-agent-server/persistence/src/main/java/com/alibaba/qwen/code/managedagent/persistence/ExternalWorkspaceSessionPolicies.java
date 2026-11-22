@@ -45,6 +45,14 @@ final class ExternalWorkspaceSessionPolicies {
     static AgentSessionPolicies.AgentPin creationPin(boolean external, JdbcManagedWorkspaceRegistry workspaces, ContextBinding binding,
             AgentSessionPolicies.AgentPin resolvedPin, SessionCreationCommand command) {
         AgentSessionPolicies.AgentPin effective = resolvedPin;
+        if (external && (WorkspaceToolProfiles.SHELL.equals(command.requestedToolProfile())
+                || command.requestedToolProfile() == null && workspaces.externalExtensionsAvailable())) {
+            if (!workspaces.externalExtensionsAllowed(binding) || !"qwen-code".equals(command.agentId())
+                    || resolvedPin.digest() != null || !WorkspaceToolProfiles.isPublicShell(resolvedPin.toolProfile())) {
+                throw AgentSessionPolicies.workspaceExecutionUnavailable();
+            }
+            return selectApprovalMode(resolvedPin, command.requestedApprovalMode(), command.approvalSelectionSupported());
+        }
         if (external) {
             String profile = command.requestedToolProfile() == null
                     ? WorkspaceToolProfiles.EXTERNAL_FILES : command.requestedToolProfile();
@@ -102,6 +110,9 @@ final class ExternalWorkspaceSessionPolicies {
      */
     static boolean refusesApprovalSelection(SessionRecord session,
             JdbcManagedWorkspaceRegistry workspaces, AgentSessionQueries sessionQueries) {
+        if (workspaces.isExternal(session.workspace()) && WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
+            return !workspaces.externalExtensionsAllowed(session.workspace());
+        }
         return WorkspaceToolProfiles.isExternal(session.toolProfile())
                 && (!externalProfileAllowedOrRefuse(workspaces, session.workspace(), session.toolProfile())
                         || sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) != null);

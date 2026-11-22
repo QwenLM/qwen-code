@@ -13,6 +13,7 @@ import {
 } from './managed-context-envelope.js';
 import { publisherFields } from './managed-shell-publisher.js';
 import { realpathDeepestExisting } from './managed-runtime-tool-executor.js';
+import { MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST } from './managed-extension-profile.js';
 import {
   EXTERNAL_SHELL_CAPABILITY_DIGEST,
   isWorkspaceToolCapability,
@@ -146,7 +147,12 @@ export async function readManagedExternalBoot(
       (boot.isolationClass !== 'session' &&
         boot.isolationClass !== 'workspace') ||
       boot.mountRoot !== storage.mountRoot ||
-      !isWorkspaceToolCapability(boot.capabilityDigest)
+      !(
+        isWorkspaceToolCapability(boot.capabilityDigest) ||
+        (boot.capabilityDigest ===
+          MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST &&
+          boot.managedExtensions?.mode === 'developer-process-group')
+      )
     )
       throw new Error(INVALID);
     // The external Shell lane drains one worker's foreground captures before

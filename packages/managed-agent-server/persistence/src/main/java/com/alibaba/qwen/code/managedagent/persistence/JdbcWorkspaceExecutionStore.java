@@ -80,11 +80,16 @@ public class JdbcWorkspaceExecutionStore
         }
     }
 
+    boolean externalSession(SessionRecord session) {
+        return isExternal(session.workspace()) && (WorkspaceToolProfiles.isExternal(session.toolProfile())
+                || WorkspaceToolProfiles.isPublicShell(session.toolProfile()));
+    }
+
     public void authorize(SessionRecord session) {
         requireExternalExecution(session.workspace());
         authorizePassiveAttachment(session);
         if (storageGuard != null
-                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !externalSession(session)) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -97,7 +102,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, authority);
         if (storageGuard != null
-                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !externalSession(session)) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -108,7 +113,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, null, true);
         if (storageGuard != null
-                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !externalSession(session)) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -119,7 +124,7 @@ public class JdbcWorkspaceExecutionStore
     // classify retryable-with-cause, structural refusals keep the terminal
     // verdict, and the shared acquire path (claim/assertHeld) is untouched.
     public void verifyMountForProbe(ContextBinding binding) {
-        if (storageGuard != null) {
+        if (storageGuard != null && !isExternal(binding)) {
             storageGuard.verifyProbe(binding);
         }
     }
@@ -180,8 +185,12 @@ public class JdbcWorkspaceExecutionStore
 
     public void authorizeExternal(SessionRecord session,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        if (!isExternal(session.workspace()) || !WorkspaceToolProfiles.isExternal(session.toolProfile())
+        if (!externalSession(session)
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null) {
+            throw unavailable();
+        }
+        if (authority == null && WorkspaceToolProfiles.isPublicShell(session.toolProfile())
+                && (externalAdmission == null || !externalAdmission.externalExtensionsAllowed(session.workspace()))) {
             throw unavailable();
         }
         if (authority != null) {
@@ -591,11 +600,31 @@ public class JdbcWorkspaceExecutionStore
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
-                || HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
+        }
+        if (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())) {
+            if (!com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                    .equals(saved.getRequest().getScope().getCapabilityDigest())) {
+                return false;
+            }
+            if (!(repository instanceof JdbcRuntimeBindingRepository original) || !original.usesDataSource(jdbc.getDataSource())) {
+                throw unavailable();
+            }
+            WorkspaceStorageKindGuard.requireFreshTransaction();
+            return transaction.execute(status -> jdbc.execute((ConnectionCallback<Boolean>) connection -> {
+                var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, saved);
+                var current = JdbcExternalWorkspaceOwnership.requireCurrent(connection, original, saved, false);
+                // 共享 worker 只能由存储级 retirement 停止；owner 锁同时持有原 storage 行，禁止校验期间撤销 fence。
+                if (!original.isStorageFenced(current.getRequest().getScope().getTenantId(),
+                        current.getRequest().getStorageId(), null)) {
+                    return false;
+                }
+                JdbcExternalWorkspaceOwnership.requireDrainMembers(connection, owner, current);
+                return noActiveExecutions(current);
+            }));
         }
         return external(null, saved, repository,
                 saved.getRequest().getScope(),

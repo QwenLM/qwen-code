@@ -126,7 +126,10 @@ public final class WorkspaceRuntimeResolver {
         SessionRecord session = sessions.findSessionById(sessionId)
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
         if (authority.isExternal(session.workspace())) {
-            if (hook || managedExtensions.isEnabled() || externalRegistrations == null
+            boolean executable = com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                    .isPublicShell(session.toolProfile()) && managedExtensions.isEnabled()
+                    && "developer-process-group".equals(managedExtensions.getMode());
+            if (hook && !executable || externalRegistrations == null
                     || !java.util.Set.of("session", "workspace")
                             .contains(boundSessionIsolationClass)) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -140,7 +143,8 @@ public final class WorkspaceRuntimeResolver {
             }
             return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
                     Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
-                    externalDigest(session.toolProfile()),
+                    executable ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                            : externalDigest(session.toolProfile()),
                     boundSessionIsolationClass)
                     .withLifecycleAuthority(lifecycle));
         }
@@ -264,7 +268,11 @@ public final class WorkspaceRuntimeResolver {
                     ? WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST
                     : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
         }
-        if ("linux".equals(platform)) {
+        if ("developer-process-group".equals(managedExtensions.getMode())
+                && java.util.Set.of("linux", "darwin").contains(platform)) {
+            return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST;
+        }
+        if ("linux".equals(platform) && "linux-cgroup".equals(managedExtensions.getMode())) {
             return com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.LINUX_CAPABILITY_DIGEST;
         }
         if ("darwin".equals(platform) && "developer-process-group".equals(managedExtensions.getMode())) {
@@ -377,10 +385,13 @@ public final class WorkspaceRuntimeResolver {
             RuntimeScope scope, String storageId) {
         if (externalRegistrations == null
                 || !scope.getWorkspaceId().equals(storageId)
-                // The Shell profile is Session-isolated by construction: a
-                // shared placement has no owning Session to pin its profile,
-                // so it stays on the files capability.
-                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
+                // The shared worker retains its registered scope; each logical
+                // Session is independently authorized before acquiring a member.
+                || !(WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
+                        || managedExtensions.isEnabled()
+                                && "developer-process-group".equals(managedExtensions.getMode())
+                                && com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                                        .equals(scope.getCapabilityDigest()))
                 || !"workspace".equals(scope.getIsolationClass())) {
             throw WorkspaceExecutionStore.unavailable();
         }

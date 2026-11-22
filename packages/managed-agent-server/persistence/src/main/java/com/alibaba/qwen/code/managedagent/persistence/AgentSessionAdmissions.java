@@ -237,7 +237,8 @@ final class AgentSessionAdmissions {
         }
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
-        return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
+        return workspaces.isExternal(workspace.binding()) && !workspaces.externalExtensionsAllowed(workspace.binding())
+                ? null : pin.toolProfile();
     }
 
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {

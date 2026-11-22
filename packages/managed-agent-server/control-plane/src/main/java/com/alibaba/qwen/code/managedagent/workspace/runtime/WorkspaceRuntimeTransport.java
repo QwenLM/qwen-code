@@ -103,6 +103,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(current.getRequest().getProvisionerKind())
                 && !(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(current.getRequest().getProvisionerKind())
                         && ManagedExtensionExecutionProfile.admits(current.getRequest().getScope().getCapabilityDigest()))
+                && !externalExecution(current.getRequest())
                 || !WorkspaceExecutionProfile.admitsCapabilityDigest(current.getRequest().getScope().getCapabilityDigest())) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -114,7 +115,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             String harnessSessionId, Map<String, Object> operation) {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
         if (current != null && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
-                .equals(current.getRequest().getProvisionerKind())) {
+                .equals(current.getRequest().getProvisionerKind()) && !externalExecution(current.getRequest())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         ContextBinding saved = savedBindings.apply(harnessSessionId);
@@ -130,7 +131,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !saved.getWorkspaceId().equals(current.getRequest().getScope().getWorkspaceId())
                 || !Long.toString(saved.getWorkspaceGeneration()).equals(current.getRequest().getScope().getWorkspaceGeneration())
                 || !saved.getStorageId().equals(current.getRequest().getStorageId())
-                || !harnessSessionId.equals(current.getRequest().getIsolationKey())) {
+                || !(externalExecution(current.getRequest())
+                        && com.alibaba.qwen.code.runtimebroker.HarnessOwnership.sharesRuntimeSessions(current.getRequest()))
+                        && !harnessSessionId.equals(current.getRequest().getIsolationKey())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return delegate.extensionControl(current, harnessSessionId, saved, operation);
@@ -217,7 +220,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 }
                 assertHeld(context);
                 if (v3(reference)) {
-                    captureContext = requireLocalCapture(context);
+                    captureContext = requireWorkerCapture(context);
                 }
             } catch (RuntimeException error) {
                 // These checks precede HTTP dispatch, so no tool could have started.
@@ -257,9 +260,9 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Void> installPublication(RuntimeLease lease,
             RuntimeSession session, RuntimePublicationGrant grant) {
         Context context = requireOwnedContext(lease, session);
-        // The external worker holds no control-plane credential; the Broker is
-        // that publication's producer, so a grant is never installed there.
-        if (external(context)) {
+        // Legacy external publication is Broker-owned. The full execution
+        // lane uses the ordinary Session-scoped worker publication grant.
+        if (external(context) && !externalExecution(context.runtime().getRequest())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         assertHeld(context);
@@ -322,7 +325,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         requireOwnedWorkspace(lease, session);
         if (capture == null && v3(reference)) {
             Context original = context(lease, session, true);
-            Context held = requireLocalCapture(original);
+            Context held = requireWorkerCapture(original);
             capture =
                     Map.of(
                             "tenantId",
@@ -387,7 +390,12 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         if (external(context)
-                && !WorkspaceExecutionProfile.isExternalShellRequest(context.runtime().getRequest())) {
+                && !WorkspaceExecutionProfile.isExternalShellRequest(context.runtime().getRequest())
+                && !externalExecution(context.runtime().getRequest())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        if (externalExecution(context.runtime().getRequest())
+                && context.session().getState() != RuntimeSessionRecord.State.READY) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return context;
@@ -406,7 +414,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        Context context = requireLocalCapture(context(lease, session, true));
+        Context context = requireWorkerCapture(context(lease, session, true));
         assertHeld(context);
         return delegate.installPublisherV3(lease, session, publisher);
     }
@@ -425,7 +433,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             // requirement belongs to the other lane.
             assertHeld(context);
         } else {
-            requireLocalCapture(context);
+            requireWorkerCapture(context);
         }
         return delegate.acknowledgeV3(lease, session, wireReference(reference), receipt)
                 .thenApply(WorkspaceRuntimeTransport::projectStatus);
@@ -438,7 +446,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            requireLocalCapture(context(lease, session, false));
+            requireWorkerCapture(context(lease, session, false));
             return delegate.statusV3(lease, session, wireReference(reference), afterSequence)
                     .thenApply(WorkspaceRuntimeTransport::projectStatus);
         }
@@ -452,7 +460,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            requireLocalCapture(context(lease, session, false));
+            requireWorkerCapture(context(lease, session, false));
             return delegate.cancelV3(lease, session, wireReference(reference))
                     .thenApply(WorkspaceRuntimeTransport::projectStatus);
         }
@@ -463,9 +471,10 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         return Integer.valueOf(3).equals(reference.get("runtimeProtocol"));
     }
 
-    private static Context requireLocalCapture(Context context) {
+    private static Context requireWorkerCapture(Context context) {
         if (!java.util.Set.of(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS, com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS)
-                .contains(context.runtime().getRequest().getProvisionerKind())) {
+                .contains(context.runtime().getRequest().getProvisionerKind())
+                && !externalExecution(context.runtime().getRequest())) {
             throw WorkspaceExecutionStore.unavailable();
         }
         return context;
@@ -500,7 +509,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         if (managed(session)) {
             Context selected = context(lease, session, false);
-            if (external(selected)) {
+            if (external(selected) && !externalExecution(selected.runtime().getRequest())) {
                 requireExternalControl(operation, session);
                 // Snapshot settles capture debt on the original holder even after public admission is disabled.
                 Context original = "snapshot".equals(operation.get("action")) ? selected : context(lease, session, true);
@@ -721,9 +730,18 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         return WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.runtime().getRequest());
     }
 
+    private static boolean externalExecution(RuntimeProvisionRequest request) {
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                && ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                        .equals(request.getScope().getCapabilityDigest())
+                && ("session".equals(request.getScope().getIsolationClass())
+                        || "workspace".equals(request.getScope().getIsolationClass()));
+    }
+
     private static void requireExternalFile(Context context, Map<String, Object> reference) {
         if (external(context)
                 && !WorkspaceExecutionProfile.isExternalShellRequest(context.runtime().getRequest())
+                && !externalExecution(context.runtime().getRequest())
                 && (reference.containsKey("runtimeProtocol")
                 || !java.util.Set.of("read_file", "write_file", "edit", "glob").contains(reference.get("toolName")))) {
             throw WorkspaceExecutionStore.unavailable();

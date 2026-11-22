@@ -116,8 +116,25 @@ public final class JdbcExternalWorkspaceOwnership {
                 || !registration.mountRoot().equals(binding.getRequest().getScope().getCanonicalCwd())) {
             throw unavailable();
         }
-        var boot = new TreeMap<String, Object>(ManagedContextProtocol.boot(binding.getRequest(), seed));
+        Map<String, Object> extensions = null;
+        if (com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                .equals(binding.getRequest().getScope().getCapabilityDigest())) {
+            if (!(handle.getValue().get("managedExtensions") instanceof Map<?, ?> config)
+                    || !(config.get("cacheDirectory") instanceof String directory)) {
+                throw unavailable();
+            }
+            extensions = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(
+                    binding.getRequest().getScope().getCapabilityDigest(), directory, null);
+            if (!extensions.equals(config)) {
+                throw unavailable();
+            }
+        }
+        var boot = new TreeMap<String, Object>(ManagedContextProtocol.boot(binding.getRequest(), seed, extensions));
         boot.remove("token");
+        // Match the provisioner's canonical ordering for the nested execution contract.
+        if (extensions != null) {
+            boot.put("managedExtensions", new TreeMap<>(extensions));
+        }
         boot.put("storage", new TreeMap<>(registration.bootStorage(seed)));
         Map<String, Object> identityFields = new TreeMap<>();
         identityFields.put("version", 1);
@@ -127,9 +144,13 @@ public final class JdbcExternalWorkspaceOwnership {
         identityFields.put("boot", boot);
         String identity = DigestUtils.sha256Hex(
                 JsonCodec.encode(identityFields));
-        if (!handle.getValue().equals(Map.of("providerId", registration.providerId(),
+        Map<String, Object> expected = new TreeMap<>(Map.of("providerId", registration.providerId(),
                 "provisionRequestId", seed.getProvisionRequestId(), "identity", identity,
-                "provider", Map.of("requestId", seed.getProvisionRequestId())))) {
+                "provider", Map.of("requestId", seed.getProvisionRequestId())));
+        if (extensions != null) {
+            expected.put("managedExtensions", extensions);
+        }
+        if (!handle.getValue().equals(expected)) {
             throw unavailable();
         }
     }
@@ -192,8 +213,12 @@ public final class JdbcExternalWorkspaceOwnership {
                         || !harness.equals(row.getString("session_id")) || row.getObject("deleted_at") != null
                         || !"qwen-code".equals(row.getString("agent_id")) || row.getObject("agent_definition_digest") != null
                         || row.getObject("parent_session_id") != null
-                        || !com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                        || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
                                 .isExternal(row.getString("tool_profile"))
+                                || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles
+                                        .isPublicShell(row.getString("tool_profile"))
+                                        && com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.DEVELOPER_CAPABILITY_DIGEST
+                                                .equals(scope.getCapabilityDigest()))
                         || !WorkspaceExecutionProfile.CONFIG_REF.equals(row.getString("workspace_config_ref"))
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(row.getString("workspace_policy_ref"))
                         || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))
