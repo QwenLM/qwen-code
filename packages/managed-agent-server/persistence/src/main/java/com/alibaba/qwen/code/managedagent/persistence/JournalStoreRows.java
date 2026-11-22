@@ -11,7 +11,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -277,11 +276,10 @@ final class JournalStoreRows {
 
     private HeadRow findHeadWithRootLocked(String tenantId, String sessionId) {
         var heads = jdbc.query(
-                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                        + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
+                "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND"
+                        + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION' FOR UPDATE",
                 headMapper,
-                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                RuntimeAdmissionFences.harnessDrainKey(sessionId), tenantId, sessionId);
+                tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         return heads.isEmpty() ? null : heads.getFirst();
     }
@@ -310,11 +308,9 @@ final class JournalStoreRows {
     HeadRow requireHead(String tenantId, String sessionId) {
         List<HeadRow> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND"
-                            + " tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'",
+                        "SELECT " + ManagedSchemaProjection.SESSION_HEAD.columns() + " FROM ma_session_head WHERE tenant_id = ? AND"
+                            + " harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                         headMapper,
-                        RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                        RuntimeAdmissionFences.harnessDrainKey(sessionId),
                         tenantId,
                         sessionId);
         if (rows.isEmpty()) {
@@ -340,11 +336,10 @@ final class JournalStoreRows {
     ResourceRow findResource(String scopeKey, String resourceId, boolean lock) {
         List<ResourceRow> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ?"
+                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ?"
                         + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
                         ManagedSessionStore.resourceKey(scopeKey, resourceId),
-                        scopeKey,
                         resourceId);
         return rows.isEmpty() ? null : rows.get(0);
     }

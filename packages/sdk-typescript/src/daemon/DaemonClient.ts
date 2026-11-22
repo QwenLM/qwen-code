@@ -202,6 +202,7 @@ import type {
   PermissionResponse,
   PromptContentBlock,
   PromptResult,
+  RateSessionTurnResult,
   SetModelResult,
   SetSessionLanguageResult,
   SetUserLanguageResult,
@@ -7151,6 +7152,35 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/model');
         }
         return (await res.json()) as SetModelResult;
+      },
+    );
+  }
+
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the session's
+   * telemetry pipeline as a `user_feedback` event. The daemon fills model
+   * and approval mode from the live session Config; the caller supplies
+   * only the turn's admitted prompt id and the mark direction. Clearing a
+   * mark is client-local and has no wire call.
+   */
+  async rateSessionTurn(
+    sessionId: string,
+    promptId: string,
+    rating: 'up' | 'down',
+    clientId?: string,
+  ): Promise<RateSessionTurnResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/feedback`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ promptId, rating }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /session/:id/feedback');
+        }
+        return (await res.json()) as RateSessionTurnResult;
       },
     );
   }

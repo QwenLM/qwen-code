@@ -64,7 +64,7 @@ export interface DaemonChatControllerDeps {
   // Pass-through transcript facts.
   readonly messages: readonly Message[];
   readonly transcriptState: 'loading' | 'ready' | 'error';
-  loadOlder?(): Promise<void>;
+  loadOlder?(options?: { force?: boolean }): Promise<void>;
 
   // Pass-through status and capability facts.
   readonly statusFacts: ChatStatusFacts;

@@ -36,6 +36,175 @@ import { createGitWorkspaceScenario } from './utils/gitScenario';
 
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
+const TEST_KEYBOARD_TOP = 437.5;
+
+async function installTestSoftwareKeyboard(page: Page): Promise<void> {
+  await page.addInitScript((keyboardTop) => {
+    let open = false;
+    const listeners = new Map<string, Set<EventListener>>();
+    const emit = (type: string) => {
+      for (const listener of listeners.get(type) ?? []) {
+        listener(new Event(type));
+      }
+    };
+    Object.defineProperty(window, 'visualViewport', {
+      configurable: true,
+      value: {
+        get height() {
+          return open ? keyboardTop : window.innerHeight;
+        },
+        get width() {
+          return window.innerWidth;
+        },
+        get offsetTop() {
+          return 0;
+        },
+        get offsetLeft() {
+          return 0;
+        },
+        get pageTop() {
+          return 0;
+        },
+        get pageLeft() {
+          return 0;
+        },
+        get scale() {
+          return 1;
+        },
+        addEventListener(type: string, listener: EventListener) {
+          const entries = listeners.get(type) ?? new Set<EventListener>();
+          entries.add(listener);
+          listeners.set(type, entries);
+        },
+        removeEventListener(type: string, listener: EventListener) {
+          listeners.get(type)?.delete(listener);
+        },
+      },
+    });
+
+    const setKeyboard = (nextOpen: boolean) => {
+      if (open === nextOpen) return;
+      open = nextOpen;
+      document.querySelector('[data-test-software-keyboard]')?.remove();
+      if (open) {
+        // Opaque band standing in for the software keyboard. Its `top` is the
+        // visible-viewport bottom edge and it intercepts every pointer that
+        // still lands under it (#17859), so a composer that has not been
+        // lifted onto the inset is genuinely unreachable in these tests.
+        const keyboard = document.createElement('div');
+        keyboard.dataset.testSoftwareKeyboard = '';
+        Object.assign(keyboard.style, {
+          position: 'fixed',
+          top: `${keyboardTop}px`,
+          right: '0',
+          bottom: '0',
+          left: '0',
+          zIndex: '10000',
+          background: '#25272a',
+          pointerEvents: 'auto',
+        });
+        document.body.append(keyboard);
+      }
+      emit('resize');
+    };
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboard: (visible: boolean) => void;
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboard = setKeyboard;
+    // Same state change without the `visualViewport` resize. A shell that only
+    // hears window resize must still recompute, and this is the only way to
+    // tell that listener apart from the viewport one.
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboardSilently = (nextOpen: boolean) => {
+      if (open === nextOpen) return;
+      open = nextOpen;
+      document.querySelector('[data-test-software-keyboard]')?.remove();
+    };
+    document.addEventListener(
+      'focusout',
+      (event) => {
+        if (
+          event.target instanceof HTMLTextAreaElement &&
+          event.target.matches('[data-web-shell-composer-editor]')
+        ) {
+          setKeyboard(false);
+        }
+      },
+      true,
+    );
+  }, TEST_KEYBOARD_TOP);
+}
+
+async function setTestSoftwareKeyboard(
+  page: Page,
+  visible: boolean,
+): Promise<void> {
+  await page.evaluate((nextVisible) => {
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboard: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboard(nextVisible);
+  }, visible);
+}
+
+async function expectUncoveredStableSend(
+  page: Page,
+  testInfo: TestInfo,
+  label: string,
+) {
+  const send = page.locator('[data-web-shell-composer-submit]');
+  const box = await send.boundingBox();
+  expect(box).not.toBeNull();
+  const screenshotPath = testInfo.outputPath(`${label}-before-tap.png`);
+  await page.screenshot({ path: screenshotPath });
+  await testInfo.attach(`${label}-before-tap`, {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  expect(box!.y + box!.height).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  const center = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  expect(
+    await page.evaluate(({ x, y }) => {
+      const hit = document.elementFromPoint(x, y);
+      const target = document.querySelector('[data-web-shell-composer-submit]');
+      return hit instanceof Node && target?.contains(hit);
+    }, center),
+  ).toBe(true);
+  await page.touchscreen.tap(center.x, center.y);
+}
+
+async function measureWelcomeLayout(page: Page) {
+  return page.getByTestId('chat-pane-container').evaluate((pane) => {
+    const measure = (selector: string) => {
+      const element = pane.querySelector(selector);
+      return element ? element.getBoundingClientRect() : null;
+    };
+    const paneRect = pane.getBoundingClientRect();
+    const header = measure('[data-e2e-mobile-welcome-header]');
+    const welcomeFooter = measure('[data-e2e-mobile-welcome-footer]');
+    const composer = measure('[data-web-shell-composer-surface]');
+    const send = measure('[data-web-shell-composer-submit]');
+    if (!header || !welcomeFooter || !composer || !send) {
+      throw new Error('Expected the mobile welcome chrome to render.');
+    }
+    return {
+      paneTop: paneRect.top,
+      paneBottom: paneRect.bottom,
+      headerTop: header.top,
+      headerBottom: header.bottom,
+      welcomeFooterTop: welcomeFooter.top,
+      composerTop: composer.top,
+      composerBottom: composer.bottom,
+      sendBottom: send.bottom,
+    };
+  });
+}
 
 test('simple mobile composer grows and submits Chinese multiline input @smoke', async ({
   page,
@@ -626,10 +795,332 @@ test('anchors the empty mobile composer with the textarea backend', async ({
   const layout = await emptyMobileComposerLayout(page);
   expectEmptyMobileComposerAnchored(layout);
 
+  // The bottom-anchored compact layout above is gated on the visual viewport
+  // actually being occluded. With no keyboard open the group must stay
+  // vertically centred, so this pins the `inset > 0` half of the toggle:
+  // forcing the attribute on would bottom-anchor a phone that has no keyboard.
+  const unoccluded = await page
+    .getByTestId('chat-pane-container')
+    .evaluate((chatPane) => {
+      const root = document.querySelector('[data-web-shell-root]');
+      const pane = chatPane.getBoundingClientRect();
+      const header = chatPane
+        .querySelector('[data-e2e-mobile-welcome-header]')!
+        .getBoundingClientRect();
+      const composer = chatPane
+        .querySelector('[data-web-shell-composer-surface]')!
+        .getBoundingClientRect();
+      return {
+        occluded: root?.hasAttribute('data-visual-viewport-occluded') ?? null,
+        inset: root
+          ? getComputedStyle(root).getPropertyValue(
+              '--web-shell-visual-viewport-inset-bottom',
+            )
+          : null,
+        paneTop: pane.top,
+        paneBottom: pane.bottom,
+        headerTop: header.top,
+        headerBottom: header.bottom,
+        composerTop: composer.top,
+        composerBottom: composer.bottom,
+        footerBottom:
+          chatPane
+            .querySelector('[data-e2e-mobile-welcome-footer]')
+            ?.getBoundingClientRect().bottom ?? null,
+      };
+    });
+  expect(unoccluded.occluded).toBe(false);
+  expect(unoccluded.inset).toBe('0px');
+  const paneCentre = (unoccluded.paneTop + unoccluded.paneBottom) / 2;
+  const groupCentre =
+    (unoccluded.headerTop +
+      (unoccluded.footerBottom ?? unoccluded.headerBottom)) /
+    2;
+  expect(Math.abs(groupCentre - paneCentre)).toBeLessThan(20);
+
   await textarea.tap();
   await textarea.fill('Composer remains interactive on touch devices');
   await expect(textarea).toHaveValue(
     'Composer remains interactive on touch devices',
+  );
+});
+
+test('recomputes the inset from a window resize the visual viewport never emits', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page);
+
+  const inset = () =>
+    page.evaluate(() =>
+      getComputedStyle(
+        document.querySelector('[data-web-shell-root]') as HTMLElement,
+      )
+        .getPropertyValue('--web-shell-visual-viewport-inset-bottom')
+        .trim(),
+    );
+
+  await setTestSoftwareKeyboard(page, true);
+  await expect.poll(inset).not.toBe('0px');
+  const occludedInset = await inset();
+  expect(Number.parseFloat(occludedInset)).toBeGreaterThan(0);
+
+  // The keyboard state changes and the viewport stays silent; only the window
+  // resize below can deliver the new geometry to the shell.
+  await page.evaluate(() => {
+    (
+      window as typeof window & {
+        __setTestSoftwareKeyboardSilently: (visible: boolean) => void;
+      }
+    ).__setTestSoftwareKeyboardSilently(false);
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  await expect.poll(inset).toBe('0px');
+});
+
+test('submits welcome and follow-up prompts on the first tap above a software keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await page.goto('/?language=en');
+  const installTapGeometry = () =>
+    page.evaluate(() => {
+      type TapEvent = {
+        type: string;
+        target: string;
+        active: string;
+        top: number | null;
+        viewportHeight: number;
+      };
+      const events: TapEvent[] = [];
+      (
+        window as typeof window & { __sendTapGeometry: TapEvent[] }
+      ).__sendTapGeometry = events;
+      for (const type of [
+        'pointerdown',
+        'mousedown',
+        'pointerup',
+        'mouseup',
+        'click',
+        'focusout',
+        'focusin',
+      ]) {
+        document.addEventListener(
+          type,
+          (event) => {
+            if (!(event.target instanceof Element)) return;
+            const send = event.target.closest(
+              '[data-web-shell-composer-submit]',
+            );
+            const editor = event.target.closest(
+              '[data-web-shell-composer-editor]',
+            );
+            if (!send && !editor) return;
+            const currentSend = document.querySelector(
+              '[data-web-shell-composer-submit]',
+            );
+            events.push({
+              type,
+              target: send ? 'send' : 'editor',
+              active: document.activeElement?.tagName ?? 'none',
+              top: currentSend?.getBoundingClientRect().top ?? null,
+              viewportHeight: window.visualViewport?.height ?? -1,
+            });
+          },
+          true,
+        );
+      }
+    });
+  const takeTapGeometry = () =>
+    page.evaluate(() => {
+      const state = window as typeof window & {
+        __sendTapGeometry: Array<{
+          type: string;
+          target: string;
+          active: string;
+          top: number | null;
+          viewportHeight: number;
+        }>;
+      };
+      return state.__sendTapGeometry.splice(0);
+    });
+
+  await installTapGeometry();
+  const welcome = page.locator(COMPOSER_TEXTAREA);
+  await welcome.tap();
+  await welcome.fill('hi');
+  await expect(welcome).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+  await expectUncoveredStableSend(page, testInfo, 'welcome');
+  const welcomeEvents = await takeTapGeometry();
+  await testInfo.attach('welcome-tap-events', {
+    body: JSON.stringify(welcomeEvents, null, 2),
+    contentType: 'application/json',
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain('hi');
+  const welcomeSendEvents = welcomeEvents.filter(
+    ({ target, type }) =>
+      target === 'send' && (type === 'pointerdown' || type === 'click'),
+  );
+  expect(welcomeSendEvents.map(({ type }) => type)).toEqual([
+    'pointerdown',
+    'click',
+  ]);
+  expect(welcomeSendEvents[0]?.top).toBe(welcomeSendEvents[1]?.top);
+
+  await expect(page).toHaveURL(new RegExp(`/session/${scenario.sessionId}`));
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await expect(
+    page.locator('[data-web-shell-composer-submit]'),
+  ).toHaveAttribute('aria-label', 'Stop');
+  await daemon.sendEvent(
+    assistantTextEvent('Done.', { id: 100, sessionId: scenario.sessionId }),
+  );
+  await daemon.sendEvent(
+    turnCompleteEvent('prompt-e2e', {
+      id: 101,
+      sessionId: scenario.sessionId,
+    }),
+  );
+  await expect(
+    page.locator('[data-web-shell-composer-submit]'),
+  ).toHaveAttribute('aria-label', 'Send message');
+  await installTapGeometry();
+  const followUp = page.locator(COMPOSER_TEXTAREA);
+  await expect(followUp).toBeVisible();
+  await followUp.tap();
+  await followUp.fill('follow up');
+  await setTestSoftwareKeyboard(page, true);
+  await expectUncoveredStableSend(page, testInfo, 'follow-up');
+  const followUpEvents = await takeTapGeometry();
+  await testInfo.attach('follow-up-tap-events', {
+    body: JSON.stringify(followUpEvents, null, 2),
+    contentType: 'application/json',
+  });
+  await expect.poll(() => daemon.promptRequests().length).toBe(2);
+  expect(JSON.stringify(daemon.promptRequests()[1]?.body)).toContain(
+    'follow up',
+  );
+  const followUpSendEvents = followUpEvents.filter(
+    ({ target, type }) =>
+      target === 'send' && (type === 'pointerdown' || type === 'click'),
+  );
+  expect(followUpSendEvents.map(({ type }) => type)).toEqual([
+    'pointerdown',
+    'click',
+  ]);
+  expect(followUpSendEvents[0]?.top).toBe(followUpSendEvents[1]?.top);
+});
+
+test('keeps the custom-footer mobile welcome group inside the pane above a software keyboard @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.fill('custom footer welcome');
+  await expect(textarea).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+
+  const viewportHeight = page.viewportSize()!.height;
+  const expectedInset = `${viewportHeight - TEST_KEYBOARD_TOP}px`;
+  await expect
+    .poll(() =>
+      page
+        .locator('[data-web-shell-root]')
+        .evaluate((element) =>
+          getComputedStyle(element)
+            .getPropertyValue('--web-shell-visual-viewport-inset-bottom')
+            .trim(),
+        ),
+    )
+    .toBe(expectedInset);
+
+  const layout = await measureWelcomeLayout(page);
+
+  const screenshotPath = testInfo.outputPath(
+    'custom-footer-welcome-keyboard-open.png',
+  );
+  await page.screenshot({ path: screenshotPath });
+  await testInfo.attach('custom-footer-welcome-keyboard-open', {
+    path: screenshotPath,
+    contentType: 'image/png',
+  });
+  await testInfo.attach('custom-footer-welcome-layout', {
+    body: JSON.stringify(layout, null, 2),
+    contentType: 'application/json',
+  });
+
+  // The inset is reserved by the pane padding, so the whole shrink-to-content
+  // welcome group must stay inside the pane instead of being displaced above
+  // its `overflow: hidden` box by the inset a second time.
+  expect(layout.headerTop).toBeGreaterThanOrEqual(layout.paneTop);
+  expect(layout.headerBottom).toBeLessThanOrEqual(layout.welcomeFooterTop);
+  expect(layout.welcomeFooterTop).toBeLessThanOrEqual(layout.composerTop);
+  expect(layout.composerBottom).toBeLessThanOrEqual(layout.paneBottom);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+
+  await expectUncoveredStableSend(page, testInfo, 'custom-footer-welcome');
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
+    'custom footer welcome',
+  );
+});
+
+test('keeps Send above the keyboard when the welcome footer outgrows the reduced pane @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await installTestSoftwareKeyboard(page);
+  await gotoEmptyMobileWelcomeHarness(page, { customFooter: true });
+  await expectEmptyMobileWelcomeChromeVisible(page);
+
+  // Grow the host welcome footer until header + footer + composer no longer
+  // fit the inset-reduced pane. A centred group would then overflow both ways
+  // and leave Send under the keyboard; anchoring it to the bottom of the
+  // padded content box sends the overflow upward instead.
+  await page
+    .locator('[data-e2e-mobile-welcome-footer]:visible')
+    .evaluate((element) => {
+      (element as HTMLElement).style.minHeight = '360px';
+    });
+
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  await textarea.fill('tall welcome footer');
+  await expect(textarea).toBeFocused();
+  await setTestSoftwareKeyboard(page, true);
+
+  const layout = await measureWelcomeLayout(page);
+  await testInfo.attach('tall-welcome-footer-layout', {
+    body: JSON.stringify(layout, null, 2),
+    contentType: 'application/json',
+  });
+
+  // The group demonstrably overflowed the content box (its top starts above
+  // the pane), yet the composer stays on the reserved inset instead of
+  // following the overflow below the keyboard.
+  expect(layout.headerTop).toBeLessThan(layout.paneTop);
+  expect(layout.composerBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+  expect(layout.sendBottom).toBeLessThanOrEqual(TEST_KEYBOARD_TOP);
+
+  await expectUncoveredStableSend(page, testInfo, 'tall-welcome-footer');
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expect(JSON.stringify(daemon.promptRequests()[0]?.body)).toContain(
+    'tall welcome footer',
   );
 });
 
@@ -702,7 +1193,10 @@ test('keeps a persisted wide sidebar inside the mobile drawer and exposes close'
     drawerWidth: element.parentElement?.getBoundingClientRect().width ?? 0,
     sidebarWidth: element.getBoundingClientRect().width,
   }));
-  expect(sidebarWidth).toBeCloseTo(drawerWidth * 0.7, 0);
+  expect(sidebarWidth).toBeCloseTo(
+    Math.min(Math.max(drawerWidth * 0.85, 220), 420),
+    0,
+  );
   expect(sidebarWidth).toBeLessThanOrEqual(drawerWidth);
 
   await page.screenshot({
