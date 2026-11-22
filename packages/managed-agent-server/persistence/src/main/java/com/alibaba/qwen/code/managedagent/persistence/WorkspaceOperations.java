@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
@@ -18,7 +17,7 @@ import java.util.Map;
 
 final class WorkspaceOperations {
     enum Kind {
-        WORKSPACE_RECOVERY, WORKSPACE_OPERATOR_RECOVERY, STORAGE_MIGRATION, CSI_RETIREMENT, WORKSPACE_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE
+        WORKSPACE_RECOVERY, WORKSPACE_OPERATOR_RECOVERY, STORAGE_MIGRATION, WORKSPACE_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE
     }
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -75,9 +74,8 @@ final class WorkspaceOperations {
         String request = (String) data.getOrDefault("request_json", encode(data));
         String state = (String) data.getOrDefault("state", "PENDING");
         requireState(kind, state);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, target_id, target_revision, storage_key, physical_key, state, phase, delivery_state, request_digest, request_json, result_json, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                key(kind, id), hash(tenant), data.get("session_id") instanceof String session
-                        ? ManagedSessionStore.sessionScopeKey(tenant, session) : null, kind.name(), id.getBytes(StandardCharsets.UTF_8),
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id, target_kind, target_key, target_id, target_revision, storage_key, physical_key, state, phase, delivery_state, request_digest, request_json, result_json, available_at, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                key(kind, id), hash(tenant), kind.name(), id.getBytes(StandardCharsets.UTF_8),
                 tenant.getBytes(StandardCharsets.UTF_8), data.get("session_id"),
                 data.containsKey("binding_id") ? "RUNTIME_BINDING" : "STORAGE", hash(target), target.getBytes(StandardCharsets.UTF_8), revision,
                 storage == null ? null : RuntimeAdmissionFences.storageAliasKey(tenant, storage),
@@ -175,7 +173,6 @@ final class WorkspaceOperations {
             case WORKSPACE_RECOVERY -> java.util.Set.of("CAPTURING", "VERIFYING", "SEALED", "VERIFIED", "INVALIDATED");
             case WORKSPACE_OPERATOR_RECOVERY -> java.util.Set.of("PREPARED", "ATTESTED", "COMPLETED");
             case STORAGE_MIGRATION -> java.util.Set.of("RETIRING", "RETIRED", "PREPARING", "PREPARED", "COMPLETED", "ABORTED", "INVALIDATED");
-            case CSI_RETIREMENT -> java.util.Set.of("DRAINING");
             case WORKSPACE_RETIREMENT -> java.util.Set.of("DRAINING", "PLATFORM_CLEANED", "RELEASED");
             case CHILD_WORKSPACE -> java.util.Set.of(JdbcChildWorkspaceStore.PREPARING, JdbcChildWorkspaceStore.READY,
                     JdbcChildWorkspaceStore.MERGING, JdbcChildWorkspaceStore.APPLYING, JdbcChildWorkspaceStore.APPLIED,
@@ -204,7 +201,7 @@ final class WorkspaceOperations {
                     || "PREPARED".equals(from) && "COMPLETED".equals(to));
             case WORKSPACE_RETIREMENT -> "DRAINING".equals(from) && "PLATFORM_CLEANED".equals(to)
                     || "PLATFORM_CLEANED".equals(from) && "RELEASED".equals(to);
-            case CSI_RETIREMENT, CHILD_WORKSPACE, SESSION_WORKTREE -> false;
+            case CHILD_WORKSPACE, SESSION_WORKTREE -> false;
         };
         if (!allowed) {
             throw new IllegalStateException("Workspace operation transition conflicts");

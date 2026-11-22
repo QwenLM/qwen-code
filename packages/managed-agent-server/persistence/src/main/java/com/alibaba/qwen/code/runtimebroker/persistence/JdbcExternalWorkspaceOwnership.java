@@ -73,16 +73,13 @@ public final class JdbcExternalWorkspaceOwnership {
         try (var statement = connection.prepareStatement("SELECT * FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
             statement.setString(1, registration.ownerKey());
             try (var row = statement.executeQuery()) {
-                if (!row.next() || !registration.ownerKey().equals(row.getString("physical_key"))
+                if (!row.next() || !registration.ownerKey().equals(row.getString("storage_key"))
                         || !"EXTERNAL".equals(row.getString("storage_kind"))
                         || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
                         || !registration.mountRoot().equals(row.getString("mount_root"))
                         || registration.registrationRevision() != row.getLong("mount_revision")
                         || !"UNVERIFIED".equals(row.getString("mount_state"))
-                        || row.getObject("maintenance_id") != null || row.getObject("maintenance_generation") != null
-                        || !"RELEASED".equals(row.getString("csi_phase")) || row.getLong("csi_revision") != 0
-                        || row.getObject("csi_reservation_id") != null || row.getObject("csi_registration_key") != null
-                        || row.getObject("csi_registration_revision") != null || row.getObject("csi_provision_request_id") != null) {
+                        || row.getObject("maintenance_id") != null || row.getObject("maintenance_generation") != null) {
                     throw unavailable();
                 }
                 Long generation = row.getObject("runtime_generation") == null ? null : row.getLong("runtime_generation");

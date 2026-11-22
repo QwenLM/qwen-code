@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -45,6 +44,7 @@ class WorkspaceMigrationStoreTest {
 
     @TempDir Path temp;
     private JdbcTemplate jdbc;
+    private StoreLockTrace trace;
     private DataSourceTransactionManager manager;
     private WorkspaceStorageGuard guard;
     private ObjectNode request;
@@ -58,8 +58,9 @@ class WorkspaceMigrationStoreTest {
         var data = new DriverManagerDataSource("jdbc:h2:mem:migration-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         ManagedSchema.initialize(data);
-        jdbc = new ManagedSchemaJdbcTemplate(data);
-        manager = new DataSourceTransactionManager(data);
+        trace = new StoreLockTrace(data);
+        jdbc = new ManagedSchemaJdbcTemplate(trace);
+        manager = new DataSourceTransactionManager(trace);
         source = Files.createDirectory(temp.resolve("source")).toRealPath();
         target = Files.createDirectory(temp.resolve("target")).toRealPath();
         var properties = new ManagedAgentProperties();
@@ -91,24 +92,106 @@ class WorkspaceMigrationStoreTest {
                 request.toString().getBytes(StandardCharsets.UTF_8), create, new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void rejectsCsiStorageBeforeInstallingAnyMigrationFence(boolean alias) throws Exception {
-        if (alias) {
-            jdbc.update("UPDATE ma_storage SET storage_kind = 'CSI' WHERE alias_key = ?", WorkspaceCsiRegistration.aliasKey("tenant", "storage"));
-        } else {
-            jdbc.update("UPDATE ma_storage_owner SET storage_kind = 'CSI'");
-        }
-        var registration = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner");
-        byte[] marker = Files.readAllBytes(source.resolve(".qwen-managed-storage.json"));
-        assertThatThrownBy(() -> store(true)).isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
-            assertThat(error.getCode()).isEqualTo("workspace_unavailable");
-            assertThat(error.isRetryable()).isFalse();
+    @Test
+    void admissionUsesBoundedExistenceChecksOnOneFreshReaderConnection() {
+        trace.clear();
+        var operation = store(true);
+        var probes = trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .filter(event -> event.sql().startsWith("select 1") && (event.sql().contains(" from ma_session s ")
+                        || event.sql().contains(" from ma_session_worktree ") || event.sql().contains(" from ma_workspace ")))
+                .toList();
+        assertThat(probes).hasSize(6).allSatisfy(event -> {
+            assertThat(event.sql()).endsWith("limit 1").doesNotContain("count(");
+            assertThat(event.autoCommit()).isTrue();
         });
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE fence_operation_id IS NOT NULL", Long.class)).isZero();
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner")).isEqualTo(registration);
-        assertThat(Files.readAllBytes(source.resolve(".qwen-managed-storage.json"))).isEqualTo(marker);
+        assertThat(probes.stream().map(StoreLockTrace.Event::connection).distinct()).hasSize(1);
+        assertThat(trace.events()).anySatisfy(event -> {
+            assertThat(event.phase()).isEqualTo(StoreLockTrace.Phase.SUCCEEDED);
+            assertThat(event.sql()).startsWith("insert into ma_operation ");
+            assertThat(event.autoCommit()).isFalse();
+            assertThat(event.connection()).isNotEqualTo(probes.getFirst().connection());
+        });
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"runtime", "tool"})
+    void retirementStaysBusyUntilEveryMatchingExecutionSettles(String kind) {
+        store(true);
+        var bindings = mock(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class);
+        var binding = mock(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.class);
+        org.mockito.Mockito.when(binding.getBindingId()).thenReturn("binding");
+        org.mockito.Mockito.when(binding.getGeneration()).thenReturn(2L);
+        org.mockito.Mockito.when(binding.getState()).thenReturn(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.RELEASED);
+        org.mockito.Mockito.when(binding.hasStoppedWriters()).thenReturn(true);
+        org.mockito.Mockito.when(bindings.findByStorage("tenant", "storage", null, 50)).thenReturn(List.of(binding));
+        var broker = mock(RuntimeBrokerService.class);
+        org.mockito.Mockito.when(broker.retireStorageBinding("tenant", "storage",
+                request.path("migrationOperationId").asText(), "binding", 2L))
+                .thenReturn(java.util.concurrent.CompletableFuture.completedFuture(null));
+        for (int index = 0; index < 4; index++) {
+            String work = "work-" + index;
+            String owner = index == 3 ? "other-binding" : "binding";
+            long generation = index == 2 ? 1 : 2;
+            if ("runtime".equals(kind)) {
+                jdbc.update("INSERT INTO ma_runtime_session (scope_key, runtime_session_id, tenant_id, workspace_id,"
+                        + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
+                        + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
+                        + " VALUES (?, ?, 'tenant', 'workspace', '1', '/', 'digest', 'SHARED', 'session', 'TOOL', ?, ?, 'ACTIVE', 1, 1)",
+                        WorkspaceOperations.hash(work), work, owner, generation);
+            } else {
+                jdbc.update("INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id, idempotency_key_hash,"
+                        + " idempotency_key, binding_id, runtime_generation, harness_session_id, runtime_session_id,"
+                        + " runtime_session_key, turn_id, tool_call_id, request_digest, reference_json, execution_state,"
+                        + " last_sequence, is_cancel_requested, dispatch_generation, record_version)"
+                        + " VALUES (?, ?, ?, ?, ?, ?, 'session', 'runtime', ?, 'turn', ?, 'digest', '{}', 'RUNNING', 0, 0, 1, 1)",
+                        WorkspaceOperations.hash(work), work, WorkspaceOperations.hash(work), work, owner, generation,
+                        WorkspaceOperations.hash("runtime"), work);
+            }
+        }
+        var operation = new WorkspaceMigrationStore(jdbc, manager,
+                guard, bindings, request.toString().getBytes(StandardCharsets.UTF_8), false,
+                new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalRecoveryWorker());
+        String settle = "runtime".equals(kind)
+                ? "UPDATE ma_runtime_session SET session_state = 'RELEASED' WHERE runtime_session_id = ?"
+                : "UPDATE ma_tool_execution SET execution_state = 'SETTLED' WHERE execution_call_id = ?";
+        assertThatThrownBy(() -> operation.retire(broker)).hasMessageContaining("migration_work_unsettled");
+        jdbc.update(settle, "work-0");
+        assertThatThrownBy(() -> operation.retire(broker)).hasMessageContaining("migration_work_unsettled");
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
+        jdbc.update(settle, "work-1");
+        trace.clear();
+        operation.retire(broker);
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRED");
+        assertThat(trace.events().stream().filter(event -> event.phase() == StoreLockTrace.Phase.SUCCEEDED)
+                .map(StoreLockTrace.Event::sql).filter(sql -> sql.startsWith("select 1 from ma_runtime_session ")
+                        || sql.startsWith("select 1 from ma_tool_execution ")))
+                .hasSize(2).allSatisfy(sql -> assertThat(sql).contains("binding_id = ?", "runtime_generation = ?").endsWith("limit 1"));
+    }
+
+    @Test
+    void idleChecksStillWalkApprovalPagesAndIgnoreOtherStorage() {
+        var operation = store(true);
+        for (int index = 0; index < 34; index++) {
+            String session = "approval-" + String.format(java.util.Locale.ROOT, "%02d", index);
+            String scope = ManagedSessionStore.sessionScopeKey("tenant", session);
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, workspace_storage_id, gmt_create, gmt_modified,"
+                    + " workspace_id, workspace_generation, cwd_relative, context_config_ref, context_revision, workspace_config_ref, workspace_policy_ref)"
+                    + " VALUES ('tenant', ?, 'agent', ?, 1, 1, 'workspace', 1, '.', ?, 1, ?, ?)",
+                    session, index == 33 ? "other-storage" : "storage", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                    WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+            jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, session_id, domain,"
+                    + " record_id, revision, record_kind, state, action_id, action_version, options_json, gmt_create)"
+                    + " VALUES (?, 'tenant', ?, 'approval', ?, 1, 'ACTION', 'requested', ?, 1, ?, 1)", WorkspaceOperations.hash(session), session, session, session,
+                    JSON.createObjectNode().put("expiresAt", index >= 32 ? Long.MAX_VALUE : 0).toString());
+        }
+        assertThatThrownBy(() -> operation.retire(mock(RuntimeBrokerService.class)))
+                .hasMessageContaining("migration_work_unsettled");
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
+        jdbc.update("UPDATE ma_session_record SET options_json = '{\"expiresAt\":0}' WHERE tenant_id = ? AND session_id = ?",
+                "tenant", "approval-32");
+        operation.retire(mock(RuntimeBrokerService.class));
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRED");
     }
 
     @Test
@@ -363,10 +446,10 @@ class WorkspaceMigrationStoreTest {
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id,"
                 + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
-                WorkspaceOperations.hash("rename"), scope, scope, WorkspaceOperations.hash("session"), state, state);
+                + " VALUES (?, ?, 'RENAME', 'rename:1', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', ?, 'SUBMITTED', ?, 0, 1, 1)",
+                WorkspaceOperations.hash("rename"), scope, WorkspaceOperations.hash("session"), state, state);
         assertThatThrownBy(() -> store(true)).hasMessageContaining("source_drift")
                 .hasMessageNotContaining("migration_work_unsettled");
     }
@@ -415,11 +498,11 @@ class WorkspaceMigrationStoreTest {
         String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
         jdbc.update("UPDATE ma_session SET tenant_key = ?, session_key = ?, session_scope_key = ? WHERE tenant_id = X'74656e616e74' AND session_id = X'73657373696f6e'",
                 WorkspaceOperations.hash("tenant"), WorkspaceOperations.hash("session"), scope);
-        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_kind, operation_id, tenant_id, session_id,"
+        jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, session_id,"
                 + " target_kind, target_key, request_digest, request_json, state, phase, delivery_state, failure_code, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
+                + " VALUES (?, ?, 'TASK_CANCEL', 'op_cancel', 'tenant', 'session', 'SESSION', ?, 'digest', '{}', 'RECOVERY_BLOCKED',"
                 + " 'RECOVERY_BLOCKED', 'BLOCKED', 'task_cancel_unconfirmed', 0, 1, 1)",
-                WorkspaceOperations.hash("cancel"), scope, scope, WorkspaceOperations.hash("session"));
+                WorkspaceOperations.hash("cancel"), scope, WorkspaceOperations.hash("session"));
         assertThatThrownBy(() -> store(true)).hasMessageContaining("migration_work_unsettled");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'", Long.class)).isZero();
         // Settled, it no longer holds the move: the migration gets past its

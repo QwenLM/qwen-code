@@ -8,6 +8,10 @@ import {
   restoreSessionSources,
   type SessionSourcesRestoreState,
 } from './session-sources.js';
+import {
+  restoreGeneratedUiStates,
+  type GeneratedUiStateRestore,
+} from './generated-ui-state.js';
 
 import { Storage } from '../config/storage.js';
 import {
@@ -25,12 +29,15 @@ import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import {
+  isGeneratedUiStateRecord,
   isTranscriptConversationRecord,
   prepareTranscriptRecords,
+  selectActiveGeneratedUiStateRecordUuids,
 } from '../utils/transcript-records.js';
 import { projectUserTranscriptForDisplay } from '../utils/transcript-records.js';
 import type {
   ChatRecord,
+  CustomTitleRecordPayload,
   FileHistorySnapshotRecordPayload,
   TitleSource,
   UiTelemetryRecordPayload,
@@ -67,6 +74,8 @@ import {
   isSessionArtifactRecord,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   getWebPreviewSnapshotId,
+  hasDisqualifyingArtifactJournalWarning,
+  isRestorablePersistedArtifact,
   type PersistedSessionArtifact,
   rebuildSessionArtifactSnapshot,
   remapSessionArtifactPayloadForFork,
@@ -74,7 +83,14 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
-import { moveSessionPrSidecar } from './session-pr-service.js';
+import {
+  moveSessionPrSidecar,
+  readSessionPrsDetailed,
+} from './session-pr-service.js';
+import {
+  deleteSessionGoalSidecar,
+  moveSessionGoalSidecar,
+} from './session-goal-sidecar.js';
 import {
   moveSessionTitleSidecar,
   readSessionTitleSidecar,
@@ -84,6 +100,18 @@ import {
   writeSessionTitleSidecar,
   type SessionTitleSidecar,
 } from './session-title-sidecar.js';
+import {
+  moveSessionBranchSidecar,
+  removeSessionBranchSidecar,
+  sessionBranchSidecarPath,
+} from './session-branch-sidecar.js';
+import {
+  moveSessionArtifactSummarySidecar,
+  readSessionArtifactSummarySidecar,
+  removeSessionArtifactSummarySidecar,
+  sessionArtifactSummarySidecarPath,
+  writeSessionArtifactSummarySidecar,
+} from './session-artifact-summary-sidecar.js';
 import {
   deleteArtifactSnapshot,
   retainArtifactSnapshot,
@@ -424,6 +452,7 @@ export interface RemoveSessionOptions {
   assertStorageUnchanged?: () => Promise<void>;
   assertCanMutate?: () => void;
   assertCleanupOwned?: () => void;
+  onlyIfSubSessionStartup?: boolean;
 }
 
 export interface ArchiveSessionsResult {
@@ -923,6 +952,7 @@ export class SessionService {
     sessionId: string,
     pr: { number: number; url: string },
   ) => void;
+  private sessionGoalChangedCallback?: (sessionId: string) => void;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
@@ -1041,11 +1071,48 @@ export class SessionService {
     return path.join(this.getChatsDirForState(state), `${sessionId}.pr.json`);
   }
 
+  private getArtifactSummaryPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionArtifactSummarySidecarPath(
+      this.getChatsDirForState(state),
+      sessionId,
+    );
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that caches the
+   * session's restorable artifact count for the session list. The file may
+   * not exist yet — consumers must handle a missing sidecar as "unknown
+   * count", not as zero artifacts.
+   */
+  getArtifactSummaryPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getArtifactSummaryPathForState(sessionId, state);
+  }
+
+  private getGoalSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.goal.json`);
+  }
+
   private getSessionTitleSidecarPathForState(
     sessionId: string,
     state: SessionArchiveState,
   ): string {
     return sessionTitleSidecarPath(this.getChatsDirForState(state), sessionId);
+  }
+
+  private getSessionBranchSidecarPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return sessionBranchSidecarPath(this.getChatsDirForState(state), sessionId);
   }
 
   /**
@@ -1199,6 +1266,31 @@ export class SessionService {
   }
 
   /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * immutable start commit recorded when a session was branched from a
+   * checkpoint. The file may not exist yet — consumers must handle ENOENT as
+   * "no recorded branch point".
+   */
+  getBranchSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getSessionBranchSidecarPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * session's Goal list projection for the given session id. The file may
+   * not exist yet — consumers must handle ENOENT as "no goal".
+   */
+  getGoalSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getGoalSessionPathForState(sessionId, state);
+  }
+
+  /**
    * Fires when the shell tool persists a `gh pr create` binding for a
    * session (agent process). The serve host wires this to mark the session
    * catalog so clients refetch the binding; unwired it is a no-op.
@@ -1226,6 +1318,31 @@ export class SessionService {
     pr: { number: number; url: string },
   ): void {
     this.sessionPrBoundCallback?.(sessionId, pr);
+  }
+
+  /**
+   * Fires when the session's Goal projection changes (agent process journal
+   * hook). The serve host wires this to mark the session catalog so clients
+   * refetch the marker; unwired it is a no-op. Carries only the session id:
+   * the notification is a pure catalog-clock mark, and the sidecar on disk
+   * is the single source of the projected values.
+   */
+  setSessionGoalChangedCallback(
+    callback: ((sessionId: string) => void) | undefined,
+  ): void {
+    this.sessionGoalChangedCallback = callback;
+  }
+
+  /**
+   * Exposes the registered callback so `Config.relocateWorkingDirectory`
+   * can carry it onto the replacement service when it resets this one.
+   */
+  getSessionGoalChangedCallback(): ((sessionId: string) => void) | undefined {
+    return this.sessionGoalChangedCallback;
+  }
+
+  emitSessionGoalChanged(sessionId: string): void {
+    this.sessionGoalChangedCallback?.(sessionId);
   }
 
   /**
@@ -1857,10 +1974,35 @@ export class SessionService {
     }
   }
 
+  private removeGoalSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getGoalSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
   private removeSessionTitleSidecars(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       removeSessionTitleSidecar(
         this.getSessionTitleSidecarPathForState(sessionId, state),
+      );
+    }
+  }
+
+  private removeSessionBranchSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, state),
+      );
+    }
+  }
+
+  private removeArtifactSummarySidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      removeSessionArtifactSummarySidecar(
+        this.getArtifactSummaryPathForState(sessionId, state),
       );
     }
   }
@@ -1990,9 +2132,12 @@ export class SessionService {
   /**
    * A conflict resolution keeps one transcript and drops the other. The kept
    * transcript's label wins: move the dropped side's sidecar in only when the
-   * kept side has none, and discard it otherwise.
+   * kept side has none, and discard it otherwise. The dropped side's artifact
+   * count is always discarded: the kept transcript has a different artifact
+   * set, so the count must not transfer; the kept side's own sidecar (if any)
+   * stays, and the load-time seed regenerates a missing one.
    */
-  private reconcileTitleSidecarOnConflict(
+  private reconcileSidecarsOnConflict(
     sessionId: string,
     keptState: SessionArchiveState,
     droppedState: SessionArchiveState,
@@ -2006,6 +2151,46 @@ export class SessionService {
       removeSessionTitleSidecar(dropped);
     } else {
       moveSessionTitleSidecar(dropped, kept);
+    }
+    removeSessionArtifactSummarySidecar(
+      this.getArtifactSummaryPathForState(sessionId, droppedState),
+    );
+  }
+
+  // The kept transcript's Goal is authoritative. Unlike a title label, an
+  // absent goal sidecar is a VALUE: the surviving session's goal may have
+  // been cleared, so adopting the dropped lineage's projection would
+  // resurrect a goal the kept transcript no longer records (and an archived
+  // survivor is never reloaded to repair it). Always discard the dropped
+  // projection; the survivor's marker is rebuilt from its own transcript on
+  // the next transition or restore — a missing marker beats a wrong one.
+  private async reconcileGoalSidecarOnConflict(
+    sessionId: string,
+    droppedState: SessionArchiveState,
+  ): Promise<void> {
+    const dropped = this.getGoalSessionPathForState(sessionId, droppedState);
+    await deleteSessionGoalSidecar(dropped);
+  }
+
+  /**
+   * The kept transcript's recorded branch point wins; mirror the title
+   * sidecar's conflict policy so a checkpoint-branch start commit follows the
+   * surviving transcript.
+   */
+  private reconcileBranchSidecarOnConflict(
+    sessionId: string,
+    keptState: SessionArchiveState,
+    droppedState: SessionArchiveState,
+  ): void {
+    const kept = this.getSessionBranchSidecarPathForState(sessionId, keptState);
+    const dropped = this.getSessionBranchSidecarPathForState(
+      sessionId,
+      droppedState,
+    );
+    if (fs.existsSync(kept)) {
+      removeSessionBranchSidecar(dropped);
+    } else {
+      moveSessionBranchSidecar(dropped, kept);
     }
   }
 
@@ -2050,6 +2235,18 @@ export class SessionService {
         `${action}Sessions: failed to move pr sidecar for ${sessionId}: ${error}`,
       );
     }
+    try {
+      assertCleanupOwned?.();
+      await moveSessionGoalSidecar(
+        this.getGoalSessionPathForState(sessionId, sourceState),
+        this.getGoalSessionPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move goal sidecar for ${sessionId}: ${error}`,
+      );
+    }
     const sourceLedger = this.getPromptLedgerPathForState(
       sessionId,
       sourceState,
@@ -2083,6 +2280,30 @@ export class SessionService {
       assertCleanupOwned?.();
       this.warn(
         `${action}Sessions: failed to move title sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionBranchSidecar(
+        this.getSessionBranchSidecarPathForState(sessionId, sourceState),
+        this.getSessionBranchSidecarPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move branch sidecar for ${sessionId}: ${error}`,
+      );
+    }
+    try {
+      assertCleanupOwned?.();
+      moveSessionArtifactSummarySidecar(
+        this.getArtifactSummaryPathForState(sessionId, sourceState),
+        this.getArtifactSummaryPathForState(sessionId, destinationState),
+      );
+    } catch (error) {
+      assertCleanupOwned?.();
+      this.warn(
+        `${action}Sessions: failed to move artifact summary sidecar for ${sessionId}: ${error}`,
       );
     }
   }
@@ -3290,7 +3511,7 @@ export class SessionService {
       throw new SessionTranscriptChangedError();
     }
     const identity = physical.identities[0];
-    const maxBytes = 64 * 1024 * 1024;
+    const maxBytes = MAX_TRANSCRIPT_READ_BYTES;
     if (identity.size > maxBytes) {
       throw new SessionTranscriptTooLargeError(
         sessionId,
@@ -3356,15 +3577,7 @@ export class SessionService {
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
-    // Artifacts can be registered before the first prompt; these valid
-    // sessions have only side records and no conversation chain.
-    const sideRecordsOnly = records.every(
-      (record) =>
-        isSessionArtifactRecord(record) ||
-        (record.type === 'system' &&
-          (record.subtype === 'custom_title' ||
-            record.subtype === 'session_sources_snapshot')),
-    );
+    const sideRecordsOnly = isSideRecordsOnlyTranscript(records);
     if (gaps.length || (!messages.length && !sideRecordsOnly)) {
       throw new SessionArtifactLibraryError(
         sessionId,
@@ -3372,17 +3585,18 @@ export class SessionService {
         'The session transcript has an incomplete conversation chain.',
       );
     }
+    const journalWarnings: string[] = [];
     const snapshot = rebuildSessionArtifactSnapshot(
-      sideRecordsOnly
-        ? records
-        : includeActiveSideArtifactRecords(records, messages),
+      artifactRebuildRecords(records, messages),
       sessionId,
+      journalWarnings,
     );
     return {
       physical,
       identity,
       records,
       snapshot,
+      journalWarnings,
       // Parenting to side records would hide this removal on conversation replay.
       artifactParentUuid: messages.at(-1)?.uuid ?? null,
     };
@@ -3442,14 +3656,9 @@ export class SessionService {
         'Artifact mutation must use its managed session authority.',
       );
     }
-    if (
-      state.snapshot?.warnings.some(
-        (warning) =>
-          !warning.startsWith('skipped malformed artifact ') &&
-          !warning.startsWith('skipped oversized metadata for artifact ') &&
-          warning !== 'skipped artifact without id/title',
-      )
-    ) {
+    // Threaded warnings, not the snapshot's: an all-refused journal yields
+    // no snapshot but is damaged, not artifact-free (same gate as the seed).
+    if (hasDisqualifyingArtifactJournalWarning(state.journalWarnings)) {
       throw new SessionArtifactLibraryError(
         sessionId,
         'session_transcript_corrupt',
@@ -3488,6 +3697,21 @@ export class SessionService {
     guards.assertCanMutate();
     this.assertMaintainableSessionUnchanged(sessionId, state.physical);
     jsonl.writeLineSync(state.identity.filePath, record);
+    // Keep the derived list cache in step with the journal edit (this path
+    // bypasses the recording service). Best-effort, like every sidecar
+    // write. Count the restorable survivors — the same set the load seed
+    // counts — not the raw rebuild minus the removed batch.
+    writeSessionArtifactSummarySidecar(
+      sessionArtifactSummarySidecarPath(
+        path.dirname(state.identity.filePath),
+        sessionId,
+      ),
+      (state.snapshot?.artifacts ?? []).filter(
+        (artifact) =>
+          !requestedIds.has(artifact.id) &&
+          isRestorablePersistedArtifact(artifact),
+      ).length,
+    );
     const retainedSnapshots = new Set(
       (state.snapshot?.artifacts ?? [])
         .filter((artifact) => !requestedIds.has(artifact.id))
@@ -3539,14 +3763,256 @@ export class SessionService {
     return restoreSessionSources(records, sessionId);
   }
 
+  /** The latest saved view state per Generated UI card on the active branch. */
+  async readGeneratedUiStates(
+    sessionId: string,
+  ): Promise<GeneratedUiStateRestore> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`))
+      throw new Error('Invalid session ID');
+    const filePath = this.getSessionFilePath(sessionId, 'active');
+    try {
+      await fs.promises.stat(filePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        return { states: new Map(), maxRevision: 0 };
+      return { unavailable: true };
+    }
+    const { records, complete } =
+      await jsonl.readLinesWithIntegrity<ChatRecord>(filePath, Infinity);
+    if (!complete) return { unavailable: true };
+    if (
+      records[0] &&
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    )
+      throw new Error('Session workspace does not match');
+    const prepared = prepareTranscriptRecords(records);
+    const activeUuids = prepared.records.map((record) => record.uuid);
+    if (
+      prepared.diagnostics.some(
+        ({ code, recordId }) =>
+          code === 'history_gap' ||
+          code === 'parent_cycle' ||
+          (code === 'conflicting_parent_uuid' &&
+            recordId !== undefined &&
+            activeUuids.includes(recordId)),
+      )
+    ) {
+      return { unavailable: true };
+    }
+    return restoreGeneratedUiStates(records, activeUuids);
+  }
+
   async readRestoreProjection(
     sessionId: string,
     options: SelectiveSessionRestoreOptions,
   ): Promise<SessionRestoreProjection | undefined> {
-    return this.transcriptReader.readRestoreProjection(sessionId, options, {
-      validateFirstRecord: (record) =>
-        this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+    const projection = await this.transcriptReader.readRestoreProjection(
+      sessionId,
+      options,
+      {
+        validateFirstRecord: (record) =>
+          this.sessionBelongsToCurrentProject(record.sessionId, record.cwd),
+      },
+    );
+    // The daemon/ACP restore funnel reads selectively and never calls
+    // loadSession (the writer-lease path consumes the projection even when
+    // it is undefined), so the first-open seed must run here too. A missing
+    // projection is NOT a restore candidate: the index builder found no
+    // conversation record at all, so no downstream path carries an
+    // artifactSnapshot for it and a count written here would advertise a
+    // set no cold open can deliver. For a defined projection with an empty
+    // apiHistory (the metadata-bearing side-records shape), count exactly
+    // the set THIS projection delivers and heal an existing sidecar to
+    // that count. The side-record selector includes every artifact record
+    // for a metadata-only active chain, so this delivery matches the
+    // whole-transcript rebuild the load funnel counts and the recorder
+    // stamps — one delivered-set definition across all three writers.
+    // The authority gates mirror the load seed: an incomplete read
+    // (sourceReadComplete — the same signal the load seed gates on;
+    // sourcesUnavailable is broader and also flags a damaged sources
+    // snapshot, which does not narrow artifact delivery), a broken history
+    // chain, or a damaged artifact journal must not overwrite a correct
+    // count — the library mutation guard refuses the same journal, and the
+    // load seed keeps the last known good count on refusal. Counting the
+    // delivery needs no auxiliary read: the reader already paid the
+    // indexing cost. Sessions with a conversation are not seeded here;
+    // their count arrives via the recorder stamp and the CLI load funnel
+    // (a daemon-only first open of a legacy conversation session without a
+    // sidecar is a pre-existing #17518 limitation, tracked as a follow-up).
+    if (
+      projection &&
+      projection.runtime.apiHistory.length === 0 &&
+      projection.runtime.sourceReadComplete === true &&
+      !projection.runtime.historyGaps?.length &&
+      !hasDisqualifyingArtifactJournalWarning(
+        projection.runtime.artifactJournalWarnings ?? [],
+      )
+    ) {
+      const count =
+        projection.runtime.artifactSnapshot?.artifacts.filter(
+          isRestorablePersistedArtifact,
+        ).length ?? 0;
+      const summaryPath = this.getArtifactSummaryPathForState(
+        sessionId,
+        'active',
+      );
+      const existing = readSessionArtifactSummarySidecar(summaryPath);
+      if (
+        existing?.artifactCount !== count &&
+        (count > 0 || existing !== undefined)
+      ) {
+        writeSessionArtifactSummarySidecar(summaryPath, count);
+      }
+    }
+    return projection;
+  }
+
+  /**
+   * First-open seed for conversation-less transcripts in the load funnel,
+   * owning the size cap, ownership, shape and authority gates in one
+   * place. The load funnel passes the records it already read for the
+   * conversation; the cap still governs the seed. (The projection funnel
+   * does not read here — it counts the artifactSnapshot its own selective
+   * read already delivers, so count and delivery share one source.) The
+   * boundary is inclusive, matching the library mutation read's
+   * `size > maxBytes` refusal; a failed size probe skips the seed.
+   * Returns the rebuilt snapshot when the seed runs, or undefined when a
+   * gate declines; the gates decide the sidecar COUNT only — the load
+   * funnel falls back to a payload-only rebuild on a decline so the restore
+   * payload still carries the active-branch artifacts (round-9 R9-1).
+   */
+  private async seedSideRecordsOnlyTranscript(
+    sessionId: string,
+    state: SessionArchiveState,
+    filePath: string,
+    readRecords: () => Promise<{
+      records: ChatRecord[];
+      sourceReadComplete: boolean;
+    }>,
+  ): Promise<RebuiltSessionArtifactSnapshot | undefined> {
+    let size: number | undefined;
+    try {
+      size = (await fs.promises.stat(filePath)).size;
+    } catch {
+      size = undefined;
+    }
+    if (size === undefined || size > MAX_TRANSCRIPT_READ_BYTES) {
+      debugLogger.debug(
+        `artifact summary seed: size gate declined for ${sessionId} ` +
+          `(size=${size ?? 'unavailable'})`,
+      );
+      return undefined;
+    }
+    const { records, sourceReadComplete } = await readRecords();
+    const firstRecord = records[0];
+    if (!firstRecord) {
+      debugLogger.debug(
+        `artifact summary seed: empty transcript for ${sessionId}`,
+      );
+      return undefined;
+    }
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        firstRecord.sessionId,
+        firstRecord.cwd,
+      ))
+    ) {
+      debugLogger.debug(
+        `artifact summary seed: foreign project for ${sessionId}`,
+      );
+      return undefined;
+    }
+    if (!isSideRecordsOnlyTranscript(records)) {
+      debugLogger.debug(
+        `artifact summary seed: shape gate declined for ${sessionId} ` +
+          '(raw records are not all system metadata)',
+      );
+      return undefined;
+    }
+    const { messages, gaps } = this.reconstructHistory(records, {
+      detectGaps: true,
     });
+    // No reconstructable message means no restore path can open this
+    // transcript (loadSession returns undefined, the projection is
+    // undefined): seeding a count here would advertise artifacts the
+    // opened session can never show. Metadata-bearing side-records
+    // transcripts reconstruct their creation records as messages and pass.
+    if (messages.length === 0) {
+      debugLogger.debug(
+        `artifact summary seed: no reconstructable message for ${sessionId}`,
+      );
+      return undefined;
+    }
+    return this.seedArtifactSummaryFromRecords(
+      sessionId,
+      state,
+      records,
+      messages,
+      gaps,
+      sourceReadComplete,
+    );
+  }
+
+  /**
+   * Seeds the derived list cache so legacy sessions (journal records
+   * predating the sidecar) and forks gain a count on their first open.
+   * Shared by both restore funnels (loadSession and the daemon/ACP
+   * projection read). Best-effort and only from an authoritative read: a
+   * partial transcript must not publish an undercount, a broken history
+   * chain can orphan artifact events off the active branch (same
+   * undercount), and a journal with record-level damage is one the library
+   * mutation guard refuses — the seed refuses it too rather than clobbering
+   * a correct sidecar. The journal stays authoritative. Skip the write
+   * when the sidecar already carries this count so a warm load adds no disk
+   * write to the restore path. A zero count heals an existing stale sidecar
+   * (a failed best-effort zero write must not leave a phantom count forever)
+   * but never creates one for an artifact-free session. An undefined
+   * snapshot with NO warnings (no artifact records on the active branch at
+   * all) is a zero count for healing purposes; an undefined snapshot whose
+   * records were all refused is damaged, and the gate refuses it via the
+   * threaded warnings. Returns the rebuilt snapshot for the restore
+   * payload.
+   */
+  private seedArtifactSummaryFromRecords(
+    sessionId: string,
+    state: SessionArchiveState,
+    records: ChatRecord[],
+    messages: ChatRecord[],
+    gaps: HistoryGap[],
+    sourceReadComplete: boolean,
+  ): RebuiltSessionArtifactSnapshot | undefined {
+    const artifactJournalWarnings: string[] = [];
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      artifactRebuildRecords(records, messages),
+      sessionId,
+      artifactJournalWarnings,
+    );
+    if (
+      sourceReadComplete &&
+      gaps.length === 0 &&
+      !hasDisqualifyingArtifactJournalWarning(artifactJournalWarnings)
+    ) {
+      // Count the set a cold open restores, not the raw rebuild: the
+      // bridge drops non-snapshot published file locators on restore
+      // (whatever their kind or id) and they must not inflate the row's
+      // count — the same shared predicate the bridge's own count uses.
+      const count =
+        artifactSnapshot?.artifacts.filter((artifact) =>
+          isRestorablePersistedArtifact(artifact),
+        ).length ?? 0;
+      const summaryPath = this.getArtifactSummaryPathForState(sessionId, state);
+      const existing = readSessionArtifactSummarySidecar(summaryPath);
+      if (
+        existing?.artifactCount !== count &&
+        (count > 0 || existing !== undefined)
+      ) {
+        writeSessionArtifactSummarySidecar(summaryPath, count);
+      }
+    }
+    return artifactSnapshot;
   }
 
   async readLiveRestoreProjection(
@@ -3622,6 +4088,56 @@ export class SessionService {
     const { messages, gaps } = this.reconstructHistory(records, {
       detectGaps: true,
     });
+
+    // Runs before the empty-conversation early return: artifacts can be
+    // registered before the first prompt, and those side-records-only
+    // sessions are listable even though they have no conversation to load.
+    // Dispatch on a real conversation turn, not on a non-empty messages:
+    // creation-time metadata (custom_title, session_source, session_model)
+    // reconstructs messages too, and the raw records are unvalidated, so
+    // neither messages.length nor the raw-array shape decides "has a
+    // conversation". Only a transcript with a user/assistant/tool_result
+    // turn takes the uncapped seed — its read is the load itself, and the
+    // restore payload's embedded snapshot must not depend on the sidecar
+    // cap. Everything else goes through the shared capped helper, whose
+    // shape gate refuses a mixed raw array (a validator-dropped record
+    // alongside metadata) and whose empty-message refusal covers the
+    // artifact-only shape no restore path can open — seeding either from
+    // an empty active set would heal a correct sidecar to zero.
+    const hasConversationTurn = messages.some(
+      (message) => message.type !== 'system',
+    );
+    // The helper's size and shape gates are sidecar-COUNT policies: they
+    // decide whether to write the derived count, not whether the restore
+    // payload carries artifacts. The load read is the authoritative restore
+    // itself, so when the helper declines (an oversized journal, or a raw
+    // file holding rewound-away conversation records beside a metadata-only
+    // active chain) fall back to a payload-only rebuild — the resumed
+    // session must still see its active-branch artifacts, while the sidecar
+    // stays untouched (review round-9 R9-1). The empty-message refusal needs
+    // no fallback: messages.length === 0 returns below before the payload is
+    // used, and no restore path can open that shape anyway.
+    const artifactSnapshot = hasConversationTurn
+      ? this.seedArtifactSummaryFromRecords(
+          sessionId,
+          state,
+          records,
+          messages,
+          gaps,
+          sourceReadComplete,
+        )
+      : ((await this.seedSideRecordsOnlyTranscript(
+          sessionId,
+          state,
+          filePath,
+          async () => ({ records, sourceReadComplete }),
+        )) ??
+        rebuildSessionArtifactSnapshot(
+          artifactRebuildRecords(records, messages),
+          sessionId,
+          [],
+        ));
+
     if (messages.length === 0) {
       return;
     }
@@ -3662,14 +4178,6 @@ export class SessionService {
       }
     }
     const fileHistorySnapshots = fileHistoryAccumulator.finish();
-    const activeBranchRecords = includeActiveSideArtifactRecords(
-      records,
-      messages,
-    );
-    const artifactSnapshot = rebuildSessionArtifactSnapshot(
-      activeBranchRecords,
-      firstRecord.sessionId,
-    );
 
     return {
       conversation,
@@ -3699,6 +4207,29 @@ export class SessionService {
       await this.cleanupRemovedSessionStateInternal(sessionId, options, false);
     }
     return removed;
+  }
+
+  async removeUnusedSubSession(
+    sessionId: string,
+    assertStillClosed: () => void,
+  ): Promise<boolean> {
+    const lease = await this.acquireSessionWriterLease(sessionId, {
+      processKind: 'daemon',
+      reclaimPolicy: 'local',
+    });
+    try {
+      return await this.removeSession(sessionId, {
+        onlyIfSubSessionStartup: true,
+        assertStorageUnchanged: () => lease.assertOwnedAndUnchanged(),
+        assertCanMutate: () => {
+          assertStillClosed();
+          lease.assertCleanupOwned();
+        },
+        assertCleanupOwned: () => lease.assertCleanupOwned(),
+      });
+    } finally {
+      await lease.release();
+    }
   }
 
   async removeSessionTranscriptForLifecycle(
@@ -3876,6 +4407,76 @@ export class SessionService {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
+      if (options.onlyIfSubSessionStartup) {
+        const [identity] = physicalSnapshot.identities;
+        // A fresh child has only a few small startup records. Preserve any
+        // history we cannot prove consists entirely of those records.
+        if (
+          physicalSnapshot.location !== 'active' ||
+          identity.size > 64 * 1024
+        ) {
+          return false;
+        }
+        let complete = true;
+        const records = await jsonl.read<Partial<ChatRecord> | null>(
+          identity.filePath,
+          { onIncompleteRead: () => (complete = false) },
+        );
+        if (
+          !complete ||
+          !records.length ||
+          records.some((record) => {
+            if (record?.sessionId !== sessionId || record.type !== 'system') {
+              return true;
+            }
+            if (record.subtype === 'custom_title') {
+              const title = record.systemPayload as
+                | CustomTitleRecordPayload
+                | undefined;
+              return title?.titleSource !== 'auto';
+            }
+            return (
+              record.subtype !== 'parent_session' &&
+              record.subtype !== 'session_source' &&
+              record.subtype !== 'session_execution_engine' &&
+              record.subtype !== 'session_model' &&
+              record.subtype !== 'session_approval_mode'
+            );
+          })
+        ) {
+          return false;
+        }
+        const titlePath = this.getSessionTitleSidecarPathForState(
+          sessionId,
+          'active',
+        );
+        if (
+          readSessionTitleSidecar(titlePath)?.source !== 'auto' &&
+          fs.lstatSync(titlePath, { throwIfNoEntry: false })
+        ) {
+          return false;
+        }
+        const organization = Storage.runWithResolvedRuntimeBaseDir(
+          this.storage.getRuntimeBaseDir(),
+          () => new SessionOrganizationService(this.projectRoot),
+        );
+        if (
+          (await organization.hasStoredSessionOrganization(sessionId)) !== false
+        ) {
+          return false;
+        }
+        for (const state of ['active', 'archived'] as const) {
+          const bindings = await readSessionPrsDetailed(
+            this.getPrSessionPathForState(sessionId, state),
+          );
+          if (
+            bindings.status === 'invalid' ||
+            (bindings.status === 'ok' && bindings.prs.length > 0)
+          ) {
+            return false;
+          }
+        }
+      }
       if (
         expectedLocation !== undefined &&
         (physicalSnapshot.location !== expectedLocation ||
@@ -4000,7 +4601,13 @@ export class SessionService {
     assertCleanupOwned?.();
     this.removePrSidecars(sessionId);
     assertCleanupOwned?.();
+    this.removeGoalSidecars(sessionId);
+    assertCleanupOwned?.();
     this.removeSessionTitleSidecars(sessionId);
+    assertCleanupOwned?.();
+    this.removeSessionBranchSidecars(sessionId);
+    assertCleanupOwned?.();
+    this.removeArtifactSummarySidecars(sessionId);
     assertCleanupOwned?.();
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();
@@ -4079,6 +4686,15 @@ export class SessionService {
               `archiveSessions: failed to merge active pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
+          try {
+            options.assertCleanupOwned?.();
+            await this.reconcileGoalSidecarOnConflict(sessionId, 'active');
+          } catch (sidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile active goal sidecar for ${sessionId}: ${sidecarError}`,
+            );
+          }
           options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'active'),
@@ -4089,15 +4705,24 @@ export class SessionService {
           );
           try {
             options.assertCleanupOwned?.();
-            this.reconcileTitleSidecarOnConflict(
-              sessionId,
-              'archived',
-              'active',
-            );
+            this.reconcileSidecarsOnConflict(sessionId, 'archived', 'active');
           } catch (titleSidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
               `archiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileBranchSidecarOnConflict(
+              sessionId,
+              'archived',
+              'active',
+            );
+          } catch (branchSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `archiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           archived.push(sessionId);
@@ -4241,6 +4866,15 @@ export class SessionService {
               `unarchiveSessions: failed to merge archived pr sidecar for ${sessionId}: ${sidecarError}`,
             );
           }
+          try {
+            options.assertCleanupOwned?.();
+            await this.reconcileGoalSidecarOnConflict(sessionId, 'archived');
+          } catch (sidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile archived goal sidecar for ${sessionId}: ${sidecarError}`,
+            );
+          }
           options.assertCleanupOwned?.();
           this.removeFileIfExists(
             this.getWorktreeSessionPathForState(sessionId, 'archived'),
@@ -4251,15 +4885,24 @@ export class SessionService {
           );
           try {
             options.assertCleanupOwned?.();
-            this.reconcileTitleSidecarOnConflict(
-              sessionId,
-              'active',
-              'archived',
-            );
+            this.reconcileSidecarsOnConflict(sessionId, 'active', 'archived');
           } catch (titleSidecarError) {
             options.assertCleanupOwned?.();
             this.warn(
               `unarchiveSessions: failed to reconcile title sidecar for ${sessionId}: ${titleSidecarError}`,
+            );
+          }
+          try {
+            options.assertCleanupOwned?.();
+            this.reconcileBranchSidecarOnConflict(
+              sessionId,
+              'active',
+              'archived',
+            );
+          } catch (branchSidecarError) {
+            options.assertCleanupOwned?.();
+            this.warn(
+              `unarchiveSessions: failed to reconcile branch sidecar for ${sessionId}: ${branchSidecarError}`,
             );
           }
           unarchived.push(sessionId);
@@ -4639,10 +5282,7 @@ export class SessionService {
     {
       let lastRetained: string | null = null;
       for (const record of preFilterRecords) {
-        if (
-          retainedUuids.has(record.uuid) &&
-          !isSessionArtifactRecord(record)
-        ) {
+        if (retainedUuids.has(record.uuid) && !isForkSideRecord(record)) {
           lastRetained = record.uuid;
         } else {
           nearestRetainedPredecessor.set(record.uuid, lastRetained);
@@ -4652,7 +5292,7 @@ export class SessionService {
     const forked: ChatRecord[] = [
       ...(sourceRecord ? [sourceRecord] : []),
       ...sourceRecords.map((record) => {
-        const isArtifactRecord = isSessionArtifactRecord(record);
+        const isSideRecord = isForkSideRecord(record);
         let systemPayload = remapSystemPayloadForFork(
           record,
           sourceSessionId,
@@ -4688,7 +5328,7 @@ export class SessionService {
               }
             : {}),
           parentUuid:
-            isArtifactRecord &&
+            isSideRecord &&
             record.parentUuid !== null &&
             retainedUuids.has(record.parentUuid)
               ? record.parentUuid
@@ -4698,7 +5338,7 @@ export class SessionService {
             messageUuid: record.uuid,
           },
         };
-        if (!isArtifactRecord) {
+        if (!isSideRecord) {
           prevUuid = record.uuid;
         }
         return next;
@@ -5407,6 +6047,55 @@ function remapSystemPayloadForFork(
   return record.systemPayload;
 }
 
+/**
+ * Side records hang beside the active tail without moving it: session
+ * artifacts and Generated UI view state. A fork keeps their attachment.
+ */
+function isForkSideRecord(record: ChatRecord): boolean {
+  return isSessionArtifactRecord(record) || isGeneratedUiStateRecord(record);
+}
+
+/**
+ * Transcript size cap shared by the library mutation read and the
+ * best-effort first-open seed's size gate. It bounds the library mutation
+ * read; for the seed it declines to seed an oversized conversation-less
+ * transcript. The load funnel's own parse is the load and is not bounded
+ * by this cap — the seed's size gate runs after that read.
+ */
+const MAX_TRANSCRIPT_READ_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Artifacts can be registered before the first prompt; these valid
+ * sessions have no conversation turns at all — every record is system
+ * metadata (creation-time records such as session_source/session_model,
+ * titles, artifact events, UI state). The gate states that property
+ * instead of enumerating subtypes, so every creation-time record the
+ * product writes before the first prompt keeps it true, today and later.
+ * Shared by the library mutation guard and the load-time sidecar seed so
+ * both accept the same transcript shape. Deliberately NOT
+ * `!records.some(isTranscriptConversationRecord)`: that predicate counts
+ * creation-time system metadata (e.g. session_source) as conversation
+ * records and would re-break the daemon creation shape.
+ */
+function isSideRecordsOnlyTranscript(records: ChatRecord[]): boolean {
+  return records.every((record) => record.type === 'system');
+}
+
+/**
+ * The records fed to the artifact rebuild: a side-records-only journal
+ * feeds the whole transcript, any other journal only its active-branch
+ * side records. Shared by the load-time seed (both restore funnels) and
+ * the library mutation guard so the composition cannot drift.
+ */
+function artifactRebuildRecords(
+  records: ChatRecord[],
+  messages: ChatRecord[],
+): ChatRecord[] {
+  return isSideRecordsOnlyTranscript(records)
+    ? records
+    : includeActiveSideArtifactRecords(records, messages);
+}
+
 function includeActiveSideArtifactRecords(
   records: ChatRecord[],
   activeRecords: ChatRecord[],
@@ -5414,12 +6103,11 @@ function includeActiveSideArtifactRecords(
   const activeByUuid = new Map(
     activeRecords.map((record) => [record.uuid, record]),
   );
-  const artifactUuids = new Set(
-    selectActiveSideArtifactRecordUuids(
-      records,
-      activeRecords.map((record) => record.uuid),
-    ),
-  );
+  const activeUuids = activeRecords.map((record) => record.uuid);
+  const artifactUuids = new Set([
+    ...selectActiveSideArtifactRecordUuids(records, activeUuids),
+    ...selectActiveGeneratedUiStateRecordUuids(records, activeUuids),
+  ]);
   const selected: ChatRecord[] = [];
   for (const record of records) {
     const activeRecord = activeByUuid.get(record.uuid);

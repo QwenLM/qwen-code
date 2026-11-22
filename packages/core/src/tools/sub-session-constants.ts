@@ -9,3 +9,6 @@
  * shared value at their boundaries.
  */
 export const MAX_SUB_SESSION_PROMPT_CHARS = 100_000;
+
+/** Ceiling on a delegated workspace path or ID. */
+export const MAX_SUB_SESSION_WORKSPACE_CHARS = 4096;

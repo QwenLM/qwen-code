@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPoli
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
@@ -22,12 +21,10 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionSt
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -104,9 +101,6 @@ class ToolPublicationStoreTest {
     private ToolPublicationStore store;
     private ObjectNode binding;
     private JsonNode checkpoint;
-    private WorkspaceCsiReservationStore csiStore;
-    private WorkspaceCsiRegistration csiRegistration;
-    private WorkspaceCsiReservationStore.Reservation csiReservation;
 
     @BeforeEach
     void setup() {
@@ -114,26 +108,12 @@ class ToolPublicationStoreTest {
     }
 
     private void initialize(javax.sql.DataSource source) {
-        initialize(source, false);
+        initialize(source, null, false);
     }
 
-    private void initialize(javax.sql.DataSource source, boolean csiWorkspace) {
-        initialize(source, csiWorkspace, null);
-    }
-
-    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
-            ToolPublicationObjectStore objects) {
-        initialize(source, csiWorkspace, objects, false);
-    }
-
-    private void initialize(javax.sql.DataSource source, boolean csiWorkspace,
+    private void initialize(javax.sql.DataSource source,
             ToolPublicationObjectStore objects, boolean diagnostics) {
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        csiRegistration = csiWorkspace
-                ? new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                        "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                        "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1)
-                : null;
         jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
         manager = new DataSourceTransactionManager(source);
         projectionProperties = new ManagedAgentProperties();
@@ -143,7 +123,7 @@ class ToolPublicationStoreTest {
                 publicWorkspaces, projectionProperties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         publicResults = new JdbcManagedToolResultStore(jdbc, manager, publicSessions);
         journal = diagnostics ? PublicationJournalFixture.createWithExecutionDiagnostics(source, objects, publicResults)
-                : PublicationJournalFixture.create(source, csiRegistration, objects, publicResults);
+                : PublicationJournalFixture.create(source, objects, publicResults);
         jdbc = journal.jdbc;
         manager = journal.manager;
         sessions = journal.sessions;
@@ -152,8 +132,6 @@ class ToolPublicationStoreTest {
         store = journal.store;
         binding = journal.binding;
         checkpoint = journal.checkpoint;
-        csiStore = csiWorkspace ? new WorkspaceCsiReservationStore(jdbc, manager, JSON) : null;
-        csiReservation = journal.csiReservation;
     }
 
     javax.sql.DataSource publicationDataSource() {
@@ -170,11 +148,10 @@ class ToolPublicationStoreTest {
         try (var pool = Executors.newSingleThreadExecutor()) {
             new TransactionTemplate(manager).executeWithoutResult(status -> {
                 JdbcWorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
-                String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
-                jdbc.update("INSERT INTO ma_tenant_guard (tenant_key, tenant_id, guard_domain) VALUES (?, ?, 'output_publication')"
-                        + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
-                jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ? FOR UPDATE",
-                        tenantKey);
+                jdbc.update("INSERT INTO ma_tenant_guard (tenant_id, guard_domain) VALUES (?, 'output_publication')"
+                        + " ON DUPLICATE KEY UPDATE tenant_id = tenant_id", "tenant-1");
+                jdbc.queryForList("SELECT tenant_id FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_id = ? FOR UPDATE",
+                        "tenant-1");
                 try {
                     assertThat(pool.submit(() -> reserve()).get(3, java.util.concurrent.TimeUnit.SECONDS)
                             .path("publicationId").asText()).isEqualTo("pub-1");
@@ -251,168 +228,7 @@ class ToolPublicationStoreTest {
         }
     }
 
-    @ParameterizedTest
-    @ValueSource(doubles = {0.5, 1.0, 0.0, -0.0})
-    void csiOriginalProducerFinishesBlockedCaptureAndCreatesItsFirstCandidateAfterSeal(
-            double score) {
-        var execution = authorizeCsi();
-        retireCsi();
-        var objects = new java.util.HashMap<String, byte[]>();
-        var data = csiData(objects);
-        byte[] output = "original".getBytes(StandardCharsets.UTF_8);
-        verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
-                "segment-0", "stdout", 0, output, digest("original"));
-        JsonNode terminal = blockedTerminal();
-        ((ObjectNode) terminal.path("responseParts").get(0)).put("score", score);
-        verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
-                terminal.toString().getBytes(StandardCharsets.UTF_8));
-        assertThat(data.finishedForBroker(execution).path("result")).isEqualTo(terminal);
-        execution = executions.compareAndSet(execution, execution.withResult(
-                JSON.convertValue(terminal, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}),
-                0, Instant.now()), "dispatcher", execution.getDispatchGeneration());
-        assertThat(execution.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_resource WHERE slot_key ="
-                                        + " X'61646d697373696f6e'",
-                Integer.class)).isZero();
-        JsonNode outcome = blockedOutcome(terminal);
-        JsonNode candidate = data.prepareAdmission(binding.get("sessionKey"), "pub-1", "writer-1", 1,
-                WRITER_TOKEN, outcome);
-        assertThat(data.prepareAdmission(binding.get("sessionKey"), "pub-1", "writer-1", 1,
-                WRITER_TOKEN, outcome)).isEqualTo(candidate);
-        assertThat(csiStore.inspect(csiRegistration).phase()).isEqualTo("DRAINING");
-        assertThat(jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot", String.class))
-                .isEqualTo("binding-1");
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"0.6", "0.50000000000000000001"})
-    void csiCandidateRefusesAChangedSettledNumericResult(String score) {
-        var execution = authorizeCsi();
-        retireCsi();
-        var data = csiData(new java.util.HashMap<>());
-        JsonNode terminal = blockedTerminal();
-        verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
-                terminal.toString().getBytes(StandardCharsets.UTF_8));
-        Map<String, Object> changed = JSON.convertValue(terminal,
-                new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
-        changed.put("responseParts", List.of(Map.of("score", new java.math.BigDecimal(score))));
-        execution = executions.compareAndSet(execution, execution.withResult(changed, 0, Instant.now()),
-                "dispatcher", execution.getDispatchGeneration());
-        assertThat(execution.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
-        var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
-        assertThatThrownBy(() -> data.prepareAdmission(binding.get("sessionKey"), "pub-1", "writer-1", 1,
-                WRITER_TOKEN, blockedOutcome(terminal)))
-                .hasMessageContaining("Original settled Broker result conflicts");
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture")).isEqualTo(before);
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_resource WHERE slot_key ="
-                                        + " X'61646d697373696f6e'",
-                Integer.class)).isZero();
-    }
-
-    @Test
-    void csiSettledProducerOnlyReplaysItsOriginalSucceededOperation() {
-        var execution = authorizeCsi();
-        retireCsi();
-        var data = csiData(new java.util.HashMap<>());
-        byte[] output = "original".getBytes(StandardCharsets.UTF_8);
-        JsonNode receipt = verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
-                "segment-0", "stdout", 0, output, digest("original"));
-        JsonNode terminal = blockedTerminal();
-        JsonNode finish = verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
-                terminal.toString().getBytes(StandardCharsets.UTF_8));
-        executions.compareAndSet(execution, execution.withResult(
-                JSON.convertValue(terminal, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {}),
-                0, Instant.now()), "dispatcher", execution.getDispatchGeneration());
-        var before = jdbc.queryForList(
-                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') ORDER BY operation_id");
-        var publication = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
-        assertThat(verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
-                "segment-0", "stdout", 0, output, digest("original"))).isEqualTo(receipt);
-        assertThat(verified(data).finish(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "finish-1",
-                terminal.toString().getBytes(StandardCharsets.UTF_8))).isEqualTo(finish);
-        assertThatThrownBy(() -> verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
-                "new-operation", "stdout", 0, output, digest("original"))).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> verified(data).prefix(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
-                "new-prefix", "stdout")).isInstanceOf(IllegalArgumentException.class);
-        assertThat(jdbc.queryForList(
-                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') ORDER BY operation_id")).usingRecursiveComparison().isEqualTo(before);
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture")).isEqualTo(publication);
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"marker", "journal", "unknown", "grant"})
-    void csiTailRefusesMissingOrClosedOriginalAuthority(String damage) {
-        var execution = authorizeCsi();
-        retireCsi();
-        if ("marker".equals(damage)) {
-            jdbc.update(
-                    "UPDATE ma_tool_execution SET authorized_dispatch_generation = NULL,"
-                            + " authorized_binding_version = NULL");
-        } else if ("journal".equals(damage)) {
-            jdbc.update("DELETE FROM ma_operation WHERE operation_kind = 'CSI_RETIREMENT'");
-        } else if ("unknown".equals(damage)) {
-            executions.compareAndSet(execution, execution.withUnknown(), "dispatcher", execution.getDispatchGeneration());
-        } else {
-            jdbc.update("UPDATE ma_output_capture SET expires_at = 0");
-        }
-        var data = csiData(new java.util.HashMap<>());
-        var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
-        assertThatThrownBy(() -> verified(data).publishSegment(binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN,
-                "segment-0", "stdout", 0, new byte[] {1}, null))
-                .isInstanceOf(RuntimeException.class);
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture")).isEqualTo(before);
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
-                                        + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Integer.class)).isZero();
-        assertThat(csiStore.inspect(csiRegistration).phase()).isEqualTo("DRAINING");
-    }
-
-    @Test
-    void csiSealRefusesNewGrantReserveRenewAndInstallation() {
-        var execution = authorizeCsi();
-        retireCsi();
-        var before = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture");
-        assertThatThrownBy(this::reserve).isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> store.apply(request("renew"), WRITER_TOKEN, PUBLICATION_TOKEN))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> store.verifyDispatch(execution, "pub-1", PUBLICATION_TOKEN))
-                .isInstanceOf(IllegalArgumentException.class);
-        assertThat(jdbc.queryForMap("SELECT " + ManagedSchemaProjection.OUTPUT_CAPTURE.columns() + " FROM ma_output_capture")).isEqualTo(before);
-    }
-
-    @Test
-    void csiStagedProducerRefusesAmbientTransactionBeforeObjectWrites() {
-        authorizeCsi();
-        var objects = new java.util.HashMap<String, byte[]>();
-        var data = csiData(objects);
-        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> verified(data).publishSegment(
-                binding.get("sessionKey"), "pub-1", PUBLICATION_TOKEN, "segment-0", "stdout", 0,
-                new byte[] {1}, null))).hasMessageContaining("ambient transaction");
-        assertThat(objects).isEmpty();
-        assertThat(jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
-                                        + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Integer.class)).isZero();
-    }
-
-    private ToolExecutionRecord authorizeCsi() {
-        initialize(publicationDataSource(), true);
-        store = newStore(10 * ALLOCATION, 10);
-        reserve();
-        var prepared = executions.findByExecutionCallId("execution-1");
-        assertThat(store.verifyDispatch(prepared, "pub-1", PUBLICATION_TOKEN)).isEqualTo(binding);
-        var claim = executions.claimDispatch("execution-1", "dispatcher", Duration.ofMinutes(1));
-        return bindings.authorizeDispatch(new JdbcRuntimeSessionRepository(manager.getDataSource()), executions,
-                claim, "dispatcher", claim.getDispatchGeneration());
-    }
-
-    private void retireCsi() {
-        csiStore.beginRetirement(csiRegistration, bindings, bindings.findById("binding-1"), csiReservation,
-                UUID.randomUUID().toString());
-    }
-
-    private ToolPublicationDataStore csiData(Map<String, byte[]> objects) {
+    private ToolPublicationDataStore memoryData(Map<String, byte[]> objects) {
         ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
             @Override
             public InputStream openRange(String key, long offset, long length, Runnable guard) {
@@ -504,7 +320,7 @@ class ToolPublicationStoreTest {
                                     + " X'6f746865722d776f726b7370616365'");
             case "runtime-generation" -> jdbc.update("UPDATE ma_runtime_binding SET runtime_generation = 2");
             case "runtime-provisioner" -> jdbc.update("UPDATE ma_runtime_binding SET provisioner_kind = ?",
-                    WorkspaceCsiReservationStore.PROVISIONER_KIND);
+                    "ssh-process");
             default -> throw new AssertionError("Unexpected target conflict");
         }
         jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'runtime_placement'");
@@ -514,7 +330,7 @@ class ToolPublicationStoreTest {
                 if ("apply".equals(operation)) {
                     return store.apply(request("fence"), WRITER_TOKEN, null);
                 }
-                return csiData(new java.util.HashMap<>()).prepareAdmission(binding.path("sessionKey"), "pub-1",
+                return memoryData(new java.util.HashMap<>()).prepareAdmission(binding.path("sessionKey"), "pub-1",
                         "writer-1", 1, WRITER_TOKEN, JSON.createObjectNode().put("schemaVersion", 1));
             } catch (RuntimeException failure) {
                 assertThat(jdbc.queryForList(
@@ -1001,7 +817,7 @@ class ToolPublicationStoreTest {
                             }
                         });
             }
-        }, false, bucket, true);
+        }, bucket, true);
         reserve();
         var data = new ToolPublicationDataStore(jdbc, manager, store, sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30), VERIFICATION_BUDGET);
@@ -1087,6 +903,10 @@ class ToolPublicationStoreTest {
         assertThat(blockedPublic.path("artifacts")).isEmpty();
         String objectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
                 + " WHERE slot_key = X'61646d697373696f6e'", String.class);
+        assertThat(objectKey).isEqualTo("managed-tool-results/tenant-1/workspace-1/session-1/pub-1/admission");
+        String terminalObjectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
+                + " WHERE slot_key = X'7465726d696e616c'", String.class);
+        assertThat(terminalObjectKey).isEqualTo("managed-tool-results/tenant-1/workspace-1/session-1/pub-1/terminal");
         objects.get(objectKey)[0] = 'z';
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
@@ -1403,6 +1223,8 @@ class ToolPublicationStoreTest {
         String damagedSlot = contentBody ? "content:stdout" : "segment:stdout:0";
         String damagedKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource WHERE slot_key = ?",
                 String.class, damagedSlot);
+        assertThat(damagedKey).isEqualTo(
+                "managed-tool-results/tenant-1/workspace-1/session-1/pub-1/" + damagedSlot);
         objects.get(damagedKey)[0] = 'z';
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
@@ -2362,6 +2184,33 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void capacityRefusalReadsEachScopeAggregateOnce() {
+        ObjectNode second = addSecondExecution();
+        List<String> aggregates = new java.util.ArrayList<>();
+        JdbcTemplate observed = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(jdbc.getDataSource()) {
+            @Override
+            public <T> T query(String sql, org.springframework.jdbc.core.PreparedStatementSetter setter,
+                    org.springframework.jdbc.core.ResultSetExtractor<T> extractor) {
+                if (sql.startsWith("SELECT COALESCE(SUM(")) {
+                    aggregates.add(sql);
+                }
+                return super.query(sql, setter, extractor);
+            }
+        };
+        store = new ToolPublicationStore(observed, manager, sessions, executions, bindings,
+                new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, ALLOCATION, 10 * ALLOCATION, 10));
+        reserve();
+        aggregates.clear();
+        ObjectNode secondRequest = request("reserve");
+        secondRequest.set("binding", second);
+        assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "session_bytes");
+        assertThat(aggregates).hasSize(2);
+        assertThat(aggregates.getFirst()).contains("tenant_id = ?", "AS used");
+        assertThat(aggregates.getLast()).contains("scope_key = ?", "AS retained", "producer_phase <> 'FINISHING'");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
     void refusesEachExhaustedLimitWithItsOwnCode() {
         ObjectNode second = addSecondExecution();
         store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
@@ -2504,7 +2353,7 @@ class ToolPublicationStoreTest {
             store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                     new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 10));
             reserve();
-            Map<String, Object> keys = jdbc.queryForMap("SELECT tenant_key, scope_key FROM ma_output_capture");
+            Map<String, Object> keys = jdbc.queryForMap("SELECT scope_key FROM ma_output_capture");
             // Distinct numbers: the capture holds 10 bytes less than an
             // allocation, has used 3, and now belongs to another Session.
             jdbc.update("UPDATE ma_output_capture SET capture_held_bytes = capture_held_bytes - 10,"
@@ -2520,7 +2369,8 @@ class ToolPublicationStoreTest {
             store = new ToolPublicationStore(jdbc, manager, sessions, executions, bindings,
                     new ToolPublicationStore.Capacity(CAPTURE_BYTES * 2, 10 * ALLOCATION, 10 * ALLOCATION, 1));
             assertRefused(() -> store.apply(secondRequest, WRITER_TOKEN, PUBLICATION_TOKEN), false, "active_captures");
-            String identity = " tenant=" + keys.get("tenant_key") + " scope=" + keys.get("scope_key");
+            String identity = " tenant=" + com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key("tenant-1")
+                    + " scope=" + keys.get("scope_key");
             String held = " held=" + (ALLOCATION - 10) + " used=3 requested=" + ALLOCATION;
             assertThat(logged.list).extracting(ILoggingEvent::getFormattedMessage).containsExactly(
                     "Tool publication reservation refused limit=tenant_bytes retained=false" + identity + held
@@ -2675,10 +2525,10 @@ class ToolPublicationStoreTest {
 
     // Another open capture of the same Session, as a reservation leaves it.
     private void copyCapture(String from, String to) {
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_id, workspace_id, session_id,"
                 + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
-                + " producer_held_bytes, admission_held_bytes, is_write_evidence) SELECT scope_key, tenant_key,"
+                + " producer_held_bytes, admission_held_bytes, is_write_evidence) SELECT scope_key,"
                 + " tenant_id, workspace_id, session_id, ?, ?, ?, binding_json, binding_digest, token_hash, state,"
                 + " expires_at, capture_bytes, producer_bytes, admission_bytes, capture_held_bytes,"
                 + " producer_held_bytes, admission_held_bytes, is_write_evidence FROM ma_output_capture"
@@ -3291,9 +3141,8 @@ class ToolPublicationStoreTest {
                 .isEqualTo(events);
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void projectionUsesPersistedOwnerAndRejectsForeignActiveClaims(boolean privateSession) {
+    @Test
+    void projectionUsesPersistedOwnerAndRejectsForeignActiveClaims() {
         var fixture = apiFixture();
         fixture.jdbc()
                 .update(
@@ -3316,9 +3165,6 @@ class ToolPublicationStoreTest {
                                 source.resources(),
                                 source.sourceDigest()),
                         claim.generation());
-        if (privateSession) {
-            fixture.jdbc().update("UPDATE ma_session SET tool_profile = 'csi-files-retirement/1'");
-        }
         var before =
                 fixture.jdbc()
                         .queryForMap(
@@ -3333,19 +3179,14 @@ class ToolPublicationStoreTest {
                         JSON.createObjectNode(),
                         List.of(),
                         fixture.policy().version());
-        if (privateSession) {
-            assertThat(fixture.results().complete(foreign, projection, fixture.policy().version()))
-                    .isFalse();
-        } else {
-            assertThatThrownBy(
-                            () ->
-                                    fixture.results()
-                                            .complete(
-                                                    foreign,
-                                                    projection,
-                                                    fixture.policy().version()))
-                    .hasMessage("Claimed projection source conflicts");
-        }
+        assertThatThrownBy(
+                        () ->
+                                fixture.results()
+                                        .complete(
+                                                foreign,
+                                                projection,
+                                                fixture.policy().version()))
+                .hasMessage("Claimed projection source conflicts");
         assertThat(
                         fixture.jdbc()
                                 .queryForMap(
@@ -3358,33 +3199,6 @@ class ToolPublicationStoreTest {
         assertThat(fixture.jdbc().queryForList("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event"))
                 .usingRecursiveComparison()
                 .isEqualTo(events);
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"tool_profile = 'csi-files-retirement/1'", "runtime_request_key = 'fixture-request'"})
-    void projectionClaimSkipsPrivateCsiSessions(String privateMarker) {
-        // csi_guard is generated from these two columns, so the seed sets one of them.
-        var fixture = apiFixture();
-        fixture.jdbc()
-                .update(
-                        "UPDATE ma_operation SET state = 'PENDING', available_at = 0 WHERE"
-                            + " operation_kind = 'TOOL_RESULT_PROJECTION'");
-        var original = fixture.jdbc().queryForMap("SELECT tool_profile, runtime_request_key FROM ma_session");
-        fixture.jdbc().update("UPDATE ma_session SET " + privateMarker);
-        var before =
-                fixture.jdbc()
-                        .queryForMap(
-                                "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'");
-        assertThat(fixture.results().claim()).isEmpty();
-        assertThat(
-                        fixture.jdbc()
-                                .queryForMap(
-                                        "SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'TOOL_RESULT_PROJECTION'"))
-                .usingRecursiveComparison()
-                .isEqualTo(before);
-        fixture.jdbc().update("UPDATE ma_session SET tool_profile = ?, runtime_request_key = ?",
-                original.get("tool_profile"), original.get("runtime_request_key"));
-        assertThat(fixture.results().claim()).isPresent();
     }
 
     @Test
@@ -3815,9 +3629,9 @@ class ToolPublicationStoreTest {
                     (row, index) -> new String[] {row.getString(1), row.getString(2)});
             for (var row : rows) {
                 jdbc.update(
-                                        "DELETE FROM ma_resource_ref WHERE session_scope_key = ?"
-                                                + " AND owner_kind = 'ARTIFACT' AND owner_key = ?",
-                        row[0], com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(row[0], row[1]));
+                                        "DELETE FROM ma_resource_ref WHERE"
+                                                + " owner_kind = 'ARTIFACT' AND owner_key = ?",
+                        com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(row[0], row[1]));
                 jdbc.update(
                                         "DELETE FROM ma_artifact WHERE scope_key = ? AND"
                                                 + " artifact_id = ?", row[0], row[1]);

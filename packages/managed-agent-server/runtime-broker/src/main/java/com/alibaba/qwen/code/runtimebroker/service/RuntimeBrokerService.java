@@ -1,14 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.NativeCsiExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -34,7 +31,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
-import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
@@ -46,7 +42,6 @@ import org.apache.commons.codec.digest.DigestUtils;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -58,6 +53,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.sameLease;
@@ -100,6 +96,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     private final HarnessSessionResolver sessionResolver;
     private RuntimeExtensionCommandVerifier extensionCommandVerifier;
+    private volatile boolean mcpParking;
     private final RuntimeProvisioner provisioner;
     private final RuntimeTransport transport;
     private final RuntimeBindingRepository bindingRepository;
@@ -127,6 +124,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeSessionRelease sessionRelease;
     private final RuntimeDrainCoordinator drainCoordinator;
     private final RuntimeHoldInventory holdInventory;
+    private final RuntimeObservationCoordinator observationCoordinator;
 
     /**
      * H4b: the live physical Runtime binding of a Harness Session — how
@@ -299,6 +297,24 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 executionRepository, provisioner, transport, bindingProvisioning, executionRecovery,
                 executionDispatcher, sessionRelease, this.brokerOwnerId, this.operationLeaseDuration,
                 clock, closed, this::newBindingRenewal);
+        this.observationCoordinator = new RuntimeObservationCoordinator(sessionResolver, bindingRegistry,
+                bindingProvisioning, bindingRepository, sessionRepository, provisioner, transport,
+                executionRecovery, this.brokerOwnerId, clock, closed);
+        this.executionRecovery.setAdoptedSessionLookup(observationCoordinator::requireOrAdoptReadySession);
+    }
+
+    public void configureStageStore(com.alibaba.qwen.code.runtimebroker.RuntimeStageStore stageStore) {
+        observationCoordinator.configureStageStore(stageStore, null, null, -1, -1L);
+    }
+
+    public void configureStageStore(com.alibaba.qwen.code.runtimebroker.RuntimeStageStore stageStore,
+            Duration claimLease, Duration scanInterval, int longPollWaitMs, long attachedCooldownMs) {
+        observationCoordinator.configureStageStore(
+                stageStore, claimLease, scanInterval, longPollWaitMs, attachedCooldownMs);
+    }
+
+    public CompletionStage<Void> runObservationScanOnce() {
+        return observationCoordinator.runScanOnce();
     }
 
     private BindingRenewal newBindingRenewal(RuntimeBindingRecord claimed) {
@@ -326,10 +342,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public CompletionStage<Void> drainHarnessSession(String tenantId, String harnessSessionId) {
         return drainCoordinator.drainHarnessSession(tenantId, harnessSessionId);
-    }
-
-    public CompletionStage<Void> closeResidentHarnessSession(RuntimeProvisionRequest request, String harnessSessionId) {
-        return drainCoordinator.closeResidentHarnessSession(request, harnessSessionId);
     }
 
     public CompletionStage<Void> drainHarnessResources(String tenantId, String harnessSessionId,
@@ -431,6 +443,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             RuntimeBindingRecord original;
             if (expectedBindingId != null) {
                 original = bindingRepository.findById(expectedBindingId);
+            } else if ("workspace".equals(scope.getIsolationClass())) {
+                // A shared binding has no isolation key to scan by; its slot is
+                // keyed by the full placement request. Like the session scan, an
+                // identity-free probe only resolves a READY, undrained owner and
+                // never provisions one.
+                RuntimeBindingRecord active = bindingRepository.findActive(provisionRequest(scope, harnessId));
+                if (active == null || active.getState() != RuntimeBindingRecord.State.READY || active.isDrainRequested()) {
+                    throw conflict("managed_extension_owner_unavailable", "The original extension Runtime is unavailable or ambiguous.");
+                }
+                original = active;
             } else {
                 RuntimeBindingRecord found = null;
                 String after = null;
@@ -455,9 +477,11 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 }
                 original = found;
             }
+            boolean shared = original != null && HarnessOwnership.sharesRuntimeSessions(original.getRequest());
             if (original == null || expectedGeneration != null && original.getGeneration() != expectedGeneration
                     || !original.getRequest().getScope().equals(scope)
-                    || !harnessId.equals(original.getRequest().getIsolationKey())
+                    || !shared && (!harnessId.equals(original.getRequest().getIsolationKey())
+                            || !"session".equals(original.getRequest().getScope().getIsolationClass()))
                     || original.getLease() == null
                     || original.getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && original.getState() == RuntimeBindingRecord.State.DRAINING)
@@ -531,6 +555,91 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public String runtimeProvisionerKind(RuntimeSessionRecord record) {
         return bindingRegistry.runtimeProvisionerKind(record);
+    }
+
+    /** Lets Harnesses park MCP owners; only a deployment that reclaims them may call this. */
+    public void enableMcpParking() {
+        mcpParking = true;
+    }
+
+    /** External storage has one holder, so a parked owner would exclude every rival. */
+    public boolean mcpParkable(RuntimeSessionRecord record) {
+        RuntimeBindingRecord binding = mcpParking ? bindingRepository.findById(record.getBindingId()) : null;
+        return binding != null && binding.getRequest().isManagedContext()
+                && !WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
+    }
+
+    @Override
+    public CompletionStage<Boolean> reclaimParkedMcp(String bindingId, long generation,
+            String runtimeSessionId, BooleanSupplier parked) {
+        requireOpen(closed);
+        RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
+        BindingContext live = binding == null || binding.getGeneration() != generation
+                ? null : bindingRegistry.matchingLiveBinding(binding);
+        RuntimeSessionRecord saved = live == null
+                ? null : sessionRepository.findById(binding.getRequest().getScope(), runtimeSessionId);
+        if (saved == null || saved.getState() != RuntimeSessionRecord.State.READY
+                || !bindingId.equals(saved.getBindingId()) || saved.getRuntimeGeneration() != generation) {
+            return CompletableFuture.completedFuture(false);
+        }
+        CompletableFuture<SessionContext> adopted = new CompletableFuture<>();
+        var existing = bindingRegistry.registerSession(runtimeSessionId, adopted);
+        if (existing == null) {
+            safeStage(() -> executionRecovery.scanExecutions(
+                    new SessionContext(saved.getSession(), binding, live.lease()), saved, null))
+                    .whenComplete((context, error) -> {
+                        if (error == null) {
+                            adopted.complete(context);
+                        } else {
+                            bindingRegistry.removeSession(runtimeSessionId, adopted);
+                            adopted.completeExceptionally(unwrap(error));
+                        }
+                    });
+        }
+        return (existing == null ? adopted : existing).thenCompose(context -> context.binding().sameIdentity(binding)
+                ? reclaimParkedMcp(context, parked) : CompletableFuture.completedFuture(false));
+    }
+
+    // Connections close before the mount is handed back, so a stdio server
+    // never writes to storage it no longer holds. A successor's acquire
+    // replaces this claim, which makes the handback refuse.
+    private CompletionStage<Boolean> reclaimParkedMcp(SessionContext context, BooleanSupplier parked) {
+        String claim = UUID.randomUUID().toString();
+        String previous;
+        context.lock();
+        try {
+            previous = context.mountClaim();
+            context.mountClaim(claim);
+        } finally {
+            context.unlock();
+        }
+        // Background work owns the mount until it ends. The observe-only sweep
+        // settles runs that already ended (without the observation capability
+        // nothing else does), then a row still active refuses BEFORE the
+        // transport closes any connection, so a live run keeps its stdio
+        // servers and its storage.
+        CompletionStage<Boolean> reclaimed = !parked.getAsBoolean()
+                ? CompletableFuture.completedFuture(false)
+                : safeStage(() -> executionRecovery.settleUnprovenBackgroundRows(context, false)).thenCompose(swept ->
+                        executionRepository.hasActiveByRuntimeSession(
+                                context.binding().getBindingId(), context.binding().getGeneration(),
+                                context.session().getRuntimeSessionId())
+                                ? CompletableFuture.completedFuture(false)
+                                : safeStage(() -> transport.reclaimMcp(context.lease(), context.session()))
+                                        .thenCompose(ignored -> !parked.getAsBoolean()
+                                                ? CompletableFuture.completedFuture(false)
+                                                : executionRecovery.releaseMountAfterSweep(context, claim,
+                                                        context.session().getRuntimeSessionId())));
+        return reclaimed.whenComplete((released, error) -> {
+            context.lock();
+            try {
+                if (!Boolean.TRUE.equals(released) && claim.equals(context.mountClaim())) {
+                    context.mountClaim(previous);
+                }
+            } finally {
+                context.unlock();
+            }
+        });
     }
 
     public CompletionStage<RuntimeSessionRecord> acquire(
@@ -680,24 +789,16 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         if (ManagedExtensionProtocol.isOperation(immutable)) {
             throw invalid("runtime_control_operation_invalid", "Extensions require the metadata control route.");
         }
-        if (CsiFileHistoryProtocol.isOperation(immutable)) {
-            CsiFileHistoryProtocol.operation(immutable);
-            if (authority != null) {
-                throw conflict("runtime_lifecycle_operation_invalid", "CSI history cannot use lifecycle authority");
-            }
-            return csiFileHistory(harnessSessionId, runtimeSessionId, immutable);
-        }
         if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)
                 && !ManagedExtensionCommandProtocol.isOperation(immutable)
                 && !ManagedMonitorProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
-        return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
+        CompletionStage<SessionContext> targetSession = ManagedMonitorProtocol.isOperation(immutable)
+                ? observationCoordinator.requireOrAdoptReadySession(harnessSessionId, runtimeSessionId)
+                : bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId);
+        return targetSession
                 .thenCompose(context -> {
-                    if (CsiFilesRetirementProfile.isProfile(context.session().getScope())) {
-                        throw new RuntimeBrokerException(501, "csi_control_not_qualified",
-                                "Generic CSI runtime controls are not qualified.", false);
-                    }
                     if (ManagedMcpProtocol.isOperation(immutable)) {
                         ManagedMcpProtocol.validateSession(context.session(), immutable);
                     }
@@ -789,50 +890,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 });
     }
 
-    private CompletionStage<Object> csiFileHistory(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> operation) {
-        return bindingRegistry.requireSession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
-            if (!CsiFilesRetirementProfile.isProfile(context.session().getScope())) {
-                throw conflict("runtime_control_invalid", "CSI history requires the original private Runtime");
-            }
-            context.lock();
-            try {
-                RuntimeSessionRecord record = sessionRepository.findById(context.session().getScope(), runtimeSessionId);
-                RuntimeBindingRecord parent = bindingRepository.findById(context.binding().getBindingId());
-                if (record == null || parent == null
-                        || !record.getSession().getHarnessSessionId().equals(harnessSessionId)
-                        || !record.getSession().getRuntimeSessionId().equals(runtimeSessionId)
-                        || !record.getSession().getTurnKind().equals(context.session().getTurnKind())
-                        || !record.getSession().getScope().equals(context.session().getScope())
-                        || !record.getBindingId().equals(parent.getBindingId())
-                        || record.getRuntimeGeneration() != context.binding().getGeneration()
-                        || parent.getGeneration() != context.binding().getGeneration()
-                        || !parent.hasSameLease(context.lease())
-                        || parent.getState() != RuntimeBindingRecord.State.READY || parent.isDrainRequested()
-                        || record.getState() != RuntimeSessionRecord.State.READY) {
-                    throw conflict("csi_original_runtime_unavailable", "Original CSI history owner is unavailable");
-                }
-                bindingRegistry.requireReadySessionRecord(context);
-                bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, null);
-                context.beginControl();
-            } finally {
-                context.unlock();
-            }
-            CompletionStage<Object> result;
-            try {
-                if (!provisioner.isUsable(context.lease())) {
-                    throw conflict("csi_original_runtime_unavailable", "Original CSI worker is unavailable");
-                }
-                result = mapFailure(safeStage(() -> transport.control(context.lease(), context.session(), operation)),
-                        "csi_file_history_unavailable", "Original CSI history observation failed");
-            } catch (RuntimeException | Error failure) {
-                context.endControl();
-                throw failure;
-            }
-            return result.whenComplete((ignored, error) -> context.endControl());
-        });
-    }
-
     /**
      * A client Monitor control names one of this Runtime Session's own
      * watches: {@code operationId} is the execution that started it and
@@ -919,68 +976,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         return terminalHolds.markPtyEstablished(harnessSessionId, terminalId);
     }
 
-    public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
-            String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes) {
-        requireOpen(closed);
-        String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
-        Map<String, Object> deferred = new LinkedHashMap<>(immutableMap(reference, "reference"));
-        if (deferred.containsKey("dispatchMode") || inputBytes == null || definitionBytes == null) {
-            throw invalid("runtime_reference_invalid", "Private CSI allocation fields are invalid");
-        }
-        deferred.put("dispatchMode", "deferred");
-        Map<String, Object> immutable = immutableMap(deferred, "reference");
-        byte[] input = inputBytes.clone();
-        byte[] definition = definitionBytes.clone();
-        return mapStoreFailure(safeStage(() -> bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenApply(context -> {
-                    context.lock();
-                    try {
-                        NativeCsiExecutionRepository jdbc = privateCsiRepository(context);
-                        ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
-                                context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
-                                referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
-                                referenceString(immutable, "argsDigest"), immutable);
-                        return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
-                    } finally {
-                        context.unlock();
-                    }
-                })));
-    }
-
-    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
-            String promptId, String batchId) {
-        return readCsiBatch(harnessSessionId, runtimeSessionId, promptId, batchId, null);
-    }
-
-    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
-            String promptId, String batchId, Map<String, Object> recoveryOwner) {
-        requireOpen(closed);
-        BrokerValues.requireId(promptId, "promptId");
-        BrokerValues.requireId(batchId, "batchId");
-        return mapStoreFailure(safeStage(() -> bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenApply(context -> {
-                    context.lock();
-                    try {
-                        return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
-                                context.binding(), promptId, batchId, recoveryOwner);
-                    } finally {
-                        context.unlock();
-                    }
-                })));
-    }
-
-    private NativeCsiExecutionRepository privateCsiRepository(SessionContext context) {
-        bindingRegistry.requireReadySessionRecord(context);
-        if (!CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                || !context.session().getHarnessSessionId().equals(context.session().getRuntimeSessionId())
-                || !context.session().getRuntimeSessionId().equals(context.binding().getRequest().getIsolationKey())
-                || !context.session().getScope().equals(context.binding().getRequest().getScope())
-                || !(bindingRepository instanceof NativeCsiExecutionRepository jdbc)) {
-            throw invalid("csi_native_reservation_unavailable", "Original private CSI repositories are required");
-        }
-        return jdbc;
-    }
-
     /** A v3 reservation keeps the raw payload digest distinct from canonical input. */
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
@@ -1062,6 +1057,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
                         if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                                && !WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
                             executionRepository.settlePrepared(record, Map.of(
@@ -1069,22 +1065,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                     "error", Map.of("type", "workspace_tool_unsupported",
                                             "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
                             throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
-                        }
-                        if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
-                            throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
-                        }
-                        if (ResidentWorkspaceProfile.selects(context.binding().getRequest().getScope())
-                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
-                            Map<String, Object> refusal = new LinkedHashMap<>();
-                            refusal.put("executionStatus", "not_started");
-                            refusal.put("responseParts", List.of());
-                            refusal.put("capture", null);
-                            refusal.put("error", Map.of("type", "resident_tool_unsupported",
-                                    "message", "Resident Workspace supports only read_file, write_file and edit."));
-                            ToolExecutionRecord settled = executionRepository.settlePrepared(record, refusal, clock.instant());
-                            return CompletableFuture.completedFuture(settled == null
-                                    ? executionState.requireExecution(context, executionId) : settled);
                         }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
@@ -1188,10 +1168,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             if (receipt != null && receipt.isTerminal()) {
                 executionState.requireOwnedExecution(harnessSessionId, runtimeSessionId,
                         receipt.getExecutionCallId());
-                RuntimeBindingRecord parent = bindingRepository.findById(receipt.getBindingId());
-                if (parent != null && CsiFilesRetirementProfile.isProfile(parent.getRequest().getScope())) {
-                    throw invalid("csi_native_resources_required", "Private CSI retry requires original resource bytes");
-                }
                 if (!BrokerValues.sameJsonMap(receipt.getReference(),
                         immutableMap(reference, "reference"))) {
                     throw conflict("runtime_idempotency_conflict",
@@ -1252,25 +1228,30 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,
-            String runtimeSessionId, Map<String, Object> publisher) {
-        requireOpen(closed);
-        Map<String, Object> descriptor = immutableMap(publisher, "publisher");
-        return mapStoreFailure(safeStage(() -> bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
-                .thenCompose(context -> {
-                    context.lock();
-                    try {
-                        bindingRegistry.requireReadySessionRecord(context);
-                        context.beginControl();
-                    } finally {
-                        context.unlock();
-                    }
-                    return safeStage(() -> {
-                        bindingRegistry.requireUsableLease(context);
-                        return transport.installPublisher(context.lease(), context.session(), descriptor);
-                    }).thenApply(ignored -> Map.<String, Object>of("installed", true,
-                            "bindingGeneration", Long.toString(context.binding().getGeneration())))
-                            .whenComplete((ignored, error) -> context.endControl());
-                })));
+            String runtimeSessionId, Map<String, Object> publisher, Long writerGeneration) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.installPublisher(
+                harnessSessionId, runtimeSessionId, publisher, writerGeneration)));
+    }
+
+    @Override
+    public CompletionStage<Void> detachPublisher(String harnessSessionId,
+            String runtimeSessionId, Long writerGeneration, Map<String, Long> appliedThrough) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.detachPublisher(
+                harnessSessionId, runtimeSessionId, writerGeneration, appliedThrough)));
+    }
+
+    @Override
+    public CompletionStage<List<Map<String, Object>>> listStagedDeliveries(
+            String harnessSessionId, String writerId, long writerGeneration) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.listStagedDeliveries(
+                harnessSessionId, writerId, writerGeneration)));
+    }
+
+    @Override
+    public CompletionStage<Void> acknowledgeStagedDeliveries(String harnessSessionId,
+            String writerId, long writerGeneration, String executionCallId, long throughSeq) {
+        return mapStoreFailure(safeStage(() -> observationCoordinator.acknowledgeStagedDeliveries(
+                harnessSessionId, writerId, writerGeneration, executionCallId, throughSeq)));
     }
 
     private CompletionStage<Map<String, Object>> acknowledgeLocalExecution(String harnessSessionId,
@@ -1428,8 +1409,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             String bindingId, long generation, RuntimeLifecycleAuthority authority, boolean drain) {
         requireOpen(closed);
         RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
-        boolean shared = binding != null && (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
-                || ResidentWorkspaceProfile.selects(binding.getRequest()));
+        boolean shared = binding != null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
         if (binding == null || binding.getGeneration() != generation
                 || !shared && (!harnessSessionId.equals(binding.getRequest().getIsolationKey())
                         || !"session".equals(binding.getRequest().getScope().getIsolationClass()))) {
@@ -1833,9 +1813,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     }
 
     private RuntimeSessionRecord requireAcquireSessionRecord(SessionContext context) {
-        RuntimeSessionRecord record = bindingRegistry.requireReadySessionRecord(context);
-        return CsiFilesRetirementProfile.isProfile(record.getSession().getScope())
-                ? bindingRepository.requireSessionAdmission(sessionRepository, record) : record;
+        return bindingRegistry.requireReadySessionRecord(context);
     }
 
     @Override
@@ -1846,6 +1824,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         bindingRegistry.cancelPendingOperations();
         executionDispatcher.cancelPendingOperations();
         executionReconciler.cancelPendingOperations();
+        observationCoordinator.close();
         scheduler.shutdownNow();
         renewalScheduler.shutdownNow();
         provisioner.close();

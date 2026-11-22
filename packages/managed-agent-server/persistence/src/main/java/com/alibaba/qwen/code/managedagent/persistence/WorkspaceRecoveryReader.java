@@ -84,9 +84,9 @@ final class WorkspaceRecoveryReader {
         JsonNode head = head(source);
         String sessionScope = ManagedSessionStore.sessionScopeKey(text(head, "tenantId"), text(head, "sessionId"));
         String resourceKey = ManagedSessionStore.resourceKey(sessionScope, text(ref, "resourceId"));
-        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND session_scope_key = ? AND tenant_id = ?"
+        var rows = WorkspaceOperations.rows(jdbc, "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ? AND tenant_id = ?"
                 + " AND workspace_id = ? AND session_id = ? AND resource_id = ?",
-                resourceKey, sessionScope, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
+                resourceKey, text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"));
         byte[] bytes;
         if (!rows.isEmpty()) {
             check(rows.size() == 1, "resource_scope_conflict");
@@ -121,9 +121,9 @@ final class WorkspaceRecoveryReader {
                         "resource_layout_unsupported");
                 bytes = (byte[]) row.get("inline_bytes");
                 var references = jdbc.queryForList("SELECT resource_key FROM ma_resource_ref USE INDEX (idx_ma_ref_resource)"
-                        + " WHERE resource_key = ? AND session_scope_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
+                        + " WHERE resource_key = ? AND owner_kind IN ('JOURNAL','SESSION_RECORD')"
                         + " AND tenant_id = ? AND workspace_id = ? AND session_id = ? AND resource_id = ?"
-                        + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey, sessionScope,
+                        + " AND journal_revision <= ? LIMIT 1", String.class, resourceKey,
                         text(head, "tenantId"), text(head, "workspaceId"), text(head, "sessionId"), text(ref, "resourceId"), head.path("journalRevision").asLong());
                 check(published || !references.isEmpty(), "resource_out_of_cut");
                 if (bytes == null) {

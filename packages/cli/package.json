@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.27.3",
+  "version": "0.28.3",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -38,7 +38,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.27.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.28.3"
   },
   "dependencies": {
     "@a2a-js/sdk": "^1.1.0",
@@ -55,6 +55,7 @@
     "@qwen-code/channel-dws": "file:../channels/dws",
     "@qwen-code/channel-email": "file:../channels/email",
     "@qwen-code/channel-feishu": "file:../channels/feishu",
+    "@qwen-code/channel-generic-webhook": "file:../channels/generic-webhook",
     "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/channel-gitlab": "file:../channels/gitlab",
     "@qwen-code/channel-qqbot": "file:../channels/qqbot",

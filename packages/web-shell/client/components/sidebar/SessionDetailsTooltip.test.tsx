@@ -78,6 +78,17 @@ describe('SessionDetailsTooltip', () => {
       'User input needed',
     ],
     [{ hasActivePrompt: true, activeWorkState: 'active' as const }, 'Running'],
+    // A plain running turn must not claim background work: `toContain` alone
+    // cannot catch an unconditional composition, so this row also rejects it.
+    [{ hasActivePrompt: true, hasRunningBackgroundTasks: false }, 'Running'],
+    [
+      { isWaitingForPermission: true, hasRunningBackgroundTasks: true },
+      'Needs approval · Background tasks running',
+    ],
+    [
+      { isWaitingForUserQuestion: true, hasRunningBackgroundTasks: true },
+      'User input needed · Background tasks running',
+    ],
     [{ activeWorkState: 'active' as const }, 'Active work'],
     [{ activeWorkState: 'unknown' as const }, 'Background activity unknown'],
   ])(
@@ -111,11 +122,153 @@ describe('SessionDetailsTooltip', () => {
         expect(details?.textContent).toContain(expected);
         if (expected !== 'Running')
           expect(details?.textContent).not.toContain('Running');
+        if (flags.hasRunningBackgroundTasks === false)
+          expect(details?.textContent).not.toContain('Background');
       } finally {
         act(() => root.unmount());
       }
     },
   );
+
+  it.each([
+    // The row shows the unread dot instead of the running dot once a turn
+    // completes unread, even if a new prompt is already in flight.
+    [{ hasActivePrompt: true }, 'Finished', 'Running'],
+    [{ activeWorkState: 'active' as const }, 'Finished', 'Active work'],
+    [
+      { activeWorkState: 'unknown' as const },
+      'Finished',
+      'Background activity unknown',
+    ],
+    // The background dot outranks the unread dot on the row.
+    [
+      { hasRunningBackgroundTasks: true },
+      'Background tasks running',
+      'Finished',
+    ],
+    // Unread dot with a turn in flight: the hidden background dot is named
+    // by the suffix, exactly as in the running arm.
+    [
+      { hasActivePrompt: true, hasRunningBackgroundTasks: true },
+      'Finished · Background tasks running',
+      undefined,
+    ],
+    // Blocked states stay pinned above the unread dot.
+    [{ isWaitingForPermission: true }, 'Needs approval', 'Finished'],
+    [{}, 'Finished', 'Idle'],
+  ])(
+    'mirrors the row unread-dot precedence: %s',
+    async (flags, expected, rejected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'status',
+                  workspaceCwd: '/workspace',
+                  ...flags,
+                }}
+                label="Session"
+                time=""
+                completedUnread
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (rejected) expect(details?.textContent).not.toContain(rejected);
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it.each([
+    [true, 'Custom · Background tasks running'],
+    [false, 'Custom'],
+  ])(
+    'override label keeps the hidden-background suffix (background=%s)',
+    async (background, expected) => {
+      vi.useFakeTimers();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="en">
+              <SessionDetailsTooltip
+                session={{
+                  sessionId: 'override',
+                  workspaceCwd: '/workspace',
+                  hasRunningBackgroundTasks: background,
+                }}
+                label="Session"
+                time=""
+                statusLabel="Custom"
+              >
+                <button type="button">Session</button>
+              </SessionDetailsTooltip>
+            </I18nProvider>,
+          ),
+        );
+        await openDetails(container);
+        const details = document.querySelector('[role="dialog"]');
+        expect(details?.textContent).toContain(expected);
+        if (!background)
+          expect(details?.textContent).not.toContain(
+            'Background tasks running',
+          );
+      } finally {
+        act(() => root.unmount());
+      }
+    },
+  );
+
+  it('names background work alongside a running turn', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'status',
+                workspaceCwd: '/workspace',
+                hasActivePrompt: true,
+                hasRunningBackgroundTasks: true,
+                activeWorkState: 'active',
+              }}
+              label="Session"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Session</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        ),
+      );
+      await openDetails(container);
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain(
+        'Running · Background tasks running',
+      );
+    } finally {
+      act(() => root.unmount());
+    }
+  });
 
   it('supports a ref-forwarding click trigger, keyboard dismissal and the host portal', async () => {
     const container = document.createElement('div');
@@ -358,6 +511,44 @@ describe('SessionDetailsTooltip', () => {
     expect(details?.querySelector('svg path.fill-popover')).not.toBeNull();
 
     act(() => root.unmount());
+  });
+
+  it('shows the worktree slug when a detached worktree has no branch', async () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <SessionDetailsTooltip
+              session={{
+                sessionId: 'session-wt',
+                workspaceCwd: '/work/repo',
+                worktree: {
+                  slug: 'swift-fox',
+                  path: '/wt/swift-fox',
+                  branch: '',
+                },
+              }}
+              label="Detached worktree"
+              time=""
+              completedUnread={false}
+            >
+              <button type="button">Detached worktree</button>
+            </SessionDetailsTooltip>
+          </I18nProvider>,
+        );
+      });
+
+      await openDetails(container);
+
+      const details = document.querySelector('[role="dialog"]');
+      expect(details?.textContent).toContain('swift-fox');
+    } finally {
+      act(() => root.unmount());
+    }
   });
 
   it('preserves the standalone workspace label from the sidebar', async () => {

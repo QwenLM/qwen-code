@@ -201,11 +201,9 @@ class WorkspaceMigrationMySqlIT {
         var otherClaim = cwd ? transaction.execute(status -> store.claimOperation("unrelated", other.sessionId(),
                 otherCwd.operation().operationId(), "owner", Duration.ofSeconds(60)).orElseThrow()) : null;
         // Keep the unrelated probe outside the uncommitted fence insert's index gap.
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id)"
-                        + " VALUES (?, ?, ?, 'unrelated', 'storage')",
-                RuntimeAdmissionFences.storageAliasKey("unrelated", "storage"),
-                RuntimeAdmissionFences.storageFenceKey("unrelated"),
-                RuntimeAdmissionFences.storageFenceKey("storage"));
+        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id)"
+                        + " VALUES (?, 'unrelated', 'storage')",
+                RuntimeAdmissionFences.storageAliasKey("unrelated", "storage"));
         var binding = store.findSession("migrating", original.sessionId()).orElseThrow().workspace();
         try (var migration = data.getConnection(); var pool = Executors.newFixedThreadPool(2)) {
             migration.setAutoCommit(false);
@@ -278,13 +276,11 @@ class WorkspaceMigrationMySqlIT {
 
     private void installMigrationFence(Connection migration) throws SQLException {
         try (var fence = migration.prepareStatement(
-                "INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
-                        + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?,"
+                "INSERT INTO ma_storage (alias_key,"
+                        + " tenant_id, storage_id, fence_operation_id) VALUES (?,"
                         + " 'migrating', 'storage', ?)")) {
             fence.setString(1, RuntimeAdmissionFences.storageAliasKey("migrating", "storage"));
-            fence.setString(2, RuntimeAdmissionFences.storageFenceKey("migrating"));
-            fence.setString(3, RuntimeAdmissionFences.storageFenceKey("storage"));
-            fence.setBytes(4, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
+            fence.setBytes(2, UUID.randomUUID().toString().getBytes(StandardCharsets.UTF_8));
             fence.executeUpdate();
         }
     }
@@ -315,8 +311,8 @@ class WorkspaceMigrationMySqlIT {
         String operationKey = com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.operationKey(
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind.DELETE, scopeKey, targetKey, "delete");
         jdbc.update(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_key, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, ?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
-                operationKey, scopeKey, scopeKey, targetKey, "tenant-a", "headless");
+                "INSERT INTO ma_operation (operation_key, scope_key, target_key, target_kind, request_json, phase, tenant_id, session_id, operation_id, operation_kind, request_digest, state, admission_stage, delivery_state, session_status_before, available_at, gmt_create, gmt_modified, completed_at) VALUES (?, ?, ?, 'SESSION', '{}', 'COMPLETED', ?, ?, 'delete', 'DELETE', 'digest', 'COMPLETED', 'HARNESS_CONFIRMED', 'CONFIRMED', 'CLOSED', 1, 1, 1, 1)",
+                operationKey, scopeKey, targetKey, "tenant-a", "headless");
         var manager = new DataSourceTransactionManager(data);
         var transaction = new TransactionTemplate(manager);
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);

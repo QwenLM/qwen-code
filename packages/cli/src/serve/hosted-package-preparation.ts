@@ -247,6 +247,7 @@ export function registerHostedPackagePreparation(
             packageDigest: prepared.packageDigest,
             manifest: prepared.manifest,
             inspection: prepared.inspection,
+            standaloneSkill: prepared.standaloneSkill,
             byteLength: prepared.byteLength,
           });
         }

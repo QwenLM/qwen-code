@@ -29,13 +29,6 @@ export type ManagedSessionJsonValue =
   | { [key: string]: ManagedSessionJsonValue };
 
 export const MANAGED_SESSION_FORMAT_VERSION = 1;
-// Sessions stay readable by every deployed reader: every domain the log
-// may hold, `monitor_run` included, parses in readers since #12837
-// (v0.24.7). A `managed-session/2` stamp on each new Session would make a
-// rollback or a mixed-version rollout lose access to every Session
-// created in between (H3 round-5 verification matrix), so the stamp
-// rises only when a change genuinely breaks an older reader mid-scan.
-export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
 export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/3';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
@@ -265,6 +258,8 @@ export function assertManagedSessionChildContinuationEnabled(): void {
 export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
   'email',
   'dingtalk',
+  'github',
+  'wecom',
 ] as const);
 
 /**
@@ -397,7 +392,7 @@ export interface ManagedSessionEvent {
 
 export interface ManagedSessionHeader {
   readonly formatVersion: number;
-  readonly minimumReader: string;
+  readonly minimumReader?: string;
   readonly sessionKey: ManagedSessionKey;
   readonly engine: 'managed';
   readonly definitionRef: ManagedSessionDurableRef;
@@ -1809,16 +1804,18 @@ export function parseManagedSessionHeader(
     fail('header.formatVersion is not supported by this reader.');
   }
   const minimumReader = record['minimumReader'];
-  const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
-  const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_READER_CAPABILITY,
-  );
-  if (
-    requiredReaderVersion === null ||
-    currentReaderVersion === null ||
-    requiredReaderVersion > currentReaderVersion
-  ) {
-    fail('header.minimumReader is not supported by this reader.');
+  if (minimumReader !== undefined) {
+    const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
+    const currentReaderVersion = managedSessionReaderVersion(
+      MANAGED_SESSION_READER_CAPABILITY,
+    );
+    if (
+      requiredReaderVersion === null ||
+      currentReaderVersion === null ||
+      requiredReaderVersion > currentReaderVersion
+    ) {
+      fail('header.minimumReader is not supported by this reader.');
+    }
   }
   if (record['engine'] !== 'managed') {
     fail('header.engine must be managed.');
@@ -1826,7 +1823,9 @@ export function parseManagedSessionHeader(
   const proof = record['baseTranscriptProof'];
   return {
     formatVersion: MANAGED_SESSION_FORMAT_VERSION,
-    minimumReader: minimumReader as string,
+    ...(minimumReader === undefined
+      ? {}
+      : { minimumReader: minimumReader as string }),
     sessionKey: assertManagedSessionKey(
       record['sessionKey'],
       'header.sessionKey',

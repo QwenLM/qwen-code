@@ -320,7 +320,7 @@ class ExternalWorkspaceOwnershipTest {
         ownership.releaseStopped(context, session, binding, bindings);
         assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id FROM ma_storage_owner").values())
                 .containsOnlyNulls();
-        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, physical_key, mount_root, mount_revision FROM ma_storage_owner"))
+        assertThat(jdbc.queryForMap("SELECT tenant_id, storage_id, storage_key, mount_root, mount_revision FROM ma_storage_owner"))
                 .containsEntry("mount_revision", 7L).containsEntry("mount_root", "/remote/workspace");
         ownership.releaseStopped(context, session, binding, bindings);
     }

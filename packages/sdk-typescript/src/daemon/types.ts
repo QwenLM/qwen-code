@@ -350,6 +350,8 @@ export interface DaemonWorkspaceGitStatus {
   branch: string | null;
   /** v2: HEAD is detached (branch holds the short SHA). */
   detached?: boolean;
+  /** v2: false for an unborn HEAD (no commits yet). */
+  hasHead?: boolean;
   /** v2: number of staged entries. */
   staged?: number;
   /** v2: number of unstaged (modified) entries. */
@@ -454,6 +456,13 @@ export interface DaemonGitLogOptions {
   all?: boolean;
   /** Keep only commits whose message, author, or hash matches. */
   search?: string;
+  /**
+   * Single refs whose reachable commits are excluded from the window. Used
+   * to drop commits already covered by a bound PR. Requires the
+   * `workspace_git_log_exclude_refs` capability; an unsafe ref makes the
+   * daemon refuse the fetch (`available:false`).
+   */
+  excludeRefs?: string[];
 }
 
 /** Response from `GET /workspace/git/log`. */
@@ -598,10 +607,19 @@ export interface DaemonGitWorktreeRemoveResult {
   directoryRemains?: true;
 }
 
-/** Response from `POST /workspaces/:workspace/git/checkout`. */
+/** Response from `POST /workspaces/:workspace/git/checkout` (2xx body). */
 export interface DaemonGitCheckoutResult {
   branch: string;
   detached: boolean;
+  /**
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
+   * The entry holds the pre-switch changes; restore it manually with
+   * `git stash apply` when wanted. A 409 failure whose entry survives
+   * with a known SHA (a failed restore, or a parked-operation refusal
+   * after the push) carries the same field in its ERROR body
+   * (`{ error, message, stashSha }`), not in this interface.
+   */
+  stashSha?: string;
 }
 
 /** Response from `POST /workspaces/:workspace/git/push`. */
@@ -709,6 +727,29 @@ export interface DaemonGitHubPullRequestList {
   /** `false` when the workspace is not a git repository. */
   available: boolean;
   pullRequests: DaemonGitHubPullRequest[];
+}
+
+/** One changed file within a pull request's file list. */
+export interface DaemonGitHubPullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/** Response from `GET /workspaces/:workspace/github/prs/:number/files`. */
+export interface DaemonGitHubPullRequestFiles {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  files: DaemonGitHubPullRequestFile[];
+  /** Rows dropped because the per-file list is capped. */
+  hiddenCount: number;
+  /** PR-wide totals (cover hidden rows too). */
+  additions: number;
+  deletions: number;
+  /** The PR head commit (`headRefOid`), for scoping commit fallback. */
+  headSha: string;
 }
 
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
@@ -1067,6 +1108,20 @@ export interface DaemonStatusReport {
     maxTotalSessions: number | null;
     maxPendingPromptsPerSession: number | null;
     listenerMaxConnections: number | null;
+    /**
+     * Effective admission cap for concurrent long-lived streams across every
+     * surface; the live occupancy is `runtime.transport.streamOccupancy.total`
+     * (`restSseActive` remains the REST event surface alone). `null` =
+     * unlimited. Additive — older daemons omit this field.
+     */
+    maxSseConnections?: number | null;
+    /**
+     * Per-listener admission clamps paired with `maxSseConnections`
+     * (issue #17554): `primary`, `local-control`, `remote-access`. Each
+     * pairing listener keeps its own short-request headroom. `null` =
+     * unlimited. Additive — older daemons omit this field.
+     */
+    maxSseConnectionsPerListener?: Record<string, number | null>;
     eventRingSize: number;
     eventRingMaxBytes?: number;
     promptDeadlineMs: number | null;
@@ -1173,6 +1228,20 @@ export interface DaemonStatusReport {
     channelWorkers?: DaemonChannelWorkerGroupSnapshot[];
     transport: {
       restSseActive: number;
+      /**
+       * Listener-slot occupancy across every long-lived stream surface
+       * (issue #17554), by surface (`restEvents`, `agentEvents`,
+       * `generation`, `artifactLibrary`, `hostedEvents`, `acpSse`, `acpWs`)
+       * and by listener (`primary`, `local-control`, `remote-access`).
+       * Includes ACP WebSocket connections: the gauge measures slots, not
+       * frames. Keys are widened to string per the SDK convention.
+       * Additive — older daemons omit this field.
+       */
+      streamOccupancy?: {
+        total: number;
+        bySurface: Record<string, number>;
+        byListener: Record<string, number>;
+      };
       acp: {
         enabled: boolean;
         connections: number;
@@ -1403,13 +1472,52 @@ export interface DaemonStatusReport {
 export interface DaemonWorktreeInfo {
   slug: string;
   path: string;
+  /** Empty string while the worktree is detached (no branch ref). */
   branch: string;
+  /**
+   * The base tip the worktree was created from (its physical creation base).
+   * A legacy sidecar without `worktreeBase` is restored from
+   * `originalHeadCommit`, so this is populated on restore even for worktrees
+   * persisted before the field. The commit fallback prefers the session's own
+   * top-level start commit over this derived tip, so a plain session that
+   * hands off into a worktree keeps its pre-handoff commits.
+   */
+  baseCommit?: string;
+  /**
+   * The branch the worktree was created from (its upstream base). The commit
+   * fallback excludes commits reachable from it so integrating upstream does
+   * not re-list pre-session work. Absent when unknown.
+   */
+  baseBranch?: string;
+}
+
+/** Result of `POST /session/:id/worktree-branch` ("Create branch here"). */
+export interface DaemonWorktreeBranchResult {
+  sessionId: string;
+  worktree: DaemonWorktreeInfo;
+}
+
+/** Result of `POST /session/:id/worktree-handoff` ("Hand off"). */
+export interface DaemonWorktreeHandoffResult {
+  sessionId: string;
+  /** Null after handing off to the local checkout. */
+  worktree: DaemonWorktreeInfo | null;
+  currentCwd: string;
 }
 
 /** Branch metadata returned when a session is created with a new branch. */
 export interface DaemonBranchInfo {
   name: string;
   baseBranch: string;
+  /**
+   * The HEAD the branch was created from — the session's start commit.
+   * Immutable; the commit fallback scopes its window to `<baseCommit>..HEAD`.
+   * Live-only: branch metadata is not yet restored across a daemon restart,
+   * so this (and `baseBranch`) are absent on a restored branch session and the
+   * fallback suppresses until durable branch metadata lands. Worktree sessions
+   * carry the start commit durably on `worktree.baseCommit` instead.
+   */
+  baseCommit?: string;
 }
 
 /** GitHub pull request bound to a session (e.g. created from the Web Shell Git dialog). */
@@ -1418,6 +1526,12 @@ export interface DaemonSessionPrInfo {
   url: string;
   /** Snapshot of the PR's state at last bind/refresh; optional. */
   state?: 'open' | 'merged' | 'closed';
+  /**
+   * Binding provenance: `create`/`worktree` are the session's own delivery
+   * units; `review` is a PR merely mentioned in a review/verify command and is
+   * not this session's work. Absent on bindings persisted before provenance.
+   */
+  source?: 'create' | 'worktree' | 'review';
   /**
    * Issues the PR closes (its GitHub closing references), derived by the
    * daemon's refresh sweep; absent until the first sweep after binding.
@@ -1584,6 +1698,13 @@ export interface DaemonSessionState {
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
   artifactWarnings?: string[];
+  /**
+   * Restored artifact snapshot embedded by newer daemons so clients can surface
+   * a session-level artifact entry before the replay renders. Absent on older
+   * daemons and on sessions with no artifacts; clients fall back to
+   * `GET /session/:id/artifacts`.
+   */
+  artifacts?: DaemonSessionArtifact[];
   /** True when persisted replay could only be reconstructed partially. */
   partial?: true;
   /** Diagnostic for a partial persisted replay. */
@@ -1695,6 +1816,26 @@ export interface DaemonForkSessionResult {
 }
 
 /**
+ * A person's send from the open session to another session
+ * (`POST /session/:id/sub-sessions`, capability `session_sub_session_send`).
+ */
+export interface SendToSubSessionRequest {
+  prompt: string;
+  /** Registered workspace path or id; absent means the session's own. */
+  workspace?: string;
+  /** Any other active session, to send to instead of starting one. */
+  targetSessionId?: string;
+}
+
+export interface DaemonSubSessionSendResult {
+  sessionId: string;
+  /** Set when the target runs in another workspace. */
+  workspaceCwd?: string;
+  /** The completion's task id, set for a follow-up. */
+  taskId?: string;
+}
+
+/**
  * Wire-format mirror of `BridgePendingInteraction*` in
  * `packages/acp-bridge/src/bridgeTypes.ts`; keep fields synchronized.
  * Session runtime interaction details returned by live session endpoints.
@@ -1763,6 +1904,9 @@ export interface DaemonSessionSummary {
   sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  /** Prompts admitted but not yet finished (running + queued); flips at
+   * admission, before the active flag. Absent on older daemons. */
+  pendingPromptCount?: number;
   /** Per-session active-work observation from the owning runtime. */
   activeWorkState?: 'active' | 'idle' | 'unknown' | 'unsupported';
   backgroundTurn?: DaemonBackgroundTurn;
@@ -1771,6 +1915,14 @@ export interface DaemonSessionSummary {
   isWaitingForUserQuestion?: boolean;
   pendingInteractionCount?: number;
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight (dangling admission, reconciled interruption, or a teardown
+   * flush), so opening the session can offer "Continue execution". A hint for
+   * list surfaces only — the loaded session's recovery status stays
+   * authoritative. Absent when there is no ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
@@ -1789,8 +1941,54 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
+  /**
+   * The HEAD captured when the session was created — its immutable start
+   * commit. Present for plain sessions (which have no branch/worktree meta);
+   * branch/worktree sessions carry it on their respective meta instead. The
+   * commit fallback scopes its window to `<baseCommit>..HEAD`. Live-only for
+   * plain sessions (not restored across a daemon restart); absent when the
+   * creation read failed. Worktree sessions carry it durably on
+   * `worktree.baseCommit`.
+   */
+  baseCommit?: string;
   /** Present when GitHub PRs have been bound to the session (last = latest). */
   prs?: DaemonSessionPrInfo[];
+  /**
+   * Session artifact count, present when non-zero. Live sessions carry the
+   * live public count; there, absent means ZERO — the in-memory store is
+   * authoritative, and the list merge drops a stale sidecar-derived count
+   * when the live entry omits the field — EXCEPT while
+   * `artifactCountPending` is true (see there). Cold sessions carry the
+   * restorable count hydrated best-effort from the artifact summary
+   * sidecar; there, absent means unknown (older daemon or no sidecar yet),
+   * not zero.
+   */
+  artifactCount?: number;
+  /**
+   * True while the session's artifact restore is still in flight: the
+   * session is live, but its store is not hydrated yet, so `artifactCount`
+   * is omitted and MUST NOT be read as zero. The list merge keeps the
+   * sidecar-enriched count for such rows. Absent once the restore settles.
+   */
+  artifactCountPending?: boolean;
+  /**
+   * List-facing projection of the session's Goal, read from the goal
+   * sidecar on disk. Present for unloaded and archived sessions too,
+   * unlike the live-only Goals listing; absent when the session has no
+   * goal. Older daemons omit it.
+   */
+  goal?: DaemonSessionGoalInfo;
+}
+
+/**
+ * The goal sidecar's wire projection: identity + lifecycle state. Budgets
+ * and spend stay on the Goals page's live listing.
+ */
+export interface DaemonSessionGoalInfo {
+  status: GoalStatus;
+  objective: string;
+  /** ISO time of the goal's last transition. */
+  updatedAt: string;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -2101,6 +2299,84 @@ export interface DaemonSessionLiveStateBatchResult {
   >;
 }
 
+/** One session whose newest prompt did not settle. */
+export interface DaemonRestartRecoveryItem {
+  sessionId: string;
+  /** ISO timestamp of the newest prompt-ledger record in the scan tail. */
+  lastActivityAt: string;
+  /** `in_flight`, a terminal code such as `daemon_shutdown`, or `interrupted`. */
+  interruption: string;
+}
+
+export interface DaemonRestartRecoveryBatchRequest {
+  workspaces: string[];
+  /**
+   * Scan window in milliseconds. The daemon defaults to 24 hours and caps at
+   * 30 days.
+   */
+  sinceMs?: number;
+}
+
+export interface DaemonWorkspaceRestartRecoverySnapshot {
+  workspace: string;
+  workspaceId: string;
+  cwd: string;
+  v: 1;
+  items: DaemonRestartRecoveryItem[];
+  truncated: boolean;
+}
+
+export interface DaemonWorkspaceRestartRecoveryError {
+  workspace: string;
+  workspaceId?: string;
+  cwd?: string;
+  error: { code: string; message: string; status: number };
+}
+
+export interface DaemonRestartRecoveryBatchResult {
+  workspaces: Array<
+    DaemonWorkspaceRestartRecoverySnapshot | DaemonWorkspaceRestartRecoveryError
+  >;
+}
+
+export interface DaemonRestartRecoverySessionRef {
+  workspace: string;
+  sessionId: string;
+}
+
+export interface DaemonRestartRecoveryContinueRequest {
+  sessions: DaemonRestartRecoverySessionRef[];
+  /** Required to continue an `interrupted_turn` in a batch. */
+  confirmToolTurn?: boolean;
+}
+
+export type DaemonRestartRecoveryContinueStatus =
+  | 'accepted'
+  | 'not_continuable'
+  | 'confirmation_required'
+  | 'rejected'
+  | 'error';
+
+export interface DaemonRestartRecoveryContinueResult {
+  workspace: string;
+  sessionId: string;
+  status: DaemonRestartRecoveryContinueStatus;
+  kind?:
+    | 'clean'
+    | 'interrupted_prompt'
+    | 'interrupted_turn'
+    | 'degraded_history';
+  interruption?: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  code?: string;
+  promptId?: string;
+  lastEventId?: number;
+  eventEpoch?: string;
+}
+
+export interface DaemonRestartRecoveryContinueBatchResult {
+  results: DaemonRestartRecoveryContinueResult[];
+}
+
 export interface DaemonWorkspaceSessionInfo {
   active: number;
   archived: number;
@@ -2310,6 +2586,52 @@ export interface DaemonSessionArtifactsEnvelope {
   warningDetails?: DaemonSessionArtifactWarningDetail[];
 }
 
+export interface DaemonArtifactLibrarySessionMetadata {
+  displayName?: string;
+  createdAt: string;
+  archiveState: 'active' | 'archived';
+  sourceType: string;
+  sourceId?: string;
+}
+
+export interface DaemonArtifactLibrarySessionEnvelope
+  extends DaemonSessionArtifactsEnvelope {
+  session: DaemonArtifactLibrarySessionMetadata;
+}
+
+export interface DaemonArtifactLibraryMemberError {
+  sessionId: string;
+  status: number;
+  code: string;
+  message: string;
+}
+
+export interface DaemonWorkspaceArtifactLibraryResult {
+  v: 1;
+  sessions: DaemonArtifactLibrarySessionEnvelope[];
+  errors: DaemonArtifactLibraryMemberError[];
+}
+
+export type DaemonWorkspaceArtifactLibraryStreamEvent =
+  | { type: 'start'; v: 1; total: number }
+  | ({ type: 'session' } & DaemonArtifactLibrarySessionEnvelope)
+  | ({ type: 'session_error'; v: 1 } & DaemonArtifactLibraryMemberError)
+  | {
+      type: 'complete';
+      v: 1;
+      total: number;
+      succeeded: number;
+      failed: number;
+      skipped: number;
+    }
+  | {
+      type: 'error';
+      v: 1;
+      status: number;
+      code: string;
+      message: string;
+    };
+
 export interface DaemonSessionArtifactMutationResult {
   v: 1;
   sessionId: string;
@@ -2358,8 +2680,8 @@ export const DAEMON_ERROR_KINDS = [
   // A prompt exceeded the daemon-configured wallclock cap (or the
   // request's own `deadlineMs`, capped at the server flag).
   'prompt_deadline_exceeded',
-  // An SSE writer's last successful flush was older than the daemon's
-  // writer-idle deadline.
+  // An SSE writer's write was stuck waiting for `drain` — the consumer
+  // stopped reading — past the daemon's writer-stall budget.
   'writer_idle_timeout',
   // The model response stream ended before a complete turn could be read.
   'model_stream_interrupted',
@@ -3636,6 +3958,12 @@ export interface DaemonWorkflowPhaseVisit {
   endedAt?: number;
 }
 
+/** A phase the script declares in `meta.phases`, reached or not. */
+export interface DaemonWorkflowPlannedPhase {
+  title: string;
+  detail?: string;
+}
+
 export type DaemonWorkflowDispatchStatus =
   | 'queued'
   | 'running'
@@ -3796,6 +4124,13 @@ export interface DaemonSessionWorkflowTaskStatus {
   isBackgrounded: boolean;
   currentPhase: string | null;
   phaseVisits: DaemonWorkflowPhaseVisit[];
+  /**
+   * The phases the script declares in `meta.phases`, in order. Present from
+   * the start of the run, so a client can show phases the script has not
+   * reached yet; absent when the script declares none, and on daemons that
+   * predate the field.
+   */
+  plannedPhases?: DaemonWorkflowPlannedPhase[];
   dispatches: DaemonWorkflowDispatchStatusEntry[];
   agentsDispatched: number;
   agentsCompleted: number;
@@ -3827,6 +4162,34 @@ export interface DaemonSessionTasksStatus {
   sessionId: string;
   now: number;
   tasks: DaemonSessionTaskStatus[];
+  /** Present when requested with `includeSubSessions`. */
+  subSessions?: DaemonSessionSubSessionTaskStatus[];
+}
+
+/**
+ * A `sent` launch whose result the daemon reports back to this session:
+ * a person's send from its page, or the model's `create_sub_session`.
+ * Kept in daemon memory, so a daemon restart forgets it.
+ */
+export interface DaemonSessionSubSessionTaskStatus {
+  kind: 'session';
+  /** The completion's task id. */
+  id: string;
+  /** The session the message went to. */
+  sessionId: string;
+  workspaceCwd: string;
+  label: string;
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  /** A person sent it from the session page, not the session's model. */
+  byPerson: boolean;
+  /**
+   * The target is waiting on a permission or a question. Absent from daemons
+   * that predate it.
+   */
+  waitingForInput?: boolean;
 }
 
 /**
@@ -4132,6 +4495,17 @@ export interface DaemonUsageDashboard {
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
+}
+
+/** Returned from `POST /session/:id/feedback`. */
+export interface RateSessionTurnResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached the session's
+   * telemetry logger. RUM delivery itself remains best-effort and is
+   * additionally gated by the usage-statistics opt-in.
+   */
+  recorded: boolean;
 }
 
 /** Creation-only selection; does not change shared defaults or later session behavior. */
@@ -4846,6 +5220,28 @@ export interface DaemonSessionRecapResult {
   sessionId: string;
   recap: string | null;
 }
+
+/**
+ * A transcript row a client draws, for the session's Mods to rewrite:
+ * `component` names the site, and `props` are the ones the row draws with
+ * (for `AssistantMessage`: `{ text, isFirstOfReply }`).
+ */
+export interface DaemonModRow {
+  component: string;
+  props: Record<string, unknown>;
+}
+
+/**
+ * A session's answer for one row. `unhooked`: no hook hears the site in this
+ * session, so ask it no more. `unanswered`: the hooks did not answer in time
+ * or the session moved on; ask again later. `answered`: draw `props` where
+ * the hooks rewrote the row, and the row's own props otherwise.
+ * Pre-flight `caps.features.session_mod_rows` before asking.
+ */
+export type DaemonModRowAnswer =
+  | { status: 'unhooked' }
+  | { status: 'unanswered' }
+  | { status: 'answered'; props?: Record<string, unknown> };
 
 export type DaemonSessionBtwStreamEvent =
   | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }
@@ -6338,6 +6734,22 @@ export interface ExtensionRefreshResponse {
   refreshed: number;
   failed: number;
 }
+
+/** One Generated UI card's saved view state; revision 0 means never saved. */
+export interface DaemonGeneratedUiState {
+  cardId: string;
+  revision: number;
+  value: unknown;
+}
+
+/**
+ * Outcome of saving view state. `stale` carries the current revision and value
+ * when another view saved first; `too_large` reports the size limit in bytes.
+ */
+export type DaemonGeneratedUiStateWriteResult =
+  | { outcome: 'saved'; cardId: string; revision: number }
+  | { outcome: 'stale'; cardId: string; revision: number; value: unknown }
+  | { outcome: 'too_large'; cardId: string; limitBytes: number };
 
 export interface DaemonMcpAppToolCall {
   serverName: string;

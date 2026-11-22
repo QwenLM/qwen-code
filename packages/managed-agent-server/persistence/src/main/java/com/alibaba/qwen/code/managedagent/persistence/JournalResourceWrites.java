@@ -41,7 +41,6 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishAgentInstructions(String tenantId,
             String workspaceId, String sessionId, String instructions) {
         JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         byte[] bytes = instructions.getBytes(StandardCharsets.UTF_8);
         if (bytes.length > ManagedSessionStoreModels.MAX_AGENT_INSTRUCTIONS_BYTES) {
             throw JournalStoreRows.payloadTooLarge("Agent instructions exceed 64 KiB.");
@@ -53,7 +52,6 @@ final class JournalResourceWrites {
     ToolResultResourceRef publishAgentSkills(String tenantId,
             String workspaceId, String sessionId, List<java.util.Map<String, Object>> skills) {
         JournalStoreRows.validateScope(tenantId, workspaceId, sessionId);
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         return publishAgentResource(tenantId, workspaceId, sessionId,
                 "managed-agent-skills", "agent-skills-", AgentDefinitionExtensions.skillsBytes(skills));
     }
@@ -63,7 +61,6 @@ final class JournalResourceWrites {
         if (ManagedNativeJournalSnapshots.isSnapshotId(source.resourceId())) {
             throw JournalStoreRows.invalid("Native snapshot resources require fenced snapshot publication.");
         }
-        ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         if (!ManagedSessionStoreModels.INHERITED_EXTENSION_KINDS.contains(source.kind())
                 || source.schemaVersion() != 1 || source.byteLength() > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
                 || source.bytes().length != source.byteLength() || !JournalStoreRows.sha256(source.bytes()).equals(source.digest())) {
@@ -85,13 +82,12 @@ final class JournalResourceWrites {
         JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, resourceId);
         if (existing == null) {
             jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                    "INSERT INTO ma_resource (resource_key, tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                        + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?,"
                         + " ?, 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                     ManagedSessionStore.resourceKey(scopeKey, resourceId),
-                    scopeKey,
                     tenantId,
                     workspaceId,
                     sessionId,
@@ -144,46 +140,36 @@ final class JournalResourceWrites {
             throw JournalStoreRows.invalid("Tool result bytes do not match their length or digest.");
         }
         // Ordinary inline publication queues on its Session, like commit;
-        // lifecycle authority and CSI continuation retain their tenant guards.
-        Boolean rootPin = fencing.lockSessionFirst(tenantId, sessionId);
+        // lifecycle authority retains its tenant guards.
+        fencing.lockSessionFirst(tenantId, sessionId);
         fencing.requirePlacement(tenantId, request.workspaceId(), sessionId, writerToken, request.writerId(), false);
-        var continuation = fencing.lockCsiContinuation(tenantId, sessionId, rootPin);
-        var csiOriginal = continuation == null ? null : continuation.original();
-        if (csiOriginal != null) {
-            csiOriginal.requireContinuation();
-        }
-        if (authority == null && csiOriginal == null) {
+        if (authority == null) {
             fencing.requireSessionStorageOpenForRead(tenantId, request.workspaceId(), sessionId);
         } else {
             fencing.requireSessionStorageOpen(tenantId, request.workspaceId(), sessionId);
         }
-        JournalStoreRows.HeadRow head = fencing.requireHeadAfterCsiCheck(tenantId, sessionId);
+        JournalStoreRows.HeadRow head = fencing.requireHeadAfterRootLock(tenantId, sessionId);
         storeRows.requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         // Unlike the other writer paths, a v2 claim fences this lane even
         // for the claiming lifecycle authority: tool results are never
         // published against a Session claimed under lifecycle protocol v2.
         fencing.requireNoLifecycleClaim(tenantId, sessionId);
-        JournalFencing.requireCsiWriter(csiOriginal, head);
         Timestamp now = storeRows.databaseNow();
         fencing.requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, now, true);
-        fencing.requireInstalledCsiWriter(csiOriginal);
         String scopeKey = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
         JournalStoreRows.ResourceRow existing = storeRows.findResource(scopeKey, request.resourceId(), false);
         if (existing != null) {
             existing = storeRows.findResource(scopeKey, request.resourceId());
         }
-        fencing.requireCsiWriterCurrent(
-                continuation, head, request.writerId(), request.writerGeneration(), writerToken);
         if (existing == null) {
             try {
                 jdbc.update(
-                        "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id,"
+                        "INSERT INTO ma_resource (resource_key, tenant_id,"
                             + " workspace_id, session_id, resource_id, kind, schema_version,"
                             + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
-                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?,"
+                            + " state, gmt_create, last_verified_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?,"
                             + " ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
                         ManagedSessionStore.resourceKey(scopeKey, request.resourceId()),
-                        scopeKey,
                         tenantId,
                         request.workspaceId(),
                         sessionId,
@@ -214,7 +200,6 @@ final class JournalResourceWrites {
                         "A resourceId was reused with different content metadata.");
             }
         }
-        fencing.requireCsiCurrentTime(continuation);
         return new ToolResultResourceRef(request.resourceId(), request.kind(), request.schemaVersion(),
                 request.byteLength(), request.digest());
     }
@@ -222,8 +207,7 @@ final class JournalResourceWrites {
     void commitResources(String scopeKey, String tenantId,
             String sessionId, CommitTransactionRequest request,
             long revision, Timestamp now,
-            List<ValidatedResource> resources,
-            Runnable writeFence) {
+            List<ValidatedResource> resources) {
         Set<String> resourceIds = new HashSet<>();
         for (ValidatedResource input : resources) {
             CommitResource resource = input.resource();
@@ -241,7 +225,6 @@ final class JournalResourceWrites {
                 // A miss without bytes fails below and inserts nothing.
                 existing = storeRows.findResource(scopeKey, resource.resourceId());
             }
-            writeFence.run();
             if (existing == null) {
                 if (input.bytes() == null) {
                     // An over-cap body can only land through the OSS allocation path;
@@ -279,11 +262,10 @@ final class JournalResourceWrites {
                 }
             }
             jdbc.update(
-                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key,"
+                    "INSERT INTO ma_resource_ref (owner_kind, owner_key,"
                         + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " journal_revision, resource_id, gmt_create) VALUES (?, 'JOURNAL', ?, ?,"
+                        + " journal_revision, resource_id, gmt_create) VALUES ('JOURNAL', ?, ?,"
                         + " ?, ?, ?, ?, ?, ?, ?)",
-                    scopeKey,
                     scopeKey,
                     revision,
                     ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()),
@@ -305,15 +287,15 @@ final class JournalResourceWrites {
         CommitResource resource = input.resource();
         try {
             jdbc.update("INSERT INTO ma_resource"
-                            + " (resource_key, session_scope_key, tenant_id,"
+                            + " (resource_key, tenant_id,"
                             + " workspace_id, session_id, resource_id,"
                             + " kind, schema_version, byte_length, sha256,"
                             + " storage_kind, inline_bytes,"
                             + " publish_command_id, state, gmt_create,"
-                            + " last_verified_at) VALUES (?, ?, ?, ?, ?, ?,"
+                            + " last_verified_at) VALUES (?, ?, ?, ?, ?,"
                             + " ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?,"
                             + " 'REFERENCED', ?, ?)",
-                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), scopeKey, tenantId, request.workspaceId(), sessionId,
+                    ManagedSessionStore.resourceKey(scopeKey, resource.resourceId()), tenantId, request.workspaceId(), sessionId,
                     resource.resourceId(), resource.kind(),
                     resource.schemaVersion(), resource.byteLength(),
                     resource.digest(), input.bytes(), request.commandId(),

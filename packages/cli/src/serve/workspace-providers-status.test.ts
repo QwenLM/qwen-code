@@ -420,25 +420,24 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const result = await provider(workspace, false);
     const models = result.providers.flatMap((entry) => entry.models);
-    for (const name of [
-      'Qwen4 A',
-      'Qwen4 B',
-      'Invite A',
-      'Invite B',
-      'Stable A',
-      'Stable B',
-    ]) {
+    // Only qwen4-max takes the qwen4-max ladder; other qwen4* routes (the
+    // qwen4-plus fixtures here), the invitation-only previews, and the stable
+    // family all keep the qwen3.8-max ladder (low/medium/xhigh).
+    const expectedLadders: Record<string, string[]> = {
+      'Qwen4 A': ['none', 'low', 'medium', 'xhigh'],
+      'Qwen4 B': ['none', 'low', 'medium', 'xhigh'],
+      'Invite A': ['none', 'low', 'medium', 'xhigh'],
+      'Invite B': ['none', 'low', 'medium', 'xhigh'],
+      'Stable A': ['none', 'low', 'medium', 'xhigh'],
+      'Stable B': ['none', 'low', 'medium', 'xhigh'],
+    };
+    for (const [name, ladder] of Object.entries(expectedLadders)) {
       const entry = models.find((model) => model.name === name);
       expect(entry?.modelId).toMatch(/^qwen-route:v1:/);
       expect(entry?.configOptions).toMatchObject([
         {
           currentValue: 'low',
-          options: [
-            { value: 'none' },
-            { value: 'low' },
-            { value: 'medium' },
-            { value: 'xhigh' },
-          ],
+          options: ladder.map((value) => ({ value })),
         },
       ]);
     }
@@ -818,6 +817,156 @@ describe('createWorkspaceProvidersStatusProvider', () => {
         .filter((model) => model !== stable)
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
+  });
+
+  it('projects Kimi K3 reasoning for a custom OpenAI-compatible route', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'kimi-k3.1-pro' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'kimi-k3.1-pro',
+            baseUrl: 'https://gateway.example.test/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'kimi-k3.1-pro');
+
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'max',
+        options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'max',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'inferred K3 with a samplingParams effort',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: { samplingParams: { reasoning_effort: 'low' } },
+      currentValue: 'low',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'partial K3 with a winning extra_body effort',
+      modelId: 'kimi-k3.1-pro',
+      capabilities: { reasoning: { defaultEffort: 'high' } },
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: 'low' },
+      },
+      currentValue: 'low',
+      defaultEffort: 'high',
+    },
+    {
+      name: 'inferred K3 with a final null placeholder',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'low' },
+        extra_body: { reasoning_effort: null },
+      },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'inferred K3 with a final empty placeholder',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'low' },
+        extra_body: { reasoning_effort: '' },
+      },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'inferred K3 with an explicit nested effort',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: {
+          reasoning: { effort: 'high' },
+          reasoning_effort: 'low',
+        },
+      },
+      currentValue: 'high',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'mandatory K3 with a raw off value',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'K3 with a complete explicit profile',
+      modelId: 'kimi-k3',
+      capabilities: {
+        reasoning: {
+          profile: 'openai-reasoning',
+          efforts: ['low', 'high'],
+          defaultEffort: 'high',
+        },
+      },
+      generationConfig: { extra_body: { reasoning_effort: 'low' } },
+      currentValue: 'high',
+      defaultEffort: 'high',
+      completeProfile: true,
+    },
+  ])('projects the OpenRouter raw effort for $name', async (testCase) => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: testCase.modelId },
+      modelProviders: {
+        openai: [
+          {
+            id: testCase.modelId,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            capabilities: testCase.capabilities,
+            generationConfig: testCase.generationConfig,
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === testCase.modelId);
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: testCase.currentValue,
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: testCase.defaultEffort,
+            ...('completeProfile' in testCase
+              ? {}
+              : { thinkingMandatory: true }),
+          },
+        },
+      },
+    ]);
   });
 
   it.each([

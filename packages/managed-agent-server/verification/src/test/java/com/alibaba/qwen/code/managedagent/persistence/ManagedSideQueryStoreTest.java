@@ -60,10 +60,10 @@ class ManagedSideQueryStoreTest {
         jdbc.update("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified,tenant_key,session_key,session_scope_key)"
                         + " VALUES (?,?,'qwen-code',1,1,?,?,?)", tenant, session, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), scope);
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,gmt_modified) VALUES (?,?,'SESSION','',1)", tenant, session);
-        jdbc.update("INSERT INTO ma_session_head (tenant_id,workspace_id,session_id,storage_version,state,writer_generation,"
-                        + "journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified,tenant_key,harness_key,harness_session_id,head_kind)"
-                        + " VALUES (?,'ws',?,1,'ACTIVE',0,0,0,0,1,1,?,?,?,'MANAGED_SESSION')",
-                tenant, session, ManagedSchemaKeys.key(tenant), ManagedSchemaKeys.key(session), session);
+        jdbc.update("INSERT INTO ma_session_head (tenant_id,workspace_id,session_id,state,writer_generation,"
+                        + "journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified,harness_session_id,head_kind)"
+                        + " VALUES (?,'ws',?,'ACTIVE',0,0,0,0,1,1,?,'MANAGED_SESSION')",
+                tenant, session, session);
         var registry = mock(ManagedWorkspaceRegistry.class);
         when(registry.isSessionOwner(tenant, actor, session)).thenReturn(true);
         var models = mock(ManagedSessionModelConfigs.class);
@@ -76,15 +76,6 @@ class ManagedSideQueryStoreTest {
         String id = tx(() -> queries.admit(tenant, actor, session, btw("key", "question"), true)).query().queryId();
         Claim claim = tx(() -> queries.claim(tenant, session, id, "instance", "boot"));
         assertThat(tx(() -> queries.frozen(tenant, session, id, claim)).workspaceId()).isEqualTo("ws");
-    }
-
-    @Test
-    void unsupportedStorageRefusesGenerationWithoutAdmittingAQuery() {
-        jdbc.update("UPDATE ma_session_head SET storage_version=999 WHERE tenant_id=? AND session_id=?", tenant, session);
-        assertThat(tx(() -> queries.context(tenant, actor, session)).generationAvailable()).isFalse();
-        assertThatThrownBy(() -> tx(() -> queries.admit(tenant, actor, session, btw("key", "question"), true)))
-                .hasFieldOrPropertyWithValue("code", "side_query_history_unavailable");
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_side_query WHERE tenant_id=?", Integer.class, tenant)).isZero();
     }
 
     @Test

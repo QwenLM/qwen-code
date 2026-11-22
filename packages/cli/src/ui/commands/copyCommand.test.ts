@@ -10,6 +10,7 @@ import { copyCommand } from './copyCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
+import { countMarkdownSourceBlocks } from '../utils/MarkdownDisplay.js';
 
 vi.mock('../utils/commandUtils.js', () => ({
   copyToClipboard: vi.fn(),
@@ -51,6 +52,61 @@ describe('copyCommand', () => {
       getHistoryShallow: mockGetHistoryShallow,
     });
   });
+
+  it.each([
+    {
+      kind: 'latex',
+      markdown: [
+        '```text',
+        '```not-a-close',
+        '$$',
+        'hidden',
+        '$$',
+        '$hidden_inline$',
+        '```',
+        '$$',
+        'visible',
+        '$$',
+        '$visible_inline$',
+      ].join('\n'),
+      expected: 'visible',
+    },
+    {
+      kind: 'mermaid',
+      markdown: [
+        '````text',
+        '````not-a-close',
+        '```mermaid',
+        'flowchart LR',
+        '  H[Hidden] --> X[Target]',
+        '```',
+        '````',
+        '```mermaid',
+        'flowchart LR',
+        '  V[Visible] --> Y[Target]',
+        '```',
+      ].join('\n'),
+      expected: 'flowchart LR\n  V[Visible] --> Y[Target]',
+    },
+  ])(
+    'copies the $kind source identified by the renderer after a false fence',
+    async ({ kind, markdown, expected }) => {
+      const sources: Array<{ kind: string; source: string; index: number }> =
+        [];
+      countMarkdownSourceBlocks(markdown, (kind, source, index) => {
+        sources.push({ kind, source, index });
+      });
+      expect(sources).toEqual([{ kind, source: expected, index: 1 }]);
+      mockGetHistoryShallow.mockReturnValue([
+        { role: 'model', parts: [{ text: markdown }] },
+      ]);
+      mockCopyToClipboard.mockResolvedValue(undefined);
+
+      await copyCommand.action!(mockContext, `${kind} 1`);
+
+      expect(mockCopyToClipboard).toHaveBeenCalledExactlyOnceWith(expected);
+    },
+  );
 
   it('should return info message when no history is available', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
@@ -275,6 +331,88 @@ describe('copyCommand', () => {
       type: 'message',
       messageType: 'info',
       content: 'Code block 2 copied to the clipboard',
+    });
+  });
+
+  it.each([
+    ['```', '```not-a-close'],
+    ['~~~', '~~~~ still-code'],
+    ['```', '```\u00a0'],
+  ])(
+    'keeps %s fence-looking content in the copied block',
+    async (fence, contentLine) => {
+      const content = [
+        `${fence}text`,
+        'alpha',
+        contentLine,
+        'beta',
+        fence,
+      ].join('\n');
+      mockGetHistoryShallow.mockReturnValue([
+        { role: 'model', parts: [{ text: content }] },
+      ]);
+
+      await copyCommand.action!(mockContext, 'code');
+
+      expect(mockCopyToClipboard).toHaveBeenCalledExactlyOnceWith(
+        `alpha\n${contentLine}\nbeta`,
+      );
+    },
+  );
+
+  it.each(['```', '~~~'])(
+    'accepts a longer %s closing fence followed by spaces and tabs',
+    async (fence) => {
+      const content = [`${fence}text`, 'alpha', `${fence}${fence[0]} \t`].join(
+        '\r\n',
+      );
+      mockGetHistoryShallow.mockReturnValue([
+        { role: 'model', parts: [{ text: content }] },
+      ]);
+
+      await copyCommand.action!(mockContext, 'code');
+
+      expect(mockCopyToClipboard).toHaveBeenCalledExactlyOnceWith('alpha');
+    },
+  );
+
+  it.each(['```', '~~~'])(
+    'keeps LaTeX inside %s code until a valid closing fence',
+    async (fence) => {
+      const content = [
+        `${fence}text`,
+        `${fence}not-a-close`,
+        '$$',
+        'hidden',
+        '$$',
+        '$hidden_inline$',
+        fence,
+        '$$',
+        'visible',
+        '$$',
+        '$visible_inline$',
+      ].join('\n');
+      mockGetHistoryShallow.mockReturnValue([
+        { role: 'model', parts: [{ text: content }] },
+      ]);
+
+      await copyCommand.action!(mockContext, 'latex 1');
+      expect(mockCopyToClipboard).toHaveBeenLastCalledWith('visible');
+      await copyCommand.action!(mockContext, 'inline-latex 1');
+      expect(mockCopyToClipboard).toHaveBeenLastCalledWith('visible_inline');
+    },
+  );
+
+  it('does not copy an unfinished block closed only by a fence with text', async () => {
+    mockGetHistoryShallow.mockReturnValue([
+      { role: 'model', parts: [{ text: '```text\nalpha\n```still-code' }] },
+    ]);
+
+    const result = await copyCommand.action!(mockContext, 'code');
+
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      content: 'No matching code block found in the last AI output.',
     });
   });
 

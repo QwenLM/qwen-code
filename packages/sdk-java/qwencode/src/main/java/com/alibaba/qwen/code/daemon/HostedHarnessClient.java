@@ -33,6 +33,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /** Java 11 transport dedicated to the private Hosted Harness profile. */
@@ -109,6 +110,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private final Set<HarnessEventStream> streams =
             ConcurrentHashMap.newKeySet();
     private final AtomicBoolean closed = new AtomicBoolean();
+    private volatile Consumer<HarnessSessionRef> attachmentRetirementListener;
 
     private HostedHarnessClient(Builder builder) {
         this.baseUrl = normalizeBaseUri(builder.baseUri);
@@ -165,6 +167,17 @@ public final class HostedHarnessClient implements AutoCloseable {
     public HostedHarnessCapabilities capabilities() {
         ensureOpen();
         return capabilities;
+    }
+
+    /**
+     * Registers the consumer notified with the exact reference this client
+     * retires — a heartbeat's definitive 404, a proven generation change,
+     * or a teardown. A notice can arrive after a newer reference replaced
+     * the retired one, so the consumer must match by identity before
+     * evicting anything of its own.
+     */
+    public void onAttachmentRetirement(Consumer<HarnessSessionRef> listener) {
+        this.attachmentRetirementListener = listener;
     }
 
     public Map<String, Object> prepareManagedPackage(Map<String, Object> metadata, InputStream source) {
@@ -1935,6 +1948,14 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (observedAttachment != null
                 && attachments.remove(sessionId, observedAttachment)) {
             observedAttachment.cancel();
+            notifyAttachmentRetirement(observedAttachment.session);
+        }
+    }
+
+    private void notifyAttachmentRetirement(HarnessSessionRef ref) {
+        Consumer<HarnessSessionRef> listener = attachmentRetirementListener;
+        if (listener != null) {
+            listener.accept(ref);
         }
     }
 
@@ -2729,9 +2750,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         if (!heartbeatInterval.isZero()) {
             long delay = saturatedMillis(heartbeatInterval);
-            replacement.task = scheduler.scheduleWithFixedDelay(
+            ScheduledFuture<?> task = scheduler.scheduleWithFixedDelay(
                     () -> scheduleHeartbeat(replacement), delay, delay,
                     TimeUnit.MILLISECONDS);
+            replacement.task = task;
+            // Removal may have cancelled the attachment before its future
+            // was available. Complete that cancellation after publication.
+            if (replacement.cancelled.get()) {
+                task.cancel(false);
+            }
         }
     }
 
@@ -2766,11 +2793,9 @@ public final class HostedHarnessClient implements AutoCloseable {
                                     == 404
                             && "hosted_session_not_found".equals(
                                     ((DaemonHttpException) e)
-                                            .getErrorCode())
-                            && attachments.remove(
-                                    state.session.getHarnessSessionId(),
-                                    state)) {
-                        state.cancel();
+                                            .getErrorCode())) {
+                        discardObservedAttachment(
+                                state.session.getHarnessSessionId(), state);
                     }
                 } finally {
                     state.heartbeatInFlight.set(false);
@@ -2786,6 +2811,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         if (state != null && state.matches(session)
                 && attachments.remove(session.getHarnessSessionId(), state)) {
             state.cancel();
+            notifyAttachmentRetirement(session);
         }
     }
 
