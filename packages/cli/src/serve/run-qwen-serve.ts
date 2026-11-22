@@ -3583,8 +3583,14 @@ async function runQwenServeImpl(
     managedMarkerDepth += 1;
     process.env[QWEN_CODE_MANAGED_RUNTIME_ENV] = '1';
   }
+  // One-shot per boot: the shutdown block and the startup-failure catch are
+  // independent callers (a runtimeReady rejection closes the handle and then
+  // rejects into the catch), so a second call must not decrement again.
+  let managedMarkerReleased = false;
   const restoreManagedRuntimeMarker = (): void => {
     if (optsIn.profile !== 'hosted-harness') return;
+    if (managedMarkerReleased) return;
+    managedMarkerReleased = true;
     managedMarkerDepth -= 1;
     if (managedMarkerDepth > 0) return;
     if (managedMarkerAmbient === undefined) {
