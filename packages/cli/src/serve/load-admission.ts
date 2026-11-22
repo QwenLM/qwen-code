@@ -143,6 +143,13 @@ export function createLoadAdmissionMonitor(
   const tick = () => {
     const mono = now();
     const timely = lastTickMono === null || mono - lastTickMono <= 3 * sampleMs;
+    if (!timely) {
+      // Overdue ticks often fire before queued HTTP handlers on the timers
+      // phase; latch here too so refreshing lastTickMono does not erase the
+      // stall before snapshot() sees it.
+      gapLatched = true;
+      healthyTimelyStreak = 0;
+    }
     lastTickMono = mono;
     latest = readSignals!();
     sampledAtMs = Date.now();
@@ -154,49 +161,53 @@ export function createLoadAdmissionMonitor(
       EVENT_LOOP_LAG_EXIT_MS,
     );
     // Skipped intervals are not healthy readings: only timely ticks with
-    // both signals clear count toward releasing the gap latch.
-    if (timely && !cpu.overloaded && !lag.overloaded) {
-      healthyTimelyStreak += 1;
-      if (gapLatched && healthyTimelyStreak >= LOAD_ADMISSION_SUSTAIN_SAMPLES) {
-        gapLatched = false;
+    // both signals clear count toward releasing an active gap latch.
+    if (gapLatched) {
+      if (timely && !cpu.overloaded && !lag.overloaded) {
+        healthyTimelyStreak += 1;
+        if (healthyTimelyStreak >= LOAD_ADMISSION_SUSTAIN_SAMPLES) {
+          gapLatched = false;
+          healthyTimelyStreak = 0;
+        }
+      } else {
         healthyTimelyStreak = 0;
       }
-    } else {
-      healthyTimelyStreak = 0;
     }
   };
   const timer = setInterval(tick, sampleMs);
   timer.unref();
 
   let frozen: LoadAdmissionSnapshot | null = null;
+  const snapshot = (): LoadAdmissionSnapshot => {
+    // A disposed monitor is dead: freeze its last verdict instead of
+    // re-deriving a gap from a clock that keeps moving.
+    if (disposed && frozen) return frozen;
+    if (lastTickMono !== null && now() - lastTickMono > 3 * sampleMs) {
+      gapLatched = true;
+    }
+    const overloaded = gapLatched || cpu.overloaded || lag.overloaded;
+    const verdict: LoadAdmissionSnapshot = {
+      enabled: true,
+      overloaded,
+      reason: gapLatched
+        ? 'observation_gap'
+        : cpu.overloaded
+          ? 'cpu_load'
+          : lag.overloaded
+            ? 'event_loop_lag'
+            : null,
+      loadRatio: latest.loadRatio,
+      eventLoopLagP99Ms: latest.eventLoopLagP99Ms,
+      sampledAtMs,
+    };
+    frozen = verdict;
+    return verdict;
+  };
   return {
-    snapshot(): LoadAdmissionSnapshot {
-      // A disposed monitor is dead: freeze its last verdict instead of
-      // re-deriving a gap from a clock that keeps moving.
-      if (disposed && frozen) return frozen;
-      if (lastTickMono !== null && now() - lastTickMono > 3 * sampleMs) {
-        gapLatched = true;
-      }
-      const overloaded = gapLatched || cpu.overloaded || lag.overloaded;
-      const verdict: LoadAdmissionSnapshot = {
-        enabled: true,
-        overloaded,
-        reason: gapLatched
-          ? 'observation_gap'
-          : cpu.overloaded
-            ? 'cpu_load'
-            : lag.overloaded
-              ? 'event_loop_lag'
-              : null,
-        loadRatio: latest.loadRatio,
-        eventLoopLagP99Ms: latest.eventLoopLagP99Ms,
-        sampledAtMs,
-      };
-      frozen = verdict;
-      return verdict;
-    },
+    snapshot,
     dispose() {
       if (disposed) return;
+      frozen = snapshot();
       disposed = true;
       clearInterval(timer);
       histogram?.disable();

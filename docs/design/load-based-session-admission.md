@@ -65,32 +65,41 @@ snapshot that admission reads synchronously:
 interface LoadAdmissionSnapshot {
   enabled: boolean;
   overloaded: boolean;
-  reason: 'cpu_load' | 'event_loop_lag' | null;
+  reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap' | null;
   loadRatio: number; // os.loadavg()[0] / os.cpus().length (host scope both sides)
   eventLoopLagP99Ms: number; // window-scoped p99, histogram reset each tick
   sampledAtMs: number;
 }
 ```
 
-Two signals, each with enter/exit thresholds (hysteresis):
+Two signals, each with enter/exit thresholds (hysteresis), plus a monotonic
+observation-gap latch:
 
-| Signal         | Source                                                                 | Enter         | Exit         |
-| -------------- | ---------------------------------------------------------------------- | ------------- | ------------ |
-| CPU load       | `os.loadavg()[0] / os.cpus().length`                                   | ratio ≥ 2.0   | ratio < 1.0  |
-| Event-loop lag | `monitorEventLoopDelay({ resolution: 20 })`, percentile(99) per window | p99 ≥ 1000 ms | p99 < 250 ms |
+| Signal / latch  | Source                                                                 | Enter         | Exit                   |
+| --------------- | ---------------------------------------------------------------------- | ------------- | ---------------------- |
+| CPU load        | `os.loadavg()[0] / os.cpus().length`                                   | ratio ≥ 2.0   | ratio < 1.0            |
+| Event-loop lag  | `monitorEventLoopDelay({ resolution: 20 })`, percentile(99) per window | p99 ≥ 1000 ms | p99 < 250 ms           |
+| Observation gap | monotonic age (`performance.now()`) since last tick                    | age > 3 ticks | 3 timely healthy ticks |
 
 A signal flips state only after the flip condition holds for 3 consecutive
-samples (6 seconds). Each signal keeps its own sustain counters;
-`overloaded` is the OR of the two signal states. `reason` names the currently
-overloaded signal, `cpu_load` taking precedence when both are active; the
-snapshot always carries both measured values. The lag histogram is dedicated
-to this monitor and reset every tick so the reading is per-window, matching
-the existing metrics sampler's pattern in `run-qwen-serve.ts`.
+samples (6 seconds), with each signal maintaining its own sustain counters.
+An observation gap latches whenever a tick arrives more than `3 * sampleMs`
+late or `snapshot()` observes an age past `3 * sampleMs` (cold start before
+the first tick stays fail-open), and clears only after 3 consecutive timely
+ticks in which both signals are not overloaded. `overloaded` is
+`gapLatched || cpu.overloaded || lag.overloaded`; `reason` precedence is
+`observation_gap` > `cpu_load` > `event_loop_lag` (so a gap-latched snapshot
+can report `overloaded: true, reason: 'observation_gap'` even while both
+measured fields sit below their enter thresholds). The snapshot always
+carries both measured values. The lag histogram is dedicated to this monitor
+and reset every tick so the reading is per-window, matching the existing
+metrics sampler's pattern in `run-qwen-serve.ts`.
 
-The monitor accepts an optional `readSignals` test seam (defaults to the real
-`os`/`perf_hooks` reads) and an optional `sampleMs` override. `dispose()`
-clears the interval and disables the histogram. Thresholds and sustain counts
-are exported constants, not configuration, in this change.
+The monitor accepts optional `readSignals` / `now` test seams (defaulting to
+real `os`/`perf_hooks` reads and `performance.now()`) and an optional
+`sampleMs` override. `dispose()` freezes the last verdict, clears the
+interval, and disables the histogram. Thresholds and sustain counts are
+exported constants, not configuration, in this change.
 
 ### Admission integration
 
@@ -243,8 +252,11 @@ as today.
   `Retry-After`, and no child process is spawned.
 - During overload, prompts to live sessions, cancel, detach, status, and SSE
   keep working.
-- After both signals stay below their exit thresholds for ≥ 6 seconds,
-  creations are admitted again.
+- After every active signal stays below its exit threshold for ≥ 6 seconds
+  (3 consecutive samples), creations are admitted again — or, if the
+  `observation_gap` latch also engaged during a stall, after 3 further
+  timely healthy ticks once both signals are clear (~10 seconds total after
+  the stall ends).
 - `--no-load-admission` disables the gate entirely; behavior matches today.
 - `GET /daemon/status` reports the load-admission state and the
   `system_overloaded` issue while overloaded.

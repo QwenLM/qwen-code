@@ -64,10 +64,20 @@ export function createTotalSessionAdmissionController({
       }
       const load = loadAdmission?.snapshot();
       if (load?.overloaded) {
-        throw new SystemOverloadedError(
-          load.reason ?? 'cpu_load',
-          load.loadRatio,
-          load.eventLoopLagP99Ms,
+        throw Object.assign(
+          new SystemOverloadedError(
+            load.reason ?? 'cpu_load',
+            load.loadRatio,
+            load.eventLoopLagP99Ms,
+          ),
+          {
+            operation: context.operation,
+            workspaceCwd: context.workspaceCwd,
+            ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+            ...(context.sourceSessionId
+              ? { sourceSessionId: context.sourceSessionId }
+              : {}),
+          },
         );
       }
       if (limit !== Number.POSITIVE_INFINITY) {

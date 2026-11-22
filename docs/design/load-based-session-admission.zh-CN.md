@@ -59,29 +59,36 @@
 interface LoadAdmissionSnapshot {
   enabled: boolean;
   overloaded: boolean;
-  reason: 'cpu_load' | 'event_loop_lag' | null;
+  reason: 'cpu_load' | 'event_loop_lag' | 'observation_gap' | null;
   loadRatio: number; // os.loadavg()[0] / os.cpus().length（分子分母同为主机作用域）
   eventLoopLagP99Ms: number; // 窗口内 p99，直方图每 tick 重置
   sampledAtMs: number;
 }
 ```
 
-两个信号，各带进入/退出阈值（滞回）：
+两个信号，各带进入/退出阈值（滞回），外加一个单调钟观测缺口锁存：
 
-| 信号         | 来源                                                               | 进入          | 退出         |
-| ------------ | ------------------------------------------------------------------ | ------------- | ------------ |
-| CPU 负荷     | `os.loadavg()[0] / os.cpus().length`                               | ratio ≥ 2.0   | ratio < 1.0  |
-| 事件循环延迟 | `monitorEventLoopDelay({ resolution: 20 })`，每窗口 percentile(99) | p99 ≥ 1000 ms | p99 < 250 ms |
+| 信号 / 锁存  | 来源                                                               | 进入          | 退出              |
+| ------------ | ------------------------------------------------------------------ | ------------- | ----------------- |
+| CPU 负荷     | `os.loadavg()[0] / os.cpus().length`                               | ratio ≥ 2.0   | ratio < 1.0       |
+| 事件循环延迟 | `monitorEventLoopDelay({ resolution: 20 })`，每窗口 percentile(99) | p99 ≥ 1000 ms | p99 < 250 ms      |
+| 观测缺口锁存 | 距上次 tick 的单调钟年龄（`performance.now()`）                    | 年龄 > 3 周期 | 连续 3 次按时健康 |
 
-信号只有在翻转条件连续 3 次采样（6 秒）成立后才翻转状态。每个信号各自维护
-持续计数；`overloaded` 是两个信号状态的 OR。`reason` 指出当前过载的信号，
-两者同时过载时 `cpu_load` 优先；快照始终携带两个实测值。延迟直方图为本监视器
-专用且每 tick 重置，读数是窗口内的，与 `run-qwen-serve.ts` 中现有 metrics
-sampler 的模式一致。
+每个信号各自维护持续计数，翻转条件连续 3 次采样（6 秒）成立后才翻转状态。
+当一次 tick 迟到超过 `3 * sampleMs`，或 `snapshot()` 读到上次 tick 年龄超过
+`3 * sampleMs` 时锁存观测缺口（首次 tick 前的冷启动保持 fail-open），仅在
+两个信号均未过载且连续 3 次按时 tick 后才清除。`overloaded` 为
+`gapLatched || cpu.overloaded || lag.overloaded`；`reason` 优先级为
+`observation_gap` > `cpu_load` > `event_loop_lag`（因此缺口锁存期间即使两个
+实测字段都低于进入阈值，快照仍可报告 `overloaded: true, reason:
+'observation_gap'`）。快照始终携带两个实测值。延迟直方图为本监视器专用且每
+tick 重置，读数是窗口内的，与 `run-qwen-serve.ts` 中现有 metrics sampler
+的模式一致。
 
-监视器接受可选的 `readSignals` 测试接缝（默认真实 `os`/`perf_hooks` 读取）
-与可选的 `sampleMs` 覆盖。`dispose()` 清除定时器并停用直方图。阈值与持续
-次数在本次变更中是导出常量，不是配置。
+监视器接受可选的 `readSignals` / `now` 测试接缝（默认真实 `os`/`perf_hooks`
+读取与 `performance.now()`）与可选的 `sampleMs` 覆盖。`dispose()` 冻结最后
+判定、清除定时器并停用直方图。阈值与持续次数在本次变更中是导出常量，不是
+配置。
 
 ### 准入集成
 
@@ -205,7 +212,9 @@ flag `--load-admission` / `--no-load-admission`（yargs boolean 带默认值）�
 - 持续饱和（load ratio ≥ 2.0 或事件循环 p99 ≥ 1000 ms 达 ≥ 6 秒）时，新建
   会话返回 `503 system_overloaded` 带 `Retry-After`，且不 spawn 子进程。
 - 过载期间，发往存活会话的 prompt、cancel、detach、status、SSE 保持可用。
-- 两个信号都低于退出阈值持续 ≥ 6 秒后，新建重新被放行。
+- 各活动信号分别低于各自退出阈值持续 ≥ 6 秒（连续 3 次采样）后，新建重新被
+  放行；若卡顿期间同时触发了 `observation_gap` 锁存，则需在两信号均回落后
+  再经过 3 次按时健康 tick 才解除（卡顿结束后总计约 10 秒）。
 - `--no-load-admission` 完全禁用闸门；行为与今天一致。
 - `GET /daemon/status` 报告负荷准入状态，过载时报告 `system_overloaded`
   issue。

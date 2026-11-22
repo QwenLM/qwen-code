@@ -179,13 +179,18 @@ describe('createTotalSessionAdmissionController load admission', () => {
     expect(admission.snapshot()).toEqual({ liveCount: 0, inFlight: 0 });
   });
 
-  it('carries the monitor reason and readings on the error', () => {
+  it('carries the monitor reason, readings, and admission context on the error', () => {
     const admission = createTotalSessionAdmissionController({
       getBridges: () => [],
       loadAdmission: { snapshot: () => overloadedSnapshot },
     });
     try {
-      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' });
+      admission.admit({
+        operation: 'branch',
+        workspaceCwd: '/work/a',
+        sessionId: 'sess-new',
+        sourceSessionId: 'sess-src',
+      });
       throw new Error('expected SystemOverloadedError');
     } catch (err) {
       expect(err).toBeInstanceOf(SystemOverloadedError);
@@ -193,6 +198,10 @@ describe('createTotalSessionAdmissionController load admission', () => {
         reason: 'cpu_load',
         loadRatio: 2.5,
         eventLoopLagP99Ms: 120,
+        operation: 'branch',
+        workspaceCwd: '/work/a',
+        sessionId: 'sess-new',
+        sourceSessionId: 'sess-src',
       });
     }
   });

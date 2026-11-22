@@ -626,6 +626,13 @@ export async function rehydrateScheduledTaskSessions(deps: {
       await withTimeout(resume, timeoutMs, `resumeSession(${sessionId})`);
       loaded.push(sessionId);
     } catch (err) {
+      if (err instanceof SystemOverloadedError) {
+        // Load backpressure, not a restore defect: leave this session
+        // non-resident for the keepalive revive loop instead of reporting a
+        // failure and alarming on a saturated boot.
+        log.debug('rehydrate: load admission refused', sessionId);
+        return;
+      }
       // Timed out (or the load rejected). Do NOT await the raw `load` here: a
       // genuinely hung, non-abortable load would pin this worker forever and, if
       // enough loads hang, the whole boot sweep never completes (`Promise.all`

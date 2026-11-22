@@ -41575,7 +41575,11 @@ describe('createServeApp', () => {
     it('503 + Retry-After 15 + readings and daemon log when bridge throws SystemOverloadedError', async () => {
       const bridge = fakeBridge({
         spawnImpl: async () => {
-          throw new SystemOverloadedError('cpu_load', 2.5, 120);
+          throw Object.assign(new SystemOverloadedError('cpu_load', 2.5, 120), {
+            operation: 'spawn',
+            workspaceCwd: '/work/a',
+            sourceSessionId: 'sess-src',
+          });
         },
       });
       const daemonLog = fakeDaemonLog();
@@ -41602,6 +41606,9 @@ describe('createServeApp', () => {
           reason: 'cpu_load',
           loadRatio: 2.5,
           eventLoopLagP99Ms: 120,
+          operation: 'spawn',
+          workspaceCwd: '/work/a',
+          sourceSessionId: 'sess-src',
         }),
       );
     });

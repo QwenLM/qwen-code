@@ -323,4 +323,189 @@ describe('load admission observation-gap latch', () => {
     expect(monitor.snapshot().reason).toBe('observation_gap');
     monitor.dispose();
   });
+
+  it('latches on the overdue tick itself even when no read precedes it', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    // Tick-first ordering (timers phase runs before queued HTTP handlers):
+    // do NOT read snapshot() before the overdue tick fires.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+
+    const afterTick = monitor.snapshot();
+    expect(afterTick.overloaded).toBe(true);
+    expect(afterTick.reason).toBe('observation_gap');
+
+    const admission = createTotalSessionAdmissionController({
+      getBridges: () => [],
+      loadAdmission: monitor,
+    });
+    expect(() =>
+      admission.admit({ operation: 'spawn', workspaceCwd: '/work/a' }),
+    ).toThrow(SystemOverloadedError);
+    monitor.dispose();
+  });
+
+  it('uses a monotonic default clock that ignores wall-clock jumps', () => {
+    const dateNowSpy = vi.spyOn(Date, 'now');
+    let wall = 1_700_000_000_000;
+    dateNowSpy.mockImplementation(() => wall);
+    const monitor = createLoadAdmissionMonitor({
+      readSignals: () => signals,
+    });
+    try {
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+      expect(monitor.snapshot().overloaded).toBe(false);
+
+      // Step ONLY wall clock forward by 60 s (NTP jump) without moving
+      // monotonic time: an idle daemon must not latch observation_gap.
+      wall += 60_000;
+      const verdict = monitor.snapshot();
+      expect(verdict.overloaded).toBe(false);
+      expect(verdict.reason).toBeNull();
+    } finally {
+      monitor.dispose();
+      dateNowSpy.mockRestore();
+    }
+  });
+
+  it('keeps the gap latch while CPU load stays overloaded across timely ticks', () => {
+    const monitor = makeMonitor();
+    // Arm CPU overload first, then stall to also latch observation_gap.
+    signals = { loadRatio: LOAD_RATIO_ENTER + 1, eventLoopLagP99Ms: 5 };
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    expect(monitor.snapshot().reason).toBe('cpu_load');
+
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    // Timely ticks while CPU is still overloaded must not release the latch.
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES + 1; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+      expect(monitor.snapshot().reason).toBe('observation_gap');
+    }
+    monitor.dispose();
+  });
+
+  it('keeps the gap latch while event-loop lag stays overloaded across timely ticks', () => {
+    const monitor = makeMonitor();
+    signals = { loadRatio: 0.2, eventLoopLagP99Ms: EVENT_LOOP_LAG_ENTER_MS };
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    expect(monitor.snapshot().reason).toBe('event_loop_lag');
+
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES + 1; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+      expect(monitor.snapshot().reason).toBe('observation_gap');
+    }
+    monitor.dispose();
+  });
+
+  it('requires three fresh timely ticks after a second stall following release', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+
+    // First stall and release.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    // Second stall (tick-first): must still require three full timely ticks
+    // to clear, never reusing the streak from the first release.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().reason).toBe('observation_gap');
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES - 1; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+      expect(monitor.snapshot().reason).toBe('observation_gap');
+    }
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot().overloaded).toBe(false);
+    monitor.dispose();
+  });
+
+  it('enforces the exact three-interval timeliness bound (four intervals latches)', () => {
+    const monitor = makeMonitor();
+    // Build a pre-stall healthy streak of 3 timely ticks.
+    for (let i = 0; i < LOAD_ADMISSION_SUSTAIN_SAMPLES; i++) {
+      monoNow += LOAD_ADMISSION_SAMPLE_MS;
+      vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    }
+    expect(monitor.snapshot().overloaded).toBe(false);
+
+    // Exactly 4 intervals elapsed (> 3 * sampleMs, <= 4 * sampleMs):
+    // must be classified untimely, latch observation_gap, and not reuse the
+    // pre-stall healthy streak to clear itself on the same tick.
+    monoNow += 4 * LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: true,
+      reason: 'observation_gap',
+    });
+    monitor.dispose();
+  });
+
+  it('freezes on dispose even if snapshot() was never called beforehand', () => {
+    const monitor = makeMonitor();
+    monoNow += LOAD_ADMISSION_SAMPLE_MS;
+    vi.advanceTimersByTime(LOAD_ADMISSION_SAMPLE_MS);
+    monitor.dispose();
+    monoNow += 10 * LOAD_ADMISSION_SAMPLE_MS;
+    expect(monitor.snapshot()).toMatchObject({
+      overloaded: false,
+      reason: null,
+    });
+  });
+});
+
+describe('load admission real event-loop stall', () => {
+  it('latches observation_gap across a genuine synchronous busy-wait stall', async () => {
+    // Real timers + real monotonic performance.now() on a short 20 ms cadence:
+    // a 100 ms synchronous block exceeds 3 * 20 ms regardless of whether the
+    // overdue tick or the post-stall read runs first.
+    const monitor = createLoadAdmissionMonitor({
+      readSignals: () => ({ loadRatio: 0.1, eventLoopLagP99Ms: 1 }),
+      sampleMs: 20,
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 45));
+      expect(monitor.snapshot().overloaded).toBe(false);
+
+      const stallEnd = performance.now() + 100;
+      while (performance.now() < stallEnd) {
+        // deliberate synchronous stall
+      }
+      // Yield once so the overdue timer callback runs before the read
+      // (matching Node's real timers-before-poll ordering).
+      await new Promise((r) => setTimeout(r, 0));
+      expect(monitor.snapshot()).toMatchObject({
+        overloaded: true,
+        reason: 'observation_gap',
+      });
+    } finally {
+      monitor.dispose();
+    }
+  });
 });

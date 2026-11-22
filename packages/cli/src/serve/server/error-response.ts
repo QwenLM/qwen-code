@@ -1000,12 +1000,26 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof SystemOverloadedError) {
+    const loadError = err as SystemOverloadedError & {
+      operation?: string;
+      workspaceCwd?: string;
+      sessionId?: string;
+      sourceSessionId?: string;
+    };
+    const loggedSessionId = ctx?.sessionId ?? loadError.sessionId;
     daemonLog?.warn('load admission rejected', {
       ...(ctx?.route ? { route: ctx.route } : {}),
-      ...(ctx?.sessionId ? { sessionId: ctx.sessionId } : {}),
+      ...(loggedSessionId ? { sessionId: loggedSessionId } : {}),
       reason: err.reason,
       loadRatio: err.loadRatio,
       eventLoopLagP99Ms: err.eventLoopLagP99Ms,
+      ...(loadError.operation ? { operation: loadError.operation } : {}),
+      ...(loadError.workspaceCwd
+        ? { workspaceCwd: loadError.workspaceCwd }
+        : {}),
+      ...(loadError.sourceSessionId
+        ? { sourceSessionId: loadError.sourceSessionId }
+        : {}),
     });
     // Host load drains more slowly than a session slot frees, so the hint
     // is longer than the count gates' 5s.
