@@ -34,6 +34,7 @@ final class RuntimeExecutionRecovery {
     private final RuntimeTransport transport;
     private final RuntimeExecutionReconciler executionReconciler;
     private final AtomicBoolean closed;
+    private volatile java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> adoptedSessions;
 
     RuntimeExecutionRecovery(RuntimeBindingRegistry bindingRegistry,
             RuntimeExecutionState executionState,
@@ -49,6 +50,12 @@ final class RuntimeExecutionRecovery {
         this.transport = transport;
         this.executionReconciler = executionReconciler;
         this.closed = closed;
+        this.adoptedSessions = bindingRegistry::requireReadySession;
+    }
+
+    void setAdoptedSessionLookup(
+            java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> lookup) {
+        this.adoptedSessions = lookup;
     }
 
     /**
@@ -63,7 +70,7 @@ final class RuntimeExecutionRecovery {
         requireOpen(closed);
         String invocationId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
+        return adoptedSessions.apply(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord invocation = executionState.requireExecution(context, invocationId);
                     ToolExecutionRecord process = executionState.requireExecution(context, invocationId + ":process");

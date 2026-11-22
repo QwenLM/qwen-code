@@ -348,8 +348,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions.',
-      accesses: { whole: 2 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions. It also reads the QWEN_MANAGED_RUNTIME_OBSERVATION gate that decides whether the worker owns background observation.',
+      accesses: { 'key:QWEN_MANAGED_RUNTIME_OBSERVATION': 1, whole: 2 },
     },
   ],
   [

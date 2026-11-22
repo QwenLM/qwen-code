@@ -655,7 +655,13 @@ export async function runManagedRuntimeAttestationWorker(
       !('storage' in contextBoot) &&
       (isWorkspaceToolCapability(contextBoot.capabilityDigest) ||
         contextBoot.managedExtensions !== undefined)
-      ? new ManagedShellPublisherRegistry()
+      ? new ManagedShellPublisherRegistry({
+          // Phase 3b: the worker-owned background capture is gated by the
+          // worker capability, off by default until the registration chain
+          // and characterization prove resident equivalence.
+          enabled: process.env['QWEN_MANAGED_RUNTIME_OBSERVATION'] === '1',
+          workspaceId: (contextBoot as { workspaceId?: string }).workspaceId,
+        })
       : undefined,
     containerBootPath !== undefined,
   ).catch((error: unknown) => {
