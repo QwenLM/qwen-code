@@ -207,8 +207,12 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_155_023;
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
 // including the metadata checks: 2,155,023 bytes with ChatSurface merged.
-// Reserve 430 bytes for toolchain variance.
-const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 430;
+// The cross-project Todos page (PR #14237) adds i18n keys and daemon actions
+// reachable from the document entry; the merged tree measures 2,157,262
+// bytes with the forbidden-input guard passing, so the reserve covers that
+// growth — the same deliberate bump #16774 and #17153 made for merged-main
+// growth — plus toolchain variance.
+const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 2_400;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.

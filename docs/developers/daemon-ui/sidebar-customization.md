@@ -75,7 +75,8 @@ type WebShellSidebarPrimaryNavItem =
   | 'workflows' // Requires workflow support
   | 'managed' // Requires a managed-agent provider
   | 'scheduledTasks' // 📅 Scheduled Tasks button
-  | 'goals'; // 🎯 Goals button
+  | 'goals' // 🎯 Goals button
+  | 'todos'; // ☑ Todos button
 
 interface WebShellSidebarPrimaryNavOptions {
   items?: readonly WebShellSidebarPrimaryNavItem[]; // which built-in buttons to show (default: ['newTask'])
