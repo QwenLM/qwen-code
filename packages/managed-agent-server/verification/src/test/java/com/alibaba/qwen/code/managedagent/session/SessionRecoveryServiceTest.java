@@ -714,7 +714,7 @@ class SessionRecoveryServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"unavailable", "unsettled", "unready", "no-prompt", "cancelled-prompt"})
+    @ValueSource(strings = {"unavailable", "unsettled", "unready", "no-prompt"})
     void cancellationBeforeAdmissionDoesNotSupplyMissingRecoveryProof(String cut) {
         cancelBeforeAdmission();
         var evidence = switch (cut) {
@@ -725,7 +725,6 @@ class SessionRecoveryServiceTest {
                     "prior-prompt", true, false, false);
             case "no-prompt" -> new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending",
                     null, true, true, false);
-            case "cancelled-prompt" -> new RecoveryStatus("ready", null, "private-prompt", true, true, true);
             default -> throw new IllegalArgumentException(cut);
         };
         when(harness.inspectRecovery("tenant", "session", null)).thenReturn(evidence);
@@ -739,6 +738,61 @@ class SessionRecoveryServiceTest {
                 .hasMessage("This recovery has no existing work to recheck.");
         verify(harness, never()).recheckRecoveryCleanup(anyString(), anyString(), anyString());
         verifyNoInteractions(coordinator);
+    }
+
+    @Test
+    void aLostAdmissionReplyStillRecoversThroughTheTurnsOwnPrompt() {
+        cancelBeforeAdmission();
+        when(harness.inspectRecovery("tenant", "session", null))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+
+        var recovery = service.query("tenant", "actor", "session");
+        assertThat(recovery.state()).isEqualTo("ready");
+        assertThat(recovery.turnId()).isEqualTo("turn");
+        assertThat(recovery.nextTurnAllowed()).isTrue();
+        assertThat(service.recheck("tenant", "actor", "session", "turn")).isEqualTo(recovery);
+        verify(harness, never()).inspectRecovery("tenant", "session", "private-prompt");
+    }
+
+    @Test
+    void cleanupRecheckAfterALostAdmissionReplyTargetsTheTurnsOwnPrompt() {
+        cancelBeforeAdmission();
+        var nativeStatus = new AtomicReference<>(new RecoveryStatus("cleanup_pending", "runtime_cleanup_pending",
+                "private-prompt", true, true, false));
+        when(harness.inspectRecovery("tenant", "session", null)).thenAnswer(call -> nativeStatus.get());
+        when(harness.recheckRecoveryCleanup("tenant", "session", "private-prompt")).thenAnswer(call -> {
+            nativeStatus.set(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+            return true;
+        });
+
+        var pending = service.query("tenant", "actor", "session");
+        assertThat(pending.nextTurnAllowed()).isFalse();
+        assertThat(pending.actions().recheck()).isTrue();
+        var result = service.recheck("tenant", "actor", "session", "turn");
+        assertThat(result.turnId()).isEqualTo("turn");
+        assertThat(result.nextTurnAllowed()).isTrue();
+        verify(harness).recheckRecoveryCleanup("tenant", "session", "private-prompt");
+        verifyNoInteractions(coordinator);
+    }
+
+    @ParameterizedTest
+    @CsvSource(value = {"CANCELLED,true,NONE", "CANCELLED,false,epoch", "FAILED,false,NONE"},
+            nullValues = "NONE")
+    void anyAdmissionMarkerKeepsTheEvidenceTargetedOnTheTurnsOwnPrompt(
+            String status, boolean submissionAttempted, String epoch) {
+        jdbc.update("INSERT INTO ma_turn VALUES ('tenant', 'session', 'COMPLETED', TRUE, 'epoch')");
+        var turn = new TurnRecord("tenant", "session", "turn", "private-prompt", List.of(),
+                "digest", status, submissionAttempted, epoch, null, null, null, 0, 0, 0, null,
+                null, null, 1, 2, 2L, 1);
+        when(store.findLatestTurns("tenant", List.of("session"))).thenReturn(Map.of("session",
+                new TurnSummary("session", "turn", status, 1, 2L, null)));
+        when(store.findTurn("tenant", "session", "turn")).thenReturn(Optional.of(turn));
+        when(harness.inspectRecovery("tenant", "session", "private-prompt"))
+                .thenReturn(new RecoveryStatus("ready", null, "private-prompt", true, true, true));
+
+        assertThat(service.query("tenant", "actor", "session").nextTurnAllowed()).isTrue();
+        verify(harness).inspectRecovery("tenant", "session", "private-prompt");
+        verify(harness, never()).inspectRecovery("tenant", "session", null);
     }
 
     @Test

@@ -14,6 +14,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SessionRecoveryRepository;
 import com.alibaba.qwen.code.managedagent.repository.SessionRecoveryRepository.HeadRecovery;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -249,8 +250,11 @@ public class SessionRecoveryService {
         try {
             RecoveryStatus status = harness.inspectRecovery(session.tenantId(),
                     session.sessionId(), target);
-            if (status == null || target != null && !target.equals(status.promptId())
-                    || localCancellation && turn.promptId().equals(status.promptId())) {
+            // A null target lets the Harness name its last accepted input,
+            // and that answer is authoritative even when it names this
+            // Turn's own prompt: a withdrawn submission mark does not
+            // prove non-admission (R10-4).
+            if (status == null || target != null && !target.equals(status.promptId())) {
                 return null;
             }
             return status;
@@ -262,7 +266,7 @@ public class SessionRecoveryService {
     private static boolean hasCleanupTarget(RecoveryStatus evidence) {
         return evidence != null && "cleanup_pending".equals(evidence.state())
                 && evidence.inputSettled() && evidence.continuationReady()
-                && org.apache.commons.lang3.StringUtils.isNotBlank(evidence.promptId());
+                && StringUtils.isNotBlank(evidence.promptId());
     }
 
     private static boolean cancelledBeforeAdmission(TurnRecord turn) {
