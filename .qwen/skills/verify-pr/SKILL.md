@@ -184,9 +184,10 @@ trigger the sandboxed `@qwen-code /verify` lane instead.
 `boundary.json` must be in the artifact directory — the checker refuses a
 round without it. For a waived host run or an attested VM, **prepare** writes
 the approved declaration before any PR code runs; the round never hand-writes
-it. If a container battery cannot run, stop, release any in-flight
-registration and re-run prepare with `--execution host|vm` and its approval
-arguments before the battery; never convert the round by hand-writing a
+it. If a container battery cannot run, stop and keep the current head/round
+in-flight registration while changing execution modes. Re-run prepare with
+`--execution host|vm` and its applicable approval arguments before the
+battery; never convert the round by hand-writing a
 legacy waiver afterward. Otherwise the boundary's operator writes the
 container declaration in the recipe's host check step, and the CI publish job
 writes the lane declaration. A `mode:"container"` declaration must also be
@@ -262,12 +263,14 @@ requirement. The shapes:
   Registration stays outside the PR clone and precedes any PR-code execution.
   A first local registration may use round 1; later executions need their own
   allocated round, not the old round just because no marker is currently in
-  flight. Then ask once, in words. If the maintainer approves this exact
+  flight. `--start` prints a new `registrationNonce` for each actual
+  registration and keeps it unchanged while that registration stays in flight.
+  Then ask once, in words. If the maintainer approves this exact
   execution, **they**, never the round, post the PR comment. It carries
   human-readable approval plus exactly one marker:
 
   ```text
-  <!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2} -->
+  <!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2,"registrationNonce":"<nonce from this --start>"} -->
   Approved host execution for this verify round.
   ```
 
@@ -277,21 +280,28 @@ requirement. The shapes:
   head/round written by the real watch helper. Prepare checks that
   registration before reading the numbered comment; it derives `by` from
   the comment author, checks their live `admin | maintain | write`
-  permission, and requires the marker's mode/head/round to match. An
-  in-flight retry may reuse its approval. After `--complete` or an actual
-  release, prepare refuses the same unregistered invocation before creating
-  new artifacts — copying or inventing a marker in the PR tree cannot prove
-  a fresh round. Ordinary prose containing a head, duplicate or malformed
+  permission, and requires the marker's mode/head/round/registrationNonce to
+  match. A retry of that same in-flight registration may reuse its approval.
+  Changing execution modes retains the registration instead of releasing it.
+  After `--complete`, an actual release, or a fresh `--start` in another
+  state root, prepare refuses the old marker before creating new artifacts.
+  A release followed by `--start` creates a different nonce even when head
+  and round repeat, so it needs a fresh marked approval; do not promise that
+  the old comment can be reused after an actual release. A legacy in-flight
+  entry without a nonce must be deliberately released and restarted before
+  requesting that fresh marker — old approval markers are never silently
+  migrated. Ordinary prose containing a head, duplicate or malformed
   markers, an approval for another PR or a previous registration, and a
   synthetic/completed marker fail closed. Register completion with the
-  existing `--complete` form only after publication succeeds; use the
-  existing `--release` form after setup refusal.
+  existing `--complete` form only after publication succeeds. Reserve
+  `--release` for abandoning a failed setup, not for changing modes.
 
 - Prepare writes the resulting `executionApproval` into the host-held
   context and the same object to artifact `boundary.json`: `mode` is `vm` or
   `waived`, `source` is `local-trust` or `comment`, and the object also names
   `basis`, `by`, `permission`, `head`, `round`, `reason`, optional
-  `attestation`, and for a comment its permalink, id and body digest. The PR
+  `attestation`, and for a comment its permalink, id, body digest and
+  registrationNonce. The PR
   artifact copy is only a copy, not self-certifying authority. Publication
   requires `--context <host snapshot>` and a matching
   `--context-sha256`, checks the object shapes and their deep equality, and
@@ -631,9 +641,10 @@ authority to certify the round.
    battery run on the host cannot read the container-local nonce, and the
    record's hash does not reveal it. If the battery cannot run in this
    container (e.g. a Java-heavy round whose image carries no JDK), stop: do
-   NOT declare `mode:"container"`, and do not hand-write a waiver. Release
-   any in-flight registration, then re-run prepare with `--execution host|vm`
-   and its approval arguments **before** the battery.
+   NOT declare `mode:"container"`, and do not hand-write a waiver. Keep the
+   current head/round in-flight registration while changing modes, then re-run
+   prepare with `--execution host|vm` and its applicable approval arguments
+   **before** the battery. Do not release it merely to change modes.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -843,20 +854,24 @@ failure. If prepare fails after `--start`, recover with
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`,
 then start the head again at the SAME round
 (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`)
-and retry prepare. A comment-backed approval is bound to `<r>` on BOTH the
-registration and the marker, so this same-round restart keeps the existing
-approval valid. To restart at `<r+1>` instead, ask the maintainer for a fresh
-approval marker at `<r+1>` before retrying prepare. A release alone leaves the
+and retry prepare. A release followed by `--start` creates a new
+registrationNonce even at the same `<r>`, so a comment-backed retry needs a
+fresh marked approval carrying that new value. To restart comment approval at
+`<r+1>` instead, register it and ask for a fresh marker at `<r+1>` too. An
+unattended container restart needs neither a marker nor an approval option;
+keep `<r>` and the head consistent across start, prepare and complete, whether
+retrying the same round or allocating another. A release alone leaves the
 head unregistered (it files only a push-order hint, not a deferral) and no
 probe fire will deliver it again. A transient prepare failure (the round still
-runs) leaves the marker intact — prepare reads the watch state only to
-validate an `--approval` registration — so retrying prepare at the original
-round and completing there recovers the head with no release; do not increment
-the round without a fresh comment approval. The release + restart is for a
-round that died, and a kill between its two commands would re-open the silent
-drop. `--repo` is required on both: `--start` recorded it, and every verb
+runs) leaves the marker and nonce intact — prepare reads the watch state only
+to validate an `--approval` registration — so retrying prepare at the original
+round and completing there recovers the head with no release. A new round
+needs its own start, and a comment-backed one needs its own marked approval;
+a container-only one does not. Reserve release + restart for abandoning a
+round that died, not changing execution modes. A kill between its two
+commands would re-open the silent drop. `--repo` is required on both: `--start` recorded it, and every verb
 refuses an omitted `--repo` once a repo is recorded. The restarted round's
-number (`<r>` for the same approval, or `<r+1>` with a fresh one) becomes this
+number (`<r>` after the requested restart, or `<r+1>`) becomes this
 round's number — repeat that value in `--complete`. Do not recover with
 `--complete inconclusive` instead — only that verdict increments the retry
 counter whose cap is the terminal not-covered state, so two transient prepare
@@ -1125,16 +1140,19 @@ ambiguous rather than verify a guessed PR. Then, in order:
    it again (`--repo` is required once `--start` recorded it). After the
    release, restart at the SAME `<r>`
    (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`)
-   and retry prepare. A comment-backed approval is bound to `<r>` on BOTH the
-   registration and the marker, so the same-round restart keeps the existing
-   approval valid. To restart at `<r+1>` instead, first ask the maintainer for
-   a fresh comment marker at `<r+1>` when using `--approval`. A transient
-   prepare failure (the round still runs) leaves the marker intact — prepare
-   reads the watch state only to validate an `--approval` registration — so
-   retrying prepare at the original round and completing there recovers `H`
-   with no release; do not increment the round without a fresh comment
-   approval. The release + restart is for a round that died. The restarted
-   round's number (`<r>` for the same approval, or `<r+1>` with a fresh one)
+   and retry prepare. An actual release followed by `--start` creates a new
+   registrationNonce even at the same `<r>`, so a comment-backed retry needs a
+   fresh marker carrying that new value. To restart comment approval at
+   `<r+1>` instead, register it and ask the maintainer for a fresh comment
+   marker at `<r+1>` as well. A non-comment container restart needs no marked
+   approval; keep head and round consistent with its registration. A transient
+   prepare failure (the round still runs) leaves the marker and nonce intact —
+   prepare reads the watch state only to validate an `--approval` registration
+   — so retrying prepare at the original round and completing there recovers
+   `H` with no release. A later comment-backed round needs a new registration
+   and marked approval; a container-only one does not. Reserve release +
+   restart for a round that died, not an execution-mode change. The restarted
+   round's number (`<r>` after the requested restart, or `<r+1>`)
    becomes this round's number — repeat that value in `--complete`. Do not
    recover with `--complete inconclusive` instead: it increments the retry
    counter whose cap is the terminal not-covered state. If prepare refuses because the head it names is

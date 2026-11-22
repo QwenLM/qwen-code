@@ -751,18 +751,34 @@ describe('local container recipe pins', () => {
     ].map((match) => match[1]);
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
-    // The coordinate calls are a closure too: every trusted-path invocation
-    // must select container explicitly rather than relying on a mode default.
-    const coordinateCalls = [
-      ...skill.matchAll(
-        /node <trusted-clone>\/scripts\/verify-pr-prepare\.mjs([^`\n]*)/g,
-      ),
-    ].map((match) => match[1]);
-    expect(coordinateCalls.length).toBeGreaterThanOrEqual(3);
-    for (const args of coordinateCalls) {
-      expect(args).toContain('--execution container');
+    // The coordinate calls are an exact closed set. Substring matching would
+    // accept --execution host with a trailing "# --execution container".
+    const basic = ' <n> --repo <owner>/<repo> --execution container';
+    const logged =
+      ' <n> --repo <owner>/<repo> --execution container --context-out ~/.cache/qwen-verify/pr<n>/pr.json > ~/.cache/qwen-verify/pr<n>/prepare.log 2>&1 || { cat ~/.cache/qwen-verify/pr<n>/prepare.log >&2; exit 1; }';
+    const onlyContainerCoordinates = (document) => {
+      const calls = [
+        ...document.matchAll(
+          /node <trusted-clone>\/scripts\/verify-pr-prepare\.mjs([^`\n]*)/g,
+        ),
+      ].map((match) => match[1].replace(/\s+/g, ' ').trim());
+      const expected = [basic.trim(), basic.trim(), logged.trim()].sort();
+      return (
+        calls.length === 3 &&
+        calls.sort().every((call, index) => call === expected[index])
+      );
+    };
+    expect(onlyContainerCoordinates(skill)).toBe(true);
+    for (const hostile of [
+      '<n> --repo <owner>/<repo> --execution host --trust-pr-head --round 2 --reason why --context-out /tmp/pr.json # --execution container',
+      `${basic.trim()} # --execution container`,
+      `${basic.trim()} --trust-pr-head`,
+      `${logged.trim()} ; echo unexpected`,
+    ]) {
+      expect(
+        onlyContainerCoordinates(skill.replace(basic.trim(), hostile)),
+      ).toBe(false);
     }
-    expect(skill).not.toMatch(/--execution container[^\n]*--trust-pr-head/);
     expect(skill).not.toMatch(
       /node <pr-clone>\/scripts\/verify-pr-(prepare|check|model-proxy|guard|watch-state|watch-gate|credential-scan)/,
     );
@@ -932,6 +948,39 @@ describe('local container recipe pins', () => {
     );
     // Add-only extraction would keep a .qwen file the base deleted.
     expect(skill).toContain('rm -rf ~/.cache/qwen-verify/pr<n>/qwen-base');
+  });
+
+  it('keeps both Java recipes on the waived mode their separate battery can produce', () => {
+    const english = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../docs/design/2026-11-14-verify-pr-java-container-recipe.md',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    const chinese = readFileSync(
+      fileURLToPath(
+        new URL(
+          '../../docs/design/2026-11-14-verify-pr-java-container-recipe.zh-CN.md',
+          import.meta.url,
+        ),
+      ),
+      'utf8',
+    );
+    expect(english).toContain(
+      "`boundary.json` retains prepare's `waived` executionApproval",
+    );
+    expect(english).not.toContain('`boundary.json` records container mode');
+    expect(english).toContain(
+      'keeps the same registration while changing modes',
+    );
+    expect(chinese).toContain(
+      '`boundary.json` 保留 prepare 生成、与宿主 context 一致的 `waived` executionApproval',
+    );
+    expect(chinese).not.toContain('`boundary.json` 记录 container 模式');
+    expect(chinese).toContain('在切换模式时保留同一注册');
   });
 
   it('hashes the base-pinned skill copy in the publish footer', () => {

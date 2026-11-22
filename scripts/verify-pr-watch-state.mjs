@@ -29,6 +29,10 @@
  * number is only unique within its repo); an omitted --repo does not
  * disarm the guard once a repo is recorded.
  *
+ * `--start` allocates a fresh registration nonce; an in-flight retry keeps
+ * it, while completion, release or a fresh start consumes it. A comment
+ * approval must name that current registration, not just its head and round.
+ *
  * `--start` exits 3 when the head is already verified, or while any round
  * is in flight for the PR. Verified heads are remembered as a list, so a
  * redelivered head-change event for any verified head dedupes (the
@@ -236,14 +240,19 @@ export function sameCommit(a, b) {
   );
 }
 
-/** Matches the one normalized in-flight registration used by approvals. */
-export function hasInFlightRegistration(state, head, round) {
+/** Returns the one normalized in-flight registration used by approvals. */
+export function inFlightRegistration(state, head, round) {
   const flights = inFlightEntries(state);
-  return (
-    flights.length === 1 &&
+  return flights.length === 1 &&
     sameCommit(flights[0]?.head, head) &&
     (flights[0]?.round === null || flights[0]?.round === round)
-  );
+    ? flights[0]
+    : null;
+}
+
+/** Matches the one normalized in-flight registration used by approvals. */
+export function hasInFlightRegistration(state, head, round) {
+  return inFlightRegistration(state, head, round) !== null;
 }
 
 /** A list entry is usable only with a non-empty string head. */
@@ -656,6 +665,7 @@ export function startRound(
         {
           head,
           round,
+          registrationNonce: randomUUID(),
           artifactDir,
           startedAt,
           seq,
@@ -916,7 +926,10 @@ dropped head. Record the directory prepare printed at --complete
 (--artifact-dir <dir>). A completion that omits it inherits the in-flight
 marker's directory when the start carried one, else an earlier verdict's
 directory for the same head, else none — a non-inconclusive verdict that
-resolves to none warns that it has no evidence directory.
+resolves to none warns that it has no evidence directory. Each actual start
+allocates and prints registrationNonce; a comment approval must match the
+current registration's value. Completion or release consumes it, so a later
+start needs a fresh marked approval rather than replaying the old comment.
 --start exits 3 when the head is already verified or any round is in flight
 for the PR (one round per PR). Every verb exits 3 when the state belongs to
 another repo (a PR number is only unique within its repository); an omitted
@@ -1128,7 +1141,8 @@ function main(argv) {
         return 3;
       }
       process.stdout.write(
-        `verify-pr watch-state: PR ${args.pr} round ${args.round} in flight at ${result.path}\n`,
+        `verify-pr watch-state: PR ${args.pr} round ${args.round} in flight at ${result.path}\n` +
+          `verify-pr watch-state: registrationNonce ${result.state.inFlightHeads[0].registrationNonce} (a comment approval must carry it)\n`,
       );
     } else if (args.complete) {
       const result = completeRound(root, args);

@@ -35,7 +35,8 @@ code execution:
 2. A VM or host selection is accepted only with either an explicit local
    trust decision for the maintainer's own or same-repository PR, or a real
    maintainer approval comment plus an in-flight trusted watch registration
-   for another fork, bound to the current repository, PR, head and round.
+   for another fork, bound to the current repository, PR, head, round and
+   per-registration nonce. A new nonce is allocated by every actual --start.
 3. Prepare stores the resulting declaration in the existing host-held
    context snapshot and a copy in the artifact directory.
 4. The publication checker compares that copy with the host snapshot and
@@ -115,17 +116,26 @@ with an unused positive round and an absolute trusted state root outside the
 PR clone. Registration remains outside the PR clone and precedes PR-code
 execution. The round continues using the existing complete/release commands.
 Prepare requires one actual in-flight entry for that repo, PR, head and round,
-in a single-link
-regular state file whose fully canonicalized path is outside the PR clone,
-including every intermediate `.qwen/tmp` directory. A completed or released registration cannot authorize a
-new invocation. This distinguishes a retry while the original round is still
-in flight from replaying its comment as a later execution.
+in a single-link regular state file whose fully canonicalized path is outside
+the PR clone, including every intermediate `.qwen/tmp` directory. Each actual
+`--start` allocates and prints a `registrationNonce`; prefix matching against
+the registered head and lookup of this entry stay owned by watch-state. The
+nonce stays unchanged during that registration's in-flight prepare retries
+and execution-mode changes. Completion or release consumes that identity: a
+later `--start`, including one for the same head/round or in another trusted
+state root, gets a different nonce and cannot reuse its old comment.
+
+Legacy in-flight entries without a nonce remain readable by the existing
+complete/release commands, but cannot authorize a new comment approval. The
+operator must deliberately release and restart to allocate a nonce, then
+request a fresh marked approval; prepare never silently migrates an old
+comment into approval for the new registration.
 
 The maintainer, never the round, then posts a comment on the PR. The comment
 contains one exact marker and human-readable approval text:
 
 ```text
-<!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2} -->
+<!-- verify-pr-boundary-approval: {"mode":"host","head":"<40hex>","round":2,"registrationNonce":"<nonce from this --start>"} -->
 Approved host execution for this verify round.
 ```
 
@@ -135,8 +145,9 @@ authenticated `gh` before creating the artifact directory:
 - the permalink has the existing accepted shape and names this repository and
   PR;
 - the numbered issue comment exists and belongs to that PR;
-- exactly one marker parses as JSON and its `mode`, `head` and `round` equal
-  the requested execution, trusted `headRefOid` and positive round;
+- exactly one marker parses as JSON and its `mode`, `head`, `round` and
+  `registrationNonce` equal the requested execution, trusted `headRefOid`,
+  positive round and current normalized in-flight entry;
 - the comment author has `write`, `maintain`, or `admin` repository permission,
   established through the collaborators permission endpoint rather than the
   free-text `by` value;
@@ -156,9 +167,9 @@ host context bytes that `--context-out` already writes. The object contains
 `round`, and the authenticated permission. `source` is `local-trust` or
 `comment`; `basis` is `own-pr` or `same-repository` for local trust and
 `maintainer-comment` for a comment. A local decision has no `approval`
-permalink; a comment decision adds `approval` plus the observed comment id and
-body sha256. The declaration's `mode` remains the existing vocabulary: `vm`
-or `waived`.
+permalink; a comment decision adds `approval`, the observed comment id and
+body sha256, and its `registrationNonce`. The declaration's `mode` remains
+the existing vocabulary: `vm` or `waived`.
 
 The artifact's `boundary.json` carries the same object. Existing checker
 rules ignore additional declaration fields, so the declaration schema does
@@ -171,7 +182,12 @@ trusted `headRefOid`. It also revalidates `basis` against the snapshot's
 author and `isCrossRepository`. Unlike the older optional context-digest
 warning, VM and host publication requires `--context-sha256` and a byte
 match. The existing outside-clone, non-symlink and single-link rules apply
-too. The PR-tree copy of the snapshot is never authoritative.
+too. The PR-tree copy of the snapshot is never authoritative. Before any
+context or approval file is written, the time-stamped artifact directory must
+be a real directory, not a symbolic link or other file, whose fully canonical
+path is exactly the expected direct child of the real `tmp/` directory. An
+ordinary same-second retry still reuses that existing real directory; a
+redirect or non-directory exits 3 without writing into its target.
 
 Container and CI-lane behavior remains unchanged. Older host or VM artifacts
 without the host-held record are deliberately refused rather than presented
@@ -192,13 +208,22 @@ resolve the current head
 
 Waiting for approval does not move ahead of registration: the watch cursor
 has already delivered the head, so an interrupted wait must leave the
-recoverable in-flight marker. Prepare's existing release/retry rules apply.
+recoverable in-flight marker. When changing container to host/VM, keep the
+same registration through prepare, battery, publication and `--complete`.
+Do not release merely to change modes. Registration runs ahead even for
+local trust, whose prepare itself needs no public marker or `--state-root`.
+
 A fresh local-trust round without a marker uses round 1 because its explicit
 flag is a new trust decision on every invocation. A comment-backed round,
 including a fresh one, also registers: its first registration may use round
 1; subsequent executions need another unused positive round rather than
-silently replaying the old comment. No watch-state schema or next-round
-command is added.
+silently replaying the old comment. The in-flight state's only schema addition
+is `registrationNonce`; there is no parallel approval file or new next-round
+command. A transient prepare failure keeps the registration and nonce, so its
+retry can reuse its matching comment. An actual release followed by `--start`
+always allocates a new nonce: even the same head/round then needs a fresh
+comment marker. Non-comment container retries or later rounds need matching
+head/round registration but no comment approval.
 
 An unattended watch must not invent host approval. It selects a container or
 stops for the maintainer rather than persisting `--trust-pr-head` for unknown
@@ -244,10 +269,12 @@ publication.
   digest flag and containment implementation would duplicate an already
   audited trust path. `executionApproval` stays absent from container and CI
   snapshots; the shared coordinate addition is only `isCrossRepository`.
-- **Binding to head, round and real registration is mandatory.** PR matching
-  alone would allow a previous approval to be reused. Comment approval also
-  requires the in-flight watch marker so completion turns it into history
-  rather than a reusable host waiver.
+- **Binding to head, round and one registration identity is mandatory.** PR
+  and head/round matching alone would allow a completed approval to be reused
+  after a new `--start` in another trusted state root. The marked comment must
+  carry the exact nonce owned by the current in-flight registration; fresh
+  short-head starts use the same normalized lookup and legacy nonce-less
+  registrations fail closed instead of guessing an identity.
 - **Permission and local eligibility are verified remotely.** Repository
   permission is queried directly. Local trust additionally requires the
   current user to be the PR author or the PR not to be cross-repository;
@@ -268,9 +295,11 @@ publication.
 - Unit and CLI tests prove argument refusal precedes artifact creation and
   that no refusal writes a fresh authoritative approval snapshot.
 - Fake-`gh` witnesses cover valid own-fork and same-repository local trust,
-  valid comment-backed host and VM approvals, an ineligible other-fork local
-  attempt, nonexistent comment, wrong PR, duplicate or malformed markers,
-  wrong head or round, insufficient permission, and API failure.
+  valid local-trust VM with attestation, valid comment-backed host and VM
+  approvals, an ineligible other-fork local attempt, nonexistent comment,
+  wrong PR, duplicate or malformed markers, wrong head/round/nonce,
+  insufficient author permission (with an admin decoy), and API failure. The
+  fake projects requested PR fields and answers permission lookups by login.
 - A valid prepare creates the artifact declaration and host context with the
   same approval; the checker accepts their matching copies.
 - Editing or deleting the artifact declaration, substituting another approval,
@@ -279,11 +308,20 @@ publication.
 - Existing container fixture tests and the in-boundary gate suite remain
   green without an observed-marker requirement on host coordinate prepare.
 - Watch/re-verification registration still precedes an approval wait, and a
-  killed wait leaves the existing recoverable marker. A local-trust fresh
-  round is explicitly round 1; comment-backed fresh rounds are registered,
-  accept a retry while in flight, and refuse a replay after completion.
-  Old persisted prompts retain the container default instead of losing the
-  delivered head. A read-only approval file produces controlled exit 3.
+  killed wait leaves the existing recoverable marker. Start → mode fallback →
+  prepare → successful checker → complete works with no earlier verdict for
+  both local trust and comment approval. A matching in-flight retry keeps its
+  nonce. A completion in root A followed by a fresh same-head/round start in
+  root B refuses A's marker, accepts B's new marker, and has a source-removal
+  red control. Legacy nonce-less entries disclose and test their fresh-marker
+  migration. Old persisted prompts retain the container default instead of
+  losing the delivered head.
+- Frozen-clock real-CLI probes reject a symlinked or non-directory stamped
+  artifact parent with controlled exit 3 and no external context/approval
+  write. They also accept a normal same-second retry and turn red when the
+  canonical-parent guard is removed. A read-only approval file produces
+  controlled exit 3. Checker CLI tests accept genuine VM records for both
+  local trust and comment approval and reject no-context/no-digest forms.
 - The stale host context/digest files are removed before each local prepare;
   a host/VM checker invocation without a current digest fails closed.
 - The script fixture suite, formatting, lint, build and typecheck commands

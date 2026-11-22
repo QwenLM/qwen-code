@@ -25,6 +25,7 @@ import {
   completeRound,
   duplicateHead,
   hasInFlightRegistration,
+  inFlightRegistration,
   readState,
   releaseRound,
   sameCommit,
@@ -101,6 +102,42 @@ describe('startRound', () => {
       artifactDir: 'tmp/pr16866-verify-20261114-020119',
     });
     expect(state.startedAt).toBe(now.toISOString());
+    expect(state.inFlightHeads[0].registrationNonce).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it('keeps one nonce for an in-flight retry and rotates it after release', () => {
+    const root = makeRoot();
+    const started = run(root, START);
+    expect(started.status).toBe(0);
+    const nonce = readState(root, 16866).inFlightHeads[0].registrationNonce;
+    expect(started.stdout).toContain(`registrationNonce ${nonce}`);
+
+    const retry = startRound(root, {
+      pr: 16866,
+      head: HEAD.slice(0, 12),
+      round: 11,
+      artifactDir: 'retry',
+    });
+    expect(retry.duplicate).toBe('in-flight');
+    expect(
+      inFlightRegistration(readState(root, 16866), HEAD, 11),
+    ).toMatchObject({ registrationNonce: nonce });
+
+    expect(
+      releaseRound(root, { pr: 16866, head: HEAD, round: 11 }).released,
+    ).toBe(true);
+    const restarted = startRound(root, {
+      pr: 16866,
+      head: HEAD,
+      round: 11,
+      artifactDir: 'after-release',
+    });
+    expect(restarted.duplicate).toBeUndefined();
+    expect(readState(root, 16866).inFlightHeads[0].registrationNonce).not.toBe(
+      nonce,
+    );
   });
 
   it('preserves the previous verified heads and repo', () => {
@@ -1413,6 +1450,10 @@ describe('hasInFlightRegistration', () => {
     expect(
       hasInFlightRegistration({ inFlightHead: HEAD, round: 2 }, HEAD, 2),
     ).toBe(true);
+    expect(
+      inFlightRegistration({ inFlightHead: HEAD, round: 2 }, HEAD, 2)
+        .registrationNonce,
+    ).toBeUndefined();
     expect(
       hasInFlightRegistration(
         { inFlightHeads: [{ head: HEAD, round: 1 }] },

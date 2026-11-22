@@ -104,10 +104,10 @@ claim to mirror the gate's full trigger:
    offline battery runs in a different container than the seed/gate, so it
    cannot read the gate container's plaintext and cannot mint
    `mode:"container"`. Per the skill's step 5, when the battery cannot run in
-   the gate container, stop rather than declaring a waiver by hand: release
-   any in-flight registration and re-run prepare with `--execution host` and
-   its approval arguments before any seed, model turn or battery executes PR
-   code. A gate-container attestation is not a substitute for the battery's
+   the gate container, stop rather than declaring a waiver by hand: keep the
+   current head/round in-flight registration while changing modes and re-run
+   prepare with `--execution host` and its applicable approval arguments before
+   any seed, model turn or battery executes PR code. A gate-container attestation is not a substitute for the battery's
    own boundary (R3-6).
 2. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
@@ -242,7 +242,9 @@ claim to mirror the gate's full trigger:
    turn or battery executes PR code, run prepare with `--execution host`,
    `--round <n>`, `--reason <text>`, `--context-out <host snapshot>` and the
    applicable explicit approval path; prepare authors `boundary.json`. Never
-   hand-write a waiver after the gate or battery.
+   hand-write a waiver after the gate or battery. A watched re-verification
+   keeps the same registration while changing modes; a comment approval names
+   that registration's nonce, and the same registration finishes at --complete.
 
    The prepare `--reason` names **every** container the round uses — including
    the seed container, the only one with outbound egress and the one in which
@@ -349,8 +351,10 @@ claim to mirror the gate's full trigger:
 ## Validation plan
 
 - One live Java-heavy round (a `managed-agent-server` PR) runs compile +
-  battery + at least one mutation inside the recipe; the gate exits 0 and
-  `boundary.json` records container mode.
+  battery + at least one mutation inside the recipe; the seed-container gate
+  exits 0 and `boundary.json` retains prepare's `waived` executionApproval,
+  which matches the host-held context. The separate offline battery makes no
+  `mode:"container"` claim.
 - A/B parity: the same battery's counts match a baseline run of the same
   head (the recipe changes the boundary, not the measurements). A host
   baseline is itself a `waived` round with the maintainer's approval recorded

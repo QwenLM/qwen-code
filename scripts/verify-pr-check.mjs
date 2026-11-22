@@ -495,12 +495,12 @@ export function containerNonceErrors(boundaryText, gateText, roundDir) {
     if (found) return [];
     if (bounded) {
       return [
-        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if execution must move to a host or VM, stop, release any in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
+        'the nonce log scan hit its resource bound (64 MiB total / 20000 entries) before reading a matching container-nonce line: refusing mode:"container" — the marker may exist beyond the bound; reduce the round\'s non-evidence log volume or echo the nonce into an early log; if execution must move to a host or VM, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
       ];
     }
   }
   return [
-    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if execution must move to a host or VM, stop, release any in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
+    'round logs carry no container-nonce line whose sha256 matches boundary-gate.json nonceSha256: refusing mode:"container" — the battery must echo the container-local nonce ($HOME/.qwen-verify-nonce) into its logs; if execution must move to a host or VM, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments BEFORE the battery; never hand-write the declaration',
   ];
 }
 
@@ -545,7 +545,7 @@ export function checkBoundary(
   if (text === null || text === undefined || text.trim() === '') {
     return {
       errors: [
-        'boundary.json is missing: every round declares where the untrusted PR code ran — for a container, write {"mode":"container","detail":…} only after the isolation gate passes; for host/VM execution, stop, release any in-flight registration and re-run prepare with --execution host|vm and its approval arguments before the battery instead of hand-writing a declaration',
+        'boundary.json is missing: every round declares where the untrusted PR code ran — for a container, write {"mode":"container","detail":…} only after the isolation gate passes; for host/VM execution, keep the current head/round in-flight registration and re-run prepare with --execution host|vm and its approval arguments before the battery instead of hand-writing a declaration',
       ],
     };
   }
@@ -719,10 +719,13 @@ export function executionApprovalErrors(
       !APPROVAL_PERMALINK.test(approval.approval ?? '') ||
       !Number.isSafeInteger(approval.comment?.id) ||
       approval.comment.id <= 0 ||
-      !/^[0-9a-f]{64}$/.test(approval.comment?.bodySha256 ?? '')
+      !/^[0-9a-f]{64}$/.test(approval.comment?.bodySha256 ?? '') ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        approval.registrationNonce ?? '',
+      )
     ) {
       return [
-        'comment executionApproval needs basis maintainer-comment, an approval permalink, numeric comment.id and 64-hex comment.bodySha256',
+        'comment executionApproval needs basis maintainer-comment, an approval permalink, numeric comment.id, 64-hex comment.bodySha256 and its registrationNonce',
       ];
     }
   } else {

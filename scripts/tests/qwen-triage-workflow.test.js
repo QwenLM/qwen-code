@@ -6839,13 +6839,13 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(manualSlice).toContain(
       'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H> --round <r> --repo <owner>/<repo>`',
     );
-    // R1-11: the manual ladder has the same same-round approval reuse and
-    // fresh-marker requirement for r+1 as the watch prompt.
+    // R1-11: a released registration gets a new nonce, including at the same
+    // round; comment approval and container-only recovery stay distinct.
     expect(manualSlice).toContain(
       'After the release, restart at the SAME `<r>` (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>`) and retry prepare',
     );
     expect(manualSlice).toContain(
-      'To restart at `<r+1>` instead, first ask the maintainer for a fresh comment marker at `<r+1>` when using `--approval`',
+      'To restart comment approval at `<r+1>` instead, register it and ask the maintainer for a fresh comment marker at `<r+1>` as well',
     );
     expect(manualSlice).toContain(
       'prepare reads the watch state only to validate an `--approval` registration',
@@ -6854,7 +6854,7 @@ describe('qwen-triage verify hardening round 2', () => {
       'retrying prepare at the original round and completing there recovers `H` with no release',
     );
     expect(manualSlice).toContain(
-      "The restarted round's number (`<r>` for the same approval, or `<r+1>` with a fresh one) becomes this round's number — repeat that value in `--complete`",
+      "The restarted round's number (`<r>` after the requested restart, or `<r+1>`) becomes this round's number — repeat that value in `--complete`",
     );
     // R3-1: the manual inconclusive-recovery prohibition (colon variant).
     expect(manualSlice).toContain(
@@ -7104,13 +7104,13 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       'If prepare fails after `--start`, recover with `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> --round <r> --repo <owner>/<repo>`',
     );
-    // R1-11: a release/restart keeps a comment approval only when the new
-    // registration uses the SAME round; r+1 needs a fresh marker as well.
+    // R1-11: after release, even a same-round comment marker must name the
+    // new registration; a non-comment container restart asks for no marker.
     expect(flat).toContain(
       'then start the head again at the SAME round (`node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>`) and retry prepare',
     );
     expect(promptSlice).toContain(
-      'To restart at `<r+1>` instead, ask the maintainer for a fresh approval marker at `<r+1>` before retrying prepare',
+      'To restart comment approval at `<r+1>` instead, register it and ask for a fresh marker at `<r+1>` too',
     );
     // Prepare reads watch state only for --approval identity validation.
     expect(promptSlice).toContain(
@@ -7124,14 +7124,19 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(promptSlice).toContain(
       'A release alone leaves the head unregistered',
     );
-    // Completion repeats the restart's actual round, whether the approval was
-    // reused at r or re-issued at r+1.
+    // Completion repeats the restart's actual round; after release, the
+    // marker is re-issued for that new registration at r or r+1.
     expect(promptSlice).toContain(
-      "The restarted round's number (`<r>` for the same approval, or `<r+1>` with a fresh one) becomes this round's number — repeat that value in `--complete`",
+      "The restarted round's number (`<r>` after the requested restart, or `<r+1>`) becomes this round's number — repeat that value in `--complete`",
     );
-    expect(flat.match(/A comment-backed approval is bound to/g)).toHaveLength(
-      2,
+    expect(flat).toContain(
+      'A non-comment container restart needs no marked approval',
     );
+    expect(flat).toContain('Do not release it merely to change modes');
+    expect(flat).not.toContain('release any in-flight registration');
+    expect(
+      flat.match(/release followed by `--start` creates a new/gi),
+    ).toHaveLength(2);
     expect(flat.match(/prepare reads the watch state only to/g)).toHaveLength(
       2,
     );

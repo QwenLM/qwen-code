@@ -68,6 +68,7 @@ function commentApproval(overrides = {}) {
     },
     head: HEAD,
     round: 1,
+    registrationNonce: 'a2a2a24d-91c8-4c4b-9f87-2f62968a105a',
     reason: 'Java battery needs the host JDK',
     ...overrides,
   };
@@ -1122,6 +1123,13 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       encoding: 'utf8',
       env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
     });
+  const hostFile = (name, text) => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-host-'));
+    tmpDirs.push(root);
+    const path = join(root, name);
+    writeFileSync(path, text);
+    return path;
+  };
 
   it('downgrades an absent declaration to a warning under QWEN_VERIFY_CONTEXT', () => {
     const dir = makeArtifactDir(validFiles({ boundary: undefined }), [
@@ -1522,29 +1530,120 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     );
   });
 
-  // The artifact directory is PR-writable: its own context.json supplies
-  // neither the coordinates nor a substitute preflight approval.
+  // The artifact directory is PR-writable: even a fully coherent approval in
+  // both artifact files supplies no trusted coordinates or preflight approval.
   it('refuses a waiver whose only approval is inside artifact context.json', () => {
+    const approval = commentApproval();
     const dir = makeArtifactDir(
       validFiles({
-        boundary: JSON.stringify({
-          mode: 'waived',
-          by: 'maintainer',
-          approval: 'https://github.com/torvalds/linux/issues/1#issuecomment-1',
-          reason: 'why',
-        }),
+        boundary: JSON.stringify(approval),
         report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
       }),
       ['01-ab-cells.png'],
     );
     writeFileSync(
       join(dir, 'context.json'),
-      JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
+      JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 17185,
+        headRefOid: HEAD,
+        executionApproval: approval,
+      }),
     );
     const result = run(dir);
     expect(result.status).toBe(1);
     expect(result.stdout).toMatch(/needs the host-held --context snapshot/);
     expect(result.stdout).not.toMatch(/approval permalink cites/);
+
+    // Supplying a real host file and exact digest does not help when the trust
+    // record itself is removed from that file.
+    const untrustedText = JSON.stringify({
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      headRefOid: HEAD,
+    });
+    const hostSnapshot = hostFile('host-without-approval.json', untrustedText);
+    const removingTrust = spawnSync(
+      process.execPath,
+      [
+        SCRIPT,
+        '--context',
+        hostSnapshot,
+        '--context-sha256',
+        createHash('sha256').update(untrustedText).digest('hex'),
+        dir,
+      ],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      },
+    );
+    expect(removingTrust.status).toBe(1);
+    expect(removingTrust.stdout).toMatch(/has no executionApproval object/);
+  });
+
+  it('accepts VM only with genuine matching host records and refuses both missing authority forms', () => {
+    for (const approval of [
+      commentApproval({
+        mode: 'vm',
+        attestation: 'nothing mounted, no host credentials',
+      }),
+      localTrustApproval({
+        mode: 'vm',
+        attestation: 'nothing mounted, no host credentials',
+      }),
+    ]) {
+      const dir = makeArtifactDir(
+        validFiles({
+          boundary: JSON.stringify(approval),
+          boundaryGate: undefined,
+          report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** attested VM, no host mounts or credentials.\n`,
+        }),
+        ['01-ab-cells.png'],
+      );
+      const noContext = run(dir);
+      expect(noContext.status, approval.source).toBe(1);
+      expect(noContext.stdout).toMatch(/needs the host-held --context/);
+      const trustedText = JSON.stringify({
+        repo: 'QwenLM/qwen-code',
+        pr: 17185,
+        headRefOid: HEAD,
+        author: { login: 'maintainer' },
+        isCrossRepository: true,
+        executionApproval: approval,
+      });
+      const hostSnapshot = hostFile(
+        `host-${approval.source}.json`,
+        trustedText,
+      );
+      const noDigest = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', hostSnapshot, dir],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+        },
+      );
+      expect(noDigest.status, approval.source).toBe(1);
+      expect(noDigest.stdout).toMatch(/needs --context-sha256/);
+      const accepted = spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--context',
+          hostSnapshot,
+          '--context-sha256',
+          createHash('sha256').update(trustedText).digest('hex'),
+          dir,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+        },
+      );
+      expect(accepted.status, `${approval.source}: ${accepted.stdout}`).toBe(0);
+      expect(accepted.stdout).toContain('ok: verdict=merge-ready');
+    }
   });
 });
 
@@ -1828,6 +1927,7 @@ describe('executionApproval host binding', () => {
         comment: { id: 0, bodySha256: 'a'.repeat(64) },
       }),
       commentApproval({ comment: { id: 1234567890, bodySha256: 'bad' } }),
+      commentApproval({ registrationNonce: 'not-a-registration' }),
     ]) {
       expect(
         executionApprovalErrors(JSON.stringify(bad), snapshot(bad), verified),
@@ -2928,7 +3028,10 @@ describe('containerNonceErrors (R16-1 / D17-1 / D17-2)', () => {
   it('names prepare-authored host/VM approval before the battery (D17-2)', () => {
     const dir = dirWithLog(null);
     const message = containerNonceErrors(boundary, gateWith(), dir).join('\n');
-    expect(message).toMatch(/release any in-flight registration/);
+    expect(message).toMatch(
+      /keep the current head\/round in-flight registration/,
+    );
+    expect(message).not.toMatch(/release any in-flight registration/);
     expect(message).toMatch(/--execution host\|vm/);
     expect(message).toMatch(/BEFORE the battery/);
     expect(message).toMatch(/never hand-write the declaration/);

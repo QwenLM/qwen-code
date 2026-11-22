@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -43,6 +43,9 @@ const SCRIPT = fileURLToPath(
 );
 const WATCH_STATE_SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-watch-state.mjs', import.meta.url),
+);
+const CHECK_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
 );
 const OID = (char) => char.repeat(40);
 const REPO = 'QwenLM/qwen-code';
@@ -100,7 +103,8 @@ function makeRepo() {
  * outside the clone: prepare refuses untracked files, and a harness planted
  * inside the tree under test would trip the very check it exercises. `gh api`
  * records its arguments and answers with the review pages, failing the way
- * gh does when there are none.
+ * gh does when there are none. `pr view` records and projects requested fields;
+ * permission responses are keyed by login and reject unexpected accounts.
  */
 function installFakeGh(snapshot, reviewPages, fixtures = {}) {
   const dir = makeTmpDir();
@@ -111,11 +115,15 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
   const reviewPath = join(dir, 'review.json');
   if (reviewPages) writeFileSync(reviewPath, JSON.stringify(reviewPages));
   const paths = {};
-  for (const key of ['user', 'permission', 'comment']) {
+  for (const key of ['user', 'comment']) {
     paths[key] = join(dir, `${key}.json`);
     if (fixtures[key]) {
       writeFileSync(paths[key], JSON.stringify(fixtures[key]));
     }
+  }
+  paths.permissions = join(dir, 'permissions.json');
+  if (fixtures.permissions) {
+    writeFileSync(paths.permissions, JSON.stringify(fixtures.permissions));
   }
   const gh = join(bin, 'gh');
   const logger = join(dir, 'log-args.mjs');
@@ -123,10 +131,21 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
     logger,
     "import { appendFileSync } from 'node:fs';\nappendFileSync(process.env.FAKE_GH_API_ARGS, JSON.stringify(process.argv.slice(2)) + '\\n');\n",
   );
+  const prView = join(dir, 'pr-view.mjs');
+  writeFileSync(
+    prView,
+    "import { appendFileSync, readFileSync } from 'node:fs';\nconst args = process.argv.slice(2);\nappendFileSync(process.env.FAKE_GH_PR_ARGS, JSON.stringify(args) + '\\n');\nconst snapshot = JSON.parse(readFileSync(process.env.FAKE_GH_SNAPSHOT, 'utf8'));\nconst fields = (args[args.indexOf('--json') + 1] ?? '').split(',');\nprocess.stdout.write(JSON.stringify(Object.fromEntries(fields.filter((field) => field in snapshot).map((field) => [field, snapshot[field]]))));\n",
+  );
+  const permission = join(dir, 'permission.mjs');
+  writeFileSync(
+    permission,
+    "import { existsSync, readFileSync } from 'node:fs';\nconst match = /\\/collaborators\\/([^/]+)\\/permission$/.exec(process.argv[3]);\nconst users = existsSync(process.env.FAKE_GH_PERMISSIONS) ? JSON.parse(readFileSync(process.env.FAKE_GH_PERMISSIONS, 'utf8')) : {};\nconst login = decodeURIComponent(match?.[1] ?? '');\nif (!(login in users)) { process.stderr.write(`unexpected permission lookup for ${login}\\n`); process.exit(1); }\nprocess.stdout.write(JSON.stringify(users[login]));\n",
+  );
   writeFileSync(
     gh,
     [
       '#!/bin/sh',
+      'if [ "$1" = pr ] && [ "$2" = view ]; then exec node "$FAKE_GH_PR_VIEW" "$@"; fi',
       'if [ "$1" = api ]; then',
       '  node "$FAKE_GH_LOG_ARGS" "$@"',
       '  if [ "$2" = user ] && [ -f "$FAKE_GH_USER" ]; then exec cat "$FAKE_GH_USER"; fi',
@@ -134,13 +153,13 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
       '  case "$2" in',
       '    */issues/comments/*)',
       '      [ -f "$FAKE_GH_COMMENT" ] && exec cat "$FAKE_GH_COMMENT" ;;',
-      '    */collaborators/*/permission)',
-      '      [ -f "$FAKE_GH_PERMISSION" ] && exec cat "$FAKE_GH_PERMISSION" ;;',
+      '    */collaborators/*/permission) exec node "$FAKE_GH_PERMISSION" "$@" ;;',
       '  esac',
       '  echo "HTTP 502: Bad Gateway" >&2',
       '  exit 1',
       'fi',
-      'cat "$FAKE_GH_SNAPSHOT"',
+      'echo "unexpected gh invocation: $*" >&2',
+      'exit 1',
       '',
     ].join('\n'),
   );
@@ -151,10 +170,13 @@ function installFakeGh(snapshot, reviewPages, fixtures = {}) {
     FAKE_GH_SNAPSHOT: snapshotPath,
     FAKE_GH_REVIEW: reviewPath,
     FAKE_GH_USER: paths.user,
-    FAKE_GH_PERMISSION: paths.permission,
+    FAKE_GH_PERMISSIONS: paths.permissions,
     FAKE_GH_COMMENT: paths.comment,
     FAKE_GH_LOG_ARGS: logger,
+    FAKE_GH_PR_VIEW: prView,
+    FAKE_GH_PERMISSION: permission,
     FAKE_GH_API_ARGS: join(dir, 'api-args'),
+    FAKE_GH_PR_ARGS: join(dir, 'pr-args'),
   };
 }
 
@@ -896,8 +918,34 @@ describe.skipIf(process.platform === 'win32')(
   () => {
     const permalink =
       'https://github.com/QwenLM/qwen-code/pull/42#issuecomment-900001';
-    const marker = ({ mode = 'host', head, round = 2 }) =>
-      `<!-- verify-pr-boundary-approval: ${JSON.stringify({ mode, head, round })} -->\nApproved execution for this verify round.`;
+    const marker = ({ mode = 'host', head, round = 2, registrationNonce }) =>
+      `<!-- verify-pr-boundary-approval: ${JSON.stringify({ mode, head, round, registrationNonce })} -->\nApproved execution for this verify round.`;
+    const registrationNonceFor = (stateRoot) =>
+      JSON.parse(
+        readFileSync(
+          join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+          'utf8',
+        ),
+      ).inFlightHeads[0].registrationNonce;
+    const watchState = (stateRoot, head, round, verb = '--start') =>
+      spawnSync(
+        process.execPath,
+        [
+          WATCH_STATE_SCRIPT,
+          '42',
+          verb,
+          '--head',
+          head,
+          '--round',
+          String(round),
+          ...(verb === '--complete' ? ['--verdict', 'merge-ready'] : []),
+          '--repo',
+          REPO,
+          '--state-root',
+          stateRoot,
+        ],
+        { encoding: 'utf8', env: gitEnv },
+      );
     const command = ({
       execution = 'host',
       trust = true,
@@ -928,6 +976,7 @@ describe.skipIf(process.platform === 'win32')(
         expect(started.status).toBe(0);
       }
       return {
+        registrationNonce: trust ? null : registrationNonceFor(stateRoot),
         artifactArgs: [
           '42',
           '--repo',
@@ -953,6 +1002,38 @@ describe.skipIf(process.platform === 'win32')(
     };
     const artifactsFrom = (result) =>
       result.stdout.match(/artifacts {2}(\S+)/)?.[1];
+    const checkPrepared = (result, head, artifactArgs) => {
+      const artifacts = artifactsFrom(result);
+      const declaration = JSON.parse(
+        readFileSync(join(artifacts, 'boundary.json'), 'utf8'),
+      );
+      writeFileSync(
+        join(artifacts, 'report.md'),
+        `merge-ready · 1 passed · 0 failed · 1 total · ${head}\n\n## Methodology\n\n**Boundary.** ${declaration.mode === 'vm' ? 'attested VM, no host mounts or credentials' : 'host, maintainer-approved waiver'}.\n`,
+      );
+      writeFileSync(join(artifacts, 'verdict.txt'), 'merge-ready\n');
+      writeFileSync(
+        join(artifacts, 'assertions.json'),
+        JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+      );
+      writeFileSync(join(artifacts, 'evidence', '01-ab-cells.png'), 'png');
+      const contextPath =
+        artifactArgs[artifactArgs.indexOf('--context-out') + 1];
+      const runCheck = (args) =>
+        spawnSync(process.execPath, [CHECK_SCRIPT, ...args, artifacts], {
+          env: { ...gitEnv, QWEN_VERIFY_CONTEXT: '' },
+          encoding: 'utf8',
+        });
+      const checked = runCheck([
+        '--context',
+        contextPath,
+        '--context-sha256',
+        createHash('sha256').update(readFileSync(contextPath)).digest('hex'),
+      ]);
+      const noContext = runCheck([]);
+      const noDigest = runCheck(['--context', contextPath]);
+      return { artifacts, checked, noContext, noDigest };
+    };
 
     it('accepts explicit local trust for an own fork and a same-repository PR', () => {
       for (const fixture of [
@@ -967,7 +1048,7 @@ describe.skipIf(process.platform === 'win32')(
         };
         const env = installFakeGh(snapshot, reviewPages(), {
           user: { login: 'maintainer' },
-          permission: { permission: 'maintain' },
+          permissions: { maintainer: { permission: 'maintain' } },
         });
         const { artifactArgs } = command({ round: 1 });
         const result = runPrepare(dir, artifactArgs, env);
@@ -997,8 +1078,59 @@ describe.skipIf(process.platform === 'win32')(
         expect(result.stdout).not.toContain('--require-isolation');
         const calls = ghApiArgs(env);
         expect(calls).toContain('"api","user"');
+        expect(calls).toContain('/collaborators/maintainer/permission');
         expect(calls).not.toContain('/issues/comments/');
+        const prCall = JSON.parse(
+          readFileSync(env.FAKE_GH_PR_ARGS, 'utf8').trim().split('\n')[0],
+        );
+        expect(prCall[prCall.indexOf('--json') + 1].split(',')).toContain(
+          'isCrossRepository',
+        );
       }
+    });
+
+    it('preserves VM attestation on the local-trust approval path', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permissions: { maintainer: { permission: 'maintain' } },
+        },
+      );
+      const { artifactArgs } = command({ execution: 'vm', round: 1 });
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(0);
+      const declaration = JSON.parse(
+        readFileSync(join(artifactsFrom(result), 'boundary.json'), 'utf8'),
+      );
+      expect(declaration).toMatchObject({
+        mode: 'vm',
+        source: 'local-trust',
+        basis: 'own-pr',
+        attestation: 'nothing mounted, no host credentials',
+        head,
+        round: 1,
+      });
+      expect(declaration).not.toHaveProperty('registrationNonce');
+      const contextPath =
+        artifactArgs[artifactArgs.indexOf('--context-out') + 1];
+      expect(
+        JSON.parse(readFileSync(contextPath, 'utf8')).executionApproval,
+      ).toEqual(declaration);
+      const { checked, noContext, noDigest } = checkPrepared(
+        result,
+        head,
+        artifactArgs,
+      );
+      expect(checked.status, checked.stdout).toBe(0);
+      expect(noContext.status).toBe(1);
+      expect(noDigest.status).toBe(1);
     });
 
     it('refuses local trust for another fork before creating artifacts', () => {
@@ -1012,7 +1144,7 @@ describe.skipIf(process.platform === 'win32')(
         reviewPages(),
         {
           user: { login: 'maintainer' },
-          permission: { permission: 'admin' },
+          permissions: { maintainer: { permission: 'admin' } },
         },
       );
       const { artifactArgs } = command();
@@ -1035,7 +1167,7 @@ describe.skipIf(process.platform === 'win32')(
         reviewPages(),
         {
           user: { login: 'maintainer' },
-          permission: { permission: 'read' },
+          permissions: { maintainer: { permission: 'read' } },
         },
       );
       const { artifactArgs, hostDir } = command();
@@ -1048,7 +1180,13 @@ describe.skipIf(process.platform === 'win32')(
 
     it('accepts a marked maintainer-comment approval for VM execution', () => {
       const { dir, base, head } = makeRepo();
-      const body = marker({ mode: 'vm', head });
+      const { artifactArgs, registrationNonce } = command({
+        execution: 'vm',
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      const body = marker({ mode: 'vm', head, registrationNonce });
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
         comment: {
           id: 900001,
@@ -1056,13 +1194,7 @@ describe.skipIf(process.platform === 'win32')(
           body,
           user: { login: 'approver' },
         },
-        permission: { permission: 'admin' },
-      });
-      const { artifactArgs } = command({
-        execution: 'vm',
-        trust: false,
-        approval: permalink,
-        head,
+        permissions: { approver: { permission: 'admin' } },
       });
       const result = runPrepare(dir, artifactArgs, env);
       expect(result.status).toBe(0);
@@ -1083,17 +1215,31 @@ describe.skipIf(process.platform === 'win32')(
         attestation: 'nothing mounted, no host credentials',
         head,
         round: 2,
+        registrationNonce,
         reason: 'fixture needs a host runtime',
       });
-      // The same in-flight head/round may retry prepare; only a completed
-      // cycle needs a different registered round.
+      const { checked, noContext, noDigest } = checkPrepared(
+        result,
+        head,
+        artifactArgs,
+      );
+      expect(checked.status, checked.stdout).toBe(0);
+      expect(noContext.status).toBe(1);
+      expect(noDigest.status).toBe(1);
+      // A retry of the same in-flight head/round keeps its nonce. An actual
+      // release instead needs a new registration and fresh marked approval.
       const retry = runPrepare(dir, artifactArgs, env);
       expect(retry.status).toBe(0);
     });
 
     it('accepts a marked maintainer-comment approval for host execution', () => {
       const { dir, base, head } = makeRepo();
-      const body = marker({ head });
+      const { artifactArgs, registrationNonce } = command({
+        trust: false,
+        approval: permalink,
+        head,
+      });
+      const body = marker({ head, registrationNonce });
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
         comment: {
           id: 900001,
@@ -1101,12 +1247,7 @@ describe.skipIf(process.platform === 'win32')(
           body,
           user: { login: 'approver' },
         },
-        permission: { permission: 'write' },
-      });
-      const { artifactArgs } = command({
-        trust: false,
-        approval: permalink,
-        head,
+        permissions: { approver: { permission: 'write' } },
       });
       const result = runPrepare(dir, artifactArgs, env);
       expect(result.status).toBe(0);
@@ -1134,106 +1275,132 @@ describe.skipIf(process.platform === 'win32')(
       expect(
         JSON.parse(readFileSync(contextPath, 'utf8')).executionApproval,
       ).toEqual(declaration);
+      expect(ghApiArgs(env)).toContain('/collaborators/approver/permission');
     });
 
-    it.each([
-      { registration: 'short', description: 'short-head' },
-      { registration: 'legacy', description: 'legacy' },
-    ])(
-      'accepts $description in-flight registration through the owner semantics',
-      ({ registration }) => {
-        const { dir, base, head } = makeRepo();
-        const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
-          comment: {
-            id: 900001,
-            issue_url:
-              'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
-            body: marker({ head }),
-            user: { login: 'approver' },
-          },
-          permission: { permission: 'admin' },
-        });
-        const { artifactArgs, stateRoot } = command({
-          trust: false,
-          approval: permalink,
-          head: registration === 'short' ? head.slice(0, 12) : head,
-        });
-        if (registration === 'legacy') {
-          writeFileSync(
-            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
-            JSON.stringify({
-              pr: 42,
-              repo: REPO,
-              inFlightHead: head,
-              round: 2,
-            }),
-          );
-        }
-        const result = runPrepare(dir, artifactArgs, env);
-        expect(result.status, registration).toBe(0);
-        const declaration = JSON.parse(
-          readFileSync(join(artifactsFrom(result), 'boundary.json'), 'utf8'),
-        );
-        expect(declaration.head).toBe(head);
-        expect(declaration.round).toBe(2);
-      },
-    );
-
-    it('reuses a comment approval only after a same-round release and restart', () => {
+    it('accepts a short-head registration through the same normalized owner', () => {
       const { dir, base, head } = makeRepo();
+      const { artifactArgs, stateRoot, registrationNonce } = command({
+        trust: false,
+        approval: permalink,
+        head: head.slice(0, 12),
+      });
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
         comment: {
           id: 900001,
           issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
-          body: marker({ head }),
+          body: marker({ head, registrationNonce }),
           user: { login: 'approver' },
         },
-        permission: { permission: 'admin' },
+        permissions: { approver: { permission: 'admin' } },
       });
-      const { artifactArgs, stateRoot } = command({
+      const result = runPrepare(dir, artifactArgs, env);
+      expect(result.status).toBe(0);
+      const declaration = JSON.parse(
+        readFileSync(join(artifactsFrom(result), 'boundary.json'), 'utf8'),
+      );
+      expect(declaration).toMatchObject({
+        head,
+        round: 2,
+        registrationNonce: registrationNonceFor(stateRoot),
+      });
+    });
+
+    it('requires an explicit nonce migration for a legacy in-flight registration', () => {
+      const { dir, base, head } = makeRepo();
+      const { artifactArgs, stateRoot, hostDir } = command({
         trust: false,
         approval: permalink,
         head,
       });
-      expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
-      const restart = (releaseRound, startRound = releaseRound) => {
-        for (const [verb, round] of [
-          ['--release', releaseRound],
-          ['--start', startRound],
-        ]) {
-          const result = spawnSync(
-            process.execPath,
-            [
-              WATCH_STATE_SCRIPT,
-              '42',
-              verb,
-              '--head',
-              head,
-              '--round',
-              String(round),
-              '--repo',
-              REPO,
-              '--state-root',
-              stateRoot,
-            ],
-            { encoding: 'utf8', env: gitEnv },
-          );
-          expect(result.status, `${verb} round ${round}`).toBe(0);
-        }
-      };
-      restart(2);
-      expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
+      writeFileSync(
+        join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+        JSON.stringify({ pr: 42, repo: REPO, inFlightHead: head, round: 2 }),
+      );
+      const comment = (body) => ({
+        id: 900001,
+        issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+        body,
+        user: { login: 'approver' },
+      });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: comment(marker({ head })),
+        permissions: { approver: { permission: 'admin' } },
+      });
+      const legacy = runPrepare(dir, artifactArgs, env);
+      expect(legacy.status).toBe(3);
+      expect(legacy.stderr).toMatch(/legacy in-flight registration/);
+      expect(existsSync(join(dir, 'tmp'))).toBe(false);
+      expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
 
-      restart(2, 3);
-      artifactArgs[artifactArgs.indexOf('--round') + 1] = '3';
-      const oldApproval = runPrepare(dir, artifactArgs, env);
-      expect(oldApproval.status).toBe(3);
-      expect(oldApproval.stderr).toMatch(/mode, head and round matching/);
+      expect(watchState(stateRoot, head, 2, '--release').status).toBe(0);
+      expect(watchState(stateRoot, head, 2).status).toBe(0);
+      const registrationNonce = registrationNonceFor(stateRoot);
+      writeFileSync(
+        env.FAKE_GH_COMMENT,
+        JSON.stringify(comment(marker({ head, registrationNonce }))),
+      );
+      expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
+    });
+
+    it('refuses a completed approval replay across state roots, then accepts the new registration marker', () => {
+      const { dir, base, head } = makeRepo();
+      const a = command({ trust: false, approval: permalink, head, round: 1 });
+      const bodyA = marker({
+        head,
+        round: 1,
+        registrationNonce: a.registrationNonce,
+      });
+      const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
+        comment: {
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body: bodyA,
+          user: { login: 'approver' },
+        },
+        permissions: { approver: { permission: 'admin' } },
+      });
+      expect(runPrepare(dir, a.artifactArgs, env).status).toBe(0);
+      expect(watchState(a.stateRoot, head, 1, '--complete').status).toBe(0);
+
+      const b = command({ trust: false, approval: permalink, head, round: 1 });
+      expect(b.registrationNonce).not.toBe(a.registrationNonce);
+      const before = readdirSync(join(dir, 'tmp'));
+      const replay = runPrepare(dir, b.artifactArgs, env);
+      expect(replay.status).toBe(3);
+      expect(replay.stderr).toMatch(/registrationNonce/);
+      expect(readdirSync(join(dir, 'tmp'))).toEqual(before);
+      expect(existsSync(join(b.hostDir, 'pr.json'))).toBe(false);
+
+      writeFileSync(
+        env.FAKE_GH_COMMENT,
+        JSON.stringify({
+          id: 900001,
+          issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+          body: marker({
+            head,
+            round: 1,
+            registrationNonce: b.registrationNonce,
+          }),
+          user: { login: 'approver' },
+        }),
+      );
+      const fresh = runPrepare(dir, b.artifactArgs, env);
+      expect(fresh.status).toBe(0);
+      expect(
+        JSON.parse(readFileSync(join(artifactsFrom(fresh), 'boundary.json'))),
+      ).toMatchObject({ registrationNonce: b.registrationNonce, round: 1 });
     });
 
     it('refuses a comment approval replay after its registered round completes', () => {
       const { dir, base, head } = makeRepo();
-      const body = marker({ head, round: 1 });
+      const { artifactArgs, stateRoot, registrationNonce } = command({
+        trust: false,
+        approval: permalink,
+        head,
+        round: 1,
+      });
+      const body = marker({ head, round: 1, registrationNonce });
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
         comment: {
           id: 900001,
@@ -1241,34 +1408,10 @@ describe.skipIf(process.platform === 'win32')(
           body,
           user: { login: 'approver' },
         },
-        permission: { permission: 'admin' },
-      });
-      const { artifactArgs, stateRoot } = command({
-        trust: false,
-        approval: permalink,
-        head,
-        round: 1,
+        permissions: { approver: { permission: 'admin' } },
       });
       expect(runPrepare(dir, artifactArgs, env).status).toBe(0);
-      const completed = spawnSync(
-        process.execPath,
-        [
-          WATCH_STATE_SCRIPT,
-          '42',
-          '--complete',
-          '--head',
-          head,
-          '--round',
-          '1',
-          '--verdict',
-          'merge-ready',
-          '--repo',
-          REPO,
-          '--state-root',
-          stateRoot,
-        ],
-        { encoding: 'utf8', env: gitEnv },
-      );
+      const completed = watchState(stateRoot, head, 1, '--complete');
       expect(completed.status).toBe(0);
       const before = readdirSync(join(dir, 'tmp'));
       const replay = runPrepare(dir, artifactArgs, env);
@@ -1296,39 +1439,62 @@ describe.skipIf(process.platform === 'win32')(
       },
       {
         name: 'stale marker head',
-        body: () => marker({ head: OID('0'), round: 2 }),
-        expected: /mode, head and round matching/,
+        body: (head, registrationNonce) =>
+          marker({ head: OID('0'), round: 2, registrationNonce }),
+        expected: /only mode, head, round and registrationNonce/,
       },
       {
         name: 'wrong marker round',
-        body: (head) => marker({ head, round: 1 }),
-        expected: /mode, head and round matching/,
+        body: (head, registrationNonce) =>
+          marker({ head, round: 1, registrationNonce }),
+        expected: /only mode, head, round and registrationNonce/,
       },
       {
         name: 'host marker incorrectly used for VM',
         execution: 'vm',
-        body: (head) => marker({ mode: 'host', head }),
-        expected: /mode, head and round matching/,
+        body: (head, registrationNonce) =>
+          marker({ mode: 'host', head, registrationNonce }),
+        expected: /only mode, head, round and registrationNonce/,
       },
       {
         name: 'short approval marker head',
-        body: (head) => marker({ head: head.slice(0, 12) }),
-        expected: /mode, head and round matching/,
+        body: (head, registrationNonce) =>
+          marker({ head: head.slice(0, 12), registrationNonce }),
+        expected: /only mode, head, round and registrationNonce/,
       },
       {
         name: 'duplicate marker',
-        body: (head) => `${marker({ head })}\n${marker({ head })}`,
+        body: (head, registrationNonce) =>
+          `${marker({ head, registrationNonce })}\n${marker({ head, registrationNonce })}`,
         expected: /exactly one well-formed/,
       },
       {
-        name: 'read-only approver',
+        name: 'malformed JSON inside a well-formed outer marker',
+        body: () =>
+          '<!-- verify-pr-boundary-approval: {"mode":"host",} -->\nApproved.',
+        expected: /approval marker is not valid JSON/,
+      },
+      {
+        name: 'read-only approver with an admin decoy',
         permission: 'read',
+        permissions: {
+          approver: { permission: 'read' },
+          'admin-decoy': { permission: 'admin' },
+        },
         expected: /not admin \| maintain \| write/,
       },
     ];
     it.each(refusalCases)('refuses $name', (testCase) => {
       const { dir, base, head } = makeRepo();
-      const body = testCase.body ? testCase.body(head) : marker({ head });
+      const { artifactArgs, hostDir, registrationNonce } = command({
+        execution: testCase.execution ?? 'host',
+        trust: false,
+        approval: testCase.approval ?? permalink,
+        head,
+      });
+      const body = testCase.body
+        ? testCase.body(head, registrationNonce)
+        : marker({ head, registrationNonce });
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
         comment:
           testCase.comment === null
@@ -1341,13 +1507,9 @@ describe.skipIf(process.platform === 'win32')(
                 body,
                 user: { login: 'approver' },
               },
-        permission: { permission: testCase.permission ?? 'admin' },
-      });
-      const { artifactArgs, hostDir } = command({
-        execution: testCase.execution ?? 'host',
-        trust: false,
-        approval: testCase.approval ?? permalink,
-        head,
+        permissions: testCase.permissions ?? {
+          approver: { permission: 'admin' },
+        },
       });
       const result = runPrepare(dir, artifactArgs, env);
       expect(result.status, testCase.name).toBe(3);
@@ -1358,19 +1520,19 @@ describe.skipIf(process.platform === 'win32')(
 
     it('refuses a state-root alias that redirects registration into the PR clone', () => {
       const { dir, base, head } = makeRepo();
+      const { artifactArgs, stateRoot, hostDir, registrationNonce } = command({
+        trust: false,
+        approval: permalink,
+        head,
+      });
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages(), {
         comment: {
           id: 900001,
           issue_url: 'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
-          body: marker({ head }),
+          body: marker({ head, registrationNonce }),
           user: { login: 'approver' },
         },
-        permission: { permission: 'admin' },
-      });
-      const { artifactArgs, stateRoot, hostDir } = command({
-        trust: false,
-        approval: permalink,
-        head,
+        permissions: { approver: { permission: 'admin' } },
       });
       const cloneTmp = join(dir, '.qwen', 'tmp');
       mkdirSync(cloneTmp, { recursive: true });
@@ -1407,7 +1569,7 @@ describe.skipIf(process.platform === 'win32')(
           reviewPages(),
           {
             user: { login: 'maintainer' },
-            permission: { permission: 'write' },
+            permissions: { maintainer: { permission: 'write' } },
           },
         );
         const clock = join(makeTmpDir(), 'freeze-clock.cjs');
@@ -1449,7 +1611,7 @@ describe.skipIf(process.platform === 'win32')(
           reviewPages(),
           {
             user: { login: 'maintainer' },
-            permission: { permission: 'write' },
+            permissions: { maintainer: { permission: 'write' } },
           },
         );
         const clock = join(makeTmpDir(), `freeze-clock-${alias}.cjs`);
@@ -1485,6 +1647,216 @@ describe.skipIf(process.platform === 'win32')(
       }
     });
 
+    it('refuses a redirected or non-directory artifact parent before any context write', () => {
+      for (const shape of ['symlink', 'regular-file']) {
+        const { dir, base, head } = makeRepo();
+        const env = installFakeGh(
+          {
+            ...snapshotFor({ base, head }),
+            author: { login: 'maintainer' },
+            isCrossRepository: true,
+          },
+          reviewPages(),
+          {
+            user: { login: 'maintainer' },
+            permissions: { maintainer: { permission: 'write' } },
+          },
+        );
+        const clock = join(makeTmpDir(), `freeze-clock-parent-${shape}.cjs`);
+        writeFileSync(
+          clock,
+          'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+        );
+        const artifacts = join(
+          dir,
+          'tmp',
+          artifactDirName(42, new Date(1700000000000)),
+        );
+        mkdirSync(dirname(artifacts), { recursive: true });
+        const target = join(makeTmpDir(), 'outside');
+        mkdirSync(target);
+        writeFileSync(join(target, 'context.json'), 'outer context\n');
+        writeFileSync(join(target, 'boundary.json'), 'outer boundary\n');
+        if (shape === 'symlink') symlinkSync(target, artifacts, 'dir');
+        else writeFileSync(artifacts, 'do not replace\n');
+        const { artifactArgs, hostDir } = command({ round: 1 });
+        const result = runPrepare(dir, artifactArgs, {
+          ...env,
+          NODE_OPTIONS: `--require=${clock}`,
+        });
+        expect(result.status, shape).toBe(3);
+        expect(result.stderr, shape).not.toMatch(/\n\s+at /);
+        expect(readFileSync(join(target, 'context.json'), 'utf8')).toBe(
+          'outer context\n',
+        );
+        expect(readFileSync(join(target, 'boundary.json'), 'utf8')).toBe(
+          'outer boundary\n',
+        );
+        expect(existsSync(join(hostDir, 'pr.json'))).toBe(false);
+        expect(
+          existsSync(join(dir, 'tmp', 'verify-context', 'pr42.json')),
+        ).toBe(false);
+        if (shape === 'regular-file') {
+          expect(readFileSync(artifacts, 'utf8')).toBe('do not replace\n');
+        }
+      }
+    });
+
+    it('keeps same-second retries permissive for the existing real artifact directory', () => {
+      const { dir, base, head } = makeRepo();
+      const env = installFakeGh(
+        {
+          ...snapshotFor({ base, head }),
+          author: { login: 'maintainer' },
+          isCrossRepository: true,
+        },
+        reviewPages(),
+        {
+          user: { login: 'maintainer' },
+          permissions: { maintainer: { permission: 'write' } },
+        },
+      );
+      const clock = join(makeTmpDir(), 'freeze-clock-parent-retry.cjs');
+      writeFileSync(
+        clock,
+        'const NativeDate = Date;\nglobalThis.Date = class extends NativeDate {\n  constructor(...args) { super(...(args.length > 0 ? args : [1700000000000])); }\n  static now() { return 1700000000000; }\n};\n',
+      );
+      const { artifactArgs } = command({ round: 1 });
+      const frozen = { ...env, NODE_OPTIONS: `--require=${clock}` };
+      const first = runPrepare(dir, artifactArgs, frozen);
+      const second = runPrepare(dir, artifactArgs, frozen);
+      expect(first.status).toBe(0);
+      expect(second.status).toBe(0);
+      expect(artifactsFrom(second)).toBe(artifactsFrom(first));
+    });
+
+    it.each([
+      { name: 'local-trust', trust: true },
+      { name: 'comment', trust: false },
+    ])(
+      'completes the original delivery after a $name mode fallback',
+      ({ trust }) => {
+        const { dir, base, head } = makeRepo();
+        const prepared = command({
+          trust,
+          approval: trust ? null : permalink,
+          head,
+          round: 1,
+        });
+        const stateRoot = trust ? makeTmpDir() : prepared.stateRoot;
+        if (trust) {
+          const started = watchState(stateRoot, head, 1);
+          expect(started.status).toBe(0);
+        }
+        const before = JSON.parse(
+          readFileSync(
+            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+            'utf8',
+          ),
+        ).inFlightHeads[0];
+        const env = installFakeGh(
+          {
+            ...snapshotFor({ base, head }),
+            author: { login: 'maintainer' },
+            isCrossRepository: true,
+          },
+          reviewPages(),
+          trust
+            ? {
+                user: { login: 'maintainer' },
+                permissions: { maintainer: { permission: 'maintain' } },
+              }
+            : {
+                comment: {
+                  id: 900001,
+                  issue_url:
+                    'https://api.github.com/repos/QwenLM/qwen-code/issues/42',
+                  body: marker({
+                    head,
+                    round: 1,
+                    registrationNonce: prepared.registrationNonce,
+                  }),
+                  user: { login: 'approver' },
+                },
+                permissions: { approver: { permission: 'admin' } },
+              },
+        );
+        const container = runPrepare(
+          dir,
+          [
+            '42',
+            '--repo',
+            REPO,
+            '--execution',
+            'container',
+            '--context-out',
+            join(makeTmpDir(), 'container-context.json'),
+          ],
+          env,
+        );
+        expect(container.status).toBe(0);
+        expect(container.stdout).toContain(
+          'Do not release a registration merely to change modes',
+        );
+
+        const host = runPrepare(dir, prepared.artifactArgs, env);
+        expect(host.status).toBe(0);
+        expect(
+          JSON.parse(
+            readFileSync(
+              join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+              'utf8',
+            ),
+          ).inFlightHeads[0],
+        ).toEqual(before);
+        const { artifacts, checked, noContext, noDigest } = checkPrepared(
+          host,
+          head,
+          prepared.artifactArgs,
+        );
+        expect(checked.status, checked.stdout).toBe(0);
+        expect(noContext.status).toBe(1);
+        expect(noDigest.status).toBe(1);
+
+        const completed = spawnSync(
+          process.execPath,
+          [
+            WATCH_STATE_SCRIPT,
+            '42',
+            '--complete',
+            '--head',
+            head,
+            '--round',
+            '1',
+            '--verdict',
+            'merge-ready',
+            '--artifact-dir',
+            artifacts,
+            '--repo',
+            REPO,
+            '--state-root',
+            stateRoot,
+          ],
+          { encoding: 'utf8', env: gitEnv },
+        );
+        expect(completed.status, completed.stderr).toBe(0);
+        const state = JSON.parse(
+          readFileSync(
+            join(stateRoot, '.qwen', 'tmp', 'verify-pr-watch-42.json'),
+            'utf8',
+          ),
+        );
+        expect(state.inFlightHeads).toEqual([]);
+        expect(state.verifiedHeads[0]).toMatchObject({
+          head,
+          round: 1,
+          verdict: 'merge-ready',
+          artifactDir: artifacts,
+        });
+        expect(before).toMatchObject({ head, round: 1 });
+      },
+    );
+
     it('preserves the legacy container form without minting a host waiver', () => {
       const { dir, base, head } = makeRepo();
       const env = installFakeGh(snapshotFor({ base, head }), reviewPages());
@@ -1504,7 +1876,9 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.stdout).toContain('execution  container');
       expect(result.stdout).not.toContain('Declare mode:"vm"');
       expect(result.stdout).toContain('--execution');
-      expect(result.stdout).toContain('host|vm and its approval arguments');
+      expect(result.stdout).toContain(
+        'host|vm and its applicable approval arguments',
+      );
     });
   },
 );
@@ -1556,12 +1930,15 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     );
     // A failed container setup must not teach the operator to mint a host/VM
     // declaration after the battery. Host/VM approval belongs to prepare,
-    // before execution, and any live registration is released first.
+    // before execution, and a live registration survives the mode change.
     expect(result.stdout).toContain(
-      'For host or VM execution, stop and release any in-flight',
+      'For host or VM execution, keep the current head/round',
     );
     expect(result.stdout).toContain(
-      'host|vm and its approval arguments; prepare writes boundary.json.',
+      '--execution host|vm and its applicable approval arguments; prepare writes',
+    );
+    expect(result.stdout).toContain(
+      'Do not release a registration merely to change modes',
     );
     expect(result.stdout).toContain(
       'Never hand-write a host/VM declaration after the battery.',

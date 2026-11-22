@@ -66,7 +66,7 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 import { checkBoundary } from './verify-pr-check.mjs';
 import {
-  hasInFlightRegistration,
+  inFlightRegistration,
   readState as readWatchState,
   statePath as watchStatePath,
 } from './verify-pr-watch-state.mjs';
@@ -766,17 +766,27 @@ function registeredRoundApproval(options, snapshot, owner, name, cloneRoot) {
   } catch (error) {
     return { error: `could not read the watch registration: ${error.message}` };
   }
+  const registration = inFlightRegistration(
+    state,
+    snapshot.headRefOid,
+    options.round,
+  );
   if (
     state?.pr !== snapshot.number ||
     typeof state?.repo !== 'string' ||
     state.repo.toLowerCase() !== `${owner}/${name}`.toLowerCase() ||
-    !hasInFlightRegistration(state, snapshot.headRefOid, options.round)
+    !registration
   ) {
     return {
       error: `--approval needs one in-flight registration for ${owner}/${name}#${snapshot.number} at head ${snapshot.headRefOid}, round ${options.round}; register before waiting, then use the matching fresh round instead of reusing a completed approval`,
     };
   }
-  return { registered: true };
+  return {
+    registrationNonce:
+      typeof registration.registrationNonce === 'string'
+        ? registration.registrationNonce
+        : null,
+  };
 }
 
 function commentApproval(options, snapshot, owner, name, cloneRoot) {
@@ -847,16 +857,27 @@ function commentApproval(options, snapshot, owner, name, cloneRoot) {
   } catch {
     return { error: 'the approval marker is not valid JSON' };
   }
-  const markerKeys = Object.keys(marker ?? {}).sort();
   if (
-    markerKeys.join(',') !== 'head,mode,round' ||
-    marker.mode !== options.execution ||
-    marker.head !== snapshot.headRefOid ||
-    marker.round !== options.round
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+      registered.registrationNonce ?? '',
+    )
   ) {
     return {
       error:
-        'the approval marker must contain only mode, head and round matching this execution, trusted head and round',
+        'this legacy in-flight registration has no registrationNonce; release and restart it with the current watch-state helper, then obtain a fresh marked approval for that new registration instead of reusing an old approval marker',
+    };
+  }
+  const markerKeys = Object.keys(marker ?? {}).sort();
+  if (
+    markerKeys.join(',') !== 'head,mode,registrationNonce,round' ||
+    marker.mode !== options.execution ||
+    marker.head !== snapshot.headRefOid ||
+    marker.round !== options.round ||
+    marker.registrationNonce !== registered.registrationNonce
+  ) {
+    return {
+      error:
+        'the approval marker must contain only mode, head, round and registrationNonce matching this execution, trusted head, round and current in-flight registration; a released, completed or other-state-root registration needs a fresh marked approval',
     };
   }
   const allowed = maintainerPermission(owner, name, login);
@@ -875,6 +896,7 @@ function commentApproval(options, snapshot, owner, name, cloneRoot) {
       },
       head: snapshot.headRefOid,
       round: options.round,
+      registrationNonce: registered.registrationNonce,
       reason: options.reason,
       ...(options.execution === 'vm'
         ? { attestation: options.attestation }
@@ -1104,6 +1126,28 @@ function main(argv) {
     // Recursive, so a retry within the same second lands in the directory this
     // script just made instead of failing on it.
     mkdirSync(artifacts, { recursive: true });
+  } catch (error) {
+    return fail(3, `could not create the artifact directory: ${error.message}`);
+  }
+  try {
+    if (
+      !lstatSync(artifacts).isDirectory() ||
+      lstatSync(artifacts).isSymbolicLink() ||
+      realpathSync(artifacts) !==
+        join(realpathSync(tmpDir), basename(artifacts))
+    ) {
+      return fail(
+        3,
+        `refusing to write through a non-directory or redirected artifact directory: ${artifacts}`,
+      );
+    }
+  } catch (error) {
+    return fail(
+      3,
+      `could not validate the artifact directory: ${error.message}`,
+    );
+  }
+  try {
     mkdirSync(join(artifacts, 'evidence'), { recursive: true });
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
@@ -1298,9 +1342,10 @@ function main(argv) {
       'The path is the in-container one: the gate runs from the read-only',
       "/trusted-scripts mount, never the PR head's own copy of the script,",
       'and the record lands in the mounted artifact directory so it survives',
-      'the container. For host or VM execution, stop and release any in-flight',
-      'registration, then re-run prepare BEFORE the battery with --execution',
-      'host|vm and its approval arguments; prepare writes boundary.json.',
+      'the container. For host or VM execution, keep the current head/round',
+      'in-flight registration and re-run prepare BEFORE the battery with',
+      '--execution host|vm and its applicable approval arguments; prepare writes',
+      'boundary.json. Do not release a registration merely to change modes.',
       'Never hand-write a host/VM declaration after the battery. The container',
       'gate writes boundary-gate.json into the artifact directory; the checker',
       'requires that record alongside the container declaration.',
