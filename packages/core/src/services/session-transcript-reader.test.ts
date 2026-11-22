@@ -179,16 +179,19 @@ import {
   InvalidSessionTranscriptCursorError,
   isReplayTurnStartType,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptCooperativeReadBudgetForTest,
   setSessionTranscriptExpandedPageBytesForTest,
+  setSessionTranscriptMaxIndexEstimateBytesForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
   SessionTranscriptSnapshotUnavailableError,
+  SessionTranscriptTooLargeError,
   SessionTranscriptReader,
   type SelectiveSessionRestoreOptions,
   type SessionTranscriptCursorState,
@@ -2226,6 +2229,35 @@ describe('SessionTranscriptReader', () => {
     for (const offset of lifecycleOffsets) {
       expect(readOffsets.has(offset)).toBe(false);
     }
+  });
+
+  it('rejects a dense transcript during streaming index build when the index estimate exceeds the build budget', async () => {
+    expect(SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES).toBe(256 * 1024 * 1024);
+
+    const lines: ChatRecord[] = [];
+    let parent: string | null = null;
+    for (let i = 0; i < 40; i += 1) {
+      const uuid = `dense-${i}`;
+      lines.push(record(uuid, parent, `m${i}`));
+      parent = uuid;
+    }
+    const filePath = await writeRecords(lines);
+    const stat = await fs.stat(filePath);
+    expect(stat.size).toBeLessThan(SESSION_TRANSCRIPT_MAX_INDEX_BYTES);
+
+    // Budget fits ~10 records but not 40, forcing an early abort inside the
+    // streaming pass before the index build completes.
+    setSessionTranscriptMaxIndexEstimateBytesForTest(12 * 1024);
+
+    await expect(
+      newReader().readPage(sessionId, { limit: 10 }),
+    ).rejects.toThrow(SessionTranscriptTooLargeError);
+    await expect(
+      newReader().readRestoreProjection(sessionId, {
+        replay: { kind: 'none' },
+      }),
+    ).rejects.toThrow(SessionTranscriptTooLargeError);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
   });
 
   it('uses the bounded persisted-title picker instead of the full active chain', async () => {

@@ -624,6 +624,8 @@ const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 // an oversized entry can take a slot a warm small index held (at most three
 // oversized entries fit the class budget).
 const INDEX_CACHE_OVERSIZED_MAX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES =
+  INDEX_CACHE_OVERSIZED_MAX_BYTES;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_ENTRY_BASE_BYTES = 256;
 const INDEX_SEGMENT_BYTES = 64;
@@ -754,6 +756,7 @@ function trimPromptTimeScopes(): void {
 const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
 let indexCacheOversizedMaxBytesForTest: number | undefined;
+let maxIndexEstimateBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
@@ -1862,8 +1865,52 @@ function getIndexCacheOversizedMaxBytes(): number {
   return indexCacheOversizedMaxBytesForTest ?? INDEX_CACHE_OVERSIZED_MAX_BYTES;
 }
 
+function getMaxIndexEstimateBytes(): number {
+  return (
+    maxIndexEstimateBytesForTest ?? SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES
+  );
+}
+
 function estimateStringBytes(value: string | null | undefined): number {
   return value ? value.length * INDEX_STRING_BYTES : 0;
+}
+
+function estimatePhysicalRecordHintBytes(record: PhysicalRecordHint): number {
+  return (
+    INDEX_HINT_BASE_BYTES +
+    estimateStringBytes(record.uuid) +
+    estimateStringBytes(record.parentUuid) +
+    estimateStringBytes(record.type) +
+    estimateStringBytes(record.subtype)
+  );
+}
+
+function estimateUuidIndexEntryBytes(
+  uuid: string,
+  entry: UuidIndexEntry,
+): number {
+  return (
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_HINT_BASE_BYTES * 2 +
+    INDEX_MAP_ENTRY_BYTES +
+    INDEX_CONTAINER_BASE_BYTES +
+    entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
+    estimateStringBytes(uuid) +
+    estimateStringBytes(entry.parentUuid) +
+    estimateStringBytes(entry.lastUserPromptAt) +
+    estimateStringBytes(entry.type) +
+    estimateStringBytes(entry.subtype) +
+    estimateStringBytes(entry.navigationKind) +
+    estimateStringBytes(entry.turnResultPromptId) +
+    estimateStringBytes(entry.daemonPromptId) +
+    estimateStringBytes(entry.turnHint.turnParentUuid) +
+    estimateStringBytes(entry.turnHint.turnPromptId) +
+    estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
+    estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
+    estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
+    entry.segments.length * INDEX_SEGMENT_BYTES
+  );
 }
 
 function estimateIndexCacheBytes(index: TranscriptIndex): number {
@@ -1885,12 +1932,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
     estimateStringBytes(index.lastUpdated);
 
   for (const record of index.physicalRecords) {
-    total +=
-      INDEX_HINT_BASE_BYTES +
-      estimateStringBytes(record.uuid) +
-      estimateStringBytes(record.parentUuid) +
-      estimateStringBytes(record.type) +
-      estimateStringBytes(record.subtype);
+    total += estimatePhysicalRecordHintBytes(record);
   }
 
   for (const uuid of index.runtimeUuids) {
@@ -1907,27 +1949,7 @@ function estimateIndexCacheBytes(index: TranscriptIndex): number {
       estimateStringBytes(gap.missingParentUuid);
   }
   for (const [uuid, entry] of index.byUuid) {
-    total +=
-      INDEX_ENTRY_BASE_BYTES +
-      INDEX_HINT_BASE_BYTES * 2 +
-      INDEX_MAP_ENTRY_BYTES +
-      INDEX_CONTAINER_BASE_BYTES +
-      entry.segments.length * INDEX_CONTAINER_SLOT_BYTES +
-      estimateStringBytes(uuid) +
-      estimateStringBytes(entry.parentUuid) +
-      estimateStringBytes(entry.lastUserPromptAt) +
-      estimateStringBytes(entry.type) +
-      estimateStringBytes(entry.subtype) +
-      estimateStringBytes(entry.navigationKind) +
-      estimateStringBytes(entry.turnResultPromptId) +
-      estimateStringBytes(entry.daemonPromptId) +
-      estimateStringBytes(entry.turnHint.turnParentUuid) +
-      estimateStringBytes(entry.turnHint.turnPromptId) +
-      estimateStringBytes(entry.turnHint.turnDaemonPromptId) +
-      estimateStringBytes(entry.turnHint.backgroundNotificationTaskId) +
-      estimateStringBytes(entry.turnHint.hookTurn?.promptId) +
-      estimateStringBytes(entry.turnHint.hookTurn?.parentUuid) +
-      entry.segments.length * INDEX_SEGMENT_BYTES;
+    total += estimateUuidIndexEntryBytes(uuid, entry);
   }
   for (const turn of index.navigationTurns) {
     total +=
@@ -2561,6 +2583,11 @@ async function buildIndex(params: {
   let firstRecordUuid: string | undefined;
   let firstRecordTimestamp: string | undefined;
   let startTime: string | undefined;
+  const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+  let estimatedIndexBytes =
+    INDEX_ENTRY_BASE_BYTES +
+    INDEX_CONTAINER_BASE_BYTES * 7 +
+    estimateStringBytes(filePath);
 
   try {
     await forEachLineInSnapshot(
@@ -2588,14 +2615,18 @@ async function buildIndex(params: {
             leafUuid = record.uuid;
           }
           const existing = byUuid.get(record.uuid);
-          physicalRecords.push({
+          const physicalHint: PhysicalRecordHint = {
             uuid: record.uuid,
             parentUuid: record.parentUuid,
             type: record.type,
             ...(record.subtype !== undefined
               ? { subtype: record.subtype }
               : {}),
-          });
+          };
+          physicalRecords.push(physicalHint);
+          estimatedIndexBytes +=
+            INDEX_CONTAINER_SLOT_BYTES +
+            estimatePhysicalRecordHintBytes(physicalHint);
           const segment = {
             offset,
             length,
@@ -2613,6 +2644,8 @@ async function buildIndex(params: {
                 : undefined,
             } as ChatRecord;
             existing.segments.push(segment);
+            estimatedIndexBytes +=
+              INDEX_CONTAINER_SLOT_BYTES + INDEX_SEGMENT_BYTES;
             existing.sessionIdMatchesFile &&= record.sessionId === sessionId;
             existing.navigationKind ??= navigationKindForRecord(fragmentRecord);
             existing.assistantPreviewCandidate ||=
@@ -2638,6 +2671,17 @@ async function buildIndex(params: {
             const chatRecord = record as unknown as ChatRecord;
             const entry = newIndexEntry(chatRecord, sessionId, [segment]);
             byUuid.set(record.uuid, entry);
+            estimatedIndexBytes += estimateUuidIndexEntryBytes(
+              record.uuid,
+              entry,
+            );
+          }
+          if (estimatedIndexBytes > maxIndexEstimateBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              estimatedIndexBytes,
+              maxIndexEstimateBytes,
+            );
           }
         }
       },
@@ -2754,9 +2798,7 @@ async function buildIndex(params: {
       `branchPoints=${branchPointsByAssistantUuid.size}`,
   );
 
-  await indexBuildCompleteHookForTest?.(filePath);
-
-  return {
+  const builtIndex: TranscriptIndex = {
     executionEngine: executionEngine.finish({
       filePath,
       ...fileIdentity,
@@ -2781,6 +2823,18 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
+  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
+  if (finalEstimatedBytes > maxIndexEstimateBytes) {
+    throw new SessionTranscriptTooLargeError(
+      sessionId,
+      finalEstimatedBytes,
+      maxIndexEstimateBytes,
+    );
+  }
+
+  await indexBuildCompleteHookForTest?.(filePath);
+
+  return builtIndex;
 }
 
 async function getCachedIndex(params: {
@@ -5224,6 +5278,7 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   cursorHmacKeys.clear();
   indexCacheMaxBytesForTest = undefined;
   indexCacheOversizedMaxBytesForTest = undefined;
+  maxIndexEstimateBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -5270,6 +5325,12 @@ export function setSessionTranscriptIndexCacheOversizedMaxBytesForTest(
 ): void {
   indexCacheOversizedMaxBytesForTest = maxBytes;
   pruneCache();
+}
+
+export function setSessionTranscriptMaxIndexEstimateBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxIndexEstimateBytesForTest = maxBytes;
 }
 
 export function setSessionTranscriptExpandedPageBytesForTest(

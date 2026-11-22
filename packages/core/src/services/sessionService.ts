@@ -3530,6 +3530,10 @@ export class SessionService {
     const records: ChatRecord[] = [];
     let firstRecordMeta: { cwd: string; version: string } | undefined;
     let complete = true;
+    const maxRetainedEstimateBytes =
+      artifactLibraryMaxRetainedEstimateBytesForTest ??
+      ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES;
+    let estimatedRetainedBytes = 0;
     try {
       const stats = await handle.stat();
       if (
@@ -3555,24 +3559,40 @@ export class SessionService {
             );
             complete &&= parsed.complete;
             for (const record of parsed.records) {
-              if (
-                record === null ||
-                typeof record !== 'object' ||
-                Array.isArray(record)
-              ) {
-                records.push(record);
-                continue;
-              }
               firstRecordMeta ??= {
                 cwd: record.cwd,
                 version: record.version,
               };
               if (isSessionArtifactRecord(record)) {
+                estimatedRetainedBytes += 256 + line.length * 2;
+                if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
+                  throw new SessionTranscriptTooLargeError(
+                    sessionId,
+                    estimatedRetainedBytes,
+                    maxRetainedEstimateBytes,
+                  );
+                }
                 records.push(record);
               } else {
                 // Keep only chain-identity fields for non-artifact records so
                 // large transcripts do not retain message/tool-result bodies
                 // in memory while verifying history continuity.
+                estimatedRetainedBytes +=
+                  256 +
+                  ((record.uuid?.length ?? 0) +
+                    (record.parentUuid?.length ?? 0) +
+                    (record.sessionId?.length ?? 0) +
+                    (record.timestamp?.length ?? 0) +
+                    (record.type?.length ?? 0) +
+                    (record.subtype?.length ?? 0)) *
+                    2;
+                if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
+                  throw new SessionTranscriptTooLargeError(
+                    sessionId,
+                    estimatedRetainedBytes,
+                    maxRetainedEstimateBytes,
+                  );
+                }
                 records.push({
                   uuid: record.uuid,
                   parentUuid: record.parentUuid,
@@ -6276,12 +6296,21 @@ export function normalizeDerivedBranchTitle(
   return normalized || undefined;
 }
 
+export const ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES = 128 * 1024 * 1024;
+
 let artifactLibraryRetainedRecordsHookForTest:
   | ((records: readonly ChatRecord[]) => void)
   | undefined;
+let artifactLibraryMaxRetainedEstimateBytesForTest: number | undefined;
 
 export function setArtifactLibraryRetainedRecordsHookForTest(
   hook: ((records: readonly ChatRecord[]) => void) | undefined,
 ): void {
   artifactLibraryRetainedRecordsHookForTest = hook;
+}
+
+export function setArtifactLibraryMaxRetainedEstimateBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  artifactLibraryMaxRetainedEstimateBytesForTest = maxBytes;
 }

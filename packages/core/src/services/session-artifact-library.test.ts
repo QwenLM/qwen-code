@@ -9,9 +9,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import {
+  ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES,
   SessionArtifactLibraryError,
   SessionStorageEntryError,
   SessionService,
+  setArtifactLibraryMaxRetainedEstimateBytesForTest,
   setArtifactLibraryRetainedRecordsHookForTest,
 } from './sessionService.js';
 import {
@@ -117,6 +119,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   setArtifactLibraryRetainedRecordsHookForTest(undefined);
+  setArtifactLibraryMaxRetainedEstimateBytesForTest(undefined);
   await fs.rm(temp, { recursive: true, force: true });
 });
 
@@ -537,6 +540,68 @@ describe('persisted artifact library', () => {
 
     const after = await service.readSessionArtifactSnapshot(id);
     expect(after?.artifacts).toEqual([]);
+  });
+
+  it('accepts a valid transcript above the legacy 64 MiB cap and below 1 GiB', async () => {
+    await seed();
+    const legacyCap = 64 * 1024 * 1024;
+    const padChunk = 'z'.repeat(16 * 1024 * 1024);
+    let parentUuid = 'assistant-1';
+    for (let i = 0; i < 4; i += 1) {
+      const uuid = `large-pad-${i}`;
+      await fs.appendFile(
+        file,
+        JSON.stringify({
+          uuid,
+          parentUuid,
+          sessionId: id,
+          cwd,
+          timestamp: stamp,
+          version: '0.25.3',
+          type: 'tool_result',
+          message: { role: 'user', parts: [{ text: padChunk }] },
+        }) + '\n',
+      );
+      parentUuid = uuid;
+    }
+    const stats = await fs.stat(file);
+    expect(stats.size).toBeGreaterThan(legacyCap);
+    expect(stats.size).toBeLessThan(SESSION_TRANSCRIPT_MAX_INDEX_BYTES);
+
+    const snapshot = await service.readSessionArtifactSnapshot(id);
+    expect(snapshot?.artifacts.map((item) => item.id)).toEqual([artifactId]);
+  });
+
+  it('rejects a dense minimal-record transcript when retained estimates exceed the artifact-library budget', async () => {
+    expect(ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES).toBe(
+      128 * 1024 * 1024,
+    );
+    await seed();
+    let parentUuid = 'assistant-1';
+    const extra: string[] = [];
+    for (let i = 0; i < 40; i += 1) {
+      const uuid = `dense-art-${i}`;
+      extra.push(
+        JSON.stringify({
+          uuid,
+          parentUuid,
+          sessionId: id,
+          cwd,
+          timestamp: stamp,
+          version: '0.25.3',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: `x${i}` }] },
+        }),
+      );
+      parentUuid = uuid;
+    }
+    await fs.appendFile(file, extra.join('\n') + '\n');
+
+    setArtifactLibraryMaxRetainedEstimateBytesForTest(6 * 1024);
+
+    await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow(
+      SessionTranscriptTooLargeError,
+    );
   });
 
   it('refuses legacy mutation of a managed-owned transcript', async () => {
