@@ -144,7 +144,7 @@ export interface SessionChatController {
 
   readonly messages: readonly Message[];
   readonly transcriptState: 'loading' | 'ready' | 'error';
-  loadOlder?(): Promise<void>;
+  loadOlder?(options?: { force?: boolean }): Promise<void>;
 
   // `cancelling` is derived from an unestablished cancel operation and
   // persists until settlement evidence arrives.
