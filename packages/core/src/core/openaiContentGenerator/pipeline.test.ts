@@ -2532,6 +2532,54 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('uses nested reasoning for inferred Kimi K3 on OpenRouter', async () => {
+      const wire = await executeWithCapability(
+        undefined,
+        { baseUrl: OPENROUTER_URL },
+        'kimi-k3',
+      );
+      expectFields(wire, {
+        reasoning: { effort: 'max' },
+        reasoning_effort: undefined,
+      });
+    });
+
+    it.each(['samplingParams', 'extra_body'] as const)(
+      'does not mix an explicit OpenRouter %s effort with a nested default',
+      async (source) => {
+        routeThrough(DefaultOpenAICompatibleProvider);
+        const wire = await executeWithCapability(
+          undefined,
+          {
+            baseUrl: OPENROUTER_URL,
+            [source]: { reasoning_effort: 'low' },
+          },
+          'kimi-k3',
+        );
+        expectFields(wire, {
+          reasoning: undefined,
+          reasoning_effort: 'low',
+        });
+      },
+    );
+
+    it('does not mix extra_body effort with a default when samplingParams is unset', async () => {
+      routeThrough(DefaultOpenAICompatibleProvider);
+      const wire = await executeWithCapability(
+        undefined,
+        {
+          baseUrl: OPENROUTER_URL,
+          samplingParams: undefined,
+          extra_body: { reasoning_effort: 'low' },
+        },
+        'kimi-k3',
+      );
+      expectFields(wire, {
+        reasoning: undefined,
+        reasoning_effort: 'low',
+      });
+    });
+
     it.each([
       ['qwen3.8-max', DASHSCOPE_URL],
       ['openai/gpt-5.4', OPENROUTER_URL],

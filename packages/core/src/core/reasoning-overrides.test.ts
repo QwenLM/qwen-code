@@ -201,7 +201,13 @@ describe('reasoning declarations', () => {
     'kimi-k3.1-pro',
     'k3.1-pro',
     'k3.1-pro-highspeed',
+    'k3.1-pro-high-speed',
+    'kimi-k3-20261231',
     'moonshot/kimi-k3-1-pro-highspeed',
+    'kimi-k3-256k',
+    'k3-256k',
+    'KIMI-K3-256K',
+    'moonshot/kimi-k3-256k:latest',
   ])('infers Kimi K3 capabilities for custom OpenAI route %s', (modelId) => {
     const target = { ...route, model: modelId };
     const resolved = resolveReasoningCapabilities(target, undefined);
@@ -223,6 +229,13 @@ describe('reasoning declarations', () => {
 
   it.each([
     { ...route, model: 'kimi-k2.7-code' },
+    { ...route, model: 'k3x' },
+    { ...route, model: 'kimi-k3x' },
+    { ...route, model: 'k3-instruct-nothink' },
+    { ...route, model: 'kimi-k3-highspeed' },
+    { ...route, model: 'kimi-k3.1-pro-instruct-nothink' },
+    { ...route, model: 'k3-256k-instruct-nothink' },
+    { ...route, model: 'kimi-k3-20261231-instruct-nothink' },
     {
       ...route,
       model: 'kimi-k3.1-pro',
@@ -251,6 +264,50 @@ describe('reasoning declarations', () => {
       disableField: 'reasoning_effort',
     });
   });
+
+  it.each([
+    'https://openrouter.ai/api/v1',
+    'https://openrouter.ai./api/v1',
+    'https://llm.openrouter.ai./api/v1',
+  ])('uses the OpenRouter reasoning profile for %s', (baseUrl) => {
+    expect(
+      resolveReasoningCapabilities(
+        { ...route, model: 'moonshotai/kimi-k3', baseUrl },
+        undefined,
+      ),
+    ).toMatchObject({
+      profile: 'openai-reasoning',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'max',
+    });
+  });
+
+  it('keeps a complete custom Kimi K3 declaration authoritative', () => {
+    const target = { ...route, model: 'kimi-k3.1-pro' };
+    const resolved = resolveReasoningCapabilities(target, {
+      profile: 'openai-effort',
+      efforts: ['low', 'high', 'max'],
+      defaultEffort: 'high',
+    });
+    expect(resolved).toMatchObject({ defaultEffort: 'high' });
+    expect(resolved?.canDisable).toBeUndefined();
+    expect(
+      getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+    ).toBe(false);
+  });
+
+  it.each(['dashscope-thinking', 'qwen-chat-template'] as const)(
+    'keeps a complete custom Kimi K3 %s declaration authoritative',
+    (profile) => {
+      const target = { ...route, model: 'kimi-k3.1-pro' };
+      const resolved = resolveReasoningCapabilities(target, { profile });
+      expect(resolved).toMatchObject({ profile, toggleOnly: true });
+      expect(resolved?.canDisable).toBeUndefined();
+      expect(
+        getEffectiveReasoning({ ...target, reasoning: false }, resolved),
+      ).toBe(false);
+    },
+  );
 
   it.each([
     ['https://api.deepseek.com/v1', 'deepseek-flash', 'low', 'low'],

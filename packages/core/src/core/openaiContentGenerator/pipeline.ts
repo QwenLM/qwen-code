@@ -1433,10 +1433,12 @@ export class ContentGenerationPipeline {
       { ...this.contentGeneratorConfig, model: context.model },
       reasoningCapabilities,
     );
+    // A flat explicit tier must not coexist with OpenRouter's nested default.
     if (
       reasoningCapabilities &&
       !('reasoning' in baseRequest) &&
       effectiveReasoning &&
+      !this.hasExplicitOpenRouterEffort() &&
       request.config?.thinkingConfig?.includeThoughts !== false
     ) {
       baseRequest = {
@@ -2018,6 +2020,16 @@ export class ContentGenerationPipeline {
     return params;
   }
 
+  private hasExplicitOpenRouterEffort(): boolean {
+    return (
+      isOpenRouterHostname(this.contentGeneratorConfig) &&
+      (this.contentGeneratorConfig.samplingParams?.['reasoning_effort'] !==
+        undefined ||
+        this.contentGeneratorConfig.extra_body?.['reasoning_effort'] !==
+          undefined)
+    );
+  }
+
   private buildReasoningConfig(
     request: GenerateContentParameters,
   ): Record<string, unknown> {
@@ -2035,7 +2047,10 @@ export class ContentGenerationPipeline {
     // configured reasoning object when explicitly enabled. This keeps provider- and
     // model-specific semantics intact while honoring request-level opt-out.
 
-    if (request.config?.thinkingConfig?.includeThoughts === false) {
+    if (
+      request.config?.thinkingConfig?.includeThoughts === false ||
+      this.hasExplicitOpenRouterEffort()
+    ) {
       return {};
     }
 

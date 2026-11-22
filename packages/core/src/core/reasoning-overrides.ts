@@ -180,9 +180,15 @@ export function validateReasoningCapabilities(
     provider?.models?.find((candidate) => candidate.id === route.model) ??
     provider?.models?.find((candidate) => candidate.id === model)
   )?.capabilities?.reasoning;
-  const inherited = parseModelReasoningCapabilities(
-    known ?? getBuiltinKimiK3Reasoning(route),
-  );
+  const builtinKimi = getBuiltinKimiK3Reasoning(route);
+  const inherited = parseModelReasoningCapabilities(known ?? builtinKimi);
+  const hasCompleteCustomKimiDeclaration =
+    known === undefined &&
+    builtinKimi !== undefined &&
+    input.profile !== undefined &&
+    (input.profile === 'dashscope-thinking' ||
+      input.profile === 'qwen-chat-template' ||
+      (input.efforts !== undefined && input.defaultEffort !== undefined));
   if (!input.profile && inherited?.toggleOnly) {
     if (input.efforts || input.defaultEffort) return invalidReasoning(route);
     return parseModelReasoningCapabilities({ ...inherited, ...input });
@@ -303,7 +309,7 @@ export function validateReasoningCapabilities(
     disableField,
     ...(toggleOnly ? {} : { efforts, defaultEffort }),
     ...(route.thinkingMandatory ||
-    inherited?.canDisable === false ||
+    (inherited?.canDisable === false && !hasCompleteCustomKimiDeclaration) ||
     gpt?.thinkingMandatory
       ? { canDisable: false }
       : {}),
