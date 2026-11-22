@@ -1178,6 +1178,11 @@ const {
         };
         currentSessionSchedulingAvailable?: boolean;
         autofixPrWatchesAvailable?: boolean;
+        shouldRefuseOneShotRun?: (task: {
+          recurring: boolean;
+          sessionId: string | null;
+          sessionMode?: 'persistent' | 'per_run';
+        }) => boolean;
       } | null,
       latestPrWatchesProps: null as {
         onRunPrompt?: (
@@ -60361,147 +60366,361 @@ describe('upstream embedded transport reproduction', () => {
     expect(testState.latestMessageListProps?.activeTurnStartedAt).toBe(1000);
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
+});
 
-  describe('overload pause guards in App', () => {
-    const armOverload = () => {
-      overloadPauseStub.paused = true;
-      overloadPauseStub.pollOverloaded = true;
-      overloadPauseStub.loadAdmission = {
-        enabled: true,
-        overloaded: true,
-        reason: 'cpu_load',
-        loadRatio: 2.5,
-        eventLoopLagP99Ms: 20,
-        sampledAtMs: 1_000,
-      };
+describe('overload pause guards in App', () => {
+  const armOverload = () => {
+    overloadPauseStub.paused = true;
+    overloadPauseStub.pollOverloaded = true;
+    overloadPauseStub.loadAdmission = {
+      enabled: true,
+      overloaded: true,
+      reason: 'cpu_load',
+      loadRatio: 2.5,
+      eventLoopLagP99Ms: 20,
+      sampledAtMs: 1_000,
     };
+  };
 
-    it('refuses !ls from an empty draft with one warning toast and no sendShellCommand', async () => {
-      armOverload();
-      mockConnection.sessionId = null;
-      const toasts: Array<[string, string]> = [];
-      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
-      await flush();
-      toasts.length = 0;
+  it('refuses !ls from an empty draft with one warning toast and no sendShellCommand', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
 
-      let accepted: boolean | void;
-      await act(async () => {
-        accepted = testState.latestChatEditorProps?.onSubmit('!ls');
-        await Promise.resolve();
-      });
-      await flush();
-
-      expect(accepted).toBe(false);
-      expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
-      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
-      expect(toasts).toHaveLength(1);
-      expect(toasts[0]?.[0]).toBe('warning');
-      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await Promise.resolve();
     });
+    await flush();
 
-    it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
-      armOverload();
-      mockConnection.sessionId = null;
-      const toasts: Array<[string, string]> = [];
-      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
-      await flush();
-      toasts.length = 0;
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
 
-      let accepted: boolean | void;
-      await act(async () => {
-        accepted = testState.latestChatEditorProps?.onSubmit(
-          '/goal set keep tests green',
-        );
-        await Promise.resolve();
-      });
-      await flush();
+  it('refuses /goal set from an empty draft with one warning toast and no noSession error', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    const toasts: Array<[string, string]> = [];
+    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    await flush();
+    toasts.length = 0;
 
-      expect(accepted).toBe(false);
-      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
-      expect(toasts).toHaveLength(1);
-      expect(toasts[0]?.[0]).toBe('warning');
-      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
-    });
-
-    it('rejects a paused unbound manual run with the overload message, not cancellation', async () => {
-      armOverload();
-      mockConnection.sessionId = null;
-      mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
-      const { container } = renderApp({});
-      await flush();
-      testState.prompt = '/schedule';
-      await clickSubmit(container);
-      await flush();
-      const handler = testState.latestScheduledTasksProps?.onRunPrompt;
-      if (!handler) throw new Error('onRunPrompt was not captured');
-
-      await expect(handler('check status', null)).rejects.toThrow(
-        'System overloaded — new tasks paused',
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        '/goal set keep tests green',
       );
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(accepted).toBe(false);
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('rejects a paused unbound manual run with an already-dispatched overload error and one warning toast', async () => {
+    armOverload();
+    mockConnection.sessionId = null;
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
+    const props = testState.latestScheduledTasksProps;
+    const handler = props?.onRunPrompt;
+    if (!handler || !props) throw new Error('ScheduledTasksProps not captured');
+    expect(
+      props.shouldRefuseOneShotRun?.({
+        recurring: false,
+        sessionId: null,
+        sessionMode: 'persistent',
+      }),
+    ).toBe(true);
+    toasts.length = 0;
+
+    let caught: unknown;
+    try {
+      await handler('check status', null);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toBe(
+      'System overloaded — new tasks paused',
+    );
+    expect(
+      (caught as Error & { _alreadyDispatched?: boolean })._alreadyDispatched,
+    ).toBe(true);
+    // Forward the caught error to ScheduledTasksDialog's onError (reportError)
+    // as handleRunNow's catch does: _alreadyDispatched must suppress a second
+    // error-toned toast.
+    props.onError(caught, 'Failed to run task');
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('refuses createNewSession at the App root with a warning toast while paused', async () => {
+    armOverload();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('pauses creation reactively when a system_overloaded create_session notice arrives', async () => {
+    testState.notices = [
+      {
+        id: 'overload-1',
+        severity: 'error',
+        category: 'user_action',
+        operation: 'create_session',
+        code: 'system_overloaded',
+        message: 'System overloaded (cpu_load: load ratio 3.00)',
+        createdAt: Date.now(),
+      },
+    ];
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    const btn = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    );
+    expect(btn).not.toBeNull();
+    await act(async () => {
+      btn!.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toBe(
+      'System overloaded (cpu_load: load ratio 3.00)',
+    );
+  });
+
+  it('refuses @-mention from a session-less draft with one warning toast and no noSession error', async () => {
+    armOverload();
+    mentionApiSpy.mockClear();
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    mockWorkspace.capabilities = {
+      ...mockWorkspace.capabilities,
+      features: ['agent_collaboration_v1'],
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/agent/agents')
+        ? {
+            agents: [
+              {
+                id: 'a1',
+                name: 'helper',
+                enabled: true,
+                status: 'idle',
+                waiting: 0,
+              },
+            ],
+          }
+        : url.includes('/agent/squads')
+          ? { squads: [] }
+          : {};
+      return { ok: true, json: async () => body } as Response;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const toasts: Array<[string, string]> = [];
+    try {
+      renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+      await flush();
+      toasts.length = 0;
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('@helper please review');
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
-    });
-
-    it('refuses createNewSession at the App root with a warning toast while paused', async () => {
-      armOverload();
-      const toasts: Array<[string, string]> = [];
-      const { container } = renderApp({
-        onToast: (tone, msg) => toasts.push([tone, msg]),
-      });
-      await flush();
-      toasts.length = 0;
-
-      const btn = container.querySelector<HTMLButtonElement>(
-        '[data-testid="new-session"]',
-      );
-      expect(btn).not.toBeNull();
-      await act(async () => {
-        btn!.click();
-        await Promise.resolve();
-      });
-      await flush();
-
-      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(mentionApiSpy).not.toHaveBeenCalled();
       expect(toasts).toHaveLength(1);
       expect(toasts[0]?.[0]).toBe('warning');
       expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('refuses New side task while paused with one warning toast and no createSideTaskSession call', async () => {
+    armOverload();
+    mockConnection.sessionId = 'parent-session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_side_task', 'scheduled_task_session_reuse'],
+    } as typeof mockConnection.capabilities;
+    mockWorkspace.client.createSideTaskSession.mockClear();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    toasts.length = 0;
+
+    const panelProps = testState.latestArtifactPanelProps;
+    expect(panelProps).not.toBeNull();
+    expect(panelProps?.overloadPaused).toBe(true);
+
+    await act(async () => {
+      panelProps?.onCreateSideTask?.();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(
+      testState.latestArtifactPanelProps?.tabs.some(
+        (tab) => tab.kind === 'side_task',
+      ),
+    ).toBe(false);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('guards the low-level side-task creation retry and preserves the boolean API', async () => {
+    armOverload();
+    mockConnection.sessionId = 'parent-session-1';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.capabilities = {
+      ...mockConnection.capabilities,
+      features: ['session_side_task'],
+    } as typeof mockConnection.capabilities;
+    mockWorkspace.client.createSideTaskSession.mockClear();
+    const toasts: Array<[string, string]> = [];
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({
+      shellRef,
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    let created: boolean | undefined;
+    act(() => {
+      created = shellRef.current?.createSideTask();
+    });
+    expect(created).toBe(false);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+    toasts.length = 0;
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Toggle right panel"]',
+        )
+        ?.click();
+    });
+    await flush();
+    const createSession =
+      testState.latestArtifactPanelProps?.onCreateSideTaskSession;
+    expect(createSession).toBeTypeOf('function');
+    await act(async () => {
+      let caught: unknown;
+      try {
+        await createSession?.('retry-tab', 'parent-session-1', 'Retry task');
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ _alreadyDispatched: true });
+      testState.latestArtifactPanelProps?.onError?.(
+        caught,
+        'sideTask.createFailed',
+      );
     });
 
-    it('pauses creation reactively when a system_overloaded create_session notice arrives', async () => {
-      testState.notices = [
-        {
-          id: 'overload-1',
-          severity: 'error',
-          category: 'user_action',
-          operation: 'create_session',
-          code: 'system_overloaded',
-          message: 'System overloaded (cpu_load: load ratio 3.00)',
-          createdAt: Date.now(),
-        },
-      ];
-      const toasts: Array<[string, string]> = [];
-      const { container } = renderApp({
-        onToast: (tone, msg) => toasts.push([tone, msg]),
-      });
-      await flush();
-      toasts.length = 0;
+    expect(mockWorkspace.client.createSideTaskSession).not.toHaveBeenCalled();
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.[0]).toBe('warning');
+  });
 
-      const btn = container.querySelector<HTMLButtonElement>(
-        '[data-testid="new-session"]',
-      );
-      expect(btn).not.toBeNull();
-      await act(async () => {
-        btn!.click();
-        await Promise.resolve();
-      });
-      await flush();
+  it('pins live-session reuse and per-run refusal in the one-shot predicate', async () => {
+    armOverload();
+    mockConnection.sessionId = 'live-session';
+    mockConnection.workspaceCwd = '/workspace';
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/schedule';
+    await clickSubmit(container);
+    await flush();
 
-      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
-      expect(toasts).toHaveLength(1);
-      expect(toasts[0]?.[0]).toBe('warning');
-      expect(toasts[0]?.[1]).toBe(
-        'System overloaded (cpu_load: load ratio 3.00)',
-      );
-    });
+    const predicate =
+      testState.latestScheduledTasksProps?.shouldRefuseOneShotRun;
+    expect(predicate).toBeTypeOf('function');
+    const unbound = {
+      recurring: false,
+      sessionId: null,
+      sessionMode: 'persistent' as const,
+    };
+    expect(predicate?.(unbound)).toBe(false);
+    expect(predicate?.({ ...unbound, sessionId: 'another-live-session' })).toBe(
+      false,
+    );
+    expect(predicate?.({ ...unbound, sessionMode: 'per_run' })).toBe(true);
+
+    mockConnection.sessionId = null;
+    expect(predicate?.(unbound)).toBe(true);
   });
 });

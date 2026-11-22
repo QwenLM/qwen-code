@@ -3879,6 +3879,8 @@ export function App({
   const managedMode = managedAgentProvider !== undefined && managedHome;
   const managedModeRef = useRef(managedMode);
   managedModeRef.current = managedMode;
+  const overloadPausedRef = useRef(false);
+  const overloadDetailRef = useRef<string | undefined>(undefined);
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
   const [archivedSessionsTarget, setArchivedSessionsTarget] =
@@ -6142,6 +6144,13 @@ export function App({
           setArtifactPanelOpen(true);
           return true;
         }
+      } else if (overloadPausedRef.current && !managedModeRef.current) {
+        // Opening a brand-new side-task tab spawns a fresh daemon child.
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return false;
       }
       // A details side task is one-per-pending-question: repeat clicks focus
       // the existing tab instead of provisioning a duplicate child session.
@@ -6193,10 +6202,19 @@ export function App({
       setArtifactPanelOpen(true);
       return true;
     },
-    [connection.sessionId, connection.workspaceCwd, sideTasksAvailable, t],
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      pushToast,
+      sideTasksAvailable,
+      t,
+    ],
   );
   const createEmptySideTask = useCallback(() => {
-    if (createSideTask()) return;
+    const created = createSideTask();
+    if (created || (overloadPausedRef.current && !managedModeRef.current)) {
+      return;
+    }
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
   const openWebPreviewTab = useCallback(() => {
@@ -6256,6 +6274,18 @@ export function App({
     (tabId: string, parentSessionId: string, title: string) => {
       const pending = sideTaskCreationPromisesRef.current.get(tabId);
       if (pending) return pending;
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        // A failed tab's Retry bypasses the tab-opening guard.
+        pushToast(
+          'warning',
+          overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+        );
+        return Promise.reject(
+          Object.assign(new Error(t('sidebar.overloadPaused')), {
+            _alreadyDispatched: true,
+          }),
+        );
+      }
       if (tabId.startsWith(DETAILS_TAB_ID_PREFIX)) {
         // Capture the parent identity now: the draft tab may close before
         // creation resolves, and the association must still be recorded.
@@ -6307,6 +6337,7 @@ export function App({
       sessionOwnerGuard,
       pushToast,
       sessionCatalogController,
+      t,
       workspace.client,
     ],
   );
@@ -10763,9 +10794,7 @@ export function App({
           reason: pollLoadAdmission.reason ?? 'unknown',
         })
       : overloadRefusalMessage;
-  const overloadPausedRef = useRef(overloadPaused);
   overloadPausedRef.current = overloadPaused;
-  const overloadDetailRef = useRef(overloadDetail);
   overloadDetailRef.current = overloadDetail;
   const [showRewindDialog, setShowRewindDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
@@ -19184,7 +19213,14 @@ export function App({
           (result) => {
             if (result === false) {
               if (!admitted) {
-                reject(new Error(t('sidebar.overloadPaused')));
+                // sendPrompt's guard already pushed the warning toast with
+                // load readings; mark as dispatched so reportError does not
+                // surface a duplicate error-toned toast for the same click.
+                reject(
+                  Object.assign(new Error(t('sidebar.overloadPaused')), {
+                    _alreadyDispatched: true,
+                  }),
+                );
               }
               return;
             }
@@ -23481,6 +23517,13 @@ export function App({
   // ordinary first prompt (`promptWorkspaceCwd` in the submit path).
   const ensureAgentMentionSession = useCallback(async () => {
     const existing = connectionRef.current.sessionId;
+    if (!existing && overloadPausedRef.current && !managedModeRef.current) {
+      pushToast(
+        'warning',
+        overloadDetailRef.current ?? t('sidebar.overloadPaused'),
+      );
+      return { paused: true as const };
+    }
     const allocated = existing ? undefined : await ensureSessionForPrompt();
     const sessionId =
       existing ?? allocated?.sessionId ?? connectionRef.current.sessionId;
@@ -23504,7 +23547,7 @@ export function App({
           }
         : {}),
     };
-  }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
+  }, [ensureSessionForPrompt, getComposerWorkspaceCwd, pushToast, t]);
   const settledAgentRunsKey = useMemo(
     () => settledAgentRunKey(blocks),
     [blocks],
@@ -24323,6 +24366,7 @@ export function App({
     sideTasks: visibleSideTasks,
     archivedSideTasks: visibleArchivedSideTasks,
     sideTasksLoading,
+    overloadPaused: overloadPaused && !managedMode,
     onCreateSideTask: createEmptySideTask,
     onOpenSideTask: openSideTask,
     onArchiveSideTasks: sideTaskArchiveAvailable ? archiveSideTasks : undefined,
@@ -26024,6 +26068,21 @@ export function App({
                         'workspace_channel_observed_contacts',
                       )}
                       autofixPrWatchesAvailable={prWatchesAvailable}
+                      shouldRefuseOneShotRun={(fresh) =>
+                        overloadPausedRef.current &&
+                        !managedModeRef.current &&
+                        (fresh.sessionMode === 'per_run' ||
+                          (!fresh.sessionId &&
+                            !connectionRef.current.sessionId))
+                      }
+                      overloadDetail={overloadDetail}
+                      onOverloadRefused={() => {
+                        pushToast(
+                          'warning',
+                          overloadDetailRef.current ??
+                            t('sidebar.overloadPaused'),
+                        );
+                      }}
                       onCreateViaChat={() => {
                         // Start a FRESH session and jump to it so the task-
                         // creation chat doesn't pile onto the current

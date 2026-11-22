@@ -55,10 +55,10 @@ New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.o
 - **Poll plus refusal, not poll alone.** A 5-second poll can lag the gate by up to one interval plus the gate's own debounce; the reactive refusal makes the first failed click immediately explanatory, and its TTL matches the daemon's retry hint so the UI never stays paused longer than the daemon advises without poll confirmation.
 - **Poll alone is not enough either.** Without it the state only appears after a failed click, which is exactly the surprise this slice removes.
 - **Reuse before refusal.** In `resolveSessionForWorkspace` the pause guard sits below both reuse branches (connected-session ownership, newest catalog session) and above allocation: GitDialog commit/PR generation allocates nothing and must keep working while overloaded; only `forceCreate`/allocation is refused.
-- **Freshness bound on the poll verdict.** `useDaemonResource` retains the last payload across poll failures, so `pollOverloaded` additionally requires `error === undefined`; while status is unreachable only the expiring refusal hint may pause the UI.
+- **Freshness bound on the poll verdict.** `useDaemonResource` retains the last payload across poll failures and while disabled, so `pollOverloaded` requires `enabled && error === undefined`; while status is unreachable or offline only the expiring refusal hint may pause the UI.
 - **Mount-request tracking and hidden-tab gate.** The autoLoad/mount request is counted in the same in-flight accounting as interval polls, and the resource is enabled only while the tab is visible (a `visibilitychange` listener re-enables and reloads on return), so a backgrounded or saturated-daemon tab never stacks summary requests.
-- **One managed exemption, four guards.** `createNewSession`, `sendPrompt`, `ensureSessionForPrompt` and `resolveSessionForWorkspace` all carry `!managedModeRef.current`, matching the sidebar prop exemption; managed home creates no daemon session.
-- **Explicit refusal contract.** `sendPrompt` returns `false` on the pause refusal; the composer submit and the settings language sync honor it (draft kept / no false success), while fire-and-forget callers are unaffected.
+- **One managed exemption across every guarded entry point.** Every `App.tsx` guard carries `!managedModeRef.current` — `createNewSession`, `sendPrompt`, `ensureSessionForPrompt`, `resolveSessionForWorkspace`, `handleGoalSlashCommand`, the `!` inline-shell branch of `handleSubmit`, `ensureAgentMentionSession` (returning `{ paused: true }` so `useAgentChatEntry` skips `collab.mention.noSession`), and both side-task creation boundaries. `createSideTask` keeps its public boolean contract while `createEmptySideTask` omits a duplicate error; `createSideTaskSession` also refuses a failed tab's Retry with an already-dispatched rejection. The `overloadPaused && !managedMode` prop goes to `WebShellSidebar` and `ArtifactPanel`. `ScheduledTasksDialog` instead receives a live predicate that reads the App's pause and connection refs after its server refresh, refusing only genuinely unbound/per-run one-shot runs before `/run` consumes the task and preserving warm-session reuse.
+- **Explicit refusal contract.** `sendPrompt` returns `false` on the pause refusal; the composer submit and the settings language sync honor it (draft kept / no false success), `enqueueManualRun` rejects with `_alreadyDispatched: true` so `reportError` does not emit a duplicate error toast, and fire-and-forget callers are unaffected.
 - **Derived OR, no merge machine.** Two sources with different lifetimes (render-derived vs expiring state) combine in one expression; storing a merged verdict would need reconciliation on every poll and every expiry.
 - **Additive SDK field.** Older daemons omit `loadAdmission`; the optional field keeps the client compatible with them and with the opt-out flag (`enabled: false` never pauses).
 
@@ -71,7 +71,7 @@ New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.o
 ## Validation plan
 
 - Component tests: sidebar renders the strip and disables the button (and early-returns from the create handler) while `overloadPaused`, and restores both when cleared; tooltip carries the detail string.
-- Hook/App-level tests: poll overload drives the paused state; a `system_overloaded` notice sets the expiring reactive state; expiry clears it; a non-overloaded poll does not clear an unexpired reactive hint.
+- Hook/App-level tests: poll overload drives the paused state (and drops on poll failure or `enabled: false`); a `system_overloaded` notice sets the expiring reactive state; expiry clears it; a non-overloaded poll does not clear an unexpired reactive hint; paused `!ls`, `/goal set`, `@`-mention, New side task, `createNewSession`, and unbound manual runs each emit a single warning toast without creating a session, and a paused unbound one-shot in `ScheduledTasksDialog` is refused before `runScheduledTask` consumes it.
 - `npm run build && npm run typecheck` plus the touched web-shell suites; SDK type addition checked by the sdk typecheck.
 - E2E plan: `.qwen/e2e-tests/daemon-overload-sidebar-indicator.md` (component-level matrix plus an optional live probe against a loaded daemon).
 
@@ -88,25 +88,29 @@ New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.o
 
 ## Files affected
 
-| File                                                                                   | Change                                        |
-| -------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `packages/sdk-typescript/src/daemon/types.ts`                                          | Additive `runtime.loadAdmission` type         |
-| `packages/web-shell/client/App.tsx`                                                    | Poll + reactive state, root guards, notice    |
-| `packages/web-shell/client/App.test.tsx`                                               | App-level pause guard & reactive notice tests |
-| `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` classifier          |
-| `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | Classifier shape & negative-control table     |
-| `packages/web-shell/client/daemon/session/actions.ts`                                  | `system_overloaded` notice code mapping       |
-| `packages/web-shell/client/daemon/session/actions.test.ts`                             | Notice code mapping test                      |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | Strip, disabled predicate, handler guards     |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | Warning strip & disabled header-action styles |
-| `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop                     |
-| `packages/web-shell/client/i18n.tsx`                                                   | `en` overload keys                            |
-| `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` overload keys                         |
-| `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` overload keys                         |
-| `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` overload keys                            |
-| `packages/web-shell/client/i18n.test.ts`                                               | Four-locale interpolation & parity test       |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | Poll + expiry + freshness + OR hook           |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | Poll/reactive/expiry/freshness tests          |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | Strip/disabled/menu/standalone tests          |
-| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | Default healthy `GET /daemon/status` mock     |
-| `packages/web-templates/src/export-html/build.mjs`                                     | Merged-tree export-size budget re-track       |
+| File                                                                                   | Change                                            |
+| -------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| `packages/sdk-typescript/src/daemon/types.ts`                                          | Additive `runtime.loadAdmission` type             |
+| `packages/web-shell/client/App.tsx`                                                    | Poll + reactive state, root guards, notice        |
+| `packages/web-shell/client/App.test.tsx`                                               | App-level pause guard & reactive notice tests     |
+| `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` classifier              |
+| `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | Classifier shape & negative-control table         |
+| `packages/web-shell/client/daemon/session/actions.ts`                                  | `system_overloaded` notice code mapping           |
+| `packages/web-shell/client/daemon/session/actions.test.ts`                             | Notice code mapping test                          |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | Strip, disabled predicate, handler guards         |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | Warning strip & disabled header-action styles     |
+| `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop                         |
+| `packages/web-shell/client/components/workspace-agents/useAgentChatEntry.ts`           | `{ paused: true }` short-circuit for `@`-mentions |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.tsx`                | Pre-consume one-shot pause guard                  |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.test.tsx`           | One-shot pre-consume guard test                   |
+| `packages/web-shell/client/components/artifacts/ArtifactPanel.tsx`                     | `overloadPaused` disable on New side task         |
+| `packages/web-shell/client/i18n.tsx`                                                   | `en` overload keys                                |
+| `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` overload keys                             |
+| `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` overload keys                             |
+| `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` overload keys                                |
+| `packages/web-shell/client/i18n.test.ts`                                               | Four-locale interpolation & parity test           |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | Poll + expiry + freshness + OR hook               |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | Poll/reactive/expiry/freshness tests              |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | Strip/disabled/menu/standalone tests              |
+| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | Default healthy `GET /daemon/status` mock         |
+| `packages/web-templates/src/export-html/build.mjs`                                     | Merged-tree export-size budget re-track           |

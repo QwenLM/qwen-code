@@ -55,10 +55,10 @@
 - **轮询加拒绝，而非仅轮询。** 5 秒轮询可能落后闸门至多一个间隔加闸门自身去抖；被动拒绝让第一次失败点击立即有解释，其 TTL 与 daemon 的重试提示一致，使 UI 在没有轮询确认时不会暂停得比 daemon 建议的更久。
 - **仅轮询也不够。** 没有它状态只在失败点击后出现，而那正是本切片要消除的意外。
 - **复用先于拒绝。** `resolveSessionForWorkspace` 的暂停守卫位于两条复用分支（连接会话所有权、目录最新会话）之下、分配之上：GitDialog 提交/PR 生成不分配会话，过载时须继续工作；仅 forceCreate/分配被拒。
-- **轮询裁决的新鲜度界。** `useDaemonResource` 在轮询失败时保留旧 payload，故 `pollOverloaded` 额外要求 `error === undefined`；status 不可达期间仅带过期的拒绝提示可暂停 UI。
+- **轮询裁决的新鲜度界。** `useDaemonResource` 在轮询失败或禁用时保留旧 payload，故 `pollOverloaded` 要求 `enabled && error === undefined`；status 不可达或离线期间仅带过期的拒绝提示可暂停 UI。
 - **挂载请求记账与隐藏标签页门。** autoLoad/挂载请求与 interval 轮询共用同一在途记账；资源仅在标签页可见时 enabled（visibilitychange 监听在回到前台时重新启用并重拉），后台或饱和 daemon 的标签页不堆叠 summary 请求。
-- **一处 managed 豁免，四处守卫。** createNewSession、sendPrompt、ensureSessionForPrompt、resolveSessionForWorkspace 均带 `!managedModeRef.current`，与侧栏 prop 豁免一致；managed 首页不创建 daemon 会话。
-- **显式拒绝契约。** sendPrompt 暂停拒绝返回 false；composer submit 与设置语言同步遵从（保留草稿/不报假成功），fire-and-forget 调用点不受影响。
+- **所有受守卫入口共享同一 managed 豁免。** `App.tsx` 的全部守卫均带 `!managedModeRef.current`——`createNewSession`、`sendPrompt`、`ensureSessionForPrompt`、`resolveSessionForWorkspace`、`handleGoalSlashCommand`、`handleSubmit` 的 `!` 行内 shell 分支、`ensureAgentMentionSession`（返回 `{ paused: true }` 使 `useAgentChatEntry` 跳过 `collab.mention.noSession`）、以及 side task 的两个创建边界。`createSideTask` 保持公共 boolean 契约，`createEmptySideTask` 不重复弹错误；`createSideTaskSession` 也会拒绝失败标签的 Retry 并回传已派发错误，避免重复提示。`WebShellSidebar` 与 `ArtifactPanel` 接收 `overloadPaused && !managedMode`。`ScheduledTasksDialog` 改收实时 predicate，在服务端刷新后读取 App 的暂停与连接 ref，只在 `/run` 消费前拦截真正未绑定或 per-run 的一次性任务，保留 warm session 复用。
+- **显式拒绝契约。** `sendPrompt` 暂停拒绝返回 `false`；composer submit 与设置语言同步遵从（保留草稿/不报假成功），`enqueueManualRun` 以带 `_alreadyDispatched: true` 的 Error 拒绝以防 `reportError` 弹出重复错误 toast，fire-and-forget 调用点不受影响。
 - **派生 OR，不做合并机器。** 两个生命周期不同的来源（渲染派生 vs 带过期状态）在一个表达式里组合；存储合并裁决需要在每次轮询与每次过期时对账。
 - **加性 SDK 字段。** 旧 daemon 省略 `loadAdmission`；可选字段保持客户端对它们与 opt-out flag（`enabled: false` 永不暂停）的兼容。
 
@@ -71,7 +71,7 @@
 ## 验证计划
 
 - 组件测试：`overloadPaused` 时侧栏渲染警示条并禁用按钮（且 create handler 提前 return），清除后两者恢复；tooltip 携带 detail 字符串。
-- Hook/App 级测试：轮询过载驱动暂停状态；`system_overloaded` notice 设置带过期的被动状态；过期清除；未过载的轮询不清除未过期的被动提示。
+- Hook/App 级测试：轮询过载驱动暂停状态（轮询失败或 `enabled: false` 时清除）；`system_overloaded` notice 设置带过期的被动状态；过期清除；未过载的轮询不清除未过期的被动提示；暂停态的 `!ls`、`/goal set`、`@`-mention、新建 side task、`createNewSession`、未绑定手动运行各自仅弹一条警告 toast 且不创建会话，`ScheduledTasksDialog` 的未绑定一次性任务在 `runScheduledTask` 消费前被拒。
 - `npm run build && npm run typecheck` 加 touched web-shell 套件；SDK 类型新增由 sdk typecheck 检查。
 - E2E 计划：`.qwen/e2e-tests/daemon-overload-sidebar-indicator.md`（组件级矩阵加对加载 daemon 的可选实机探针）。
 
@@ -100,6 +100,10 @@
 | `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | 警示条、禁用谓词、handler 守卫          |
 | `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | 警示条与禁用头部按钮样式                |
 | `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop               |
+| `packages/web-shell/client/components/workspace-agents/useAgentChatEntry.ts`           | `@`-mention 的 `{ paused: true }` 短路  |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.tsx`                | 一次性任务消费前暂停守卫                |
+| `packages/web-shell/client/components/dialogs/ScheduledTasksDialog.test.tsx`           | 一次性任务消费前守卫测试                |
+| `packages/web-shell/client/components/artifacts/ArtifactPanel.tsx`                     | 新建 side task 的 `overloadPaused` 禁用 |
 | `packages/web-shell/client/i18n.tsx`                                                   | `en` 过载文案                           |
 | `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` 过载文案                        |
 | `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` 过载文案                        |

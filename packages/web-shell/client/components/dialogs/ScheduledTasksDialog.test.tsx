@@ -123,6 +123,13 @@ async function mount(
       trusted: boolean;
       kind: 'ordinary';
     };
+    shouldRefuseOneShotRun?: (task: {
+      recurring: boolean;
+      sessionId: string | null;
+      sessionMode?: 'persistent' | 'per_run';
+    }) => boolean;
+    overloadDetail?: string;
+    onOverloadRefused?: () => void;
   } = {},
 ) {
   actions.listScheduledTasks.mockResolvedValue(tasks);
@@ -166,6 +173,9 @@ async function mount(
               autofixPrWatchesAvailable={nextOpts.autofixPrWatchesAvailable}
               workspaces={nextOpts.workspaces}
               lockedWorkspace={nextOpts.lockedWorkspace}
+              shouldRefuseOneShotRun={nextOpts.shouldRefuseOneShotRun}
+              overloadDetail={nextOpts.overloadDetail}
+              onOverloadRefused={nextOpts.onOverloadRefused}
               onError={nextOpts.onError ?? vi.fn()}
             />
           </I18nProvider>
@@ -1642,6 +1652,97 @@ describe('ScheduledTasksDialog run now', () => {
       expect.any(Error),
       expect.stringContaining('never ran'),
     );
+  });
+
+  it('refuses an unbound ONE-SHOT run before consuming it when load admission is paused', async () => {
+    const onRunPrompt = vi.fn();
+    const onOverloadRefused = vi.fn();
+    await mount(
+      [
+        baseTask({
+          id: 'oneshot-1',
+          name: 'One-shot backup',
+          recurring: false,
+          enabled: true,
+          sessionId: null,
+          prompt: 'run once',
+        }),
+      ],
+      {
+        onRunPrompt,
+        shouldRefuseOneShotRun: (fresh) => !fresh.sessionId,
+        onOverloadRefused,
+      },
+    );
+    expect(document.body.textContent).toContain('One-shot backup');
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onOverloadRefused).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain('One-shot backup');
+  });
+
+  it('re-reads the overload predicate after the server refresh resolves', async () => {
+    const refreshed = deferred<ReturnType<typeof baseTask>[]>();
+    let paused = false;
+    const onRunPrompt = vi.fn();
+    const onOverloadRefused = vi.fn();
+    const task = baseTask({
+      id: 'oneshot-refresh',
+      name: 'Refreshed one-shot',
+      recurring: false,
+      enabled: true,
+      sessionId: null,
+      prompt: 'run once',
+    });
+    await mount([task], {
+      onRunPrompt,
+      shouldRefuseOneShotRun: () => paused,
+      onOverloadRefused,
+    });
+    actions.listScheduledTasks.mockImplementation(() => refreshed.promise);
+
+    click(document.querySelector('[aria-label="Run now"]'));
+    paused = true;
+    await act(async () => {
+      refreshed.resolve([task]);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(actions.runScheduledTask).not.toHaveBeenCalled();
+    expect(onRunPrompt).not.toHaveBeenCalled();
+    expect(onOverloadRefused).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a one-shot that reuses the live session while paused', async () => {
+    const onRunPrompt = vi.fn();
+    await mount(
+      [
+        baseTask({
+          id: 'oneshot-reuse',
+          recurring: false,
+          enabled: true,
+          sessionId: null,
+          prompt: 'reuse current',
+        }),
+      ],
+      {
+        onRunPrompt,
+        shouldRefuseOneShotRun: () => false,
+        overloadDetail: 'Host is overloaded',
+      },
+    );
+
+    click(document.querySelector('[aria-label="Run now"]'));
+    await flush();
+
+    expect(actions.runScheduledTask).toHaveBeenCalledWith(
+      'oneshot-reuse',
+      undefined,
+    );
+    expect(onRunPrompt).toHaveBeenCalledWith('reuse current', null);
   });
 
   it('records a RECURRING task after enqueuing (enqueue → record)', async () => {

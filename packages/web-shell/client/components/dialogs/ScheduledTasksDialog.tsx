@@ -200,6 +200,11 @@ interface ScheduledTasksDialogProps {
   /** The daemon advertises `autofix_pr_watches`: the card of an
    * `/autofix-pr` watch's task shows the watch's state, and can stop it. */
   autofixPrWatchesAvailable?: boolean;
+  /** Re-read live App state after the async task refresh, before a one-shot
+   * is consumed and its fresh session allocation would be refused. */
+  shouldRefuseOneShotRun?: (task: DaemonScheduledTask) => boolean;
+  overloadDetail?: string;
+  onOverloadRefused?: () => void;
   onError: (error: unknown, fallback: string) => void;
 }
 
@@ -667,6 +672,9 @@ export function ScheduledTasksDialog({
   deliveryAvailable = false,
   observedContactsAvailable = false,
   autofixPrWatchesAvailable = false,
+  shouldRefuseOneShotRun,
+  overloadDetail,
+  onOverloadRefused,
   onError,
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
@@ -1537,6 +1545,22 @@ export function ScheduledTasksDialog({
           );
           return;
         }
+        // Refuse a one-shot run BEFORE consuming (/run deletes the task) when
+        // load admission would refuse its fresh session allocation aside from a
+        // genuinely reusable connection. The App predicate reads refs: this old
+        // callback and its props belong to the click-time render, while the
+        // server refresh and the live connection may still be changing.
+        if (!fresh.recurring && shouldRefuseOneShotRun?.(fresh)) {
+          if (onOverloadRefused) {
+            onOverloadRefused();
+          } else {
+            onError(
+              new Error(overloadDetail ?? t('sidebar.overloadPaused')),
+              t('sidebar.overloadPaused'),
+            );
+          }
+          return;
+        }
         if (fresh.sessionMode === 'per_run') {
           // The daemon owns fresh-session creation and records the actual child
           // session on this run. The client must not also enqueue the prompt in
@@ -1587,7 +1611,17 @@ export function ScheduledTasksDialog({
         setRunningTaskId(null);
       }
     },
-    [actions, onError, onRunPrompt, reload, runningTaskId, t],
+    [
+      actions,
+      shouldRefuseOneShotRun,
+      onError,
+      onOverloadRefused,
+      onRunPrompt,
+      overloadDetail,
+      reload,
+      runningTaskId,
+      t,
+    ],
   );
 
   const handleDelete = useCallback(
