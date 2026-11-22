@@ -9,19 +9,15 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
@@ -52,11 +48,6 @@ public final class ToolPublicationDataStore {
     private final ThreadLocal<VerificationTask> verificationTask = new ThreadLocal<>();
     private volatile Runnable verificationWakeup = () -> {};
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final ObjectMapper ACK_JSON = new ObjectMapper()
-            .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
-            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
-            .enable(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
-            .disable(DeserializationFeature.ACCEPT_FLOAT_AS_INT);
     private static final int MAX_SEGMENT = 16 * 1024 * 1024;
     private static final int MAX_PAGE = 256 * 1024;
     private static final int MAX_MANIFEST = 64 * 1024;
@@ -99,151 +90,6 @@ public final class ToolPublicationDataStore {
         return source != null && jdbc.getDataSource() == source && transactionSource == source
                 && sessions.usesDataSource(source)
                 && grants.usesDataSource(source);
-    }
-
-    static final class VerifiedAcknowledgement {
-        private final String finished;
-        private final String outcome;
-        private final String outcomeRef;
-        private final String captureIdentity;
-        private final String catalog;
-
-        private VerifiedAcknowledgement(JsonNode finished, JsonNode outcome, JsonNode outcomeRef,
-                JsonNode captureIdentity, JsonNode catalog) {
-            this.finished = finished.toString();
-            this.outcome = outcome.toString();
-            this.outcomeRef = outcomeRef.toString();
-            this.captureIdentity = captureIdentity.toString();
-            this.catalog = catalog.toString();
-        }
-
-        JsonNode finished() { return exactAcknowledgementJson(finished.getBytes(StandardCharsets.UTF_8)); }
-        JsonNode outcome() { return exactAcknowledgementJson(outcome.getBytes(StandardCharsets.UTF_8)); }
-        JsonNode outcomeRef() { return exactAcknowledgementJson(outcomeRef.getBytes(StandardCharsets.UTF_8)); }
-        JsonNode captureIdentity() { return exactAcknowledgementJson(captureIdentity.getBytes(StandardCharsets.UTF_8)); }
-        JsonNode catalog() { return exactAcknowledgementJson(catalog.getBytes(StandardCharsets.UTF_8)); }
-    }
-
-    VerifiedAcknowledgement verifyOriginalAcknowledgementResources(ToolExecutionRecord execution) {
-        require(!TransactionSynchronizationManager.isActualTransactionActive()
-                && !TransactionSynchronizationManager.isSynchronizationActive()
-                && !TransactionSynchronizationManager.hasResource(jdbc.getDataSource())
-                && usesDataSource(jdbc.getDataSource())
-                && Boolean.TRUE.equals(jdbc.execute((ConnectionCallback<Boolean>) connection -> connection.getAutoCommit())),
-                "Acknowledgement verification requires native stores outside a transaction");
-        require(execution != null && execution.getState() == ToolExecutionRecord.State.SETTLED
-                && "deferred_v3".equals(execution.getReference().get("dispatchMode")),
-                "Original settled execution is unavailable");
-        JsonNode original = finishedForBroker(execution);
-        require(original != null, "Original finished publication is unavailable");
-        String publicationId = text(original, "publicationId");
-        JsonNode binding = original.path("binding");
-        JsonNode key = binding.path("sessionKey");
-        JsonNode terminal = original.path("terminal");
-        JsonNode catalog = acknowledgementCatalog(key, publicationId, false);
-        byte[] terminalBytes = readResource(key, publicationId, text(terminal, "resourceId"));
-        require(terminalBytes.length == terminal.path("byteLength").longValue()
-                && ToolPublicationContract.sha256(terminalBytes).equals(text(terminal, "digest")),
-                "Original terminal reference changed");
-        ToolPublicationContract.parseToolResult("result", terminalBytes, MAX_TERMINAL);
-        JsonNode result = exactAcknowledgementJson(terminalBytes);
-        require(sameNumericJson(result, JSON.valueToTree(execution.getResult()))
-                && result.path("executionStatus").asText().equals(execution.getExecutionStatus())
-                && !"not_started".equals(text(result, "executionStatus"))
-                && "complete".equals(text(result.path("capture"), "captureStatus"))
-                && "pending".equals(text(result.path("capture"), "deliveryStatus")),
-                "Original complete Broker result conflicts");
-        ((ObjectNode) original).set("result", result);
-        validateFinished(key, publicationId, binding, result, () -> {});
-        JsonNode manifestRef = result.path("capture").path("manifest");
-        byte[] manifestBytes = referencedResource(key, publicationId, manifestRef,
-                "managed-tool-result-manifest", MAX_MANIFEST);
-        JsonNode manifest = ToolPublicationContract.parseToolResult("manifest", manifestBytes, MAX_MANIFEST);
-        ObjectNode capture = JSON.createObjectNode();
-        for (String field : List.of("tenantId", "sessionId", "turnId", "executionCallId", "callId",
-                "invocationDigest", "bindingGeneration", "captureId", "revision")) {
-            capture.set(field, manifest.path(field));
-        }
-        var publication = jdbc.query("SELECT producer_phase, admission_resource_id,"
-                + " CASE WHEN is_quarantined THEN 1 ELSE 0 END AS is_quarantined FROM ma_output_capture"
-                + " WHERE scope_ref = ? AND publication_id = ?", (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow), scope(key), publicationId).getFirst();
-        require("REFERENCED".equals(publication.get("producer_phase"))
-                && ((Number) publication.get("is_quarantined")).intValue() == 0,
-                "Original publication receipt is unavailable");
-        String admissionId = (String) publication.get("admission_resource_id");
-        byte[] bytes = readResource(key, publicationId, admissionId);
-        JsonNode outcome = exactAcknowledgementJson(bytes);
-        require(outcome.isObject() && outcome.size() == 5
-                && outcome.path("schemaVersion").isIntegralNumber() && outcome.path("schemaVersion").canConvertToLong()
-                && outcome.path("schemaVersion").longValue() == 1
-                && "committed".equals(text(outcome, "decision"))
-                && validAdmissionHistory(outcome.path("history")) && sameNumericJson(outcome.path("envelope"), result)
-                && manifestRef.equals(outcome.path("manifestRef")), "Original committed admission conflicts");
-        JsonNode outcomeRef = JSON.createObjectNode().put("resourceId", admissionId)
-                .put("kind", "managed-tool-outcome").put("schemaVersion", 1)
-                .put("byteLength", bytes.length).put("digest", ToolPublicationContract.sha256(bytes));
-        require(sameNumericJson(catalog, acknowledgementCatalog(key, publicationId, false)),
-                "Original publication resource authorities changed during verification");
-        return new VerifiedAcknowledgement(original, outcome, outcomeRef, capture, catalog);
-    }
-
-    ToolExecutionRecord lockOriginalAcknowledgementResources(VerifiedAcknowledgement verified) {
-        require(verified != null && usesDataSource(jdbc.getDataSource())
-                && TransactionSynchronizationManager.isActualTransactionActive(),
-                "Acknowledgement settlement requires the native transaction");
-        JsonNode finished = verified.finished();
-        JsonNode key = finished.path("binding").path("sessionKey");
-        String publicationId = text(finished, "publicationId");
-        return grants.lockOriginalAcknowledgementResult(key, publicationId, finished);
-    }
-
-    void lockOriginalAcknowledgementCatalog(VerifiedAcknowledgement verified) {
-        require(verified != null && usesDataSource(jdbc.getDataSource())
-                && TransactionSynchronizationManager.isActualTransactionActive(),
-                "Acknowledgement settlement requires the native transaction");
-        JsonNode finished = verified.finished();
-        JsonNode key = finished.path("binding").path("sessionKey");
-        require(sameNumericJson(verified.catalog(), acknowledgementCatalog(key, text(finished, "publicationId"), true)),
-                "Original publication resource authorities changed");
-    }
-
-    private JsonNode acknowledgementCatalog(JsonNode key, String publicationId, boolean locked) {
-        String suffix = locked ? " FOR UPDATE" : "";
-        ObjectNode catalog = JSON.createObjectNode();
-        var objects = jdbc.query("SELECT scope_ref, publication_id, slot_key, resource_id, kind AS resource_kind, byte_length, sha256,"
-                + " capture_object_key AS object_key, capture_state AS state, operation_id, inline_bytes FROM ma_resource"
-                + " WHERE scope_ref = ? AND publication_id = ? AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374' ORDER BY slot_key LIMIT 4097" + suffix, (schemaRow, schemaIndex) -> ManagedSchemaRows.read(schemaRow),
-                scope(key), publicationId);
-        require(objects.size() <= 4096, "Original publication catalog exceeds its bound");
-        for (var object : objects) {
-            Object bytes = object.remove("inline_bytes");
-            object.put("inlineDigest", bytes instanceof byte[] inline ? ToolPublicationContract.sha256(inline) : null);
-            require(scope(key).equals(object.get("scope_ref")) && publicationId.equals(object.get("publication_id"))
-                    && "VERIFIED".equals(object.get("state")), "Original publication has unresolved objects");
-        }
-        catalog.set("objects", JSON.valueToTree(objects));
-        var seals = sealManifest.sealRows(scope(key), publicationId, null);
-        require(seals.size() <= 2, "Original publication seal catalog conflicts");
-        for (var seal : seals) {
-            require(scope(key).equals(seal.get("scope_key")) && publicationId.equals(seal.get("publication_id")),
-                    "Original publication seal identity conflicts");
-        }
-        catalog.set("seals", JSON.valueToTree(seals));
-        return catalog;
-    }
-
-    static JsonNode exactAcknowledgementJson(byte[] bytes) {
-        try {
-            ToolPublicationContract.readJson(bytes);
-            return ACK_JSON.readTree(bytes);
-        } catch (IOException error) {
-            throw new IllegalArgumentException("Original acknowledgement JSON is unavailable");
-        }
-    }
-
-    static boolean sameNumericJson(JsonNode left, JsonNode right) {
-        return left.equals((a, b) -> a.isNumber() && b.isNumber()
-                ? a.decimalValue().compareTo(b.decimalValue()) : a.equals(b) ? 0 : 1, right);
     }
 
     static boolean validAdmissionHistory(JsonNode history) {
@@ -692,7 +538,6 @@ public final class ToolPublicationDataStore {
 
     /** Admits a seal; inside the verifier context, verifies the accepted seal instead. */
     public JsonNode seal(JsonNode key, String publicationId, String token, String operationId, String streamId, int segmentCount, long byteLength, String digest) {
-        requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         require(segmentCount >= 0 && segmentCount <= 65536 && byteLength >= 0
                 && digest != null && digest.matches("[0-9a-f]{64}"), "Invalid seal");
@@ -746,7 +591,6 @@ public final class ToolPublicationDataStore {
 
     /** Admits a prefix scan; inside the verifier context, performs the accepted scan instead. */
     public JsonNode prefix(JsonNode key, String publicationId, String token, String operationId, String streamId) {
-        requireStagedCall(key, publicationId);
         require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
         String scope = scope(key);
         String slot = "prefix:" + streamId;
@@ -829,7 +673,6 @@ public final class ToolPublicationDataStore {
     }
 
     public JsonNode recoverOperation(JsonNode key, String publicationId, String token, String operationId) {
-        requireStagedCall(key, publicationId);
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
         String scope = scope(key);
@@ -1049,7 +892,6 @@ public final class ToolPublicationDataStore {
     }
 
     public JsonNode prepareAdmission(JsonNode key, String publicationId, String writerId, long writerGeneration, String writerToken, JsonNode outcome) {
-        requireStagedCall(key, publicationId);
         require(outcome != null && outcome.isObject()
                 && outcome.path("schemaVersion").asInt(-1) == 1,
                 "Invalid admission outcome");
@@ -1159,7 +1001,6 @@ public final class ToolPublicationDataStore {
 
     /** Admits a finish; inside the verifier context, verifies the accepted terminal instead. */
     public JsonNode finish(JsonNode key, String publicationId, String token, String operationId, byte[] bytes) {
-        requireStagedCall(key, publicationId);
         require(bytes != null, "Missing terminal result");
         JsonNode result = ToolPublicationContract.parseToolResult("result", bytes, MAX_TERMINAL);
         require(!"not_started".equals(text(result, "executionStatus"))
@@ -1642,7 +1483,6 @@ public final class ToolPublicationDataStore {
     }
 
     private JsonNode publish(JsonNode key, String publicationId, String token, String operationId, String slot, String kind, byte[] input, String expectedDigest, int maximum) {
-        requireStagedCall(key, publicationId);
         require(input != null && input.length > 0 && input.length <= maximum, "Invalid publication size");
         require(operationId != null && operationId.matches("[a-z0-9_-]{1,128}"),
                 "Invalid publication operation ID");
@@ -1797,10 +1637,6 @@ public final class ToolPublicationDataStore {
                 : grants.producerClaimBindingLocked(scope, publicationId, token);
         require(authorization.binding().path("sessionKey").equals(key), "Publication scope conflicts");
         return authorization;
-    }
-
-    void requireStagedCall(JsonNode key, String publicationId) {
-        grants.requireStagedCall(key, publicationId);
     }
 
     void lockStagedPlacement(JsonNode key, String publicationId, boolean requirePlacement) {
