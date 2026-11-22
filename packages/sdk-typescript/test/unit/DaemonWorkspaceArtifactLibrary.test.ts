@@ -9,6 +9,7 @@ import {
   DaemonClient,
   DaemonHttpError,
 } from '../../src/daemon/DaemonClient.js';
+import { SseFramingError } from '../../src/daemon/sse.js';
 import type { DaemonWorkspaceArtifactLibraryStreamEvent } from '../../src/daemon/types.js';
 
 function createSseStream(
@@ -100,6 +101,7 @@ describe('WorkspaceDaemonClient artifactLibrary', () => {
       'event: session\ndata: {"v":1,"sessionId":"sess-archived","generatedAt":"2026-11-21T10:00:00.000Z","limits":{"maxArtifacts":100},"session":{"createdAt":"2026-11-20T00:00:00.000Z","archiveState":"archived","sourceType":"web"},"artifacts":[]}\n\n',
       'event: session_error\ndata: {"v":1,"sessionId":"sess-err","status":413,"code":"transcript_too_large","message":"Too large"}\n\n',
       'event: complete\ndata: {"v":1,"total":3,"succeeded":1,"failed":1,"skipped":1}\n\n',
+      'event: error\ndata: {"v":1,"status":503,"code":"workspace_runtime_unavailable","message":"Runtime unavailable"}\n\n',
     ];
     const fetch = vi.fn().mockResolvedValue(
       new Response(createSseStream(sseBody), {
@@ -155,7 +157,32 @@ describe('WorkspaceDaemonClient artifactLibrary', () => {
         failed: 1,
         skipped: 1,
       },
+      {
+        type: 'error',
+        v: 1,
+        status: 503,
+        code: 'workspace_runtime_unavailable',
+        message: 'Runtime unavailable',
+      },
     ]);
+  });
+
+  it('rejects a non-SSE 200 response on artifactLibraryStream with SseFramingError', async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ v: 1, sessions: [], errors: [] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    await expect(async () => {
+      for await (const _ of client
+        .workspaceById('ws-1')
+        .artifactLibraryStream()) {
+        // unreachable
+      }
+    }).rejects.toThrow(SseFramingError);
   });
 
   it('maps pre-stream 503 sse_connection_limit_exceeded and 409 artifact_library_unavailable to DaemonHttpError', async () => {

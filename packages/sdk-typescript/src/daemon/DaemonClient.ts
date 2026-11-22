@@ -1420,6 +1420,12 @@ export class DaemonClient {
       },
     );
     if (!res.ok) throw await this.failOnError(res, label);
+    const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+    if (!contentType.includes('text/event-stream')) {
+      throw new SseFramingError(
+        `${label}: expected text/event-stream response, got ${res.headers.get('content-type') ?? '(missing)'}`,
+      );
+    }
     if (!res.body) {
       throw new SseFramingError(`${label}: response body is missing`);
     }

@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  DaemonHttpError,
-  type DaemonArtifactLibraryMemberError,
-  type DaemonArtifactLibrarySessionEnvelope,
-  type DaemonArtifactLibrarySessionMetadata,
-  type DaemonSessionArtifact,
-  type DaemonWorkspaceArtifactLibraryResult,
-  type DaemonWorkspaceArtifactLibraryStreamEvent,
+import type {
+  DaemonArtifactLibraryMemberError,
+  DaemonArtifactLibrarySessionEnvelope,
+  DaemonArtifactLibrarySessionMetadata,
+  DaemonSessionArtifact,
+  DaemonWorkspaceArtifactLibraryResult,
+  DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';
+import {
+  readDaemonHttpErrorInfo,
+  type DaemonHttpErrorInfo,
+} from '../components/artifacts/artifactUtils';
 
 export const WORKSPACE_ARTIFACT_LIBRARY_FEATURE = 'workspace_artifact_library';
 export const WORKSPACE_ARTIFACT_LIBRARY_STREAM_FEATURE =
@@ -23,16 +26,9 @@ export interface WorkspaceArtifactLibraryRow {
 export interface WorkspaceArtifactLibraryProgress {
   received: number;
   total: number | undefined;
-  succeeded?: number;
-  failed?: number;
-  skipped?: number;
 }
 
-export interface WorkspaceArtifactLibraryRequestError {
-  status?: number;
-  code?: string;
-  message: string;
-}
+export type WorkspaceArtifactLibraryRequestError = DaemonHttpErrorInfo;
 
 export interface ScanOwner {
   readonly workspaceKey: string;
@@ -54,11 +50,9 @@ export interface UseWorkspaceArtifactLibraryOptions {
   workspaceSelector: string | undefined;
   reader: WorkspaceArtifactLibraryReader;
   features: readonly string[] | undefined;
-  enabled?: boolean;
 }
 
 export interface WorkspaceArtifactLibraryState {
-  supported: boolean;
   scanning: boolean;
   complete: boolean;
   partial: boolean;
@@ -91,58 +85,28 @@ export function flattenAndSortWorkspaceArtifacts(
   rows.sort((left, right) => {
     const leftTs = artifactSortTimestamp(left.artifact);
     const rightTs = artifactSortTimestamp(right.artifact);
-    if (leftTs !== rightTs) return rightTs.localeCompare(leftTs);
+    if (leftTs !== rightTs) return rightTs < leftTs ? -1 : 1;
     if (left.sessionId !== right.sessionId) {
-      return left.sessionId.localeCompare(right.sessionId);
+      return left.sessionId < right.sessionId ? -1 : 1;
     }
-    return left.artifact.id.localeCompare(right.artifact.id);
+    return left.artifact.id < right.artifact.id
+      ? -1
+      : left.artifact.id > right.artifact.id
+        ? 1
+        : 0;
   });
   return rows;
 }
 
-function readHttpErrorRecord(
-  error: DaemonHttpError,
-): Record<string, unknown> | undefined {
-  return typeof error.body === 'object' &&
-    error.body !== null &&
-    !Array.isArray(error.body)
-    ? (error.body as Record<string, unknown>)
-    : undefined;
-}
-
 export function isSseAdmissionRefusal(error: unknown): boolean {
-  if (!(error instanceof DaemonHttpError) || error.status !== 503) return false;
-  const body = readHttpErrorRecord(error);
-  const code = body?.['code'] ?? body?.['error'];
-  return code === 'sse_connection_limit_exceeded';
+  const info = readDaemonHttpErrorInfo(error);
+  return info.status === 503 && info.code === 'sse_connection_limit_exceeded';
 }
 
 export function extractArtifactLibraryRequestError(
   error: unknown,
 ): WorkspaceArtifactLibraryRequestError {
-  if (error instanceof DaemonHttpError) {
-    const body = readHttpErrorRecord(error);
-    const code =
-      typeof body?.['code'] === 'string'
-        ? body['code']
-        : typeof body?.['error'] === 'string'
-          ? body['error']
-          : undefined;
-    const message =
-      typeof body?.['message'] === 'string' && body['message'].length > 0
-        ? body['message']
-        : typeof body?.['error'] === 'string' && body['error'].length > 0
-          ? body['error']
-          : error.message;
-    return {
-      status: error.status,
-      ...(code ? { code } : {}),
-      message,
-    };
-  }
-  return {
-    message: error instanceof Error ? error.message : String(error),
-  };
+  return readDaemonHttpErrorInfo(error);
 }
 
 const EMPTY_ROWS: readonly WorkspaceArtifactLibraryRow[] = [];
@@ -156,7 +120,6 @@ export function useWorkspaceArtifactLibrary({
   workspaceSelector,
   reader,
   features,
-  enabled = true,
 }: UseWorkspaceArtifactLibraryOptions): WorkspaceArtifactLibraryState {
   const supported =
     features?.includes(WORKSPACE_ARTIFACT_LIBRARY_FEATURE) === true;
@@ -199,7 +162,7 @@ export function useWorkspaceArtifactLibrary({
     abortRef.current?.abort();
     abortRef.current = undefined;
 
-    if (!enabled || !supported || !workspaceSelector) {
+    if (!supported || !workspaceSelector) {
       ownerRef.current = undefined;
       setState({
         owner: undefined,
@@ -239,8 +202,17 @@ export function useWorkspaceArtifactLibrary({
       total: undefined,
     };
     let projectionDirty = false;
-    let flushScheduled = false;
+    let batchTimer: ReturnType<typeof setTimeout> | undefined;
     let currentRows: readonly WorkspaceArtifactLibraryRow[] = EMPTY_ROWS;
+    let sawComplete = false;
+    let terminalError: WorkspaceArtifactLibraryRequestError | undefined;
+
+    const cancelBatchTimer = () => {
+      if (batchTimer !== undefined) {
+        clearTimeout(batchTimer);
+        batchTimer = undefined;
+      }
+    };
 
     const flushProjectionNow = () => {
       if (!projectionDirty) return;
@@ -267,12 +239,30 @@ export function useWorkspaceArtifactLibrary({
       });
     };
 
+    // Coalesce across the macrotask checkpoint so a burst of session events
+    // yielded across microtask turns triggers one projection sort rather than
+    // one sort per event.
     const scheduleBatchCommit = () => {
-      if (flushScheduled) return;
-      flushScheduled = true;
-      queueMicrotask(() => {
-        flushScheduled = false;
+      if (batchTimer !== undefined) return;
+      batchTimer = setTimeout(() => {
+        batchTimer = undefined;
         commitProgress();
+      }, 0);
+    };
+
+    const commitCompletedState = () => {
+      cancelBatchTimer();
+      flushProjectionNow();
+      setState({
+        owner,
+        scanning: false,
+        complete: true,
+        partial: false,
+        rows: currentRows,
+        sessionErrors:
+          sessionErrors.length === 0 ? EMPTY_ERRORS : [...sessionErrors],
+        requestError: undefined,
+        progress: { ...progress },
       });
     };
 
@@ -300,30 +290,16 @@ export function useWorkspaceArtifactLibrary({
       }
       sessionErrors.push(...result.errors);
       projectionDirty = true;
-      flushProjectionNow();
       const total = result.sessions.length + result.errors.length;
-      setState({
-        owner,
-        scanning: false,
-        complete: true,
-        partial: false,
-        rows: currentRows,
-        sessionErrors:
-          sessionErrors.length === 0 ? EMPTY_ERRORS : [...sessionErrors],
-        requestError: undefined,
-        progress: {
-          received: total,
-          total,
-          succeeded: result.sessions.length,
-          failed: result.errors.length,
-          skipped: 0,
-        },
-      });
+      progress = {
+        received: total,
+        total,
+      };
+      sawComplete = true;
+      commitCompletedState();
     };
 
     const runStreamScan = async () => {
-      let sawComplete = false;
-      let terminalError: WorkspaceArtifactLibraryRequestError | undefined;
       for await (const event of readerRef.current.artifactLibraryStream(
         workspaceSelector,
         { signal },
@@ -351,53 +327,45 @@ export function useWorkspaceArtifactLibrary({
             scheduleBatchCommit();
             break;
           case 'complete':
-            sawComplete = true;
             progress = {
               received: event.succeeded + event.failed + event.skipped,
               total: event.total,
-              succeeded: event.succeeded,
-              failed: event.failed,
-              skipped: event.skipped,
             };
+            if (!terminalError) {
+              sawComplete = true;
+            }
             break;
           case 'error':
-            terminalError = {
-              status: event.status,
-              code: event.code,
-              message: event.message,
-            };
+            if (!sawComplete) {
+              terminalError = {
+                status: event.status,
+                code: event.code,
+                message: event.message,
+              };
+            }
             break;
         }
       }
+      cancelBatchTimer();
       if (!isOwnerCurrent()) return;
-      flushProjectionNow();
-      if (sawComplete && !terminalError) {
-        setState({
-          owner,
-          scanning: false,
-          complete: true,
-          partial: false,
-          rows: currentRows,
-          sessionErrors:
-            sessionErrors.length === 0 ? EMPTY_ERRORS : [...sessionErrors],
-          requestError: undefined,
-          progress: { ...progress },
-        });
-      } else {
-        // Only `complete` terminates a scan: a disconnect or terminal `error`
-        // without `complete` is partial, never silently complete.
-        setState({
-          owner,
-          scanning: false,
-          complete: false,
-          partial: true,
-          rows: currentRows,
-          sessionErrors:
-            sessionErrors.length === 0 ? EMPTY_ERRORS : [...sessionErrors],
-          requestError: terminalError,
-          progress: { ...progress },
-        });
+      if (sawComplete) {
+        commitCompletedState();
+        return;
       }
+      flushProjectionNow();
+      // Only `complete` terminates a scan: a disconnect or terminal `error`
+      // without `complete` is partial, never silently complete.
+      setState({
+        owner,
+        scanning: false,
+        complete: false,
+        partial: true,
+        rows: currentRows,
+        sessionErrors:
+          sessionErrors.length === 0 ? EMPTY_ERRORS : [...sessionErrors],
+        requestError: terminalError,
+        progress: { ...progress },
+      });
     };
 
     void (async () => {
@@ -410,7 +378,11 @@ export function useWorkspaceArtifactLibrary({
             // SSE admission refusal is sent as a plain HTTP 503 before the
             // stream starts; retry the same scan as JSON within the same
             // generation.
-            if (isSseAdmissionRefusal(error) && envelopes.size === 0) {
+            if (
+              isSseAdmissionRefusal(error) &&
+              !sawComplete &&
+              envelopes.size === 0
+            ) {
               await runJsonScan();
               return;
             }
@@ -420,7 +392,12 @@ export function useWorkspaceArtifactLibrary({
           await runJsonScan();
         }
       } catch (error) {
+        cancelBatchTimer();
         if (!isOwnerCurrent()) return;
+        if (sawComplete) {
+          commitCompletedState();
+          return;
+        }
         flushProjectionNow();
         const hasPartialData =
           envelopes.size > 0 ||
@@ -441,12 +418,12 @@ export function useWorkspaceArtifactLibrary({
     })();
 
     return () => {
+      cancelBatchTimer();
       controller.abort();
     };
-  }, [enabled, refreshTick, streamSupported, supported, workspaceSelector]);
+  }, [refreshTick, streamSupported, supported, workspaceSelector]);
 
   return {
-    supported,
     scanning: state.scanning,
     complete: state.complete,
     partial: state.partial,

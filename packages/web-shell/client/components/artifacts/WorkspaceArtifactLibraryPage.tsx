@@ -126,7 +126,17 @@ export function WorkspaceArtifactLibraryPage({
 
   const [filterText, setFilterText] = useState('');
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
+  const [activatedKey, setActivatedKey] = useState<string | undefined>(
+    undefined,
+  );
+  const [activationNonce, setActivationNonce] = useState(0);
   const [renderLimit, setRenderLimit] = useState(renderLimitStep);
+
+  useEffect(() => {
+    setFilterText('');
+    setSelectedKey(undefined);
+    setActivatedKey(undefined);
+  }, [workspaceCwd]);
 
   useEffect(() => {
     setRenderLimit(renderLimitStep);
@@ -184,6 +194,8 @@ export function WorkspaceArtifactLibraryPage({
       return;
     }
     setSelectedKey(row.key);
+    setActivatedKey(row.key);
+    setActivationNonce((value) => value + 1);
   };
 
   const progressCounter =
@@ -297,6 +309,7 @@ export function WorkspaceArtifactLibraryPage({
       )}
 
       {!library.scanning &&
+        library.complete &&
         !library.requestError &&
         library.rows.length === 0 &&
         library.sessionErrors.length === 0 && (
@@ -424,15 +437,21 @@ export function WorkspaceArtifactLibraryPage({
               data-testid="workspace-artifact-library-detail"
             >
               <ArtifactDetail
+                key={`${selectedRow.key}:${
+                  selectedRow.key === activatedKey ? activationNonce : 0
+                }`}
                 artifact={selectedRow.artifact}
                 sourceSessionId={selectedRow.sessionId}
                 workspaceActions={workspaceTarget.actions}
-                onSnapshotSessionNotFound={() =>
-                  onJumpToSessionArtifact(
-                    selectedRow.sessionId,
-                    selectedRow.artifact.id,
-                    selectedRow.session.archiveState,
-                  )
+                onSnapshotSessionNotFound={
+                  selectedRow.key === activatedKey
+                    ? () =>
+                        onJumpToSessionArtifact(
+                          selectedRow.sessionId,
+                          selectedRow.artifact.id,
+                          selectedRow.session.archiveState,
+                        )
+                    : undefined
                 }
               />
             </div>

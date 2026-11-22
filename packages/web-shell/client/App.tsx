@@ -375,6 +375,7 @@ import {
 import {
   artifactDisplayName,
   resolvePendingArtifactJumpOpen,
+  runArtifactLibrarySessionJump,
   type PendingArtifactJumpOpenRequest,
 } from './components/artifacts/artifactUtils';
 import { WorkspaceArtifactLibraryPage } from './components/artifacts/WorkspaceArtifactLibraryPage';
@@ -11421,8 +11422,9 @@ export function App({
     if (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable) return;
     splitClassificationGenerationRef.current += 1;
     setActivePanel(null);
-    showChat();
+    if (!navigationRef.current) showChat();
     setMainView('artifacts');
+    navigationRef.current?.openPage('artifacts');
   }, [projectFeaturesAvailable, showChat, workspaceArtifactLibraryAvailable]);
   useEffect(() => {
     if (
@@ -11670,7 +11672,9 @@ export function App({
           ? 'pr-watches'
           : mainView === 'goals'
             ? 'goals'
-            : undefined;
+            : mainView === 'artifacts'
+              ? 'artifacts'
+              : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -11696,6 +11700,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
           (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
@@ -11723,7 +11728,9 @@ export function App({
           ? 'prWatches'
           : nextPage === 'goals'
             ? 'goals'
-            : 'chat',
+            : nextPage === 'artifacts'
+              ? 'artifacts'
+              : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -11735,6 +11742,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    workspaceArtifactLibraryAvailable,
     channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
@@ -18681,39 +18689,21 @@ export function App({
       const targetCwd =
         resolveWorkspaceMaintenanceTargetCwd() ??
         workspace.capabilities?.workspaceCwd;
-      if (artifactId) {
-        setPendingJumpArtifactOpen({ sessionId, artifactId });
-      }
-      showChat();
-      void (async () => {
-        try {
-          if (archiveState === 'archived') {
-            const primaryCwd = workspace.capabilities?.workspaceCwd;
-            if (targetCwd && primaryCwd && targetCwd !== primaryCwd) {
-              const result = await workspace.client
-                .workspaceByCwd(targetCwd)
-                .unarchiveSessionsData([sessionId]);
-              const itemError = result.errors.find(
-                (entry) => entry.sessionId === sessionId,
-              );
-              if (itemError) {
-                throw new Error(itemError.error);
-              }
-            } else {
-              await workspaceActions.unarchiveSession(sessionId);
-            }
-          }
-          await loadSidebarSession(sessionId, targetCwd);
-        } catch (error) {
-          if (
-            pendingJumpArtifactOpenRef.current?.sessionId === sessionId &&
-            pendingJumpArtifactOpenRef.current?.artifactId === artifactId
-          ) {
-            setPendingJumpArtifactOpen(undefined);
-          }
-          reportError(error, 'Failed to open session');
-        }
-      })();
+      void runArtifactLibrarySessionJump({
+        sessionId,
+        archiveState,
+        artifactId,
+        targetCwd,
+        primaryCwd: workspace.capabilities?.workspaceCwd,
+        showChat,
+        unarchivePrimarySession: (id) => workspaceActions.unarchiveSession(id),
+        unarchiveWorkspaceSessions: (cwd, ids) =>
+          workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+        getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
+        setPendingJumpArtifactOpen,
+        loadSidebarSession: (id, cwd) => loadSidebarSession(id, cwd),
+        reportError,
+      });
     },
     [
       loadSidebarSession,

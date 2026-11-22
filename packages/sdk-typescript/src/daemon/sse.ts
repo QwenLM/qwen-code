@@ -67,10 +67,17 @@ export class SseFramingError extends Error {
  */
 const MAX_BUF_CHARS = 16 * 1024 * 1024;
 
-export async function* parseSseStream(
+export interface NamedSseFrame {
+  event?: string;
+  data: Record<string, unknown>;
+}
+
+async function* walkSseFrames<T>(
   body: ReadableStream<Uint8Array>,
-  signal?: AbortSignal,
-): AsyncGenerator<DaemonEvent> {
+  signal: AbortSignal | undefined,
+  parse: (raw: string) => T | undefined,
+  label: string,
+): AsyncGenerator<T> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -138,14 +145,14 @@ export async function* parseSseStream(
           // single-frame fallback) which silently dropped events.
           const consumed = consumeFrames(buf);
           for (const raw of consumed.frames) {
-            const frame = parseFrame(raw);
+            const frame = parse(raw);
             if (frame) yield frame;
           }
           // Anything left over after the last separator is a
           // legitimate trailing fragment (no `\n\n` ever arrived);
           // try to parse it once as a final attempt.
           if (consumed.tail.length > 0) {
-            const frame = parseFrame(consumed.tail);
+            const frame = parse(consumed.tail);
             if (frame) yield frame;
           }
         }
@@ -155,7 +162,7 @@ export async function* parseSseStream(
       // Unbounded buffer is a memory-pressure vector — see MAX_BUF_CHARS.
       if (buf.length > MAX_BUF_CHARS) {
         throw new SseFramingError(
-          `parseSseStream: unread buffer exceeded ${MAX_BUF_CHARS} ` +
+          `${label}: unread buffer exceeded ${MAX_BUF_CHARS} ` +
             `UTF-16 code units without a frame separator — upstream likely not SSE`,
         );
       }
@@ -163,7 +170,7 @@ export async function* parseSseStream(
       if (consumed.frames.length > 0) {
         for (const raw of consumed.frames) {
           if (signal?.aborted) return;
-          const frame = parseFrame(raw);
+          const frame = parse(raw);
           if (frame) yield frame;
         }
       }
@@ -182,6 +189,27 @@ export async function* parseSseStream(
       /* already cancelled or detached */
     }
   }
+}
+
+export function parseSseStream(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<DaemonEvent> {
+  return walkSseFrames(body, signal, parseFrame, 'parseSseStream');
+}
+
+/**
+ * Parse an SSE stream whose event discriminator is carried on the `event:`
+ * field rather than inside the JSON `data` payload (e.g.
+ * `ArtifactLibraryStream` via `formatGenerationSse`). Shares the same frame
+ * walker, 16 Mi buffer cap, and abort-driven reader cleanup as
+ * `parseSseStream`.
+ */
+export function parseNamedSseStream(
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<NamedSseFrame> {
+  return walkSseFrames(body, signal, parseNamedFrame, 'parseNamedSseStream');
 }
 
 /**
@@ -232,29 +260,47 @@ export function consumeFrames(buf: string): {
   return { frames, tail: buf.slice(cursor) };
 }
 
-function parseFrame(raw: string): DaemonEvent | undefined {
+function extractFrameFields(raw: string):
+  | {
+      event?: string;
+      dataText: string;
+    }
+  | undefined {
   if (!raw) return undefined;
+  let event: string | undefined;
+  const dataLines: string[] = [];
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith('event:')) {
+      const rest = line.slice(6);
+      event = (rest.startsWith(' ') ? rest.slice(1) : rest).trim() || undefined;
+    } else if (line.startsWith('data:')) {
+      const rest = line.slice(5);
+      // Strip ONE leading space if present (per spec); preserve subsequent
+      // whitespace verbatim.
+      dataLines.push(rest.startsWith(' ') ? rest.slice(1) : rest);
+    }
+  }
+  if (dataLines.length === 0) return undefined;
+  return {
+    ...(event !== undefined ? { event } : {}),
+    dataText: dataLines.join('\n'),
+  };
+}
+
+function parseFrame(raw: string): DaemonEvent | undefined {
   // Per the EventSource spec, comment lines (`:` prefix) and `retry:`
   // are line-level fields, not frame-level. A frame may legitimately
   // contain a leading comment / retry line AND `data:` lines (e.g. an
   // intermediary that prepends `: keep-alive` to every frame). The
-  // line-level loop below only collects `data:` lines, so a
+  // line-level loop in `extractFrameFields` only collects `data:` lines, so a
   // pure-comment frame still returns undefined via the
   // `dataLines.length === 0` guard — without us dropping real events
   // whose first line happens to be a comment (BRgq-).
   // Split on either CRLF or LF (same forgiving stance as frame boundaries).
-  const dataLines: string[] = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.startsWith('data:')) continue;
-    const rest = line.slice(5);
-    // Strip ONE leading space if present (per spec); preserve subsequent
-    // whitespace verbatim.
-    dataLines.push(rest.startsWith(' ') ? rest.slice(1) : rest);
-  }
-  if (dataLines.length === 0) return undefined;
-  const dataText = dataLines.join('\n');
+  const extracted = extractFrameFields(raw);
+  if (!extracted) return undefined;
   try {
-    const parsed = JSON.parse(dataText);
+    const parsed = JSON.parse(extracted.dataText);
     // `JSON.parse('null')` / `JSON.parse('42')` / `JSON.parse('[1,2]')`
     // etc. parse cleanly but aren't `DaemonEvent`-shaped. Casting
     // them through would hand consumers a value that violates the
@@ -300,113 +346,19 @@ function parseFrame(raw: string): DaemonEvent | undefined {
   }
 }
 
-export interface NamedSseFrame {
-  event?: string;
-  data: Record<string, unknown>;
-}
-
 function parseNamedFrame(raw: string): NamedSseFrame | undefined {
-  if (!raw) return undefined;
-  let event: string | undefined;
-  const dataLines: string[] = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (line.startsWith('event:')) {
-      const rest = line.slice(6);
-      event = (rest.startsWith(' ') ? rest.slice(1) : rest).trim() || undefined;
-    } else if (line.startsWith('data:')) {
-      const rest = line.slice(5);
-      dataLines.push(rest.startsWith(' ') ? rest.slice(1) : rest);
-    }
-  }
-  if (dataLines.length === 0) return undefined;
+  const extracted = extractFrameFields(raw);
+  if (!extracted) return undefined;
   try {
-    const parsed = JSON.parse(dataLines.join('\n'));
+    const parsed = JSON.parse(extracted.dataText);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
       return undefined;
     if ((parsed as { v?: unknown }).v !== 1) return undefined;
     return {
-      ...(event !== undefined ? { event } : {}),
+      ...(extracted.event !== undefined ? { event: extracted.event } : {}),
       data: parsed as Record<string, unknown>,
     };
   } catch {
     return undefined;
-  }
-}
-
-/**
- * Parse an SSE stream whose event discriminator is carried on the `event:`
- * field rather than inside the JSON `data` payload (e.g.
- * `ArtifactLibraryStream` via `formatGenerationSse`). Shares the same frame
- * walker, 16 Mi buffer cap, and abort-driven reader cleanup as
- * `parseSseStream`.
- */
-export async function* parseNamedSseStream(
-  body: ReadableStream<Uint8Array>,
-  signal?: AbortSignal,
-): AsyncGenerator<NamedSseFrame> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  let onAbort: (() => void) | undefined;
-  if (signal) {
-    onAbort = () => {
-      reader.cancel().catch(() => {
-        /* already cancelled or detached */
-      });
-    };
-    if (signal.aborted) onAbort();
-    else signal.addEventListener('abort', onAbort, { once: true });
-  }
-  try {
-    while (true) {
-      if (signal?.aborted) return;
-      let value: Uint8Array | undefined;
-      let done: boolean;
-      try {
-        ({ value, done } = await reader.read());
-      } catch (err) {
-        if (signal?.aborted) return;
-        throw err;
-      }
-      if (signal?.aborted) return;
-      if (done) {
-        buf += decoder.decode();
-        if (buf.length > 0) {
-          const consumed = consumeFrames(buf);
-          for (const raw of consumed.frames) {
-            const frame = parseNamedFrame(raw);
-            if (frame) yield frame;
-          }
-          if (consumed.tail.length > 0) {
-            const frame = parseNamedFrame(consumed.tail);
-            if (frame) yield frame;
-          }
-        }
-        return;
-      }
-      buf += decoder.decode(value, { stream: true });
-      if (buf.length > MAX_BUF_CHARS) {
-        throw new SseFramingError(
-          `parseNamedSseStream: unread buffer exceeded ${MAX_BUF_CHARS} ` +
-            `UTF-16 code units without a frame separator — upstream likely not SSE`,
-        );
-      }
-      const consumed = consumeFrames(buf);
-      for (const raw of consumed.frames) {
-        if (signal?.aborted) return;
-        const frame = parseNamedFrame(raw);
-        if (frame) yield frame;
-      }
-      buf = consumed.tail;
-    }
-  } finally {
-    if (signal && onAbort) {
-      signal.removeEventListener('abort', onAbort);
-    }
-    try {
-      await reader.cancel();
-    } catch {
-      /* already cancelled or detached */
-    }
   }
 }

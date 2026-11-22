@@ -1,5 +1,6 @@
 import {
   DaemonHttpError,
+  isSessionLevelNotFound,
   type DaemonSessionArtifact,
   type DaemonWorkspaceFileBytes,
 } from '@qwen-code/sdk/daemon';
@@ -654,37 +655,50 @@ export function classifyWorkspaceArtifactDispatch(
   return { kind: 'metadata_detail' };
 }
 
-function readDaemonHttpErrorField(
-  error: unknown,
-  field: 'code' | 'error',
-): string | undefined {
-  if (!(error instanceof DaemonHttpError)) return undefined;
-  if (
-    typeof error.body !== 'object' ||
-    error.body === null ||
-    Array.isArray(error.body)
-  ) {
-    return undefined;
+export interface DaemonHttpErrorInfo {
+  status?: number;
+  code?: string;
+  message: string;
+}
+
+export function readDaemonHttpErrorInfo(error: unknown): DaemonHttpErrorInfo {
+  if (error instanceof DaemonHttpError) {
+    const body =
+      typeof error.body === 'object' &&
+      error.body !== null &&
+      !Array.isArray(error.body)
+        ? (error.body as Record<string, unknown>)
+        : undefined;
+    const code =
+      typeof body?.['code'] === 'string'
+        ? body['code']
+        : typeof body?.['error'] === 'string'
+          ? body['error']
+          : undefined;
+    const message =
+      typeof body?.['message'] === 'string' && body['message'].length > 0
+        ? body['message']
+        : typeof body?.['error'] === 'string' && body['error'].length > 0
+          ? body['error']
+          : error.message;
+    return {
+      status: error.status,
+      ...(code ? { code } : {}),
+      message,
+    };
   }
-  const value = (error.body as Record<string, unknown>)[field];
-  return typeof value === 'string' ? value : undefined;
+  return {
+    message: error instanceof Error ? error.message : String(error),
+  };
 }
 
 export function isSessionNotFoundArtifactError(error: unknown): boolean {
-  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
-  return (
-    readDaemonHttpErrorField(error, 'code') === 'session_not_found' ||
-    readDaemonHttpErrorField(error, 'error') === 'session_not_found'
-  );
+  return isSessionLevelNotFound(error);
 }
 
 export function isArtifactSnapshotUnavailableError(error: unknown): boolean {
-  if (!(error instanceof DaemonHttpError) || error.status !== 404) return false;
-  return (
-    readDaemonHttpErrorField(error, 'error') ===
-      'artifact_snapshot_unavailable' ||
-    readDaemonHttpErrorField(error, 'code') === 'artifact_snapshot_unavailable'
-  );
+  const info = readDaemonHttpErrorInfo(error);
+  return info.status === 404 && info.code === 'artifact_snapshot_unavailable';
 }
 
 export interface PendingArtifactJumpOpenRequest {
@@ -733,4 +747,88 @@ export function resolvePendingArtifactJumpOpen(
     return 'wait';
   }
   return 'open';
+}
+
+export interface ArtifactLibrarySessionJumpDeps {
+  sessionId: string;
+  archiveState: 'active' | 'archived';
+  artifactId?: string;
+  targetCwd: string | undefined;
+  primaryCwd: string | undefined;
+  showChat: () => void;
+  unarchivePrimarySession: (sessionId: string) => Promise<unknown>;
+  unarchiveWorkspaceSessions: (
+    workspaceCwd: string,
+    sessionIds: string[],
+  ) => Promise<{
+    unarchived: string[];
+    alreadyActive: string[];
+    notFound: string[];
+    errors: Array<{ sessionId: string; error: string }>;
+  }>;
+  getPendingJumpArtifactOpen: () => PendingArtifactJumpOpenRequest | undefined;
+  setPendingJumpArtifactOpen: (
+    request: PendingArtifactJumpOpenRequest | undefined,
+  ) => void;
+  loadSidebarSession: (
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => Promise<void>;
+  reportError: (error: unknown, fallbackMessage: string) => void;
+}
+
+/**
+ * Orchestrates opening a session (and optionally arming a post-jump artifact
+ * tab open) from the workspace artifact library. For archived sessions, the
+ * pending artifact open is armed only AFTER unarchive resolves and immediately
+ * before `loadSidebarSession`, so `resolvePendingArtifactJumpOpen` does not
+ * cancel the request while the shell is still parked on the old session during
+ * the awaited unarchive RPC.
+ */
+export async function runArtifactLibrarySessionJump(
+  deps: ArtifactLibrarySessionJumpDeps,
+): Promise<void> {
+  const {
+    sessionId,
+    archiveState,
+    artifactId,
+    targetCwd,
+    primaryCwd,
+    showChat,
+    unarchivePrimarySession,
+    unarchiveWorkspaceSessions,
+    getPendingJumpArtifactOpen,
+    setPendingJumpArtifactOpen,
+    loadSidebarSession,
+    reportError,
+  } = deps;
+  showChat();
+  try {
+    if (archiveState === 'archived') {
+      if (targetCwd && primaryCwd && targetCwd !== primaryCwd) {
+        const result = await unarchiveWorkspaceSessions(targetCwd, [sessionId]);
+        if (result.errors.length > 0) {
+          throw new Error(result.errors[0]!.error);
+        }
+        if (result.notFound.includes(sessionId)) {
+          throw new Error(`${sessionId}: not found in its workspace catalog`);
+        }
+      } else {
+        await unarchivePrimarySession(sessionId);
+      }
+    }
+    if (artifactId) {
+      setPendingJumpArtifactOpen({ sessionId, artifactId });
+    }
+    await loadSidebarSession(sessionId, targetCwd);
+  } catch (error) {
+    const current = getPendingJumpArtifactOpen();
+    if (
+      current?.sessionId === sessionId &&
+      current?.artifactId === artifactId
+    ) {
+      setPendingJumpArtifactOpen(undefined);
+    }
+    reportError(error, 'Failed to open session');
+  }
 }

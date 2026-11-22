@@ -5,22 +5,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DaemonHttpError,
   type DaemonArtifactLibrarySessionEnvelope,
+  type DaemonClient,
   type DaemonSessionArtifact,
+  type DaemonWorkspaceArtifactLibraryStreamEvent,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import {
   WORKSPACE_ARTIFACT_LIBRARY_FEATURE,
+  WORKSPACE_ARTIFACT_LIBRARY_STREAM_FEATURE,
   type WorkspaceArtifactLibraryReader,
 } from '../../hooks/useWorkspaceArtifactLibrary';
+import { getSessionCatalogStore } from '../../session-catalog/session-catalog-store';
 import {
   classifyWorkspaceArtifactDispatch,
   resolvePendingArtifactJumpOpen,
+  runArtifactLibrarySessionJump,
+  type PendingArtifactJumpOpenRequest,
 } from './artifactUtils';
 import { WorkspaceArtifactLibraryPage } from './WorkspaceArtifactLibraryPage';
 
 const mocks = vi.hoisted(() => {
   const readSessionArtifactContent = vi.fn();
-  const readFile = vi.fn();
+  const readWorkspaceFile = vi.fn();
   const readFileBytes = vi.fn();
   const stat = vi.fn();
   const client = {
@@ -31,13 +37,13 @@ const mocks = vi.hoisted(() => {
     features: ['workspace_artifact_library'],
   };
   const actions = {
-    readFile,
+    readWorkspaceFile,
     readFileBytes,
     stat,
   };
   return {
     readSessionArtifactContent,
-    readFile,
+    readWorkspaceFile,
     readFileBytes,
     stat,
     client,
@@ -48,7 +54,7 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useConnection: () => ({
-    sessionId: 'sess-live',
+    sessionId: 'sess-connected-current',
     clientId: 'client-1',
     status: 'connected',
   }),
@@ -83,6 +89,8 @@ function makeArtifact(
     workspacePath: `docs/${id}.md`,
     status: 'available',
     source: 'tool',
+    retention: 'restorable',
+    clientRetained: false,
     sizeBytes: 512,
     createdAt: '2026-11-21T08:00:00.000Z',
     updatedAt: '2026-11-21T09:00:00.000Z',
@@ -111,11 +119,19 @@ function makeEnvelope(
   };
 }
 
+function setInputValue(input: HTMLInputElement, nextValue: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLInputElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(input, nextValue);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 async function flush() {
   await act(async () => {
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 10));
   });
 }
 
@@ -128,9 +144,10 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mocks.readSessionArtifactContent.mockReset();
-    mocks.readFile.mockReset().mockResolvedValue({
+    mocks.readWorkspaceFile.mockReset().mockResolvedValue({
       path: 'docs/a.md',
       content: '# Hello from workspace file',
+      truncated: false,
     });
     mocks.readFileBytes.mockReset().mockResolvedValue({
       contentBase64: '',
@@ -143,6 +160,9 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       modifiedMs: 1,
       type: 'file',
     });
+    getSessionCatalogStore(
+      mocks.client as unknown as DaemonClient,
+    ).applyLiveState('/work/proj', []);
   });
 
   afterEach(async () => {
@@ -169,12 +189,9 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     expect(classifyWorkspaceArtifactDispatch(snapshot, true)).toEqual({
       kind: 'live_web_preview_snapshot',
     });
-    // Cold-but-active session: archiveState may be 'active' in the envelope,
-    // but live-state says false -> must jump, never hit content route.
     expect(classifyWorkspaceArtifactDispatch(snapshot, false)).toEqual({
       kind: 'jump_web_preview_snapshot',
     });
-    // Metadata-only storage:'managed' renders straight from descriptor, no jump.
     expect(
       classifyWorkspaceArtifactDispatch(managedMetadataOnly, false),
     ).toEqual({
@@ -187,150 +204,341 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
 
   it('holds post-jump open until the target session right-panel restore settles and cancels on mid-load session switch (S3)', () => {
     const pending = { sessionId: 'sess-target', artifactId: 'art-1' };
+    const settledState = {
+      currentSessionId: 'sess-target',
+      switchingSessionId: null,
+      panelStateKey: 'sess-target',
+      restoredSessionKey: 'sess-target',
+      panelRestoring: false,
+      loadingTranscript: false,
+      artifactsLoading: false,
+      connected: true,
+    };
 
-    // Target session still switching / restoring -> wait
+    // No pending request -> 'none'
+    expect(resolvePendingArtifactJumpOpen(undefined, settledState)).toBe(
+      'none',
+    );
+
+    // Target session still switching -> wait
     expect(
       resolvePendingArtifactJumpOpen(pending, {
+        ...settledState,
         currentSessionId: 'sess-old',
         switchingSessionId: 'sess-target',
-        panelStateKey: 'sess-old',
-        restoredSessionKey: 'sess-old',
-        panelRestoring: false,
-        loadingTranscript: true,
-        artifactsLoading: true,
-        connected: true,
       }),
     ).toBe('wait');
 
-    // Connected to target session, but panel restore has not committed yet -> wait
+    // Neither connected to target session nor switching to it -> cancel
     expect(
       resolvePendingArtifactJumpOpen(pending, {
-        currentSessionId: 'sess-target',
+        ...settledState,
+        currentSessionId: 'sess-old',
         switchingSessionId: null,
-        panelStateKey: 'sess-target',
-        restoredSessionKey: undefined,
-        panelRestoring: true,
-        loadingTranscript: false,
-        artifactsLoading: false,
-        connected: true,
       }),
-    ).toBe('wait');
+    ).toBe('cancel');
 
     // User switches to a different session mid-load -> cancel
     expect(
       resolvePendingArtifactJumpOpen(pending, {
-        currentSessionId: 'sess-target',
+        ...settledState,
         switchingSessionId: 'sess-other',
-        panelStateKey: 'sess-target',
-        restoredSessionKey: undefined,
-        panelRestoring: true,
-        loadingTranscript: true,
-        artifactsLoading: false,
-        connected: true,
       }),
     ).toBe('cancel');
 
-    // Target session restore committed and settled -> open
+    // Reconnecting (connected: false) while all other fields match -> wait
     expect(
       resolvePendingArtifactJumpOpen(pending, {
-        currentSessionId: 'sess-target',
+        ...settledState,
+        connected: false,
+      }),
+    ).toBe('wait');
+
+    // Transcript still loading -> wait
+    expect(
+      resolvePendingArtifactJumpOpen(pending, {
+        ...settledState,
+        loadingTranscript: true,
+      }),
+    ).toBe('wait');
+
+    // Artifacts still loading -> wait
+    expect(
+      resolvePendingArtifactJumpOpen(pending, {
+        ...settledState,
+        artifactsLoading: true,
+      }),
+    ).toBe('wait');
+
+    // Panel restore in flight -> wait
+    expect(
+      resolvePendingArtifactJumpOpen(pending, {
+        ...settledState,
+        panelRestoring: true,
+      }),
+    ).toBe('wait');
+
+    // Panel restore key not yet committed -> wait
+    expect(
+      resolvePendingArtifactJumpOpen(pending, {
+        ...settledState,
+        restoredSessionKey: undefined,
+      }),
+    ).toBe('wait');
+
+    // Target session restore committed and settled -> open
+    expect(resolvePendingArtifactJumpOpen(pending, settledState)).toBe('open');
+  });
+
+  it('arms post-jump pending artifact open only after archived session unarchive resolves, and fails closed on cross-workspace unarchive notFound (R1-1 & R3-2)', async () => {
+    let pending: PendingArtifactJumpOpenRequest | undefined;
+    let resolveUnarchive!: () => void;
+    const unarchivePrimarySession = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUnarchive = resolve;
+        }),
+    );
+    const loadSidebarSession = vi.fn(async (_sessionId: string) => {
+      // At the moment loadSidebarSession starts, pending must already be armed
+      expect(pending).toEqual({
+        sessionId: 'sess-archived',
+        artifactId: 'art-snap',
+      });
+    });
+    const reportError = vi.fn();
+
+    const jumpPromise = runArtifactLibrarySessionJump({
+      sessionId: 'sess-archived',
+      archiveState: 'archived',
+      artifactId: 'art-snap',
+      targetCwd: '/work/proj',
+      primaryCwd: '/work/proj',
+      showChat: vi.fn(),
+      unarchivePrimarySession,
+      unarchiveWorkspaceSessions: vi.fn(),
+      getPendingJumpArtifactOpen: () => pending,
+      setPendingJumpArtifactOpen: (req) => {
+        pending = req;
+      },
+      loadSidebarSession,
+      reportError,
+    });
+
+    // While parked on `await unarchivePrimarySession`, pending MUST still be
+    // undefined so `resolvePendingArtifactJumpOpen` on the current session
+    // returns 'none' instead of 'cancel'.
+    expect(unarchivePrimarySession).toHaveBeenCalledWith('sess-archived');
+    expect(pending).toBeUndefined();
+    expect(
+      resolvePendingArtifactJumpOpen(pending, {
+        currentSessionId: 'sess-old-current',
         switchingSessionId: null,
-        panelStateKey: 'sess-target',
-        restoredSessionKey: 'sess-target',
+        panelStateKey: 'sess-old-current',
+        restoredSessionKey: 'sess-old-current',
         panelRestoring: false,
         loadingTranscript: false,
         artifactsLoading: false,
         connected: true,
       }),
-    ).toBe('open');
+    ).toBe('none');
+
+    resolveUnarchive();
+    await jumpPromise;
+    expect(loadSidebarSession).toHaveBeenCalledWith(
+      'sess-archived',
+      '/work/proj',
+    );
+    expect(reportError).not.toHaveBeenCalled();
+
+    // Cross-workspace unarchive returning notFound fails closed without calling loadSidebarSession
+    const loadNotFound = vi.fn();
+    const reportNotFound = vi.fn();
+    await runArtifactLibrarySessionJump({
+      sessionId: 'sess-gone',
+      archiveState: 'archived',
+      artifactId: 'art-gone',
+      targetCwd: '/work/secondary',
+      primaryCwd: '/work/primary',
+      showChat: vi.fn(),
+      unarchivePrimarySession: vi.fn(),
+      unarchiveWorkspaceSessions: vi.fn().mockResolvedValue({
+        unarchived: [],
+        alreadyActive: [],
+        notFound: ['sess-gone'],
+        errors: [],
+      }),
+      getPendingJumpArtifactOpen: () => pending,
+      setPendingJumpArtifactOpen: (req) => {
+        pending = req;
+      },
+      loadSidebarSession: loadNotFound,
+      reportError: reportNotFound,
+    });
+    expect(loadNotFound).not.toHaveBeenCalled();
+    expect(reportNotFound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: 'sess-gone: not found in its workspace catalog',
+      }),
+      'Failed to open session',
+    );
+
+    // Cross-workspace unarchive returning alreadyActive succeeds and loads the session
+    const loadAlreadyActive = vi.fn().mockResolvedValue(undefined);
+    await runArtifactLibrarySessionJump({
+      sessionId: 'sess-already',
+      archiveState: 'archived',
+      targetCwd: '/work/secondary',
+      primaryCwd: '/work/primary',
+      showChat: vi.fn(),
+      unarchivePrimarySession: vi.fn(),
+      unarchiveWorkspaceSessions: vi.fn().mockResolvedValue({
+        unarchived: [],
+        alreadyActive: ['sess-already'],
+        notFound: [],
+        errors: [],
+      }),
+      getPendingJumpArtifactOpen: () => pending,
+      setPendingJumpArtifactOpen: (req) => {
+        pending = req;
+      },
+      loadSidebarSession: loadAlreadyActive,
+      reportError: vi.fn(),
+    });
+    expect(loadAlreadyActive).toHaveBeenCalledWith(
+      'sess-already',
+      '/work/secondary',
+    );
   });
 
-  it('renders rows with displayName fallback and archive badges, filters client-side, bounds rendered rows with Show more, and previews metadata-only managed artifacts without loading a session', async () => {
+  it('renders rows with displayName fallback and archive badges, previews workspace-file and metadata-only managed artifacts without loading a session, filters client-side and resets filter on workspace change, and bounds rendered rows with Show more', async () => {
     const onOpenSession = vi.fn();
     const onJumpToSessionArtifact = vi.fn();
     const reader: WorkspaceArtifactLibraryReader = {
       artifactLibraryStream: vi.fn(),
-      artifactLibrary: vi.fn().mockResolvedValue({
-        v: 1,
-        sessions: [
-          makeEnvelope(
-            '12345678-aaaa-bbbb-cccc-ddddeeeeffff',
-            [
-              makeArtifact('art-managed', {
-                title: 'Managed Summary',
-                storage: 'managed',
-                workspacePath: undefined,
-                description: 'Descriptor-only output',
-                updatedAt: '2026-11-21T11:00:00.000Z',
-              }),
-              makeArtifact('art-2', {
-                title: 'Second Doc',
-                updatedAt: '2026-11-21T10:00:00.000Z',
-              }),
-            ],
-            'archived',
-            undefined, // missing displayName -> fallback to shortened sessionId
-          ),
-          makeEnvelope(
-            'sess-named',
-            [
-              makeArtifact('art-3', {
-                title: 'Third Doc',
-                updatedAt: '2026-11-21T09:00:00.000Z',
-              }),
-            ],
-            'active',
-            'Named Session',
-          ),
-        ],
-        errors: [],
-      }),
+      artifactLibrary: vi.fn((ws: string) =>
+        Promise.resolve({
+          v: 1 as const,
+          sessions:
+            ws === '/work/proj-b'
+              ? [
+                  makeEnvelope(
+                    'sess-b',
+                    [
+                      makeArtifact('art-b1', {
+                        title: 'Workspace B Doc',
+                        updatedAt: '2026-11-21T12:00:00.000Z',
+                      }),
+                    ],
+                    'active',
+                    'Workspace B Session',
+                  ),
+                ]
+              : [
+                  makeEnvelope(
+                    '12345678-aaaa-bbbb-cccc-ddddeeeeffff',
+                    [
+                      makeArtifact('art-managed', {
+                        title: 'Managed Summary',
+                        storage: 'managed',
+                        workspacePath: undefined,
+                        description: 'Descriptor-only output',
+                        updatedAt: '2026-11-21T11:00:00.000Z',
+                      }),
+                      makeArtifact('art-ws', {
+                        title: 'Second Doc',
+                        storage: 'workspace',
+                        workspacePath: 'docs/a.md',
+                        updatedAt: '2026-11-21T10:00:00.000Z',
+                      }),
+                    ],
+                    'archived',
+                    undefined,
+                  ),
+                  makeEnvelope(
+                    'sess-named',
+                    [
+                      makeArtifact('art-3', {
+                        title: 'Third Doc',
+                        workspacePath: 'src/special-path.ts',
+                        updatedAt: '2026-11-21T09:00:00.000Z',
+                      }),
+                    ],
+                    'active',
+                    'Named Session',
+                  ),
+                ],
+          errors: [],
+        }),
+      ),
     };
 
-    await act(async () => {
-      root.render(
-        <I18nProvider>
-          <WorkspaceArtifactLibraryPage
-            workspaceCwd="/work/proj"
-            reader={reader}
-            features={[WORKSPACE_ARTIFACT_LIBRARY_FEATURE]}
-            isSessionLive={() => false}
-            renderLimitStep={2}
-            onOpenSession={onOpenSession}
-            onJumpToSessionArtifact={onJumpToSessionArtifact}
-          />
-        </I18nProvider>,
-      );
-    });
-    await flush();
+    const renderForWorkspace = async (cwd: string) => {
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <WorkspaceArtifactLibraryPage
+              workspaceCwd={cwd}
+              reader={reader}
+              features={[WORKSPACE_ARTIFACT_LIBRARY_FEATURE]}
+              isSessionLive={() => false}
+              renderLimitStep={2}
+              onOpenSession={onOpenSession}
+              onJumpToSessionArtifact={onJumpToSessionArtifact}
+            />
+          </I18nProvider>,
+        );
+      });
+      await flush();
+    };
 
-    // Terminal wording for clean completion: "Enumeration finished"
+    await renderForWorkspace('/work/proj');
+
     expect(
       container.querySelector(
         '[data-testid="workspace-artifact-library-status"]',
       )?.textContent,
     ).toContain('Enumeration finished (2/2)');
 
-    // Bounded rendering: only 2 of 3 rows mounted initially
-    const initialRows = container.querySelectorAll(
-      '[data-testid="workspace-artifact-library-row"]',
-    );
-    expect(initialRows).toHaveLength(2);
+    // Bounded rendering: 2 of 3 rows initially
+    expect(
+      container.querySelectorAll(
+        '[data-testid="workspace-artifact-library-row"]',
+      ),
+    ).toHaveLength(2);
 
-    // Fallback session label ("Session 12345678") and Archived badge
     const firstSessionBtn = container.querySelector(
       '[data-testid="workspace-artifact-library-session-link"]',
     ) as HTMLButtonElement;
     expect(firstSessionBtn.textContent).toContain('Session 12345678');
     expect(firstSessionBtn.textContent).toContain('Archived');
 
-    // Metadata-only managed artifact is selected and rendered directly from descriptor without session jump
+    // Metadata-only managed artifact is selected first and rendered from descriptor
     expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
     expect(
       container.querySelector(
         '[data-testid="workspace-artifact-library-detail"]',
       )?.textContent,
     ).toContain('Descriptor-only output');
+
+    // Select the workspace-storage row -> previews via stat + readWorkspaceFile without session jump
+    const secondRowBtn = container
+      .querySelectorAll('[data-testid="workspace-artifact-library-row"]')[1]
+      ?.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      secondRowBtn.click();
+    });
+    await flush();
+    expect(mocks.stat).toHaveBeenCalledWith('docs/a.md');
+    expect(mocks.readWorkspaceFile).toHaveBeenCalledWith(
+      'docs/a.md',
+      expect.objectContaining({ maxBytes: 256 * 1024 }),
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-detail"]',
+      )?.textContent,
+    ).toContain('Hello from workspace file');
 
     // Click Show more -> 3rd row appears
     const loadMoreBtn = container.querySelector(
@@ -346,17 +554,67 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       ),
     ).toHaveLength(3);
 
-    // Clicking session label opens the archived session
+    // Client-side filter matches description, session label, workspacePath (case-insensitive)
+    const filterInput = container.querySelector(
+      '[data-testid="workspace-artifact-library-filter"]',
+    ) as HTMLInputElement;
     await act(async () => {
-      firstSessionBtn.click();
+      setInputValue(filterInput, '  DESCRIPTOR-ONLY ');
     });
-    expect(onOpenSession).toHaveBeenCalledWith(
-      '12345678-aaaa-bbbb-cccc-ddddeeeeffff',
-      'archived',
-    );
+    expect(
+      container.querySelectorAll(
+        '[data-testid="workspace-artifact-library-row"]',
+      ),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      setInputValue(filterInput, 'named session');
+    });
+    expect(
+      container.querySelectorAll(
+        '[data-testid="workspace-artifact-library-row"]',
+      ),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      setInputValue(filterInput, 'no-such-artifact-xyz');
+    });
+    expect(
+      container.querySelectorAll(
+        '[data-testid="workspace-artifact-library-row"]',
+      ),
+    ).toHaveLength(0);
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-filter-empty"]',
+      )?.textContent,
+    ).toContain('No artifacts match the current filter.');
+
+    // Switching workspaceCwd resets filterText and clears filter-empty
+    await renderForWorkspace('/work/proj-b');
+    expect(filterInput.value).toBe('');
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-filter-empty"]',
+      ),
+    ).toBeNull();
+    expect(
+      container.querySelectorAll(
+        '[data-testid="workspace-artifact-library-row"]',
+      ),
+    ).toHaveLength(1);
+
+    // Clicking session label opens the session
+    const sessionBtnB = container.querySelector(
+      '[data-testid="workspace-artifact-library-session-link"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      sessionBtnB.click();
+    });
+    expect(onOpenSession).toHaveBeenCalledWith('sess-b', 'active');
   });
 
-  it('jumps for cold-but-active web_preview_snapshot, falls back to jump on content-route 404 session_not_found, and surfaces 404 artifact_snapshot_unavailable without jumping (S2)', async () => {
+  it('does not jump on passive auto-selection of a stale-live snapshot, jumps when the user clicks it and the content route returns 404 session_not_found, jumps immediately for cold-but-active snapshots, and surfaces 404 artifact_snapshot_unavailable without jumping (S2 & R2-6)', async () => {
     const onOpenSession = vi.fn();
     const onJumpToSessionArtifact = vi.fn();
     const coldActiveSnapshot = makeArtifact('snap-cold-active', {
@@ -389,7 +647,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
         if (artifactId === 'snap-race') {
           throw new DaemonHttpError(
             404,
-            { code: 'session_not_found', error: 'Session not found' },
+            { code: 'session_not_found', error: 'No session with id' },
             'HTTP 404',
           );
         }
@@ -422,7 +680,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
 
     await act(async () => {
       root.render(
-        <I18nProvider>
+        <I18nProvider language="en">
           <WorkspaceArtifactLibraryPage
             workspaceCwd="/work/proj"
             reader={reader}
@@ -436,8 +694,19 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     });
     await flush();
 
-    // Auto-selecting the first non-jump row ('snap-race' on sess-live) hit the
-    // content route, got 404 session_not_found, and fell back to jump:
+    // Passive auto-selection of 'snap-race' must NOT jump the user out of the library
+    expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
+
+    const rows = container.querySelectorAll(
+      '[data-testid="workspace-artifact-library-row"]',
+    );
+
+    // Explicitly clicking 'snap-race' activates it; the 404 session_not_found falls back to jump
+    const raceBtn = rows[1]?.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      raceBtn.click();
+    });
+    await flush();
     expect(onJumpToSessionArtifact).toHaveBeenCalledWith(
       'sess-live',
       'snap-race',
@@ -445,10 +714,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     );
     onJumpToSessionArtifact.mockClear();
 
-    // Clicking the cold-but-active snapshot row jumps immediately without calling the content route
-    const rows = container.querySelectorAll(
-      '[data-testid="workspace-artifact-library-row"]',
-    );
+    // Clicking the cold-but-active snapshot row jumps immediately
     const coldBtn = rows[0]?.querySelector('button') as HTMLButtonElement;
     await act(async () => {
       coldBtn.click();
@@ -460,7 +726,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
     );
     onJumpToSessionArtifact.mockClear();
 
-    // Clicking the live missing-file snapshot surfaces the missing-file alert and does NOT jump
+    // Clicking the live missing-file snapshot surfaces the dedicated missing-file message and does NOT jump
     const missingBtn = rows[2]?.querySelector('button') as HTMLButtonElement;
     await act(async () => {
       missingBtn.click();
@@ -471,10 +737,85 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       container.querySelector(
         '[data-testid="workspace-artifact-library-detail"] [role="alert"]',
       )?.textContent,
-    ).toBeTruthy();
+    ).toContain(
+      'This saved version is missing or has changed. It cannot be opened.',
+    );
   });
 
-  it('distinguishes finished-with-errors wording and renders 409 persistence-unavailable and 503 runtime-unavailable states', async () => {
+  it('exercises the production session-catalog store liveness path and subscribeLiveSessions re-render trigger (R1-7)', async () => {
+    const onJumpToSessionArtifact = vi.fn();
+    const store = getSessionCatalogStore(
+      mocks.client as unknown as DaemonClient,
+    );
+    store.applyLiveState('/work/proj', [
+      {
+        sessionId: 'sess-store-live',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isWaitingForPermission: false,
+        isWaitingForUserQuestion: false,
+        updatedAt: '2026-11-21T10:00:00.000Z',
+      },
+    ]);
+    mocks.readSessionArtifactContent.mockResolvedValue('<p>live snapshot</p>');
+
+    const snapshot = makeArtifact('snap-store', {
+      title: 'Store Live Snapshot',
+      storage: 'published',
+      managedId: 'preview-store',
+      workspacePath: undefined,
+      metadata: { artifactType: 'web_preview_snapshot' },
+    });
+    const reader: WorkspaceArtifactLibraryReader = {
+      artifactLibraryStream: vi.fn(),
+      artifactLibrary: vi.fn().mockResolvedValue({
+        v: 1,
+        sessions: [makeEnvelope('sess-store-live', [snapshot], 'active')],
+        errors: [],
+      }),
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceArtifactLibraryPage
+            workspaceCwd="/work/proj"
+            reader={reader}
+            features={[WORKSPACE_ARTIFACT_LIBRARY_FEATURE]}
+            onOpenSession={vi.fn()}
+            onJumpToSessionArtifact={onJumpToSessionArtifact}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // While live in the store, the snapshot previews inline via readSessionArtifactContent
+    expect(mocks.readSessionArtifactContent).toHaveBeenCalledWith(
+      'sess-store-live',
+      'snap-store',
+      expect.any(Object),
+    );
+    expect(onJumpToSessionArtifact).not.toHaveBeenCalled();
+
+    // Clear live state -> subscribeLiveSessions fires -> clicking the row now jumps
+    await act(async () => {
+      store.applyLiveState('/work/proj', []);
+    });
+    const rowBtn = container
+      .querySelector('[data-testid="workspace-artifact-library-row"]')
+      ?.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      rowBtn.click();
+    });
+    expect(onJumpToSessionArtifact).toHaveBeenCalledWith(
+      'sess-store-live',
+      'snap-store',
+      'active',
+    );
+  });
+
+  it('distinguishes finished-with-errors wording, renders 409 persistence-unavailable and 503 runtime-unavailable states, and shows the partial banner without empty state when a stream ends without complete (R1-5 & R2-2)', async () => {
     const readerWithMemberError: WorkspaceArtifactLibraryReader = {
       artifactLibraryStream: vi.fn(),
       artifactLibrary: vi.fn().mockResolvedValue({
@@ -493,7 +834,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
 
     await act(async () => {
       root.render(
-        <I18nProvider>
+        <I18nProvider language="en">
           <WorkspaceArtifactLibraryPage
             workspaceCwd="/work/proj"
             reader={readerWithMemberError}
@@ -517,6 +858,42 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
       )?.textContent,
     ).toContain('deadbeef · transcript_too_large: Too large');
 
+    // 409 artifact_library_unavailable
+    const reader409: WorkspaceArtifactLibraryReader = {
+      artifactLibraryStream: vi.fn(),
+      artifactLibrary: vi.fn().mockRejectedValue(
+        new DaemonHttpError(
+          409,
+          {
+            code: 'artifact_library_unavailable',
+            error: 'Artifact persistence is unavailable',
+          },
+          'HTTP 409',
+        ),
+      ),
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceArtifactLibraryPage
+            workspaceCwd="/work/proj-409"
+            reader={reader409}
+            features={[WORKSPACE_ARTIFACT_LIBRARY_FEATURE]}
+            onOpenSession={vi.fn()}
+            onJumpToSessionArtifact={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-request-error"]',
+      )?.textContent,
+    ).toContain('Artifact persistence is disabled on this daemon.');
+
     // 503 workspace_runtime_unavailable
     const reader503: WorkspaceArtifactLibraryReader = {
       artifactLibraryStream: vi.fn(),
@@ -533,7 +910,7 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
 
     await act(async () => {
       root.render(
-        <I18nProvider>
+        <I18nProvider language="en">
           <WorkspaceArtifactLibraryPage
             workspaceCwd="/work/proj-503"
             reader={reader503}
@@ -551,5 +928,56 @@ describe('WorkspaceArtifactLibraryPage & dispatch contracts', () => {
         '[data-testid="workspace-artifact-library-request-error"]',
       )?.textContent,
     ).toContain('The workspace runtime is unavailable.');
+
+    // Unfinished stream closing with 0 rows renders partial banner and NOT empty state, and Retry re-runs scan
+    let streamCalls = 0;
+    const readerPartial: WorkspaceArtifactLibraryReader = {
+      artifactLibrary: vi.fn(),
+      artifactLibraryStream: vi.fn(
+        async function* (): AsyncGenerator<DaemonWorkspaceArtifactLibraryStreamEvent> {
+          streamCalls += 1;
+          yield { type: 'start', v: 1, total: 3 };
+        },
+      ),
+    };
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <WorkspaceArtifactLibraryPage
+            workspaceCwd="/work/proj-partial"
+            reader={readerPartial}
+            features={[
+              WORKSPACE_ARTIFACT_LIBRARY_FEATURE,
+              WORKSPACE_ARTIFACT_LIBRARY_STREAM_FEATURE,
+            ]}
+            onOpenSession={vi.fn()}
+            onJumpToSessionArtifact={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const partialBanner = container.querySelector(
+      '[data-testid="workspace-artifact-library-partial-banner"]',
+    );
+    expect(partialBanner?.textContent).toContain(
+      'Scan ended before completion; showing partial results. (0/3)',
+    );
+    expect(
+      container.querySelector(
+        '[data-testid="workspace-artifact-library-empty"]',
+      ),
+    ).toBeNull();
+
+    const retryBtn = partialBanner?.querySelector(
+      'button',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      retryBtn.click();
+    });
+    await flush();
+    expect(streamCalls).toBe(2);
   });
 });
