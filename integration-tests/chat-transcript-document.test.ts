@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { performance as nodePerformance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
@@ -732,6 +733,122 @@ describe('ExportTranscriptDocument browser gate', () => {
       expectedNetwork.cspViolations,
     );
     await page.close();
+    await browser.close();
+    browser = undefined;
+  });
+
+  it('opens V1 and rejects V2 with the pinned pre-V2 public renderer', async () => {
+    const legacyIdentity = '0.28.3+88485ce86a090982';
+    const legacyAssets = [
+      {
+        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.js',
+        integrity:
+          'sha384-RmZTu+dlEMG0jEt1MPe6uwIFPUR0wy3BVWW/vf8HIJwf0DvYK5GVg9c8F+mo3xei',
+        bytes: 2_149_861,
+      },
+      {
+        url: 'https://unpkg.com/@qwen-code/qwen-code@0.28.3/export-transcript-document.css',
+        integrity:
+          'sha384-1b7aeIUXXz756dLmrlvZotdgyGVkZgJTxDJSHyrGt+l87CPiuPqosQM4Uz7dElT7',
+        bytes: 2_426_053,
+      },
+    ];
+    // Fetch immutable public bytes and verify them before serving only these
+    // two requests through Chromium's route handler.
+    const publishedAssets = await Promise.all(
+      legacyAssets.map(async ({ url, integrity, bytes }) => {
+        const response = await fetch(url);
+        expect(response.ok, `${url}: HTTP ${response.status}`).toBe(true);
+        const asset = Buffer.from(await response.arrayBuffer());
+        expect(asset.byteLength).toBe(bytes);
+        expect(
+          `sha384-${createHash('sha384').update(asset).digest('base64')}`,
+        ).toBe(integrity);
+        return asset;
+      }),
+    );
+
+    const prompt = '/loop 60 seconds: preserve this V1 instruction';
+    const cronRecord = {
+      ...record('legacy-cron', null, 'user', prompt),
+      subtype: 'cron',
+      systemPayload: { displayText: prompt },
+    };
+    const sessionData = {
+      startTime: '2026-08-16T00:00:00.000Z',
+      metadata: {
+        sessionId: 'legacy-cron',
+        startTime: '2026-08-16T00:00:00.000Z',
+        exportTime: EXPORTED_AT,
+        cwd: '/workspace/project',
+        promptCount: 1,
+        uniqueFiles: [],
+      },
+    };
+    const options = {
+      rendererVersion: RENDERER_VERSION,
+      exportedAt: EXPORTED_AT,
+    };
+    const documents = [
+      createExportTranscriptDocumentV1([cronRecord], sessionData, options),
+      createExportTranscriptDocumentV2([cronRecord], sessionData, options),
+    ];
+    expect(documents[0].blocks[0]).not.toHaveProperty('meta');
+    expect(documents[1].blocks[0]).toMatchObject({
+      kind: 'user',
+      meta: { source: 'cron' },
+    });
+
+    const currentRendererIntegrity = `sha384-${createHash('sha384').update(rendererAsset).digest('base64')}`;
+    const currentCssIntegrity = `sha384-${createHash('sha384').update(rendererCssAsset).digest('base64')}`;
+    browser = await chromium.launch({ headless: true });
+    for (const document of documents) {
+      const page = await browser.newPage();
+      await page.route('**/*', async (route) => {
+        const index = legacyAssets.findIndex(
+          ({ url }) => route.request().url() === url,
+        );
+        if (index === -1) {
+          await route.abort('blockedbyclient');
+          return;
+        }
+        await route.fulfill({
+          body: publishedAssets[index],
+          contentType: index === 0 ? 'text/javascript' : 'text/css',
+          headers: { 'access-control-allow-origin': '*' },
+        });
+      });
+      let html = renderExportTranscriptDocumentToHtml(document);
+      html = replaceDocumentEnvelope(html, {
+        ...document,
+        rendererVersion: legacyIdentity,
+      })
+        .replaceAll(RENDERER_URL, legacyAssets[0]!.url)
+        .replaceAll(RENDERER_CSS_URL, legacyAssets[1]!.url)
+        .replaceAll(currentRendererIntegrity, legacyAssets[0]!.integrity)
+        .replaceAll(currentCssIntegrity, legacyAssets[1]!.integrity);
+      await page.setContent(html, { waitUntil: 'load' });
+      if (document.schemaVersion === 1) {
+        await expect
+          .poll(() => page.locator('body').getAttribute('data-render-complete'))
+          .toBe('true');
+        expect(await page.locator('body').innerText()).toContain(prompt);
+        expect(
+          await page
+            .locator('[data-web-shell-automatic-trigger-message]')
+            .count(),
+        ).toBe(0);
+      } else {
+        await expect
+          .poll(() => page.locator('body').getAttribute('data-render-complete'))
+          .toBe('error');
+        expect(await page.getByRole('alert').textContent()).toContain(
+          'Unable to open this chat export',
+        );
+        expect(await page.locator('body').innerText()).not.toContain(prompt);
+      }
+      await page.close();
+    }
     await browser.close();
     browser = undefined;
   });

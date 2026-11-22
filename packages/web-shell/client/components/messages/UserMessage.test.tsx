@@ -910,6 +910,7 @@ describe('UserMessage', () => {
     document.body.appendChild(container);
     const root = createRoot(container);
     mounted.push({ root, container });
+    const parse = vi.spyOn(composerTag, 'parseUserMessageContentSafely');
     const content = 'First instruction\nSecond instruction';
     const view = (source: 'cron' | 'loop') => (
       <I18nProvider language="en">
@@ -927,6 +928,8 @@ describe('UserMessage', () => {
       container.querySelector('[data-web-shell-automatic-trigger-instructions]')
         ?.textContent,
     ).toBe(content);
+    expect(parse).toHaveBeenCalled();
+    parse.mockClear();
 
     act(() => root.render(<StrictMode>{view('cron')}</StrictMode>));
     expect(
@@ -949,6 +952,38 @@ describe('UserMessage', () => {
       container.querySelector('[data-web-shell-automatic-trigger-instructions]')
         ?.textContent,
     ).toBe(content);
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('honors a tooltip-only host renderer for cron input', () => {
+    const content = '@README.md';
+    const renderComposerTagTooltip = vi.fn(() => null);
+    const container = render(
+      <WebShellCustomizationProvider value={{ renderComposerTagTooltip }}>
+        <UserMessage
+          content={content}
+          source="cron"
+          inputAnnotations={[
+            referenceAnnotation(content, '@README.md', {
+              id: 'file:README.md',
+              kind: 'file',
+              value: 'README.md',
+              serialized: '@README.md',
+            }),
+          ]}
+        />
+      </WebShellCustomizationProvider>,
+    );
+
+    expect(findByTitle(container, '@README.md')).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-automatic-trigger-message]'),
+    ).toBeNull();
+    expect(renderComposerTagTooltip).toHaveBeenCalledWith({
+      tag: expect.objectContaining({ id: 'file:README.md' }),
+      placement: 'user-message',
+      readonly: true,
+    });
   });
 
   it('does not rescan an unchanged automatic instruction during edits', () => {

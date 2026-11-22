@@ -344,11 +344,25 @@ describe('HTML export formatter', () => {
     'emits schema $schemaMaxVersion when delegated=$delegated and override=$schemaOverride',
     { timeout: 90_000 },
     ({ delegated, schemaMaxVersion, schemaOverride, delegatedIdentity }) => {
-      commandSucceeded(
-        buildTemplates(templatesDir, createBuilderEnvironment()),
-        'build isolated default renderer',
+      const initialBuild = buildTemplates(
+        templatesDir,
+        createBuilderEnvironment(),
       );
+      commandSucceeded(initialBuild, 'build isolated default renderer');
       const localRenderer = readRendererInfo(templatesDir);
+      if (!delegated) {
+        const measured = initialBuild.stdout.match(
+          /Document export renderer JS is (\d+) bytes/,
+        );
+        const rendererJs = join(
+          templatesDir,
+          'src/export-html/dist/export-transcript-document.js',
+        );
+        expect(Number(measured?.[1])).toBe(readFileSync(rendererJs).byteLength);
+        expect(localRenderer.identity.length).not.toBe(
+          '__QWEN_RENDERER_BUILD_ID__'.length,
+        );
+      }
       const {
         identity: baseIdentity,
         rendererIntegrity,

@@ -470,17 +470,17 @@ interface ExportTranscriptDocumentV1 {
 
 JSON Schema 以 `additionalProperties: false` 封闭每种 block：
 
-| block                        | V1 允许字段                                                                                                                       |
-| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| 所有 kind                    | 文档内 opaque `id`、`kind`；三个 block 时间字段固定为 `0`                                                                         |
-| `user`/`assistant`/`thought` | `text`、安全 raster images、`collapsed`、安全 parent 引用、数值 allowlist 后的 usage；`streaming=false`                           |
-| `tool`                       | opaque `toolCallId`、title、终态 status、安全 toolName/toolKind、typed `preview`/`resultPreview`、安全父子引用、短 `subagentType` |
-| `shell`                      | `text`、`stream`                                                                                                                  |
-| `user_shell`                 | `text`、`command`、脱敏 workspace-relative `cwd`、`stream`                                                                        |
-| `permission`                 | opaque `requestId`、title、label/description、`raw:null` options、typed preview、opaque tool identity、安全 resolved 终态         |
-| `status`/`error`             | text、已知 code/errorKind、安全 source                                                                                            |
-| `prompt_cancelled`           | 安全 reason                                                                                                                       |
-| `debug`                      | V1 默认拒绝；产生 code/count diagnostic                                                                                           |
+| block                        | V1 允许字段                                                                                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 所有 kind                    | 文档内 opaque `id`、`kind`；三个 block 时间字段固定为 `0`                                                                                                                                              |
+| `user`/`assistant`/`thought` | `text`、安全 raster images、`collapsed`、安全 parent 引用、`author`（仅 `user` 和 `assistant` 可用，且只允许安全的 `name`）、`usage`（仅 `assistant` 可用，且须通过数值 allowlist）；`streaming=false` |
+| `tool`                       | opaque `toolCallId`、title、终态 status、`background` 布尔值、安全 toolName/toolKind、typed `preview`/`resultPreview`、安全父子引用、短 `subagentType`                                                 |
+| `shell`                      | `text`、`stream`                                                                                                                                                                                       |
+| `user_shell`                 | `text`、`command`、脱敏 workspace-relative `cwd`、`stream`                                                                                                                                             |
+| `permission`                 | opaque `requestId`、title、label/description、`raw:null` options、typed preview、opaque tool identity、安全 resolved 终态                                                                              |
+| `status`/`error`             | text、已知 code/errorKind、安全 source                                                                                                                                                                 |
+| `prompt_cancelled`           | 安全 reason                                                                                                                                                                                            |
+| `debug`                      | V1 默认拒绝；产生 code/count diagnostic                                                                                                                                                                |
 
 在 schema version 2 中，且仅在 block 为 `user` 时，额外允许一个受限的 `meta: { source: 'cron' }`。这是离线回放生成的规范化展示路由标签，不是透传的 metadata bag；不含 timestamp、sourceRecordIds 或其它用户提供的元数据。V1 的 `user` block 不包含 `meta`，保持原有封闭字段集合。
 

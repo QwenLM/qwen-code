@@ -470,17 +470,17 @@ If a rejected record is a necessary causal node for later visible records, mark 
 
 JSON Schema closes every block kind with `additionalProperties: false`:
 
-| Block                        | Fields allowed in V1                                                                                                                                     |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Every kind                   | Document-local opaque `id` and `kind`; all three block timestamp fields fixed at `0`                                                                     |
-| `user`/`assistant`/`thought` | `text`, safe raster images, `collapsed`, safe parent references, usage after numeric allowlisting; `streaming=false`                                     |
-| `tool`                       | Opaque `toolCallId`, title, terminal status, safe toolName/toolKind, typed `preview`/`resultPreview`, safe parent/child references, short `subagentType` |
-| `shell`                      | `text`, `stream`                                                                                                                                         |
-| `user_shell`                 | `text`, `command`, sanitized workspace-relative `cwd`, `stream`                                                                                          |
-| `permission`                 | Opaque `requestId`, title, label/description, options with `raw:null`, typed preview, opaque tool identity, safe resolved terminal state                 |
-| `status`/`error`             | text, known code/errorKind, safe source                                                                                                                  |
-| `prompt_cancelled`           | Safe reason                                                                                                                                              |
-| `debug`                      | Rejected by default in V1; emit code/count diagnostic                                                                                                    |
+| Block                        | Fields allowed in V1                                                                                                                                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every kind                   | Document-local opaque `id` and `kind`; all three block timestamp fields fixed at `0`                                                                                                                                |
+| `user`/`assistant`/`thought` | `text`, safe raster images, `collapsed`, safe parent references; `author` on `user` and `assistant` only, containing only a safe `name`; `usage` after numeric allowlisting, on `assistant` only; `streaming=false` |
+| `tool`                       | Opaque `toolCallId`, title, terminal status, boolean `background`, safe toolName/toolKind, typed `preview`/`resultPreview`, safe parent/child references, short `subagentType`                                      |
+| `shell`                      | `text`, `stream`                                                                                                                                                                                                    |
+| `user_shell`                 | `text`, `command`, sanitized workspace-relative `cwd`, `stream`                                                                                                                                                     |
+| `permission`                 | Opaque `requestId`, title, label/description, options with `raw:null`, typed preview, opaque tool identity, safe resolved terminal state                                                                            |
+| `status`/`error`             | text, known code/errorKind, safe source                                                                                                                                                                             |
+| `prompt_cancelled`           | Safe reason                                                                                                                                                                                                         |
+| `debug`                      | Rejected by default in V1; emit code/count diagnostic                                                                                                                                                               |
 
 Schema version 2 permits one additional restricted `meta: { source: 'cron' }`, and only on a `user` block. This is a canonical display-routing tag generated by offline replay, not a passthrough metadata bag. It contains no timestamp, sourceRecordIds, or other user-provided metadata. A V1 `user` block contains no `meta` and retains its original closed field set.
 
