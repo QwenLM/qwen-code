@@ -4191,6 +4191,7 @@ export const ZH: Messages = {
   'rightPanel.restoreFailed': (v) => `面板恢复失败：${v?.error ?? '未知错误'}`,
   'userMessage.showMore': '显示更多',
   'userMessage.showLess': '收起',
+  'userMessage.automatic.title': '自动触发',
   'userMessage.sendFailed': '发送失败',
   'userMessage.retrySend': '重新发送消息',
   'userMessage.edit': '编辑消息',
