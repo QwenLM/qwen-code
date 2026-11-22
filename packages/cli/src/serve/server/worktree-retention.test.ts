@@ -187,6 +187,25 @@ describe('worktree retention with real repositories', () => {
     expect(fs.readFileSync(unrelated, 'utf8')).toBe('unrelated-orphan');
   });
 
+  it('resolves equal recency by canonical checkout path', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const retained = await makeRetainedSession(target, {
+      slug: 'aa-path',
+      sessionId: '00000000-0000-4000-8000-000000000002',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const evicted = await makeRetainedSession(target, {
+      slug: 'zz-path',
+      sessionId: '00000000-0000-4000-8000-000000000001',
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+
+    expect((await sweep(target)).removed).toEqual([evicted.id]);
+    expect(fs.existsSync(retained.worktreePath)).toBe(true);
+    await expectRetainedSnapshot(target, evicted);
+  });
+
   it('retains the snapshot when the checkout may have been partly removed', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 1);

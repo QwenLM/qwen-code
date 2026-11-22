@@ -233,7 +233,8 @@ async function collectEligible(
           ? 0
           : a.activityNs < b.activityNs
             ? 1
-            : -1) || a.sessionId.localeCompare(b.sessionId),
+            : -1) ||
+        (a.lockKey < b.lockKey ? -1 : a.lockKey > b.lockKey ? 1 : 0),
     )
     .slice(scope.limit)
     .reverse()

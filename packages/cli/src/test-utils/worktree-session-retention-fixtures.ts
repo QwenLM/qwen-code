@@ -105,6 +105,7 @@ export async function makeRetainedSession(
   target: RetentionTestRuntime,
   options: {
     slug: string;
+    sessionId?: string;
     dirty?: boolean;
     branch?: string;
     activity?: string;
@@ -126,7 +127,7 @@ export async function makeRetainedSession(
     throw new Error(created.error ?? `Could not create fixture ${slug}`);
   }
   const worktreePath = created.worktree.path;
-  const sessionId = randomUUID();
+  const sessionId = options.sessionId ?? randomUUID();
   const archiveState = options.archiveState ?? 'active';
   const branch = options.branch ?? '';
   if (branch) git(worktreePath, home, 'checkout', '-b', branch);
