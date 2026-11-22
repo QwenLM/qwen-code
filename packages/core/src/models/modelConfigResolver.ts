@@ -357,12 +357,12 @@ export function resolveModelConfig(
   // If request is DeepInfra Flex and no explicit timeout was set by user,
   // apply 10-minute (600,000ms) default to accommodate scheduling queues.
   const effectiveBaseUrl = baseUrlResult?.value || modelProvider?.baseUrl;
-  const isDeepInfra =
-    (modelProvider?.id === 'deepinfra' ||
-      modelProvider?.envKey === 'DEEPINFRA_ENV_KEY' ||
-      apiKeyEnvKey === 'DEEPINFRA_API_KEY' ||
-      modelProvider?.envKey === 'DEEPINFRA_API_KEY') &&
-    isDeepInfraEndpoint(effectiveBaseUrl);
+  const isDeepInfra = isDeepInfraModel({
+    id: modelProvider?.id,
+    baseUrl: effectiveBaseUrl,
+    envKey: apiKeyEnvKey || modelProvider?.envKey,
+    providerId: modelProvider?.id,
+  });
 
   if (
     isDeepInfra &&
@@ -478,7 +478,7 @@ function resolveQwenOAuthConfig(
   return { config, sources, warnings };
 }
 
-function isDeepInfraEndpoint(baseUrl?: string): boolean {
+export function isDeepInfraEndpoint(baseUrl?: string): boolean {
   if (!baseUrl) return false;
   try {
     const host = new URL(baseUrl).hostname;
@@ -490,6 +490,21 @@ function isDeepInfraEndpoint(baseUrl?: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function isDeepInfraModel(model: {
+  id?: string;
+  baseUrl?: string;
+  envKey?: string;
+  providerId?: string;
+}): boolean {
+  const isDeepInfra =
+    model.providerId === 'deepinfra' ||
+    model.id === 'deepinfra' ||
+    model.envKey === 'DEEPINFRA_API_KEY' ||
+    model.envKey === 'DEEPINFRA_ENV_KEY' ||
+    Boolean(model.id && model.id.startsWith('deepinfra/'));
+  return Boolean(isDeepInfra && isDeepInfraEndpoint(model.baseUrl));
 }
 
 function resolveServiceTier(params: {
@@ -533,12 +548,12 @@ function resolveServiceTier(params: {
 
   // Check if provider is DeepInfra (endpoint + credential)
   const effectiveBaseUrl = baseUrl || modelProvider?.baseUrl;
-  const isDeepInfra =
-    (modelProvider?.id === 'deepinfra' ||
-      modelProvider?.envKey === 'DEEPINFRA_ENV_KEY' ||
-      apiKeyEnvKey === 'DEEPINFRA_API_KEY' ||
-      modelProvider?.envKey === 'DEEPINFRA_API_KEY') &&
-    isDeepInfraEndpoint(effectiveBaseUrl);
+  const isDeepInfra = isDeepInfraModel({
+    id: modelProvider?.id,
+    baseUrl: effectiveBaseUrl,
+    envKey: apiKeyEnvKey || modelProvider?.envKey,
+    providerId: modelProvider?.id,
+  });
 
   // 3. Environment variables
   if (isDeepInfra) {
