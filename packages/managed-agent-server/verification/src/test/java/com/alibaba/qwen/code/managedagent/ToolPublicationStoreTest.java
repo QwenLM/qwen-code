@@ -903,6 +903,10 @@ class ToolPublicationStoreTest {
         assertThat(blockedPublic.path("artifacts")).isEmpty();
         String objectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
                 + " WHERE slot_key = X'61646d697373696f6e'", String.class);
+        assertThat(objectKey).isEqualTo("managed-tool-results/tenant-1/workspace-1/session-1/pub-1/admission");
+        String terminalObjectKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource"
+                + " WHERE slot_key = X'7465726d696e616c'", String.class);
+        assertThat(terminalObjectKey).isEqualTo("managed-tool-results/tenant-1/workspace-1/session-1/pub-1/terminal");
         objects.get(objectKey)[0] = 'z';
         assertThatThrownBy(() -> sessions.readResource("tenant-1", "workspace-1", "session-1",
                 admission.path("resourceId").asText(), WRITER_TOKEN)).hasMessageContaining("verification");
@@ -1219,6 +1223,10 @@ class ToolPublicationStoreTest {
         String damagedSlot = contentBody ? "content:stdout" : "segment:stdout:0";
         String damagedKey = jdbc.queryForObject("SELECT capture_object_key FROM ma_resource WHERE slot_key = ?",
                 String.class, damagedSlot);
+        if ("large-segment".equals(damage)) {
+            assertThat(damagedKey).isEqualTo(
+                    "managed-tool-results/tenant-1/workspace-1/session-1/pub-1/segment:stdout:0");
+        }
         objects.get(damagedKey)[0] = 'z';
         assertThatThrownBy(() -> data.readRange(key, "pub-1", WRITER_TOKEN, manifestRef,
                 identity, "stdout", 0, 1)).hasMessageContaining("digest changed");
