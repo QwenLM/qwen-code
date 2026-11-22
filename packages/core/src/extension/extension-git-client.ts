@@ -200,7 +200,8 @@ function restrictedChildEnvironment(
       'utf8',
     ).toString('base64');
     environment['GIT_CONFIG_COUNT'] = '1';
-    environment['GIT_CONFIG_KEY_0'] = `http.${authentication.source}.extraHeader`;
+    environment['GIT_CONFIG_KEY_0'] =
+      `http.${authentication.source}.extraHeader`;
     environment['GIT_CONFIG_VALUE_0'] = `Authorization: Basic ${value}`;
   }
   return environment;

@@ -160,7 +160,8 @@ export function gitRemoteEnv(
   const source = base ?? process.env;
   const env = gitEnv(source);
   for (const [key, value] of Object.entries(source)) {
-    if (NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase())) env[key] = value;
+    if (NORMALIZED_REMOTE_GIT_TRANSPORT_KEYS.has(key.toLowerCase()))
+      env[key] = value;
   }
   return env;
 }

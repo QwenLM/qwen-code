@@ -144,36 +144,38 @@ describe('loadSimpleGit', () => {
     await expect(git.version()).resolves.toBeDefined();
   });
 
-  it('keeps the ambient transport variables for clients that never set .env()', async () => {
-    // Unmocked: v4's guard deletes every guarded key the client did not name,
-    // not only the ones a task env sets. The extension git client returns
-    // before `.env()` on the default policy, so an operator's SSH identity has
-    // to survive in the child or an SSH-sourced install fails `publickey`.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-env-shim-'));
-    const shim = path.join(
-      dir,
-      process.platform === 'win32' ? 'shim.cmd' : 'shim',
-    );
-    const dump = path.join(dir, 'env.txt');
-    fs.writeFileSync(
-      shim,
-      `#!/bin/sh\nprintf '%s' "$GIT_SSH_COMMAND" > '${dump}'\nexit 1\n`,
-    );
-    fs.chmodSync(shim, 0o755);
-    try {
-      vi.stubEnv('GIT_SSH_COMMAND', 'ssh -i /tmp/operator-key');
-      const { loadSimpleGit } = await import('./load-simple-git.js');
-      const { simpleGit: guarded } = await loadSimpleGit();
+  // The witness is a POSIX shell script: Windows has no `#!/bin/sh` and the
+  // batch equivalent would test cmd.exe quoting rather than the env guard.
+  it.skipIf(process.platform === 'win32')(
+    'keeps the ambient transport variables for clients that never set .env()',
+    async () => {
+      // Unmocked: v4's guard deletes every guarded key the client did not name,
+      // not only the ones a task env sets. The extension git client returns
+      // before `.env()` on the default policy, so an operator's SSH identity has
+      // to survive in the child or an SSH-sourced install fails `publickey`.
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'git-env-shim-'));
+      const shim = path.join(dir, 'shim');
+      const dump = path.join(dir, 'env.txt');
+      fs.writeFileSync(
+        shim,
+        `#!/bin/sh\nprintf '%s' "$GIT_SSH_COMMAND" > '${dump}'\nexit 1\n`,
+      );
+      fs.chmodSync(shim, 0o755);
+      try {
+        vi.stubEnv('GIT_SSH_COMMAND', 'ssh -i /tmp/operator-key');
+        const { loadSimpleGit } = await import('./load-simple-git.js');
+        const { simpleGit: guarded } = await loadSimpleGit();
 
-      const git = guarded({ binary: shim });
-      // The shim exits non-zero on purpose; what matters is the environment
-      // its child received, not how simple-git reports the failure.
-      await git.raw(['version']).catch(() => undefined);
-      expect(fs.readFileSync(dump, 'utf8')).toBe('ssh -i /tmp/operator-key');
-    } finally {
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
+        const git = guarded({ binary: shim });
+        // The shim exits non-zero on purpose; what matters is the environment
+        // its child received, not how simple-git reports the failure.
+        await git.raw(['version']).catch(() => undefined);
+        expect(fs.readFileSync(dump, 'utf8')).toBe('ssh -i /tmp/operator-key');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('allowlists every guarded key gitEnv() restores', async () => {
     vi.stubEnv('GIT_AUTHOR_NAME', 'CI User');
