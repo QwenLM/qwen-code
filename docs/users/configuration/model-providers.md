@@ -390,7 +390,22 @@ When connecting DeepInfra through the Web Shell or Desktop settings (`Connect a 
   - `Priority`: Models supporting priority low-latency routing.
   - `Flex`: Models supporting the 20% discounted flex routing tier.
 - **In & Out Pricing Sort**: Dedicated sortable columns for input and output pricing in `$/Mt`.
-- **Service Tier (`flex`)**: Configure `"service_tier": "flex"` in `generationConfig` (or pass `--service-tier flex`) to route inference requests to DeepInfra's Flex tier at a 20% discount.
+- **Service Tier (`flex` / `priority`)**: Configure `"service_tier": "flex"` in `generationConfig`, pass `--service-tier flex`, or set environment variables to route inference requests to DeepInfra's Flex tier at a discount or to Priority routing for lowest latency.
+
+##### Service Tier Configuration and Precedence
+
+The service tier can be configured across multiple levels. Resolution follows a strict priority order:
+
+1. **Model Provider Entry**: `modelProviders[].generationConfig.service_tier` in `settings.json`.
+2. **CLI Flag**: `--service-tier <tier>` (e.g. `--service-tier flex`).
+3. **Environment Variables**:
+   - `DEEPINFRA_SERVICE_TIER`: Dedicated to DeepInfra. It is only read when the active endpoint and credentials belong to DeepInfra, and it takes precedence over `OPENAI_SERVICE_TIER` for DeepInfra requests.
+   - `OPENAI_SERVICE_TIER`: Generic service tier environment variable applied to OpenAI-compatible endpoints.
+4. **Global Settings**: `model.generationConfig.service_tier` in `settings.json`.
+
+At the individual request level, an explicit `extra_body.service_tier` overrides any configured tier.
+
+Requests routed to DeepInfra's `flex` tier without an explicit timeout configured automatically default to a 10-minute (600,000ms) timeout to accommodate Flex scheduling and queueing windows without prematurely aborting. All non-Flex requests or requests with an explicit `timeout` preserve their configured value.
 
 When pointing an entry at a hosted OpenAI-compatible gateway, set `baseUrl` to the API's `/v1` root (for example, `https://gateway.example.com/v1`) rather than the full `/v1/chat/completions` path — the SDK appends the request path itself.
 
