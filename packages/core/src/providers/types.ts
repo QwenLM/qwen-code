@@ -32,6 +32,7 @@ export interface ModelSpec {
   description?: string;
   supportsImageGeneration?: boolean;
   imageOnly?: boolean;
+  service_tier?: string;
 }
 
 export interface BaseUrlOption {
@@ -103,6 +104,11 @@ export interface ProviderConfig {
    */
   customHeaders?: Record<string, string>;
 
+  /**
+   * Default service tier for models under this provider (e.g. 'flex').
+   */
+  service_tier?: string;
+
   /** Documentation URL for the provider. */
   documentationUrl?: string | ((baseUrl: string) => string);
 
@@ -167,6 +173,7 @@ export interface ProviderSetupInputs {
     multimodal?: InputModalities;
     contextWindowSize?: number;
     maxTokens?: number;
+    service_tier?: string;
   };
 }
 
