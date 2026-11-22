@@ -129,6 +129,7 @@ describe('buildAuthProviderCatalog', () => {
         'modelscope',
         'openrouter',
         'requesty',
+        'deepinfra',
       ],
     });
     expect(catalog.groups[3]).toMatchObject({
