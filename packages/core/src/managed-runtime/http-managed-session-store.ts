@@ -843,12 +843,13 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   async publish(
     kind: string,
     source: Buffer,
+    resourceId?: string,
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
-      resourceId: randomUUID(),
+      resourceId: resourceId ?? randomUUID(),
       kind: safeKind,
       schemaVersion: 1,
       byteLength: bytes.byteLength,

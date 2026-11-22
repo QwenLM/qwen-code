@@ -190,6 +190,7 @@ export async function reattachAndDrainBackgroundDeliveries(
 
   const sessionKey = input.managed.authority.sessionHeader.sessionKey;
   const writer = await input.writerOwner.owner();
+  const created = !input.lane.publisher;
   const publisher = (input.lane.publisher ??= new HostedShellPublisher(
     input.managed,
     input.lane.resources,
@@ -280,6 +281,16 @@ export async function reattachAndDrainBackgroundDeliveries(
           ),
       );
     }
+  } catch (cause) {
+    if (created) {
+      // A failed load must not leak the listener this call started. Release
+      // the gate first so close drains gated pushes instead of waiting on
+      // them forever.
+      releaseGate();
+      await publisher.close();
+      input.lane.publisher = undefined;
+    }
+    throw cause;
   } finally {
     releaseGate();
   }

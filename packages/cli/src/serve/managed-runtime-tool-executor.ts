@@ -362,6 +362,8 @@ export interface ManagedShellCapturePublisher {
     identity: ToolResultExpectedIdentity,
     result: ToolResultEnvelope,
   ): Promise<void>;
+  /** Releases a prepared run that never started, so no terminal will retire it. */
+  discardWorkerRun?(executionCallId: string): void;
   /**
    * Whether this lane's retirement is proven by the publisher itself rather
    * than by an acknowledgement naming the worker's own manifest. The external
@@ -1731,6 +1733,7 @@ export class ManagedToolExecutor {
       });
     }
     if (this.closing || tools.isActive?.() === false) {
+      this.capturePublisher?.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1838,6 +1841,7 @@ export class ManagedToolExecutor {
           launchStarted === undefined ? 0 : performance.now() - launchStarted,
         ),
       );
+      publisher.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],
@@ -1852,6 +1856,7 @@ export class ManagedToolExecutor {
     }
     const watchProcess = watchHandle.process;
     if (watchProcess === undefined) {
+      publisher.discardWorkerRun?.(capture.executionCallId);
       return settle({
         executionStatus: 'not_started',
         responseParts: [],

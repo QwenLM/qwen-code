@@ -17,6 +17,8 @@ import type { ToolResultExpectedIdentity } from '@qwen-code/qwen-code-core/manag
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import {
+  BACKGROUND_SEGMENT_BYTES,
+  BACKGROUND_SEGMENTS_PER_PAGE,
   MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
   type ManagedDeliveryEntry,
   type ManagedDeliveryResource,
@@ -35,16 +37,6 @@ import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 // producer_lost. Everything that must become durable is a numbered delivery
 // entry; the worker drops an entry only after a consumer acknowledges it.
 
-// A delivery entry carries its resources base64-encoded inside a request
-// bounded by MANAGED_DELIVERY_REQUEST_LIMIT_BYTES (512 KiB), and an entry
-// larger than that can never be pushed at all. Every segment publishes its
-// own revision, which re-publishes the stream's open page of up to 256
-// segment descriptors (~25 KB), so the largest entry — a segment and a page
-// per stream plus one manifest of at most 64 KiB — stays under 510 KB once
-// encoded. The 64-page bound then holds 16,384 segments per stream, so idle
-// partial flushes spend ordinals instead of exhausting pages.
-const BACKGROUND_SEGMENT_BYTES = 128 * 1024;
-const BACKGROUND_SEGMENTS_PER_PAGE = 256;
 const PARTIAL_FLUSH_MS = 250;
 /** Per-run outbox budget, sized above the largest single flush batch. */
 const RUN_OUTBOX_BYTES = 8 * 1024 * 1024;

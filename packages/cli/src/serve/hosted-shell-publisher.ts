@@ -26,6 +26,7 @@ import type { HostedMonitorSession } from './hosted-monitor-session.js';
 import { buildMonitorNotificationInput } from './hosted-monitor-notification.js';
 import type { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import {
+  HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
   ResourceToolResultSegmentStore,
   type DurableToolResultResourceStore,
 } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -1178,11 +1179,25 @@ export class HostedShellPublisher {
     entry: ManagedDeliveryEntry,
   ): Promise<void> {
     for (const resource of entry.resources) {
-      await this.resources.publish(
-        resource.ref.kind,
-        Buffer.from(resource.bytesBase64, 'base64'),
-        resource.ref.resourceId,
-      );
+      const bytes = Buffer.from(resource.bytesBase64, 'base64');
+      // The tool-result store only admits the capture kinds; an observation's
+      // notification resources belong to the session store, under the same
+      // worker-minted ids the staged drain path already preserves.
+      if (
+        Object.hasOwn(HOSTED_TOOL_RESULT_RESOURCE_LIMITS, resource.ref.kind)
+      ) {
+        await this.resources.publish(
+          resource.ref.kind,
+          bytes,
+          resource.ref.resourceId,
+        );
+      } else {
+        await this.session.resources.publish(
+          resource.ref.kind,
+          bytes,
+          resource.ref.resourceId,
+        );
+      }
     }
   }
 

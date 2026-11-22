@@ -5145,6 +5145,10 @@ export function registerHostedHarnessSessionRoutes(
       const previous = backgroundCertified;
       backgroundCertified =
         session.stores?.supportsRuntimeObservation?.() === true &&
+        // The seal only stamps the background hold under wake dispatch; a
+        // certificate without it would suspend a Session into a seal its
+        // recovery cannot read.
+        session.stores?.supportsWakeDispatch?.() === true &&
         (await backgroundSuspensionCertificate(
           session.managed,
           new Set([

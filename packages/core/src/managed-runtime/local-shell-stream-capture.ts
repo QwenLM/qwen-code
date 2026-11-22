@@ -44,7 +44,7 @@ const SEGMENTS_PER_PAGE = 512;
 
 export interface LocalShellStreamCaptureOptions {
   readonly segmentsPerPage?: number;
-  /** Background worker-owned captures use 256 KiB so one flush fits one
+  /** Background worker-owned captures use 128 KiB so one flush fits one
    * delivery request; the Harness foreground lane keeps the 1 MiB default. */
   readonly segmentBytes?: number;
   /** Invoked after every manifest revision publishes, with its ref. The

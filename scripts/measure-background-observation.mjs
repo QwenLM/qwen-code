@@ -30,10 +30,14 @@ const { LocalManagedSessionResourceStore } = await core(
   'managed-session-resources.js',
 );
 const { createManagedHarnessHandle } = await core('managed-harness-factory.js');
-const { parseToolResultManifestBytes } = await core('managed-tool-result.js');
-const { MANAGED_DELIVERY_REQUEST_LIMIT_BYTES } = await core(
-  'managed-delivery-entry.js',
+const { parseToolResultManifestBytes, MANAGED_TOOL_RESULT_LIMITS } = await core(
+  'managed-tool-result.js',
 );
+const {
+  MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+  BACKGROUND_SEGMENT_BYTES,
+  BACKGROUND_SEGMENTS_PER_PAGE,
+} = await core('managed-delivery-entry.js');
 const { BackgroundDeliveryRun, WorkerBackgroundCaptureSink } = await cli(
   'managed-background-delivery.js',
 );
@@ -132,11 +136,16 @@ async function drainLoop(run, isDone) {
   let acked = 0;
   let pulls = 0;
   while (!isDone() || run.pendingCount > 0) {
-    const batch = await run.pullForStage({ afterSeq: acked, waitMs: 5 });
+    // The acknowledgement rides the next pull, exactly as the Broker's
+    // staging loop acks the prefix it already stored.
+    const batch = await run.pullForStage({
+      afterSeq: acked,
+      ackThrough: acked,
+      waitMs: 5,
+    });
     pulls++;
     if (batch.entries.length > 0) {
       acked = batch.entries[batch.entries.length - 1].deliverySeq;
-      run.acknowledgeStaged(acked);
     } else if (isDone() && run.pendingCount === 0) {
       break;
     }
@@ -247,6 +256,7 @@ const M1_BYTES = 6 * MB;
   for (;;) {
     const batch = await run.pullForStage({
       afterSeq: acked,
+      ackThrough: acked,
       waitMs: 0,
       maxEntries: 256,
     });
@@ -258,7 +268,6 @@ const M1_BYTES = 6 * MB;
       if (entry.kind === 'terminal') terminal = entry;
     }
     acked = batch.entries[batch.entries.length - 1].deliverySeq;
-    run.acknowledgeStaged(acked);
     if (terminal) break;
   }
   assert.ok(terminal, 'terminal entry missing');
@@ -490,16 +499,22 @@ const M1_BYTES = 6 * MB;
     await sink.resources.read(lastRef),
   );
   const stdout = manifest.contents.find((c) => c.streamId === 'stdout');
+  const totalCapBytes =
+    MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream *
+    BACKGROUND_SEGMENTS_PER_PAGE *
+    BACKGROUND_SEGMENT_BYTES;
   emit('M5-total-output-cap', {
     attemptedBytes: 16 * MB,
     admittedBytes: stdout.byteLength,
     pages: stdout.body.pages.length,
+    segments: stdout.body.pages.reduce((n, page) => n + page.segmentCount, 0),
+    totalCapBytes,
     brokenReason: sink.capture.brokenReason,
     envelopeCaptureStatus: envelope.capture.captureStatus,
     lastDurableRevision: manifest.revision,
     manifestBytes: (await sink.resources.read(lastRef)).byteLength,
     elapsedMs: Math.round(performance.now() - started),
-    note: 'maxPagesPerStream(64) x segmentsPerPage(1) x segmentBytes(128KiB) = 8MiB total cap; foreground lane reaches ~32GiB',
+    note: `cap = maxPagesPerStream(${MANAGED_TOOL_RESULT_LIMITS.maxPagesPerStream}) x segmentsPerPage(${BACKGROUND_SEGMENTS_PER_PAGE}) x segmentBytes(${BACKGROUND_SEGMENT_BYTES}) = ${totalCapBytes / MB} MiB, derived from the shipped constants; the 16 MiB attempt stays below it, so this run measures admission and page geometry, not the cap break`,
   });
 }
 

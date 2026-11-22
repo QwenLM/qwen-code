@@ -12,7 +12,7 @@ import { constants, tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, type Server } from 'node:http';
 import express from 'express';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   openManagedSession,
   type ManagedSession,
@@ -345,193 +345,199 @@ async function reattach(
     release();
   }
 }
-it('a quiet exit while detached settles from the terminal entry on re-attach', async () => {
-  const r = await rig();
-  await r.detach(1);
-  await publishers[0]!.close();
+// POSIX process semantics (SIGSTOP/SIGKILL, process groups) — the Windows
+// lane would bail the whole package on the first signal assertion.
+describe.skipIf(process.platform === 'win32')('real-process delivery', () => {
+  it('a quiet exit while detached settles from the terminal entry on re-attach', async () => {
+    const r = await rig();
+    await r.detach(1);
+    await publishers[0]!.close();
 
-  // No output at all: the only entry the worker can emit is the terminal one.
-  const { exited, drained } = driveRealProcess(r.sink, 'exit 0');
-  const { code } = await exited;
-  await drained;
-  expect(r.sink.run.lastApplied).toBe(0);
-  r.sink.setProcessResult({
-    exitCode: code,
-    signal: null,
-    rawOutput: Buffer.alloc(0),
-    output: '',
-    error: null,
-    aborted: false,
-    pid: 0,
-    executionMethod: 'child_process',
+    // No output at all: the only entry the worker can emit is the terminal one.
+    const { exited, drained } = driveRealProcess(r.sink, 'exit 0');
+    const { code } = await exited;
+    await drained;
+    expect(r.sink.run.lastApplied).toBe(0);
+    r.sink.setProcessResult({
+      exitCode: code,
+      signal: null,
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      error: null,
+      aborted: false,
+      pid: 0,
+      executionMethod: 'child_process',
+    });
+    const envelopePromise = r.sink.finalize('success', []);
+    await waitFor(() => r.sink.run.isClosedOrTerminal);
+
+    const second = r.newPublisher();
+    second.restoreBackgroundCapture(
+      EXECUTION,
+      'child_run',
+      r.childRuns.record(EXECUTION)!.outputRef,
+    );
+    await r.install(second, 2);
+    const envelope = await envelopePromise;
+    await r.registry.accept(r.prepared.identity, envelope);
+    await waitFor(() => r.childRuns.record(EXECUTION)!.run.state === 'settled');
+    expect(r.childRuns.record(EXECUTION)!.exitCode).toBe(0);
+    // A quiet exit still leaves a valid, empty manifest chain rather than no
+    // Artifact at all.
+    const settled = r.childRuns.record(EXECUTION)!;
+    expect(settled.outputRef).not.toBeNull();
+    const summary = await streamSummary(r, settled.outputRef!);
+    expect(summary.every((stream) => stream.byteLength === 0)).toBe(true);
   });
-  const envelopePromise = r.sink.finalize('success', []);
-  await waitFor(() => r.sink.run.isClosedOrTerminal);
+  it('a Harness restart mid-stream keeps one capture and every byte exactly once', async () => {
+    const r = await rig();
+    const chunks = 48;
+    const chunkWidth = 8192;
+    const expected = Array.from(
+      { length: chunks },
+      (_, i) => String(i + 1).padStart(chunkWidth, '0') + '\n',
+    ).join('');
+    const { exited, drained } = driveRealProcess(
+      r.sink,
+      `for i in $(seq 1 ${chunks}); do printf '%0${chunkWidth}d\\n' "$i"; sleep 0.01; done`,
+    );
 
-  const second = r.newPublisher();
-  second.restoreBackgroundCapture(
-    EXECUTION,
-    'child_run',
-    r.childRuns.record(EXECUTION)!.outputRef,
-  );
-  await r.install(second, 2);
-  const envelope = await envelopePromise;
-  await r.registry.accept(r.prepared.identity, envelope);
-  await waitFor(() => r.childRuns.record(EXECUTION)!.run.state === 'settled');
-  expect(r.childRuns.record(EXECUTION)!.exitCode).toBe(0);
-  // A quiet exit still leaves a valid, empty manifest chain rather than no
-  // Artifact at all.
-  const settled = r.childRuns.record(EXECUTION)!;
-  expect(settled.outputRef).not.toBeNull();
-  const summary = await streamSummary(r, settled.outputRef!);
-  expect(summary.every((stream) => stream.byteLength === 0)).toBe(true);
+    // The first Harness applies a prefix, then dies while the process runs on.
+    await waitFor(() => r.sink.run.lastApplied > 0);
+    const appliedBeforeRestart = r.sink.run.lastApplied;
+    await r.detach(1);
+    await publishers[0]!.close();
+
+    const second = r.newPublisher();
+    await reattach(r, second, 2);
+
+    const { code } = await exited;
+    await drained;
+    r.sink.setProcessResult({
+      exitCode: code,
+      signal: null,
+      rawOutput: Buffer.from(expected),
+      output: expected,
+      error: null,
+      aborted: false,
+      pid: 0,
+      executionMethod: 'child_process',
+    });
+    const envelope = await r.sink.finalize('success', [{ text: expected }]);
+    expect(envelope.executionStatus).toBe('success');
+    await r.registry.accept(r.prepared.identity, envelope);
+    await waitFor(() => r.childRuns.record(EXECUTION)!.run.state === 'settled');
+
+    const settled = r.childRuns.record(EXECUTION)!;
+    expect(settled.exitCode).toBe(0);
+    expect(appliedBeforeRestart).toBeGreaterThan(0);
+    // Every byte exactly once, in order, through one capture lineage.
+    const manifest = parseToolResultManifestBytes(
+      await r.resources.read(settled.outputRef!),
+    );
+    const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+    expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
+    expect(stdout.digest).toBe(
+      createHash('sha256').update(expected).digest('hex'),
+    );
+    expect(manifest.revision).toBeGreaterThan(1);
+  });
+
+  it('a forced stop under backpressure still produces its exit proof', async () => {
+    const r = await rig();
+    await r.detach(1);
+    await publishers[0]!.close();
+
+    // An unbounded producer fills the held outbox until the capture's write
+    // queue parks on the byte budget — the worker-side equivalent of a
+    // process paused on its own output pipes. SIGSTOP freezes the producer
+    // so the buffered tail stays bounded, then SIGKILL is the forced stop.
+    const line = '0'.repeat(8191) + '1\n';
+    const { child, exited } = driveRealProcess(
+      r.sink,
+      `while :; do printf '%08192d\\n' 1; done`,
+    );
+    // Wait until the outbox is full and the write queue parks on the budget:
+    // the entry count stops growing while the producer is still writing, so
+    // more buffered output sits behind the parked revision — the tail the
+    // stop must drop. Freezing earlier could land on a segment boundary with
+    // nothing left to lose.
+    let stable = 0;
+    let previous = r.sink.run.pendingCount;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline && stable < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const current = r.sink.run.pendingCount;
+      stable = current === previous && current > 0 ? stable + 1 : 0;
+      previous = current;
+    }
+    expect(stable).toBeGreaterThanOrEqual(2);
+    child.kill('SIGSTOP');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    child.kill('SIGKILL');
+    const { signal } = await exited;
+    expect(signal).toBe('SIGKILL');
+
+    // The registry's completion order: stop marker, physical evidence, then
+    // finish + finalize. None of it may wait on the parked write queue (§4.4:
+    // a full outbox must never keep a stopped process from its exit proof).
+    r.sink.setStopRequested();
+    r.sink.setProcessResult({
+      exitCode: null,
+      signal: constants.signals.SIGKILL,
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      error: null,
+      aborted: false,
+      pid: 0,
+      executionMethod: 'child_process',
+    });
+    await r.sink.finish('stdout', true);
+    await r.sink.finish('stderr', true);
+    const envelope = await r.sink.finalize('error', [], {
+      message: 'Background Shell terminated with SIGKILL.',
+    });
+    expect(r.sink.run.isClosedOrTerminal).toBe(true);
+    expect(envelope.capture?.captureStatus).toBe('partial');
+    expect(envelope.capture?.captureReason).toBe('cancelled');
+
+    // The exit proof rides the reserved terminal slot; a fresh applier drains
+    // the queued prefix and settles the stop without a model turn.
+    const second = r.newPublisher();
+    await reattach(r, second, 2);
+    const receipt = await r.registry.accept(r.prepared.identity, envelope);
+    expect(receipt.manifest).not.toBeNull();
+    await waitFor(
+      () => r.childRuns.record(EXECUTION)!.run.execution === 'settled',
+    );
+    const settled = r.childRuns.record(EXECUTION)!;
+    expect(settled.run.state).toBe('cancelled');
+    expect(settled.stopReason).toBe('stop_requested');
+    expect(settled.stopRequested).toBe(true);
+    // A stop by anyone else carries no exit status (contract rule).
+    expect(settled.exitCode).toBeNull();
+    expect(settled.exitSignal).toBeNull();
+
+    // The retained prefix is exactly the producer's bytes; the dropped tail
+    // is a declared gap, not admitted bytes.
+    const manifest = parseToolResultManifestBytes(
+      await r.resources.read(settled.outputRef!),
+    );
+    expect(manifest.executionStatus).toBe('error');
+    expect(manifest.signal).toBe('SIGKILL');
+    expect(manifest.captureStatus).toBe('partial');
+    expect(manifest.captureReason).toBe('cancelled');
+    const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
+    expect(stdout.state).toBe('incomplete');
+    expect(stdout.byteLength).toBeGreaterThan(0);
+    expect(stdout.missingRanges).toEqual([
+      { start: stdout.byteLength, end: null },
+    ]);
+    const prefix = line
+      .repeat(Math.ceil(stdout.byteLength / line.length))
+      .slice(0, stdout.byteLength);
+    expect(stdout.digest).toBe(
+      createHash('sha256').update(prefix).digest('hex'),
+    );
+  }, 30_000);
 });
-it('a Harness restart mid-stream keeps one capture and every byte exactly once', async () => {
-  const r = await rig();
-  const chunks = 48;
-  const chunkWidth = 8192;
-  const expected = Array.from(
-    { length: chunks },
-    (_, i) => String(i + 1).padStart(chunkWidth, '0') + '\n',
-  ).join('');
-  const { exited, drained } = driveRealProcess(
-    r.sink,
-    `for i in $(seq 1 ${chunks}); do printf '%0${chunkWidth}d\\n' "$i"; sleep 0.01; done`,
-  );
-
-  // The first Harness applies a prefix, then dies while the process runs on.
-  await waitFor(() => r.sink.run.lastApplied > 0);
-  const appliedBeforeRestart = r.sink.run.lastApplied;
-  await r.detach(1);
-  await publishers[0]!.close();
-
-  const second = r.newPublisher();
-  await reattach(r, second, 2);
-
-  const { code } = await exited;
-  await drained;
-  r.sink.setProcessResult({
-    exitCode: code,
-    signal: null,
-    rawOutput: Buffer.from(expected),
-    output: expected,
-    error: null,
-    aborted: false,
-    pid: 0,
-    executionMethod: 'child_process',
-  });
-  const envelope = await r.sink.finalize('success', [{ text: expected }]);
-  expect(envelope.executionStatus).toBe('success');
-  await r.registry.accept(r.prepared.identity, envelope);
-  await waitFor(() => r.childRuns.record(EXECUTION)!.run.state === 'settled');
-
-  const settled = r.childRuns.record(EXECUTION)!;
-  expect(settled.exitCode).toBe(0);
-  expect(appliedBeforeRestart).toBeGreaterThan(0);
-  // Every byte exactly once, in order, through one capture lineage.
-  const manifest = parseToolResultManifestBytes(
-    await r.resources.read(settled.outputRef!),
-  );
-  const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
-  expect(stdout.byteLength).toBe(Buffer.byteLength(expected));
-  expect(stdout.digest).toBe(
-    createHash('sha256').update(expected).digest('hex'),
-  );
-  expect(manifest.revision).toBeGreaterThan(1);
-});
-
-it('a forced stop under backpressure still produces its exit proof', async () => {
-  const r = await rig();
-  await r.detach(1);
-  await publishers[0]!.close();
-
-  // An unbounded producer fills the held outbox until the capture's write
-  // queue parks on the byte budget — the worker-side equivalent of a
-  // process paused on its own output pipes. SIGSTOP freezes the producer
-  // so the buffered tail stays bounded, then SIGKILL is the forced stop.
-  const line = '0'.repeat(8191) + '1\n';
-  const { child, exited } = driveRealProcess(
-    r.sink,
-    `while :; do printf '%08192d\\n' 1; done`,
-  );
-  // Wait until the outbox is full and the write queue parks on the budget:
-  // the entry count stops growing while the producer is still writing, so
-  // more buffered output sits behind the parked revision — the tail the
-  // stop must drop. Freezing earlier could land on a segment boundary with
-  // nothing left to lose.
-  let stable = 0;
-  let previous = r.sink.run.pendingCount;
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline && stable < 2) {
-    await new Promise((resolve) => setTimeout(resolve, 150));
-    const current = r.sink.run.pendingCount;
-    stable = current === previous && current > 0 ? stable + 1 : 0;
-    previous = current;
-  }
-  expect(stable).toBeGreaterThanOrEqual(2);
-  child.kill('SIGSTOP');
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  child.kill('SIGKILL');
-  const { signal } = await exited;
-  expect(signal).toBe('SIGKILL');
-
-  // The registry's completion order: stop marker, physical evidence, then
-  // finish + finalize. None of it may wait on the parked write queue (§4.4:
-  // a full outbox must never keep a stopped process from its exit proof).
-  r.sink.setStopRequested();
-  r.sink.setProcessResult({
-    exitCode: null,
-    signal: constants.signals.SIGKILL,
-    rawOutput: Buffer.alloc(0),
-    output: '',
-    error: null,
-    aborted: false,
-    pid: 0,
-    executionMethod: 'child_process',
-  });
-  await r.sink.finish('stdout', true);
-  await r.sink.finish('stderr', true);
-  const envelope = await r.sink.finalize('error', [], {
-    message: 'Background Shell terminated with SIGKILL.',
-  });
-  expect(r.sink.run.isClosedOrTerminal).toBe(true);
-  expect(envelope.capture?.captureStatus).toBe('partial');
-  expect(envelope.capture?.captureReason).toBe('cancelled');
-
-  // The exit proof rides the reserved terminal slot; a fresh applier drains
-  // the queued prefix and settles the stop without a model turn.
-  const second = r.newPublisher();
-  await reattach(r, second, 2);
-  const receipt = await r.registry.accept(r.prepared.identity, envelope);
-  expect(receipt.manifest).not.toBeNull();
-  await waitFor(
-    () => r.childRuns.record(EXECUTION)!.run.execution === 'settled',
-  );
-  const settled = r.childRuns.record(EXECUTION)!;
-  expect(settled.run.state).toBe('cancelled');
-  expect(settled.stopReason).toBe('stop_requested');
-  expect(settled.stopRequested).toBe(true);
-  // A stop by anyone else carries no exit status (contract rule).
-  expect(settled.exitCode).toBeNull();
-  expect(settled.exitSignal).toBeNull();
-
-  // The retained prefix is exactly the producer's bytes; the dropped tail
-  // is a declared gap, not admitted bytes.
-  const manifest = parseToolResultManifestBytes(
-    await r.resources.read(settled.outputRef!),
-  );
-  expect(manifest.executionStatus).toBe('error');
-  expect(manifest.signal).toBe('SIGKILL');
-  expect(manifest.captureStatus).toBe('partial');
-  expect(manifest.captureReason).toBe('cancelled');
-  const stdout = manifest.contents.find((c) => c.streamId === 'stdout')!;
-  expect(stdout.state).toBe('incomplete');
-  expect(stdout.byteLength).toBeGreaterThan(0);
-  expect(stdout.missingRanges).toEqual([
-    { start: stdout.byteLength, end: null },
-  ]);
-  const prefix = line
-    .repeat(Math.ceil(stdout.byteLength / line.length))
-    .slice(0, stdout.byteLength);
-  expect(stdout.digest).toBe(createHash('sha256').update(prefix).digest('hex'));
-}, 30_000);

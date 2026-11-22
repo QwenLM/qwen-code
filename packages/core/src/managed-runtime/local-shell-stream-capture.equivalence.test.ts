@@ -12,15 +12,22 @@ import {
   type ToolResultManifest,
 } from './managed-tool-result.js';
 import { ResourceToolResultSegmentStore } from './resource-tool-result-store.js';
-import { LocalShellStreamCapture } from './local-shell-stream-capture.js';
+import {
+  LocalShellStreamCapture,
+  type LocalShellStreamCaptureOptions,
+} from './local-shell-stream-capture.js';
+import {
+  BACKGROUND_SEGMENT_BYTES,
+  BACKGROUND_SEGMENTS_PER_PAGE,
+} from './managed-delivery-entry.js';
 
 // Phase 3b characterization (design §10 "Capture equivalence"): the
-// worker-owned background capture uses 256 KiB segments and 1024 segments per
-// page where the Harness foreground capture uses 1 MiB and 512. The granularity
-// differs, but the content must not: the same input bytes produce the same
-// per-stream running digest and the same reconstructable output, and the same
-// final execution status. This pins that the move into the worker changes no
-// observable Artifact content.
+// worker-owned background capture runs the shipped delivery geometry (128 KiB
+// segments, 256 per page, a revision per segment) where the Harness foreground
+// capture uses 1 MiB and 512. The granularity differs, but the content must
+// not: the same input bytes produce the same per-stream running digest and the
+// same reconstructable output, and the same final execution status. This pins
+// that the move into the worker changes no observable Artifact content.
 
 const IDENTITY = {
   tenantId: 'tenant-1',
@@ -72,7 +79,7 @@ interface Captured {
 
 async function capture(
   chunks: ReadonlyArray<{ stream: 'stdout' | 'stderr'; bytes: Buffer }>,
-  options: { segmentBytes?: number; segmentsPerPage?: number },
+  options: LocalShellStreamCaptureOptions,
 ): Promise<Captured> {
   const resources = memoryResources();
   const segmentStore = new ResourceToolResultSegmentStore(resources);
@@ -140,7 +147,7 @@ function streamSummary(manifest: ToolResultManifest, streamId: string) {
 
 it('worker and Harness captures produce identical content for the same bytes', async () => {
   // ~3 MiB of deterministic stdout crosses several 1 MiB Harness segments and
-  // many 256 KiB worker segments; stderr is smaller; a multi-byte UTF-8 char is
+  // many 128 KiB worker segments; stderr is smaller; a multi-byte UTF-8 char is
   // split across two chunks to prove byte-level (not character-level) capture.
   const big = Buffer.alloc(3 * 1024 * 1024 + 17);
   for (let i = 0; i < big.length; i++) big[i] = (i * 31 + 7) & 0xff;
@@ -163,8 +170,9 @@ it('worker and Harness captures produce identical content for the same bytes', a
 
   const harness = await capture(chunks, {});
   const worker = await capture(chunks, {
-    segmentBytes: 256 * 1024,
-    segmentsPerPage: 1024,
+    segmentBytes: BACKGROUND_SEGMENT_BYTES,
+    segmentsPerPage: BACKGROUND_SEGMENTS_PER_PAGE,
+    revisionPerSegment: true,
   });
 
   // Same final content per stream, regardless of segment/page granularity.
@@ -197,8 +205,9 @@ it('equivalence holds for an empty stream and a single partial segment', async (
   ];
   const harness = await capture(chunks, {});
   const worker = await capture(chunks, {
-    segmentBytes: 256 * 1024,
-    segmentsPerPage: 1024,
+    segmentBytes: BACKGROUND_SEGMENT_BYTES,
+    segmentsPerPage: BACKGROUND_SEGMENTS_PER_PAGE,
+    revisionPerSegment: true,
   });
   for (const streamId of ['stdout', 'stderr']) {
     expect(streamSummary(worker.manifest, streamId)).toEqual(

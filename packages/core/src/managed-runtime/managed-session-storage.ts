@@ -182,7 +182,16 @@ export interface ManagedSessionJournalStore {
 }
 
 export interface ManagedSessionResourceStore {
-  publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
+  /**
+   * An explicit resourceId republishes bytes another owner already named
+   * (a worker-owned delivery entry carries its complete refs); omitting it
+   * mints a fresh identity.
+   */
+  publish(
+    kind: string,
+    bytes: Buffer,
+    resourceId?: string,
+  ): Promise<ManagedSessionDurableRef>;
   read(ref: ManagedSessionDurableRef): Promise<Buffer>;
 }
 

@@ -80,8 +80,19 @@ export type ManagedDeliveryEntry =
   | ManagedDeliveryObservationEntry
   | ManagedDeliveryTerminalEntry;
 
-/** The largest single delivery request, sized above one 256 KiB flush batch. */
+/** The largest single delivery request, sized above one 128 KiB flush batch. */
 export const MANAGED_DELIVERY_REQUEST_LIMIT_BYTES = 512 * 1024;
+
+// A delivery entry carries its resources base64-encoded inside a request
+// bounded by MANAGED_DELIVERY_REQUEST_LIMIT_BYTES (512 KiB), and an entry
+// larger than that can never be pushed at all. Every segment publishes its
+// own revision, which re-publishes the stream's open page of up to 256
+// segment descriptors (~25 KB), so the largest entry — a segment and a page
+// per stream plus one manifest of at most 64 KiB — stays under 510 KB once
+// encoded. The 64-page bound then holds 16,384 segments per stream, so idle
+// partial flushes spend ordinals instead of exhausting pages.
+export const BACKGROUND_SEGMENT_BYTES = 128 * 1024;
+export const BACKGROUND_SEGMENTS_PER_PAGE = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);

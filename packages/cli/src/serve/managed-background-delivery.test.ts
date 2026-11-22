@@ -24,7 +24,10 @@ import {
   MANAGED_TOOL_RESULT_PROTOCOL,
   parseToolResultManifestBytes,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
-import type { DurableToolResultResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
+import {
+  HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
+  type DurableToolResultResourceStore,
+} from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
@@ -90,7 +93,7 @@ function resourceStore(
   };
 }
 
-async function rig(options: { install?: boolean } = {}) {
+async function rig(options: { install?: boolean; kindGated?: boolean } = {}) {
   root = await mkdtemp(path.join(tmpdir(), 'qwen-worker-delivery-'));
   const key = {
     tenantId: 'tenant-a',
@@ -122,6 +125,19 @@ async function rig(options: { install?: boolean } = {}) {
   const harness = createManagedHarnessHandle(session);
   await harness.ensureRunnable();
   const resources = resourceStore(root, key.sessionId, session.resources);
+  // Mirror the production tool-result gate: only the capture kinds publish
+  // there, so an observation's notification kinds must take the session lane.
+  const toolResults: DurableToolResultResourceStore = options.kindGated
+    ? {
+        publish: (kind, bytes, resourceId) => {
+          if (!Object.hasOwn(HOSTED_TOOL_RESULT_RESOURCE_LIMITS, kind)) {
+            throw new Error('Unsupported tool result resource or size.');
+          }
+          return resources.publish(kind, bytes, resourceId);
+        },
+        read: (ref) => resources.read(ref),
+      }
+    : resources;
   const orchestrator = new HostedChildRunSession(
     { authority: session.authority, resources },
     key,
@@ -132,7 +148,7 @@ async function rig(options: { install?: boolean } = {}) {
   );
   publisher = new HostedShellPublisher(
     session,
-    resources,
+    toolResults,
     async () => {},
     orchestrator,
     monitors,
@@ -356,6 +372,14 @@ it('refuses a publisher registration from an older writer generation', async () 
   expect((await r.install(5)).status).toBe(200);
 });
 
+it('refuses a stale writer after a detach because the watermark survives', async () => {
+  const r = await rig();
+  expect((await r.install(5)).status).toBe(200);
+  expect(r.registry.detachSession(r.key.sessionId, 5)).toBe(true);
+  expect((await r.install(3)).status).toBe(409);
+  expect((await r.install(5)).status).toBe(200);
+});
+
 it('worker monitor policy delivers an observation entry the applier commits once', async () => {
   const r = await rig();
   const monitorId = 'execution-mon';
@@ -454,6 +478,99 @@ it('worker monitor policy delivers an observation entry the applier commits once
   expect(record.notifiedThrough).toBe(1);
   expect(record.run.state).toBe('settled');
   expect(record.stopReason).toBe('exited');
+});
+
+it('applies a live observation through the production kind gate, keeping the worker resource ids', async () => {
+  const r = await rig({ kindGated: true });
+  const monitorId = 'execution-mon-gated';
+  const binding = { runtimeBindingId: 'binding-a', generation: '1' };
+  await r.monitors.admit({
+    monitorId,
+    ownerScopeId: r.key.sessionId,
+    executionCallId: monitorId,
+    args: { command: 'tail -f log', description: 'watch log' },
+    maxEvents: 100,
+    idleTimeoutMs: 60_000,
+    debounceMs: 1_000,
+  });
+  await r.monitors.dispatchStarted(monitorId, binding);
+  await r.monitors.attach(monitorId, binding, { pid: 9 });
+  const request = {
+    reference: {
+      sessionId: r.key.sessionId,
+      promptId: 'prompt-a',
+      callId: 'worker-call-mon',
+      argsDigest: `sha256:${'b'.repeat(64)}`,
+    },
+    capture: {
+      tenantId: r.key.tenantId,
+      sessionId: r.key.sessionId,
+      turnId: 'turn-a',
+      executionCallId: monitorId,
+      bindingGeneration: '1',
+      capturePolicy: 'complete_required',
+      background: true,
+      monitoring: true,
+    },
+  };
+  publisher!.register(
+    request as Parameters<HostedShellPublisher['register']>[0],
+    'model-call-mon',
+    'prompt-a',
+  );
+  const prepared = await r.registry.prepare(
+    request as Parameters<ManagedShellPublisherRegistry['prepare']>[0],
+  );
+  const sink = prepared.sink as WorkerBackgroundCaptureSink;
+  const sessionPublish = vi.spyOn(session!.resources, 'publish');
+  sink.attachMonitorPolicy(
+    new WorkerMonitorPolicy(
+      sink.run,
+      {
+        monitorId,
+        executionCallId: monitorId,
+        description: 'watch log',
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+        startSequence: 0,
+      },
+      async () => true,
+    ),
+  );
+  sink.setStarted(9);
+  await sink.write('stdout', Buffer.from('line1\nline2\n'));
+  await sink.finish('stdout', true);
+  await sink.finish('stderr', true);
+  sink.setProcessResult({
+    exitCode: 0,
+    signal: null,
+    rawOutput: Buffer.from('line1\nline2\n'),
+    output: 'line1\nline2\n',
+    error: null,
+    aborted: false,
+    pid: 9,
+    executionMethod: 'child_process',
+  });
+  const envelope = await sink.finalize('success', []);
+  await r.registry.accept(prepared.identity, envelope);
+  const record = r.monitors.record(monitorId)!;
+  expect(record.observationSequence).toBe(1);
+  expect(record.notifiedThrough).toBe(1);
+  expect(record.run.state).toBe('settled');
+  // The notification kinds must reach the session store under the worker's
+  // explicit ids: the commit's resource closure verifies exactly those refs.
+  for (const kind of ['managed-input', 'managed-admission']) {
+    const index = sessionPublish.mock.calls.findIndex(
+      ([published]) => published === kind,
+    );
+    expect(index).toBeGreaterThanOrEqual(0);
+    const [, bytes, resourceId] = sessionPublish.mock.calls[index];
+    expect(resourceId).toBeDefined();
+    const ref = await sessionPublish.mock.results[index].value;
+    expect(ref.resourceId).toBe(resourceId);
+    expect(await session!.resources.read(ref)).toEqual(bytes);
+  }
 });
 
 it('keeps the capture in held mode while the publisher is unavailable and resumes on registration', async () => {

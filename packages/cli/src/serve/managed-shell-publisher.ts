@@ -503,13 +503,15 @@ export class ManagedShellPublisherRegistry
             res.status(409).json({ code: 'managed_runtime_identity_conflict' });
             return;
           }
-        } else if (previous && writerGeneration !== undefined) {
+        } else if (
+          writerGeneration !== undefined &&
+          writerGeneration < previousGeneration
+        ) {
           // Phase 3b: a same-or-newer writer generation replaces the publisher;
-          // an older one is refused.
-          if (writerGeneration < previousGeneration) {
-            res.status(409).json({ code: 'managed_runtime_identity_conflict' });
-            return;
-          }
+          // an older one is refused. The retained watermark fences even a
+          // registration after a detach cleared the installed publisher.
+          res.status(409).json({ code: 'managed_runtime_identity_conflict' });
+          return;
         }
         this.sessions.set(sessionId, publisher);
         const observedRuns: Record<string, number> = {};
@@ -836,6 +838,18 @@ export class ManagedShellPublisherRegistry
     ) {
       return;
     }
+    this.workerRuns.delete(executionCallId);
+    void workerRun.sink.close();
+  }
+
+  /**
+   * A watch that never started produces no terminal to acknowledge, so the
+   * accepted-run retire path can never fire for it: drop the prepared run
+   * and close its sink (which disarms the Monitor policy) at the refusal.
+   */
+  discardWorkerRun(executionCallId: string): void {
+    const workerRun = this.workerRuns.get(executionCallId);
+    if (!workerRun || workerRun.accepted) return;
     this.workerRuns.delete(executionCallId);
     void workerRun.sink.close();
   }

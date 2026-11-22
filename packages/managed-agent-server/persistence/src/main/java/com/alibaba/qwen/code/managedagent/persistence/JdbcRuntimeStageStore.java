@@ -94,6 +94,11 @@ public class JdbcRuntimeStageStore implements RuntimeStageStore {
                         + " JOIN ma_runtime_binding b ON b.binding_id = e.binding_id"
                         + " AND b.runtime_generation = e.runtime_generation"
                         + " WHERE e.execution_state = 'PREPARED' AND b.binding_state = 'READY'"
+                        // The suffix predicate must spend the LIMIT budget on
+                        // background runs only: filtering in the row mapper
+                        // let 256 foreground PREPARED rows starve every
+                        // background run sorting past the cutoff.
+                        + " AND e.execution_call_id LIKE '%:process'"
                         + " ORDER BY e.binding_id, e.execution_call_id_hash LIMIT 256",
                 (rs, index) -> {
                     String rawCallId = utf8(rs, "execution_call_id");
