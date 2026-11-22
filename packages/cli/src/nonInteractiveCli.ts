@@ -3151,6 +3151,9 @@ export async function runNonInteractive(
         const roundOptions: SendMessageOptions = {
           type: sendType,
           modelOverride,
+          // Stream-json consumers need a tool call's id and name as soon as
+          // the provider streams them, before the arguments arrive (#17422).
+          toolCallPreparations: true,
           workflowModeEligible:
             isFirstTurn &&
             sendType === SendMessageType.UserQuery &&
@@ -3682,6 +3685,9 @@ export async function runNonInteractive(
               ? {
                   type: SendMessageType.UserQuery,
                   modelOverride: itemModelOverride,
+                  // See roundOptions above: stream-json needs the tool
+                  // call's id and name before its arguments arrive.
+                  toolCallPreparations: true,
                   submittedPrompt: modPrompt.text,
                   submittedByMod: modPrompt.plugin,
                   ...(modPrompt.asUser && { submittedAsUser: true }),
@@ -3708,6 +3714,7 @@ export async function runNonInteractive(
               : {
                   type: item.sendMessageType,
                   modelOverride: itemModelOverride,
+                  toolCallPreparations: true,
                   notificationDisplayText: item.displayText,
                   todoWorkChainId: item.todoWorkChainId,
                 };
@@ -3783,6 +3790,7 @@ export async function runNonInteractive(
                   : {
                       type: SendMessageType.ToolResult,
                       modelOverride: itemModelOverride,
+                      toolCallPreparations: true,
                     },
               );
               itemIsFirstTurn = false;

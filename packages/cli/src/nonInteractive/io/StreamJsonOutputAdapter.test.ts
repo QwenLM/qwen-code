@@ -217,6 +217,140 @@ describe('StreamJsonOutputAdapter', () => {
         expect(blockStartCall).toBeDefined();
       });
 
+      it('should emit content_block_start as soon as a tool call preparation arrives', () => {
+        adapter.processEvent({
+          type: LlmEventType.ToolCallPreparation,
+          value: { callId: 'tool-call-1', toolName: 'write_file' },
+        });
+
+        const events = stdoutWriteSpy.mock.calls
+          .map((call: unknown[]) => {
+            try {
+              return JSON.parse(call[0] as string);
+            } catch {
+              return null;
+            }
+          })
+          .filter(
+            (parsed: unknown) =>
+              parsed !== null &&
+              (parsed as { type: string }).type === 'stream_event',
+          );
+        const starts = events.filter(
+          (parsed: { event: { type: string } }) =>
+            parsed.event.type === 'content_block_start',
+        );
+        expect(starts).toHaveLength(1);
+        expect(starts[0].event.content_block).toMatchObject({
+          type: 'tool_use',
+          id: 'tool-call-1',
+          name: 'write_file',
+          input: {},
+        });
+        expect(
+          events.some(
+            (parsed: { event: { type: string } }) =>
+              parsed.event.type === 'content_block_delta',
+          ),
+        ).toBe(false);
+      });
+
+      it('should emit a single content_block_start when the request follows a preparation', () => {
+        adapter.processEvent({
+          type: LlmEventType.ToolCallPreparation,
+          value: { callId: 'tool-call-1', toolName: 'write_file' },
+        });
+        adapter.processEvent({
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'tool-call-1',
+            name: 'write_file',
+            args: { filePath: '/tmp/out.txt', content: 'hello' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-1',
+          },
+        });
+
+        const events = stdoutWriteSpy.mock.calls
+          .map((call: unknown[]) => {
+            try {
+              return JSON.parse(call[0] as string);
+            } catch {
+              return null;
+            }
+          })
+          .filter(
+            (parsed: unknown) =>
+              parsed !== null &&
+              (parsed as { type: string }).type === 'stream_event',
+          );
+        const starts = events.filter(
+          (parsed: { event: { type: string } }) =>
+            parsed.event.type === 'content_block_start',
+        );
+        expect(starts).toHaveLength(1);
+        const deltas = events.filter(
+          (parsed: { event: { type: string; delta: { type: string } } }) =>
+            parsed.event.type === 'content_block_delta' &&
+            parsed.event.delta.type === 'input_json_delta',
+        );
+        expect(deltas).toHaveLength(1);
+        expect(deltas[0].event.delta.partial_json).toBe(
+          JSON.stringify({ filePath: '/tmp/out.txt', content: 'hello' }),
+        );
+        expect(
+          events.filter(
+            (parsed: { event: { type: string } }) =>
+              parsed.event.type === 'content_block_stop',
+          ),
+        ).toHaveLength(1);
+
+        const message = adapter.finalizeAssistantMessage();
+        expect(message.message.content).toHaveLength(1);
+        expect(message.message.content[0]).toMatchObject({
+          type: 'tool_use',
+          id: 'tool-call-1',
+          name: 'write_file',
+          input: { filePath: '/tmp/out.txt', content: 'hello' },
+        });
+      });
+
+      it('should drop a preparation-only tool call from the finalized message', () => {
+        adapter.processEvent({
+          type: LlmEventType.ToolCallPreparation,
+          value: { callId: 'tool-call-1', toolName: 'write_file' },
+        });
+
+        const message = adapter.finalizeAssistantMessage();
+        expect(message.message.content).toHaveLength(0);
+
+        const events = stdoutWriteSpy.mock.calls
+          .map((call: unknown[]) => {
+            try {
+              return JSON.parse(call[0] as string);
+            } catch {
+              return null;
+            }
+          })
+          .filter(
+            (parsed: unknown) =>
+              parsed !== null &&
+              (parsed as { type: string }).type === 'stream_event',
+          );
+        expect(
+          events.some(
+            (parsed: { event: { type: string } }) =>
+              parsed.event.type === 'content_block_start',
+          ),
+        ).toBe(true);
+        expect(
+          events.some(
+            (parsed: { event: { type: string } }) =>
+              parsed.event.type === 'content_block_stop',
+          ),
+        ).toBe(true);
+      });
+
       it('should emit thinking delta events', () => {
         adapter.processEvent({
           type: LlmEventType.Thought,

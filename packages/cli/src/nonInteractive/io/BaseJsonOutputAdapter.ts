@@ -8,6 +8,7 @@ import { shellResultText } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
   Config,
+  ToolCallPreparation,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   SessionMetrics,
@@ -406,9 +407,22 @@ export abstract class BaseJsonOutputAdapter {
     const orderedOpenBlocks = Array.from(state.openBlocks).sort(
       (a, b) => a - b,
     );
+    // A tool_use block still open here was created by a preparation event
+    // whose ToolCallRequest never arrived (abort or truncated stream).
+    // Close it on the wire like any other block, but keep it out of the
+    // finalized message: the call never executed.
+    const uncompletedToolUse = new Set<number>();
     for (const index of orderedOpenBlocks) {
+      if (state.blocks[index]?.type === 'tool_use') {
+        uncompletedToolUse.add(index);
+      }
       this.onBlockClosed(state, index, parentToolUseId);
       this.closeBlock(state, index);
+    }
+    if (uncompletedToolUse.size > 0) {
+      state.blocks = state.blocks.filter(
+        (_block, index) => !uncompletedToolUse.has(index),
+      );
     }
 
     const message = this.buildMessage(parentToolUseId);
@@ -693,6 +707,9 @@ export abstract class BaseJsonOutputAdapter {
       case LlmEventType.ToolCallRequest:
         this.appendToolUse(state, event.value, null);
         break;
+      case LlmEventType.ToolCallPreparation:
+        this.appendToolUsePreparation(state, event.value, null);
+        break;
       case LlmEventType.Finished:
         if (event.value?.usageMetadata) {
           state.usage = this.createUsage(event.value.usageMetadata);
@@ -959,6 +976,45 @@ export abstract class BaseJsonOutputAdapter {
   }
 
   /**
+   * Creates a tool_use block as soon as the model starts streaming a tool
+   * call, before its arguments arrive. The block carries an empty input and
+   * stays open until the matching ToolCallRequest fills it in; if the
+   * request never arrives the block is dropped when the message finalizes,
+   * so it never executes or enters the history.
+   *
+   * @param state - Message state
+   * @param preparation - Tool call id and name from the stream
+   * @param parentToolUseId - null for main agent, string for subagent
+   */
+  protected appendToolUsePreparation(
+    state: MessageState,
+    preparation: ToolCallPreparation,
+    parentToolUseId: string | null,
+  ): void {
+    if (
+      state.blocks.some(
+        (block) => block.type === 'tool_use' && block.id === preparation.callId,
+      )
+    ) {
+      return;
+    }
+    this.ensureBlockTypeConsistency(state, 'tool_use', parentToolUseId);
+    this.ensureMessageStarted(state, parentToolUseId);
+    this.finalizePendingBlocks(state, parentToolUseId);
+
+    const index = state.blocks.length;
+    const block: ToolUseBlock = {
+      type: 'tool_use',
+      id: preparation.callId,
+      name: preparation.toolName,
+      input: {},
+    };
+    state.blocks.push(block);
+    this.openBlock(state, index, block);
+    this.onToolUseBlockCreated(state, index, { ...block }, parentToolUseId);
+  }
+
+  /**
    * Appends a tool_use block to the current message.
    * Uses template method pattern with hooks for stream events.
    *
@@ -971,6 +1027,26 @@ export abstract class BaseJsonOutputAdapter {
     request: ToolCallRequestInfo,
     parentToolUseId: string | null,
   ): void {
+    const preparedIndex = state.blocks.findIndex(
+      (block, index) =>
+        block.type === 'tool_use' &&
+        block.id === request.callId &&
+        state.openBlocks.has(index),
+    );
+    if (preparedIndex !== -1) {
+      const block = state.blocks[preparedIndex] as ToolUseBlock;
+      block.input = request.args ?? {};
+      this.onToolUseInputSet(
+        state,
+        preparedIndex,
+        request.args ?? {},
+        parentToolUseId,
+      );
+      this.onBlockClosed(state, preparedIndex, parentToolUseId);
+      this.closeBlock(state, preparedIndex);
+      return;
+    }
+
     this.ensureBlockTypeConsistency(state, 'tool_use', parentToolUseId);
     this.ensureMessageStarted(state, parentToolUseId);
     this.finalizePendingBlocks(state, parentToolUseId);
