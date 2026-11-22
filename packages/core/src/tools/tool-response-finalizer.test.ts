@@ -995,6 +995,33 @@ describe('tool response finalization', () => {
     );
   });
 
+  it('names the producer fallback artifact when a decided-empty entry list is truncated', async () => {
+    const artifact = '/tmp/tool-results/web-fetch.output';
+    const parts = convertToFunctionResponse(
+      'web_fetch',
+      'send',
+      `Full extracted text saved to: ${artifact}\n${'x'.repeat(1000)}`,
+      { fallbackPersistedOutputFiles: [artifact] },
+    );
+    const entries = [entry('send', parts, [])];
+
+    const result = await finalizeToolResponses(
+      config(200_000),
+      entries,
+      undefined,
+      false,
+      false,
+      100,
+      false,
+    );
+
+    expect(persist).not.toHaveBeenCalled();
+    expect(result[0].persistedOutputFiles).toEqual([]);
+    expect(JSON.stringify(result[0].responseParts[0])).toContain(
+      `Persisted tool-output artifact: ${artifact}`,
+    );
+  });
+
   it('keeps a real preview when the persisted pointer cannot fit the allocation', async () => {
     const artifact = `/home/runner/.qwen/tmp/${'a'.repeat(64)}/tool-results/send-boundary-${'b'.repeat(36)}.txt`;
     persist.mockImplementation(async (_callId, _toolName, content) => ({

@@ -139,9 +139,12 @@ function recoveryHeader(files: string[] | undefined): string {
 
 function minimumRecoveryBudget(slot: TextSlot): number {
   const text = slot.recovery?.text;
-  const files =
-    slot.recovery?.persistedOutputFiles ??
-    slot.recovery?.fallbackPersistedOutputFiles;
+  // Same first-non-empty ordering as replaceTextSlots, so the budget holds
+  // out the header the replacement will actually derive.
+  const files = slot.recovery?.persistedOutputFiles?.length
+    ? slot.recovery.persistedOutputFiles
+    : (slot.recovery?.fallbackPersistedOutputFiles ??
+      slot.recovery?.persistedOutputFiles);
   return recoveryHeader(files).length + (text ? text.length + 2 : 0) + 3;
 }
 
@@ -378,14 +381,16 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
-    // A producer's [] is a final decision; a failed finalizer write may still
-    // fall back to the producer artifact.
-    const files =
-      slot.recovery?.persistedOutputFiles ??
-      (entry.persistedOutputFiles?.length
+    // The header prefers the first non-empty list: a decided-empty [] (a
+    // refused write) must not shadow the producer's fallback artifact. The
+    // [] itself stays the write decision — previousFiles below reads it.
+    const files = slot.recovery?.persistedOutputFiles?.length
+      ? slot.recovery.persistedOutputFiles
+      : entry.persistedOutputFiles?.length
         ? entry.persistedOutputFiles
         : (slot.recovery?.fallbackPersistedOutputFiles ??
-          entry.persistedOutputFiles));
+          slot.recovery?.persistedOutputFiles ??
+          entry.persistedOutputFiles);
     const recovery = { ...slot.recovery, persistedOutputFiles: files };
     // Paths come from producer metadata or this module's write, never from a
     // string recovered from model-visible text.
