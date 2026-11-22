@@ -76,18 +76,24 @@ const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 // The schema-version narrowing capture adds a further 8 bytes.
 // Including the merged ChatSurface inputs, local builds and the CI merge tree
 // both measure 2,155,023 injected JS bytes, with 2,428,500 bytes of CSS.
+// Merged main through 68388f5d41 plus the focus-stable touch-control changes
+// measures 2,155,573 renderer JS bytes and 2,428,500 CSS bytes on 2026-11-22,
+// across independent local transcript/export builds. Keep the house margins:
+// warning = measurement + 713, hard ceiling = measurement + 1,713.
 //
 // The context-diff renderer (#13766) is transcript-reachable by design: the
 // bounded unified-diff builder, the invisible-character escaping and the
-// narrow/wide diff views all render in the transcript column, so this entry
-// legitimately carries them. Rebuilding web-shell's three dist artifacts and
-// this renderer on the merged tree measures 2,159,079 injected JS bytes
-// (+4,056), with the third-party input mix unchanged and the forbidden-input
-// guard passing (first-party inputs 2,010,167 → 2,016,695 pre-minify). CI's
-// Build lane measured 2,158,816 on the parent tree, before the four
-// approval/gitDiff keys this branch adds to the two inlined catalogs (EN and
-// ZH-CN; zh-TW and RU are transcript-stubbed) added 263 bytes.
-const DOCUMENT_RUNTIME_WARNING_BYTES = 2_159_079;
+// narrow/wide diff views all render in the transcript column, so the document
+// entry legitimately carries them, and its four approval/gitDiff catalog keys
+// ride the two catalogs this entry inlines (EN and ZH-CN; zh-TW and RU are
+// transcript-stubbed). On the merged tree at main 91a14e33, after rebuilding
+// web-shell's three dist artifacts, the renderer measures 2,159,629 bytes
+// (+4,056 over the 2,155,573 main measurement, CSS separate at 2,428,823),
+// with the forbidden-input guard passing and the third-party input mix
+// unchanged (first-party inputs 2,010,167 -> 2,016,695 pre-minify). CI's Build
+// lane measured 2,158,816 on the parent tree. Re-track with the house margins:
+// warning = measurement + 713, hard ceiling = measurement + 1,713.
+const DOCUMENT_RUNTIME_WARNING_BYTES = 2_160_342;
 // Grouped deletion plus main 159f8d0266 measures 2,041,583 JS bytes
 // (CSS is separate). Per-cause loop-stop text (#14828: seven keys across two
 // locales plus their mapping) adds 5,139: 2,041,583 against 2,046,722 on main
@@ -217,10 +223,10 @@ const DOCUMENT_RUNTIME_WARNING_BYTES = 2_159_079;
 // A normal build at the measured size below is not warned; only further
 // growth is warned. The identity placeholder can change byte length when it
 // is replaced, so the budget measures the actual injected asset below,
-// including the metadata checks: 2,159,079 bytes with the context-diff
-// renderer merged.
-// Reserve 430 bytes for toolchain variance.
-const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 430;
+// including the metadata checks: 2,159,629 bytes with the context-diff
+// renderer merged. The ceiling stays coupled to the warning threshold (1,713
+// bytes above the measurement, as above) instead of becoming a literal.
+const MAX_DOCUMENT_RUNTIME_BYTES = DOCUMENT_RUNTIME_WARNING_BYTES + 1_000;
 
 // Modules that must not be reachable from the document entry, checked against
 // the esbuild metafile inputs after the bundle is produced.
