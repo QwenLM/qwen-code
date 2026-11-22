@@ -2,6 +2,8 @@
 
 [English](2026-10-21-managed-harness-kubernetes.md) | [简体中文](2026-10-21-managed-harness-kubernetes.zh-CN.md)
 
+> **Archived.** The Kubernetes Harness pool discovery and deployment system described here was cold-archived by [#17415](https://github.com/QwenLM/qwen-code/pull/17415) (Java sources) and [#17427](https://github.com/QwenLM/qwen-code/issues/17427) (distribution templates, build/render/preflight scripts, and their tests) under `packages/sdk-java/managed-kubernetes-archive/`. Java supports only `discovery: static`. This document is preserved as the historical design record.
+
 Status: Implementation candidate, 2026-10-23, integrated with main `32b4234b84` and its single-V1 first-release contract. Original source audit: `97567d5dd733ad905aacf61f1f61a1e71c6fcc72`. Historical ACK idle-pool acceptance predates this baseline; new-head CI, foreground/fault and automatic-scaling gates remain pending. This refines [shared multi-tenant Harness](2026-10-21-managed-shared-harness.md).
 
 ## Scope and decisions

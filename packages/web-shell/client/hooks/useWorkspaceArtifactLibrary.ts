@@ -203,9 +203,11 @@ export function useWorkspaceArtifactLibrary({
     };
     let projectionDirty = false;
     let batchTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastCommitAt = 0;
     let currentRows: readonly WorkspaceArtifactLibraryRow[] = EMPTY_ROWS;
     let sawComplete = false;
     let terminalError: WorkspaceArtifactLibraryRequestError | undefined;
+    const BATCH_INTERVAL_MS = 50;
 
     const cancelBatchTimer = () => {
       if (batchTimer !== undefined) {
@@ -225,6 +227,7 @@ export function useWorkspaceArtifactLibrary({
 
     const commitProgress = () => {
       if (!isOwnerCurrent()) return;
+      lastCommitAt = Date.now();
       flushProjectionNow();
       setState({
         owner,
@@ -239,15 +242,19 @@ export function useWorkspaceArtifactLibrary({
       });
     };
 
-    // Coalesce across the macrotask checkpoint so a burst of session events
-    // yielded across microtask turns triggers one projection sort rather than
-    // one sort per event.
+    // Coalesce both bursts (same tick -> 0ms) and trickle streams (subsequent
+    // arrivals within BATCH_INTERVAL_MS) into batched projection sorts;
+    // terminal commits cancel the timer and flush immediately.
     const scheduleBatchCommit = () => {
       if (batchTimer !== undefined) return;
+      const delay =
+        lastCommitAt === 0
+          ? 0
+          : Math.max(0, BATCH_INTERVAL_MS - (Date.now() - lastCommitAt));
       batchTimer = setTimeout(() => {
         batchTimer = undefined;
         commitProgress();
-      }, 0);
+      }, delay);
     };
 
     const commitCompletedState = () => {
