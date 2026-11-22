@@ -179,6 +179,37 @@ class HarnessEventProjectorTest {
     }
 
     @Test
+    void carriesBooleanMachineTitleProvenanceFromTheUpdateMeta() {
+        for (boolean flag : java.util.List.of(true, false)) {
+            ProjectedEvent event = projector.project(new SourceEvent(8L,
+                    "session_update", Map.of("update", Map.of(
+                            "sessionUpdate", "tool_call",
+                            "toolCallId", "call-1",
+                            "name", "write_file",
+                            "title", "WriteFile: Writing to notes.md",
+                            "_meta", Map.of("titleIsMachine", flag))),
+                    "prompt", Map.of()), "turn-1");
+            assertThat(event.data())
+                    .containsEntry("title", "WriteFile: Writing to notes.md")
+                    .containsEntry("titleIsMachine", flag);
+        }
+        for (Object refused : java.util.List.of("true", 1, Map.<String, Object>of())) {
+            ProjectedEvent event = projector.project(new SourceEvent(9L,
+                    "session_update", Map.of("update", Map.of(
+                            "sessionUpdate", "tool_call",
+                            "toolCallId", "call-1",
+                            "_meta", Map.of("titleIsMachine", refused))),
+                    "prompt", Map.of()), "turn-1");
+            assertThat(event.data()).doesNotContainKey("titleIsMachine");
+        }
+        ProjectedEvent absent = projector.project(new SourceEvent(10L,
+                "session_update", Map.of("update", Map.of(
+                        "sessionUpdate", "tool_call",
+                        "toolCallId", "call-1")), "prompt", Map.of()), "turn-1");
+        assertThat(absent.data()).doesNotContainKey("titleIsMachine");
+    }
+
+    @Test
     void substitutesTheSafeFallbackCodeForAnOutOfAlphabetErrorCode() {
         ProjectedEvent event = projector.project(new SourceEvent(4L,
                 "turn_error", Map.of("code", "sql=1; DROP TABLE users --",

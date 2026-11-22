@@ -323,22 +323,26 @@ describe('Managed approval presentation', () => {
   it.each([true, false, undefined])(
     'carries the tool row title provenance (%s) into the approval',
     (titleIsMachine) => {
-      const messages = [
-        {
-          id: 'managed:s1:turn-2:1',
-          role: 'tool_group',
-          tools: [
-            {
-              callId: 'turn-2:call-1',
+      const messages = managedEventsToMessages(
+        [
+          {
+            id: 9,
+            at: 9,
+            type: 'tool_requested',
+            sessionId: 's1',
+            turnId: 'turn-2',
+            data: {
+              itemId: 'item_tool_1',
+              toolCallId: 'call-1',
               toolName: 'write_file',
-              status: 'pending',
               title: 'WriteFile: Writing to مجلد/ملف.ts',
               ...(titleIsMachine !== undefined ? { titleIsMachine } : {}),
-              args: { file_path: 'مجلد/ملف.ts', content: 'x' },
+              input: { file_path: 'مجلد/ملف.ts', content: 'x' },
             },
-          ],
-        } as Message,
-      ];
+          },
+        ],
+        '[truncated]',
+      );
       const request = toManagedPermissionRequest(action, messages);
       expect(request.title).toBe('WriteFile: Writing to مجلد/ملف.ts');
       if (titleIsMachine === undefined) {
