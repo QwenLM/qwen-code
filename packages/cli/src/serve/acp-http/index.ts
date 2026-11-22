@@ -442,6 +442,12 @@ const UPGRADE_REJECT_LOG_INTERVAL_MS = 60_000;
 /** Upper bound on the rejection-log dedupe map, evicting least recent first. */
 const MAX_UPGRADE_REJECT_LOG_KEYS = 256;
 
+// How many distinct reasons one key remembers. The count that reaches the next
+// log line only needs a few; keeping every distinct value would let a client
+// vary a header and grow the payload without bound while `MAX_UPGRADE_REJECT_LOG_KEYS`
+// caps only the number of keys.
+const MAX_UPGRADE_REJECT_REASONS = 16;
+
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
   /** Process-level fallback for embedded mounts and parent-process runtimes. */
@@ -1624,6 +1630,9 @@ export function mountAcpHttp(
   // tells an operator how hard it retried. The key is the category rather than
   // the rendered reason: the reason embeds client-controlled text, which would
   // otherwise mint a fresh key per attempt.
+  // Each key keeps at most MAX_UPGRADE_REJECT_REASONS distinct reasons for the
+  // window it is suppressed, so a peer varying a client-controlled header
+  // cannot grow the payload without bound inside one capped key.
   const upgradeRejectLoggedAt = new Map<
     string,
     { at: number; suppressed: number; reasons: Set<string> }
@@ -1698,7 +1707,12 @@ export function mountAcpHttp(
           now - last.at < UPGRADE_REJECT_LOG_INTERVAL_MS
         ) {
           last.suppressed += 1;
-          last.reasons.add(reason);
+          // The set is only ever read as a size on the next line; keeping it
+          // bounded stops a client-varying header from growing the payload
+          // without limit while `MAX_UPGRADE_REJECT_LOG_KEYS` caps the keys.
+          if (last.reasons.size < MAX_UPGRADE_REJECT_REASONS) {
+            last.reasons.add(reason);
+          }
           return;
         }
         // Re-insert so the map stays in least-recently-logged order: a daemon

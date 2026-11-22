@@ -13504,6 +13504,39 @@ describe('ACP WebSocket transport security', () => {
     }
   });
 
+  it('caps the distinct reasons one key retains', async () => {
+    await startServer();
+    const rejections = () =>
+      stdioMocks.writeStderrLine.mock.calls.filter(([line]) =>
+        String(line).includes('WebSocket upgrade rejected'),
+      );
+    const before = rejections().length;
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // Each attempt carries a distinct Origin, all folding onto one key; the
+      // suppression must not retain every one of them.
+      for (let i = 0; i < 40; i++) {
+        expect(
+          (await wsConnectRaw('127.0.0.1', `https://varied-${i}.example`)).code,
+        ).toBe(403);
+      }
+      expect(rejections().length - before).toBe(1);
+
+      vi.setSystemTime(Date.now() + 61_000);
+      expect(
+        (await wsConnectRaw('127.0.0.1', 'https://varied-final.example')).code,
+      ).toBe(403);
+      const line = String(rejections().at(-1)![0]);
+      expect(line).toContain('suppressed=39 ');
+      // The retained set is capped, and the freshly written line's reason is
+      // what the next count carries — not one per attempt.
+      expect(line).toMatch(/reasons=\d+ /);
+      expect(Number(/reasons=(\d+)/.exec(line)![1])).toBeLessThanOrEqual(17);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keys the throttle by listener so a LAN probe is not folded into primary', async () => {
     await startServer({
       token: 'runtime-token',
