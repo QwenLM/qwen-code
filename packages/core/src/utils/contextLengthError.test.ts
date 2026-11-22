@@ -273,6 +273,17 @@ describe('contextLengthError', () => {
       expect(info.limitKind).toBe('total');
     });
 
+    it('only takes the input count that follows the matched total', () => {
+      const info = getContextLengthExceededInfo(
+        new Error(
+          "This model's maximum context length is 128000 tokens. However, your messages resulted in 135000 tokens. An earlier attempt sent 1000 tokens from the input messages.",
+        ),
+      );
+
+      expect(info.actualTokens).toBe(135000);
+      expect(info.limitTokens).toBe(128000);
+    });
+
     it('reads the limit from the total-token wording when no count follows', () => {
       const info = getContextLengthExceededInfo(
         new Error(

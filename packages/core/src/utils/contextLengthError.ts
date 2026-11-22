@@ -80,14 +80,11 @@ function parseTokenCounts(text: string): {
   // M tokens: K tokens from the input messages and ...". SGLang's total also
   // counts the completion budget, so its input count is the better anchor.
   const openAiMatch = text.match(
-    /maximum context length (?:is|of)\s*(\d[\d,]{0,31})\s*tokens?[\s\S]*?(?:resulted in|requested(?: a total of)?|used)\s*(\d[\d,]{0,31})\s*tokens?/i,
+    /maximum context length (?:is|of)\s*(\d[\d,]{0,31})\s*tokens?[\s\S]*?(?:resulted in|requested(?: a total of)?|used)\s*(\d[\d,]{0,31})\s*tokens?(?::\s*(\d[\d,]{0,31})\s*tokens? from the input messages)?/i,
   );
   if (openAiMatch) {
-    const inputMessagesMatch = text.match(
-      /(\d[\d,]{0,31})\s*tokens? from the input messages/i,
-    );
     return {
-      actualTokens: parseInteger(inputMessagesMatch?.[1] ?? openAiMatch[2]!),
+      actualTokens: parseInteger(openAiMatch[3] ?? openAiMatch[2]!),
       limitTokens: parseInteger(openAiMatch[1]!),
       limitKind: 'total',
     };
