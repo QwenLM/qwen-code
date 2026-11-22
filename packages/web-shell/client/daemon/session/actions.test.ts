@@ -7217,7 +7217,11 @@ describe('createDaemonSessionActions', () => {
       expect(pendingSessionLoadRef.current?.sessionId).toBe('checkpoint-child');
     });
 
-    pendingSessionLoadRef.current?.reject(
+    const pendingLoad = pendingSessionLoadRef.current;
+    if (!pendingLoad) throw new Error('Expected a pending checkpoint load');
+    clearTimeout(pendingLoad.timeout);
+    pendingSessionLoadRef.current = undefined;
+    pendingLoad.reject(
       new DaemonHttpError(
         503,
         {

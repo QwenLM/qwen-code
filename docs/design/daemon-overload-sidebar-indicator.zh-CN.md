@@ -30,7 +30,7 @@
 两个独立来源，渲染时 OR 组合：
 
 1. **主动轮询。** `useDaemonOverloadPause` 内部通过 `useOptionalDaemonWorkspace()` 将 `actions.loadDaemonStatus('summary')` 交给 `useDaemonResource`（`autoLoad: true`，门控在 `enabled && actions !== undefined && visible`），在 daemon 可用且标签页可见期间按 5 秒间隔 reload（挂载与定时间隔共用在途记账）。`report.runtime.loadAdmission.overloaded`（门控在 `enabled && error === undefined`）驱动暂停状态；tooltip 文案由快照的 `reason`、`loadRatio`、`eventLoopLagP99Ms` 经 i18n 组合。SDK 的 `DaemonStatusReport` runtime 类型按既有"旧 daemon 省略该字段"约定新增加性可选 `loadAdmission` 字段；没有闸门的 daemon 永远不上报它。
-2. **被动拒绝。** 已处理 `session_limit_exceeded` 的现有 notice effect 同时处理 `create_session` 上 `code === 'system_overloaded'`：以 `Date.now() + 15_000`（daemon 的 `Retry-After`）为过期时间存储 notice 消息，由 timeout 清除。覆盖轮询之间的窗口与 status 轮询失败的 daemon。
+2. **被动拒绝。** 已处理 `session_limit_exceeded` 的现有 notice effect 同时处理 `create_session`、`branch_session` 和 `fork_session` 上 `code === 'system_overloaded'`：以 `Date.now() + 15_000`（daemon 的 `Retry-After`）为过期时间存储 notice 消息，由 timeout 清除。覆盖轮询之间的窗口与 status 轮询失败的 daemon。
 
 `overloadPaused = pollOverloaded || reactiveUnexpired`。tooltip 在轮询报告过载时优先用轮询的本地化读数，否则用拒绝消息。不做合并状态机：轮询侧每次渲染从资源派生，被动侧是单个带过期时间的状态值。
 
@@ -64,7 +64,7 @@
 - **复用先于拒绝。** `resolveSessionForWorkspace` 的暂停守卫位于两条复用分支（连接会话所有权、目录最新会话）之下、分配之上：GitDialog 提交/PR 生成不分配会话，过载时须继续工作；仅 forceCreate/分配被拒。
 - **轮询裁决的新鲜度界。** `useDaemonResource` 在轮询失败或禁用时保留旧 payload，故 `pollOverloaded` 要求 `enabled && error === undefined`；status 不可达或离线期间仅带过期的拒绝提示可暂停 UI。
 - **挂载请求记账与隐藏标签页门。** autoLoad/挂载请求与 interval 轮询共用同一在途记账；资源仅在标签页可见时 enabled（visibilitychange 监听在回到前台时重新启用并重拉），后台或饱和 daemon 的标签页不堆叠 summary 请求。
-- **所有受守卫入口共享同一 managed 豁免。** `App.tsx` 的全部守卫均带 `!managedModeRef.current`——`createNewSession`、`sendPrompt`、`ensureSessionForPrompt`、`resolveSessionForWorkspace`、`handleGoalSlashCommand`、`handleSubmit` 的 `!` 行内 shell 分支（需要新会话时，拒绝先于命令排队）、`ensureAgentMentionSession`（返回 `{ paused: true }` 使 `useAgentChatEntry` 跳过 `collab.mention.noSession`）、以及 side task 的两个创建边界。`createSideTask` 保持公共 boolean 契约，`createEmptySideTask` 不重复弹错误；`createSideTaskSession` 也会拒绝失败标签的 Retry 并回传已派发错误，避免重复提示。`WebShellSidebar` 与 `ArtifactPanel` 接收 `overloadPaused && !managedMode`。`ScheduledTasksDialog` 改收实时 predicate，在服务端刷新后读取 App 的暂停与连接 ref，只在 `/run` 消费前拦截真正未绑定或 per-run 的一次性任务，保留 warm session 复用。
+- **所有受守卫入口共享同一 managed 豁免。** `App.tsx` 的全部守卫均带 `!managedModeRef.current`——`createNewSession`、`sendPrompt`、`ensureSessionForPrompt`、`resolveSessionForWorkspace`、`handleGoalSlashCommand`、`branchCurrentSession`（包括 checkpoint 在 worktree 预检前的提前检查）、`handleSubmit` 的 `!` 行内 shell 分支（需要新会话时，拒绝先于命令排队）、`ensureAgentMentionSession`（返回 `{ paused: true }` 使 `useAgentChatEntry` 跳过 `collab.mention.noSession`）、以及 side task 的两个创建边界。`createSideTask` 保持公共 boolean 契约，`createEmptySideTask` 不重复弹错误；`createSideTaskSession` 也会拒绝失败标签的 Retry 并回传已派发错误，避免重复提示。`WebShellSidebar` 与 `ArtifactPanel` 接收 `overloadPaused && !managedMode`。`ScheduledTasksDialog` 改收实时 predicate，在服务端刷新后读取 App 的暂停与连接 ref，只在 `/run` 消费前拦截真正未绑定或 per-run 的一次性任务，保留 warm session 复用。
 - **显式拒绝契约。** `sendPrompt` 暂停拒绝返回 `false`；composer submit 与设置语言同步遵从（保留草稿/不报假成功），`enqueueManualRun` 以带 `_alreadyDispatched: true` 的 Error 拒绝以防 `reportError` 弹出重复错误 toast，fire-and-forget 调用点不受影响。
 - **派生 OR，不做合并机器。** 两个生命周期不同的来源（渲染派生 vs 带过期状态）在一个表达式里组合；存储合并裁决需要在每次轮询与每次过期时对账。
 - **加性 SDK 字段。** 旧 daemon 省略 `loadAdmission`；可选字段保持客户端对它们与 opt-out flag（`enabled: false` 永不暂停）的兼容。
@@ -78,7 +78,7 @@
 ## 验证计划
 
 - 组件测试：`overloadPaused` 时侧栏渲染警示条并禁用按钮（且 create handler 提前 return），清除后两者恢复；tooltip 携带 detail 字符串。
-- Hook/App 级测试：轮询过载驱动暂停状态（轮询失败或 `enabled: false` 时清除）；`system_overloaded` notice 设置带过期的被动状态；过期清除；未过载的轮询不清除未过期的被动提示；暂停态的 `!ls`、`/goal set`、`@`-mention、新建 side task、`createNewSession`、未绑定手动运行各自仅弹一条警告 toast 且不创建会话，`ScheduledTasksDialog` 的未绑定一次性任务在 `runScheduledTask` 消费前被拒。
+- Hook/App 级测试：轮询过载驱动暂停状态（轮询失败或 `enabled: false` 时清除）；`system_overloaded` notice 设置带过期的被动状态；过期清除；未过载的轮询不清除未过期的被动提示；暂停态的 `!ls`、`/goal set`、`@`-mention、新建 side task、`createNewSession`、未绑定手动运行各自仅弹一条警告 toast 且不创建会话，`ScheduledTasksDialog` 的未绑定一次性任务在 `runScheduledTask` 消费前被拒。暂停态的 `/branch` 与 checkpoint 激活在 branch 分配或 worktree 预检前被拒绝；普通 checkpoint 请求保留 pending Promise，两个 worktree fallback 均等待它。branch/fork 过载 notice 保留各自的 operation 与 code，包括已发布 branch 的延迟 load 拒绝；`/fork` 仍可沿用父 ACP runtime。
 - `npm run build && npm run typecheck` 加 touched web-shell 套件；SDK 类型新增由 sdk typecheck 检查。
 - E2E 计划：`.qwen/e2e-tests/daemon-overload-sidebar-indicator.md`（组件级矩阵加对加载 daemon 的可选实机探针）。
 

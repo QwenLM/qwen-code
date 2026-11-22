@@ -60576,10 +60576,34 @@ describe('overload pause guards in App', () => {
   it('refuses checkpoint activation while paused instead of guessing runtime reuse', async () => {
     armOverload();
     mockConnection.sessionId = 'source-session';
+    Object.assign(mockWorkspace.capabilities, {
+      features: ['session_branch_worktree'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    });
+    const workspaceGit = vi.fn().mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+      worktreeSupported: true,
+    });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
     const toasts: Array<[string, string]> = [];
-    renderApp({ onToast: (tone, msg) => toasts.push([tone, msg]) });
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
     await flush();
     toasts.length = 0;
+    workspaceGit.mockClear();
 
     await act(async () => {
       await testState.latestMessageListProps?.onBranchSession?.('checkpoint-1');
@@ -60587,7 +60611,9 @@ describe('overload pause guards in App', () => {
     });
     await flush();
 
+    expect(workspaceGit).not.toHaveBeenCalled();
     expect(mockSessionActions.branchSession).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="radio"]')).toBeNull();
     expect(toasts).toEqual([
       ['warning', expect.stringContaining('Host load ratio 2.50')],
     ]);

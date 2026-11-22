@@ -17432,6 +17432,10 @@ export function App({
         const request = branchCurrentSession({ atRecordId });
         return request === false ? undefined : request;
       }
+      if (overloadPausedRef.current && !managedModeRef.current) {
+        branchCurrentSession({ atRecordId });
+        return;
+      }
       return (async () => {
         try {
           const status = await workspace.client
