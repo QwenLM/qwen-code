@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WakeRecoveryStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -134,6 +135,10 @@ public class JdbcWakeRecoveryStore
 
     /** An empty result yields a partial proof without certifying consumption. */
     public synchronized Optional<Boolean> hasPendingInput(Candidate candidate) {
+        if (JdbcRuntimeStageStore.hasWakeWorthyRow(
+                jdbc, ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId()))) {
+            return Optional.of(true);
+        }
         if (candidate.compactedThroughRevision() != 0) {
             throw corrupt();
         }
@@ -309,11 +314,22 @@ public class JdbcWakeRecoveryStore
 
     /** Only a full prefix at this exact revision may clear the hint. */
     public boolean recordPending(Candidate candidate, boolean pending) {
-        return jdbc.update("UPDATE ma_session_head SET is_wake_pending = ?, wake_head_revision = ?"
+        if (!pending) {
+            String scopeKey = ManagedSessionStore.sessionScopeKey(candidate.tenantId(), candidate.sessionId());
+            return jdbc.update("UPDATE ma_session_head SET is_wake_pending = FALSE, wake_head_revision = ?"
+                            + " WHERE tenant_id = ? AND"
+                            + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
+                            + " AND compacted_through_revision = 0"
+                            + " AND NOT EXISTS (SELECT 1 FROM ma_runtime_stage"
+                            + " WHERE runtime_session_key = ? AND is_wake_worthy = 1)",
+                    candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
+                    candidate.workspaceId(), candidate.journalRevision(), scopeKey) == 1;
+        }
+        return jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE, wake_head_revision = ?"
                         + " WHERE tenant_id = ? AND"
                         + " harness_session_id = ? AND workspace_id = ? AND journal_revision = ?"
                         + " AND compacted_through_revision = 0",
-                pending, candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
+                candidate.journalRevision(), candidate.tenantId(), candidate.sessionId(),
                 candidate.workspaceId(), candidate.journalRevision()) == 1;
     }
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { CommandInfo, TodoItem } from '../adapters/types.js';
 import { TranscriptViewport } from '../components/TranscriptViewport.js';
 import { ToolApproval } from '../components/messages/ToolApproval.js';
@@ -28,17 +28,14 @@ export interface ChatSurfaceProps {
   readonly transcriptError?: ReactNode;
   readonly commands?: readonly CommandInfo[];
   readonly onError?: (error: unknown, fallback: string) => void;
-  // History pagination: the loader defaults to the controller's capability, but
-  // whether older history exists is a page fact the contract does not carry yet.
+  // History pagination: all five members default to the controller's bound
+  // facts and loader capability, while optional props let an owning page
+  // override them when needed.
   readonly hasOlderHistory?: boolean;
   readonly onLoadOlderHistory?: (options?: {
     force?: boolean;
   }) => Promise<void>;
-  // Paired with the pagination props: without it a failed older-history page is
-  // invisible and every top-scroll re-issues the failing request.
   readonly historyPaginationError?: boolean;
-  // Older-history spinner and capacity notice, forwarded to the transcript so
-  // the switch does not drop them (the contract does not carry these facts yet).
   readonly loadingOlderHistory?: boolean;
   readonly historyCapacityReached?: boolean;
   // Approval facts and focus/notification gating are computed by the owning
@@ -115,6 +112,72 @@ export function ChatSurface({
   // path) until the user explicitly acknowledges, mirroring the sibling surfaces.
   const admissionLockedRef = useRef(false);
   const [admissionLocked, setAdmissionLocked] = useState(false);
+  // Both latches belong to the session that armed them: on a session switch,
+  // park the outgoing session's latches under its durable sessionId and restore
+  // the incoming session's parked latches (defaulting to fresh) so a stale lock
+  // never blocks another session while a round-trip switch back (A -> B -> A)
+  // preserves A's in-flight guard, owner token, and unknown-admission lock.
+  // An unallocated '' new chat has no durable session to return to and abandons
+  // its latches on a switch. Track the live refs' owner in a ref (refOwnerRef)
+  // separate from the React state (lockOwner): if React discards an uncommitted
+  // render after the ref park/restore has run, the retry re-enters with
+  // lockOwner rolled back while refOwnerRef already matches controller.sessionId,
+  // so gating the ref mutation on refOwnerRef makes the transition idempotent
+  // instead of overwriting or deleting the entry it just parked.
+  const ownerTokenRef = useRef({});
+  const parkedLatchesRef = useRef<
+    Map<string, { token: object; inFlight: boolean; admissionLocked: boolean }>
+  >(new Map());
+  const refOwnerRef = useRef(controller.sessionId);
+  const [lockOwner, setLockOwner] = useState(controller.sessionId);
+  if (
+    refOwnerRef.current !== controller.sessionId ||
+    lockOwner !== controller.sessionId
+  ) {
+    if (refOwnerRef.current !== controller.sessionId) {
+      const prevOwner = refOwnerRef.current;
+      if (prevOwner !== '') {
+        if (submitInFlightRef.current || admissionLockedRef.current) {
+          parkedLatchesRef.current.set(prevOwner, {
+            token: ownerTokenRef.current,
+            inFlight: submitInFlightRef.current,
+            admissionLocked: admissionLockedRef.current,
+          });
+        } else {
+          parkedLatchesRef.current.delete(prevOwner);
+        }
+      }
+      const restored = parkedLatchesRef.current.get(controller.sessionId);
+      ownerTokenRef.current = restored?.token ?? {};
+      submitInFlightRef.current = restored?.inFlight ?? false;
+      admissionLockedRef.current = restored?.admissionLocked ?? false;
+      refOwnerRef.current = controller.sessionId;
+    }
+    setLockOwner(controller.sessionId);
+    setSubmitInFlight(submitInFlightRef.current);
+    setAdmissionLocked(admissionLockedRef.current);
+  }
+  // Commit-time snapshot for async cancel settlement checks: refOwnerRef must
+  // keep updating during render for latch idempotency across discarded renders,
+  // whereas a cancel settling while an incoming switch render is suspended /
+  // discarded must still evaluate against the committed, on-screen session and
+  // controller (and stay silent once this surface has unmounted).
+  const committedSessionIdRef = useRef(controller.sessionId);
+  const committedTokenRef = useRef(ownerTokenRef.current);
+  const committedControllerRef = useRef(controller);
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    committedSessionIdRef.current = controller.sessionId;
+    committedTokenRef.current = ownerTokenRef.current;
+    committedControllerRef.current = controller;
+  });
+  useLayoutEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =
     controller.phase === 'running' ||
@@ -141,11 +204,17 @@ export function ChatSurface({
             loadingTranscript={controller.transcriptState === 'loading'}
             isResponding={isRunning}
             sessionKey={controller.sessionId}
-            hasOlderHistory={hasOlderHistory}
+            hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
             onLoadOlderHistory={loadOlder}
-            historyPaginationError={historyPaginationError}
-            loadingOlderHistory={loadingOlderHistory}
-            historyCapacityReached={historyCapacityReached}
+            historyPaginationError={
+              historyPaginationError ?? controller.historyPaginationError
+            }
+            loadingOlderHistory={
+              loadingOlderHistory ?? controller.loadingOlderHistory
+            }
+            historyCapacityReached={
+              historyCapacityReached ?? controller.historyCapacityReached
+            }
           />
         )}
       </div>
@@ -222,6 +291,7 @@ export function ChatSurface({
             onClick={() => {
               admissionLockedRef.current = false;
               setAdmissionLocked(false);
+              parkedLatchesRef.current.delete(controller.sessionId);
             }}
           >
             {t('chat.acknowledgeUnknown')}
@@ -255,17 +325,37 @@ export function ChatSurface({
             controller.phase === 'submitting'
           }
           onCancel={() => {
-            // A refused or unknown stop admission must not be silent: the turn
-            // keeps running and the user needs to know the stop did not land.
+            const cancelSessionId = controller.sessionId;
+            const cancelTurnId = controller.activeTurnId;
+            const token = committedTokenRef.current;
+            const isOwnerActive = (resultTurnId?: string) => {
+              if (!mountedRef.current) return false;
+              const sameSession =
+                cancelSessionId !== ''
+                  ? committedSessionIdRef.current === cancelSessionId
+                  : committedTokenRef.current === token;
+              if (!sameSession) return false;
+              const targetTurnId = resultTurnId ?? cancelTurnId;
+              return (
+                targetTurnId === undefined ||
+                committedControllerRef.current.activeTurnId === targetTurnId
+              );
+            };
+            // A refused or unknown stop admission must not be silent on the
+            // session and turn that requested it, while a late settlement after
+            // a session switch, turn advance, or unmount must not misattribute
+            // an older stop failure to another session or a newer turn.
             void controller
               .cancel()
               .then((result) => {
+                if (!isOwnerActive(result.target?.turnId)) return;
                 if (result.admission !== 'accepted') {
                   const message = t('chat.stopNotConfirmed');
                   reportError(new Error(message), message);
                 }
               })
               .catch((cause: unknown) => {
+                if (!isOwnerActive()) return;
                 const message = t('chat.stopNotConfirmed');
                 reportError(new Error(message, { cause }), message);
               });
@@ -277,33 +367,62 @@ export function ChatSurface({
             if (submitInFlightRef.current || admissionLockedRef.current) {
               return false;
             }
+            const token = ownerTokenRef.current;
             submitInFlightRef.current = true;
             setSubmitInFlight(true);
             void controller
               .submit({ text, images, files, metadata })
               .then((result) => {
-                // Clear the draft on admission, not on establishment.
+                // Clear the submitting session's own draft on accepted admission
+                // even if the user has since switched sessions: useComposerCore
+                // scopes commitAccepted to the submitting draft key and history
+                // key, so it never touches the new session's draft.
                 if (result.admission === 'accepted') {
                   commitAccepted?.();
-                } else if (result.admission === 'unknown') {
+                }
+                // A submit whose session is no longer active must not lock the
+                // new session's composer or report errors on it; if the owning
+                // session was parked, record an unknown admission on its parked
+                // entry so returning to that session restores the lock.
+                if (ownerTokenRef.current !== token) {
+                  if (result.admission === 'unknown') {
+                    for (const parked of parkedLatchesRef.current.values()) {
+                      if (parked.token === token) {
+                        parked.admissionLocked = true;
+                      }
+                    }
+                  }
+                  return;
+                }
+                if (result.admission === 'unknown') {
                   // Delivery is uncertain: lock the payload until acknowledged so
                   // a resend cannot duplicate a turn the daemon may be running.
                   admissionLockedRef.current = true;
                   setAdmissionLocked(true);
                   const message = t('chat.promptNotConfirmed');
                   reportError(new Error(message), message);
-                } else {
+                } else if (result.admission !== 'accepted') {
                   const message = t('chat.promptNotAdmitted');
                   reportError(new Error(message), message);
                 }
               })
               .catch((cause: unknown) => {
+                if (ownerTokenRef.current !== token) return;
                 // The host sink displays error.message, so the localized text
                 // must be the Error's own message, not just the fallback.
                 const message = t('chat.failedToSend');
                 reportError(new Error(message, { cause }), message);
               })
               .finally(() => {
+                for (const [key, parked] of parkedLatchesRef.current) {
+                  if (parked.token === token) {
+                    parked.inFlight = false;
+                    if (!parked.admissionLocked) {
+                      parkedLatchesRef.current.delete(key);
+                    }
+                  }
+                }
+                if (ownerTokenRef.current !== token) return;
                 submitInFlightRef.current = false;
                 setSubmitInFlight(false);
               });

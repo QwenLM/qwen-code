@@ -20,6 +20,13 @@ const chatPaneCss = postcss.parse(
   },
 );
 
+const chatEditorCss = postcss.parse(
+  readFileSync(
+    new URL('./components/ChatEditor.module.css', import.meta.url),
+    'utf8',
+  ),
+);
+
 const tidy = (text: string) => text.replace(/\s+/g, ' ').trim();
 
 function declarations(rule: Rule): Map<string, string> {
@@ -113,5 +120,42 @@ describe('Chat layout relayout boundary CSS contracts', () => {
     );
     expect(emptyApprovalRules).toHaveLength(1);
     expect(emptyApprovalRules[0]?.get('position')).toBe('relative');
+  });
+});
+
+describe('touch follow-up chip theme tokens', () => {
+  it('uses theme tokens for each color declaration in both themes', () => {
+    for (const selector of [
+      '.mobileFollowupAccept',
+      '.mobileFollowupAccept:not(:disabled):hover',
+    ]) {
+      const rules = findRules(chatEditorCss, selector);
+      expect(rules.length, `${selector} exists`).toBeGreaterThan(0);
+      const declarations = rules.flatMap((decls) => [...decls.entries()]);
+      for (const [property, value] of declarations) {
+        if (
+          !['background', 'color', 'border', 'border-color'].includes(property)
+        ) {
+          continue;
+        }
+        expect(value, `${selector} ${property} uses a theme token`).toMatch(
+          /var\(--chat-editor-[\w-]+/,
+        );
+      }
+      const themeTokens = rules
+        .flatMap((decls) => [...decls.values()])
+        .join(' ')
+        .match(/--chat-editor-[\w-]+/g);
+      expect(themeTokens, `${selector} uses theme tokens`).not.toBeNull();
+      for (const theme of ['.themeDark', '.themeLight']) {
+        const declared = new Set<string>();
+        findRules(appCss, theme).forEach((decls) => {
+          for (const prop of decls.keys()) declared.add(prop);
+        });
+        for (const token of themeTokens!) {
+          expect(declared.has(token), `${theme} declares ${token}`).toBe(true);
+        }
+      }
+    }
   });
 });

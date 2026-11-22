@@ -154,6 +154,40 @@ class WakeSealStampTest {
         assertThat(head().get("wake_retry_at")).isEqualTo(5L);
     }
 
+    // Phase 3b §4.8: the background certificate rides the same stamp, under
+    // the same writer fence and revision check, and any acquisition clears it.
+    @Test
+    void aBackgroundCertifiedSealRecordsTheCertificateAtItsRevision() {
+        seal(new WakeStamp(1, false, 0, true));
+        var head = head();
+        assertThat(head.get("wake_seal_revision")).isEqualTo(1L);
+        assertThat(head.get("wake_seal_background")).isEqualTo(1);
+    }
+
+    @Test
+    void anOrdinarySealLeavesTheCertificateClear() {
+        seal(new WakeStamp(1, false, 0));
+        assertThat(head().get("wake_seal_background")).isEqualTo(0);
+    }
+
+    @Test
+    void aBackgroundCertificateForAnotherRevisionRefusesTheSeal() {
+        assertThatThrownBy(() -> seal(new WakeStamp(0, false, 0, true)))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        refused -> assertThat(refused.getCode()).isEqualTo("managed_session_wake_stamp_stale"));
+        assertThat(head().get("wake_seal_background")).isEqualTo(0);
+    }
+
+    @Test
+    void anAcquisitionClearsTheBackgroundCertificate() {
+        seal(new WakeStamp(1, false, 0, true));
+        acquire();
+        assertThat(head().get("wake_seal_background")).isEqualTo(0);
+        // The seal of a load that refuses sends no stamp and inherits none.
+        seal(null);
+        assertThat(head().get("wake_seal_background")).isEqualTo(0);
+    }
+
     private void acquire() {
         generation = transaction.execute(status -> store.acquireWriter("tenant", session, TOKEN,
                 new AcquireWriterRequest("workspace", "writer", 60_000L))).writerGeneration();
@@ -167,7 +201,8 @@ class WakeSealStampTest {
     private Map<String, Object> head() {
         // Read each column at its Java type: an unsigned BIGINT need not come back as a Long.
         return jdbc.queryForObject("SELECT state, wake_seal_revision, wake_head_revision, is_wake_pending,"
-                        + " is_wake_scan_pending, wake_retry_at FROM ma_session_head WHERE session_id = ?",
+                        + " is_wake_scan_pending, wake_retry_at, wake_seal_background"
+                        + " FROM ma_session_head WHERE session_id = ?",
                 (row, index) -> {
                     var values = new java.util.HashMap<String, Object>();
                     values.put("state", row.getString("state"));
@@ -176,6 +211,7 @@ class WakeSealStampTest {
                     values.put("is_wake_pending", row.getInt("is_wake_pending"));
                     values.put("is_wake_scan_pending", row.getInt("is_wake_scan_pending"));
                     values.put("wake_retry_at", row.getLong("wake_retry_at"));
+                    values.put("wake_seal_background", row.getInt("wake_seal_background"));
                     return values;
                 }, session);
     }
