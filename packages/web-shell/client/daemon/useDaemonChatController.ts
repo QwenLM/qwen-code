@@ -194,6 +194,7 @@ export function useDaemonChatController(): SessionChatController {
   >(undefined);
   const answeredRef = useRef<Set<string>>(new Set());
   const prevPendingRef = useRef<Set<string>>(new Set());
+  const allocatedSessionIdRef = useRef<string | undefined>(undefined);
 
   const controllerRef = useRef<{
     sessionId: string | undefined;
@@ -201,6 +202,9 @@ export function useDaemonChatController(): SessionChatController {
   } | null>(null);
 
   if (!controllerRef.current || controllerRef.current.sessionId !== sessionId) {
+    if (sessionId && sessionId !== allocatedSessionIdRef.current) {
+      allocatedSessionIdRef.current = undefined;
+    }
     answeredRef.current = new Set();
     prevPendingRef.current = new Set();
     controllerRef.current = {
@@ -209,6 +213,9 @@ export function useDaemonChatController(): SessionChatController {
         sessionId: sessionId ?? '',
         storageKey:
           getComposerDraftStorageKey(sessionId, connection.workspaceCwd) ?? '',
+        get allocatedSessionId() {
+          return allocatedSessionIdRef.current;
+        },
         get messages() {
           return factsRef.current.messages;
         },
@@ -231,11 +238,14 @@ export function useDaemonChatController(): SessionChatController {
           return factsRef.current.settledPhase;
         },
         // History pagination is a provider capability, not an intent: read the
-        // latest loader per call so a session-stable controller never pins a
-        // stale history handle.
-        loadOlder: () => transcriptHistoryRef.current.loadMore(),
+        // latest loader per call and forward options (including { force: true }
+        // for pagination-error retries) so a session-stable controller never
+        // pins a stale history handle or silently drops a retry.
+        loadOlder: (options) => transcriptHistoryRef.current.loadMore(options),
         liveApprovalRequestIds: pendingApprovals.map((approval) => approval.id),
         async submitPrompt(input, onAdmitted) {
+          const startedUnallocated = !connectionRef.current.sessionId;
+          let allocatedByThisSubmit: string | undefined;
           try {
             // submitPrompt is non-blocking and resolves the prompt id; it does
             // not invoke an onAdmitted option (only sendPrompt does), so bind
@@ -248,11 +258,24 @@ export function useDaemonChatController(): SessionChatController {
               ...(input.metadata?.inputAnnotations?.length
                 ? { inputAnnotations: [...input.metadata.inputAnnotations] }
                 : {}),
+              onAdmissionStarted: () => {
+                if (startedUnallocated && connectionRef.current.sessionId) {
+                  allocatedByThisSubmit = connectionRef.current.sessionId;
+                  allocatedSessionIdRef.current = allocatedByThisSubmit;
+                }
+              },
             });
             onAdmitted(accepted.promptId);
             return 'accepted';
           } catch {
             return 'unknown';
+          } finally {
+            if (
+              allocatedByThisSubmit !== undefined &&
+              allocatedSessionIdRef.current === allocatedByThisSubmit
+            ) {
+              allocatedSessionIdRef.current = undefined;
+            }
           }
         },
         async cancelPrompt() {

@@ -115,28 +115,56 @@ export function ChatSurface({
   // path) until the user explicitly acknowledges, mirroring the sibling surfaces.
   const admissionLockedRef = useRef(false);
   const [admissionLocked, setAdmissionLocked] = useState(false);
-  // Both latches belong to the session that armed them: a real session switch
-  // abandons them so a stale lock cannot block the next session's composer, and
-  // rotates the owner token so a late settlement from the abandoned submit
-  // cannot clobber the new session's latches or draft. The one change that is
-  // NOT a switch is the '' -> id allocation a new chat's first submit spans
-  // while that submit is still in flight — that is the same logical chat, so the
-  // in-flight latch and the owner token survive it (resetting there would let a
-  // duplicate send slip through mid-submit). An idle '' -> id (a sidebar click
-  // out of a locked new chat) has no submit spanning it and resets like any
-  // other switch. Mirrors the session-owned admission state in App/ChatPane.
+  // Both latches belong to the session that armed them: on a session switch,
+  // park the outgoing session's latches under its durable sessionId and restore
+  // the incoming session's parked latches (defaulting to fresh) so a stale lock
+  // never blocks another session while a round-trip switch back (A -> B -> A)
+  // preserves A's in-flight guard, owner token, and unknown-admission lock.
+  // The one transition that is NOT a switch is the '' -> id allocation a new
+  // chat's first submit spans while that submit is still in flight AND the
+  // controller identifies the new sessionId as the one that submit allocated
+  // (controller.allocatedSessionId) — that is the same logical chat, so the
+  // active latch and owner token stay armed across it. A switch out of an
+  // unallocated '' new chat into an unrelated existing session has no durable
+  // '' session to return to and abandons the unallocated latches.
   const ownerTokenRef = useRef({});
+  const submittingControllerRef = useRef<SessionChatController | null>(null);
+  const parkedLatchesRef = useRef<
+    Map<string, { token: object; inFlight: boolean; admissionLocked: boolean }>
+  >(new Map());
   const [lockOwner, setLockOwner] = useState(controller.sessionId);
   if (lockOwner !== controller.sessionId) {
+    const allocatedId =
+      controller.allocatedSessionId ??
+      submittingControllerRef.current?.allocatedSessionId;
     const allocatedMidSubmit =
-      lockOwner === '' && controller.sessionId !== '' && submitInFlight;
+      lockOwner === '' &&
+      controller.sessionId !== '' &&
+      submitInFlight &&
+      allocatedId === controller.sessionId;
     setLockOwner(controller.sessionId);
     if (!allocatedMidSubmit) {
-      ownerTokenRef.current = {};
-      submitInFlightRef.current = false;
-      setSubmitInFlight(false);
-      admissionLockedRef.current = false;
-      setAdmissionLocked(false);
+      if (lockOwner !== '') {
+        if (submitInFlightRef.current || admissionLockedRef.current) {
+          parkedLatchesRef.current.set(lockOwner, {
+            token: ownerTokenRef.current,
+            inFlight: submitInFlightRef.current,
+            admissionLocked: admissionLockedRef.current,
+          });
+        } else {
+          parkedLatchesRef.current.delete(lockOwner);
+        }
+      }
+      const restored =
+        controller.sessionId !== ''
+          ? parkedLatchesRef.current.get(controller.sessionId)
+          : undefined;
+      ownerTokenRef.current = restored?.token ?? {};
+      submittingControllerRef.current = null;
+      submitInFlightRef.current = restored?.inFlight ?? false;
+      setSubmitInFlight(restored?.inFlight ?? false);
+      admissionLockedRef.current = restored?.admissionLocked ?? false;
+      setAdmissionLocked(restored?.admissionLocked ?? false);
     }
   }
   // A cancel in flight keeps the turn live until settlement evidence arrives.
@@ -246,6 +274,9 @@ export function ChatSurface({
             onClick={() => {
               admissionLockedRef.current = false;
               setAdmissionLocked(false);
+              if (controller.sessionId !== '') {
+                parkedLatchesRef.current.delete(controller.sessionId);
+              }
             }}
           >
             {t('chat.acknowledgeUnknown')}
@@ -302,26 +333,41 @@ export function ChatSurface({
               return false;
             }
             const token = ownerTokenRef.current;
+            submittingControllerRef.current = controller;
             submitInFlightRef.current = true;
             setSubmitInFlight(true);
             void controller
               .submit({ text, images, files, metadata })
               .then((result) => {
-                // An abandoned submit (the user switched sessions while it was
-                // in flight) must not clear the new session's draft or lock the
-                // new session's composer.
-                if (ownerTokenRef.current !== token) return;
-                // Clear the draft on admission, not on establishment.
+                // Clear the submitting session's own draft on accepted admission
+                // even if the user has since switched sessions: useComposerCore
+                // scopes commitAccepted to the submitting draft key and history
+                // key, so it never touches the new session's draft.
                 if (result.admission === 'accepted') {
                   commitAccepted?.();
-                } else if (result.admission === 'unknown') {
+                }
+                // A submit whose session is no longer active must not lock the
+                // new session's composer or report errors on it; if the owning
+                // session was parked, record an unknown admission on its parked
+                // entry so returning to that session restores the lock.
+                if (ownerTokenRef.current !== token) {
+                  if (result.admission === 'unknown') {
+                    for (const parked of parkedLatchesRef.current.values()) {
+                      if (parked.token === token) {
+                        parked.admissionLocked = true;
+                      }
+                    }
+                  }
+                  return;
+                }
+                if (result.admission === 'unknown') {
                   // Delivery is uncertain: lock the payload until acknowledged so
                   // a resend cannot duplicate a turn the daemon may be running.
                   admissionLockedRef.current = true;
                   setAdmissionLocked(true);
                   const message = t('chat.promptNotConfirmed');
                   reportError(new Error(message), message);
-                } else {
+                } else if (result.admission !== 'accepted') {
                   const message = t('chat.promptNotAdmitted');
                   reportError(new Error(message), message);
                 }
@@ -334,7 +380,16 @@ export function ChatSurface({
                 reportError(new Error(message, { cause }), message);
               })
               .finally(() => {
+                for (const [key, parked] of parkedLatchesRef.current) {
+                  if (parked.token === token) {
+                    parked.inFlight = false;
+                    if (!parked.admissionLocked) {
+                      parkedLatchesRef.current.delete(key);
+                    }
+                  }
+                }
                 if (ownerTokenRef.current !== token) return;
+                submittingControllerRef.current = null;
                 submitInFlightRef.current = false;
                 setSubmitInFlight(false);
               });

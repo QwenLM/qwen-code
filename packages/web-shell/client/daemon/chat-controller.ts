@@ -60,11 +60,12 @@ export interface DaemonDecisionSettlement {
 export interface DaemonChatControllerDeps {
   readonly sessionId: string;
   readonly storageKey: string;
+  readonly allocatedSessionId?: string;
 
   // Pass-through transcript facts.
   readonly messages: readonly Message[];
   readonly transcriptState: 'loading' | 'ready' | 'error';
-  loadOlder?(): Promise<void>;
+  loadOlder?(options?: { force?: boolean }): Promise<void>;
 
   // Pass-through status and capability facts.
   readonly statusFacts: ChatStatusFacts;
@@ -317,6 +318,9 @@ export function createDaemonChatController(
     },
     get storageKey() {
       return deps.storageKey;
+    },
+    get allocatedSessionId() {
+      return deps.allocatedSessionId;
     },
     get operations(): readonly ChatOperation[] {
       return intents.operations;

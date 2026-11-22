@@ -159,13 +159,57 @@ describe('useDaemonChatController', () => {
     );
   });
 
-  it('binds loadOlder to the transcript history loader', async () => {
+  it('binds loadOlder to the transcript history loader and forwards retry options', async () => {
     mountReact(<Probe />);
     // Dropping the loadOlder binding leaves the capability undefined, so the
-    // surface would silently lose older-history pagination.
+    // surface would silently lose older-history pagination; dropping the
+    // options parameter loses { force: true } on pagination-error retries;
+    // dropping the per-render ref update pins the mount-time history handle.
     expect(controller!.loadOlder).toBeDefined();
     await controller!.loadOlder!();
     expect(harness.history.loadMore).toHaveBeenCalledTimes(1);
+    expect(harness.history.loadMore).toHaveBeenLastCalledWith(undefined);
+    const originalHistory = harness.history;
+    const nextLoadMore = vi.fn(async () => {});
+    harness.history = { ...originalHistory, loadMore: nextLoadMore };
+    try {
+      forceRerender!();
+      await controller!.loadOlder!({ force: true });
+      expect(originalHistory.loadMore).toHaveBeenCalledTimes(1);
+      expect(nextLoadMore).toHaveBeenCalledTimes(1);
+      expect(nextLoadMore).toHaveBeenLastCalledWith({ force: true });
+    } finally {
+      harness.history = originalHistory;
+    }
+  });
+
+  it('exposes allocatedSessionId only while an unallocated new-chat submit spans its session allocation', async () => {
+    harness.connection.sessionId = '';
+    mountReact(<Probe />);
+    expect(controller!.allocatedSessionId).toBeUndefined();
+    let resolvePrompt: ((value: { promptId: string }) => void) | undefined;
+    harness.submitPrompt.mockImplementationOnce(
+      (_text: string, options?: { onAdmissionStarted?: () => void }) =>
+        new Promise<{ promptId: string }>((resolve) => {
+          resolvePrompt = resolve;
+          // Simulate session creation allocating 's1' before admission starts.
+          harness.connection.sessionId = 's1';
+          options?.onAdmissionStarted?.();
+        }),
+    );
+    const pendingSubmit = controller!.submit({ text: 'first prompt' });
+    forceRerender!();
+    // The rebuilt controller for 's1' identifies 's1' as the id allocated by
+    // the in-flight submit; switching to an unrelated 's2' clears it.
+    expect(controller!.sessionId).toBe('s1');
+    expect(controller!.allocatedSessionId).toBe('s1');
+    harness.connection.sessionId = 's2';
+    forceRerender!();
+    expect(controller!.sessionId).toBe('s2');
+    expect(controller!.allocatedSessionId).toBeUndefined();
+    resolvePrompt!({ promptId: 'p1' });
+    await pendingSubmit;
+    expect(controller!.allocatedSessionId).toBeUndefined();
   });
 
   it('splits question permissions from tool approvals', () => {
