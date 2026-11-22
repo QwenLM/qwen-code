@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -167,5 +168,29 @@ class HarnessConfigurationTest {
                 Map.entry("http://127.0.0.1:4170", 1),
                 Map.entry(" http://127.0.0.1:4170 ", 0),
                 Map.entry("http://qwen_harness:4170", 0));
+    }
+
+    @Test
+    void refusesNonStaticPoolDiscoveryAtStartup() {
+        var properties = new ManagedAgentProperties();
+        var harness = properties.getHarness();
+        harness.setEnabled(true);
+        harness.setBaseUrl("http://127.0.0.1:4170");
+        harness.setToken("test-harness-token");
+        harness.setCapabilityDigest("sha256:" + "a".repeat(64));
+        harness.getPool().setEnabled(true);
+        harness.getPool().setDiscovery("kubernetes");
+        properties.getSessionStore().setEnabled(true);
+        properties.getSessionStore().setBaseUrl("https://store.example");
+        properties.getSessionStore().setWorkspaceId("workspace");
+        properties.getSessionStore().setBindingKey("b".repeat(64));
+        assertThatThrownBy(() -> new HarnessConfiguration().hostedHarnessConnector(properties,
+                mock(AgentStateStore.class), mock(JdbcWorkspaceExecutionStore.class),
+                mock(JdbcManagedActionStore.class), mock(JdbcManagedAgentDefinitionStore.class),
+                mock(JdbcManagedSessionStore.class), mock(JdbcSshWorkspaceStore.class),
+                mock(JdbcHarnessPlacementStore.class), mock(JdbcManagedSessionSkills.class),
+                new ObjectMapper(), mock(JdbcManagedExtensionRecordStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Harness pool discovery must be static");
     }
 }

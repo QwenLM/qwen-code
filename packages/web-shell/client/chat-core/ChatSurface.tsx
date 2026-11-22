@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useRef, useState, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import type { CommandInfo, TodoItem } from '../adapters/types.js';
 import { TranscriptViewport } from '../components/TranscriptViewport.js';
 import { ToolApproval } from '../components/messages/ToolApproval.js';
@@ -28,17 +28,14 @@ export interface ChatSurfaceProps {
   readonly transcriptError?: ReactNode;
   readonly commands?: readonly CommandInfo[];
   readonly onError?: (error: unknown, fallback: string) => void;
-  // History pagination: the loader defaults to the controller's capability, but
-  // whether older history exists is a page fact the contract does not carry yet.
+  // History pagination: all five members default to the controller's bound
+  // facts and loader capability, while optional props let an owning page
+  // override them when needed.
   readonly hasOlderHistory?: boolean;
   readonly onLoadOlderHistory?: (options?: {
     force?: boolean;
   }) => Promise<void>;
-  // Paired with the pagination props: without it a failed older-history page is
-  // invisible and every top-scroll re-issues the failing request.
   readonly historyPaginationError?: boolean;
-  // Older-history spinner and capacity notice, forwarded to the transcript so
-  // the switch does not drop them (the contract does not carry these facts yet).
   readonly loadingOlderHistory?: boolean;
   readonly historyCapacityReached?: boolean;
   // Approval facts and focus/notification gating are computed by the owning
@@ -160,6 +157,27 @@ export function ChatSurface({
     setSubmitInFlight(submitInFlightRef.current);
     setAdmissionLocked(admissionLockedRef.current);
   }
+  // Commit-time snapshot for async cancel settlement checks: refOwnerRef must
+  // keep updating during render for latch idempotency across discarded renders,
+  // whereas a cancel settling while an incoming switch render is suspended /
+  // discarded must still evaluate against the committed, on-screen session and
+  // controller (and stay silent once this surface has unmounted).
+  const committedSessionIdRef = useRef(controller.sessionId);
+  const committedTokenRef = useRef(ownerTokenRef.current);
+  const committedControllerRef = useRef(controller);
+  const mountedRef = useRef(true);
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    committedSessionIdRef.current = controller.sessionId;
+    committedTokenRef.current = ownerTokenRef.current;
+    committedControllerRef.current = controller;
+  });
+  useLayoutEffect(
+    () => () => {
+      mountedRef.current = false;
+    },
+    [],
+  );
   // A cancel in flight keeps the turn live until settlement evidence arrives.
   const isRunning =
     controller.phase === 'running' ||
@@ -186,11 +204,17 @@ export function ChatSurface({
             loadingTranscript={controller.transcriptState === 'loading'}
             isResponding={isRunning}
             sessionKey={controller.sessionId}
-            hasOlderHistory={hasOlderHistory}
+            hasOlderHistory={hasOlderHistory ?? controller.hasOlderHistory}
             onLoadOlderHistory={loadOlder}
-            historyPaginationError={historyPaginationError}
-            loadingOlderHistory={loadingOlderHistory}
-            historyCapacityReached={historyCapacityReached}
+            historyPaginationError={
+              historyPaginationError ?? controller.historyPaginationError
+            }
+            loadingOlderHistory={
+              loadingOlderHistory ?? controller.loadingOlderHistory
+            }
+            historyCapacityReached={
+              historyCapacityReached ?? controller.historyCapacityReached
+            }
           />
         )}
       </div>
@@ -301,17 +325,37 @@ export function ChatSurface({
             controller.phase === 'submitting'
           }
           onCancel={() => {
-            // A refused or unknown stop admission must not be silent: the turn
-            // keeps running and the user needs to know the stop did not land.
+            const cancelSessionId = controller.sessionId;
+            const cancelTurnId = controller.activeTurnId;
+            const token = committedTokenRef.current;
+            const isOwnerActive = (resultTurnId?: string) => {
+              if (!mountedRef.current) return false;
+              const sameSession =
+                cancelSessionId !== ''
+                  ? committedSessionIdRef.current === cancelSessionId
+                  : committedTokenRef.current === token;
+              if (!sameSession) return false;
+              const targetTurnId = resultTurnId ?? cancelTurnId;
+              return (
+                targetTurnId === undefined ||
+                committedControllerRef.current.activeTurnId === targetTurnId
+              );
+            };
+            // A refused or unknown stop admission must not be silent on the
+            // session and turn that requested it, while a late settlement after
+            // a session switch, turn advance, or unmount must not misattribute
+            // an older stop failure to another session or a newer turn.
             void controller
               .cancel()
               .then((result) => {
+                if (!isOwnerActive(result.target?.turnId)) return;
                 if (result.admission !== 'accepted') {
                   const message = t('chat.stopNotConfirmed');
                   reportError(new Error(message), message);
                 }
               })
               .catch((cause: unknown) => {
+                if (!isOwnerActive()) return;
                 const message = t('chat.stopNotConfirmed');
                 reportError(new Error(message, { cause }), message);
               });

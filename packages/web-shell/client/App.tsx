@@ -372,7 +372,14 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
-import { artifactDisplayName } from './components/artifacts/artifactUtils';
+import {
+  artifactDisplayName,
+  resolvePendingArtifactJumpOpen,
+  runArtifactLibrarySessionJump,
+  type PendingArtifactJumpOpenRequest,
+} from './components/artifacts/artifactUtils';
+import { WorkspaceArtifactLibraryPage } from './components/artifacts/WorkspaceArtifactLibraryPage';
+import { WORKSPACE_ARTIFACT_LIBRARY_FEATURE } from './hooks/useWorkspaceArtifactLibrary';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -2072,6 +2079,7 @@ type MainView =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'artifacts'
   | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -4821,6 +4829,10 @@ export function App({
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
     workspace.capabilities?.features?.includes('autofix_pr_watches') === true;
+  const workspaceArtifactLibraryAvailable =
+    workspace.capabilities?.features?.includes(
+      WORKSPACE_ARTIFACT_LIBRARY_FEATURE,
+    ) === true;
   const [pendingSessionContext, setPendingSessionContextState] = useState<
     DaemonProductSessionContext | undefined
   >(undefined);
@@ -8519,6 +8531,49 @@ export function App({
     sessionWorktree?.path,
     workspace.client,
   ]);
+  const [pendingJumpArtifactOpen, setPendingJumpArtifactOpenState] = useState<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const pendingJumpArtifactOpenRef = useRef<
+    PendingArtifactJumpOpenRequest | undefined
+  >(undefined);
+  const setPendingJumpArtifactOpen = useCallback(
+    (request: PendingArtifactJumpOpenRequest | undefined) => {
+      pendingJumpArtifactOpenRef.current = request;
+      setPendingJumpArtifactOpenState(request);
+    },
+    [],
+  );
+  useEffect(() => {
+    const decision = resolvePendingArtifactJumpOpen(pendingJumpArtifactOpen, {
+      currentSessionId: connection.sessionId,
+      switchingSessionId: sidebarSwitchingSessionId,
+      panelStateKey,
+      restoredSessionKey: artifactPanelRestoredSessionKeyRef.current,
+      panelRestoring: artifactPanelRestoring,
+      loadingTranscript: Boolean(connection.loadingTranscript),
+      artifactsLoading,
+      connected: connection.status === 'connected',
+    });
+    if (decision === 'cancel') {
+      setPendingJumpArtifactOpen(undefined);
+    } else if (decision === 'open' && pendingJumpArtifactOpen) {
+      const targetArtifactId = pendingJumpArtifactOpen.artifactId;
+      setPendingJumpArtifactOpen(undefined);
+      openArtifactPanel(targetArtifactId);
+    }
+  }, [
+    artifactPanelRestoring,
+    artifactsLoading,
+    connection.loadingTranscript,
+    connection.sessionId,
+    connection.status,
+    openArtifactPanel,
+    panelStateKey,
+    pendingJumpArtifactOpen,
+    setPendingJumpArtifactOpen,
+    sidebarSwitchingSessionId,
+  ]);
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -11046,6 +11101,10 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   const splitClassificationGenerationRef = useRef(0);
+  const artifactLibraryJumpGenRef = useRef(0);
+  const artifactLibraryJumpDispatchingRef = useRef<string | undefined>(
+    undefined,
+  );
   // Generation recorded when the latest classification started; differs from
   // the live generation only while a superseded classification is in flight.
   const splitClassificationStartGenerationRef = useRef(0);
@@ -11260,6 +11319,7 @@ export function App({
         (mainView === 'scheduledTasks' ||
           mainView === 'prWatches' ||
           mainView === 'goals' ||
+          mainView === 'artifacts' ||
           mainView === 'split'))
     ) {
       setMainView('chat');
@@ -11366,6 +11426,27 @@ export function App({
       showChat();
     }
   }, [mainView, prWatchesAvailable, projectFeaturesAvailable, showChat]);
+  const openArtifacts = useCallback(() => {
+    if (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable) return;
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    if (!navigationRef.current) showChat();
+    setMainView('artifacts');
+    navigationRef.current?.openPage('artifacts');
+  }, [projectFeaturesAvailable, showChat, workspaceArtifactLibraryAvailable]);
+  useEffect(() => {
+    if (
+      mainView === 'artifacts' &&
+      (!projectFeaturesAvailable || !workspaceArtifactLibraryAvailable)
+    ) {
+      showChat();
+    }
+  }, [
+    mainView,
+    projectFeaturesAvailable,
+    showChat,
+    workspaceArtifactLibraryAvailable,
+  ]);
   const returnToChat = useCallback(() => {
     if (navigationRef.current && navigationRef.current.route.page !== 'chat') {
       navigationRef.current.returnToChat();
@@ -11384,6 +11465,7 @@ export function App({
         if (item === 'live') return sidebarOptions.showLive;
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
+        if (item === 'artifacts') return workspaceArtifactLibraryAvailable;
         return true;
       }),
     );
@@ -11598,7 +11680,9 @@ export function App({
           ? 'pr-watches'
           : mainView === 'goals'
             ? 'goals'
-            : undefined;
+            : mainView === 'artifacts'
+              ? 'artifacts'
+              : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -11624,6 +11708,7 @@ export function App({
         : projectFeaturesAvailable &&
           (page !== 'live' || liveSidebarEnabled) &&
           (page !== 'pr-watches' || prWatchesAvailable) &&
+          (page !== 'artifacts' || workspaceArtifactLibraryAvailable) &&
           (page !== 'channel-events' || channelNavigationEnabled) &&
           (hostSidebar?.primaryNav?.items?.some(
             (item) => item === primaryItem,
@@ -11651,7 +11736,9 @@ export function App({
           ? 'prWatches'
           : nextPage === 'goals'
             ? 'goals'
-            : 'chat',
+            : nextPage === 'artifacts'
+              ? 'artifacts'
+              : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -11663,6 +11750,7 @@ export function App({
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
     prWatchesAvailable,
+    workspaceArtifactLibraryAvailable,
     channelNavigationEnabled,
     workspaceCapabilitiesReady,
   ]);
@@ -12422,6 +12510,7 @@ export function App({
           // `/clear` carry so the pane session's lineage never inherits the
           // cleared session's title.
           pendingManualTitleRef.current = undefined;
+          artifactLibraryJumpGenRef.current += 1;
           void sessionActions.loadSession(firstPane).catch(() => undefined);
         }
       }
@@ -12533,7 +12622,8 @@ export function App({
       mainView === 'scheduledTasks' ||
       mainView === 'prWatches' ||
       mainView === 'workflows' ||
-      mainView === 'goals'
+      mainView === 'goals' ||
+      mainView === 'artifacts'
     ) {
       setMainView('chat');
     }
@@ -17334,6 +17424,7 @@ export function App({
         ? { displayName: opts.carryManualTitle }
         : undefined;
       splitClassificationGenerationRef.current += 1;
+      artifactLibraryJumpGenRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
       let nextContext: DaemonProductSessionContext | undefined;
       let availableWorkspaces = workspacesRef.current;
@@ -18513,6 +18604,18 @@ export function App({
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
     ) => {
+      // Suppress the generation bump for the jump's own load so a rejection
+      // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
+      // catch block and still clears pending state and surfaces the error.
+      if (artifactLibraryJumpDispatchingRef.current !== sessionId) {
+        artifactLibraryJumpGenRef.current += 1;
+      }
+      if (
+        pendingJumpArtifactOpenRef.current &&
+        pendingJumpArtifactOpenRef.current.sessionId !== sessionId
+      ) {
+        setPendingJumpArtifactOpen(undefined);
+      }
       setManagedHome(false);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
@@ -18588,7 +18691,54 @@ export function App({
       closePanel,
       isKnownLiveWorkspaceCwd,
       sessionActions,
+      setPendingJumpArtifactOpen,
       setPendingSessionContext,
+    ],
+  );
+
+  const openSessionFromArtifactLibrary = useCallback(
+    (
+      sessionId: string,
+      archiveState: 'active' | 'archived',
+      artifactId?: string,
+    ) => {
+      const jumpGen = ++artifactLibraryJumpGenRef.current;
+      const targetCwd =
+        resolveWorkspaceMaintenanceTargetCwd() ??
+        workspace.capabilities?.workspaceCwd;
+      void runArtifactLibrarySessionJump({
+        sessionId,
+        archiveState,
+        artifactId,
+        targetCwd,
+        primaryCwd: workspace.capabilities?.workspaceCwd,
+        showChat,
+        unarchivePrimarySession: (id) => workspaceActions.unarchiveSession(id),
+        unarchiveWorkspaceSessions: (cwd, ids) =>
+          workspace.client.workspaceByCwd(cwd).unarchiveSessionsData(ids),
+        getPendingJumpArtifactOpen: () => pendingJumpArtifactOpenRef.current,
+        setPendingJumpArtifactOpen,
+        isCurrent: () => artifactLibraryJumpGenRef.current === jumpGen,
+        loadSidebarSession: (id, cwd) => {
+          artifactLibraryJumpDispatchingRef.current = id;
+          try {
+            return loadSidebarSession(id, cwd);
+          } finally {
+            artifactLibraryJumpDispatchingRef.current = undefined;
+          }
+        },
+        reportError,
+      });
+    },
+    [
+      loadSidebarSession,
+      reportError,
+      resolveWorkspaceMaintenanceTargetCwd,
+      setPendingJumpArtifactOpen,
+      showChat,
+      workspace.capabilities?.workspaceCwd,
+      workspace.client,
+      workspaceActions,
     ],
   );
 
@@ -24941,6 +25091,14 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  {...(workspaceArtifactLibraryAvailable
+                    ? {
+                        onOpenArtifacts: () => {
+                          closeMobileDrawer();
+                          openArtifacts();
+                        },
+                      }
+                    : {})}
                   {...(prWatchesAvailable
                     ? {
                         onOpenPrWatches: () => {
@@ -26256,6 +26414,68 @@ export function App({
                   </div>
                 </div>
               )}
+              {projectFeaturesAvailable &&
+                workspaceArtifactLibraryAvailable &&
+                mainView === 'artifacts' && (
+                  <div
+                    className={styles.fullPage}
+                    data-testid="artifacts-library-page"
+                  >
+                    <div className={styles.fullPageHeader}>
+                      {!navigationRailVisible && (
+                        <button
+                          type="button"
+                          className={styles.fullPageBack}
+                          onClick={returnToChat}
+                          aria-label={t('common.back')}
+                          title={t('common.back')}
+                        >
+                          <svg
+                            viewBox="0 0 24 24"
+                            width="18"
+                            height="18"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden="true"
+                          >
+                            <path d="M15 18l-6-6 6-6" />
+                          </svg>
+                        </button>
+                      )}
+                      <div className={styles.fullPageTitle}>
+                        {t('workspaceArtifactLibrary.title')}
+                      </div>
+                    </div>
+                    <div className={styles.fullPageBody}>
+                      <WorkspaceArtifactLibraryPage
+                        workspaceCwd={
+                          resolveWorkspaceMaintenanceTargetCwd() ??
+                          workspace.capabilities?.workspaceCwd
+                        }
+                        onOpenSession={(sessionId, archiveState) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                          )
+                        }
+                        onJumpToSessionArtifact={(
+                          sessionId,
+                          artifactId,
+                          archiveState,
+                        ) =>
+                          openSessionFromArtifactLibrary(
+                            sessionId,
+                            archiveState,
+                            artifactId,
+                          )
+                        }
+                      />
+                    </div>
+                  </div>
+                )}
               {workspaceContextActive && mainView === 'cockpit' && (
                 <div className={styles.fullPage} data-testid="cockpit-page">
                   <SessionWorkflowCockpit
@@ -26898,7 +27118,7 @@ export function App({
                               {connection.runtimeStopPersistenceUnconfirmed ? ` ${t('capacityChoice.persistenceUnconfirmed')}` : ''}
                             </span>
                             <button type="button" className={styles.composerActionTipButton}
-                              onClick={() => { if (connection.sessionId) void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); }}>
+                              onClick={() => { if (connection.sessionId) { artifactLibraryJumpGenRef.current += 1; void sessionActions.loadSession(connection.sessionId, { sessionContext: connection.sessionContext }).catch((error: unknown) => reportError(error, 'Failed to resume session')); } }}>
                               {t('capacityChoice.resume')}
                             </button>
                           </div>
