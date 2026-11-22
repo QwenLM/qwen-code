@@ -10,6 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
+import { hasVerifiableInode } from './file-identity.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('GIT_BRANCHES');
@@ -2154,8 +2155,12 @@ function refuseOccupiedPreImage(
   const oldStat = lstatOrNull(root, oldPath);
   if (oldStat === null) return;
   const newStat = lstatOrNull(root, newPath);
+  // On FAT/exFAT/SMB every file reports `ino === 0`, so two unrelated files on
+  // one device compare equal and the exemption would wave an occupant through.
+  // Treat a zero inode as unverifiable and refuse.
   const sameIdentity =
     newStat !== null &&
+    hasVerifiableInode(oldStat.ino) &&
     oldStat.dev === newStat.dev &&
     oldStat.ino === newStat.ino;
   // A case-folding filesystem resolves the old spelling to the post-image
