@@ -43,6 +43,7 @@ import {
   WorkerBackgroundCaptureSink,
   WorkerMonitorPolicy,
 } from './managed-background-delivery.js';
+import { monitorNotificationText } from './hosted-monitor-notification.js';
 
 let root: string | undefined;
 let session: ManagedSession | undefined;
@@ -1103,6 +1104,64 @@ function monitorPolicy(
     terminate,
   );
 }
+
+it('bounds a worker monitor window before its serialized delivery request', async () => {
+  const run = new BackgroundDeliveryRun(
+    'execution-large-monitor-window',
+    '1',
+    'monitor_run',
+  );
+  const policy = monitorPolicy(run, 100, async () => true);
+  const lines = Array.from(
+    { length: 1_005 },
+    (_, index) => `${index.toString().padStart(4, '0')}:${'x'.repeat(600)}`,
+  );
+  policy.onChunk(Buffer.from(`${lines.join('\n')}\n`, 'utf8'));
+  await policy.flushTail();
+  const { entries } = await run.pullForStage({ afterSeq: 0 });
+  const observation = entries.find((entry) => entry.kind === 'observation');
+  if (observation?.kind !== 'observation') {
+    throw new Error('The worker did not enqueue its observation.');
+  }
+
+  const requestBytes = Buffer.byteLength(
+    JSON.stringify({
+      operation: 'deliver',
+      executionCallId: run.executionCallId,
+      entries: [observation],
+    }),
+  );
+  expect(requestBytes).toBeLessThanOrEqual(
+    MANAGED_DELIVERY_REQUEST_LIMIT_BYTES,
+  );
+  expect(observation.lines.length).toBeLessThanOrEqual(1_000);
+  expect(
+    Buffer.byteLength(observation.lines.join('\n'), 'utf8'),
+  ).toBeLessThanOrEqual(64 * 1024);
+  const retained = observation.lines.slice(0, -1);
+  expect(retained).toEqual(lines.slice(0, retained.length));
+  expect(observation.lines.at(-1)).toBe(
+    `... ${lines.length - retained.length} more lines omitted`,
+  );
+
+  const input = observation.resources.find(
+    (resource) => resource.ref.kind === 'managed-input',
+  );
+  expect(input).toBeDefined();
+  const notification = JSON.parse(
+    Buffer.from(input!.bytesBase64, 'base64').toString('utf8'),
+  ) as { text: string };
+  expect(notification.text).toBe(
+    monitorNotificationText({
+      monitorId: run.executionCallId,
+      toolUseId: run.executionCallId,
+      description: 'watch',
+      eventCount: 1,
+      lines: observation.lines,
+    }),
+  );
+  run.close();
+});
 
 it('sizes a push batch by its serialized request, wrapper and separators included', async () => {
   const harness = await deliveryEndpoint(() => 200);
