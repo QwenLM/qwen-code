@@ -893,6 +893,7 @@ function matchWorkspaceSessionsRoute(
 function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
+    path === '/daemon/status' ||
     path === '/capabilities' ||
     path === '/workspace-order' ||
     path === '/brand' ||
@@ -974,7 +975,10 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   if (
     method === 'GET' &&
-    (path === '/health' || path === '/capabilities' || path === '/brand')
+    (path === '/health' ||
+      path === '/daemon/status' ||
+      path === '/capabilities' ||
+      path === '/brand')
   ) {
     return true;
   }
@@ -1363,6 +1367,61 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/health') {
     await json(route, { status: 'ok' });
+    return;
+  }
+  if (method === 'GET' && path === '/daemon/status') {
+    // The overload pause hook polls GET /daemon/status?detail=summary at boot
+    // and every 5 s. Serve a minimal healthy summary (omitting loadAdmission,
+    // matching older daemons so no overload strip triggers unless a spec
+    // overrides **/daemon/status* via Playwright's LIFO page.route). Without
+    // this default, every spec falls through to Vite's proxy and logs 502s.
+    await json(route, {
+      v: 1,
+      detail: searchParams.get('detail') === 'full' ? 'full' : 'summary',
+      generatedAt: new Date().toISOString(),
+      status: 'ok',
+      issues: [],
+      daemon: {
+        pid: 1,
+        uptimeMs: 1000,
+        mode: 'http-bridge',
+        workspaceCwd: scenario.workspaceCwd,
+        qwenCodeVersion: '0.0.0-e2e',
+      },
+      security: {
+        tokenConfigured: false,
+        requireAuth: false,
+        loopbackBind: true,
+        allowOriginConfigured: false,
+        allowOriginMode: 'loopback',
+        sessionShellCommandEnabled: true,
+      },
+      limits: {
+        maxSessions: null,
+        maxPendingPromptsPerSession: 5,
+        eventRingSize: 8000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
+        compactedReplayMaxBytes: 4 * 1024 * 1024,
+        maxJournalEvents: 10000,
+        maxJournalBytes: 8 * 1024 * 1024,
+        channelIdleTimeoutMs: 0,
+        sessionIdleTimeoutMs: 1800000,
+        sessionPromptSettledCloseGraceMs: 0,
+        maxTotalSessions: null,
+      },
+      runtime: {
+        sessions: { active: 0 },
+        permissions: { pending: 0, policy: 'first-responder' },
+        channel: { live: true },
+        process: {
+          rss: 0,
+          heapTotal: 0,
+          heapUsed: 0,
+          external: 0,
+          arrayBuffers: 0,
+        },
+      },
+    });
     return;
   }
   if (method === 'GET' && path === '/capabilities') {

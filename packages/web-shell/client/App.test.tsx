@@ -1529,12 +1529,18 @@ const overloadPauseStub = vi.hoisted(() => ({
 
 vi.mock('./daemon/workspace/hooks/useDaemonOverloadPause.js', () => ({
   OVERLOAD_REFUSAL_TTL_MS: 15_000,
-  useDaemonOverloadPause: () => ({
-    paused: overloadPauseStub.paused,
-    pollOverloaded: overloadPauseStub.pollOverloaded,
-    loadAdmission: overloadPauseStub.loadAdmission,
-    refusalMessage: overloadPauseStub.refusalMessage,
-  }),
+  useDaemonOverloadPause: (options?: {
+    refusal?: { message: string; expiresAt: number } | null;
+  }) => {
+    const refusal = options?.refusal ?? null;
+    const reactiveActive = refusal !== null && Date.now() < refusal.expiresAt;
+    return {
+      paused: overloadPauseStub.paused || reactiveActive,
+      pollOverloaded: overloadPauseStub.pollOverloaded,
+      loadAdmission: overloadPauseStub.loadAdmission,
+      refusalMessage: refusal?.message ?? overloadPauseStub.refusalMessage,
+    };
+  },
 }));
 
 vi.mock('./components/ChatEditor', async () => {
@@ -60434,6 +60440,68 @@ describe('upstream embedded transport reproduction', () => {
       );
       expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
       expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    });
+
+    it('refuses createNewSession at the App root with a warning toast while paused', async () => {
+      armOverload();
+      const toasts: Array<[string, string]> = [];
+      const { container } = renderApp({
+        onToast: (tone, msg) => toasts.push([tone, msg]),
+      });
+      await flush();
+      toasts.length = 0;
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="new-session"]',
+      );
+      expect(btn).not.toBeNull();
+      await act(async () => {
+        btn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.[0]).toBe('warning');
+      expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+    });
+
+    it('pauses creation reactively when a system_overloaded create_session notice arrives', async () => {
+      testState.notices = [
+        {
+          id: 'overload-1',
+          severity: 'error',
+          category: 'user_action',
+          operation: 'create_session',
+          code: 'system_overloaded',
+          message: 'System overloaded (cpu_load: load ratio 3.00)',
+          createdAt: Date.now(),
+        },
+      ];
+      const toasts: Array<[string, string]> = [];
+      const { container } = renderApp({
+        onToast: (tone, msg) => toasts.push([tone, msg]),
+      });
+      await flush();
+      toasts.length = 0;
+
+      const btn = container.querySelector<HTMLButtonElement>(
+        '[data-testid="new-session"]',
+      );
+      expect(btn).not.toBeNull();
+      await act(async () => {
+        btn!.click();
+        await Promise.resolve();
+      });
+      await flush();
+
+      expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+      expect(toasts).toHaveLength(1);
+      expect(toasts[0]?.[0]).toBe('warning');
+      expect(toasts[0]?.[1]).toBe(
+        'System overloaded (cpu_load: load ratio 3.00)',
+      );
     });
   });
 });

@@ -29,7 +29,7 @@ The load-admission gate (see [load-based session admission](load-based-session-a
 
 Two independent sources, OR-combined at render time:
 
-1. **Proactive poll.** A `useDaemonStatusReport({ detail: 'summary' })` resource in the App, reloaded on a 5-second interval while the daemon is available. `report.runtime.loadAdmission.overloaded` drives the paused state; the tooltip text is composed from the snapshot's `reason`, `loadRatio`, and `eventLoopLagP99Ms` through i18n. The SDK's `DaemonStatusReport` runtime type gains an additive optional `loadAdmission` field, following the existing "older daemons omit this field" convention; daemons without the gate simply never report it.
+1. **Proactive poll.** Inside `useDaemonOverloadPause`, `useOptionalDaemonWorkspace()` supplies `actions.loadDaemonStatus('summary')` to `useDaemonResource` (`autoLoad: true`, gated on `enabled && actions !== undefined && visible`), reloaded on a 5-second interval while the daemon is available and the tab is visible (with in-flight tracking across mount and interval ticks). `report.runtime.loadAdmission.overloaded` (gated on `enabled && error === undefined`) drives the paused state; the tooltip text is composed from the snapshot's `reason`, `loadRatio`, and `eventLoopLagP99Ms` through i18n. The SDK's `DaemonStatusReport` runtime type gains an additive optional `loadAdmission` field, following the existing "older daemons omit this field" convention; daemons without the gate simply never report it.
 2. **Reactive refusal.** The existing notice effect that already handles `session_limit_exceeded` also handles `code === 'system_overloaded'` on `create_session`: it stores the notice message with an expiry of `Date.now() + 15_000` (the daemon's `Retry-After`), cleared by a timeout. This covers the window between polls and daemons whose status poll fails.
 
 `overloadPaused = pollOverloaded || reactiveUnexpired`. The tooltip prefers the poll's localized readings when the poll reports overload, otherwise the refusal message. No merged state machine: the poll side is derived from the resource each render, the reactive side is a single expiring state value.
@@ -47,7 +47,7 @@ The poll/expiry/OR logic lives in a small `useDaemonOverloadPause` hook next to 
 
 ### i18n
 
-New keys in both dictionaries: `sidebar.overloadPaused` (strip label) and `sidebar.overloadDetail` (tooltip template with reason/ratio/lag placeholders). The reactive path reuses the daemon's own message verbatim.
+New keys in all four shipped catalogs (`en`, `zh-CN`, `zh-TW`, `ru`): `sidebar.overloadPaused` (strip label) and `sidebar.overloadDetail` (interpolating function formatting reason, load ratio, and event-loop lag). Only `en` and `zh-CN` are inlined into the document export bundle (`zh-TW` and `ru` are transcript-stubbed). The reactive path reuses the daemon's own message verbatim.
 
 ## Design decisions and rationale
 
@@ -88,14 +88,25 @@ New keys in both dictionaries: `sidebar.overloadPaused` (strip label) and `sideb
 
 ## Files affected
 
-| File                                                                                   | Change                                   |
-| -------------------------------------------------------------------------------------- | ---------------------------------------- |
-| `packages/sdk-typescript/src/daemon/types.ts`                                          | Additive `runtime.loadAdmission` type    |
-| `packages/web-shell/client/App.tsx`                                                    | Poll + reactive state, props, notice     |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | Strip, disabled predicate, handler guard |
-| `packages/web-shell/client/i18n.tsx`                                                   | en + zh keys                             |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | Warning strip styles                     |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | Poll + expiry + OR hook                  |
-| `packages/web-shell/client/daemon/workspace/hooks/index.ts`                            | Hook barrel export                       |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | Strip/disabled tests                     |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | Poll/reactive/expiry tests               |
+| File                                                                                   | Change                                        |
+| -------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `packages/sdk-typescript/src/daemon/types.ts`                                          | Additive `runtime.loadAdmission` type         |
+| `packages/web-shell/client/App.tsx`                                                    | Poll + reactive state, root guards, notice    |
+| `packages/web-shell/client/App.test.tsx`                                               | App-level pause guard & reactive notice tests |
+| `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` classifier          |
+| `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | Classifier shape & negative-control table     |
+| `packages/web-shell/client/daemon/session/actions.ts`                                  | `system_overloaded` notice code mapping       |
+| `packages/web-shell/client/daemon/session/actions.test.ts`                             | Notice code mapping test                      |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | Strip, disabled predicate, handler guards     |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | Warning strip & disabled header-action styles |
+| `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop                     |
+| `packages/web-shell/client/i18n.tsx`                                                   | `en` overload keys                            |
+| `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` overload keys                         |
+| `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` overload keys                         |
+| `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` overload keys                            |
+| `packages/web-shell/client/i18n.test.ts`                                               | Four-locale interpolation & parity test       |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | Poll + expiry + freshness + OR hook           |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | Poll/reactive/expiry/freshness tests          |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | Strip/disabled/menu/standalone tests          |
+| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | Default healthy `GET /daemon/status` mock     |
+| `packages/web-templates/src/export-html/build.mjs`                                     | Merged-tree export-size budget re-track       |

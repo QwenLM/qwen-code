@@ -29,7 +29,7 @@
 
 两个独立来源，渲染时 OR 组合：
 
-1. **主动轮询。** App 中一个 `useDaemonStatusReport({ detail: 'summary' })` 资源，在 daemon 可用期间按 5 秒间隔 reload。`report.runtime.loadAdmission.overloaded` 驱动暂停状态；tooltip 文案由快照的 `reason`、`loadRatio`、`eventLoopLagP99Ms` 经 i18n 组合。SDK 的 `DaemonStatusReport` runtime 类型按既有"旧 daemon 省略该字段"约定新增加性可选 `loadAdmission` 字段；没有闸门的 daemon 永远不上报它。
+1. **主动轮询。** `useDaemonOverloadPause` 内部通过 `useOptionalDaemonWorkspace()` 将 `actions.loadDaemonStatus('summary')` 交给 `useDaemonResource`（`autoLoad: true`，门控在 `enabled && actions !== undefined && visible`），在 daemon 可用且标签页可见期间按 5 秒间隔 reload（挂载与定时间隔共用在途记账）。`report.runtime.loadAdmission.overloaded`（门控在 `enabled && error === undefined`）驱动暂停状态；tooltip 文案由快照的 `reason`、`loadRatio`、`eventLoopLagP99Ms` 经 i18n 组合。SDK 的 `DaemonStatusReport` runtime 类型按既有"旧 daemon 省略该字段"约定新增加性可选 `loadAdmission` 字段；没有闸门的 daemon 永远不上报它。
 2. **被动拒绝。** 已处理 `session_limit_exceeded` 的现有 notice effect 同时处理 `create_session` 上 `code === 'system_overloaded'`：以 `Date.now() + 15_000`（daemon 的 `Retry-After`）为过期时间存储 notice 消息，由 timeout 清除。覆盖轮询之间的窗口与 status 轮询失败的 daemon。
 
 `overloadPaused = pollOverloaded || reactiveUnexpired`。tooltip 在轮询报告过载时优先用轮询的本地化读数，否则用拒绝消息。不做合并状态机：轮询侧每次渲染从资源派生，被动侧是单个带过期时间的状态值。
@@ -47,7 +47,7 @@
 
 ### i18n
 
-双语字典新增 key：`sidebar.overloadPaused`（条标签）与 `sidebar.overloadDetail`（带 reason/ratio/lag 占位符的 tooltip 模板）。被动路径原样复用 daemon 自己的消息。
+四个随包发布的语言目录（`en`、`zh-CN`、`zh-TW`、`ru`）均新增 key：`sidebar.overloadPaused`（条标签）与 `sidebar.overloadDetail`（格式化 reason、loadRatio、eventLoopLagP99Ms 的插值函数）。文档导出 bundle 仅内联 `en` 与 `zh-CN`（`zh-TW` 与 `ru` 被 transcript stub 替换）。被动路径原样复用 daemon 自己的消息。
 
 ## 设计决策与理由
 
@@ -88,14 +88,25 @@
 
 ## 涉及文件
 
-| 文件                                                                                   | 变更                              |
-| -------------------------------------------------------------------------------------- | --------------------------------- |
-| `packages/sdk-typescript/src/daemon/types.ts`                                          | 加性 `runtime.loadAdmission` 类型 |
-| `packages/web-shell/client/App.tsx`                                                    | 轮询 + 被动状态、props、notice    |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | 警示条、禁用谓词、handler 守卫    |
-| `packages/web-shell/client/i18n.tsx`                                                   | en + zh keys                      |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | 警示条样式                        |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | 轮询 + 过期 + OR hook             |
-| `packages/web-shell/client/daemon/workspace/hooks/index.ts`                            | hook barrel 导出                  |
-| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | 警示条/禁用测试                   |
-| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | 轮询/被动/过期测试                |
+| 文件                                                                                   | 变更                                    |
+| -------------------------------------------------------------------------------------- | --------------------------------------- |
+| `packages/sdk-typescript/src/daemon/types.ts`                                          | 加性 `runtime.loadAdmission` 类型       |
+| `packages/web-shell/client/App.tsx`                                                    | 轮询 + 被动状态、根守卫、notice         |
+| `packages/web-shell/client/App.test.tsx`                                               | App 层暂停守卫与被动 notice 测试        |
+| `packages/web-shell/client/daemon/session/httpErrors.ts`                               | `isSystemOverloadedError` 分类器        |
+| `packages/web-shell/client/daemon/session/httpErrors.test.ts`                          | 分类器三形状与负向控制表                |
+| `packages/web-shell/client/daemon/session/actions.ts`                                  | `system_overloaded` notice code 映射    |
+| `packages/web-shell/client/daemon/session/actions.test.ts`                             | notice code 映射测试                    |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.tsx`                     | 警示条、禁用谓词、handler 守卫          |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.module.css`              | 警示条与禁用头部按钮样式                |
+| `packages/web-shell/client/components/sidebar/StandaloneRecents.tsx`                   | `newSessionDisabled` prop               |
+| `packages/web-shell/client/i18n.tsx`                                                   | `en` 过载文案                           |
+| `packages/web-shell/client/i18n-zh-cn.ts`                                              | `zh-CN` 过载文案                        |
+| `packages/web-shell/client/i18n-zh-tw.ts`                                              | `zh-TW` 过载文案                        |
+| `packages/web-shell/client/i18n-ru-part3.ts`                                           | `ru` 过载文案                           |
+| `packages/web-shell/client/i18n.test.ts`                                               | 四语言插值与 parity 测试                |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.ts`           | 轮询 + 过期 + 新鲜度 + OR hook          |
+| `packages/web-shell/client/daemon/workspace/hooks/useDaemonOverloadPause.test.ts`      | 轮询/被动/过期/新鲜度测试               |
+| `packages/web-shell/client/components/sidebar/WebShellSidebar.overload-strip.test.tsx` | 警示条/禁用/菜单/standalone 测试        |
+| `packages/web-shell/client/e2e/utils/mockDaemon.ts`                                    | 默认健康 `GET /daemon/status` mock 路由 |
+| `packages/web-templates/src/export-html/build.mjs`                                     | 合并树导出体积预算重记                  |

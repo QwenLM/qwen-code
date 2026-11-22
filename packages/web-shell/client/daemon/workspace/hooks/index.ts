@@ -16,12 +16,6 @@ export { useDaemonFiles } from './useDaemonFiles.js';
 export { useDaemonGlob } from './useDaemonGlob.js';
 export { useDaemonMcp } from './useDaemonMcp.js';
 export { useDaemonMemory } from './useDaemonMemory.js';
-export {
-  OVERLOAD_POLL_INTERVAL_MS,
-  OVERLOAD_REFUSAL_TTL_MS,
-  useDaemonOverloadPause,
-  type OverloadRefusal,
-} from './useDaemonOverloadPause.js';
 export { useDaemonResource } from './useDaemonResource.js';
 export { useDaemonSessions } from './useDaemonSessions.js';
 export { useDaemonSkills } from './useDaemonSkills.js';
