@@ -22,7 +22,11 @@ the host cache. Each fallback download uses an atomically created `mktemp` file,
 not a fixed output path that could be an existing symlink or hardlink. An
 exit-scoped trap attempts to remove only the downloaded copy, including when
 fetch or seed fails. It never targets the workspace helper, and a removal
-failure preserves the original step status. Before
+failure preserves the original step status and, when the output channel is
+writable, emits a `::warning::` annotation with the helper's residual path in
+a subshell. A closed log pipe can terminate that diagnostic subshell without
+terminating the step shell before it restores the original status. Other
+source, seed, mount, and prune failures remain fail-closed. Before
 copying, the helper checks the host source for mounts; a mounted or uninspectable
 host source skips that optional copy and uses a clean job-local repository. The
 tooling lookup does not change the immutable source revision being validated.
@@ -363,7 +367,11 @@ order this section exists to prevent.
   source revision does not change. Downloads use fresh `mktemp` regular files,
   leaving the targets of pre-existing symlinks or hardlinks untouched, and
   attempt to remove only the downloaded copy on exit. If that removal fails,
-  cleanup is advisory and preserves the saved step status.
+  cleanup is advisory, preserves the saved step status, and emits a
+  `::warning::` annotation with the residual path when the output channel is
+  writable. The warning subshell confines `SIGPIPE` from a closed log pipe
+  to that diagnostic process, so it cannot abort restoration of the saved step
+  status. Other cleanup and warning I/O failures do not replace that status.
   The reference build directly sources its checked-out helper and never
   requires a fallback fetch. A
   host-source mount or mount-inspection failure skips the optional copy and

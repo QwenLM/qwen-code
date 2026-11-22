@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -6,6 +6,8 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  closeSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -2012,10 +2014,16 @@ describe('SDK Java self-hosted workflow guards', () => {
         [true, 97, false, false, 'delete-workspace'],
         [false, 0, false, false, 'rm-denied'],
         [false, 0, false, false, 'rm-denied-nonzero'],
+        [false, 0, false, false, 'rm-denied-closed-stdout'],
+        [false, 0, false, false, 'rm-denied-closed-stdout-nonzero'],
       ]) {
-        const cleanupDenied = ['rm-denied', 'rm-denied-nonzero'].includes(
-          mutation,
-        );
+        const cleanupDenied = mutation?.startsWith('rm-denied') ?? false;
+        const echoDenied =
+          mutation?.startsWith('rm-denied-closed-stdout') ?? false;
+        const nonzeroCleanup = [
+          'rm-denied-nonzero',
+          'rm-denied-closed-stdout-nonzero',
+        ].includes(mutation);
         // A privileged uid cannot exercise this permission failure.
         if (cleanupDenied && process.getuid?.() === 0) continue;
         const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-helper-'));
@@ -2112,8 +2120,9 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
         const stub = `
           mvn() {
             printf '%s\\n' "$*" >> "\${RUNNER_TEMP}/mvn-calls"
+            ${echoDenied ? 'exec 1>&-' : ''}
             ${cleanupDenied ? 'chmod a-w "${RUNNER_TEMP}"' : ''}
-            ${mutation === 'rm-denied-nonzero' ? 'return 37' : ''}
+            ${nonzeroCleanup ? 'return 37' : ''}
           }
         `;
         let scriptBody =
@@ -2172,7 +2181,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
           const seedSucceeded =
             helperExists || (curlFailure === 0 && !failSourceGuard);
           expect(result.status, result.stderr).toBe(
-            mutation === 'rm-denied-nonzero'
+            nonzeroCleanup
               ? 37
               : failSourceGuard
                 ? 1
@@ -2197,8 +2206,21 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
               /^maven-cache-seed\..{6}$/.test(name),
             ),
           ).toHaveLength(mutation === 'no-cleanup' || cleanupDenied ? 1 : 0);
-          if (cleanupDenied) {
+          if (echoDenied) {
+            expect(result.stdout).toBe('');
             expect(result.stderr).toContain('Permission denied');
+            expect(result.stderr).toMatch(
+              /echo: write error: Bad file descriptor/,
+            );
+          } else if (cleanupDenied) {
+            expect(result.stderr).toContain('Permission denied');
+            expect(result.stdout).toContain(
+              '::warning::Maven cache seed helper cleanup failed',
+            );
+          } else {
+            expect(result.stdout).not.toContain(
+              '::warning::Maven cache seed helper cleanup failed',
+            );
           }
           if (helperExists) {
             expect(
@@ -2255,6 +2277,109 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
         } finally {
           if (cleanupDenied) chmodSync(runnerTemp, 0o755);
           rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() === 0)(
+    'preserves step status when the cleanup log pipe closes',
+    async () => {
+      const source = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
+      const traps = source.match(/trap '[^\n]*seed_helper_status=[^\n]*\n/g);
+      expect(traps).toHaveLength(4);
+      expect(new Set(traps?.map((trap) => trap.trim())).size).toBe(1);
+      const [trap] = traps;
+      expect(trap).toContain('|| (echo ');
+      for (const expected of [0, 37]) {
+        for (const closingPipe of [false, true]) {
+          const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-log-pipe-'));
+          const helper = join(dir, 'maven-cache-seed.fixture');
+          writeFileSync(helper, 'download fixture\n');
+          let reader;
+          let writer;
+          let closed = false;
+          const closePorts = () => {
+            if (closed) return;
+            closed = true;
+            if (reader !== undefined) closeSync(reader);
+            if (writer !== undefined) closeSync(writer);
+          };
+          try {
+            if (closingPipe) {
+              const fifo = join(dir, 'warning.fifo');
+              execFileSync('mkfifo', [fifo]);
+              reader = openSync(fifo, 'r+');
+              writer = openSync(fifo, 'w');
+            }
+            const result = await new Promise((resolve, reject) => {
+              const child = spawn(
+                'bash',
+                [
+                  '-e',
+                  '-c',
+                  `seed_helper=${JSON.stringify(helper)}\n${trap}\nIFS= read -r _ || true\nexit ${expected}`,
+                ],
+                {
+                  stdio: ['pipe', writer ?? 'pipe', 'pipe'],
+                  env: { ...process.env, RUNNER_TEMP: dir },
+                },
+              );
+              let stdout = '';
+              let stderr = '';
+              if (child.stdout) child.stdout.setEncoding('utf8');
+              child.stderr.setEncoding('utf8');
+              child.stdout?.on('data', (chunk) => {
+                stdout += chunk;
+              });
+              child.stderr.on('data', (chunk) => {
+                stderr += chunk;
+              });
+              // Make the pipe loss deterministic before allowing the exit trap.
+              child.once('spawn', () => {
+                chmodSync(dir, 0o555);
+                closePorts();
+                child.stdin.end();
+              });
+              const timeout = setTimeout(() => {
+                child.kill('SIGTERM');
+                reject(new Error('log-pipe probe timed out'));
+              }, 15000);
+              child.once('error', (error) => {
+                clearTimeout(timeout);
+                closePorts();
+                reject(error);
+              });
+              child.once('close', (status, signal) => {
+                clearTimeout(timeout);
+                resolve({ status, signal, stdout, stderr });
+              });
+            });
+            expect(result.error).toBeUndefined();
+            expect(result.signal, result.stderr).toBeNull();
+            expect(result.status, result.stderr).toBe(expected);
+            expect(result.stderr).toContain('Permission denied');
+            if (closingPipe) {
+              expect(result.stdout).toBe('');
+              // A fatal SIGPIPE need not leave an echo error line.
+              expect(readFileSync(helper, 'utf8')).toBe('download fixture\n');
+            } else {
+              expect(
+                result.stdout
+                  .split('\n')
+                  .filter((line) =>
+                    line.startsWith(
+                      '::warning::Maven cache seed helper cleanup failed',
+                    ),
+                  ),
+              ).toHaveLength(1);
+              expect(result.stdout).toContain(helper);
+            }
+          } finally {
+            closePorts();
+            chmodSync(dir, 0o755);
+            rmSync(dir, { recursive: true, force: true });
+          }
         }
       }
     },
