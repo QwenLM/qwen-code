@@ -101,7 +101,9 @@ Checks a local round against the rules the CI publisher enforces:
     its bytes with --context-sha256, and match the trusted head; prepare has
     already registered comment approvals to an in-flight head and round.
     When the snapshot carries repo and pr, the approval permalink must cite
-    that PR. A shape-only waiver or a PR-side record alone is refused.
+    that PR. This host-coordinate binding also requires a real artifact
+    directory, not a symlink or other non-directory; pass the resolved path.
+    A shape-only waiver or a PR-side record alone is refused.
     The CI publish job's own ci-lane record is honored only under
     --publish-lane, the flag the publish job passes (an argv claim, not an
     authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
@@ -1615,15 +1617,24 @@ function main(argv) {
     evidenceUnreadable,
     unreadableKeys,
   });
-  if (
-    contextPath &&
-    coordinates &&
-    dirPrNumber &&
-    Number(dirPrNumber) !== coordinates.number
-  ) {
-    result.errors.push(
-      `artifact directory ${basename(resolve(dir))} names PR ${dirPrNumber}, but the trusted host snapshot is for ${coordinates.owner}/${coordinates.repo}#${coordinates.number}; a host-held approval cannot be replayed into another PR's round directory`,
-    );
+  if (contextPath && coordinates) {
+    let realArtifactDirectory = false;
+    try {
+      const rootStat = lstatSync(resolve(dir));
+      realArtifactDirectory =
+        rootStat.isDirectory() && !rootStat.isSymbolicLink();
+    } catch {
+      // The real-directory refusal below also covers an unreadable root.
+    }
+    if (!realArtifactDirectory) {
+      result.errors.push(
+        `artifact directory ${dir} must be a real directory, not a symbolic link or other non-directory, when --context supplies trusted PR coordinates; pass the resolved artifact directory path`,
+      );
+    } else if (dirPrNumber && Number(dirPrNumber) !== coordinates.number) {
+      result.errors.push(
+        `artifact directory ${basename(resolve(dir))} names PR ${dirPrNumber}, but the trusted host snapshot is for ${coordinates.owner}/${coordinates.repo}#${coordinates.number}; a host-held approval cannot be replayed into another PR's round directory`,
+      );
+    }
   }
   result.errors.push(
     ...executionApprovalErrors(files.boundary, trustedSnapshot, {

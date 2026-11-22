@@ -1004,9 +1004,10 @@ describe('local container recipe pins', () => {
       const fragments = [];
       const helperToken = (text) => /verify-pr(?:-|\\)/.test(text);
       const dynamicImport = (text) => /\bnode\s[\s\S]*\bimport\s*\(/.test(text);
+      const foldContinuations = (text) => text.replace(/\\\r?\n[ \t]*/g, ' ');
       const interpreterCommand = (text) =>
         /(?:^|[\s;|&(`])["']?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:node|(?:\/[A-Za-z0-9_.-]+)*\/node)["']?(?=\s+(?:-|["']?\/|<|["']?\S+\.[cm]?js(?:\s|$)))/.test(
-          text,
+          foldContinuations(text),
         );
       const executableNode = (text) =>
         helperToken(text) || dynamicImport(text) || interpreterCommand(text);
@@ -1037,7 +1038,10 @@ describe('local container recipe pins', () => {
             let current = '';
             for (const line of body.split('\n')) {
               current += `${current ? '\n' : ''}${line}`;
-              if (/\\[ \t]*$/.test(line) || /(?:&&|\|\|)[ \t]*$/.test(line)) {
+              if (
+                /\\[ \t]*\r?$/.test(line) ||
+                /(?:&&|\|\|)[ \t]*$/.test(line)
+              ) {
                 continue;
               }
               logicalLines.push(current);
@@ -1131,19 +1135,21 @@ describe('local container recipe pins', () => {
           );
         const followsNode =
           lineIndex > 0 && /^node\s/.test(rawLines[lineIndex - 1].trim());
+        const continuedNode =
+          lineIndex > 0 &&
+          /\\[ \t]*\r?$/.test(rawLines[lineIndex - 1]) &&
+          executableNode(`${rawLines[lineIndex - 1]}\n${line}`);
         if (
           !inFence &&
           !inCodeSpan(lineStart) &&
-          executableNode(line) &&
+          (executableNode(line) || continuedNode) &&
           (!plainCitation || followsNode)
         ) {
           const executable =
             /^(?:node\s|cd\s|touch\s|sudo\s|env\s|[A-Za-z_][A-Za-z0-9_]*=\S+\s+node\s|ba?sh\s|["']?\/\S+\s|scripts\/\S*(?:\s|$)|verify-pr-\S*(?:\s|$))/.test(
               trimmed,
             );
-          if (executable) {
-            fragments.push({ source: line, quotedGate: false });
-          } else if (followsNode) {
+          if (continuedNode || (!executable && followsNode)) {
             let end = lineIndex + 1;
             while (end < rawLines.length && rawLines[end].trim() !== '') {
               end += 1;
@@ -1152,6 +1158,8 @@ describe('local container recipe pins', () => {
               source: rawLines.slice(lineIndex - 1, end).join('\n'),
               quotedGate: false,
             });
+          } else if (executable) {
+            fragments.push({ source: line, quotedGate: false });
           }
         }
         if (
@@ -1195,10 +1203,7 @@ describe('local container recipe pins', () => {
         visit(node);
         for (const child of node.namedChildren) walk(child, visit);
       };
-      const inspect = async ({ source: rawSource, quotedGate }) => {
-        const source = rawSource.replace(/\\\r?\n[ \t]*/g, (continuation) =>
-          ' '.repeat(continuation.length),
-        );
+      const inspect = async ({ source, quotedGate }) => {
         const parsed = source.replace(/<[^<>\r\n]+>/g, (placeholder) =>
           'P'.repeat(placeholder.length),
         );
@@ -1344,7 +1349,11 @@ describe('local container recipe pins', () => {
               const argumentEnd = background
                 ? source.indexOf('&', statement.endIndex) + 1
                 : statement.endIndex;
-              const rawArguments = source.slice(args[0].endIndex, argumentEnd);
+              // Keep here-doc bodies and the rest of the parsed source intact;
+              // only this command's argument range needs continuation folding.
+              const rawArguments = foldContinuations(
+                source.slice(args[0].endIndex, argumentEnd),
+              );
               const approvedArguments = validHelperArguments(
                 family,
                 rawArguments,
@@ -1761,6 +1770,37 @@ describe('local container recipe pins', () => {
         expect(await onlyDocumentedPrepareCalls(document), hostile).toBe(false);
       }
     }
+    const continuedEval = 'node \\\n -e "0 * 0"';
+    for (const [interpreter, command] of [
+      ['node', continuedEval],
+      ['env node', `env ${continuedEval}`],
+      ['/usr/bin/node', continuedEval.replace(/^node/, '/usr/bin/node')],
+    ]) {
+      for (const [newlineName, newline] of [
+        ['LF', '\n'],
+        ['CRLF', '\r\n'],
+      ]) {
+        const sample = command.replace('\n', newline);
+        for (const [shape, document] of [
+          ['raw', `${skill}\n${sample}`],
+          ['fenced', `${skill}\n\`\`\`bash\n${sample}\n\`\`\``],
+        ]) {
+          expect(
+            await onlyDocumentedPrepareCalls(document),
+            `${interpreter} ${shape} ${newlineName}`,
+          ).toBe(false);
+        }
+      }
+    }
+    expect(
+      await onlyDocumentedPrepareCalls(
+        skill.replace(
+          'node /trusted-scripts/verify-pr-credential-scan.mjs /work || exit 1',
+          'node /trusted-scripts/verify-pr-credential-scan.mjs \\\n /work || exit 1',
+        ),
+      ),
+      'a continued legitimate call preserves the invocation census',
+    ).toBe(true);
     expect(
       await onlyDocumentedPrepareCalls(
         `${skill}\nThe prose word node does not execute anything; arbitrary-helper.js is only a filename.`,
@@ -1781,6 +1821,15 @@ describe('local container recipe pins', () => {
         `${skill}\n\`\`\`bash\n${heredoc}\n\`\`\``,
       ),
       'here-doc body is not executable',
+    ).toBe(true);
+    const continuedHeredoc = ["python3 - <<'PY'", continuedEval, 'PY'].join(
+      '\n',
+    );
+    expect(
+      await onlyDocumentedPrepareCalls(
+        `${skill}\n\`\`\`bash\n${continuedHeredoc}\n\`\`\``,
+      ),
+      'continued text in a here-doc remains data',
     ).toBe(true);
     const genuineGate =
       'node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release';

@@ -1579,6 +1579,17 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
         expect(cross.stdout).toMatch(
           /pr43-verify-.* names PR 43, but the trusted host snapshot is for QwenLM\/qwen-code#42/,
         );
+
+        const aliased = setup(43, artifactContext);
+        const alias = join(aliased.clone, 'tmp', 'pr42-verify-20261123-000000');
+        symlinkSync('pr43-verify-20261123-000000', alias, 'dir');
+        for (const roundDir of [alias, `${alias}/`]) {
+          const crossThroughAlias = check({ ...aliased, dir: roundDir });
+          expect(crossThroughAlias.status, crossThroughAlias.stdout).toBe(1);
+          expect(crossThroughAlias.stdout).toMatch(
+            /artifact directory .* must be a real directory, not a symbolic link or other non-directory, when --context supplies trusted PR coordinates; pass the resolved artifact directory path/,
+          );
+        }
       }
     },
   );

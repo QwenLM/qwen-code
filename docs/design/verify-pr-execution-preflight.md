@@ -227,6 +227,9 @@ too. The PR-tree copy of the snapshot is never authoritative, and an artifact
 are known, a `pr<N>-verify-*` directory whose N differs is refused for both
 comment and local-trust approvals, even at the same head on a shared branch; a
 missing or cross-identifying artifact context cannot change that host identity.
+For this comparison the artifact ROOT must itself be a real directory, not a
+symlink or other non-directory; an alias named for the approved PR must not hide
+a different target. The operator must pass the resolved artifact directory path.
 Before any context or approval file is written, the time-stamped artifact directory must
 be a real directory, not a symbolic link or other file, whose fully canonical
 path is exactly the expected direct child of the real `tmp/` directory. An
