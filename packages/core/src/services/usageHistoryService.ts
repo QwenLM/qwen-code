@@ -221,7 +221,7 @@ export function metricsToUsageRecord(
   endTime: number,
   metrics: SessionMetrics,
 ): UsageSummaryRecord {
-  const models: UsageSummaryRecord['models'] = {};
+  const models = Object.create(null) as UsageSummaryRecord['models'];
   const requestExecutionIds = getRequestExecutionIds(metrics);
   let totalLatencyMs = 0;
   for (const [name, m] of Object.entries(metrics.models)) {
@@ -1157,6 +1157,14 @@ function toolsAndFilesCoverRun(
   rebuilt: UsageSummaryRecord,
   run: UsageSummaryRecord,
 ): boolean {
+  if (
+    !rebuilt.tools?.byName ||
+    !run.tools?.byName ||
+    !rebuilt.files ||
+    !run.files
+  ) {
+    return false;
+  }
   return (
     rebuilt.tools.totalCalls >= run.tools.totalCalls &&
     rebuilt.tools.totalSuccess >= run.tools.totalSuccess &&

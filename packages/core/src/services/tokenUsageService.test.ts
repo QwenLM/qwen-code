@@ -29,6 +29,7 @@ import {
   resetTokenUsageFailureLogging,
 } from './tokenUsageService.js';
 import type { TokenUsageDailyByModel } from './tokenUsageService.js';
+import { buildUsageDashboard } from './usage-dashboard-service.js';
 
 describe('tokenUsageService', () => {
   let tempDir: string;
@@ -641,6 +642,47 @@ describe('tokenUsageService', () => {
       readFile(getTokenUsageFilePath('2026-05'), 'utf-8'),
     );
     expect(fileContent).toContain('"model":"model-a"');
+  });
+
+  it('reads pre-upgrade chat-completions reasoning only once', async () => {
+    // The old writer could store 1000 + 200 + 50 as total=1250 for openai.
+    const filePath = getTokenUsageFilePath('2026-05');
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        id: 'legacy-reasoning',
+        timestamp: '2026-05-25T10:00:00.000Z',
+        localDate: '2026-05-25',
+        localMonth: '2026-05',
+        sessionId: 'legacy-session',
+        model: 'qwen-model',
+        authType: 'openai',
+        source: 'main',
+        inputTokens: 1000,
+        outputTokens: 200,
+        cachedTokens: 0,
+        thoughtsTokens: 50,
+        totalTokens: 1250,
+        apiDurationMs: 50,
+      }) + '\n',
+    );
+
+    const ledgerDaily = await loadTokenUsageDailyByModel('2026-05-25');
+
+    expect(ledgerDaily.get('2026-05-25')?.get('qwen-model')).toMatchObject({
+      outputTokens: 200,
+      totalTokens: 1200,
+    });
+    const dashboard = buildUsageDashboard([], { range: 'today' }, ledgerDaily);
+    expect(dashboard.summary).toMatchObject({
+      totalTokens: 1200,
+      inputTokens: 1000,
+      outputTokens: 200,
+      thoughtsTokens: 50,
+      requests: 1,
+    });
   });
 
   it('aggregates the ledger per local day and model', async () => {

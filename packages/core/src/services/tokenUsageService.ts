@@ -375,12 +375,17 @@ async function accumulateMonthByDay(
           };
           byModel.set(record.model, totals);
         }
+        // Older writers could already include thoughts in totalTokens.
+        // Normalize at the record boundary, where authType is still available.
+        const normalizedOutput = outputIncludesThoughts(record.authType)
+          ? record.outputTokens
+          : record.outputTokens + record.thoughtsTokens;
         totals.requests += 1;
         totals.inputTokens += record.inputTokens;
-        totals.outputTokens += record.outputTokens;
+        totals.outputTokens += normalizedOutput;
         totals.cachedTokens += record.cachedTokens;
         totals.thoughtsTokens += record.thoughtsTokens;
-        totals.totalTokens += record.totalTokens;
+        totals.totalTokens += record.inputTokens + normalizedOutput;
         totals.apiDurationMs += record.apiDurationMs;
       }
     }

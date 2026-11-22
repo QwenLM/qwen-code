@@ -22,8 +22,8 @@ import {
 import { createManagedHarnessHandle } from './managed-harness-factory.js';
 import { TurnBudget } from '../core/turn-budget.js';
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
-import { ApiResponseEvent } from '../telemetry/types.js';
-import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
+import { ApiResponseEvent, type ApiErrorEvent } from '../telemetry/types.js';
+import { EVENT_API_ERROR, EVENT_API_RESPONSE } from '../telemetry/constants.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import { enableManagedSessionDiagnostics } from './managed-session-diagnostics.js';
 import { captureManagedContext } from './managed-context-snapshot.js';
@@ -707,6 +707,47 @@ describe('Managed Hook model activation', () => {
     sessions.push(restored);
     expect(await restored.authority.harnessRunAuthorization()).toEqual({
       status: 'initial',
+    });
+  });
+
+  it('keeps new failure latency out of the closed legacy usage payload', async () => {
+    const { session, controller, options } = await fixture();
+    uiTelemetryService.addEvent(
+      {
+        'event.name': EVENT_API_ERROR,
+        model: evaluation.model,
+        duration_ms: 75,
+        error_message: 'mock_failed',
+      } as ApiErrorEvent & { 'event.name': typeof EVENT_API_ERROR },
+      options.sessionId,
+    );
+
+    await controller.runHookOperation(operation, async (scope) => {
+      await scope.evaluate(evaluation, async (usage) => {
+        usage({ totalTokenCount: 7 });
+        return result;
+      });
+    });
+
+    const attempts = session.authority
+      .eventsInSequenceRange(1, session.authority.committedSequence)
+      .filter((event) => event.kind === 'model.attempt');
+    const usage = JSON.parse(
+      (
+        await session.resources.read(
+          attempts.at(-1)!.payload['usageRef'] as never,
+        )
+      ).toString(),
+    );
+    expect(usage.models[evaluation.model].api).toEqual({
+      totalRequests: 1,
+      totalErrors: 1,
+      totalLatencyMs: 75,
+    });
+    expect(usage.models[evaluation.model].bySource.main.api).toEqual({
+      totalRequests: 1,
+      totalErrors: 1,
+      totalLatencyMs: 75,
     });
   });
 

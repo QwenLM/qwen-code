@@ -272,6 +272,22 @@ class LocalManagedHookModelScope {
           route,
           success ? context : null,
         );
+      const legacyModels = diagnosticsRef
+        ? undefined
+        : structuredClone(
+            uiTelemetryService.getMetricsForSession(
+              authority.sessionHeader.sessionKey.sessionId,
+            ).models,
+          );
+      if (legacyModels) {
+        for (const model of Object.values(legacyModels)) {
+          // Legacy managed consumers validate an exact three-key api object.
+          delete model.api.totalErrorLatencyMs;
+          for (const source of Object.values(model.bySource)) {
+            delete source.api.totalErrorLatencyMs;
+          }
+        }
+      }
       const usageBytes = diagnosticsRef
         ? await this.session.resources.read(diagnosticsRef)
         : Buffer.from(
@@ -280,9 +296,7 @@ class LocalManagedHookModelScope {
               ...route,
               attempts: usage,
               budget,
-              models: uiTelemetryService.getMetricsForSession(
-                authority.sessionHeader.sessionKey.sessionId,
-              ).models,
+              models: legacyModels,
             }),
           );
       if (!finalChatRecord) {

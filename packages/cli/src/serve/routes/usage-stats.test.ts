@@ -10,10 +10,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
-import type {
-  TokenUsageDailyByModel,
-  UsageDashboardSources,
-  UsageSummaryRecord,
+import {
+  getTokenUsageFilePath,
+  Storage,
+  type TokenUsageDailyByModel,
+  type TokenUsageRecord,
+  type UsageDashboardSources,
+  type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './usage-stats.js';
 
@@ -227,6 +230,122 @@ describe('usage-stats route (real loader against seeded history)', () => {
     if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
     else process.env['QWEN_HOME'] = originalQwenHome;
     fs.rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  describe('runtime-scoped ledgers', () => {
+    let roots: string;
+    let originalRuntimeDir: string | undefined;
+
+    const ledgerRow = (
+      id: string,
+      inputTokens: number,
+      outputTokens: number,
+      thoughtsTokens = 0,
+      totalTokens = inputTokens + outputTokens,
+    ): TokenUsageRecord => ({
+      schemaVersion: 1,
+      id,
+      timestamp: '2026-05-25T10:00:00.000Z',
+      localDate: '2026-05-25',
+      localMonth: '2026-05',
+      sessionId: id,
+      model: 'qwen-max',
+      authType: 'openai',
+      source: 'main',
+      inputTokens,
+      outputTokens,
+      cachedTokens: 0,
+      thoughtsTokens,
+      totalTokens,
+      apiDurationMs: 50,
+    });
+
+    const seedLedger = (root: string, row: TokenUsageRecord): void => {
+      Storage.runWithResolvedRuntimeBaseDir(root, () => {
+        const file = getTokenUsageFilePath(row.localMonth);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.writeFileSync(file, JSON.stringify(row) + '\n');
+      });
+    };
+
+    beforeEach(() => {
+      roots = fs.mkdtempSync(path.join(tmpHome, 'runtime-roots-'));
+      originalRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      Storage.setRuntimeBaseDir(null);
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-05-25T10:00:00.000Z'));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      Storage.setRuntimeBaseDir(null);
+      if (originalRuntimeDir === undefined)
+        delete process.env['QWEN_RUNTIME_DIR'];
+      else process.env['QWEN_RUNTIME_DIR'] = originalRuntimeDir;
+    });
+
+    it('reads a ledger from its owning runtime instead of the ambient route root', async () => {
+      const owner = path.join(roots, 'owner');
+      const ambient = path.join(roots, 'ambient');
+      process.env['QWEN_RUNTIME_DIR'] = ambient;
+      seedLedger(owner, ledgerRow('owned-request', 500, 100));
+      expect(fs.existsSync(getTokenUsageFilePath('2026-05'))).toBe(false);
+
+      const app = mount({ getLedgerRuntimeBaseDirs: () => [owner] });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 600,
+        outputTokens: 100,
+        requests: 1,
+      });
+    });
+
+    it('merges the known runtime roots rather than selecting only one', async () => {
+      const rootA = path.join(roots, 'a');
+      const rootB = path.join(roots, 'b');
+      process.env['QWEN_RUNTIME_DIR'] = path.join(roots, 'ambient');
+      seedLedger(rootA, ledgerRow('request-a', 500, 100));
+      seedLedger(rootB, ledgerRow('request-b', 800, 200));
+
+      const app = mount({
+        getLedgerRuntimeBaseDirs: () => [rootA, rootB, rootA],
+      });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary).toMatchObject({
+        totalTokens: 1600,
+        outputTokens: 300,
+        requests: 2,
+      });
+    });
+
+    it('falls back to global records when no ledger runtime is known', async () => {
+      const ambient = path.join(roots, 'ambient');
+      process.env['QWEN_RUNTIME_DIR'] = ambient;
+      seedLedger(ambient, ledgerRow('unrelated-request', 9999, 0));
+      const timestamp = Date.parse('2026-05-25T10:00:00.000Z');
+      fs.writeFileSync(
+        path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl'),
+        JSON.stringify(
+          rec({
+            sessionId: 'without-known-runtime',
+            timestamp,
+            totalTokens: 600,
+            inputTokens: 500,
+          }),
+        ) + '\n',
+      );
+
+      const app = mount({ getLedgerRuntimeBaseDirs: () => [] });
+      const res = await request(app).get('/usage/dashboard?range=today');
+
+      expect(res.status).toBe(200);
+      expect(res.body.summary.totalTokens).toBe(600);
+      expect(res.body.summary.sessions).toBe(1);
+    });
   });
 
   it('returns real aggregated totals from usage_record.jsonl', async () => {

@@ -8,10 +8,10 @@
  * Read-only usage-dashboard surface behind the Web Shell Daemon Status
  * "统计 / Usage" tab. Serves the selected range's (`today`/`week`/`month`)
  * flattened token totals plus a trailing per-day heatmap, computed by core's
- * `buildUsageDashboard` from two local sources (global `~/.qwen`, cross-project):
- * the per-request token ledger, which places every response on the local day it
- * happened, and the session history (`usage_record.jsonl` unioned with a replay
- * of recent transcripts) for sessions, tool calls, changed lines and skills. A
+ * `buildUsageDashboard` from token ledgers in the registered workspaces' own
+ * runtime roots and the global session history (`usage_record.jsonl` unioned with
+ * a replay of recent transcripts) for sessions, tool calls, changed lines and
+ * skills. A
  * day the ledger covers replaces that day's session-record tokens rather than
  * adding to them. The load is read-only (never writes `~/.qwen`).
  *
@@ -47,6 +47,8 @@ export interface RegisterUsageStatsRoutesDeps {
   loadSources?: () => Promise<UsageDashboardSources>;
   /** Coalescing/refresh window for the cached sources. Defaults to 60s. */
   cacheTtlMs?: number;
+  /** Resolved ledger roots for the current daemon's registered workspaces. */
+  getLedgerRuntimeBaseDirs?: () => readonly string[];
 }
 
 /** Parse `?range=`; anything invalid falls back to `today` (matches core). */
@@ -70,7 +72,9 @@ export function registerUsageStatsRoutes(
   app: Application,
   deps: RegisterUsageStatsRoutesDeps = {},
 ): void {
-  const loadSources = deps.loadSources ?? (() => loadUsageDashboardSources());
+  const loadSources =
+    deps.loadSources ??
+    (() => loadUsageDashboardSources(deps.getLedgerRuntimeBaseDirs?.()));
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 
   // Closure-scoped, range-independent source cache (one daemon per process).

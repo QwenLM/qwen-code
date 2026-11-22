@@ -509,6 +509,15 @@ than a fabricated attribution.
   OpenAI chat completions, OpenAI Responses and Qwen OAuth already include
   reasoning in output; Gemini-style providers keep it separate. The generic
   fallback for unrecognized conventions remains unchanged.
+- **Legacy totals are normalized per persisted record.** A pre-upgrade writer
+  could include reasoning in `totalTokens` even when `outputTokens` already did.
+  The ledger reader uses `authType` while accumulating each row, then carries
+  `inputTokens` plus reasoning-once output into the day/model totals. This
+  changes only the read-side view; it neither rewrites nor migrates old rows.
+- **Legacy managed usage keeps its closed api shape.** Failure-latency tracking
+  remains available to the usage statistics, but the non-diagnostics managed
+  serializer strips that new counter from model and source `api` objects rather
+  than extending the consumers' exact three-key contract.
 - Ledger writes are gated by `config.getUsageStatisticsEnabled()` and skip internal
   prompt ids (`loggers.ts`), so ledger coverage is not guaranteed.
 - Do not add project paths or content to ledger records.
@@ -523,11 +532,15 @@ than a fabricated attribution.
 - **Ledger read cost.** Measured 862 ms to stream and parse 771,906 records
   (~304 MB, 5 month files); the combined source load measured 29.4 s, still
   dominated by the transcript replay, and the route caches it for 60 s.
-- **Directory scope.** The ledger lives under `Storage.getRuntimeBaseDir()`, the
-  same base its writer uses, while the session history is read from
-  `Storage.getGlobalQwenDir()`. They coincide by default; a deployment that pins a
-  per-workspace runtime directory would aggregate that runtime's ledger next to
-  global session history.
+- **Directory scope.** The route reads the ledger roots of registered workspaces,
+  plus the global `~/.qwen` root used by default CLI sessions. Shared roots are
+  loaded once; distinct known roots are merged. It does not fall back from a known
+  workspace root to an unrelated ambient process runtime. Global session history
+  is loaded independently and is never narrowed to those workspaces. For a
+  historical runtime that is no longer discoverable, records retain their
+  conservative session-record attribution rather than being rewritten from a
+  wrong-scope ledger; this does not invent per-request attribution for the
+  undiscoverable root.
 - **Existing history is mostly replay.** 1,482 of 2,065 persisted records (72%)
   belong to ids with zero ledger requests, totalling 376,868,201,294 tokens. The
   ledger only starts 2026-07-30 and a run with usage statistics disabled also
@@ -550,12 +563,14 @@ than a fabricated attribution.
   `loadUsageHistory` that this PR does not convert (for example the per-project
   token column and the pre-repair fallback window) still show the old numbers for
   that history. Only newly written records are correct.
-- **Caching is limited to completed months.** The TUI immutably reuses old-month
-  aggregates to avoid reparsing hundreds of megabytes on every open, and coalesces
-  concurrent pending reads. The current month is always re-read, so a real-append
-  test sees the new tokens on the next open, and `_resetStatsLedgerCacheForTest`
-  clears the caller's completed-month cache in addition to pending reads. The
-  daemon retains its independent 60-second source cache.
+- **Caching is limited to completed months.** The TUI validates completed-month
+  aggregates against the latest `(mtimeMs, size)` before reuse, so a late append or
+  replacement invalidates the cached month instead of remaining stale. It also
+  coalesces concurrent pending reads. The current month is always re-read, so a
+  real-append test sees the new tokens on the next open, and
+  `_resetStatsLedgerCacheForTest` clears the caller's completed-month cache in
+  addition to pending reads. The daemon retains its independent 60-second source
+  cache.
 
 ## Validation plan
 

@@ -836,6 +836,43 @@ describe('UiTelemetryService', () => {
       expect(Object.getPrototypeOf(metrics.statsModels)).toBeNull();
     });
 
+    it.each(['constructor', 'toString', 'hasOwnProperty', '__proto__'])(
+      'preserves model %s after cloning and replay restore',
+      (modelName) => {
+        const service = new UiTelemetryService();
+        const event = apiResponse(modelName, 10, [100, 20, 120, 0, 0]);
+        service.addEvent(event, 'session-a');
+        const snapshot = service.snapshotForReplay('session-a');
+        service.addEvent(event, 'session-a');
+
+        expect(
+          service.getMetricsForSession('session-a').models[modelName],
+        ).toMatchObject({
+          api: { totalRequests: 2 },
+          tokens: { prompt: 200, candidates: 40, total: 240 },
+        });
+        expect(Object.getPrototypeOf(snapshot.metrics.models)).toBeNull();
+
+        service.restoreFromReplaySnapshot(snapshot);
+        service.addEvent(event, 'session-a');
+
+        expect(
+          service.getMetricsForSession('session-a').models[modelName],
+        ).toMatchObject({
+          api: { totalRequests: 2 },
+          tokens: { prompt: 200, candidates: 40, total: 240 },
+        });
+        expect(
+          Object.getPrototypeOf(
+            service.getMetricsForSession('session-a').models,
+          ),
+        ).toBeNull();
+        expect(service.getLiveMetrics().models[modelName].tokens.total).toBe(
+          240,
+        );
+      },
+    );
+
     it('restores legacy invocation ids from session-scoped prompt ids', () => {
       const addResponse = (
         subagentId: string,
@@ -1883,6 +1920,27 @@ describe('UiTelemetryService live usage accounting', () => {
       new Date('2019-01-02T03:04:05Z'),
     );
     expect(service.getRunStartTime().getTime()).toBe(runStart);
+  });
+
+  it('preserves a provider-supplied "__proto__" model key in a persisted run', () => {
+    const service = new UiTelemetryService();
+    service.addEvent(apiResponse('__proto__', 10, [100, 20, 120, 0, 0]), 's');
+
+    const record = metricsToRunUsageRecord(
+      's',
+      '/project',
+      1000,
+      2000,
+      service.getMetricsForSession('s'),
+    );
+
+    expect(
+      Object.prototype.hasOwnProperty.call(record.models, '__proto__'),
+    ).toBe(true);
+    expect(record.models['__proto__']).toMatchObject({
+      requests: 1,
+      totalTokens: 120,
+    });
   });
 
   it('keeps two independent failed runs by their execution identities', () => {

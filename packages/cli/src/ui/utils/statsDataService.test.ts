@@ -481,6 +481,30 @@ describe('loadStatsData — per-request ledger accounting', () => {
   const reportTokens = (r: AggregatedReport) =>
     Object.values(r.models).reduce((s, m) => s + m.totalTokens, 0);
 
+  it('preserves ledger totals for a provider-supplied "__proto__" model key', async () => {
+    const timestamp = Date.now();
+    const modelUsage = {
+      requests: 1,
+      inputTokens: 400,
+      outputTokens: 100,
+      cachedTokens: 0,
+      thoughtsTokens: 0,
+      totalTokens: 500,
+      apiDurationMs: 50,
+    };
+    const ledgerDaily: TokenUsageDailyByModel = new Map([
+      [dayKey(timestamp), new Map([['__proto__', modelUsage]])],
+    ]);
+    mockedLoadUsageHistory.mockResolvedValue([makeRecord({ timestamp })]);
+    vi.mocked(loadLedgerOrEmpty).mockResolvedValue(ledgerDaily);
+
+    const data = await loadStatsData('today');
+
+    expect(reportTokens(data.report)).toBe(500);
+    expect(data.report.models['__proto__']?.totalTokens).toBe(500);
+    expect(data.report.totalRequests).toBe(1);
+  });
+
   const weekdaysWithSparseWeekends = () => {
     vi.setSystemTime(new Date('2026-11-22T12:00:00Z'));
     const at = (day: string) => Date.parse(`${day}T12:00:00Z`);

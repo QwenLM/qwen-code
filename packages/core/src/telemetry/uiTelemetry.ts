@@ -286,6 +286,10 @@ const cloneSessionMetrics = (metrics: SessionMetrics): SessionMetrics => {
   if (executionIds) {
     executionIdsByMetrics.set(clone, new Set(executionIds));
   }
+  clone.models = Object.assign(
+    Object.create(null) as SessionMetrics['models'],
+    clone.models,
+  );
   for (const model of Object.values(clone.models)) {
     model.bySource = Object.assign(
       Object.create(null) as Record<string, ModelMetricsCore>,
@@ -405,7 +409,7 @@ const getLegacySubagentId = (
 };
 
 const createInitialMetrics = (): SessionMetrics => ({
-  models: {},
+  models: Object.create(null) as SessionMetrics['models'],
   tools: {
     totalCalls: 0,
     totalSuccess: 0,

@@ -65,7 +65,7 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
 
 `GET /usage/dashboard`（`packages/cli/src/serve/routes/usage-stats.ts`）把加载好的数据源缓存 60 秒，
 并按区间重跑 `buildUsageDashboard`。本次改动之前，数据源只有会话历史：持久的 `usage_record.jsonl`
-与有界的 transcript 重放取并集，按 sessionId 去重（后者胜、持久优先）。为 #4479 引入的逐请求台账
+与有界的 transcript 重放取并集，按 sessionId 去重；去重时优先采用已有的持久记录或经验证的重建快照，避免转录副本与已知运行被重复计入。为 #4479 引入的逐请求台账
 （`packages/core/src/services/tokenUsageService.ts`）当时已按每次 API 响应存储 `localDate`、
 `localMonth` 与 `authType`，但面板并不读取它。
 
@@ -312,6 +312,11 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   `apiResponseEventToTokenUsageRecord` 改用共享的 `outputIncludesThoughts`，而不是无条件加推理。
   OpenAI chat completions、OpenAI Responses 与 Qwen OAuth 的 output 已含推理；Gemini 类 provider 的推理另计。
   未识别 provider 的通用回退保持不变。
+- **逐条读取时归一化旧合计。** 升级前的写入方可能在 `outputTokens` 已含推理时又把推理计入 `totalTokens`。
+  台账读取在逐条聚合时依据 `authType` 采用只计一次推理的 output，并将 input 与该 output 之和带入按日 / 模型合计。
+  这只改变读取视图，不写回或迁移旧行。
+- **旧版托管用量保持封闭的 api 形状。** 失败耗时仍可供用量统计使用，但非 diagnostics 的托管序列化会移除
+  model 与 source 的 `api` 对象里的这个新增计数，不扩展消费方恰好三个键的既有契约。
 - 台账写入受 `config.getUsageStatisticsEnabled()` 门控，且跳过 internal prompt id
   （见 `loggers.ts`），因此台账覆盖并不保证。
 - 不得向台账记录加入 project 路径或内容。
@@ -324,9 +329,10 @@ Web Shell 的 Daemon 状态「用量」页高估了 token 消耗。以逐请求�
   早于台账功能的历史属于同一类缺口。
 - **台账读取代价。** 实测流式解析 771,906 条记录（约 304 MB、5 个按月文件）耗时 862 ms；
   两个数据源合并加载实测 29.4 s，仍由 transcript 重放主导，路由缓存 60 秒。
-- **目录作用域。** 台账位于 `Storage.getRuntimeBaseDir()` 之下（与其写入方同一个基目录），
-  而会话历史读自 `Storage.getGlobalQwenDir()`。默认二者重合；若部署为每个工作空间钉住独立的运行时目录，
-  就会把该运行时的台账与全局会话历史放在一起聚合。
+- **目录作用域。** 路由读取已注册工作空间各自的台账根目录，以及默认 CLI 会话使用的全局 `~/.qwen` 根目录。
+  相同根目录只读一次，相异的已知根目录合并；不会从已知工作空间的根目录退回到无关的进程 ambient runtime。
+  全局会话历史独立发现，不收窄为这些工作空间。对已经无法发现的历史 runtime，保留记录的保守归属，
+  而不是用错误作用域的台账改写它；这不虚构无法发现根目录的逐请求归属。
 - **存量历史大部分是重放。** 2,065 条持久记录中有 1,482 条（72%）所属 id 的台账请求数为零，
   合计 376,868,201,294 token。台账只从 2026-07-30 开始，且关闭用量统计的运行同样不写台账，
   所以这是重放规模的**上界**，并不能证明这些记录每一条都虚增。

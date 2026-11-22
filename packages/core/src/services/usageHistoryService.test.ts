@@ -1975,6 +1975,65 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(records.every((record) => !record.transcriptRebuild)).toBe(true);
   });
 
+  it('does not replace an identityless run merely because a rebuild has identities', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-mixed-identities', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+        requestExecutionIds: ['replayed-request'],
+      },
+      runRec('sess-mixed-identities', 500, t0 + 10_000, t0 + 20_000),
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBeUndefined();
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(500);
+  });
+
+  it('does not cover a legacy run with lower per-model counters', () => {
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-lower-counters', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+        models: {
+          'qwen-max': {
+            requests: 0,
+            inputTokens: 1000,
+            outputTokens: 0,
+            cachedTokens: 0,
+            thoughtsTokens: 0,
+            totalTokens: 1000,
+          },
+        },
+      },
+      runRec('sess-lower-counters', 500, t0 + 10_000, t0 + 20_000),
+    ]);
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.transcriptRebuild).toBeUndefined();
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(500);
+  });
+
+  it('retains a known run when a rebuilt record lacks tool telemetry', () => {
+    const run = runRec('sess-missing-tools', 500, t0 + 10_000, t0 + 20_000);
+    const records = dedupBySessionId([
+      {
+        ...persistedRec('sess-missing-tools', 1000),
+        startTime: t0,
+        timestamp: t0 + 120_000,
+        transcriptRebuild: true,
+        tools: undefined,
+      } as unknown as UsageSummaryRecord,
+      run,
+    ]);
+
+    expect(records).toEqual([run]);
+  });
+
   it('keeps last-wins for cumulative records, which are copies not runs', async () => {
     // Pre-run-scoped history: a resume replayed the conversation's history into
     // each record, so disjoint windows still describe the same spend.

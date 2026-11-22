@@ -19,6 +19,7 @@ import {
 } from './tokenUsageService.js';
 import { outputTokenCount } from '../telemetry/gen-ai-usage.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { Storage } from '../config/storage.js';
 
 const debugLogger = createDebugLogger('USAGE_DASHBOARD');
 
@@ -499,15 +500,53 @@ export async function loadLedgerOrEmpty(
  * changed lines and skills) and the per-request ledger's per-day counters (for
  * everything token-bearing). Read-only. The session history can be I/O heavy on
  * large histories, so callers should cache the pair and re-run
- * {@link buildUsageDashboard} per range.
+ * {@link buildUsageDashboard} per range. With an explicit root list, only those
+ * known roots are read; an empty list retains the independent global history
+ * instead of mixing a coincidental ambient ledger into it. Without the list,
+ * the current runtime root is used.
  */
-export async function loadUsageDashboardSources(): Promise<UsageDashboardSources> {
-  const [records, ledgerDaily] = await Promise.all([
+export async function loadUsageDashboardSources(
+  ledgerRuntimeBaseDirs?: readonly string[],
+): Promise<UsageDashboardSources> {
+  const sinceLocalDate = localDateKey(
+    Date.now() - LEDGER_WINDOW_DAYS * MS_PER_DAY,
+  );
+  const runtimeRoots = ledgerRuntimeBaseDirs
+    ? [...new Set(ledgerRuntimeBaseDirs)]
+    : [undefined];
+  const [records, ledgerTables] = await Promise.all([
     loadUsageHistoryWithLive(),
-    loadLedgerOrEmpty(
-      localDateKey(Date.now() - LEDGER_WINDOW_DAYS * MS_PER_DAY),
+    Promise.all(
+      runtimeRoots.map((runtimeRoot) =>
+        runtimeRoot
+          ? Storage.runWithResolvedRuntimeBaseDir(runtimeRoot, () =>
+              loadLedgerOrEmpty(sinceLocalDate),
+            )
+          : loadLedgerOrEmpty(sinceLocalDate),
+      ),
     ),
   ]);
+  const ledgerDaily: TokenUsageDailyByModel = new Map();
+  for (const table of ledgerTables) {
+    for (const [day, models] of table) {
+      const targetModels = ledgerDaily.get(day) ?? new Map();
+      ledgerDaily.set(day, targetModels);
+      for (const [model, totals] of models) {
+        const existing = targetModels.get(model);
+        if (!existing) {
+          targetModels.set(model, { ...totals });
+          continue;
+        }
+        existing.requests += totals.requests;
+        existing.inputTokens += totals.inputTokens;
+        existing.outputTokens += totals.outputTokens;
+        existing.cachedTokens += totals.cachedTokens;
+        existing.thoughtsTokens += totals.thoughtsTokens;
+        existing.totalTokens += totals.totalTokens;
+        existing.apiDurationMs += totals.apiDurationMs;
+      }
+    }
+  }
   return { records, ledgerDaily };
 }
 

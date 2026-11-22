@@ -161,7 +161,8 @@ function applyTokenWindow(
   endKey: string,
 ): void {
   const models = sumUsageWindowByModel(table, startKey, endKey);
-  const next: AggregatedReport['models'] = {};
+  // Provider model names are arbitrary keys, including "__proto__".
+  const next = Object.create(null) as AggregatedReport['models'];
   let requests = 0;
   let latency = 0;
   for (const [model, m] of models) {
