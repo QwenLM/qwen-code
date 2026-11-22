@@ -47,7 +47,6 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFe
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.admissionClosed;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.fence;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.hasHarnessDrain;
-import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.localStorageOwnerKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requirePhysicalStorageAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireStorageAdmission;
@@ -569,12 +568,10 @@ public final class JdbcRuntimeBindingRepository
             lockPlacementDomain(connection, tenantId);
             ExecutionAdmissionPlacement.lockDrainRoot(connection, tenantId, harnessSessionId);
             try (PreparedStatement statement = connection.prepareStatement(
-                                    "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'DRAINING' OR claim_lease_until IS NOT NULL THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'DRAINING', claim_lease_until = NULL")) {
-                statement.setString(1, harnessDrainKey(tenantId));
-                statement.setString(2, harnessDrainKey(harnessSessionId));
-                JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
-                JdbcRepositorySupport.setIdentity(statement, 4, harnessSessionId);
-                JdbcRepositorySupport.setIdentity(statement, 5, harnessSessionId);
+                                    "INSERT INTO ma_session_head (tenant_id, harness_session_id, session_id, head_kind, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, 'HARNESS', 'DRAINING', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'DRAINING' OR claim_lease_until IS NOT NULL THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'DRAINING', claim_lease_until = NULL")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+                JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
+                JdbcRepositorySupport.setIdentity(statement, 3, harnessSessionId);
                 statement.executeUpdate();
             }
             return null;
@@ -589,9 +586,9 @@ public final class JdbcRuntimeBindingRepository
                     try (PreparedStatement statement =
                             connection.prepareStatement(
                                     "SELECT phase FROM ma_session_head"
-                                            + " WHERE tenant_key = ? AND harness_key = ?")) {
-                        statement.setString(1, harnessDrainKey(tenantId));
-                        statement.setString(2, harnessDrainKey(harnessSessionId));
+                                            + " WHERE tenant_id = ? AND harness_session_id = ?")) {
+                        JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+                        JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
                         try (ResultSet row = statement.executeQuery()) {
                             return row.next() && "DRAINING".equals(row.getString(1));
                         }
@@ -911,12 +908,11 @@ public final class JdbcRuntimeBindingRepository
         lockPlacementDomain(connection, tenantId);
         try (PreparedStatement fence = connection.prepareStatement(
                         "SELECT tenant_id, harness_session_id, phase FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ? FOR UPDATE")) {
-            fence.setString(1, harnessDrainKey(tenantId));
-            fence.setString(2, harnessDrainKey(harnessSessionId));
+                                + " tenant_id = ? AND harness_session_id = ? FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(fence, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(fence, 2, harnessSessionId);
             try (ResultSet row = fence.executeQuery()) {
-                if (!row.next() || !tenantId.equals(row.getString(1)) || !harnessSessionId.equals(row.getString(2))
-                        || !"DRAINING".equals(row.getString(3))) {
+                if (!row.next() || !"DRAINING".equals(row.getString(3))) {
                     throw admissionClosed();
                 }
             }

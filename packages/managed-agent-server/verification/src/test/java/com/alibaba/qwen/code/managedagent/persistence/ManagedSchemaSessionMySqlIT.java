@@ -96,7 +96,6 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                     new Object[] {
                         ManagedSchemaKeys.key(scope, identity),
                         scope,
-                        scope,
                         identity,
                         tenant,
                         session,
@@ -109,7 +108,6 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
             resources.add(
                     new Object[] {
                         ManagedSchemaKeys.key(scope, identity),
-                        scope,
                         tenant,
                         session,
                         identity,
@@ -120,14 +118,14 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                     });
         }
         jdbc.batchUpdate(
-                "INSERT INTO ma_operation (operation_key, scope_key, session_scope_key,"
+                "INSERT INTO ma_operation (operation_key, scope_key,"
                     + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
                     + " target_key, request_digest, request_json, state, phase, delivery_state,"
-                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
+                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
                     + " ?, ?, 'COMPLETED', 'COMPLETED', 'COMPLETED', ?, ?)",
                 operations);
         jdbc.batchUpdate(
-                "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, ?, 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 resources);
     }
 }

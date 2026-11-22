@@ -182,9 +182,9 @@ final class WorkspaceMigrationAdmission {
         }
         if (workspace == null) {
             var heads = jdbc.query("SELECT tenant_id, session_id, workspace_id FROM ma_session_head"
-                    + " WHERE tenant_key = ? AND harness_key = ? AND head_kind = 'MANAGED_SESSION'",
+                    + " WHERE tenant_id = ? AND harness_session_id = ? AND head_kind = 'MANAGED_SESSION'",
                     (row, index) -> new String[] {row.getString("tenant_id"), row.getString("session_id"), row.getString("workspace_id")},
-                    RuntimeAdmissionFences.harnessDrainKey(tenant), RuntimeAdmissionFences.harnessDrainKey(session));
+                    tenant, session);
             if (heads.isEmpty()) {
                 return null;
             }

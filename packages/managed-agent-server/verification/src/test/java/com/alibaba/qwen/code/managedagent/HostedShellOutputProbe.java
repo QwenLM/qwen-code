@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
@@ -176,13 +175,13 @@ final class HostedShellOutputProbe implements AutoCloseable {
     // Led by the indexed session scope key, as in HostedGateTestSupport: the
     // raw tenant+session form scans the lane's accumulated ma_resource rows.
     private List<Map<String, Object>> resources(String id, String kind) {
-        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND kind = ? AND tenant_id = ? AND session_id = ?",
-                ManagedSessionStore.sessionScopeKey(tenant, id), kind, tenant, id);
+        return jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND kind = ? AND tenant_id = ? AND session_id = ?",
+                tenant, id, kind, tenant, id);
     }
 
     private byte[] resource(String id, String resourceId, String digest, int length) throws Exception {
-        var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                ManagedSessionStore.sessionScopeKey(tenant, id), resourceId, tenant, id);
+        var row = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                tenant, id, resourceId, tenant, id);
         byte[] bytes = (byte[]) row.get("inline_bytes");
         assertThat(bytes).hasSize(length);
         assertThat(((Number) row.get("byte_length")).intValue()).isEqualTo(length);
@@ -312,8 +311,8 @@ final class HostedShellOutputProbe implements AutoCloseable {
         assertThat(((Number) head.get("journal_revision")).longValue()).isEqualTo(revision);
         assertThat(((Number) head.get("committed_sequence")).longValue()).isEqualTo(sequence);
         assertThat(head.get("last_commit_digest")).isEqualTo(previous);
-        byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                byte[].class, ManagedSessionStore.sessionScopeKey(tenant, id), head.get("latest_checkpoint_resource_id"), tenant, id);
+        byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                byte[].class, tenant, id, head.get("latest_checkpoint_resource_id"), tenant, id);
         assertThat(JSON.readTree(checkpoint).path("continuation").path("phase").asText()).isEqualTo("await_runtime");
         if (report == null) {
             return;

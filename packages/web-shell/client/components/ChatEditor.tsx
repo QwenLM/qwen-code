@@ -22,6 +22,8 @@ import type {
   RefObject,
   DragEvent as ReactDragEvent,
   ChangeEvent as ReactChangeEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
 } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { useOptionalComposerWorkspace } from '../hooks/useComposerWorkspace.js';
@@ -74,6 +76,7 @@ import {
   getComposerTagDisplay,
   getComposerTagLabel,
   getComposerTagValue,
+  getFollowupCompletion,
 } from '../hooks/useComposerCore';
 import { AtMentionPanel } from './AtMentionPanel';
 import {
@@ -127,6 +130,9 @@ import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
+  ArrowDownIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   ChevronUpIcon,
@@ -139,6 +145,7 @@ import {
   Maximize2Icon,
   LoaderCircleIcon,
   SlashIcon,
+  TextCursorInputIcon,
   UploadIcon,
   XIcon,
 } from 'lucide-react';
@@ -2674,6 +2681,30 @@ export const ChatEditor = memo(
     }, [modelControlsDisabled, mobileModelSheet]);
     const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const isMobile = Boolean(core.mobileComposer);
+    // Touch-down blur guard shared by the mobile Send and Stop controls. Do
+    // not dismiss the software keyboard between touch-down and click: the
+    // resulting viewport resize would move the control out from under the same
+    // tap before its click is dispatched (#12462).
+    //
+    // Gate it on the pointer that started the press, not the composer backend:
+    // the history-search panel closes on an *unprevented* window `mousedown`
+    // (useComposerCore's outside handler bails on `defaultPrevented`), so
+    // swallowing a real mouse press would leave the panel open over the
+    // just-sent draft. A finger always emits `touchstart` first — which closes
+    // the panel — before the compatibility `mousedown`, so only touch presses
+    // suppress the blur.
+    const pressWasTouchRef = useRef(false);
+    const touchDownGuard = {
+      onTouchStart: () => {
+        pressWasTouchRef.current = true;
+      },
+      onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => {
+        pressWasTouchRef.current = event.pointerType !== 'mouse';
+      },
+      onMouseDown: (event: ReactMouseEvent<HTMLButtonElement>) => {
+        if (pressWasTouchRef.current) event.preventDefault();
+      },
+    };
     const [mobileFocused, setMobileFocused] = useState(false);
     const [expandedEditor, setExpandedEditor] = useState(false);
     const expandedSelectionRef = useRef<[number, number]>([0, 0]);
@@ -3195,6 +3226,7 @@ export const ChatEditor = memo(
           }`}
           onSelectWorkspace={onSelectWorkspace}
           onSelectHostedWorkspace={onSelectHostedWorkspace}
+          contentSide={core.mobileComposer ? 'bottom' : 'top'}
           onSelectStandalone={onSelectStandaloneTarget}
           onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
           onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
@@ -3205,6 +3237,7 @@ export const ChatEditor = memo(
         gitModeIntent && onGitModeIntentChange ? (
           <GitModePopover
             branch={gitBranch}
+            status={gitStatus}
             compact={compact}
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
@@ -4111,6 +4144,36 @@ export const ChatEditor = memo(
       </button>
     );
 
+    // Touch accept fills the textarea without submitting (desktop Tab
+    // semantics); Send with an empty input still submits the suggestion
+    // directly. The chip bar is the single touch accept surface — its
+    // content is its label — and it hides once the user starts typing.
+    const mobileFollowupSuggestion =
+      !disabled &&
+      core.mobileComposer &&
+      core.mobileComposer.value === '' &&
+      core.followupState?.isVisible &&
+      core.followupState.suggestion
+        ? core.followupState.suggestion
+        : null;
+    // The right key accepts on a typed prefix too, so its label follows the
+    // same completion the key performs, not the empty-draft chip rule.
+    const touchFollowupCompletionRaw =
+      core.mobileComposer && core.followupState?.isVisible
+        ? getFollowupCompletion(
+            core.mobileComposer.value,
+            core.followupState.suggestion,
+          )
+        : null;
+    // Label only announces an accept when there is an actual remainder; an
+    // exact-match draft falls through to the caret move, same as the key.
+    const touchFollowupCompletion =
+      touchFollowupCompletionRaw &&
+      core.mobileComposer &&
+      touchFollowupCompletionRaw.length > core.mobileComposer.value.length
+        ? touchFollowupCompletionRaw
+        : null;
+
     const primaryInput = (
       <>
         <div className={styles.editorArea}>
@@ -4129,6 +4192,9 @@ export const ChatEditor = memo(
               className={styles.mobileTextarea}
               value={core.mobileComposer.value}
               onChange={core.mobileComposer.onChange}
+              onCompositionStart={() => core.setComposing(true)}
+              onCompositionEnd={() => core.setComposing(false)}
+              onSelect={() => core.resetVerticalColumn()}
               onFocus={() => setMobileFocused(true)}
               onBlur={() => {
                 setMobileFocused(false);
@@ -4213,6 +4279,7 @@ export const ChatEditor = memo(
                   className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
                   disabled={cancelPreparing || !onCancel}
                   data-web-shell-composer-stop
+                  {...touchDownGuard}
                   aria-label={t('composerMobile.stop')}
                   onClick={(event) => {
                     event.stopPropagation();
@@ -4238,6 +4305,7 @@ export const ChatEditor = memo(
                     : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
+              {...touchDownGuard}
               onClick={(e) => {
                 e.stopPropagation();
                 if (submitLoading) {
@@ -4843,35 +4911,142 @@ export const ChatEditor = memo(
                 {!mobileContextRowVisible && (
                   <span className={styles.mobileEditingSpacer} />
                 )}
-                {mobileFocused && (
+                <div
+                  className={styles.mobileEditingKeys}
+                  data-web-shell-mobile-editing-keys
+                >
                   <button
                     type="button"
                     className={styles.toolBtn}
-                    aria-label={t('composerMobile.hideKeyboard')}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.caretUp')}
+                    title={t('composerMobile.caretUp')}
+                    data-web-shell-mobile-caret-up
                     onMouseDown={(event) => event.preventDefault()}
-                    onClick={() =>
-                      core.mobileComposer?.textareaRef.current?.blur()
-                    }
+                    onClick={() => core.pressEditingKey('up')}
                   >
-                    <KeyboardIcon />
+                    <ArrowUpIcon />
                   </button>
-                )}
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.caretDown')}
+                    title={t('composerMobile.caretDown')}
+                    data-web-shell-mobile-caret-down
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('down')}
+                  >
+                    <ArrowDownIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={
+                      touchFollowupCompletion
+                        ? t('composerMobile.acceptFollowup')
+                        : t('composerMobile.caretRight')
+                    }
+                    title={
+                      touchFollowupCompletion
+                        ? t('composerMobile.acceptFollowup')
+                        : t('composerMobile.caretRight')
+                    }
+                    data-web-shell-mobile-caret-right
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('right')}
+                  >
+                    <ArrowRightIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.toolBtn}
+                    disabled={disabled}
+                    aria-label={t('composerMobile.insertSlash')}
+                    title={t('composerMobile.insertSlash')}
+                    data-web-shell-mobile-insert-slash
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => core.pressEditingKey('slash')}
+                  >
+                    <SlashIcon />
+                  </button>
+                  <div className={styles.mobileEditingTail}>
+                    <button
+                      type="button"
+                      className={`${styles.toolBtn} ${
+                        mobileFocused ? '' : styles.mobileKeyboardPlaceholder
+                      }`}
+                      disabled={!mobileFocused}
+                      aria-hidden={!mobileFocused}
+                      aria-label={t('composerMobile.hideKeyboard')}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() =>
+                        core.mobileComposer?.textareaRef.current?.blur()
+                      }
+                    >
+                      <KeyboardIcon />
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.toolBtn}
+                      disabled={disabled}
+                      aria-label={t('composerMobile.expand')}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        const textarea =
+                          core.mobileComposer?.textareaRef.current;
+                        expandedSelectionRef.current = [
+                          textarea?.selectionStart ?? 0,
+                          textarea?.selectionEnd ?? 0,
+                        ];
+                        setExpandedEditor(true);
+                      }}
+                    >
+                      <Maximize2Icon />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+            {mobileFollowupSuggestion && (
+              <div
+                className={styles.mobileFollowup}
+                data-web-shell-mobile-followup
+              >
+                <button
+                  type="button"
+                  className={styles.mobileFollowupAccept}
+                  data-web-shell-mobile-followup-accept
+                  aria-label={`${t('composerMobile.acceptFollowup')}: ${mobileFollowupSuggestion}`}
+                  title={t('composerMobile.acceptFollowup')}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => core.onAcceptFollowup('tab')}
+                >
+                  <TextCursorInputIcon
+                    size={14}
+                    strokeWidth={1.5}
+                    aria-hidden="true"
+                  />
+                  <span className={styles.mobileFollowupText}>
+                    {mobileFollowupSuggestion}
+                  </span>
+                </button>
                 <button
                   type="button"
                   className={styles.toolBtn}
-                  disabled={disabled}
-                  aria-label={t('composerMobile.expand')}
+                  data-web-shell-mobile-followup-dismiss
+                  aria-label={t('composerMobile.dismissFollowup')}
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => {
-                    const textarea = core.mobileComposer?.textareaRef.current;
-                    expandedSelectionRef.current = [
-                      textarea?.selectionStart ?? 0,
-                      textarea?.selectionEnd ?? 0,
-                    ];
-                    setExpandedEditor(true);
+                  onClick={(event) => {
+                    // Dismissing must not bubble into the composer surface's
+                    // focus handler: that would focus the empty textarea and
+                    // pop the keyboard for a user who only ignored a hint.
+                    event.stopPropagation();
+                    core.onDismissFollowup();
                   }}
                 >
-                  <Maximize2Icon />
+                  <XIcon />
                 </button>
               </div>
             )}
@@ -5183,10 +5358,15 @@ export const ChatEditor = memo(
                     event.currentTarget.selectionStart,
                     event.currentTarget.selectionEnd,
                   ];
+                  core.resetVerticalColumn();
                 }}
                 className={styles.mobileExpandedTextarea}
-                aria-label={core.mobileComposer.placeholder}
-                placeholder={core.mobileComposer.placeholder}
+                aria-label={
+                  mobileFollowupSuggestion ?? core.mobileComposer.placeholder
+                }
+                placeholder={
+                  mobileFollowupSuggestion ?? core.mobileComposer.placeholder
+                }
                 autoCapitalize="off"
                 autoCorrect="off"
                 spellCheck={false}
