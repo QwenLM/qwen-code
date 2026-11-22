@@ -153,6 +153,19 @@ describe('stats cross-session transcript reconstruction', () => {
     });
   });
 
+  it('preserves a non-persisted session beside cumulative history', async () => {
+    const history = path.join(home, 'usage_record.jsonl');
+    const record = JSON.parse(fs.readFileSync(history, 'utf8'));
+    Reflect.deleteProperty(record, 'runScoped');
+    fs.writeFileSync(history, `${JSON.stringify(record)}\n`);
+
+    const data = await loadStatsData('all', undefined, B, home);
+
+    expect(data.report.models['qwen-max']?.totalTokens).toBe(1100);
+    expect(data.report.sessionCount).toBe(2);
+    expect(data.report.totalRequests).toBe(2);
+  });
+
   it('adds only the current run without rewriting historical tokens', async () => {
     const live = buildCurrentSessionRecord(
       B,

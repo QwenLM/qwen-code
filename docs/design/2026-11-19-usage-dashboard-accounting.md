@@ -243,8 +243,10 @@ history from an old unmarked record whose provenance is unknowable.
   establish universal cross-store event identity. Partial overlap retains the
   known run rather than guessing what to subtract. Transcript replay has no
   skill-invocation channel, so known live skills from covered runs are retained
-  in the rebuilt summary. The newest reconstruction is selected by actual event
-  time, including when runs are present.
+  in the rebuilt summary. Their by-name counters merge into a null-prototype
+  map so names such as `__proto__` remain own enumerable properties. The newest
+  reconstruction is selected by actual event time, including when runs are
+  present.
 - **Different clocks.** A run's timestamp is the wall clock of exit, `/clear`
   or a session swap, whereas a transcript reconstruction ends at its last
   recorded event. A reading pause between them is normal, even when it lasts
@@ -324,8 +326,12 @@ project identities and the active mapped transcript exists. When the caller
 supplies that workspace, an absent transcript for another known run is skipped
 in place rather than triggering a full directory scan. Unknown, multi-root or
 caller-mismatched identities retain full directory discovery rather than
-guessing;
-discovering new, unrecorded daemon sessions always requires bounded discovery.
+guessing. Empty boundary maps also do not prove that a current transcript has
+no real activity: a non-persisted session beside legacy cumulative history
+still needs reconstruction. Eliminating the fallback by skipping such a
+session would lose genuine usage; a safe alternative needs a validated
+session-to-directory index, not a guessed absence of work. Discovering new,
+unrecorded daemon sessions always requires bounded discovery.
 That single-project fast path belongs only to `loadUsageHistory` with an
 explicit id allowlist. `loadUsageHistoryWithLive` does not pass
 `projectChatsDirs`: its unscoped discovery must still examine all project
@@ -533,7 +539,10 @@ than a fabricated attribution.
   replacing an entire day. A day and model alone are not proof that another
   session's activity can replace a record. Inputs without that metadata retain
   the bounded legacy behaviour, not a claim of a universal event join. Ledger
-  `id` and telemetry `execution_id` remain separate identities.
+  `id` and telemetry `execution_id` remain separate identities. An absent
+  `runScoped` flag does not prove that a record is a replay copy. Where session
+  metadata is available, a session absent from the ledger must not be
+  reclassified as another session's spend merely by a shared day and model.
 - Ledger writes are gated by `config.getUsageStatisticsEnabled()` and skip internal
   prompt ids (`loggers.ts`), so ledger coverage is not guaranteed.
 - Do not add project paths or content to ledger records.

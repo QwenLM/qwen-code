@@ -1845,10 +1845,13 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         ...runRec('sess-covered-skills', 500, t0 + 10_000, t0 + 20_000),
         requestExecutionIds: ['request-with-skill'],
         skills: {
-          totalCalls: 1,
-          totalSuccess: 1,
+          totalCalls: 2,
+          totalSuccess: 2,
           totalFail: 0,
-          byName: { 'helper-skill': { count: 1, success: 1, fail: 0 } },
+          byName: {
+            'helper-skill': { count: 1, success: 1, fail: 0 },
+            ['__proto__']: { count: 1, success: 1, fail: 0 },
+          },
         },
       },
     ]);
@@ -1856,8 +1859,10 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(records).toHaveLength(1);
     expect(records[0]!.transcriptRebuild).toBe(true);
     expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1000);
-    expect(records[0]!.skills?.totalCalls).toBe(1);
+    expect(records[0]!.skills?.totalCalls).toBe(2);
     expect(records[0]!.skills?.byName['helper-skill']?.count).toBe(1);
+    expect(Object.hasOwn(records[0]!.skills!.byName, '__proto__')).toBe(true);
+    expect(records[0]!.skills?.byName['__proto__']?.count).toBe(1);
   });
 
   it('preserves a covering rebuild across the exit-persist clock gap', () => {

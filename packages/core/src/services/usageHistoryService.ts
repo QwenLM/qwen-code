@@ -1313,7 +1313,10 @@ export function dedupBySessionId(
             totalCalls: latestRebuild.skills?.totalCalls ?? 0,
             totalSuccess: latestRebuild.skills?.totalSuccess ?? 0,
             totalFail: latestRebuild.skills?.totalFail ?? 0,
-            byName: { ...latestRebuild.skills?.byName },
+            byName: Object.assign(
+              Object.create(null),
+              latestRebuild.skills?.byName,
+            ),
           };
           for (const run of coveredRuns) {
             if (!run.skills) continue;
