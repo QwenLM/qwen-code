@@ -1330,14 +1330,12 @@ const SYSTEM =
   'and identifiers unchanged. Reply with only the full translation, followed by this exact line:' +
   END;
 
-// Prose that is already mostly Chinese, or a block of code alone, stays as it is.
 function mostlyChinese(text) {
-  if (
-    text.split('\n').every((line) => !line.trim() || /^( {4}|\t)/.test(line))
-  ) {
+  const indented = /^(?: {4}| {0,3}\t)/;
+  if (text.split('\n').every((line) => !line.trim() || indented.test(line))) {
     return true;
   }
-  // The closing fence uses the same character and can be longer.
+  // Ignore closed fences of either kind, including longer closing fences.
   const fencedCode =
     /^ {0,3}((`|~)\2{2,})(?!\2)[^\n]*\n[\s\S]*?^ {0,3}\1\2*[ \t]*$/gm;
   const prose = text.replace(fencedCode, '').replace(/`[^`\n]*`/g, '');
