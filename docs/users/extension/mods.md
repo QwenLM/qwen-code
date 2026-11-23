@@ -1293,6 +1293,118 @@ rewrite of a thought, it hides the translate button beside that thought, which
 would translate the original. An exported transcript draws the original
 thoughts.
 
+## Example: show the model's output in Chinese
+
+This Mod shows the model's replies and the thoughts you open in Simplified
+Chinese, in the Ink and OpenTUI terminals and the Web Shell. It rewrites the
+[reply rows](#reply-rows) and [thinking rows](#thinking-rows) with
+`$.model.complete`. The stored conversation, what the session model reads in
+the main conversation, `/copy` and the Web Shell's copy buttons keep the original.
+
+```text
+zh-display/
+  .claude-plugin/plugin.json
+  hooks/hooks.json
+  hooks/register.js
+```
+
+`.claude-plugin/plugin.json`:
+
+```json
+{ "name": "zh-display", "version": "1.0.0" }
+```
+
+`hooks/hooks.json`:
+
+```json
+{ "modules": ["./register.js"] }
+```
+
+`hooks/register.js`:
+
+```javascript
+const END = '\n[ZH_DISPLAY_END]';
+const SYSTEM =
+  'Translate the Markdown the user sends into Simplified Chinese. Keep its ' +
+  'Markdown structure, code blocks, inline code, file paths, URLs, commands ' +
+  'and identifiers unchanged. Reply with only the full translation, followed by this exact line:' +
+  END;
+
+function mostlyChinese(text) {
+  const indented = /^(?: {4}| {0,3}\t)/;
+  if (text.split('\n').every((line) => !line.trim() || indented.test(line))) {
+    return true;
+  }
+  // Ignore closed fences of either kind, including longer closing fences.
+  const fencedCode =
+    /^ {0,3}((`|~)\2{2,})(?!\2)[^\n]*\n[\s\S]*?^ {0,3}\1\2*[ \t]*$/gm;
+  const prose = text.replace(fencedCode, '').replace(/`[^`\n]*`/g, '');
+  const letters = prose.match(/[A-Za-z一-鿿]/g) ?? [];
+  const han = letters.filter((letter) => letter >= '一').length;
+  return han * 2 >= letters.length;
+}
+
+export function register(on) {
+  on(
+    'ui.render',
+    { component: ['AssistantMessage', 'Thinking'] },
+    async ($, e, next) => {
+      if (mostlyChinese(e.props.text)) return next(e);
+      const r = await $.model.complete(
+        {
+          model: 'haiku',
+          system: SYSTEM,
+          prompt: e.props.text,
+          maxTokens: 8192,
+          timeoutMs: 25000,
+        },
+        { signal: next.signal },
+      );
+      if (!r.isAnswered) {
+        $.ui.log(`Left untranslated: ${r.reason}`, { to: 'debug' });
+        return next(e);
+      }
+      const answer = r.text.replace(/\r/g, '').trimEnd();
+      if (
+        !answer.endsWith(END) ||
+        answer.includes('\n[... truncated for Mods ...]\n')
+      ) {
+        return next(e);
+      }
+      const text = answer.slice(0, -END.length);
+      if (!text.trim()) return next(e);
+      return next({ ...e, props: { ...e.props, text } });
+    },
+  );
+}
+```
+
+The Mod sends the original text of each row it translates to the selected
+model's endpoint, including visible replies and expanded thoughts from resumed
+sessions. If your fast model uses a different provider, that provider receives
+the text.
+
+Install it, turn Mods on, and start a new session:
+
+```bash
+qwen extensions install ./zh-display --consent
+```
+
+- A reply block shows its original text while it streams and switches to the
+  translation once it is complete and the hook answers. Open a thought to have
+  it translated; a thought that stays collapsed costs nothing.
+- `model: 'haiku'` runs the session's [fast model](../configuration/settings.md#fastmodel),
+  or the session's model when none is set. A fast model without thinking can
+  reduce latency. The hook allows 25 seconds for the model call within the
+  30-second row render limit. A failed, timed-out, or incomplete translation
+  leaves the original text.
+- An uncached reply block or opened thought that needs translation makes one
+  model call when shown. The session reuses the answer while it is cached. An
+  evicted row or a row shown after resuming a session can trigger another call.
+- In the Web Shell, a translated thought no longer shows the built-in translate
+  button.
+- For another language, change the system prompt and the `mostlyChinese` check.
+
 ## TypeScript, JSX and relative imports
 
 Change the hooks entry to `./register.ts` to use TypeScript, or to

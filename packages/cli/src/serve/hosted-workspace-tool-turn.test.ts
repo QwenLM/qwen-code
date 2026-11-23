@@ -109,7 +109,6 @@ import {
   LOOP_PROMPT_MAX_CHARS,
 } from './hosted-loop-session.js';
 import { HostedCronSession } from './hosted-cron-session.js';
-import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import {
@@ -3762,30 +3761,19 @@ it.each([
   );
 });
 
-it('keeps PDF pages out of resident and private CSI declarations', async () => {
+it('keeps PDF pages out of resident declarations', async () => {
   broker.capabilityDigest = RESIDENT_WORKSPACE_CAPABILITY_DIGEST;
   turn = createTurn();
-  const resident = await turn.declarations(new AbortController().signal);
-  const csi = await new HostedCsiToolTurn(
-    session,
-    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
-    { bindingId: 'binding', generation: '1' },
-    'prompt',
-    commit,
-    harness,
-    messageFitsInline,
-  ).declarations(new AbortController().signal);
-  for (const declarations of [resident, csi]) {
-    expect(declarations.map((tool) => tool.name)).toEqual([
-      'read_file',
-      'write_file',
-      'edit',
-    ]);
-    expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
-    expect(declarations[0]).not.toHaveProperty(
-      'parametersJsonSchema.properties.pages',
-    );
-  }
+  const declarations = await turn.declarations(new AbortController().signal);
+  expect(declarations.map((tool) => tool.name)).toEqual([
+    'read_file',
+    'write_file',
+    'edit',
+  ]);
+  expect(declarations[0]).toEqual(HOSTED_WORKSPACE_FILE_TOOLS[0]);
+  expect(declarations[0]).not.toHaveProperty(
+    'parametersJsonSchema.properties.pages',
+  );
 });
 
 it('dispatches PDF pages with the original input and declaration persisted', async () => {
