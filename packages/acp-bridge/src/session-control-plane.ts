@@ -234,6 +234,7 @@ import type {
   SessionPrInfo,
   BridgeTurnStatus,
   BridgeSessionCatalogVersion,
+  BridgeSessionFeedbackResult,
   BridgePendingInteraction,
   BridgeClientRequestContext,
   CloseSessionOpts,
@@ -15724,6 +15725,17 @@ export function createSessionControlPlane(
         sessionId: entry.sessionId,
         recap: response.recap ?? null,
       };
+    },
+
+    async rateSessionTurn(sessionId, req, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      return await requestSessionStatus<BridgeSessionFeedbackResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        { promptId: req.promptId, rating: req.rating },
+      );
     },
 
     generateSessionContent(sessionId, prompt, signal, context) {

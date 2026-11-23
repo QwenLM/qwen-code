@@ -159,8 +159,8 @@ class ManagedExtensionPackageServiceTest {
         var overflow = insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PUBLISHED", true);
         assertThatThrownBy(() -> repository.list("tenant", "workspace"))
                 .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("extension_catalog_too_large"));
-        jdbc.update("UPDATE ma_extension_package SET manifest_json = 'invalid' WHERE scope_key = ? AND extension_id = ?",
-                ManagedSchemaKeys.key("tenant", "workspace"), overflow.extensionId());
+        jdbc.update("UPDATE ma_extension_package SET manifest_json = 'invalid' WHERE tenant_id = ? AND workspace_id = ? AND extension_id = ?",
+                "tenant", "workspace", overflow.extensionId());
         for (String selected : List.of(id, missing)) {
             assertThatThrownBy(() -> repository.findLatestCatalogPackage("tenant", "workspace", selected))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
@@ -175,8 +175,8 @@ class ManagedExtensionPackageServiceTest {
     @Test
     void singlePackageOperationsDoNotReadOtherCatalogBodies() throws Exception {
         var unrelated = insertPackage("tenant", "workspace", "ext_" + UUID.randomUUID(), 1, "PUBLISHED", true);
-        jdbc.update("UPDATE ma_extension_package SET manifest_json = 'invalid', source_json = 'invalid' WHERE scope_key = ? AND extension_id = ?",
-                ManagedSchemaKeys.key("tenant", "workspace"), unrelated.extensionId());
+        jdbc.update("UPDATE ma_extension_package SET manifest_json = 'invalid', source_json = 'invalid' WHERE tenant_id = ? AND workspace_id = ? AND extension_id = ?",
+                "tenant", "workspace", unrelated.extensionId());
         String digest = DigestUtils.sha256Hex(bytes);
         var first = service.publish("tenant", "operator", "workspace", null, digest, "create", manifest, new ByteArrayInputStream(bytes));
         assertThat(service.settings("tenant", "reader", "workspace", first.extensionId()).settingsRevision()).isZero();
@@ -607,9 +607,8 @@ class ManagedExtensionPackageServiceTest {
     private Pin insertPackage(String tenant, String workspace, String id, long revision, String state, boolean listed) throws Exception {
         String digest = DigestUtils.sha256Hex(ManagedSchemaKeys.key(tenant, workspace, id, Long.toString(revision)));
         var version = new Manifest(1, 1, manifest.name(), Long.toString(revision), manifest.target(), manifest.components());
-        jdbc.update("INSERT INTO ma_extension_package (scope_key, tenant_id, workspace_id, extension_id, package_revision,"
-                        + " package_digest, manifest_json, byte_length, state, is_catalog_listed, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-                ManagedSchemaKeys.key(tenant, workspace), tenant, workspace,
+        jdbc.update("INSERT INTO ma_extension_package (tenant_id, workspace_id, extension_id, package_revision,"
+                        + " package_digest, manifest_json, byte_length, state, is_catalog_listed, gmt_create) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)", tenant, workspace,
                 id, revision, digest, json.writeValueAsString(version), bytes.length, state, listed);
         return new Pin(id, revision, digest, null);
     }

@@ -19,7 +19,6 @@ import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jdk.jfr.Recording;
@@ -913,9 +912,8 @@ class EventTransportBrokerGate {
 
     private void head(String session, String state, long committed,
             int leaseOffsetSeconds, String writer) {
-        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id, state, writer_generation, writer_id, writer_lease_until, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified, tenant_key, harness_key, harness_session_id, head_kind) VALUES (?, ?, ?, ?, 1, ?, (" + ManagedSchemaTime.SQL_NOW + " + " + (leaseOffsetSeconds * 1000L) + "), 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, ?, ?, 'MANAGED_SESSION')",
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id, session_id, state, writer_generation, writer_id, writer_lease_until, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified, harness_session_id, head_kind) VALUES (?, ?, ?, ?, 1, ?, (" + ManagedSchemaTime.SQL_NOW + " + " + (leaseOffsetSeconds * 1000L) + "), 3, ?, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ", ?, 'MANAGED_SESSION')",
                 TENANT, WORKSPACE, session, state, writer, committed,
-                ManagedSchemaKeys.key(TENANT), ManagedSchemaKeys.key(session),
                 session);
     }
 
