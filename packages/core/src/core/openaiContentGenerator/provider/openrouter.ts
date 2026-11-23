@@ -27,12 +27,12 @@ import type { ContentGeneratorConfig } from '../../contentGenerator.js';
  * OpenRouter requests flow through `DefaultOpenAICompatibleProvider`.
  */
 export function isOpenRouterHostname(
-  contentGeneratorConfig: ContentGeneratorConfig,
+  contentGeneratorConfig: Pick<ContentGeneratorConfig, 'baseUrl'>,
 ): boolean {
   const baseUrl = contentGeneratorConfig.baseUrl ?? '';
   if (!baseUrl) return false;
   try {
-    const hostname = new URL(baseUrl).hostname.toLowerCase();
+    const hostname = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, '');
     return hostname === 'openrouter.ai' || hostname.endsWith('.openrouter.ai');
   } catch {
     return false;

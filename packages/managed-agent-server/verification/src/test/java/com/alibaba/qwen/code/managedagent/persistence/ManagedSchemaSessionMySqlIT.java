@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRef;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -54,18 +54,19 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                 });
         String resource =
                 jdbc.queryForObject(
-                        "SELECT body_resource_key FROM ma_message WHERE tenant_id = ? AND"
+                        "SELECT body_resource_ref FROM ma_message WHERE tenant_id = ? AND"
                             + " session_id = ?",
                         String.class,
                         tenant,
                         id);
         seedHistory(tenant, id, 0, 1000);
         String body =
-                "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE resource_key = ?"
-                        + " AND state = 'REFERENCED' AND deletion_operation_key IS NULL";
-        var reads = scanned(body, resource);
+                "SELECT inline_bytes, byte_length, sha256 FROM ma_resource WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?"
+                        + " AND state = 'REFERENCED' AND deletion_operation_ref IS NULL";
+        var reads = scanned(body, tenant, id, bodyResourceId(resource));
         seedHistory(tenant, id, 1000, 10_000);
-        assertThat(scanned(body, resource).scannedRows()).isEqualTo(reads.scannedRows());
+        assertThat(scanned(body, tenant, id, bodyResourceId(resource)).scannedRows()).isEqualTo(reads.scannedRows());
         assertThat(tx.execute(status -> store.findMessagePage(tenant, id, null, 10, false)).items()).hasSize(1);
         var recent = tx.execute(status -> store.findMessagePage(tenant, id, null, 1, true));
         assertThat(recent.items()).hasSize(1);
@@ -74,8 +75,12 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
         assertThat(recent.nextCursor()).isNull();
     }
 
-    private ExecutedQueryPlan.Plan scanned(String sql, Object argument) {
-        var plan = ExecutedQueryPlan.explain(jdbc, sql, argument);
+    private static String bodyResourceId(String resourceRef) {
+        return ManagedIdentityRef.decode(resourceRef.getBytes(StandardCharsets.US_ASCII)).get(2);
+    }
+
+    private ExecutedQueryPlan.Plan scanned(String sql, Object... arguments) {
+        var plan = ExecutedQueryPlan.explain(jdbc, sql, arguments);
         assertThat(plan.tableScan()).as(plan.text()).isFalse();
         assertThat(plan.scannedRows()).as(plan.text()).isBetween(0L, 10L);
         assertThat(plan.preExecutionPageReads()).as(plan.text()).isBetween(0L, 10L);
@@ -85,7 +90,6 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
     }
 
     private void seedHistory(String tenant, String session, int first, int last) {
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         List<Object[]> operations = new ArrayList<>();
         List<Object[]> resources = new ArrayList<>();
         byte[] bytes = "history".getBytes(StandardCharsets.UTF_8);
@@ -94,12 +98,13 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
             String identity = "history-" + i;
             operations.add(
                     new Object[] {
-                        ManagedSchemaKeys.key(scope, identity),
-                        scope,
+                        ManagedIdentityRefs.operationRef("RENAME", tenant, "SESSION", session, session, identity),
+                        "SESSION",
+                        session,
                         identity,
                         tenant,
                         session,
-                        ManagedSchemaKeys.key("SESSION", tenant, session),
+                        session,
                         "digest",
                         "{}",
                         1,
@@ -107,7 +112,6 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                     });
             resources.add(
                     new Object[] {
-                        ManagedSchemaKeys.key(scope, identity),
                         tenant,
                         session,
                         identity,
@@ -118,14 +122,14 @@ public class ManagedSchemaSessionMySqlIT extends ManagedSchemaSessionStoreTest {
                     });
         }
         jdbc.batchUpdate(
-                "INSERT INTO ma_operation (operation_key, scope_key,"
+                "INSERT INTO ma_operation (operation_ref, scope_kind, scope_id,"
                     + " operation_id, operation_kind, tenant_id, session_id, target_kind,"
-                    + " target_key, request_digest, request_json, state, phase, delivery_state,"
-                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
+                    + " target_id, request_digest, request_json, state, phase, delivery_state,"
+                    + " gmt_create, gmt_modified) VALUES (?, ?, ?, ?, 'RENAME', ?, ?, 'SESSION', ?,"
                     + " ?, ?, 'COMPLETED', 'COMPLETED', 'COMPLETED', ?, ?)",
                 operations);
         jdbc.batchUpdate(
-                "INSERT INTO ma_resource (resource_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, ?, 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
+                "INSERT INTO ma_resource (tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'managed-context', 1, ?, ?, 'MYSQL_INLINE', ?, ?, 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 resources);
     }
 }

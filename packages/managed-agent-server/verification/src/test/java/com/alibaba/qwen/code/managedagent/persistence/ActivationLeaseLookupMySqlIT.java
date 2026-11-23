@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.RowMapper;
 
@@ -83,14 +83,14 @@ class ActivationLeaseLookupMySqlIT {
 
     private static Object[] transaction(long revision, long epoch, String operation, String firstLine) {
         byte[] bytes = (firstLine + "\n").getBytes(StandardCharsets.UTF_8);
-        return new Object[] {revision, ManagedSchemaKeys.key("command", Long.toString(revision)),
+        return new Object[] {revision, ManagedIdentityRefs.commandRef(operation, "command-" + revision),
                 "transaction-" + revision, operation, "command-" + revision, epoch, bytes, bytes.length,
                 JournalStoreRows.sha256(bytes)};
     }
 
     private static void insert(CapturingJdbc jdbc, List<Object[]> rows) {
         jdbc.batchUpdate("INSERT INTO ma_session_journal_tx (tenant_id, workspace_id, session_id, journal_revision,"
-                + " command_key_hash, transaction_id, operation, command_id, content_digest, first_sequence,"
+                + " command_ref, transaction_id, operation, command_id, content_digest, first_sequence,"
                 + " last_sequence, event_count, writer_generation, writer_id, writer_token_hash, activation_epoch,"
                 + " record_encoding, record_bytes, byte_length, record_digest, gmt_create) VALUES ('tenant',"
                 + " 'workspace', 'session', ?, ?, ?, ?, ?, REPEAT('0', 64), 1, 1, 1, 1, 'worker', REPEAT('0', 64),"

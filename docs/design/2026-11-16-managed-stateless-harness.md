@@ -235,7 +235,7 @@ A suspended Session keeps its placement. If its pool member leaves the pool, the
 
 ### Observability
 
-- Harness: clean suspensions, reversible aborts, gated failed/uncertain teardown and its age/reason, predicate rejections, cold opens split into store restore and MCP reinstallation, and `hosted_session_open_busy` refusals. Failed teardown is not counted as a clean suspension.
+- Harness: clean suspensions, reversible aborts, gated failed/uncertain teardown and its age/reason, predicate rejections, cold opens split into store restore and MCP reinstallation, and `hosted_session_open_busy` refusals. Failed teardown is not counted as a clean suspension. The counts accumulate from process start and are reported under `suspension` on the instance's `/internal/hosted-harness/v1/metrics` route.
 - Control plane: admission re-attachments, heartbeat retirements, preserved recovery snapshots, pool reselections, wake activations that evicted a stale attachment, and waits that reached their ageing bound.
 
 ### Failure modes
@@ -274,7 +274,7 @@ Boundary only.
 
 ## Phase 4: parked approvals
 
-Boundary only.
+Boundary only. See [Action parking](2026-11-21-managed-action-parking.md) for the pre-implementation design; it resumes the Turn through the G3 step 3 approval-continuation driver, not the Managed Runtime continue path named below.
 
 - **Today.** A Turn waiting for a tool approval keeps running in the Harness, held by `HostedApprovalWaiters`, although the checkpoint already records the `await_action` phase.
 - **Target.** The Turn parks at `await_action` and its request ends. The approval response resumes it through the existing Managed Runtime continue path, on any pool member.

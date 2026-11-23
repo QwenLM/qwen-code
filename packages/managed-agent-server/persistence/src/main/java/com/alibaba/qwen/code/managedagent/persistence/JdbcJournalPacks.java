@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -100,7 +99,6 @@ public class JdbcJournalPacks {
             throw new IllegalStateException("Pack compaction requires no ambient transaction");
         }
         ManagedAgentSettings.SessionResources config = config();
-        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         Map<String, Object> head = headSnapshot(tenant, session);
         if (head == null || !"ACTIVE".equals(head.get("state"))
                 || ((Number) head.get("compacted_through_revision")).longValue() != 0) {
@@ -130,7 +128,7 @@ public class JdbcJournalPacks {
             }
             through--;
         }
-        publishPack(config, scope, tenant, workspace, session, from, through, built);
+        publishPack(config, tenant, workspace, session, from, through, built);
         return true;
     }
 
@@ -194,11 +192,11 @@ public class JdbcJournalPacks {
                 }, tenant, session, from, through);
     }
 
-    private void publishPack(ManagedAgentSettings.SessionResources config, String scope,
+    private void publishPack(ManagedAgentSettings.SessionResources config,
             String tenant, String workspace, String session, long from, long through, Built built) {
         byte[] objectBytes = built.objectBytes();
         String packId = "pack-" + UUID.randomUUID();
-        String objectKey = config.getOssKeyPrefix() + "packs/" + scope + "/" + packId;
+        String objectKey = config.getOssKeyPrefix() + "packs/" + tenant + "/" + session + "/" + packId;
         long now = System.currentTimeMillis();
         String objectSha = JournalStoreRows.sha256(objectBytes);
         // S1: the BUILDING catalog row commits on its own before the object PUT, so a
@@ -224,7 +222,7 @@ public class JdbcJournalPacks {
                     + built.compressedBytes() + ",\"packSha256\":\"" + objectSha
                     + "\",\"indexSha256\":\"" + JournalStoreRows.sha256(built.indexBytes()) + "\"}")
                     .getBytes(StandardCharsets.UTF_8);
-            transactions.publish(packId, scope, tenant, workspace, session, from, through, manifest);
+            transactions.publish(packId, tenant, workspace, session, from, through, manifest);
         } catch (RuntimeException error) {
             try {
                 transactions.retireBuilding(packId, tenant, session);

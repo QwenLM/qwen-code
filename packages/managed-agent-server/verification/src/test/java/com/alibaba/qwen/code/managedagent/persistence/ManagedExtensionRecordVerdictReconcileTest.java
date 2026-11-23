@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,16 +45,15 @@ class ManagedExtensionRecordVerdictReconcileTest {
     private String plantRunRow() {
         String sessionId = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, record_kind, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, 'workspace', ?, 'DOMAIN', 'child_run',"
+                        + " VALUES (?, 'workspace', ?, 'DOMAIN', 'child_run',"
                         + " 'run-1', 'h', 1, 'res-x', 'child_agent',"
                         + " 'running', 'session', 'planned', 1)",
-                ManagedExtensionProjection.recordKey(sessionId, "child_run",
-                        "run-1"), TENANT, sessionId);
+                TENANT, sessionId);
         return sessionId;
     }
 
