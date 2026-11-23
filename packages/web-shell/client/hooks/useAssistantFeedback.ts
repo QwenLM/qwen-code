@@ -55,10 +55,10 @@ export function useAssistantFeedback(
       );
       let next = readAssistantFeedbackStore();
       // Replay this pane's uncommitted edits on the latest storage. A session
-      // absent from disk restores its intended ratings — evicted at the cap,
-      // or left unpersisted by a failed write.
+      // whose intended ratings are not on disk restores them — evicted at the
+      // cap, or left stale by a failed write (including a failed clear).
       const pruned = readPrunedAssistantFeedbackSession(sessionId);
-      if (pruned && !next[sessionId]) {
+      if (pruned) {
         next = { ...next, [sessionId]: { ...pruned } };
       }
       const merged = next;
@@ -86,11 +86,21 @@ export function useAssistantFeedback(
           change.rating,
         );
       }
-      if (writeAssistantFeedbackStore(next)) {
+      // A clear that empties the session retires any eviction snapshot before
+      // the write; a failed write then records the empty intent itself.
+      if (!next[sessionId]) forgetAssistantFeedbackSessionPruned(sessionId);
+      if (
+        writeAssistantFeedbackStore(
+          next,
+          pendingChanges.current.map((change) => ({
+            sessionId: change.sessionId,
+            turnId: change.turnId,
+          })),
+        )
+      ) {
         pendingChanges.current = [];
         setStore(next);
       }
-      if (!next[sessionId]) forgetAssistantFeedbackSessionPruned(sessionId);
     },
     [sessionId],
   );

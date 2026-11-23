@@ -419,6 +419,68 @@ describe('useAssistantFeedback through the answer footer', () => {
     }
   });
 
+  it('keeps a failed clear of an on-disk session cleared when a sibling writes', () => {
+    writeAssistantFeedbackStore({
+      'shared-session': { 'turn-a': 'up' },
+    });
+    mountPair('shared-session', 'shared-session');
+    try {
+      // No cap pressure: the session stays on disk through the failed clear.
+      const setItem = vi
+        .spyOn(Storage.prototype, 'setItem')
+        .mockImplementationOnce(() => {
+          throw new Error('quota exceeded');
+        });
+      rateInPane('first', 'Satisfied');
+      expect(setItem).toHaveBeenCalledOnce();
+
+      rateInPane('second', 'Not satisfied');
+
+      expect(readAssistantFeedbackStore()['shared-session']).toEqual({
+        'turn-b': 'down',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
+  it('does not retire a queued edit when a sibling restores an evicted session', () => {
+    const stored: AssistantFeedbackStore = {
+      'shared-session': { 'turn-a': 'up' },
+    };
+    for (let index = 0; index < MAX_ASSISTANT_FEEDBACK_SESSIONS - 1; index++) {
+      stored[`session-${index}`] = { 'turn-1': 'up' };
+    }
+    writeAssistantFeedbackStore(stored);
+    mountPair('shared-session', 'shared-session');
+    try {
+      const setItem = vi
+        .spyOn(Storage.prototype, 'setItem')
+        .mockImplementationOnce(() => {
+          throw new Error('quota exceeded');
+        });
+      rateInPane('first', 'Not satisfied');
+      expect(setItem).toHaveBeenCalledOnce();
+      writeAssistantFeedbackStore({
+        ...readAssistantFeedbackStore(),
+        'session-10': { 'turn-1': 'up' },
+      });
+      expect(readAssistantFeedbackStore()['shared-session']).toBeUndefined();
+
+      rateInPane('second', 'Satisfied');
+      renderPairTurns('turn-c', 'turn-b');
+      rateInPane('first', 'Satisfied');
+
+      expect(readAssistantFeedbackStore()['shared-session']).toEqual({
+        'turn-a': 'down',
+        'turn-b': 'up',
+        'turn-c': 'up',
+      });
+    } finally {
+      unmount();
+    }
+  });
+
   it('replays a queued edit over its pruned base', () => {
     writeAssistantFeedbackStore({
       'shared-session': { 'turn-a': 'up' },

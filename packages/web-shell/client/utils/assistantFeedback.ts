@@ -179,27 +179,14 @@ function keepMostRecentSessions(
 }
 
 function recordEditRevisions(
-  previous: AssistantFeedbackStore,
-  requested: AssistantFeedbackStore,
+  edited: ReadonlyArray<{ sessionId: string; turnId: string }>,
   kept: AssistantFeedbackStore,
 ): void {
-  for (const sessionId of new Set([
-    ...Object.keys(previous),
-    ...Object.keys(kept),
-  ])) {
+  for (const { sessionId, turnId } of edited) {
     // Capacity eviction retains the revision for the snapshot restored later.
-    if (previous[sessionId] && requested[sessionId] && !kept[sessionId])
-      continue;
-    const before = previous[sessionId] ?? {};
-    const after = kept[sessionId] ?? {};
-    for (const turnId of new Set([
-      ...Object.keys(before),
-      ...Object.keys(after),
-    ])) {
-      if (before[turnId] === after[turnId]) continue;
-      const key = editRevisionKey(sessionId, turnId);
-      editRevisions.set(key, (editRevisions.get(key) ?? 0) + 1);
-    }
+    if (!kept[sessionId]) continue;
+    const key = editRevisionKey(sessionId, turnId);
+    editRevisions.set(key, (editRevisions.get(key) ?? 0) + 1);
   }
 }
 
@@ -255,8 +242,14 @@ export function readAssistantFeedbackStore(): AssistantFeedbackStore {
     : emptyAssistantFeedbackStore();
 }
 
+/**
+ * Persists `store`. `edited` names the turns this write actually edits, so a
+ * restore of an evicted session does not advance the revisions of the turns
+ * it merely re-inserts and retire other panes' still-valid queued edits.
+ */
 export function writeAssistantFeedbackStore(
   store: AssistantFeedbackStore,
+  edited: ReadonlyArray<{ sessionId: string; turnId: string }> = [],
 ): boolean {
   if (typeof window === 'undefined') return false;
   const previous = readAssistantFeedbackStore();
@@ -275,17 +268,26 @@ export function writeAssistantFeedbackStore(
   }
   // Revisions only advance for persisted edits; a failed write leaves disk
   // unchanged, so bumping them would retire other panes' queued edits.
-  if (persisted) recordEditRevisions(previous, store, kept);
-  // Snapshots must track the intended state of every session that is not on
-  // disk after this attempt — including after a failed write, or another
-  // pane's restore re-inserts ratings the user already cleared.
+  if (persisted) recordEditRevisions(edited, kept);
+  // Snapshots must track the intended state of every session whose content is
+  // not on disk after this attempt — a session evicted at the cap, or one a
+  // failed write left on disk with stale content (a cleared rating a sibling
+  // pane would otherwise re-insert).
   const onDisk = persisted ? kept : previous;
-  for (const sessionId of Object.keys(previous)) {
-    if (!store[sessionId]) prunedSessions.delete(sessionId);
-  }
-  for (const sessionId of Object.keys(store)) {
-    if (onDisk[sessionId]) prunedSessions.delete(sessionId);
-    else prunedSessions.set(sessionId, { ...store[sessionId]! });
+  const touched = new Set(edited.map((edit) => edit.sessionId));
+  for (const sessionId of new Set([
+    ...Object.keys(previous),
+    ...Object.keys(store),
+  ])) {
+    const intended = store[sessionId] ?? {};
+    const landed = onDisk[sessionId];
+    if (JSON.stringify(landed ?? {}) !== JSON.stringify(intended)) {
+      prunedSessions.set(sessionId, { ...intended });
+    } else if (touched.has(sessionId)) {
+      // Only this write's own sessions may forget a snapshot on landing; an
+      // unrelated pane's write must not drop another session's unlanded edit.
+      prunedSessions.delete(sessionId);
+    }
   }
   return persisted;
 }
