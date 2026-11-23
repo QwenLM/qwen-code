@@ -178,6 +178,24 @@ describe('handleAutoUpdate', () => {
     expect(mockSpawn).toHaveBeenCalledTimes(1);
   });
 
+  it('an explicit request installs in notify mode after a /update relaunch (#14274)', () => {
+    mockSettings.merged.general!.updateMode = 'notify';
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage:
+        'Installed with npm. Attempting to automatically update now...',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn, {
+      explicitRequest: true,
+    });
+
+    expect(mockGetInstallationInfo).toHaveBeenCalledWith('/root', true);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
   it('should emit "update-received" but not update if no update command is found', () => {
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: undefined,

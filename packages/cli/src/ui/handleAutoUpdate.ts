@@ -37,6 +37,7 @@ export async function handleAutoUpdate(
   settings: LoadedSettings,
   projectRoot: string,
   spawnFn: typeof spawn = spawnWrapper,
+  options?: { explicitRequest?: boolean },
 ): Promise<boolean | undefined> {
   if (!info) {
     return;
@@ -44,8 +45,11 @@ export async function handleAutoUpdate(
 
   // The install decision re-resolves the update mode from settings so an
   // explicit 'notify' never reaches the spawn paths, regardless of how the
-  // caller gated the check (#14274).
+  // caller gated the check. A relaunch that an explicit /update requested
+  // passes explicitRequest, so 'notify' still installs — the user asked
+  // (#14274).
   const isAutoUpdateEnabled =
+    options?.explicitRequest === true ||
     resolveUpdateMode(settings.merged.general) === 'auto';
 
   const installationInfo = getInstallationInfo(

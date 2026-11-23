@@ -78,6 +78,10 @@ export async function updateBeforeRelaunch(
         result.info,
         settings,
         projectRoot,
+        undefined,
+        // relaunchOnFailure is set only when the supervisor relaunch came
+        // from an explicit /update, so notify mode still installs here.
+        { explicitRequest: relaunchOnFailure },
       );
       writeStderrLine(
         t(
