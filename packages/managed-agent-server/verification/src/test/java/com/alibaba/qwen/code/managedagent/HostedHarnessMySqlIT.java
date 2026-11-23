@@ -75,7 +75,7 @@ class HostedHarnessMySqlIT {
     private final CountDownLatch cancellationRequested = new CountDownLatch(1);
     private final CountDownLatch releaseCancellation = new CountDownLatch(1);
     private final StringBuilder output = new StringBuilder();
-    private final String tenant = "hosted-mysql-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final String sessionId = UUID.randomUUID().toString();
     private final ScheduledExecutorService watchdog =
             Executors.newSingleThreadScheduledExecutor();

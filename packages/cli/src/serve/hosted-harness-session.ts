@@ -1841,21 +1841,22 @@ export async function settleCrashedWakeTurnAftermath(params: {
       return 'pending';
     }
     await session.automations?.settleRunFailedUnknown(turnId);
+    const authorization =
+      await session.managed.authority.harnessRunAuthorization();
+    // An erased verdict read the checkpoint NOT AT ALL: settling this
+    // crash over it would skip the stop/release or the wait's advance but
+    // still consume the input, closing every retry channel the park has.
+    // Fail closed — the caller's catch keeps the block and the input
+    // pending.
+    if (
+      authorization.status === 'blocked' &&
+      !isDurableBlockedVerdict(authorization)
+    ) {
+      throw new ManagedSessionRecordError(
+        `wake crash aftermath read no durable checkpoint verdict: ${authorization.reason}${authorization.message === undefined ? '' : ` (${authorization.message})`}`,
+      );
+    }
     if (brokerOptions !== undefined) {
-      const authorization =
-        await session.managed.authority.harnessRunAuthorization();
-      // An erased verdict read the checkpoint NOT AT ALL: settling this
-      // crash over it would skip the stop/release but still consume the
-      // input, closing every retry channel the park has. Fail closed —
-      // the caller's catch keeps the block and the input pending.
-      if (
-        authorization.status === 'blocked' &&
-        !isDurableBlockedVerdict(authorization)
-      ) {
-        throw new ManagedSessionRecordError(
-          `wake crash aftermath read no durable checkpoint verdict: ${authorization.reason}${authorization.message === undefined ? '' : ` (${authorization.message})`}`,
-        );
-      }
       if (
         authorization.status === 'runnable' &&
         authorization.checkpoint.identity.turnId === turnId
@@ -2018,6 +2019,28 @@ export async function settleCrashedWakeTurnAftermath(params: {
           }
         }
       }
+    }
+    // A turn that died waiting for a decision leaves the checkpoint at
+    // await_action, where no later turn can start. The crash settles that
+    // turn, so its ask ends cancelled and the wait advances, as a parked
+    // prompt's cancellation takeover does.
+    if (
+      authorization.status === 'runnable' &&
+      authorization.checkpoint.identity.turnId === turnId &&
+      authorization.checkpoint.continuation.phase === 'await_action'
+    ) {
+      const requestId = authorization.checkpoint.approval?.requestId;
+      if (
+        requestId !== undefined &&
+        session.managed.authority.action(requestId)?.state === 'requested'
+      )
+        await endHostedAction(
+          session.managed,
+          requestId,
+          'cancelled',
+          () => !session.managed.authority.writesStopped,
+        );
+      await createManagedHarnessHandle(session.managed).resolveDurableWait();
     }
     // The calls the dead attempt committed but never answered get their
     // answers by what committed before the Turn settles; core's orphan
@@ -11876,7 +11899,7 @@ export function registerHostedHarnessSessionRoutes(
         !HOSTED_UUID.test(operationId) ||
         typeof childRunId !== 'string' ||
         childRunId.length < 1 ||
-        childRunId.length > 320
+        childRunId.length > 256
       ) {
         return error(res, 400, 'invalid_child_operation');
       }
@@ -12294,7 +12317,7 @@ export function registerHostedHarnessSessionRoutes(
             (route !== 'to_child' && route !== 'to_parent') ||
             typeof childRunId !== 'string' ||
             childRunId.length < 1 ||
-            childRunId.length > 320 ||
+            childRunId.length > 256 ||
             typeof senderSessionId !== 'string' ||
             !HOSTED_UUID.test(senderSessionId) ||
             typeof content !== 'string' ||
@@ -12440,7 +12463,7 @@ export function registerHostedHarnessSessionRoutes(
             route !== 'to_parent' ||
             typeof childRunId !== 'string' ||
             childRunId.length < 1 ||
-            childRunId.length > 320 ||
+            childRunId.length > 256 ||
             typeof senderSessionId !== 'string' ||
             !HOSTED_UUID.test(senderSessionId) ||
             typeof argsBase64 !== 'string' ||
