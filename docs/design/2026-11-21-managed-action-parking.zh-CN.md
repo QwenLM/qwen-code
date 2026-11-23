@@ -164,7 +164,7 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 派发进入 `runClaimed` 的恢复路径（Turn 已有 `submission_attempted` 与事件 epoch）：
 
-- **决定。** 决定投递（`QwenHostedHarnessConnector.doResolveAction`）在缓存缺失时先加载 Session 再 resolve，同时协调器的派发做一次 drive load。两次加载按 #17521 的 attachment 规则收敛到同一个 resident。该加载必须走 takeover 恢复臂，而不是得到停靠 Session 的 409；这一点要用测试确认。恢复臂先注册 waiter 再读 Action，从而覆盖在注册前就已胜出的决定（G3 §4.2 第 3 步）。
+- **决定。** 决定投递（`QwenHostedHarnessConnector.doResolveAction`）在缓存缺失时先加载 Session 再 resolve，同时协调器的派发做一次 drive load。两次加载按 #17521 的 attachment 规则收敛到同一个 resident。该加载必须走 takeover 恢复臂，而不是得到停靠 Session 的 409。对 Workspace Session，已有测试确认这一点（[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md) §4.7）；没有 Workspace 的 Session 从不停靠，因为它没有审批策略（该设计 §3）。恢复臂先注册 waiter 再读 Action，从而覆盖在注册前就已胜出的决定（G3 §4.2 第 3 步）。
 - **取消。** 沿用 G3：恢复后的 Turn 看到 `cancel.requested`，关闭等待，按取消结算。
 - **审批模式变更。** 恢复后的 driver 重建 live poll，按新模式代用户放行或继续等待。恢复臂今天是否重建 live poll 必须用测试确认；如果没有，这是第四阶段需要补上的。
 - **到期或 deadline。** 恢复后的 driver 立即以 `expired` 结束 Action，或因 deadline 而 abort，然后写取消终态。
@@ -259,6 +259,6 @@ Harness 事件流只由 `HarnessCoordinator` 读取（`stream` 与 `observeStrea
 
 1. 是否为停靠单设一个更短的延迟。默认值下停靠几乎不发生（§1.4），而更短的延迟会把更多决定变成冷打开。由 §7 决定。
 2. 长时间停靠期间，是否像提问等待那样交还 Turn 的 Runtime 成员资格。
-3. 冷恢复扩展后再纳入的范围：Hooks、MCP、子 Session、wake 触发的 Turn、团队计划审批。
-4. 与 3b 后台 hold 同时存在时，两种证书如何合并。
+3. 冷恢复扩展后再纳入的范围：Hooks、MCP、子 Session、wake 触发的 Turn、团队计划审批。除团队计划审批外，其余各项的方案见[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)。
+4. 与 3b 后台 hold 同时存在时，两种证书如何合并。方案见[覆盖面设计](2026-11-22-managed-action-parking-coverage.zh-CN.md)的 S2 切片。
 5. 已离开池的成员上停靠 Session 的 placement 回收，与父设计的待解决问题 1 相同。

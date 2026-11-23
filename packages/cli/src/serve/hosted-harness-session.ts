@@ -66,7 +66,9 @@ import {
 } from './hosted-approval-continuation.js';
 import {
   hostedActionParkRegistration,
+  hostedApprovalResumeShapeRefusal,
   registerHostedActionPark,
+  type HostedActionParkRefusal,
   type HostedActionParkRegistration,
 } from './hosted-action-parking.js';
 import {
@@ -4806,6 +4808,8 @@ export function registerHostedHarnessSessionRoutes(
     coldOpenTotalMs: number;
     coldOpenStoreMs: number;
     mcpReadyMs: number;
+    /** Per suspension attempt over a waiting Turn that could not park. */
+    parkRefusals: Partial<Record<HostedActionParkRefusal, number>>;
   };
 } {
   // The owed mount handbacks of recovery-blocked turns (#13800) outlive
@@ -4863,7 +4867,9 @@ export function registerHostedHarnessSessionRoutes(
     coldOpenTotalMs: 0,
     coldOpenStoreMs: 0,
     mcpReadyMs: 0,
+    parkRefusals: {} as Partial<Record<HostedActionParkRefusal, number>>,
   };
+  const countedParkRefusals = new WeakSet<HostedActionParkRegistration>();
   const releaseColdOpenSlot = (res: Response): void => {
     if (!res.locals['coldOpenSlot']) return;
     res.locals['coldOpenSlot'] = false;
@@ -4943,6 +4949,7 @@ export function registerHostedHarnessSessionRoutes(
             ).length,
           }),
           () => startOwnershipDrain(),
+          () => suspensionStats,
         );
   const acceptingWork = () => instance?.accepting !== false;
   if (instance) {
@@ -5143,21 +5150,25 @@ export function registerHostedHarnessSessionRoutes(
     readonly cleanupExempt: boolean;
   }
 
+  // Undefined means no Turn is waiting; a refusal names why a waiting Turn
+  // cannot park, in the order the terms are checked.
   const actionParkCandidate = async (
     session: HostedSession,
-  ): Promise<ActionParkCandidate | undefined> => {
+  ): Promise<ActionParkCandidate | HostedActionParkRefusal | undefined> => {
     const registration = hostedActionParkRegistration(session.managed);
+    if (!registration) return undefined;
+    if (registration.refusal) return registration.refusal;
+    if (session.active?.promptId !== registration.promptId)
+      return 'turn_mismatch';
+    if (session.recoveredTurn !== undefined) return 'recovered_turn';
+    if (session.definition?.['lineage'] !== undefined) return 'lineage';
+    const shape = hostedApprovalResumeShapeRefusal(session, brokerOptions);
+    if (shape) return shape;
     if (
-      !registration ||
-      session.active?.promptId !== registration.promptId ||
-      session.recoveredTurn !== undefined ||
-      session.definition?.['lineage'] !== undefined ||
-      session.hooks ||
-      session.mcp ||
       session.stores?.supportsActionParking?.() !== true ||
       session.stores?.supportsWakeDispatch?.() !== true
     )
-      return undefined;
+      return 'capability_not_advertised';
     const events = session.managed.authority.eventsInSequenceRange(
       1,
       session.managed.authority.committedSequence,
@@ -5167,32 +5178,32 @@ export function registerHostedHarnessSessionRoutes(
         event.kind === 'input.accepted' &&
         event.payload['turnId'] === registration.promptId,
     );
-    if (!accepted || isWakeOwnedInput(accepted)) return undefined;
+    if (!accepted) return 'input_missing';
+    if (isWakeOwnedInput(accepted)) return 'wake_owned';
     const unsettled = unsettledInputs(session);
+    if (unsettled.size !== 1 || !unsettled.has(registration.promptId))
+      return 'other_unsettled_input';
     if (
-      unsettled.size !== 1 ||
-      !unsettled.has(registration.promptId) ||
       session.managed.authority.action(registration.options.requestId)
         ?.state !== 'requested'
     )
-      return undefined;
+      return 'action_not_requested';
     const continuation = await findHostedApprovalContinuation(
       session.managed,
       registration.promptId,
     );
+    if (!continuation) return 'no_continuation';
+    if (continuation.plan.commandStep !== undefined) return 'command_step';
     if (
-      !continuation ||
-      continuation.plan.commandStep !== undefined ||
       !(await hostedOriginalPromptText(session.managed, registration.promptId))
     )
-      return undefined;
+      return 'prompt_text_missing';
     let approvalRevision: number | undefined;
     if (registration.livePoll) {
       const settings = registration.settings;
       const selection = await session.stores.approvalSelection();
+      if (!settings || !selection) return 'approval_selection_unavailable';
       if (
-        !settings ||
-        !selection ||
         !hostedApprovalAsks(
           {
             mode: selection.mode,
@@ -5203,7 +5214,7 @@ export function registerHostedHarnessSessionRoutes(
           registration.globProfile,
         )
       )
-        return undefined;
+        return 'approval_mode_allows';
       approvalRevision = selection.revision;
     }
     const deadline = accepted.payload['deadline'];
@@ -5329,10 +5340,26 @@ export function registerHostedHarnessSessionRoutes(
       pendingInputs: async () => {
         // Derived inside the attempt so a failed read reverts and rearms;
         // the pass under the gate re-reads the approval selection (§4.1).
-        if (!marked) actionPark = await actionParkCandidate(session);
-        else if (actionPark) {
+        if (!marked) {
+          const candidate = await actionParkCandidate(session);
+          if (typeof candidate === 'string') {
+            // Each wait counts once, under the first reason that kept it
+            // resident, so a long wait does not outweigh a short one.
+            const registration = hostedActionParkRegistration(session.managed);
+            if (registration && !countedParkRefusals.has(registration)) {
+              countedParkRefusals.add(registration);
+              suspensionStats.parkRefusals[candidate] =
+                (suspensionStats.parkRefusals[candidate] ?? 0) + 1;
+            }
+            actionPark = undefined;
+          } else actionPark = candidate;
+        } else if (actionPark) {
           const current = await actionParkCandidate(session);
-          if (current?.registration !== actionPark.registration) return true;
+          if (
+            typeof current === 'string' ||
+            current?.registration !== actionPark.registration
+          )
+            return true;
           actionPark = current;
         }
         const pending = pendingSessionInputs(
@@ -6709,7 +6736,8 @@ export function registerHostedHarnessSessionRoutes(
           }
           const model = await findHostedModelRequest(resident.managed, parked);
           const approval =
-            (resident.toolProfile && brokerOptions) || resident.memory
+            hostedApprovalResumeShapeRefusal(resident, brokerOptions) ===
+            undefined
               ? await findHostedApprovalContinuation(resident.managed, parked)
               : undefined;
           const memoryResults =
@@ -8670,9 +8698,8 @@ export function registerHostedHarnessSessionRoutes(
       if (
         unsettled &&
         ((takeover &&
-          !session.hooks &&
-          !session.mcp &&
-          ((session.toolProfile && brokerOptions) || session.memory)) ||
+          hostedApprovalResumeShapeRefusal(session, brokerOptions) ===
+            undefined) ||
           (session.toolProfile &&
             brokerOptions &&
             extensionsCommandStepTakeover))
@@ -15460,6 +15487,9 @@ export function registerHostedHarnessSessionRoutes(
       [...sessions.keys(), ...opening].some(
         (candidate) => candidate.toLowerCase() === id.toLowerCase(),
       ),
-    suspensionStats: () => ({ ...suspensionStats }),
+    suspensionStats: () => ({
+      ...suspensionStats,
+      parkRefusals: { ...suspensionStats.parkRefusals },
+    }),
   };
 }

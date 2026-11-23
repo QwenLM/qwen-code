@@ -324,6 +324,13 @@ or manual REST calls.
   (tmux) mode, MCP server testing, and API traffic inspection. The
   `test-engineer` agent invokes this skill internally — you typically don't
   need to use it directly.
+- **Disposable background services** (throwaway servers, proxies, workers):
+  never leave one running across turns; cap its output (bounded `ulimit -f`,
+  the service's own log file rather than a shell redirect); confirm the
+  process is gone before deleting its state. A background wrapper's
+  "terminated by signal 9" kills only the wrapper — re-check the real child.
+  For disposable MySQL, see
+  [managed-agent-server](packages/managed-agent-server/AGENTS.md).
 
 ## Submitting PRs
 
