@@ -212,7 +212,7 @@ second-signal handler.
 
 Windows does not have POSIX `SIGTERM` semantics. The asynchronous `terminate()`
 path starts the trusted absolute executable
-`%SystemRoot%\\System32\\taskkill.exe` with `/F /T /PID <rootPid>` and waits for
+`%SystemRoot%\System32\taskkill.exe` with `/F /T /PID <rootPid>` and waits for
 that operation before using direct-child force-kill as a failure fallback. It
 then waits for the root exit within the existing total deadline. The taskkill
 invocation itself is bounded and cannot outlive that deadline. This path does
