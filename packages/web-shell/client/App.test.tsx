@@ -43623,6 +43623,47 @@ describe('App session callbacks', () => {
     ).not.toBeNull();
   });
 
+  it('clears a removed standalone session during pause without a workspace cwd', async () => {
+    overloadPauseStub.paused = true;
+    mockConnection.sessionId = 'standalone-old';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onSessionIdChange = vi.fn();
+    const { container } = renderApp({ onSessionIdChange });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-sessions-overview"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(testState.latestSessionOverviewProps).not.toBeNull();
+    await act(async () => {
+      await testState.latestSessionOverviewProps?.onCurrentSessionRemoved?.({
+        sessionId: 'standalone-old',
+        workspaceCwd: '',
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
+  });
+
   it('clears a legacy current session without a connection workspace cwd', async () => {
     mockConnection.workspaceCwd = '';
     mockWorkspace.capabilities = {
@@ -60962,6 +61003,84 @@ describe('overload pause guards in App', () => {
     expect(toasts).toHaveLength(1);
     expect(toasts[0]?.[0]).toBe('warning');
     expect(toasts[0]?.[1]).toContain('Host load ratio 2.50');
+  });
+
+  it('refuses an explicit ordinary workspace creation while paused', async () => {
+    armOverload();
+    const toasts: Array<[string, string]> = [];
+    const { container } = renderApp({
+      onToast: (tone, msg) => toasts.push([tone, msg]),
+    });
+    await flush();
+    toasts.length = 0;
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="new-session-primary-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(toasts).toEqual([
+      ['warning', expect.stringContaining('Host load ratio 2.50')],
+    ]);
+  });
+
+  it('does not let an inherited recovery retry bypass overload pause', async () => {
+    armOverload();
+    mockConnection.sessionId = 'session-1';
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.standaloneSession = {
+      creationRecovery: { state: 'absent', sessionId: 'session-1' },
+    };
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    mockWorkspace.client.getStandaloneSession.mockRejectedValue(
+      new DaemonHttpError(
+        404,
+        {
+          error: 'Standalone session not found',
+          code: 'standalone_session_not_found',
+        },
+        'Standalone session not found',
+      ),
+    );
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('button'))
+        .find((button) => button.textContent?.trim() === 'Check status')
+        ?.click();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => {
+      expect(
+        Array.from(
+          container.querySelectorAll<HTMLButtonElement>('button'),
+        ).some(
+          (button) =>
+            button.textContent?.trim() === 'Start a fresh conversation',
+        ),
+      ).toBe(true);
+    });
+
+    const retry = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find(
+      (button) => button.textContent?.trim() === 'Start a fresh conversation',
+    );
+    expect(retry).toBeDefined();
+    await act(async () => {
+      retry?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
   });
 
   it('pauses creation reactively when a system_overloaded create_session notice arrives', async () => {

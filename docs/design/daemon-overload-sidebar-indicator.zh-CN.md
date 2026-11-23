@@ -47,12 +47,13 @@
 
 - `/fork` 通过现有 ACP 的 `entry.connection` 及其队列启动后台 `Agent` tool fork，不经过 `reserveFreshSession`。fork 子代理共享父生命周期和由父会话派生的运行时配置，属于现有工作，而不是 `spawn`、`load`、`resume`、`branch` 所表示的新 ACP child 分类。新建任务暂停不禁止这条现有会话的后台路径。
 - 真正来自 daemon 的 `503 { code: "system_overloaded" }` 与预先拒绝分配并不相同。`forkSession` 和 `branchSession` 保留该 code，同时保留各自的 `fork_session` / `branch_session` operation，包括 branch 已发布后经 `startSessionSwitch` 延迟出现的失败。App 的 notice effect 同时识别它们与 `create_session`，因此意外返回的过载错误仍能触发被动暂停，而不只是普通命令失败 toast。不会把它们的真实 operation 误标为 `create_session`。
+- 同一个底层 503 不能产生两条 warning：deferred branch 在 `startSessionSwitch` 内首次发出的通知就保留 `branch_session` 和 branch 专属操作文本，而不是再发 `load_session`；`_alreadyDispatched` 使外层 branch 错误处理器返回原错误，不再次通知。
 - 延迟出现 branch-load overload 属于恢复状态，不应再次请求 branch。已发布 branch 保留其 sessionId，待准入恢复后由调用方显式 load。`actions` 测试在发布后直接拒绝真实的 `pendingSessionLoadRef`，检查延迟 notice 同时保留 `branch_session` 与 `system_overloaded`。
 - 两个来源都清除后警示条消失、按钮重新可用。
 
 #### 控制导航与恢复语义
 
-- **删除与归档恢复不被暂停阻断。** 已删除或归档的当前会话不能把失效历史留在屏幕上。明确的 workspace 目录 recovery reset 可以清除本地选择状态并准备草稿，这一步不分配 ACP child；随后首条 prompt 仍须通过 admission。继承的 live/intent 不获得暂停豁免。过载时 Session Overview 的 Back 只关闭面板并保留当前选中会话，既不清空也不分配新会话。
+- **删除与归档恢复不被暂停阻断。** 已删除或归档的当前会话不能把失效历史留在屏幕上。明确的 workspace 目录 recovery reset 可以清除本地选择状态并准备草稿，这一步不分配 ACP child；随后首条 prompt 仍须通过 admission。该例外必须同时具有显式 recovery reset 与非 inherited 的 workspace/global 意图。没有 recovery flag 的普通新建，以及 inherited retry，仍然会被拒绝。过载时 Session Overview 的 Back 只关闭面板并保留当前选中会话，既不清空也不分配新会话。
 - **异步准入可能返回“无目标会话”。** 若 pause 在预检或草稿创建的飞行途中到达，`sendPrompt` 在清空编辑器前检查 `sessionIdAfterEnsure`。缺少 ID 时恢复取消/预派发状态并返回 `false`，不会乐观提交、向未连接会话发送或擦除草稿；正常准入的会话继续走原有 owner 校验。
 - **任务消费以刷新后的真实状态为准。** `ScheduledTasksDialog` 刷新任务后，在删除一次性任务或派发新 child 之前调用 `shouldRefuseManualRun`。App 读取最新暂停与连接 ref，避免使用渲染闭包里的旧裁决。周期性 per-run 派发也受保护；匹配且已加载完毕的当前连接，或复用该连接的未绑定任务，仍可运行。不同 bound ID 按可能需要冷恢复来保守处理。
 - **`/send`、`load`、`resume` 保留各自资源边界。** 没有 `--session-id` 的 `/send` 会创建新 child，在 RPC 前就拒绝；显式 target 仍可通过 `byId` attach 到已有 runtime。它若返回真正的 overload，则转为可恢复的提示与 warning toast。`startSessionSwitch` 派发失败时，overload 转为 `load_session` 或 `resume_session` 的 warning，并携带 `code: system_overloaded` 和 `_alreadyDispatched`，避免第二个错误 toast。其它错误和 abort 保持原处理，主机恢复后仍能进行冷恢复重试。

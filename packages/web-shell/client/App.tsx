@@ -17576,8 +17576,7 @@ export function App({
       if (
         overloadPausedRef.current &&
         !managedModeRef.current &&
-        !opts?.allowRecoveryReset &&
-        intent.kind !== 'workspace'
+        !(opts?.allowRecoveryReset && intent.kind !== 'inherit')
       ) {
         pushToast(
           'warning',

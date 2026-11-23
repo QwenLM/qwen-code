@@ -1033,6 +1033,8 @@ export function createDaemonSessionActions({
       sessionContext?: DaemonProductSessionContext;
       reconcilePromptActivity?: boolean;
       artifactCountHint?: number;
+      failureAction?: string;
+      failureOperation?: DaemonNoticeOperation;
     },
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
@@ -1224,9 +1226,9 @@ export function createDaemonSessionActions({
       if (isSystemOverloadedError(error)) {
         throw dispatchActionError(
           addNotice,
-          `${capitalize(mode)} session failed`,
+          options?.failureAction ?? `${capitalize(mode)} session failed`,
           error,
-          getSessionLoadNoticeOperation(mode),
+          options?.failureOperation ?? getSessionLoadNoticeOperation(mode),
           { code: 'system_overloaded' },
         );
       }
@@ -4146,25 +4148,26 @@ export function createDaemonSessionActions({
           if (restored?.clientId) {
             persistStableClientId(restored.clientId, restored.sessionId);
           }
-          void startSessionSwitch(result.sessionId, 'load').catch(
-            (switchError: unknown) => {
-              if (restored?.clientId) {
-                void session.client
-                  .detachSession(restored.sessionId, restored.clientId)
-                  .catch(() => undefined);
-              }
-              if (isAbortError(switchError)) return;
-              dispatchActionError(
-                addNotice,
-                'Branch session failed',
-                switchError,
-                'branch_session',
-                isSystemOverloadedError(switchError)
-                  ? { code: 'system_overloaded' }
-                  : undefined,
-              );
-            },
-          );
+          void startSessionSwitch(result.sessionId, 'load', {
+            failureAction: 'Branch session failed',
+            failureOperation: 'branch_session',
+          }).catch((switchError: unknown) => {
+            if (restored?.clientId) {
+              void session.client
+                .detachSession(restored.sessionId, restored.clientId)
+                .catch(() => undefined);
+            }
+            if (isAbortError(switchError)) return;
+            dispatchActionError(
+              addNotice,
+              'Branch session failed',
+              switchError,
+              'branch_session',
+              isSystemOverloadedError(switchError)
+                ? { code: 'system_overloaded' }
+                : undefined,
+            );
+          });
         } else if (restored?.clientId) {
           void session.client
             .detachSession(restored.sessionId, restored.clientId)
@@ -4428,6 +4431,13 @@ function dispatchActionError(
     code?: string;
   },
 ): Error {
+  if (
+    error instanceof Error &&
+    '_alreadyDispatched' in error &&
+    error._alreadyDispatched === true
+  ) {
+    return error;
+  }
   if (isAbortError(error)) {
     if (error instanceof Error) return error;
     const message = error instanceof DOMException ? error.message : 'Aborted';

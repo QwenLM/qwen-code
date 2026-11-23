@@ -7240,10 +7240,12 @@ describe('createDaemonSessionActions', () => {
       switchStarted: true,
     });
     await vi.waitFor(() => {
-      expect(addNotice).toHaveBeenCalledWith(
+      expect(addNotice).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
           operation: 'branch_session',
           code: 'system_overloaded',
+          severity: 'warning',
+          message: 'Branch session failed: System overloaded (cpu_load)',
         }),
       );
     });
