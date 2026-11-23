@@ -47550,6 +47550,335 @@ describe('idle suspension', () => {
   it('retries a wake approval continuation read that a Store fault failed', () =>
     resumeMonitorWakeAfterDeath(true));
 
+  // An extension command whose one step runs a Shell command, which asks in
+  // the default approval mode. Returns the Broker's command executions, the
+  // Hook catalog reads, and the initial extension selection that installs the
+  // command. With `hooks`, the extension brings a Hook catalog, as production
+  // staging derives one from a package's hooks.
+  async function mockCommandStepTurn(hooks = false): Promise<{
+    commands: unknown[];
+    catalogReads: unknown[];
+    selection: Record<string, unknown>;
+  }> {
+    const source = path.join(state.root, 'command-extension');
+    await mkdir(path.join(source, 'commands'), { recursive: true });
+    await writeFile(
+      path.join(source, 'qwen-extension.json'),
+      JSON.stringify({ name: 'sample', version: '1.0.0' }),
+    );
+    await writeFile(
+      path.join(source, 'commands', 'run.md'),
+      '---\ndescription: Run one step\n---\n!{printf parked}',
+    );
+    const archive = path.join(state.root, 'command-extension.tar.gz');
+    await createTar({ cwd: source, file: archive, gzip: true }, [
+      'qwen-extension.json',
+      'commands',
+    ]);
+    const target = { platform: 'linux', arch: 'any' } as const;
+    const prepared = await prepareManagedPackageImport(
+      archive,
+      {
+        sourceKind: 'extension',
+        sourceDigest: createHash('sha256')
+          .update(await readFile(archive))
+          .digest('hex'),
+        target,
+        compilerVersion: 1,
+      },
+      { destination: path.join(state.root, 'command-compiled') },
+    );
+    const runtime = new ManagedExtensionRuntime({
+      executionMode: 'developer-process-group',
+      directory: path.join(state.root, 'command-runtime'),
+      admitted: async (sessionId) => sessionId === SESSION_ID,
+      idle: () => true,
+      compile: async (root) =>
+        (await compileManagedExtensionPackage(root, { target })).contributions,
+      drain: async () => undefined,
+      install: async () => undefined,
+      ...(hooks
+        ? { stage: async () => ({ mcpServers: [], hookCatalog: hookPin }) }
+        : {}),
+    });
+    const catalogReads: unknown[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        if (operation.kind !== 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            result: { success: true, outcome: 'success', duration: 0 },
+          };
+        catalogReads.push(operation.pin);
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          catalog: {
+            ...operation.pin,
+            hooks: [
+              {
+                hookId: HookEventName.Notification,
+                eventName: HookEventName.Notification,
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                config: { type: 'command' as const },
+              },
+            ],
+          },
+        };
+      },
+    );
+    await runtime.cache.upload(
+      prepared.packageDigest,
+      createReadStream(prepared.archivePath),
+    );
+    mockApprovalTurn();
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'capabilityDigest',
+      'get',
+    ).mockReturnValue(MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST);
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'extensionControl',
+    ).mockImplementation(async (operation) => {
+      switch (operation.kind) {
+        case 'extension-status':
+          return {
+            ...(await runtime.operationStatus(
+              SESSION_ID,
+              operation.operationId,
+            )),
+          };
+        case 'extension-prepare':
+          return {
+            ...(await runtime.prepare(
+              SESSION_ID,
+              operation.command,
+              operation,
+            )),
+          };
+        case 'extension-activate':
+          return {
+            ...(await runtime.activate(SESSION_ID, operation.operationId)),
+          };
+        default:
+          throw new Error(`Unexpected extension operation: ${operation.kind}`);
+      }
+    });
+    const commands: unknown[] = [];
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'extensionCommand',
+    ).mockImplementation(async (operation) => {
+      commands.push((operation.input as Record<string, unknown>)['command']);
+      return {
+        state: 'settled',
+        result: {
+          executionStatus: 'success',
+          responseParts: [{ text: 'parked' }],
+        },
+      };
+    });
+    state.model.mockImplementation(
+      async ({ toolTurn, resumeFromToolResults, signal }) => {
+        if (resumeFromToolResults)
+          return { text: 'resumed', model: 'test-model' };
+        const call = {
+          name: 'skill',
+          callId: 'command-step-call',
+          args: { skill: 'sample:run' },
+          isClientInitiated: false,
+          prompt_id: PROMPT_ID,
+        };
+        await toolTurn!.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            },
+          ],
+          'test-model',
+          signal,
+        );
+        throw new Error('The waiting command step unexpectedly continued.');
+      },
+    );
+    return {
+      commands,
+      catalogReads,
+      selection: {
+        operationId: randomUUID(),
+        actorKey: 'a'.repeat(64),
+        expectedRevision: 0,
+        extensions: [
+          {
+            extensionId: 'sample',
+            packageRevision: 1,
+            packageDigest: prepared.packageDigest,
+          },
+        ],
+      },
+    };
+  }
+
+  // A bare load must never answer the parked command step: answering writes
+  // the plan's own skill call a result and destroys the continuation (R9-1).
+  // Nor may it attach a Hooks Session, which no later load could then resume.
+  // The extension configuration the plan pins cannot change meanwhile either.
+  it.each([false, true])(
+    'parks a command-step approval that a bare load leaves unanswered and the decision-delivery load resumes (hooks=%s)',
+    async (hooks) => {
+      state.wakeDispatch = true;
+      state.actionParking = true;
+      state.wakeStamps.length = 0;
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'default',
+        revision: 0,
+      });
+      const fixture = await mockCommandStepTurn(hooks);
+      const definition = {
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        initialSelection: fixture.selection,
+      };
+      try {
+        const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+        const created = await headers(supertest(server).post('/session'))
+          .send({
+            ...definition,
+            sessionId: SESSION_ID,
+            sessionScope: 'thread',
+            approvalMode: 'default',
+            approvalTimeoutMs: 60_000,
+          })
+          .expect(200);
+        const clientId = created.body.clientId as string;
+        const prompt = [{ type: 'text', text: 'run the step' }];
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+          timeout: 5000,
+        });
+        expect(statsOf(server).parkRefusals).toEqual({});
+        expect(fixture.catalogReads.length > 0).toBe(hooks);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, clientId)).status).toBe(404);
+          },
+          { timeout: 5000 },
+        );
+        const read = () =>
+          LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
+          });
+        const parked = await read();
+        const bare = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send(definition)
+          .expect(409);
+        expect(bare.body).toMatchObject({
+          code: 'hosted_turn_recovery_required',
+          reason: 'turn_unsettled',
+        });
+        const afterBare = await read();
+        expect(
+          afterBare.events
+            .slice(parked.events.length)
+            .filter((event) =>
+              ['message.committed', 'action.changed', 'turn.settled'].includes(
+                event.kind,
+              ),
+            ),
+        ).toEqual([]);
+        const requestId = afterBare.events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        )!.payload['requestId'] as string;
+        expect(requestId).toMatch(/^command_approval_/);
+        expect(fixture.commands).toEqual([]);
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({ ...definition, passiveManagedRuntimeRecovery: true })
+          .expect(200);
+        const resumedClient = loaded.body.clientId as string;
+        const apply = await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/extensions/management`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', resumedClient)
+          .send({
+            command: {
+              ...fixture.selection,
+              operationId: randomUUID(),
+              expectedRevision: 1,
+              extensions: [],
+            },
+          })
+          .expect(409);
+        expect(apply.body.code).toBe('hosted_turn_active');
+        await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', resumedClient)
+          .send({
+            optionId: 'allow',
+            inputRevision: 1,
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          })
+          .expect(200);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: false,
+            });
+          },
+          { timeout: 5000 },
+        );
+        expect(fixture.commands).toEqual(['printf parked']);
+        expect(state.model).toHaveBeenLastCalledWith(
+          expect.objectContaining({ resumeFromToolResults: expect.any(Array) }),
+        );
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).status).toBe(404);
+          },
+          { timeout: 5000 },
+        );
+      } finally {
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
+
   it('parks a recoverable approval and resumes it through cold recovery', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
@@ -48644,32 +48973,189 @@ describe('idle suspension', () => {
     }
   });
 
-  it('keeps an approval resident when its Prompt has no text to resume from', async () => {
+  const pngImage = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
+    'base64',
+  );
+  const imageOnlyPrompt = [
+    { type: 'image', mimeType: 'image/png', data: pngImage },
+  ];
+
+  type ResumedModelInput = {
+    prompt?: string;
+    history?: readonly ChatRecord[];
+  };
+
+  function captureResumedModelInput(): ResumedModelInput[] {
+    const live = state.model.getMockImplementation()!;
+    const resumed: ResumedModelInput[] = [];
+    state.model.mockImplementation(async (input) => {
+      if (input.resumeFromToolResults) resumed.push(input as ResumedModelInput);
+      return live(input);
+    });
+    return resumed;
+  }
+
+  function expectOriginalImageOnly(resumed: ResumedModelInput) {
+    expect(
+      resumed.history?.find(
+        (record) =>
+          record.type === 'user' && record.daemonPromptId === PROMPT_ID,
+      )?.message?.parts,
+    ).toEqual([{ inlineData: { data: pngImage, mimeType: 'image/png' } }]);
+  }
+
+  it('parks an image-only approval and resumes it with its image through cold recovery', async () => {
     state.wakeDispatch = true;
     state.actionParking = true;
     state.wakeStamps.length = 0;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     mockApprovalTurn();
+    const resumed = captureResumedModelInput();
     try {
       const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const clientId = await promptAndIdleInApproval(server, [
-        {
-          type: 'image',
-          mimeType: 'image/png',
-          data: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString(
-            'base64',
-          ),
+      const clientId = await promptApproval(server, imageOnlyPrompt);
+      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+        timeout: 5000,
+      });
+      expect(statsOf(server).parkRefusals).toEqual({});
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
         },
-      ]);
-      expect(state.wakeStamps).toEqual([]);
-      expect(statsOf(server).cleanSuspensions).toBe(0);
-      expect(statsOf(server).parkRefusals.prompt_text_missing).toBeGreaterThan(
-        0,
+        { timeout: 5000 },
       );
-      await endResidentApproval(server, clientId);
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0].prompt).toBe('');
+      expectOriginalImageOnly(resumed[0]);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, resumedClient)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
     } finally {
       state.wakeDispatch = false;
       state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // A park is a crash at the wait point to the journal, so the same image-only
+  // wait must also survive its Harness dying in it.
+  it('takes an image-only approval over after its Harness dies in the wait', async () => {
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    const resumed = captureResumedModelInput();
+    const wait = vi
+      .spyOn(HostedApprovalWaiters.prototype, 'wait')
+      .mockRejectedValueOnce(
+        new HostedToolRecoveryRequiredError('approval writer interrupted'),
+      );
+    try {
+      const original = await app(true);
+      const clientId = await promptApproval(original, imageOnlyPrompt);
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(original, clientId)).body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed.close();
+      wait.mockRestore();
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
+        .expect(200);
+      const resumedClient = loaded.body.clientId as string;
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      const requestId = journal.events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await headers(
+        supertest(replacement).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', resumedClient)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await statusOf(replacement, resumedClient)).body,
+          ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(resumed).toHaveLength(1);
+      expect(resumed[0].prompt).toBe('');
+      expectOriginalImageOnly(resumed[0]);
+    } finally {
+      wait.mockRestore();
       state.approvalSelections.clear();
     }
   });

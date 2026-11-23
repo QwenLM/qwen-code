@@ -10410,14 +10410,15 @@ export class HostedWorkspaceToolTurn {
             { turnId: this.promptId, promptId: this.promptId },
           );
         }
+        const waiters = this.approval.waiters;
+        const requestId = actionRequestId;
         registerHostedActionPark(this.session, {
           promptId: this.promptId,
           options,
           settings,
           livePoll: this.approval.readSettings !== undefined,
           globProfile: this.globProfile,
-          refusal: 'command_step',
-          freeze: () => false,
+          freeze: () => waiters.park(requestId),
         });
         try {
           await this.approval.waiters.wait(
