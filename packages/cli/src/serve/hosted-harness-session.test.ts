@@ -47310,13 +47310,14 @@ describe('idle suspension', () => {
     server: Server,
     prompt: unknown[] = [{ type: 'text', text: 'write notes' }],
     deadlineMs?: number,
+    toolProfile = 'hosted-workspace-files/1',
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        toolProfile: 'hosted-workspace-files/1',
+        toolProfile,
         approvalMode: 'default',
         approvalTimeoutMs: 60_000,
       })
@@ -47339,11 +47340,17 @@ describe('idle suspension', () => {
   async function promptAndIdleInApproval(
     server: Server,
     prompt?: unknown[],
+    toolProfile?: string,
   ): Promise<string> {
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
     waiting.mockClear();
     try {
-      const clientId = await promptApproval(server, prompt);
+      const clientId = await promptApproval(
+        server,
+        prompt,
+        undefined,
+        toolProfile,
+      );
       await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
         timeout: 5000,
       });
@@ -48080,9 +48087,38 @@ describe('idle suspension', () => {
       const clientId = await promptAndIdleInApproval(server);
       expect(state.wakeStamps).toEqual([]);
       expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(
+        statsOf(server).parkRefusals.capability_not_advertised,
+      ).toBeGreaterThan(0);
       await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('counts why a Shell-profile approval cannot park', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptAndIdleInApproval(
+        server,
+        undefined,
+        'hosted-workspace-shell/1',
+      );
+      expect(state.wakeStamps).toEqual([]);
+      const stats = statsOf(server);
+      expect(stats.cleanSuspensions).toBe(0);
+      expect(stats.parkRefusals.shell_profile).toBeGreaterThan(0);
+      expect(Object.keys(stats.parkRefusals)).toEqual(['shell_profile']);
+      await endResidentApproval(server, clientId);
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
       state.approvalSelections.clear();
     }
   });
@@ -48106,6 +48142,9 @@ describe('idle suspension', () => {
       ]);
       expect(state.wakeStamps).toEqual([]);
       expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(statsOf(server).parkRefusals.prompt_text_missing).toBeGreaterThan(
+        0,
+      );
       await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
