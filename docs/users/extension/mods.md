@@ -1293,6 +1293,96 @@ rewrite of a thought, it hides the translate button beside that thought, which
 would translate the original. An exported transcript draws the original
 thoughts.
 
+## Example: show the model's output in Chinese
+
+This Mod shows the model's replies and the thoughts you open in Simplified
+Chinese, in the Ink and OpenTUI terminals and the Web Shell. It rewrites the
+[reply rows](#reply-rows) and [thinking rows](#thinking-rows) with
+`$.model.complete`, so only the drawing changes: the stored conversation, what
+the model reads, `/copy` and the Web Shell's copy buttons keep the original.
+
+```text
+zh-display/
+  .claude-plugin/plugin.json
+  hooks/hooks.json
+  hooks/register.js
+```
+
+`.claude-plugin/plugin.json`:
+
+```json
+{ "name": "zh-display", "version": "1.0.0" }
+```
+
+`hooks/hooks.json`:
+
+```json
+{ "modules": ["./register.js"] }
+```
+
+`hooks/register.js`:
+
+````javascript
+const SYSTEM =
+  'Translate the Markdown the user sends into Simplified Chinese. Keep its ' +
+  'Markdown structure, code blocks, inline code, file paths, URLs, commands ' +
+  'and identifiers unchanged. Reply with the translation only.';
+
+// Prose that is already mostly Chinese, or a block of code alone, stays as it is.
+function mostlyChinese(text) {
+  const prose = text.replace(/```[\s\S]*?```|`[^`\n]*`/g, '');
+  const letters = prose.match(/[A-Za-z一-鿿]/g) ?? [];
+  const han = letters.filter((letter) => letter >= '一').length;
+  return han * 2 >= letters.length;
+}
+
+export function register(on) {
+  on(
+    'ui.render',
+    { component: ['AssistantMessage', 'Thinking'] },
+    async ($, e, next) => {
+      if (mostlyChinese(e.props.text)) return next(e);
+      const r = await $.model.complete(
+        {
+          model: 'haiku',
+          system: SYSTEM,
+          prompt: e.props.text,
+          maxTokens: 8192,
+          timeoutMs: 25000,
+        },
+        { signal: next.signal },
+      );
+      if (!r.isAnswered) {
+        $.ui.log(`Left untranslated: ${r.reason}`, { to: 'debug' });
+        return next(e);
+      }
+      const text = r.text.replace(/\r/g, '');
+      return next({ ...e, props: { ...e.props, text } });
+    },
+  );
+}
+````
+
+Install it, turn Mods on, and start a new session:
+
+```bash
+qwen extensions install ./zh-display --consent
+```
+
+- A reply block shows its original text while it streams and switches to the
+  translation once it is complete and the hook answers. Open a thought to have
+  it translated; a thought that stays collapsed costs nothing.
+- `model: 'haiku'` runs the session's [fast model](../configuration/settings.md#fastmodel),
+  or the session's model when none is set. A fast model without thinking keeps
+  each translation well inside the 30 seconds a row may take, including the
+  model call; a row whose call runs out of time keeps its original text.
+- Each block and opened thought costs one model call per session: the session
+  answers it again from its row cache, but a resumed session translates the
+  rows it shows again.
+- In the Web Shell, a translated thought no longer shows the built-in translate
+  button.
+- For another language, change the system prompt and the `mostlyChinese` check.
+
 ## TypeScript, JSX and relative imports
 
 Change the hooks entry to `./register.ts` to use TypeScript, or to
