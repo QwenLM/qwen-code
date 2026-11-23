@@ -115,6 +115,8 @@ export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_TURN_INDEX_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 1024 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_LINE_BYTES = 32 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES = 128 * 1024 * 1024;
 export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 // Hard source-byte ceiling for one backward page, counting everything the
 // turn-alignment and pair extensions add above the soft `maxBytes`
@@ -150,16 +152,38 @@ export class SessionTranscriptSnapshotUnavailableError extends Error {
 
 class EmptySessionTranscriptError extends SessionTranscriptSnapshotUnavailableError {}
 
+export type SessionTranscriptLimitDimension =
+  | 'snapshot'
+  | 'line'
+  | 'index'
+  | 'replay'
+  | 'artifact_library';
+
 export class SessionTranscriptTooLargeError extends Error {
+  readonly dimension: SessionTranscriptLimitDimension;
+  readonly measuredBytes?: number;
+
   constructor(
     readonly sessionId: string,
     readonly snapshotSize: number,
     readonly maxBytes: number,
+    details?: {
+      dimension?: SessionTranscriptLimitDimension;
+      measuredBytes?: number;
+    },
   ) {
-    super(
-      `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`,
-    );
+    const dimension = details?.dimension ?? 'snapshot';
+    const measuredBytes = details?.measuredBytes;
+    const message =
+      dimension === 'snapshot'
+        ? `Transcript snapshot for session ${sessionId} is too large to index (${snapshotSize} bytes, max ${maxBytes} bytes)`
+        : `Transcript ${dimension} for session ${sessionId} exceeds limit (${measuredBytes ?? snapshotSize} bytes, max ${maxBytes} bytes; file size ${snapshotSize} bytes)`;
+    super(message);
     this.name = 'SessionTranscriptTooLargeError';
+    this.dimension = dimension;
+    if (measuredBytes !== undefined) {
+      this.measuredBytes = measuredBytes;
+    }
   }
 }
 
@@ -624,8 +648,11 @@ const INDEX_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 // an oversized entry can take a slot a warm small index held (at most three
 // oversized entries fit the class budget).
 const INDEX_CACHE_OVERSIZED_MAX_BYTES = 256 * 1024 * 1024;
-export const SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES =
-  INDEX_CACHE_OVERSIZED_MAX_BYTES;
+// Hard refusal ceiling for dense-record index builds, decoupled from the
+// 256 MiB cache-admission budget so terse 60-120 MiB transcripts continue to
+// serve uncached (as on base) while extreme multi-million-record dense files
+// still fail closed before exhausting a 1 GiB heap.
+export const SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES = 512 * 1024 * 1024;
 const INDEX_CACHE_TTL_MS = 5 * 60 * 1000;
 const INDEX_ENTRY_BASE_BYTES = 256;
 const INDEX_SEGMENT_BYTES = 64;
@@ -757,6 +784,8 @@ const cursorHmacKeys = new Map<string, Buffer>();
 let indexCacheMaxBytesForTest: number | undefined;
 let indexCacheOversizedMaxBytesForTest: number | undefined;
 let maxIndexEstimateBytesForTest: number | undefined;
+let maxLineBytesForTest: number | undefined;
+let maxAllReplayBytesForTest: number | undefined;
 let expandedPageBytesForTest: number | undefined;
 let cooperativeReadByteBudgetForTest: number | undefined;
 let cooperativeReadTimeBudgetMsForTest: number | undefined;
@@ -1871,6 +1900,14 @@ function getMaxIndexEstimateBytes(): number {
   );
 }
 
+export function getSessionTranscriptMaxLineBytes(): number {
+  return maxLineBytesForTest ?? SESSION_TRANSCRIPT_MAX_LINE_BYTES;
+}
+
+function getMaxAllReplayBytes(): number {
+  return maxAllReplayBytesForTest ?? SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES;
+}
+
 function estimateStringBytes(value: string | null | undefined): number {
   return value ? value.length * INDEX_STRING_BYTES : 0;
 }
@@ -2255,6 +2292,7 @@ function evictSupersededSnapshots(
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
+  sessionId: string,
   onLine: (
     line: Buffer,
     offset: number,
@@ -2262,6 +2300,7 @@ async function forEachLineInSnapshot(
   ) => void | Promise<void>,
 ): Promise<void> {
   if (snapshotSize === 0) return;
+  const maxLineBytes = getSessionTranscriptMaxLineBytes();
   const scheduler = new CooperativeReadScheduler();
   let pending: Buffer[] = [];
   let pendingLength = 0;
@@ -2276,52 +2315,71 @@ async function forEachLineInSnapshot(
   const makePendingLine = (): Buffer =>
     pending.length === 1 ? pending[0]! : Buffer.concat(pending, pendingLength);
 
-  for await (const chunk of stream) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    let lineStart = 0;
-    while (lineStart < buffer.length) {
-      const lineEnd = buffer.indexOf(0x0a, lineStart);
-      if (lineEnd === -1) break;
-      const lineOffset =
-        pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
-      const currentLine = buffer.subarray(lineStart, lineEnd);
-      const rawLine =
-        pendingLength > 0
-          ? Buffer.concat(
-              [...pending, currentLine],
-              pendingLength + currentLine.length,
-            )
-          : currentLine;
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      let lineStart = 0;
+      while (lineStart < buffer.length) {
+        const lineEnd = buffer.indexOf(0x0a, lineStart);
+        if (lineEnd === -1) break;
+        const lineOffset =
+          pendingLength > 0 ? pendingOffset : streamOffset + lineStart;
+        const currentLine = buffer.subarray(lineStart, lineEnd);
+        const totalLineLength = pendingLength + currentLine.length;
+        if (totalLineLength > maxLineBytes) {
+          throw new SessionTranscriptTooLargeError(
+            sessionId,
+            snapshotSize,
+            maxLineBytes,
+            { dimension: 'line', measuredBytes: totalLineLength },
+          );
+        }
+        const rawLine =
+          pendingLength > 0
+            ? Buffer.concat([...pending, currentLine], totalLineLength)
+            : currentLine;
+        const line =
+          rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+            ? rawLine.subarray(0, rawLine.length - 1)
+            : rawLine;
+        await onLine(line, lineOffset, line.length);
+        await scheduler.afterUnit(line.length);
+        pending = [];
+        pendingLength = 0;
+        lineStart = lineEnd + 1;
+      }
+
+      if (lineStart < buffer.length) {
+        if (pendingLength === 0) {
+          pendingOffset = streamOffset + lineStart;
+        }
+        const tail = buffer.subarray(lineStart);
+        const nextPendingLength = pendingLength + tail.length;
+        if (nextPendingLength > maxLineBytes) {
+          throw new SessionTranscriptTooLargeError(
+            sessionId,
+            snapshotSize,
+            maxLineBytes,
+            { dimension: 'line', measuredBytes: nextPendingLength },
+          );
+        }
+        pending.push(tail);
+        pendingLength = nextPendingLength;
+      }
+      streamOffset += buffer.length;
+    }
+
+    if (pendingLength > 0) {
+      const rawLine = makePendingLine();
       const line =
-        rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+        rawLine[rawLine.length - 1] === 0x0d
           ? rawLine.subarray(0, rawLine.length - 1)
           : rawLine;
-      await onLine(line, lineOffset, line.length);
+      await onLine(line, pendingOffset, line.length);
       await scheduler.afterUnit(line.length);
-      pending = [];
-      pendingLength = 0;
-      lineStart = lineEnd + 1;
     }
-
-    if (lineStart < buffer.length) {
-      if (pendingLength === 0) {
-        pendingOffset = streamOffset + lineStart;
-      }
-      const tail = buffer.subarray(lineStart);
-      pending.push(tail);
-      pendingLength += tail.length;
-    }
-    streamOffset += buffer.length;
-  }
-
-  if (pendingLength > 0) {
-    const rawLine = makePendingLine();
-    const line =
-      rawLine[rawLine.length - 1] === 0x0d
-        ? rawLine.subarray(0, rawLine.length - 1)
-        : rawLine;
-    await onLine(line, pendingOffset, line.length);
-    await scheduler.afterUnit(line.length);
+  } finally {
+    stream.destroy();
   }
 }
 
@@ -2593,6 +2651,7 @@ async function buildIndex(params: {
     await forEachLineInSnapshot(
       filePath,
       snapshotSize,
+      sessionId,
       (line, offset, length) => {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
@@ -2679,8 +2738,9 @@ async function buildIndex(params: {
           if (estimatedIndexBytes > maxIndexEstimateBytes) {
             throw new SessionTranscriptTooLargeError(
               sessionId,
-              estimatedIndexBytes,
+              snapshotSize,
               maxIndexEstimateBytes,
+              { dimension: 'index', measuredBytes: estimatedIndexBytes },
             );
           }
         }
@@ -2827,8 +2887,9 @@ async function buildIndex(params: {
   if (finalEstimatedBytes > maxIndexEstimateBytes) {
     throw new SessionTranscriptTooLargeError(
       sessionId,
-      finalEstimatedBytes,
+      snapshotSize,
       maxIndexEstimateBytes,
+      { dimension: 'index', measuredBytes: finalEstimatedBytes },
     );
   }
 
@@ -3048,6 +3109,23 @@ function selectRestoreReplayUuids(
   if (replay.kind === 'none') return undefined;
   const replayIndex = makeReplayIndex(index, replay.hideInheritedHistory);
   if (replay.kind === 'all') {
+    const maxAllReplayBytes = getMaxAllReplayBytes();
+    let totalReplayBytes = 0;
+    for (const uuid of replayIndex.replayUuids) {
+      const entry = replayIndex.byUuid.get(uuid);
+      if (!entry) continue;
+      for (const segment of entry.segments) {
+        totalReplayBytes += segment.length;
+      }
+      if (totalReplayBytes > maxAllReplayBytes) {
+        throw new SessionTranscriptTooLargeError(
+          sessionId,
+          index.snapshotSize,
+          maxAllReplayBytes,
+          { dimension: 'replay', measuredBytes: totalReplayBytes },
+        );
+      }
+    }
     return {
       index: replayIndex,
       uuids: replayIndex.replayUuids,
@@ -3171,7 +3249,7 @@ export async function readSessionTranscriptSnapshot(
   const owner = new SessionExecutionEngineAccumulator(sessionId);
   const records: ChatRecord[] = [];
   let firstRecord: ChatRecord | undefined;
-  await forEachLineInSnapshot(filePath, stats.size, (line) => {
+  await forEachLineInSnapshot(filePath, stats.size, sessionId, (line) => {
     for (const { value } of owner.parseLine(
       line.toString('utf8').trim(),
       filePath,
@@ -3679,7 +3757,8 @@ export class SessionTranscriptReader {
         });
       } catch (error) {
         if (
-          error instanceof EmptySessionTranscriptError &&
+          (error instanceof EmptySessionTranscriptError ||
+            error instanceof SessionTranscriptTooLargeError) &&
           (await hasSnapshotSignature(
             filePath,
             fileIdentity,
@@ -5279,6 +5358,8 @@ export function resetSessionTranscriptIndexCacheForTest(): void {
   indexCacheMaxBytesForTest = undefined;
   indexCacheOversizedMaxBytesForTest = undefined;
   maxIndexEstimateBytesForTest = undefined;
+  maxLineBytesForTest = undefined;
+  maxAllReplayBytesForTest = undefined;
   expandedPageBytesForTest = undefined;
   cooperativeReadByteBudgetForTest = undefined;
   cooperativeReadTimeBudgetMsForTest = undefined;
@@ -5331,6 +5412,18 @@ export function setSessionTranscriptMaxIndexEstimateBytesForTest(
   maxBytes: number | undefined,
 ): void {
   maxIndexEstimateBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxLineBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxLineBytesForTest = maxBytes;
+}
+
+export function setSessionTranscriptMaxAllReplayBytesForTest(
+  maxBytes: number | undefined,
+): void {
+  maxAllReplayBytesForTest = maxBytes;
 }
 
 export function setSessionTranscriptExpandedPageBytesForTest(

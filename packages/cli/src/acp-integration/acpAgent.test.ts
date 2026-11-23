@@ -263,9 +263,14 @@ vi.mock('@agentclientprotocol/sdk', async (importOriginal) => ({
   PROTOCOL_VERSION: '1.0.0',
 }));
 
-vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
-  ndJsonStream: vi.fn().mockReturnValue({}),
-}));
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/acp-bridge/ndJsonStream')>();
+  return {
+    ...actual,
+    ndJsonStream: vi.fn().mockReturnValue({}),
+  };
+});
 
 const { mockCloseAcpOutput } = vi.hoisted(() => ({
   mockCloseAcpOutput: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
@@ -1267,7 +1272,10 @@ import {
   type GoalSnapshotV2,
   type WorkflowSnapshot,
 } from '@qwen-code/qwen-code-core';
-import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import {
+  DAEMON_ACP_NDJSON_LIMITS,
+  ndJsonStream,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import {
   DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   DAEMON_SUPPRESS_WORKTREE_CONTEXT_RESTORE_META_KEY,
@@ -33574,6 +33582,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   });
 
   it('allows an unpaged bulk load in the 32-63 MiB band under the transport frame ceiling', async () => {
+    expect(UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES).toBeLessThan(
+      DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes,
+    );
+    expect(UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES).toBe(
+      DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 1024 * 1024,
+    );
+
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     bindRestoreMocks({
       sessionExists: true,
@@ -33700,6 +33715,51 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       },
     });
     expect(emitted).toBe(LOAD_REPLAY_MAX_UPDATES + 1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('allows an unpaged bulk load in the 32-63 MiB band on a live session', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages },
+      recoveredGoalUpdates: [],
+    });
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+
+    const oneMiBChunk = 'a'.repeat(1024 * 1024);
+    mockHistoryReplay.mockImplementation(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        for (let index = 0; index < 35; index += 1) {
+          await context.sendUpdate({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: oneMiBChunk },
+          });
+        }
+      },
+    );
+
+    const response = await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: {
+        'qwen.session.loadReplayMode': 'bulk',
+      },
+    });
+    const envelope = (
+      response as { _meta?: Record<string, unknown> } | undefined
+    )?._meta?.['qwen.session.loadReplay'] as { updates: unknown[] } | undefined;
+    expect(envelope?.updates).toHaveLength(35);
 
     mockConnectionState.resolve();
     await agentPromise;

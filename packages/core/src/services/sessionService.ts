@@ -118,6 +118,7 @@ import {
   retainArtifactSnapshot,
 } from '../tools/artifact/artifact-snapshots.js';
 import {
+  getSessionTranscriptMaxLineBytes,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -3533,7 +3534,78 @@ export class SessionService {
     const maxRetainedEstimateBytes =
       artifactLibraryMaxRetainedEstimateBytesForTest ??
       ARTIFACT_LIBRARY_MAX_RETAINED_ESTIMATE_BYTES;
+    const maxLineBytes = getSessionTranscriptMaxLineBytes();
     let estimatedRetainedBytes = 0;
+    const processLine = (rawLine: Buffer): void => {
+      const trimmedBuf =
+        rawLine.length > 0 && rawLine[rawLine.length - 1] === 0x0d
+          ? rawLine.subarray(0, rawLine.length - 1)
+          : rawLine;
+      const line = trimmedBuf.toString('utf8');
+      if (!line.trim()) return;
+      const parsed = jsonl.parseLineTolerantWithIntegrity<ChatRecord>(
+        line,
+        identity.filePath,
+      );
+      complete &&= parsed.complete;
+      for (const record of parsed.records) {
+        firstRecordMeta ??= {
+          cwd: record.cwd,
+          version: record.version,
+        };
+        if (isSessionArtifactRecord(record)) {
+          estimatedRetainedBytes += 256 + line.length * 2;
+          if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              identity.size,
+              maxRetainedEstimateBytes,
+              {
+                dimension: 'artifact_library',
+                measuredBytes: estimatedRetainedBytes,
+              },
+            );
+          }
+          records.push(record);
+        } else {
+          // Keep only chain-identity fields for non-artifact records so
+          // large transcripts do not retain message/tool-result bodies
+          // in memory while verifying history continuity.
+          estimatedRetainedBytes +=
+            256 +
+            ((record.uuid?.length ?? 0) +
+              (record.parentUuid?.length ?? 0) +
+              (record.sessionId?.length ?? 0) +
+              (record.timestamp?.length ?? 0) +
+              (record.type?.length ?? 0) +
+              (record.subtype?.length ?? 0)) *
+              2;
+          if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
+            throw new SessionTranscriptTooLargeError(
+              sessionId,
+              identity.size,
+              maxRetainedEstimateBytes,
+              {
+                dimension: 'artifact_library',
+                measuredBytes: estimatedRetainedBytes,
+              },
+            );
+          }
+          records.push({
+            uuid: record.uuid,
+            parentUuid: record.parentUuid,
+            sessionId: record.sessionId,
+            timestamp: record.timestamp,
+            type: record.type,
+            ...(record.subtype !== undefined
+              ? { subtype: record.subtype }
+              : {}),
+            cwd: firstRecordMeta.cwd,
+            version: firstRecordMeta.version,
+          });
+        }
+      }
+    };
     try {
       const stats = await handle.stat();
       if (
@@ -3549,67 +3621,54 @@ export class SessionService {
         autoClose: false,
       });
       try {
-        const lines = readline.createInterface({ input, crlfDelay: Infinity });
-        try {
-          for await (const line of lines) {
-            if (!line.trim()) continue;
-            const parsed = jsonl.parseLineTolerantWithIntegrity<ChatRecord>(
-              line,
-              identity.filePath,
-            );
-            complete &&= parsed.complete;
-            for (const record of parsed.records) {
-              firstRecordMeta ??= {
-                cwd: record.cwd,
-                version: record.version,
-              };
-              if (isSessionArtifactRecord(record)) {
-                estimatedRetainedBytes += 256 + line.length * 2;
-                if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
-                  throw new SessionTranscriptTooLargeError(
-                    sessionId,
-                    estimatedRetainedBytes,
-                    maxRetainedEstimateBytes,
-                  );
-                }
-                records.push(record);
-              } else {
-                // Keep only chain-identity fields for non-artifact records so
-                // large transcripts do not retain message/tool-result bodies
-                // in memory while verifying history continuity.
-                estimatedRetainedBytes +=
-                  256 +
-                  ((record.uuid?.length ?? 0) +
-                    (record.parentUuid?.length ?? 0) +
-                    (record.sessionId?.length ?? 0) +
-                    (record.timestamp?.length ?? 0) +
-                    (record.type?.length ?? 0) +
-                    (record.subtype?.length ?? 0)) *
-                    2;
-                if (estimatedRetainedBytes > maxRetainedEstimateBytes) {
-                  throw new SessionTranscriptTooLargeError(
-                    sessionId,
-                    estimatedRetainedBytes,
-                    maxRetainedEstimateBytes,
-                  );
-                }
-                records.push({
-                  uuid: record.uuid,
-                  parentUuid: record.parentUuid,
-                  sessionId: record.sessionId,
-                  timestamp: record.timestamp,
-                  type: record.type,
-                  ...(record.subtype !== undefined
-                    ? { subtype: record.subtype }
-                    : {}),
-                  cwd: firstRecordMeta.cwd,
-                  version: firstRecordMeta.version,
-                });
-              }
+        let pending: Buffer[] = [];
+        let pendingLength = 0;
+        for await (const chunk of input) {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          let lineStart = 0;
+          while (lineStart < buffer.length) {
+            const lineEnd = buffer.indexOf(0x0a, lineStart);
+            if (lineEnd === -1) break;
+            const currentLine = buffer.subarray(lineStart, lineEnd);
+            const totalLineLength = pendingLength + currentLine.length;
+            if (totalLineLength > maxLineBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                identity.size,
+                maxLineBytes,
+                { dimension: 'line', measuredBytes: totalLineLength },
+              );
             }
+            const rawLine =
+              pendingLength > 0
+                ? Buffer.concat([...pending, currentLine], totalLineLength)
+                : currentLine;
+            processLine(rawLine);
+            pending = [];
+            pendingLength = 0;
+            lineStart = lineEnd + 1;
           }
-        } finally {
-          lines.close();
+          if (lineStart < buffer.length) {
+            const tail = buffer.subarray(lineStart);
+            const nextPendingLength = pendingLength + tail.length;
+            if (nextPendingLength > maxLineBytes) {
+              throw new SessionTranscriptTooLargeError(
+                sessionId,
+                identity.size,
+                maxLineBytes,
+                { dimension: 'line', measuredBytes: nextPendingLength },
+              );
+            }
+            pending.push(tail);
+            pendingLength = nextPendingLength;
+          }
+        }
+        if (pendingLength > 0) {
+          const rawLine =
+            pending.length === 1
+              ? pending[0]!
+              : Buffer.concat(pending, pendingLength);
+          processLine(rawLine);
         }
       } finally {
         input.destroy();

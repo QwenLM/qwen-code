@@ -19,6 +19,7 @@ import {
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionTranscriptTooLargeError,
+  setSessionTranscriptMaxLineBytesForTest,
 } from './session-transcript-reader.js';
 import { saveArtifactSnapshot } from '../tools/artifact/artifact-snapshots.js';
 import { fileURLToPath } from 'node:url';
@@ -120,6 +121,7 @@ beforeEach(async () => {
 afterEach(async () => {
   setArtifactLibraryRetainedRecordsHookForTest(undefined);
   setArtifactLibraryMaxRetainedEstimateBytesForTest(undefined);
+  setSessionTranscriptMaxLineBytesForTest(undefined);
   await fs.rm(temp, { recursive: true, force: true });
 });
 
@@ -501,7 +503,21 @@ describe('persisted artifact library', () => {
       },
       toolCallResult: { output: 'y'.repeat(64 * 1024) },
     };
-    await fs.appendFile(file, JSON.stringify(heavyToolResult) + '\n');
+    const heavySystemRecord = {
+      uuid: 'sys-heavy',
+      parentUuid: 'tool-heavy',
+      sessionId: id,
+      cwd,
+      timestamp: stamp,
+      version: '0.25.3',
+      type: 'system',
+      subtype: 'file_history_snapshot',
+      systemPayload: { snapshot: 's'.repeat(64 * 1024) },
+    };
+    await fs.appendFile(
+      file,
+      `${JSON.stringify(heavyToolResult)}\n${JSON.stringify(heavySystemRecord)}\n`,
+    );
 
     let retained: ReadonlyArray<Record<string, unknown>> = [];
     setArtifactLibraryRetainedRecordsHookForTest((records) => {
@@ -517,7 +533,11 @@ describe('persisted artifact library', () => {
     expect(retainedHeavy).toBeDefined();
     expect(retainedHeavy).not.toHaveProperty('message');
     expect(retainedHeavy).not.toHaveProperty('toolCallResult');
-    expect(retainedHeavy).not.toHaveProperty('systemPayload');
+    const retainedSystem = retained.find(
+      (entry) => entry['uuid'] === 'sys-heavy',
+    );
+    expect(retainedSystem).toBeDefined();
+    expect(retainedSystem).not.toHaveProperty('systemPayload');
     const retainedAssistant = retained.find(
       (entry) => entry['uuid'] === 'assistant-1',
     );
@@ -596,12 +616,58 @@ describe('persisted artifact library', () => {
       parentUuid = uuid;
     }
     await fs.appendFile(file, extra.join('\n') + '\n');
+    const stats = await fs.stat(file);
 
     setArtifactLibraryMaxRetainedEstimateBytesForTest(6 * 1024);
 
-    await expect(service.readSessionArtifactSnapshot(id)).rejects.toThrow(
-      SessionTranscriptTooLargeError,
+    let caught: unknown;
+    try {
+      await service.readSessionArtifactSnapshot(id);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+    const err = caught as SessionTranscriptTooLargeError;
+    expect(err.dimension).toBe('artifact_library');
+    expect(err.snapshotSize).toBe(stats.size);
+    expect(err.maxBytes).toBe(6 * 1024);
+    // Aborting inside the streaming loop keeps measuredBytes just over the
+    // 6 KiB budget; hoisting the check after reading all 40 records yields >18 KiB.
+    expect(err.measuredBytes).toBeGreaterThan(6 * 1024);
+    expect(err.measuredBytes).toBeLessThan(8 * 1024);
+  });
+
+  it('rejects a single oversized line before parsing during artifact-library reads', async () => {
+    await seed();
+    await fs.appendFile(
+      file,
+      JSON.stringify({
+        uuid: 'giant-line',
+        parentUuid: 'assistant-1',
+        sessionId: id,
+        cwd,
+        timestamp: stamp,
+        version: '0.25.3',
+        type: 'tool_result',
+        message: { role: 'user', parts: [{ text: 'g'.repeat(16 * 1024) }] },
+      }) + '\n',
     );
+    const stats = await fs.stat(file);
+
+    setSessionTranscriptMaxLineBytesForTest(4 * 1024);
+
+    let caught: unknown;
+    try {
+      await service.readSessionArtifactSnapshot(id);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+    const err = caught as SessionTranscriptTooLargeError;
+    expect(err.dimension).toBe('line');
+    expect(err.snapshotSize).toBe(stats.size);
+    expect(err.maxBytes).toBe(4 * 1024);
+    expect(err.measuredBytes).toBeGreaterThan(4 * 1024);
   });
 
   it('refuses legacy mutation of a managed-owned transcript', async () => {

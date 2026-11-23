@@ -178,13 +178,17 @@ import {
   getSessionTranscriptIndexCacheStatsForTest,
   InvalidSessionTranscriptCursorError,
   isReplayTurnStartType,
+  SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES,
+  SESSION_TRANSCRIPT_MAX_LINE_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   resetSessionTranscriptIndexCacheForTest,
   setSessionTranscriptCooperativeReadBudgetForTest,
   setSessionTranscriptExpandedPageBytesForTest,
+  setSessionTranscriptMaxAllReplayBytesForTest,
   setSessionTranscriptMaxIndexEstimateBytesForTest,
+  setSessionTranscriptMaxLineBytesForTest,
   setSessionTranscriptIndexBuildCompleteHookForTest,
   setSessionTranscriptIndexCacheMaxBytesForTest,
   setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
@@ -2232,7 +2236,7 @@ describe('SessionTranscriptReader', () => {
   });
 
   it('rejects a dense transcript during streaming index build when the index estimate exceeds the build budget', async () => {
-    expect(SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES).toBe(256 * 1024 * 1024);
+    expect(SESSION_TRANSCRIPT_MAX_INDEX_ESTIMATE_BYTES).toBe(512 * 1024 * 1024);
 
     const lines: ChatRecord[] = [];
     let parent: string | null = null;
@@ -2245,19 +2249,137 @@ describe('SessionTranscriptReader', () => {
     const stat = await fs.stat(filePath);
     expect(stat.size).toBeLessThan(SESSION_TRANSCRIPT_MAX_INDEX_BYTES);
 
-    // Budget fits ~10 records but not 40, forcing an early abort inside the
-    // streaming pass before the index build completes.
+    // Budget fits ~10 records (~12 KiB) while all 40 records estimate ~55 KiB.
+    // Asserting measuredBytes < 16 KiB proves the streaming loop aborted early
+    // rather than finishing all 40 records and failing only at the final check.
     setSessionTranscriptMaxIndexEstimateBytesForTest(12 * 1024);
 
-    await expect(
-      newReader().readPage(sessionId, { limit: 10 }),
-    ).rejects.toThrow(SessionTranscriptTooLargeError);
+    let caught: unknown;
+    try {
+      await newReader().readPage(sessionId, { limit: 10 });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+    const err = caught as SessionTranscriptTooLargeError;
+    expect(err.snapshotSize).toBe(stat.size);
+    expect(err.maxBytes).toBe(12 * 1024);
+    expect(err.dimension).toBe('index');
+    expect(err.measuredBytes).toBeGreaterThan(12 * 1024);
+    expect(err.measuredBytes).toBeLessThan(16 * 1024);
+
     await expect(
       newReader().readRestoreProjection(sessionId, {
         replay: { kind: 'none' },
       }),
     ).rejects.toThrow(SessionTranscriptTooLargeError);
     expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+  });
+
+  it('rejects a single oversized transcript line before buffering it whole', async () => {
+    expect(SESSION_TRANSCRIPT_MAX_LINE_BYTES).toBe(32 * 1024 * 1024);
+
+    const filePath = await writeRecords([
+      record('u-ok', null, 'small'),
+      record('a-huge', 'u-ok', 'x'.repeat(16 * 1024)),
+    ]);
+    const stat = await fs.stat(filePath);
+
+    setSessionTranscriptMaxLineBytesForTest(4 * 1024);
+
+    let caught: unknown;
+    try {
+      await newReader().readPage(sessionId, { limit: 10 });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+    const err = caught as SessionTranscriptTooLargeError;
+    expect(err.dimension).toBe('line');
+    expect(err.snapshotSize).toBe(stat.size);
+    expect(err.maxBytes).toBe(4 * 1024);
+    expect(err.measuredBytes).toBeGreaterThan(4 * 1024);
+  });
+
+  it('rejects replay.kind=all in readRestoreProjection before reading any record body when total replay bytes exceed the budget', async () => {
+    expect(SESSION_TRANSCRIPT_MAX_ALL_REPLAY_BYTES).toBe(128 * 1024 * 1024);
+
+    const lines: ChatRecord[] = [];
+    let parent: string | null = null;
+    for (let i = 0; i < 6; i += 1) {
+      const uuid = `body-${i}`;
+      lines.push(record(uuid, parent, 'b'.repeat(12 * 1024)));
+      parent = uuid;
+    }
+    const filePath = await writeRecords(lines);
+    const stat = await fs.stat(filePath);
+
+    setSessionTranscriptMaxAllReplayBytesForTest(32 * 1024);
+    let selectedReads = 0;
+    setSessionTranscriptSelectedLineReadHookForTest(() => {
+      selectedReads += 1;
+    });
+
+    let caught: unknown;
+    try {
+      await newReader().readRestoreProjection(sessionId, {
+        replay: { kind: 'all', hideInheritedHistory: false },
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
+    const err = caught as SessionTranscriptTooLargeError;
+    expect(err.dimension).toBe('replay');
+    expect(err.snapshotSize).toBe(stat.size);
+    expect(err.maxBytes).toBe(32 * 1024);
+    expect(err.measuredBytes).toBeGreaterThan(32 * 1024);
+    expect(selectedReads).toBe(0);
+  });
+
+  it('serves a terse transcript uncached when its index exceeds the cache-class budget but stays within the build ceiling', async () => {
+    const lines: ChatRecord[] = [];
+    let parent: string | null = null;
+    for (let i = 0; i < 40; i += 1) {
+      const uuid = `terse-${i}`;
+      lines.push(record(uuid, parent, `m${i}`));
+      parent = uuid;
+    }
+    await writeRecords(lines);
+
+    // Cache-class budget refuses admission (~12 KiB < ~55 KiB), while the
+    // decoupled hard build budget stays at its 512 MiB default.
+    setSessionTranscriptIndexCacheOversizedMaxBytesForTest(12 * 1024);
+    setSessionTranscriptIndexCacheMaxBytesForTest(4 * 1024);
+
+    const page = await newReader().readPage(sessionId, { limit: 10 });
+    expect(page.records).toHaveLength(10);
+    expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
+  });
+
+  it('memoizes over-budget getLastUserPromptAt outcomes so repeated list reads do not rebuild', async () => {
+    const lines: ChatRecord[] = [];
+    let parent: string | null = null;
+    for (let i = 0; i < 40; i += 1) {
+      const uuid = `prompt-dense-${i}`;
+      lines.push(record(uuid, parent, `m${i}`));
+      parent = uuid;
+    }
+    await writeRecords(lines);
+
+    setSessionTranscriptMaxIndexEstimateBytesForTest(12 * 1024);
+    let yieldCount = 0;
+    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+      yieldCount += 1;
+    });
+
+    const reader = newReader();
+    expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+    const afterFirst = yieldCount;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+    expect(yieldCount).toBe(afterFirst);
   });
 
   it('uses the bounded persisted-title picker instead of the full active chain', async () => {

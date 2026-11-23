@@ -239,7 +239,10 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { pickAuthMethodsForAuthRequired } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
-import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
+import {
+  DAEMON_ACP_NDJSON_LIMITS,
+  ndJsonStream,
+} from '@qwen-code/acp-bridge/ndJsonStream';
 import { createAcpOutput } from './acp-output.js';
 import {
   ACP_EVENT_LOOP_STALL_RESTART_MS,
@@ -1264,6 +1267,10 @@ function mapSessionRestoreRequestError(
       sessionId,
       snapshotSize: error.snapshotSize,
       maxBytes: error.maxBytes,
+      ...(error.dimension !== 'snapshot' ? { dimension: error.dimension } : {}),
+      ...(error.measuredBytes !== undefined
+        ? { measuredBytes: error.measuredBytes }
+        : {}),
     });
   }
   if (error instanceof SessionTranscriptPageTooLargeError) {
@@ -1298,7 +1305,8 @@ function mapSessionRestoreRequestError(
 // size and historically relied on the 64 MiB NDJSON frame ceiling
 // (`DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes`). Leave 1 MiB headroom for the
 // outer JSON-RPC response wrapper while paginated loads stay capped at 32 MiB.
-export const UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES = 63 * 1024 * 1024;
+export const UNPAGED_BULK_LOAD_REPLAY_MAX_BYTES =
+  DAEMON_ACP_NDJSON_LIMITS.maxFrameBytes - 1024 * 1024;
 
 function validateLoadReplayEnvelope(
   sessionId: string,

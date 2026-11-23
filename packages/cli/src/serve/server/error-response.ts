@@ -606,6 +606,10 @@ export function sendBridgeError(
       sessionId: err.sessionId,
       snapshotSize: err.snapshotSize,
       maxBytes: err.maxBytes,
+      ...(err.dimension !== 'snapshot' ? { dimension: err.dimension } : {}),
+      ...(err.measuredBytes !== undefined
+        ? { measuredBytes: err.measuredBytes }
+        : {}),
     });
     return;
   }
@@ -1335,6 +1339,8 @@ export function sendBridgeError(
           sessionId?: string;
           snapshotSize?: number;
           maxBytes?: number;
+          dimension?: string;
+          measuredBytes?: number;
         };
         res.status(413).json({
           error: errorMessage(err),
@@ -1344,6 +1350,12 @@ export function sendBridgeError(
             ? { snapshotSize: d.snapshotSize }
             : {}),
           ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+          ...(typeof d.dimension === 'string' && d.dimension !== 'snapshot'
+            ? { dimension: d.dimension }
+            : {}),
+          ...(typeof d.measuredBytes === 'number'
+            ? { measuredBytes: d.measuredBytes }
+            : {}),
         });
         return;
       }
