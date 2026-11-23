@@ -22,6 +22,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { getHeapStatistics } from 'node:v8';
 import type { Content, Part } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import { userPromptTimestamp } from './last-user-prompt-time.js';
@@ -2327,11 +2328,10 @@ async function forEachLineInSnapshot(
         const currentLine = buffer.subarray(lineStart, lineEnd);
         const totalLineLength = pendingLength + currentLine.length;
         if (totalLineLength > maxLineBytes) {
-          throw new SessionTranscriptTooLargeError(
+          throw new SessionTranscriptPageTooLargeError(
             sessionId,
-            snapshotSize,
+            totalLineLength,
             maxLineBytes,
-            { dimension: 'line', measuredBytes: totalLineLength },
           );
         }
         const rawLine =
@@ -2356,11 +2356,10 @@ async function forEachLineInSnapshot(
         const tail = buffer.subarray(lineStart);
         const nextPendingLength = pendingLength + tail.length;
         if (nextPendingLength > maxLineBytes) {
-          throw new SessionTranscriptTooLargeError(
+          throw new SessionTranscriptPageTooLargeError(
             sessionId,
-            snapshotSize,
+            nextPendingLength,
             maxLineBytes,
-            { dimension: 'line', measuredBytes: nextPendingLength },
           );
         }
         pending.push(tail);
@@ -2642,6 +2641,15 @@ async function buildIndex(params: {
   let firstRecordTimestamp: string | undefined;
   let startTime: string | undefined;
   const maxIndexEstimateBytes = getMaxIndexEstimateBytes();
+  const buildHeapUsedStart = process.memoryUsage().heapUsed;
+  const availableHeapBytes = Math.max(
+    0,
+    getHeapStatistics().heap_size_limit - buildHeapUsedStart,
+  );
+  const maxIndexBuildBytes = Math.min(
+    maxIndexEstimateBytes,
+    Math.max(64 * 1024, Math.floor(availableHeapBytes / 2)),
+  );
   let estimatedIndexBytes =
     INDEX_ENTRY_BASE_BYTES +
     INDEX_CONTAINER_BASE_BYTES * 7 +
@@ -2735,11 +2743,19 @@ async function buildIndex(params: {
               entry,
             );
           }
-          if (estimatedIndexBytes > maxIndexEstimateBytes) {
+          // The cache estimate intentionally stays unchanged. For the hard
+          // build ceiling, account for the real heap as well — short-record
+          // retention can cost materially more than the estimate on some
+          // runtimes, and estimation alone must not free a 1 GiB heap.
+          estimatedIndexBytes = Math.max(
+            estimatedIndexBytes,
+            process.memoryUsage().heapUsed - buildHeapUsedStart,
+          );
+          if (estimatedIndexBytes > maxIndexBuildBytes) {
             throw new SessionTranscriptTooLargeError(
               sessionId,
               snapshotSize,
-              maxIndexEstimateBytes,
+              maxIndexBuildBytes,
               { dimension: 'index', measuredBytes: estimatedIndexBytes },
             );
           }
@@ -2883,12 +2899,15 @@ async function buildIndex(params: {
     byUuid,
     branchPointsByAssistantUuid,
   };
-  const finalEstimatedBytes = estimateIndexCacheBytes(builtIndex);
-  if (finalEstimatedBytes > maxIndexEstimateBytes) {
+  const finalEstimatedBytes = Math.max(
+    estimateIndexCacheBytes(builtIndex),
+    process.memoryUsage().heapUsed - buildHeapUsedStart,
+  );
+  if (finalEstimatedBytes > maxIndexBuildBytes) {
     throw new SessionTranscriptTooLargeError(
       sessionId,
       snapshotSize,
-      maxIndexEstimateBytes,
+      maxIndexBuildBytes,
       { dimension: 'index', measuredBytes: finalEstimatedBytes },
     );
   }
@@ -3758,7 +3777,8 @@ export class SessionTranscriptReader {
       } catch (error) {
         if (
           (error instanceof EmptySessionTranscriptError ||
-            error instanceof SessionTranscriptTooLargeError) &&
+            error instanceof SessionTranscriptTooLargeError ||
+            error instanceof SessionTranscriptPageTooLargeError) &&
           (await hasSnapshotSignature(
             filePath,
             fileIdentity,

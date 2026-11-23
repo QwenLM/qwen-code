@@ -7,6 +7,8 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
@@ -194,6 +196,7 @@ import {
   setSessionTranscriptIndexCacheOversizedMaxBytesForTest,
   setSessionTranscriptSelectedLineReadHookForTest,
   SessionTranscriptCursorCodec,
+  SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
   SessionTranscriptReader,
@@ -2249,10 +2252,13 @@ describe('SessionTranscriptReader', () => {
     const stat = await fs.stat(filePath);
     expect(stat.size).toBeLessThan(SESSION_TRANSCRIPT_MAX_INDEX_BYTES);
 
-    // Budget fits ~10 records (~12 KiB) while all 40 records estimate ~55 KiB.
-    // Asserting measuredBytes < 16 KiB proves the streaming loop aborted early
-    // rather than finishing all 40 records and failing only at the final check.
+    // Reject inside the streaming pass, before all 40 records have been
+    // scanned, rather than merely rejecting the completed index afterwards.
     setSessionTranscriptMaxIndexEstimateBytesForTest(12 * 1024);
+    let scannedLines = 0;
+    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+      scannedLines += 1;
+    });
 
     let caught: unknown;
     try {
@@ -2266,7 +2272,7 @@ describe('SessionTranscriptReader', () => {
     expect(err.maxBytes).toBe(12 * 1024);
     expect(err.dimension).toBe('index');
     expect(err.measuredBytes).toBeGreaterThan(12 * 1024);
-    expect(err.measuredBytes).toBeLessThan(16 * 1024);
+    expect(scannedLines).toBeLessThan(lines.length);
 
     await expect(
       newReader().readRestoreProjection(sessionId, {
@@ -2276,14 +2282,79 @@ describe('SessionTranscriptReader', () => {
     expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
   });
 
+  it('rejects a dense transcript without exhausting a constrained process heap', async () => {
+    const readerUrl = pathToFileURL(
+      path.resolve('dist/src/services/session-transcript-reader.js'),
+    ).href;
+    const probe = `
+      import fs from 'node:fs';
+      import os from 'node:os';
+      import path from 'node:path';
+      import { SessionTranscriptReader } from ${JSON.stringify(readerUrl)};
+      const runtime = fs.mkdtempSync(path.join(os.tmpdir(), 'heap-guard-'));
+      const workspace = path.join(runtime, 'workspace');
+      fs.mkdirSync(workspace, { recursive: true });
+      const sessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+      const chats = path.join(runtime, 'projects', workspace.replace(/[^a-zA-Z0-9]/g, '-'), 'chats');
+      fs.mkdirSync(chats, { recursive: true });
+      const target = path.join(chats, sessionId + '.jsonl');
+      const out = fs.createWriteStream(target);
+      let parent = null;
+      const payload = 'dense-payload-' + 'x'.repeat(240);
+      for (let i = 0; i < 200000; i++) {
+        const uuid = 'dense-' + String(i).padStart(7, '0');
+        const record = { uuid, parentUuid: parent, sessionId, timestamp: '2026-11-22T00:00:00.000Z', type: i % 2 === 0 ? 'user' : 'assistant', cwd: workspace, version: '0.28.3', message: { role: i % 2 === 0 ? 'user' : 'model', parts: [{ text: payload }] } };
+        out.write(JSON.stringify(record) + '\\n');
+        parent = uuid;
+      }
+      await new Promise((resolve, reject) => out.end((error) => error ? reject(error) : resolve()));
+      try {
+        await new SessionTranscriptReader(workspace, undefined, runtime).readPage(sessionId, { limit: 10 });
+        console.log(JSON.stringify({ result: 'served' }));
+      } catch (error) {
+        console.log(JSON.stringify({ result: 'rejected', name: error.name, message: error.message, dimension: error.dimension, maxBytes: error.maxBytes, snapshotSize: error.snapshotSize, fileSize: fs.statSync(target).size }));
+      } finally {
+        fs.rmSync(runtime, { recursive: true, force: true });
+      }
+    `;
+    const cleanEnv = { ...process.env };
+    for (const name of Object.keys(cleanEnv)) {
+      if (name.startsWith('QWEN_')) delete cleanEnv[name];
+    }
+    const child = spawnSync(
+      process.execPath,
+      ['--max-old-space-size=256', '--input-type=module', '-e', probe],
+      { encoding: 'utf8', env: cleanEnv, maxBuffer: 2 * 1024 * 1024 },
+    );
+    if (child.status !== 0) {
+      throw new Error(
+        `Memory guard probe failed (${child.status}/${child.signal}): ${child.stderr}`,
+      );
+    }
+    const outcome = JSON.parse(child.stdout.trim()) as {
+      result: string;
+      name?: string;
+      dimension?: string;
+      maxBytes?: number;
+      snapshotSize?: number;
+      fileSize?: number;
+    };
+    expect(outcome).toMatchObject({
+      result: 'rejected',
+      name: 'SessionTranscriptTooLargeError',
+      dimension: 'index',
+    });
+    expect(outcome.maxBytes).toBeLessThan(512 * 1024 * 1024);
+    expect(outcome.snapshotSize).toBe(outcome.fileSize);
+  });
+
   it('rejects a single oversized transcript line before buffering it whole', async () => {
     expect(SESSION_TRANSCRIPT_MAX_LINE_BYTES).toBe(32 * 1024 * 1024);
 
-    const filePath = await writeRecords([
+    await writeRecords([
       record('u-ok', null, 'small'),
       record('a-huge', 'u-ok', 'x'.repeat(16 * 1024)),
     ]);
-    const stat = await fs.stat(filePath);
 
     setSessionTranscriptMaxLineBytesForTest(4 * 1024);
 
@@ -2293,12 +2364,10 @@ describe('SessionTranscriptReader', () => {
     } catch (error) {
       caught = error;
     }
-    expect(caught).toBeInstanceOf(SessionTranscriptTooLargeError);
-    const err = caught as SessionTranscriptTooLargeError;
-    expect(err.dimension).toBe('line');
-    expect(err.snapshotSize).toBe(stat.size);
+    expect(caught).toBeInstanceOf(SessionTranscriptPageTooLargeError);
+    const err = caught as SessionTranscriptPageTooLargeError;
     expect(err.maxBytes).toBe(4 * 1024);
-    expect(err.measuredBytes).toBeGreaterThan(4 * 1024);
+    expect(err.pageBytes).toBeGreaterThan(4 * 1024);
   });
 
   it('rejects replay.kind=all in readRestoreProjection before reading any record body when total replay bytes exceed the budget', async () => {
@@ -2357,30 +2426,38 @@ describe('SessionTranscriptReader', () => {
     expect(getSessionTranscriptIndexCacheStatsForTest().entries).toBe(0);
   });
 
-  it('memoizes over-budget getLastUserPromptAt outcomes so repeated list reads do not rebuild', async () => {
-    const lines: ChatRecord[] = [];
-    let parent: string | null = null;
-    for (let i = 0; i < 40; i += 1) {
-      const uuid = `prompt-dense-${i}`;
-      lines.push(record(uuid, parent, `m${i}`));
-      parent = uuid;
-    }
-    await writeRecords(lines);
+  it.each(['index', 'page'])(
+    'memoizes over-budget getLastUserPromptAt outcomes so repeated list reads do not rebuild (%s)',
+    async (budgetKind) => {
+      const lines: ChatRecord[] = [];
+      let parent: string | null = null;
+      for (let i = 0; i < 40; i += 1) {
+        const uuid = `prompt-dense-${i}`;
+        lines.push(
+          record(uuid, parent, i === 39 ? 'x'.repeat(8 * 1024) : `m${i}`),
+        );
+        parent = uuid;
+      }
+      await writeRecords(lines);
 
-    setSessionTranscriptMaxIndexEstimateBytesForTest(12 * 1024);
-    let yieldCount = 0;
-    setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
-      yieldCount += 1;
-    });
+      if (budgetKind === 'index') {
+        setSessionTranscriptMaxIndexEstimateBytesForTest(48 * 1024);
+      } else {
+        setSessionTranscriptMaxLineBytesForTest(4 * 1024);
+      }
+      let yieldCount = 0;
+      setSessionTranscriptCooperativeReadBudgetForTest(1, 0, () => {
+        yieldCount += 1;
+      });
 
-    const reader = newReader();
-    expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
-    const afterFirst = yieldCount;
-    expect(afterFirst).toBeGreaterThan(0);
+      const reader = newReader();
+      expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      const afterFirst = yieldCount;
 
-    expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
-    expect(yieldCount).toBe(afterFirst);
-  });
+      expect(await reader.getLastUserPromptAt(sessionId)).toBeUndefined();
+      expect(yieldCount).toBe(afterFirst);
+    },
+  );
 
   it('uses the bounded persisted-title picker instead of the full active chain', async () => {
     const largeText = 'x'.repeat(70 * 1024);
