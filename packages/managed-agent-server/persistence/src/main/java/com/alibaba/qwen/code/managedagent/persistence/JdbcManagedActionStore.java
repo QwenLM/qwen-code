@@ -326,10 +326,10 @@ public class JdbcManagedActionStore
                 require(decision.isNull());
             }
             if (previous == null) {
-                jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, record_kind, domain, record_id, action_id, revision, action_version, state, options_json, gmt_create, first_sequence) VALUES (?, ?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, ?, ?, ?)",
+                jdbc.update("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, record_kind, domain, record_id, action_id, revision, action_version, state, options_json, prompt_id, gmt_create, first_sequence) VALUES (?, ?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         tenantId, workspaceId, sessionId, id, id,
                         event.path("sequence").asLong(), options.path("inputRevision").asLong(),
-                        state, options.toString(), options.path("createdAt").asLong(), event.path("sequence").asLong());
+                        state, options.toString(), options.path("turnId").asText(), options.path("createdAt").asLong(), event.path("sequence").asLong());
             } else {
                 jdbc.update("UPDATE ma_session_record SET state = ?, decision_receipt_id = ?,"
                                 + " decision_digest = ?, revision = ? WHERE tenant_id = ? AND session_id = ?"
@@ -588,6 +588,7 @@ public class JdbcManagedActionStore
                                     + " operation_id = ?",
                             now, now, tenantId, sessionId,
                             existing.operationId());
+                    AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
                     return new OperationAdmission(
                             sessions.findOperation(tenantId, sessionId,
                                     existing.operationId()).orElseThrow(),
@@ -630,6 +631,7 @@ public class JdbcManagedActionStore
                             action.get().decisionReceiptId(),
                             now, now, tenantId, sessionId,
                             existing.operationId());
+                    AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
                     return new OperationAdmission(
                             sessions.findOperation(tenantId, sessionId,
                                     existing.operationId()).orElseThrow(),
@@ -723,6 +725,7 @@ public class JdbcManagedActionStore
                 ManagedSchemaKeys.receiptKey(ReceiptNamespace.ACTION_DECISION, tenantId, ReceiptScope.SESSION, actionScope, actionId),
                 tenantId, ManagedSchemaKeys.identity(ManagedIdentityRefs.receiptScopeRef(tenantId, actionScope)), ManagedSchemaKeys.identity(actionScope), actionId, ManagedSchemaKeys.key(actionId), decision,
                 sessionId, actionId, o.path("inputRevision").asLong(), ManagedSchemaKeys.identity(operationRef), now, now);
+        AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
 
         return new OperationAdmission(
                 sessions.findOperation(tenantId, sessionId, op).orElseThrow(), false);

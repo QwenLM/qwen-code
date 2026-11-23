@@ -186,6 +186,19 @@ and published model-catalog values retain their normal precedence. The same
 model id on an OpenAI-compatible route does not inherit these Gemini protocol
 defaults.
 
+Undeclared Kimi K3 models on OpenAI-compatible routes inherit mandatory
+thinking with `low`, `high`, and `max` tiers, defaulting to `max`. Recognized
+ids include `kimi-k3`, bare `k3` and `k3.1`, `kimi-k3.1-pro`, bare `k3.1-pro`,
+dotted or dashed sub-versions, and `-pro-highspeed`/`-pro-high-speed` variants. Vendor prefixes
+such as `moonshot/` and normalized version/tag spellings are supported, as are
+the exact 256K aliases `kimi-k3-256k` and `k3-256k`; not every `k3`-prefixed id
+is a recognized K3 model. Other OpenAI-compatible endpoints send the default
+as `reasoning_effort`, while OpenRouter uses the nested
+`reasoning: { "effort": "max" }` shape. An explicit flat OpenRouter effort
+takes precedence over this inferred nested default. Use an explicit
+`capabilities.reasoning` declaration to define exceptions to a custom route's
+inferred tiers, wire format, or disable behavior.
+
 Reasoning changes apply before the next user prompt. Its requests, retries and
 child agents share the captured reasoning configuration. Invalid updates retain
 the previous configuration and log the model/field error. Invalid declarations

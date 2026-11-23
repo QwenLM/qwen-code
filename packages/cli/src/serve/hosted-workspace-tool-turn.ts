@@ -164,6 +164,7 @@ import type {
   HostedApprovalContinuation,
   RestoredHostedApprovalContinuation,
 } from './hosted-approval-continuation.js';
+import { registerHostedActionPark } from './hosted-action-parking.js';
 import {
   InvalidWorkspaceRelativePathError,
   normalizeWorkspaceRelativePath,
@@ -10554,43 +10555,64 @@ export class HostedWorkspaceToolTurn {
         else signal.addEventListener('abort', release, { once: true });
       });
     }
-    if (originalRuntime) {
-      try {
-        await waitForHostedQuestion({
-          session: this.session,
-          broker: this.broker,
-          brokerOptions: this.options,
-          waiters: approval.waiters,
+    const parkable =
+      continuationRef !== undefined && this.nativeBatch?.uncaptured !== true;
+    const parkRegistration = parkable
+      ? {
+          promptId: this.promptId,
+          options,
+          settings: approval.settings,
+          livePoll: liveApproval && approval.readSettings !== undefined,
+          globProfile: this.globProfile,
+          freeze: () => approval.waiters.park(requestId),
+        }
+      : undefined;
+    if (parkRegistration)
+      registerHostedActionPark(this.session, parkRegistration);
+    try {
+      if (originalRuntime) {
+        try {
+          await waitForHostedQuestion({
+            session: this.session,
+            broker: this.broker,
+            brokerOptions: this.options,
+            waiters: approval.waiters,
+            requestId,
+            expiresAt: options.expiresAt,
+            signal,
+            released: () => {
+              this.acquired = false;
+            },
+            registerFreeze: (freeze) => {
+              if (parkRegistration) parkRegistration.freeze = freeze;
+            },
+          });
+        } catch (cause) {
+          throw new HostedToolRecoveryRequiredError(cause);
+        }
+      } else
+        await approval.waiters.wait(
           requestId,
-          expiresAt: options.expiresAt,
+          options.expiresAt,
           signal,
-          released: () => {
-            this.acquired = false;
-          },
-        });
-      } catch (cause) {
-        throw new HostedToolRecoveryRequiredError(cause);
-      }
-    } else
-      await approval.waiters.wait(
-        requestId,
-        options.expiresAt,
-        signal,
-        () =>
-          authority.action(requestId)?.state !== 'requested' ||
-          authority.writesStopped,
-        liveApproval && approval.readSettings
-          ? hostedLiveApprovalPoll(
-              this.session,
-              approval.waiters,
-              options,
-              () => this.readApprovalSettings(),
-              signal,
-              this.globProfile,
-              approval.isBlocked,
-            )
-          : undefined,
-      );
+          () =>
+            authority.action(requestId)?.state !== 'requested' ||
+            authority.writesStopped,
+          liveApproval && approval.readSettings
+            ? hostedLiveApprovalPoll(
+                this.session,
+                approval.waiters,
+                options,
+                () => this.readApprovalSettings(),
+                signal,
+                this.globProfile,
+                approval.isBlocked,
+              )
+            : undefined,
+        );
+    } finally {
+      if (parkable) registerHostedActionPark(this.session, undefined);
+    }
     if (authority.action(requestId)?.state === 'requested')
       await endHostedAction(
         this.session,

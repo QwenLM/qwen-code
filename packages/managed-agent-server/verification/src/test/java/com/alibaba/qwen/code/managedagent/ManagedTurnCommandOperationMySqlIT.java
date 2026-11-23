@@ -168,6 +168,38 @@ class ManagedTurnCommandOperationMySqlIT extends ManagedTurnCommandOperationTest
         assertThat(settled.failureCode()).isEqualTo("turn_already_settled");
     }
 
+    @Test
+    void actionParkAndCancelConvergeUnderSessionTurnLocks() throws Exception {
+        for (int index = 0; index < 4; index++) {
+            sessionId = store.insertSessionCommand(TENANT, "CREATE_SESSION",
+                    "create-action-race-" + index, "digest-action-race-" + index,
+                    "qwen-code", null, null, List.of(), null).sessionId();
+            String raceId = "action-race-" + index;
+            Admission turn = actionParkableTurn(raceId);
+            String racingSession = sessionId;
+            var start = new CyclicBarrier(2);
+            var transactions = transactions();
+            var parked = CompletableFuture.supplyAsync(() -> {
+                await(start);
+                return transactions.execute(status -> store.parkTurnForAction(
+                        TENANT, racingSession, turn.turnId(), OWNER));
+            });
+            var cancelled = CompletableFuture.supplyAsync(() -> {
+                await(start);
+                return transactions.execute(status -> cancel("cancel-" + raceId,
+                        "digest-cancel-" + raceId, turn));
+            });
+
+            // Either side may win; convergence is the post-state below.
+            parked.orTimeout(30, TimeUnit.SECONDS).join();
+            cancelled.orTimeout(30, TimeUnit.SECONDS).join();
+            var current = store.findTurn(TENANT, sessionId, turn.turnId()).orElseThrow();
+            assertThat(current.status()).isEqualTo("CANCELLING");
+            assertThat(current.errorCode()).isNull();
+            assertThat(current.retryAfter()).isNull();
+        }
+    }
+
     // Snapshot witnesses: the server default must not decide the isolation.
     private TransactionTemplate transactions() {
         var transactions = new TransactionTemplate(

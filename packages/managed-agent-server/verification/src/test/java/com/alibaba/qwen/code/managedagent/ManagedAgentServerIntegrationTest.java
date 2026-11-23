@@ -1423,6 +1423,39 @@ class ManagedAgentServerIntegrationTest {
                 .contains(target);
     }
 
+    // An Action park is dispatch bookkeeping: public and Web Shell reads
+    // still see the running Turn without an error code.
+    @Test
+    void hidesTheActionParkMarkFromTurnReads() throws Exception {
+        pauseRecoveryScanning();
+        String tenant = UUID.randomUUID().toString();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "parked-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "parked-turn", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(),
+                "sha256:" + "3".repeat(64));
+        jdbc.update("UPDATE ma_turn SET error_code = ? WHERE tenant_id = ?"
+                        + " AND session_id = ? AND turn_id = ?",
+                com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.HARNESS_ACTION_PARKED,
+                tenant, session.sessionId(), turn.turnId());
+
+        mvc.perform(get("/v1/agents/sessions/{id}", session.sessionId())
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.active_turn.id").value(turn.turnId()))
+                .andExpect(jsonPath("$.active_turn.error_code").doesNotExist());
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session.sessionId() + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.activeTurn.turnId").value(turn.turnId()))
+                .andExpect(jsonPath("$.activeTurn.errorCode").doesNotExist());
+    }
+
     // #14387: the recovery-blocked mark is durable on the still-active
     // row — the status the claim saw stands, no retry counter moves, the
     // lease releases — and a stale owner never re-marks.

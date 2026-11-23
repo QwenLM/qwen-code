@@ -216,6 +216,9 @@ CREATE TABLE ma_session_head (
     wake_retry_at BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Earliest wake retry time in Unix epoch milliseconds.',
     wake_seal_revision BIGINT UNSIGNED COMMENT 'Journal revision at which a clean suspension sealed the head and certified its wake projection.',
     wake_seal_background TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT 'Whether that seal also certified every unsettled run and cleanup debt as a verified background hold.',
+    wake_seal_parked_prompt_id VARCHAR(64) COMMENT 'Prompt identity of the Action-parked Turn certified by this seal.',
+    wake_seal_parked_until BIGINT UNSIGNED COMMENT 'Wake time of the Action-parked Turn certified by this seal.',
+    wake_seal_parked_approval_revision BIGINT UNSIGNED COMMENT 'Approval selection revision certified for the Action-parked Turn.',
     is_wake_scan_pending TINYINT UNSIGNED GENERATED ALWAYS AS (is_wake_pending = 1 OR wake_head_revision IS NULL OR wake_head_revision <> journal_revision)
         COMMENT 'Generated flag for pending wake work or an outdated wake projection.',
     cleanup_head_revision BIGINT UNSIGNED COMMENT 'Journal revision through which cleanup requirements have been projected.',
@@ -424,7 +427,7 @@ CREATE TABLE ma_session_record (
     action_version BIGINT UNSIGNED COMMENT 'Version of the approval Action being addressed.',
     decision_receipt_id VARCHAR(128) COMMENT 'Stable receipt identity for the accepted approval decision.',
     decision_digest CHAR(64) COMMENT 'Digest of the accepted approval decision.',
-    prompt_id VARBINARY(512) COMMENT 'Stable prompt identity used for Harness submission and retry.',
+    prompt_id VARCHAR(64) COMMENT 'Stable prompt identity used for Harness submission and retry.',
     turn_id VARBINARY(512) COMMENT 'Turn identity within the Session.',
     options_json LONGTEXT COMMENT 'Serialized choices offered by a public approval Action.',
     CONSTRAINT ck_ma_record_kind CHECK ((CASE record_kind WHEN 'DOMAIN' THEN 6 WHEN 'ACTION' THEN 6 WHEN 'CONVERSATION' THEN 12 ELSE -1 END = CHAR_LENGTH(record_kind))),

@@ -34,6 +34,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
+| `action-parking.enabled` | — | 布尔 | `false` | 允许 Hosted Harness 在 Session 唯一活跃的 Turn 正等待可恢复的审批或提问 Action 时挂起该 Session。Session Store 会在 writer grant 中公告该能力，挂起时的 seal 携带停靠 Turn 证书，控制面据此释放派发租约，直到决定、取消、审批模式变更或到期。需要同时开启 `qwen.managed-agent.wake-dispatch.enabled`，只开启 Action parking 会在启动时拒绝。默认关闭。关闭后不再产生新的停靠；已停靠的 Turn 仍经现有派发扫描恢复。 |
 | `agent-revision` | `QWEN_MANAGED_AGENT_REVISION` | 字符串 | `1` | 内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。 |
 | `child-relay.scan-delay` | — | 时长 | `2s` | 子结果中继两次运行之间的间隔；每次运行推进尚未完成创建或尚未将结果回传父 Session 的子 agent 与 workflow 运行。仅在 `qwen.managed-agent.runtime-broker.enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
 | `child-workspace.scan-delay` | — | 时长 | `2s` | 子 Workspace 任务两次运行之间的间隔；每次运行继续未完成的子 Workspace Git 步骤（准备、合并、应用、丢弃）。仅在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。 |
