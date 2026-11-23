@@ -11899,7 +11899,7 @@ export function registerHostedHarnessSessionRoutes(
         !HOSTED_UUID.test(operationId) ||
         typeof childRunId !== 'string' ||
         childRunId.length < 1 ||
-        childRunId.length > 320
+        childRunId.length > 256
       ) {
         return error(res, 400, 'invalid_child_operation');
       }
@@ -12317,7 +12317,7 @@ export function registerHostedHarnessSessionRoutes(
             (route !== 'to_child' && route !== 'to_parent') ||
             typeof childRunId !== 'string' ||
             childRunId.length < 1 ||
-            childRunId.length > 320 ||
+            childRunId.length > 256 ||
             typeof senderSessionId !== 'string' ||
             !HOSTED_UUID.test(senderSessionId) ||
             typeof content !== 'string' ||
@@ -12463,7 +12463,7 @@ export function registerHostedHarnessSessionRoutes(
             route !== 'to_parent' ||
             typeof childRunId !== 'string' ||
             childRunId.length < 1 ||
-            childRunId.length > 320 ||
+            childRunId.length > 256 ||
             typeof senderSessionId !== 'string' ||
             !HOSTED_UUID.test(senderSessionId) ||
             typeof argsBase64 !== 'string' ||
