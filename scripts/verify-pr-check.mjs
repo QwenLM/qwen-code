@@ -542,9 +542,13 @@ const placeholder = (value) =>
 
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const FULL_OID_RE = /^[0-9a-f]{40}$/;
+const ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function parseIsoTimestamp(value) {
-  if (typeof value !== 'string' || value.trim() === '') return null;
+  if (typeof value !== 'string' || !ISO_TIMESTAMP_RE.test(value.trim())) {
+    return null;
+  }
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms;
 }
@@ -556,10 +560,13 @@ function parseIsoTimestamp(value) {
 export function checkExecutionRecord(
   text,
   {
+    expectedBase = null,
     expectedHead = null,
     coordinates = null,
     expectedSha256 = null,
     actualSha256 = null,
+    expectedContextSha256 = null,
+    requiredExecutionClass = null,
   } = {},
 ) {
   const errors = [];
@@ -614,6 +621,14 @@ export function checkExecutionRecord(
   }
   if (nonEmpty(parsed.baseRefOid) && !FULL_OID_RE.test(parsed.baseRefOid)) {
     errors.push('execution-record.json baseRefOid must be a 40-hex OID');
+  } else if (
+    expectedBase &&
+    nonEmpty(parsed.baseRefOid) &&
+    parsed.baseRefOid !== expectedBase
+  ) {
+    errors.push(
+      `execution-record.json baseRefOid ${parsed.baseRefOid} does not match expected base ${expectedBase}`,
+    );
   }
   if (nonEmpty(parsed.headRefOid) && !FULL_OID_RE.test(parsed.headRefOid)) {
     errors.push('execution-record.json headRefOid must be a 40-hex OID');
@@ -646,6 +661,15 @@ export function checkExecutionRecord(
       errors.push(`execution-record.json ${digestField} must be 64-hex sha256`);
     }
   }
+  if (
+    expectedContextSha256 &&
+    nonEmpty(parsed.contextDigest) &&
+    parsed.contextDigest !== expectedContextSha256
+  ) {
+    errors.push(
+      `execution-record.json contextDigest ${parsed.contextDigest} does not match host context sha256 ${expectedContextSha256}`,
+    );
+  }
 
   const { prTrust, executionClass, backend } = parsed;
   if (!PR_TRUST_LEVELS.includes(prTrust)) {
@@ -656,6 +680,14 @@ export function checkExecutionRecord(
   if (!EXECUTION_CLASSES.includes(executionClass)) {
     errors.push(
       `execution-record.json executionClass must be one of ${EXECUTION_CLASSES.join(' | ')}`,
+    );
+  }
+  if (
+    requiredExecutionClass === 'hardware-isolated' &&
+    executionClass !== 'hardware-isolated'
+  ) {
+    errors.push(
+      `execution-record.json executionClass=${JSON.stringify(executionClass)} violates host context requirement executionClass=hardware-isolated`,
     );
   }
   if (
@@ -696,6 +728,8 @@ export function checkExecutionRecord(
     errors.push(
       'execution-record.json requires valid ISO startedAt and endedAt',
     );
+  } else if (endedMs < startedMs) {
+    errors.push('execution-record.json endedAt must not precede startedAt');
   }
   if (parsed.teardownStatus !== 'destroyed') {
     errors.push(
@@ -917,6 +951,13 @@ export function checkBoundary(
   // A waived host round and an attested VM both run outside an observed
   // container boundary, so both need the maintainer's recorded approval.
   // The VM additionally records what the operator attested (nothing mounted).
+  if (parsed.mode === 'waived' && executionRecord) {
+    return {
+      errors: [
+        'boundary.json mode waived contradicts a host --execution-record',
+      ],
+    };
+  }
   const approvalMode = parsed.mode === 'waived' || parsed.mode === 'vm';
   if (approvalMode && (!nonEmpty(parsed.by) || !nonEmpty(parsed.reason))) {
     return {
@@ -1172,6 +1213,7 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
 export function checkArtifacts({
   files,
   evidence = [],
+  expectedBase = null,
   expectedHead = null,
   publisherOwnsBoundary = false,
   publishLane = false,
@@ -1180,6 +1222,8 @@ export function checkArtifacts({
   unreadableKeys = new Set(),
   executionRecordText = null,
   executionRecordSha256 = null,
+  expectedContextSha256 = null,
+  requiredExecutionClass = null,
 }) {
   const errors = [];
   const warnings = [];
@@ -1355,13 +1399,33 @@ export function checkArtifacts({
       .update(executionRecordText, 'utf8')
       .digest('hex');
     const execCheck = checkExecutionRecord(executionRecordText, {
+      expectedBase,
       expectedHead,
       coordinates,
       expectedSha256: executionRecordSha256,
       actualSha256: actualExecutionRecordSha256,
+      expectedContextSha256,
+      requiredExecutionClass,
     });
     errors.push(...execCheck.errors);
     executionRecord = execCheck.record;
+  }
+
+  if (
+    requiredExecutionClass === 'hardware-isolated' &&
+    files.boundary &&
+    files.boundary.trim() !== ''
+  ) {
+    try {
+      const b = JSON.parse(files.boundary);
+      if (b && typeof b === 'object' && b.mode === 'container') {
+        errors.push(
+          'boundary.json mode container violates host context requirement executionClass=hardware-isolated',
+        );
+      }
+    } catch {
+      // Malformed boundary.json is reported by checkBoundary below.
+    }
   }
 
   const boundaryAbsent =
@@ -1725,6 +1789,9 @@ function main(argv) {
       : null;
   };
   let coordinates = null;
+  let expectedBase = null;
+  let hostContextSha256 = null;
+  let requiredExecutionClass = null;
   if (contextPath) {
     // A host-held snapshot: the PR clone is mounted read-write, so the round
     // can write ANY path inside it — the artifact dir AND the
@@ -1835,13 +1902,31 @@ function main(argv) {
       snapshotWarning = `--context ${contextPath} has no --context-sha256 binding; provenance rests on the path/link checks alone — pass the digest prepare printed to bind the snapshot's bytes`;
     }
     if (snapshotText !== null && snapshotText !== UNREADABLE) {
+      hostContextSha256 = createHash('sha256')
+        .update(snapshotText, 'utf8')
+        .digest('hex');
       try {
         const snapshot = JSON.parse(snapshotText);
+        if (/^[0-9a-f]{40}$/.test(snapshot?.baseRefOid ?? '')) {
+          expectedBase = snapshot.baseRefOid;
+        }
         if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
           expectedHead = snapshot.headRefOid;
           snapshotPath = contextPath;
         }
         coordinates = coordinatesFrom(snapshot);
+        const tc = snapshot?.trustClassification;
+        if (tc && typeof tc === 'object' && !Array.isArray(tc)) {
+          if (tc.headRefOid && expectedHead && tc.headRefOid !== expectedHead) {
+            process.stderr.write(
+              `verify-pr check: --context ${contextPath} carries stale trustClassification.headRefOid ${tc.headRefOid} (expected ${expectedHead})\n`,
+            );
+            return 1;
+          }
+          if (EXECUTION_CLASSES.includes(tc.executionClass)) {
+            requiredExecutionClass = tc.executionClass;
+          }
+        }
       } catch {
         // Reported below; never falls back to the writable artifact copy.
       }
@@ -1953,14 +2038,19 @@ function main(argv) {
   }
 
   // Refuse a guest-planted execution-record.json inside the PR-writable artifact dir (D5/D9).
+  // Only ENOENT confirms absence; EACCES/ENOTDIR must fail closed.
   const plantedExecRecordPath = join(dir, 'execution-record.json');
   try {
     lstatSync(plantedExecRecordPath);
     unreadableErrors.push(
       'execution-record.json must not reside inside the PR-writable artifact directory: pass the host-held record via --execution-record',
     );
-  } catch {
-    // Absent, as required.
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      unreadableErrors.push(
+        `could not verify absence of planted execution-record.json (${error?.code ?? 'error'})`,
+      );
+    }
   }
 
   // The CI entry path is defined by $QWEN_VERIFY_CONTEXT; there the publish
@@ -1970,6 +2060,7 @@ function main(argv) {
   const result = checkArtifacts({
     files,
     evidence,
+    expectedBase,
     expectedHead,
     publisherOwnsBoundary,
     publishLane,
@@ -1978,6 +2069,8 @@ function main(argv) {
     unreadableKeys,
     executionRecordText,
     executionRecordSha256: executionRecordSha,
+    expectedContextSha256: contextSha ?? hostContextSha256,
+    requiredExecutionClass,
   });
   // The container nonce corroboration (R16-1) needs the round dir to scan the
   // battery's logs, so it lives here rather than in checkArtifacts. It runs

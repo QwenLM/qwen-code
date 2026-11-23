@@ -74,6 +74,7 @@ const FIELDS = [
   'baseRefName',
   'baseRefOid',
   'headRefOid',
+  'isCrossRepository',
   'commits',
 ].join(',');
 
@@ -159,7 +160,7 @@ const ESCALATION_RULES = [
     test: (p) =>
       /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lockb?|npm-shrinkwrap\.json|pnpm-workspace\.yaml|\.npmrc|\.pnpmfile\.[cm]?js|\.yarnrc(?:\.yml)?)$/i.test(
         p,
-      ),
+      ) || /^patches\//i.test(p),
   },
   {
     reason: 'maven-build',
@@ -174,8 +175,9 @@ const ESCALATION_RULES = [
   {
     reason: 'verify-or-sandbox-script',
     test: (p) =>
-      /^scripts\/(?:verify-pr-|sandbox)/i.test(p) ||
-      /(?:^|\/)(?:Dockerfile(?:\.[^/]+)?|docker-compose(?:\.[^/]+)?\.ya?ml)$/i.test(
+      /^scripts\/(?:verify-pr-|sandbox|lib\/)/i.test(p) ||
+      /^\.husky\//i.test(p) ||
+      /(?:^|\/)(?:\.gitmodules|\.gitattributes|Dockerfile(?:\.[^/]+)?|docker-compose(?:\.[^/]+)?\.ya?ml|Makefile|esbuild\.config\.[cm]?js|eslint\.config\.[cm]?js|vitest\.config\.[cm]?[jt]s)$/i.test(
         p,
       ),
   },
@@ -228,10 +230,10 @@ export function classifyPrTrust({
   sponsored = false,
 } = {}) {
   let prTrust;
-  if (isLocalOwner === true) {
-    prTrust = 'local-owner';
-  } else if (isFork === true) {
+  if (isFork === true) {
     prTrust = 'external';
+  } else if (isLocalOwner === true) {
+    prTrust = 'local-owner';
   } else if (typeof permission === 'string') {
     const perm = permission.trim().toLowerCase();
     if (WRITE_PERMISSIONS.has(perm)) {
@@ -944,18 +946,19 @@ function main(argv) {
   // Classify PR trust and mandatory hardware-isolation escalations host-side
   // before writing the digest-bound snapshot (§4.1–§4.4). Failure to read
   // permission or changed files fails closed to hardware-isolated.
+  // Use -z (NUL-delimited, never C-quoted) so non-ASCII or quote-bearing
+  // filenames like `.github/workflows/测试.yml` cannot bypass prefix rules via
+  // core.quotePath=true.
   const diffRes = runGitRoot([
     'diff',
     '--name-only',
     '--no-renames',
+    '-z',
     `${context.base}..${context.head}`,
   ]);
   const changedPaths =
     diffRes.status === 0
-      ? diffRes.stdout
-          .split('\n')
-          .map((line) => line.trim())
-          .filter(Boolean)
+      ? diffRes.stdout.split('\0').filter((line) => line.length > 0)
       : null;
   const authorPerm = fetchAuthorPermission(owner, name, snapshot.author?.login);
   const trust = classifyPrTrust({

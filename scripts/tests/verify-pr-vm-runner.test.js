@@ -181,6 +181,16 @@ describe('verify-pr-vm-runner backend launch plans', () => {
 
     expect(() =>
       buildFirecrackerLaunchPlan({
+        runId: 'fc02',
+        jailBaseDir: '/tmp/j',
+        firecrackerBin: '/opt/fc/firecracker-v1.18.0-aarch64',
+        jailerBin: '/opt/fc/jailer-v1.18.0-aarch64',
+        guestCid: 2,
+      }),
+    ).toThrow(/guestCid must be an integer >= 3/);
+
+    expect(() =>
+      buildFirecrackerLaunchPlan({
         runId: 'fc-very-long-run-id-1234',
         jailBaseDir: '/root/Work/qwen-microvm-poc-20261123/jail',
         firecrackerBin: '/opt/fc/firecracker-v1.18.0-aarch64',
@@ -209,6 +219,23 @@ describe('verify-pr-vm-runner backend launch plans', () => {
     expect(plan.argv).toContain('--restful-uri');
     expect(plan.argv).toContain('none://');
     expect(plan.argv.join(' ')).not.toMatch(/virtio-net|virtio-fs|rosetta/);
+
+    expect(() =>
+      buildVfkitLaunchPlan({
+        runId: 'vf02',
+        vfkitBin: '/opt/vfkit',
+        seatbeltProfile: '/opt/vfkit-probe.sb',
+        pocDir: '/tmp/poc',
+        socketDir: '/tmp/s1',
+        kernelPath: '/tmp/vmlinuz,injected=1',
+        initramfsPath: '/tmp/initrd.gz',
+        rootfsPath: '/tmp/rootfs.ext4',
+        guestLogPath: '/tmp/guest.log',
+        pidFile: '/tmp/vfkit.pid',
+        homeDir: '/tmp/home',
+        tmpDir: '/tmp',
+      }),
+    ).toThrow(/must not contain commas/);
 
     expect(() =>
       buildVfkitLaunchPlan({
@@ -272,18 +299,24 @@ describe('verify-pr-vm-runner backend launch plans', () => {
   });
 
   it('builds a hardened Aliyun Agent Sandbox (fcsandbox) plan and refuses default public egress templates', () => {
-    expect(() =>
-      buildAliyunAgentSandboxPlan({
-        runId: 'sb01',
-        headRefOid: HEAD_OID,
-        region: 'cn-hangzhou',
-        teamId: 'team-123',
-        templateName: 'code-interpreter-v1',
-        vpcId: 'vpc-isolated',
-        vSwitchIds: ['vsw-isolated'],
-        securityGroupId: 'sg-drop-egress',
-      }),
-    ).toThrow(/default public egress is OPEN/);
+    for (const badTemplate of [
+      'code-interpreter-v1',
+      ' Code-Interpreter-V1 ',
+      'BASE',
+    ]) {
+      expect(() =>
+        buildAliyunAgentSandboxPlan({
+          runId: 'sb01',
+          headRefOid: HEAD_OID,
+          region: 'cn-hangzhou',
+          teamId: 'team-123',
+          templateName: badTemplate,
+          vpcId: 'vpc-isolated',
+          vSwitchIds: ['vsw-isolated'],
+          securityGroupId: 'sg-drop-egress',
+        }),
+      ).toThrow(/default public egress is OPEN/);
+    }
 
     const plan = buildAliyunAgentSandboxPlan({
       runId: 'sb02',

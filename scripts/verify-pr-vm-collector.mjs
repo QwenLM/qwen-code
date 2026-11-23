@@ -91,7 +91,7 @@ export function validateCollectorFilename(
   if (!FLAT_FILENAME_RE.test(decoded) || decoded.includes('..')) {
     return { ok: false, reason: 'invalid-name' };
   }
-  if (AUTHORITY_FILENAMES.has(decoded)) {
+  if (AUTHORITY_FILENAMES.has(decoded.toLowerCase())) {
     return { ok: false, reason: 'authority-file' };
   }
   if (allowedFiles && !allowedFiles.has(decoded)) {
@@ -177,12 +177,21 @@ export function startCollectorServer({
 
   let settled = false;
   let acceptTimer = null;
+  let activeConnection = false;
+  let currentConn = null;
+  let cleanupActiveConnection = null;
   const server = createServer();
 
-  const finish = (summary) => {
+  const finish = (summary, { destroyActive = false } = {}) => {
     if (settled) return;
     settled = true;
     if (acceptTimer) clearTimeout(acceptTimer);
+    if (destroyActive) {
+      if (cleanupActiveConnection) cleanupActiveConnection();
+      if (currentConn && !currentConn.destroyed) {
+        currentConn.destroy();
+      }
+    }
     server.close(() => {
       try {
         unlinkSync(socketPath);
@@ -195,6 +204,12 @@ export function startCollectorServer({
   };
 
   server.on('connection', (conn) => {
+    if (settled || activeConnection) {
+      conn.destroy();
+      return;
+    }
+    activeConnection = true;
+    currentConn = conn;
     if (acceptTimer) {
       clearTimeout(acceptTimer);
       acceptTimer = null;
@@ -206,6 +221,7 @@ export function startCollectorServer({
     const completed = [];
     let finished = false;
     let draining = 0;
+    let drainTimer = null;
     let pendingReject = null;
 
     const cleanupPending = () => {
@@ -235,6 +251,7 @@ export function startCollectorServer({
     const readTimer = setTimeout(() => {
       if (finished) return;
       finished = true;
+      if (drainTimer) clearTimeout(drainTimer);
       cleanupPending();
       try {
         conn.end(encodeReply('E', 'read-timeout'));
@@ -244,10 +261,21 @@ export function startCollectorServer({
       finish({ outputStatus: 'timeout', reason: 'read-timeout', files: [] });
     }, readDeadlineMs);
 
+    cleanupActiveConnection = () => {
+      finished = true;
+      clearTimeout(readTimer);
+      if (drainTimer) {
+        clearTimeout(drainTimer);
+        drainTimer = null;
+      }
+      cleanupPending();
+    };
+
     const failTransaction = (outputStatus, reason) => {
       if (finished) return;
       finished = true;
       clearTimeout(readTimer);
+      if (drainTimer) clearTimeout(drainTimer);
       cleanupPending();
       try {
         conn.end(encodeReply('E', reason));
@@ -264,6 +292,10 @@ export function startCollectorServer({
           buffer = buffer.subarray(take);
           draining -= take;
           if (draining === 0 && pendingReject) {
+            if (drainTimer) {
+              clearTimeout(drainTimer);
+              drainTimer = null;
+            }
             const rej = pendingReject;
             pendingReject = null;
             failTransaction(rej.outputStatus, rej.reason);
@@ -297,6 +329,13 @@ export function startCollectorServer({
             throw new CollectorRejected('rejected', 'frame-too-large');
           }
           pendingReject = new CollectorRejected('rejected', 'frame-too-large');
+          drainTimer = setTimeout(() => {
+            if (pendingReject && !finished) {
+              const rej = pendingReject;
+              pendingReject = null;
+              failTransaction(rej.outputStatus, rej.reason);
+            }
+          }, 200);
           return;
         }
 
@@ -477,11 +516,14 @@ export function startCollectorServer({
     ready,
     done,
     close: () =>
-      finish({
-        outputStatus: 'incomplete',
-        reason: 'closed-by-host',
-        files: [],
-      }),
+      finish(
+        {
+          outputStatus: 'incomplete',
+          reason: 'closed-by-host',
+          files: [],
+        },
+        { destroyActive: true },
+      ),
   };
 }
 
@@ -489,19 +531,26 @@ async function main(argv) {
   let socketPath = null;
   let vaultDir = null;
   let summaryOut = null;
-  let vmmUid = null;
-  let vmmGid = null;
+  let vmmUidRaw = null;
+  let vmmGidRaw = null;
   let readDeadlineMs = 5000;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--socket') socketPath = argv[(i += 1)] ?? null;
     else if (arg === '--vault') vaultDir = argv[(i += 1)] ?? null;
     else if (arg === '--summary-out') summaryOut = argv[(i += 1)] ?? null;
-    else if (arg === '--vmm-uid') vmmUid = Number(argv[(i += 1)]);
-    else if (arg === '--vmm-gid') vmmGid = Number(argv[(i += 1)]);
-    else if (arg === '--read-deadline-ms')
-      readDeadlineMs = Number(argv[(i += 1)]);
-    else {
+    else if (arg === '--vmm-uid') vmmUidRaw = argv[(i += 1)] ?? null;
+    else if (arg === '--vmm-gid') vmmGidRaw = argv[(i += 1)] ?? null;
+    else if (arg === '--read-deadline-ms') {
+      const val = Number(argv[(i += 1)]);
+      if (!Number.isInteger(val) || val <= 0) {
+        process.stderr.write(
+          'verify-pr vm-collector: --read-deadline-ms requires a positive integer\n',
+        );
+        return 2;
+      }
+      readDeadlineMs = val;
+    } else {
       process.stderr.write(`verify-pr vm-collector: unknown option ${arg}\n`);
       return 2;
     }
@@ -512,11 +561,34 @@ async function main(argv) {
     );
     return 2;
   }
+  let vmmUid = null;
+  let vmmGid = null;
+  if (vmmUidRaw !== null || vmmGidRaw !== null) {
+    if (vmmUidRaw === null || vmmGidRaw === null) {
+      process.stderr.write(
+        'verify-pr vm-collector: --vmm-uid and --vmm-gid must be provided together\n',
+      );
+      return 2;
+    }
+    vmmUid = Number(vmmUidRaw);
+    vmmGid = Number(vmmGidRaw);
+    if (
+      !Number.isInteger(vmmUid) ||
+      vmmUid <= 0 ||
+      !Number.isInteger(vmmGid) ||
+      vmmGid <= 0
+    ) {
+      process.stderr.write(
+        'verify-pr vm-collector: --vmm-uid and --vmm-gid require positive integers\n',
+      );
+      return 2;
+    }
+  }
   const srv = startCollectorServer({
     socketPath,
     vaultDir,
-    vmmUid: Number.isInteger(vmmUid) ? vmmUid : null,
-    vmmGid: Number.isInteger(vmmGid) ? vmmGid : null,
+    vmmUid,
+    vmmGid,
     readDeadlineMs,
   });
   await srv.ready;

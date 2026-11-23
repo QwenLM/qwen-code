@@ -116,6 +116,8 @@ export function isPathWithinApprovedRoots(targetPath, approvedRoots = []) {
   return false;
 }
 
+const MAX_RECORD_BYTES = 16 * 1024 * 1024;
+
 function readSingleLinkRegularFile(filePath) {
   let st;
   try {
@@ -127,12 +129,15 @@ function readSingleLinkRegularFile(filePath) {
   if (!st.isFile()) return { error: 'non-regular', text: null };
   if (st.nlink !== 1)
     return { error: `hardlink-alias:${st.nlink}`, text: null };
+  if (st.size > MAX_RECORD_BYTES) return { error: 'too-large', text: null };
   try {
     return { error: null, text: readFileSync(filePath, 'utf8') };
   } catch (error) {
     return { error: `read-failed:${error.code ?? 'EIO'}`, text: null };
   }
 }
+
+let atomicTmpSeq = 0;
 
 function writeAtomicPrivate(filePath, content) {
   try {
@@ -146,7 +151,8 @@ function writeAtomicPrivate(filePath, content) {
     if (error.code !== 'ENOENT') throw error;
   }
   mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  atomicTmpSeq += 1;
+  const tmp = `${filePath}.${process.pid}.${atomicTmpSeq}.tmp`;
   writeFileSync(tmp, content, { mode: 0o600 });
   chmodSync(tmp, 0o600);
   renameSync(tmp, filePath);
@@ -253,6 +259,10 @@ function stopVerifiedPid(entry, label, report, { graceMs, killWaitMs }) {
   const expectedTokens = entry?.expectedExeTokens ?? [];
   if (!Number.isInteger(pid) || pid <= 1) {
     report.errors.push(`invalid-pid:${label}:${pid}`);
+    return;
+  }
+  if (pid === process.pid) {
+    report.errors.push(`refusing-self-pid:${label}:${pid}`);
     return;
   }
   if (!inspectPidState(pid).alive) {
@@ -596,12 +606,13 @@ export function writeExecutionRecordAndBoundary({
 
   if (
     realLauncher === realArtifact ||
-    withinPrefix(realArtifact, realLauncher)
+    withinPrefix(realArtifact, realLauncher) ||
+    withinPrefix(realLauncher, realArtifact)
   ) {
     return {
       ok: false,
       errors: [
-        'launcherDir must be outside the PR-writable artifact directory',
+        'launcherDir and artifactDir must not overlap or nest inside each other',
       ],
       executionRecordPath: null,
       executionRecordSha256: null,
@@ -625,7 +636,17 @@ export function writeExecutionRecordAndBoundary({
 
   const recordPath = join(realLauncher, 'execution-record.json');
   const recordText = `${JSON.stringify(normalized, null, 2)}\n`;
-  writeAtomicPrivate(recordPath, recordText);
+  try {
+    writeAtomicPrivate(recordPath, recordText);
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [`execution-record-write-refused:${error.message}`],
+      executionRecordPath: null,
+      executionRecordSha256: null,
+      boundaryPath: null,
+    };
+  }
   const recordSha256 = createHash('sha256')
     .update(recordText, 'utf8')
     .digest('hex');
@@ -672,7 +693,17 @@ export function writeExecutionRecordAndBoundary({
     writtenBy: 'verify-pr-vm-lifecycle',
     writtenAfterTeardown: true,
   };
-  writeAtomicPrivate(boundaryPath, `${JSON.stringify(boundary, null, 2)}\n`);
+  try {
+    writeAtomicPrivate(boundaryPath, `${JSON.stringify(boundary, null, 2)}\n`);
+  } catch (error) {
+    return {
+      ok: false,
+      errors: [`boundary-write-refused:${error.message}`],
+      executionRecordPath: recordPath,
+      executionRecordSha256: recordSha256,
+      boundaryPath: null,
+    };
+  }
   return {
     ok: true,
     errors: [],

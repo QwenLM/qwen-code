@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -15,6 +16,7 @@ import {
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   ACK,
@@ -23,6 +25,10 @@ import {
   validateCollectorFilename,
   validateSocketPathLength,
 } from '../../scripts/verify-pr-vm-collector.mjs';
+
+const COLLECTOR_SCRIPT = fileURLToPath(
+  new URL('../../scripts/verify-pr-vm-collector.mjs', import.meta.url),
+);
 
 let tmpDirs = [];
 afterEach(() => {
@@ -127,10 +133,12 @@ describe('verify-pr-vm-collector', () => {
     }
     for (const auth of [
       'boundary.json',
+      'Boundary.JSON',
       'boundary-gate.json',
       'execution-record.json',
+      'EXECUTION-RECORD.JSON',
     ]) {
-      expect(validateCollectorFilename(Buffer.from(auth))).toEqual({
+      expect(validateCollectorFilename(Buffer.from(auth), null)).toEqual({
         ok: false,
         reason: 'authority-file',
       });
@@ -292,5 +300,135 @@ describe('verify-pr-vm-collector', () => {
     expect(reply2).toEqual({ kind: 'E', reason: 'read-timeout' });
     expect(sum2.outputStatus).toBe('timeout');
     expect(sum2.vaultEntries).toEqual([]);
+  });
+
+  it('rejects concurrent second connection, bounds partial oversize drain to frame-too-large, closes active connections cleanly, and validates CLI numeric flags', async () => {
+    // 0. Concurrent second connection is immediately dropped while first connection succeeds
+    const d0 = makeTmpDir('qc-conc-');
+    const s0 = join(d0, 'v.sock');
+    const v0 = join(d0, 'vault');
+    const srv0 = startCollectorServer({ socketPath: s0, vaultDir: v0 });
+    await srv0.ready;
+    const conn1 = createConnection(s0);
+    const firstDone = new Promise((resolve, reject) => {
+      let buf = Buffer.alloc(0);
+      let acked = false;
+      conn1.on('error', reject);
+      conn1.on('connect', () => conn1.write(GREETING));
+      conn1.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (!acked && buf.length >= ACK.length) {
+          acked = true;
+          buf = buf.subarray(ACK.length);
+          // Open a hostile concurrent second connection before conn1 finishes
+          const conn2 = createConnection(s0);
+          conn2.on('close', () => {
+            conn1.write(
+              Buffer.concat([
+                makeFrame('H', 'report-v1'),
+                makeWholeFile('verdict.txt', 'merge-ready\n'),
+                makeFrame('R'),
+              ]),
+            );
+          });
+          conn2.on('error', () => {
+            // Expected on immediate destroy.
+          });
+          return;
+        }
+        if (acked && buf.length >= 5) {
+          const len = buf.readUInt32BE(1);
+          if (buf.length >= 5 + len) {
+            conn1.end();
+            resolve(buf.subarray(5, 5 + len).toString('ascii'));
+          }
+        }
+      });
+    });
+    expect(await firstDone).toBe('complete');
+    const sum0 = await srv0.done;
+    expect(sum0.outputStatus).toBe('complete');
+
+    // 0b. srv.close() destroys a hung client mid-file, clears timers, and leaves zero pending files
+    const dClose = makeTmpDir('qc-close-');
+    const sClose = join(dClose, 'v.sock');
+    const vClose = join(dClose, 'vault');
+    const srvClose = startCollectorServer({
+      socketPath: sClose,
+      vaultDir: vClose,
+      readDeadlineMs: 10000,
+    });
+    await srvClose.ready;
+    const hung = createConnection(sClose);
+    hung.on('error', () => {});
+    await new Promise((resolve) => {
+      let buf = Buffer.alloc(0);
+      hung.once('connect', () => hung.write(GREETING));
+      hung.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (buf.length >= ACK.length) {
+          hung.write(
+            Buffer.concat([
+              makeFrame('H', 'report-v1'),
+              makeFileBegin('report.md', 50),
+              makeFrame('C', 'half-written'),
+            ]),
+          );
+          setTimeout(resolve, 30);
+        }
+      });
+    });
+    srvClose.close();
+    const sumClose = await srvClose.done;
+    expect(sumClose.outputStatus).toBe('incomplete');
+    expect(sumClose.vaultEntries).toEqual([]);
+
+    // 1. Oversize frame with partial stalled body still returns frame-too-large via 200ms drain timer
+    const d1 = makeTmpDir('qc-drain-');
+    const s1 = join(d1, 'v.sock');
+    const v1 = join(d1, 'vault');
+    const srv1 = startCollectorServer({
+      socketPath: s1,
+      vaultDir: v1,
+      maxFrameBytes: 1024,
+      readDeadlineMs: 5000,
+    });
+    await srv1.ready;
+    const hdr = Buffer.allocUnsafe(5);
+    hdr[0] = 'B'.charCodeAt(0);
+    hdr.writeUInt32BE(2000, 1);
+    const r1 = await sendTransaction(s1, () =>
+      Buffer.concat([
+        makeFrame('H', 'report-v1'),
+        hdr,
+        Buffer.alloc(100, 0x41),
+      ]),
+    );
+    const sum1 = await srv1.done;
+    expect(r1).toEqual({ kind: 'E', reason: 'frame-too-large' });
+    expect(sum1.outputStatus).toBe('rejected');
+    expect(sum1.reason).toBe('frame-too-large');
+
+    // 2. CLI rejects unpaired --vmm-uid and non-integer --read-deadline-ms
+    const badUid = spawnSync(
+      process.execPath,
+      [COLLECTOR_SCRIPT, '--socket', s1, '--vault', v1, '--vmm-uid', '65534'],
+      { encoding: 'utf8' },
+    );
+    expect(badUid.status).toBe(2);
+    const badDeadline = spawnSync(
+      process.execPath,
+      [
+        COLLECTOR_SCRIPT,
+        '--socket',
+        s1,
+        '--vault',
+        v1,
+        '--read-deadline-ms',
+        'abc',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(badDeadline.status).toBe(2);
   });
 });

@@ -3372,6 +3372,68 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(wrongPr.errors.join('\n')).toMatch(
       /not this round's QwenLM\/qwen-code#17185/,
     );
+
+    const wrongCtxSha = checkExecutionRecord(JSON.stringify(makeExecRecord()), {
+      expectedHead: HEAD,
+      expectedContextSha256: SHA('9'),
+    });
+    expect(wrongCtxSha.errors.join('\n')).toMatch(
+      /contextDigest .* does not match host context sha256/,
+    );
+
+    const downgraded = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          prTrust: 'collaborator',
+          executionClass: 'trusted-shared-kernel',
+          backend: 'container',
+        }),
+      ),
+      { expectedHead: HEAD, requiredExecutionClass: 'hardware-isolated' },
+    );
+    expect(downgraded.errors.join('\n')).toMatch(
+      /violates host context requirement executionClass=hardware-isolated/,
+    );
+
+    const badTime = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          startedAt: '1',
+          endedAt: '2026-11-23T10:00:00Z',
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(badTime.errors.join('\n')).toMatch(
+      /valid ISO startedAt and endedAt/,
+    );
+
+    const reversedTime = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          startedAt: '2026-11-23T11:00:10Z',
+          endedAt: '2026-11-23T11:00:05Z',
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(reversedTime.errors.join('\n')).toMatch(
+      /endedAt must not precede startedAt/,
+    );
+
+    const waivedConflict = checkBoundary(
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        reason: 'test',
+        approval: APPROVAL,
+      }),
+      null,
+      { executionRecord: makeExecRecord() },
+    );
+    expect(waivedConflict.errors.join('\n')).toMatch(
+      /mode waived contradicts a host --execution-record/,
+    );
   });
 
   it('CLI accepts a host-held --execution-record with matching --execution-record-sha256 and refuses tampered, linked, in-tree, or guest-planted records', () => {
@@ -3495,6 +3557,122 @@ describe('checkExecutionRecord and microvm/provider-vm gate', () => {
     expect(planted.status).toBe(1);
     expect(planted.stdout).toMatch(
       /execution-record\.json must not reside inside the PR-writable artifact directory/,
+    );
+    unlinkSync(join(dir, 'execution-record.json'));
+
+    // 8. CLI wires host --context trustClassification & contextDigest / baseRefOid binding
+    const hostCtx = join(base, 'host-ctx.json');
+    const ctxObj = {
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      baseRefOid: BASE_OID,
+      headRefOid: HEAD,
+      trustClassification: {
+        prTrust: 'external',
+        executionClass: 'hardware-isolated',
+        headRefOid: HEAD,
+      },
+    };
+    const ctxText = JSON.stringify(ctxObj);
+    const ctxSha = sha256(ctxText);
+    writeFileSync(hostCtx, ctxText);
+
+    // 8a. Execution record with wrong contextDigest is rejected via CLI
+    const wrongCtxRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--context-root',
+      clone,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      recSha,
+      dir,
+    ]);
+    expect(wrongCtxRes.status).toBe(1);
+    expect(wrongCtxRes.stdout).toMatch(
+      /contextDigest .* does not match host context sha256/,
+    );
+
+    // 8b. Execution record matching host contextDigest and baseRefOid exits 0
+    const boundRec = makeExecRecord({ contextDigest: ctxSha });
+    const boundRecText = JSON.stringify(boundRec, null, 2);
+    const boundRecSha = sha256(boundRecText);
+    const boundHostRec = join(base, 'bound-exec-record.json');
+    writeFileSync(boundHostRec, boundRecText);
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify(makeMicrovmBoundary(boundRec, boundRecText)),
+    );
+    const boundOk = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--context-root',
+      clone,
+      '--execution-record',
+      boundHostRec,
+      '--execution-record-sha256',
+      boundRecSha,
+      dir,
+    ]);
+    expect(boundOk.status).toBe(0);
+
+    // 8c. Stale trustClassification.headRefOid in --context is refused by CLI
+    const staleCtx = join(base, 'stale-ctx.json');
+    const staleText = JSON.stringify({
+      ...ctxObj,
+      trustClassification: {
+        ...ctxObj.trustClassification,
+        headRefOid: 'e'.repeat(40),
+      },
+    });
+    writeFileSync(staleCtx, staleText);
+    const staleRes = run([
+      '--context',
+      staleCtx,
+      '--context-sha256',
+      sha256(staleText),
+      '--context-root',
+      clone,
+      dir,
+    ]);
+    expect(staleRes.status).toBe(1);
+    expect(staleRes.stderr).toMatch(/stale trustClassification\.headRefOid/);
+
+    // 8d. Container boundary is refused by CLI when host --context requires hardware-isolated
+    const containerDir = join(
+      clone,
+      'tmp',
+      'pr17185-verify-container-downgrade',
+    );
+    mkdirSync(join(containerDir, 'evidence'), { recursive: true });
+    writeFileSync(join(containerDir, 'evidence', '01-ab.png'), 'png');
+    const cFiles = validFiles();
+    writeFileSync(join(containerDir, 'report.md'), cFiles.report);
+    writeFileSync(join(containerDir, 'verdict.txt'), cFiles.verdict);
+    writeFileSync(join(containerDir, 'assertions.json'), cFiles.assertions);
+    writeFileSync(join(containerDir, 'boundary.json'), cFiles.boundary);
+    writeFileSync(
+      join(containerDir, 'boundary-gate.json'),
+      cFiles.boundaryGate,
+    );
+    writeFileSync(join(containerDir, 'run.log'), `container-nonce: ${NONCE}\n`);
+    const downgradeRes = run([
+      '--context',
+      hostCtx,
+      '--context-sha256',
+      ctxSha,
+      '--context-root',
+      clone,
+      containerDir,
+    ]);
+    expect(downgradeRes.status).toBe(1);
+    expect(downgradeRes.stdout).toMatch(
+      /mode container violates host context requirement executionClass=hardware-isolated/,
     );
   });
 });

@@ -1751,6 +1751,12 @@ describe('trust classification and mandatory escalation (§4)', () => {
       'packages/managed-agent-server/pom.xml',
       '.github/workflows/qwen-triage.yml',
       'scripts/verify-pr-check.mjs',
+      'scripts/lib/entry-point.js',
+      '.gitmodules',
+      '.gitattributes',
+      'patches/dep.patch',
+      '.husky/pre-commit',
+      'eslint.config.js',
       'Dockerfile',
       '.qwen/skills/verify-pr/SKILL.md',
       'tools/bootstrap.sh',
@@ -1764,9 +1770,15 @@ describe('trust classification and mandatory escalation (§4)', () => {
       'pnpm-lock.yaml': 'dependency-manifest',
       '.npmrc': 'dependency-manifest',
       '.pnpmfile.mjs': 'dependency-manifest',
+      'patches/dep.patch': 'dependency-manifest',
       'packages/managed-agent-server/pom.xml': 'maven-build',
       '.github/workflows/qwen-triage.yml': 'ci-workflow',
       'scripts/verify-pr-check.mjs': 'verify-or-sandbox-script',
+      'scripts/lib/entry-point.js': 'verify-or-sandbox-script',
+      '.gitmodules': 'verify-or-sandbox-script',
+      '.gitattributes': 'verify-or-sandbox-script',
+      '.husky/pre-commit': 'verify-or-sandbox-script',
+      'eslint.config.js': 'verify-or-sandbox-script',
       Dockerfile: 'verify-or-sandbox-script',
       '.qwen/skills/verify-pr/SKILL.md': 'agent-control-config',
       'tools/bootstrap.sh': 'executable-or-binary',
@@ -1827,6 +1839,19 @@ describe('trust classification and mandatory escalation (§4)', () => {
     expect(
       classifyPrTrust({
         permission: 'write',
+        isFork: true,
+        changedPaths: ['README.md'],
+      }),
+    ).toEqual({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({
+        isLocalOwner: true,
         isFork: true,
         changedPaths: ['README.md'],
       }),
@@ -1949,14 +1974,14 @@ describe('trust classification and mandatory escalation (§4)', () => {
       'global-hardware-only-switch',
     );
 
-    // Same collaborator adding a workflow file -> mandatory hardware-isolated escalation
+    // Same collaborator adding a non-ASCII workflow filename -> -z defeats core.quotePath bypass
     mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
-    writeFileSync(join(dir, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
-    execFileSync('git', ['add', '.github/workflows/ci.yml'], {
+    writeFileSync(join(dir, '.github', 'workflows', '测试.yml'), 'name: ci\n');
+    execFileSync('git', ['add', '.github/workflows/测试.yml'], {
       cwd: dir,
       env: gitEnv,
     });
-    execFileSync('git', ['commit', '-qm', 'add workflow'], {
+    execFileSync('git', ['commit', '-qm', 'add non-ascii workflow'], {
       cwd: dir,
       env: gitEnv,
     });
@@ -1980,7 +2005,7 @@ describe('trust classification and mandatory escalation (§4)', () => {
       headRefOid: wfHead,
     });
     expect(parsed3.trustClassification.escalationReasons).toContain(
-      'ci-workflow:.github/workflows/ci.yml',
+      'ci-workflow:.github/workflows/测试.yml',
     );
   });
 });

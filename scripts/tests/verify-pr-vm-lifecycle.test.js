@@ -194,6 +194,17 @@ describe('verify-pr-vm-lifecycle reap', () => {
     expect(rep.status).toBe('failed');
     expect(rep.errors.join('\n')).toMatch(/pid-identity-mismatch:worker:/);
     expect(inspectPidState(innocent.pid).alive).toBe(true);
+
+    // Self-PID protection
+    const selfOwn = join(root, 'ownership-self.json');
+    writeOwnershipRecord(selfOwn, {
+      runId: 'reap-self',
+      backend: 'firecracker',
+      worker: { pid: process.pid, expectedExeTokens: ['node'] },
+    });
+    const selfRep = reapOwnership(selfOwn, { approvedRoots: [root] });
+    expect(selfRep.status).toBe('failed');
+    expect(selfRep.errors.join('\n')).toMatch(/refusing-self-pid:worker:/);
   });
 
   it('refuses paths outside approved roots, filesystem root approvals, and symlink token files', () => {
@@ -390,7 +401,34 @@ describe('verify-pr-vm-lifecycle finalize -> verify-pr-check end-to-end', () => 
       verifyLivePid: false,
     });
     expect(overlap.ok).toBe(false);
-    expect(overlap.errors.join('\n')).toMatch(/must be outside/);
+    expect(overlap.errors.join('\n')).toMatch(/must not overlap/);
+
+    const reverseOverlap = writeExecutionRecordAndBoundary({
+      record: rec,
+      launcherDir: root,
+      artifactDir,
+      verifyLivePid: false,
+    });
+    expect(reverseOverlap.ok).toBe(false);
+    expect(reverseOverlap.errors.join('\n')).toMatch(/must not overlap/);
+
+    // Guest-planted symlink at artifactDir/boundary.json must fail cleanly without throwing
+    const symArtifact = join(root, 'sym-artifact');
+    mkdirSync(symArtifact, { recursive: true });
+    symlinkSync(join(root, 'nonexistent'), join(symArtifact, 'boundary.json'));
+    const validRec = buildExecutionRecord({
+      contextSnapshot: makePrepareSnapshot(),
+      contextSha256: SHA('9'),
+      ...makeFirecrackerMeta(),
+    });
+    const symOut = writeExecutionRecordAndBoundary({
+      record: validRec,
+      launcherDir: join(root, 'launcher-sym'),
+      artifactDir: symArtifact,
+      verifyLivePid: false,
+    });
+    expect(symOut.ok).toBe(false);
+    expect(symOut.errors.join('\n')).toMatch(/boundary-write-refused/);
 
     const trunc = writeExecutionRecordAndBoundary({
       record: rec,

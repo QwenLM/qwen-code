@@ -41,6 +41,18 @@ function assertRunId(runId) {
   }
 }
 
+function assertCsvSafe(name, value) {
+  if (
+    typeof value !== 'string' ||
+    value.trim() === '' ||
+    /[,"\r\n\0]/.test(value)
+  ) {
+    throw new Error(
+      `invalid ${name}: must be non-empty and must not contain commas, quotes, newlines, or NUL bytes`,
+    );
+  }
+}
+
 /**
  * Selects the execution backend for a classified round. Never silently
  * downgrades `hardware-isolated` to shared-kernel or host execution.
@@ -174,6 +186,20 @@ export function buildFirecrackerLaunchPlan({
   if (!Number.isInteger(vmmGid) || vmmGid <= 0) {
     throw new Error('firecracker requires a non-root vmmGid > 0');
   }
+  if (!Number.isInteger(guestCid) || guestCid < 3) {
+    throw new Error('firecracker guestCid must be an integer >= 3');
+  }
+  for (const [label, val] of [
+    ['cpus', cpus],
+    ['memMib', memMib],
+    ['maxFsizeBytes', maxFsizeBytes],
+    ['maxNoFile', maxNoFile],
+    ['vsockPort', vsockPort],
+  ]) {
+    if (!Number.isInteger(val) || val <= 0) {
+      throw new Error(`firecracker ${label} must be a positive integer`);
+    }
+  }
   const execName = basename(firecrackerBin);
   const jailRoot = join(jailBaseDir, execName, runId, 'root');
   const hostVsockPath = join(jailRoot, `v.sock_${vsockPort}`);
@@ -296,6 +322,16 @@ export function buildVfkitLaunchPlan({
   if (typeof seatbeltProfile !== 'string' || seatbeltProfile.trim() === '') {
     throw new Error('vfkit requires an explicit enforcing Seatbelt profile');
   }
+  for (const [label, val] of [
+    ['kernelPath', kernelPath],
+    ['initramfsPath', initramfsPath],
+    ['rootfsPath', rootfsPath],
+    ['guestLogPath', guestLogPath],
+    ['socketDir', socketDir],
+    ['cmdline', cmdline],
+  ]) {
+    assertCsvSafe(label, val);
+  }
   const hostVsockPath = join(socketDir, 'v.sock');
   const len = validateSocketPathLength(hostVsockPath, 'darwin');
   if (!len.ok) {
@@ -396,6 +432,17 @@ export function buildAliyunProviderPlan({
   assertRunId(runId);
   if (!FULL_OID_RE.test(headRefOid ?? '')) {
     throw new Error('provider-vm requires a 40-hex headRefOid');
+  }
+  for (const [label, val] of [
+    ['region', region],
+    ['zone', zone],
+    ['vpcId', vpcId],
+    ['vSwitchId', vSwitchId],
+    ['imageId', imageId],
+  ]) {
+    if (typeof val !== 'string' || val.trim() === '' || /\s/.test(val)) {
+      throw new Error(`provider-vm requires a valid non-empty ${label}`);
+    }
   }
   if (!Number.isInteger(autoReleaseMinutes) || autoReleaseMinutes < 30) {
     throw new Error(
@@ -614,9 +661,10 @@ export function buildAliyunAgentSandboxPlan({
   if (typeof templateName !== 'string' || templateName.trim() === '') {
     throw new Error('aliyun-agent-sandbox requires a templateName');
   }
+  const normalizedTemplate = templateName.trim().toLowerCase();
   if (
     !allowPublicTemplateForProbe &&
-    PUBLIC_UNRESTRICTED_SANDBOX_TEMPLATES.has(templateName)
+    PUBLIC_UNRESTRICTED_SANDBOX_TEMPLATES.has(normalizedTemplate)
   ) {
     throw new Error(
       `refusing built-in template ${JSON.stringify(templateName)} for high-assurance PR verification (P7 proved default public egress is OPEN); use a custom hardened template with internetAccess: false and VPC security group`,
@@ -767,7 +815,21 @@ function main(argv) {
     process.stderr.write('verify-pr vm-runner select: --context is required\n');
     return 2;
   }
-  const snap = JSON.parse(readFileSync(contextPath, 'utf8'));
+  let snap;
+  try {
+    snap = JSON.parse(readFileSync(contextPath, 'utf8'));
+  } catch (error) {
+    process.stderr.write(
+      `verify-pr vm-runner select: could not read valid JSON context ${contextPath}: ${error.message}\n`,
+    );
+    return 1;
+  }
+  if (snap === null || typeof snap !== 'object' || Array.isArray(snap)) {
+    process.stderr.write(
+      `verify-pr vm-runner select: context ${contextPath} must be a JSON object\n`,
+    );
+    return 1;
+  }
   const executionClass =
     snap?.trustClassification?.executionClass ?? 'hardware-isolated';
   const decision = selectBackend({
