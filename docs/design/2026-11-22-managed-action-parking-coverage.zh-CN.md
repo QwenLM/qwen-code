@@ -54,8 +54,8 @@
 
 ### 4.1 S1：纯图片 Prompt
 
-- **方案。** 两条恢复臂和停靠资格都把 `hostedOriginalPromptText` 换成"原始输入可读"：对 `hosted-harness` 来源，`readHostedInput` 成功且文本或附件非空即可；对其他来源，仍要求文本非空，因为它们只能依靠文本回退。恢复时传给 `executeHostedTurn` 的文本取 `readHostedInput` 返回的 `text`（可以为空），与原始在线 Turn 保持一致。
-- **已确认。** journal 恢复出的 user 记录带有 inline 图片，所以今天已允许停靠的"文字 + 图片"Prompt 不需要收紧。Harness 测试 "resumes a parked approval with the original image still in its history" 让一个"文字 + 图片"Prompt 停靠、冷加载后 Allow，恢复时交给 model 的历史里仍以 inline 数据保留着原图。该测试替换了 model 函数，因此没有执行内存中 `InMemoryImagePayloadStore`（`packages/core/src/services/image-payload-references.ts`）在发请求时的驱逐；§7 仍为本切片保留请求快照检查。
+- **方案。** 放宽停靠资格与两条恢复臂共用的检查 `hostedOriginalPromptText`。user 记录带文字的 Prompt 不变。没有文字时，通过 `readHostedInput` 读回原始输入：带附件的 `hosted-harness` 输入从空文字重新开始，与它的在线 Turn 一致，因为 `executeHostedTurn` 自己会读回附件。其他来源仍要求有文字，因为它们只能依靠文字回退。恢复臂里所有检查 Prompt 文字的地方都用这个函数，包括原来各带一份副本的保存模型请求检查与 memory、skill 结果检查，所以纯图片 Turn 在这些阶段崩溃后也会恢复。
+- **已确认。** journal 恢复出的 user 记录带有 inline 图片，所以今天已允许停靠的"文字 + 图片"Prompt 不需要收紧。Harness 测试 "resumes a parked approval with the original image still in its history" 让一个"文字 + 图片"Prompt 停靠、冷加载后 Allow，恢复时交给 model 的历史里仍以 inline 数据保留着原图。该测试替换了 model 函数，因此没有执行内存中 `InMemoryImagePayloadStore`（`packages/core/src/services/image-payload-references.ts`）在发请求时的驱逐。已允许停靠的"文字 + 图片"Prompt 也有同样的缺口，所以本切片的测试检查的也是这份历史，而不是请求快照（§7）。
 - **待验证。** 运行选项 `prompt: text`（`hosted-harness-session.ts:4486`）的消费方接受空字符串。
 - **改动面。** 仅 Harness。
 
@@ -145,7 +145,7 @@
 
 - **口径一致。** 对同一 journal 状态，停靠资格与冷恢复臂给出相同回答。覆盖本切片放开的形态，以及仍被排除的相邻形态。
 - **崩溃等价。** 先对本切片的形态做"等待中 SIGKILL → 另一代 Harness 接管 → 决定"，确认冷恢复正确，再做"停靠 → 冷加载 → 决定"。两者的 journal 结果应一致。
-- **S1**：纯图片 Prompt 停靠后 Allow，恢复后的第一次模型请求快照中包含原图。
+- **S1**：纯图片 Prompt 停靠、冷加载后 Allow，以及它的 Harness 在等待中死掉、由新的 Harness 接管后 Allow，两种情况下工具都只执行一次，恢复后的第一次模型调用都从空文字开始，历史里带着原图。
 - **S2**：停靠期间后台终态到达，解除停靠、Turn 恢复，通知在 Turn 结算后投递；工具与通知各恰好一次。
 - **S4**：monitor 发起的 Turn 停靠后，分别走决定、取消、模式变更、到期四条路径，不经协调器也能各自完成；泵不再按崩溃结算 `await_action` 的 wake 输入。
 - **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发。
