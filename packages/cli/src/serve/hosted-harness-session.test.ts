@@ -189,7 +189,10 @@ import { HostedContextCompression } from './hosted-context-compression.js';
 import type { HistoryMaintenance } from '@qwen-code/qwen-code-core/managed-runtime/managed-history-maintenance-record.js';
 import { HostedTeamSession } from './hosted-team-session.js';
 import { teamMemberPreamble } from './hosted-member-chain.js';
-import { hostedWakeContinuationId } from './hosted-wake-continuation.js';
+import {
+  hostedWakeContinuationId,
+  isHostedWakeContinuationId,
+} from './hosted-wake-continuation.js';
 import {
   findHostedApprovalContinuation,
   HostedPublicChildRecoveryProfileChanged,
@@ -47252,7 +47255,7 @@ describe('idle suspension', () => {
   });
 
   // A write_file approval the model raises once; only a resumed Turn ends.
-  function mockApprovalTurn(): void {
+  function mockApprovalTurn(promptId = PROMPT_ID): void {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
       async function (this: HostedWorkspaceBroker) {
         this.runtime = {
@@ -47285,7 +47288,7 @@ describe('idle suspension', () => {
           callId: 'park-original-call',
           args: { file_path: 'notes.txt', content: 'hello' },
           isClientInitiated: false,
-          prompt_id: PROMPT_ID,
+          prompt_id: promptId,
         };
         await toolTurn!.execute(
           [call],
@@ -47374,6 +47377,178 @@ describe('idle suspension', () => {
       { timeout: 5000 },
     );
   }
+
+  // A wake Turn has no coordinator row, so its own pump is the only thing
+  // that can resume it after the Harness dies inside its approval wait. A
+  // Store fault while reading the saved continuation only delays it.
+  async function resumeMonitorWakeAfterDeath(fault: boolean) {
+    domainEnablement.monitorRun = true;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const turnId = 'monitor-1:notify:1';
+    mockApprovalTurn(turnId);
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const saved = vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    );
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const read = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    try {
+      const original = await app(true);
+      await headers(supertest(original).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const live = (
+        wakeDeps.last as {
+          session: {
+            managed: ManagedSession;
+            monitorWake?: { kick(): void; close(): void };
+          };
+        }
+      ).session;
+      const monitors = new HostedMonitorSession(
+        {
+          authority: live.managed.authority,
+          resources: live.managed.resources,
+        },
+        key,
+      );
+      const binding = { runtimeBindingId: 'binding-1', generation: '1' };
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: key.sessionId,
+        executionCallId: 'call-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await monitors.dispatchStarted('monitor-1', binding);
+      await monitors.attach('monitor-1', binding, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: turnId,
+            turnId,
+            source: 'monitor',
+            contentRef: await live.managed.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            admissionRef: await live.managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        },
+      );
+      live.monitorWake?.kick();
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      // The generation dies at the wait point: its pump stops and nothing
+      // after it reaches the journal, exactly as after a SIGKILL.
+      live.monitorWake?.close();
+      await live.managed.close();
+      if (fault)
+        saved.mockRejectedValueOnce(
+          new ManagedSessionStoreTransportError('Store unavailable'),
+        );
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          passiveManagedRuntimeRecovery: true,
+        })
+        .expect(200);
+      const clientId = loaded.body.clientId as string;
+      const requestId = (await read()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(replacement, clientId)).body).toMatchObject({
+            hasActivePrompt: true,
+          });
+        },
+        { timeout: 5000 },
+      );
+      await headers(
+        supertest(replacement).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await read()).events.find(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['turnId'] === turnId,
+            )?.payload,
+          ).toMatchObject({ outcome: 'completed' });
+        },
+        { timeout: 5000 },
+      );
+      expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(1);
+      expect(state.model).toHaveBeenLastCalledWith(
+        expect.objectContaining({ resumeFromToolResults: expect.any(Array) }),
+      );
+      expect(
+        (await read()).events.some(
+          (event) =>
+            event.kind === 'input.accepted' &&
+            isHostedWakeContinuationId(String(event.payload['turnId'])),
+        ),
+      ).toBe(false);
+      await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      if (fault) expect(saved.mock.calls.length).toBeGreaterThan(1);
+    } finally {
+      saved.mockRestore();
+      waiting.mockRestore();
+      state.approvalSelections.clear();
+    }
+  }
+
+  it('resumes a monitor wake approval after its Harness dies in the wait', () =>
+    resumeMonitorWakeAfterDeath(false));
+
+  it('retries a wake approval continuation read that a Store fault failed', () =>
+    resumeMonitorWakeAfterDeath(true));
 
   // An extension command whose one step runs a Shell command, which asks in
   // the default approval mode. Returns the Broker's command executions, the
@@ -49735,8 +49910,11 @@ describe('idle suspension', () => {
   });
 
   // The crash aftermath must leave a checkpoint the next turn can start
-  // from: a wait left at await_action failed every later wake turn.
-  it('settles a monitor wake that died in its approval wait so its continuation can run', async () => {
+  // from: a wait left at await_action failed every later wake turn. A wait
+  // with no saved continuation (an uncaptured batch), or one whose saved
+  // continuation is durably refused, is one the pump cannot resume, so it
+  // still meets the aftermath instead of being retried forever.
+  async function settleMonitorWakeDeadInItsWait(refused: boolean) {
     domainEnablement.monitorRun = true;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
     const turnId = 'monitor-1:notify:1';
@@ -49764,6 +49942,15 @@ describe('idle suspension', () => {
       throw new Error('The waiting Turn unexpectedly continued.');
     });
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const saved = vi.spyOn(
+      approvalContinuation,
+      'findHostedApprovalContinuation',
+    );
+    if (refused)
+      saved.mockRejectedValue(
+        new Error('Original assistant batch is missing.'),
+      );
+    else saved.mockResolvedValue(undefined);
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -49885,8 +50072,15 @@ describe('idle suspension', () => {
         .set('X-Qwen-Client-Id', loaded.body.clientId as string)
         .expect(204);
     } finally {
+      saved.mockRestore();
       waiting.mockRestore();
       state.approvalSelections.clear();
     }
-  });
+  }
+
+  it('settles a monitor wake that died in its approval wait so its continuation can run', () =>
+    settleMonitorWakeDeadInItsWait(false));
+
+  it('settles a monitor wake whose saved approval continuation is durably refused', () =>
+    settleMonitorWakeDeadInItsWait(true));
 });

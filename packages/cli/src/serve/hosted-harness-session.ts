@@ -8256,6 +8256,76 @@ export function registerHostedHarnessSessionRoutes(
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
               settleInterrupted: settleInterruptedChannelWake,
+              // A wake turn's native approval wait resumes on the terms the
+              // takeover arm applies to a parked prompt's. Channel, pr_event
+              // and session-message turns keep their own settlement for now
+              // (#18149 Stage 2).
+              resumeInterrupted: async (turn) => {
+                const source = turn.source ?? '';
+                if (
+                  !(
+                    source === 'monitor' ||
+                    source === AUTOMATION_INPUT_SOURCE ||
+                    source === LOOP_INPUT_SOURCE ||
+                    isChildNotificationSource(source)
+                  ) ||
+                  hostedApprovalResumeShapeRefusal(session, brokerOptions)
+                )
+                  return undefined;
+                const verdict =
+                  await session.managed.authority.harnessRunAuthorization();
+                if (
+                  verdict.status !== 'runnable' ||
+                  verdict.checkpoint.identity.turnId !== turn.turnId ||
+                  verdict.checkpoint.continuation.phase !== 'await_action'
+                )
+                  return undefined;
+                let continuation:
+                  | RestoredHostedApprovalContinuation
+                  | undefined;
+                try {
+                  continuation = await findHostedApprovalContinuation(
+                    session.managed,
+                    turn.turnId,
+                  );
+                } catch (cause) {
+                  // A Store fault says nothing about the saved continuation,
+                  // so the pump retries it. Any other rejection is fixed in
+                  // the journal and would fail every pass: the Turn takes the
+                  // crash path instead, as it did before it could resume.
+                  if (
+                    cause instanceof ManagedSessionStoreTransportError ||
+                    (cause instanceof ManagedSessionStoreHttpError &&
+                      (cause.status === 429 || cause.status >= 500))
+                  )
+                    throw cause;
+                  writeStderrLineSafe(
+                    `qwen serve: Interrupted wake turn ${turn.turnId} cannot resume its approval wait: ${String(cause)}`,
+                  );
+                  return undefined;
+                }
+                if (!continuation || continuation.plan.commandStep)
+                  return undefined;
+                const text = await hostedOriginalPromptText(
+                  session.managed,
+                  turn.turnId,
+                );
+                if (text === undefined) return undefined;
+                return (abort) =>
+                  executeHostedTurn(
+                    session,
+                    sessionId,
+                    cwd,
+                    turn.turnId,
+                    text,
+                    abort,
+                    brokerOptions,
+                    undefined,
+                    undefined,
+                    undefined,
+                    continuation,
+                  );
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H6c: the automation turn settled; its run settles from the
