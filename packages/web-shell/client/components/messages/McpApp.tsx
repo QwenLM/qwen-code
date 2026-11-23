@@ -35,6 +35,15 @@ import {
   ViewStateCoordinator,
   type ViewStateStatus,
 } from '../../generated-ui/view-state';
+import {
+  COPY_CAPABILITY,
+  COPY_WRITE,
+  copyRequestText,
+  downloadRequestFile,
+  startDownload,
+  writeClipboard,
+  type EffectStatus,
+} from '../../generated-ui/effects';
 
 type SandboxResource = Parameters<AppBridge['sendSandboxResourceReady']>[0];
 type AppToolResult = Parameters<AppBridge['sendToolResult']>[0];
@@ -363,6 +372,22 @@ export function McpAppRuntime({
       : undefined;
   const viewStateRef = useRef<ViewStateCoordinator | undefined>(undefined);
   const [viewStateStatus, setViewStateStatus] = useState<ViewStateStatus>();
+  // A click's copy or download, performed here rather than by the card. The
+  // count makes a repeated outcome a new observation.
+  const effectsAllowed =
+    builtInGeneratedUi && import.meta.env.MODE !== 'transcript';
+  const [effectOutcome, setEffectOutcome] = useState<{
+    status: EffectStatus;
+    count: number;
+    filename?: string;
+  }>();
+  const effectCountRef = useRef(0);
+  // Text the browser refused to copy, kept for the bar's own Copy button.
+  const pendingCopyRef = useRef<string | undefined>(undefined);
+  const reportEffect = (status: EffectStatus, filename?: string) =>
+    setEffectOutcome({ status, count: ++effectCountRef.current, filename });
+  const reportEffectRef = useRef(reportEffect);
+  reportEffectRef.current = reportEffect;
   const theme = useTheme();
   const languageRef = useRef(language);
   languageRef.current = language;
@@ -398,6 +423,8 @@ export function McpAppRuntime({
     setError(undefined);
     setAppReady(false);
     setViewStateStatus(undefined);
+    setEffectOutcome(undefined);
+    pendingCopyRef.current = undefined;
     viewStateRef.current = undefined;
     const iframe = iframeRef.current;
     if (!iframe || !sandboxUrl) return;
@@ -430,7 +457,15 @@ export function McpAppRuntime({
         ...(builtInGeneratedUi && requestMessage
           ? { updateModelContext: { text: {} } }
           : {}),
-        ...(viewState ? { experimental: { [VIEW_STATE_CAPABILITY]: {} } } : {}),
+        ...(effectsAllowed ? { downloadFile: {} } : {}),
+        ...(viewState || effectsAllowed
+          ? {
+              experimental: {
+                ...(viewState ? { [VIEW_STATE_CAPABILITY]: {} } : {}),
+                ...(effectsAllowed ? { [COPY_CAPABILITY]: {} } : {}),
+              },
+            }
+          : {}),
         sandbox: {
           ...(current.csp ? { csp: current.csp } : {}),
         },
@@ -515,10 +550,59 @@ export function McpAppRuntime({
         return {};
       };
     }
-    if (viewState) {
+    // One effect at a time, only for a card the user can see; the request is
+    // validated here whatever the App checked.
+    let effectBusy = false;
+    const admitEffect = () =>
+      active && !effectBusy && (!retained || retained.isVisible());
+    const report = (status: EffectStatus, filename?: string) => {
+      if (active) reportEffectRef.current(status, filename);
+    };
+    const copy = async (params: unknown): Promise<HostRequestResult> => {
+      const text = admitEffect() ? copyRequestText(params) : undefined;
+      if (!effectBusy) pendingCopyRef.current = undefined;
+      if (text === undefined) {
+        report('refused');
+        throw new Error('The copy was refused.');
+      }
+      effectBusy = true;
+      try {
+        if (await writeClipboard(text)) report('copied');
+        else if (active) {
+          pendingCopyRef.current = text;
+          report('copy-pending');
+        }
+      } finally {
+        effectBusy = false;
+      }
+      return {} as HostRequestResult;
+    };
+    if (effectsAllowed) {
+      bridge.ondownloadfile = async (params) => {
+        const file = admitEffect() ? downloadRequestFile(params) : undefined;
+        if (!effectBusy) pendingCopyRef.current = undefined;
+        if (!file) {
+          report('refused');
+          return { isError: true };
+        }
+        try {
+          startDownload(file);
+        } catch {
+          report('refused');
+          return { isError: true };
+        }
+        report('downloaded', file.filename);
+        return {};
+      };
+    }
+    if (viewState || effectsAllowed) {
       // The App names no card: the host answers for the one it mounted.
       bridge.fallbackRequestHandler = async (request, extra) => {
         if (!active) throw new Error('The card was unmounted.');
+        if (effectsAllowed && request.method === COPY_WRITE)
+          return copy(request.params);
+        if (!viewState)
+          throw new Error(`Unsupported request: ${request.method}`);
         if (request.method === VIEW_STATE_LOAD)
           return {
             value: await viewState.load(extra?.signal),
@@ -587,6 +671,7 @@ export function McpAppRuntime({
       bridge.oncalltool = undefined;
       bridge.onmessage = undefined;
       bridge.fallbackRequestHandler = undefined;
+      bridge.ondownloadfile = undefined;
       appAbort.abort();
       iframe.removeAttribute('src');
       bridgeRef.current = null;
@@ -660,6 +745,8 @@ export function McpAppRuntime({
       bridge.oncalltool = undefined;
       bridge.onmessage = undefined;
       bridge.fallbackRequestHandler = undefined;
+      bridge.ondownloadfile = undefined;
+      pendingCopyRef.current = undefined;
       appAbort.abort();
       bridgeRef.current = null;
       const unload = () => {
@@ -697,6 +784,7 @@ export function McpAppRuntime({
     maxHeight,
     cardId,
     viewStateHost,
+    effectsAllowed,
   ]);
 
   useEffect(() => {
@@ -718,9 +806,10 @@ export function McpAppRuntime({
     <div ref={cardRef} className={styles.card} data-testid="mcp-app">
       {builtInGeneratedUi ? (
         // No MCP framing: one quiet row for the host's own reset action and
-        // save outcome, which the generated content cannot imitate.
+        // its save, copy and download outcomes, which the generated content
+        // cannot imitate.
         import.meta.env.MODE !== 'transcript' &&
-        (retained || viewStateStatus) && (
+        (retained || viewStateStatus || effectOutcome) && (
           <div className={styles.builtInBar}>
             <span>
               {retained?.reopened ? t('mcpApp.generatedUi.reopenNotice') : ''}
@@ -734,6 +823,36 @@ export function McpAppRuntime({
                 {t(`mcpApp.generatedUi.state.${viewStateStatus}`)}
               </span>
             )}
+            {effectOutcome && (
+              <span
+                role="status"
+                className={styles.saveStatus}
+                data-generated-ui-effect={effectOutcome.status}
+                data-generated-ui-effect-count={effectOutcome.count}
+              >
+                {t(`mcpApp.generatedUi.effect.${effectOutcome.status}`, {
+                  name: effectOutcome.filename ?? '',
+                })}
+              </span>
+            )}
+            {effectOutcome?.status === 'copy-pending' && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  const text = pendingCopyRef.current;
+                  if (!text) return;
+                  // This click is the bar's own gesture.
+                  void writeClipboard(text).then((copied) => {
+                    if (!copied || pendingCopyRef.current !== text) return;
+                    pendingCopyRef.current = undefined;
+                    reportEffectRef.current('copied');
+                  });
+                }}
+              >
+                {t('mcpApp.generatedUi.effect.copy')}
+              </Button>
+            )}
             {retained && (
               <Button
                 variant="ghost"
@@ -744,6 +863,8 @@ export function McpAppRuntime({
                     : 'mcpApp.generatedUi.reopenNotice',
                 )}
                 onClick={() => {
+                  pendingCopyRef.current = undefined;
+                  setEffectOutcome(undefined);
                   const viewState = viewStateRef.current;
                   // Reset also clears what the card saved; if that fails,
                   // the card stays as it is and the bar says so.

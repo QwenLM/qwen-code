@@ -45,6 +45,7 @@ const appBridgeMocks = vi.hoisted(() => ({
       request: { method: string; params?: Record<string, unknown> },
       extra?: { signal: AbortSignal },
     ) => Promise<unknown>;
+    ondownloadfile?: (params: unknown) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
   lastOptions: undefined as unknown,
@@ -81,7 +82,7 @@ vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
   },
 }));
 
-import { McpApp } from './McpApp';
+import { McpApp, McpAppRuntime } from './McpApp';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -1641,12 +1642,235 @@ describe('built-in Generated UI admission', () => {
         'owner',
       ],
       ['a host of another session', card, 'other'],
-    ])('does not offer state for %s', (_name, shown, toolSession) => {
-      host(shown as McpAppDisplay, store(), toolSession);
+    ])('does not offer state for %s', async (_name, shown, toolSession) => {
+      const viewState = store();
+      host(shown as McpAppDisplay, viewState, toolSession);
+      expect(appBridgeMocks.lastCapabilities).not.toHaveProperty([
+        'experimental',
+        'qwen-code/generated-ui-state',
+      ]);
+      const request = appBridgeMocks.last?.fallbackRequestHandler;
+      if (request) {
+        await expect(
+          request({ method: 'qwen-code/generated-ui-state/load', params: {} }),
+        ).rejects.toThrow();
+      }
+      expect(viewState.get).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('copy and download', () => {
+    const writeText = vi.fn();
+    beforeEach(() => {
+      writeText.mockReset().mockResolvedValue(undefined);
+      vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    });
+    afterEach(() => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+    });
+    function host(shown: McpAppDisplay = display) {
+      const { container, rerender } = renderApp(shown);
+      rerender(
+        <McpAppGeneratedUiContext.Provider
+          value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpApp display={shown} />
+          </McpAppSessionContext.Provider>
+        </McpAppGeneratedUiContext.Provider>,
+      );
+      return container;
+    }
+    const outcome = (container: HTMLElement) => {
+      const status = container.querySelector('[data-generated-ui-effect]');
+      return status
+        ? {
+            status: status.getAttribute('data-generated-ui-effect'),
+            count: status.getAttribute('data-generated-ui-effect-count'),
+            text: status.textContent,
+          }
+        : undefined;
+    };
+    const copy = (text: unknown) =>
+      appBridgeMocks.last!.fallbackRequestHandler!({
+        method: 'qwen-code/generated-ui-copy/write',
+        params: { text } as Record<string, unknown>,
+      });
+    const download = (resource: Record<string, unknown>) =>
+      appBridgeMocks.last!.ondownloadfile!({
+        contents: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'file:///plans',
+              mimeType: 'text/csv',
+              text: 'plan,payment\n',
+              ...resource,
+            },
+          },
+        ],
+      });
+
+    it('is offered to the bundled card only', () => {
+      host();
+      expect(appBridgeMocks.lastCapabilities).toMatchObject({
+        downloadFile: {},
+        experimental: { 'qwen-code/generated-ui-copy': {} },
+      });
+      renderApp(appDisplay());
+      expect(appBridgeMocks.lastCapabilities).not.toHaveProperty(
+        'downloadFile',
+      );
       expect(appBridgeMocks.lastCapabilities).not.toHaveProperty(
         'experimental',
       );
-      expect(appBridgeMocks.last?.fallbackRequestHandler).toBeUndefined();
+      expect(appBridgeMocks.last?.ondownloadfile).toBeUndefined();
+    });
+
+    // This suite renders without an I18nProvider, so keys stand in for text.
+    it('copies in the page and counts each outcome as a new observation', async () => {
+      const container = host();
+      await act(async () => {
+        await expect(copy('Total: 12.30')).resolves.toEqual({});
+      });
+      expect(writeText).toHaveBeenCalledWith('Total: 12.30');
+      expect(outcome(container)).toEqual({
+        status: 'copied',
+        count: '1',
+        text: 'mcpApp.generatedUi.effect.copied',
+      });
+      await act(async () => {
+        await copy('Total: 12.40');
+      });
+      expect(outcome(container)).toMatchObject({
+        status: 'copied',
+        count: '2',
+      });
+    });
+
+    it('refuses invalid text without touching the clipboard', async () => {
+      const container = host();
+      await act(async () => {
+        await expect(copy('')).rejects.toThrow();
+        await expect(copy('x'.repeat(16 * 1024 + 1))).rejects.toThrow();
+      });
+      expect(writeText).not.toHaveBeenCalled();
+      expect(outcome(container)).toMatchObject({
+        status: 'refused',
+        count: '2',
+      });
+    });
+
+    it('offers its own Copy button when the browser refuses the write', async () => {
+      writeText.mockRejectedValueOnce(new DOMException('', 'NotAllowedError'));
+      const container = host();
+      await act(async () => {
+        await copy('Total: 12.30');
+      });
+      expect(outcome(container)).toMatchObject({ status: 'copy-pending' });
+      const button = [...container.querySelectorAll('button')].find(
+        (candidate) =>
+          candidate.textContent === 'mcpApp.generatedUi.effect.copy',
+      )!;
+      await act(async () => {
+        button.click();
+        await Promise.resolve();
+      });
+      expect(writeText).toHaveBeenLastCalledWith('Total: 12.30');
+      expect(outcome(container)).toMatchObject({
+        status: 'copied',
+        count: '2',
+      });
+      expect(
+        [...container.querySelectorAll('button')].some(
+          (candidate) =>
+            candidate.textContent === 'mcpApp.generatedUi.effect.copy',
+        ),
+      ).toBe(false);
+    });
+
+    it('refuses effects while a retained card is hidden', async () => {
+      let visible = false;
+      const retained = {
+        reopened: false,
+        getSignal: () => new AbortController().signal,
+        isVisible: () => visible,
+        reset: vi.fn(),
+      };
+      const { container, rerender } = renderApp(display);
+      rerender(<McpAppRuntime display={display} retained={retained} />);
+      await act(async () => {
+        await expect(copy('Total: 12.30')).rejects.toThrow();
+        await expect(download({})).resolves.toEqual({ isError: true });
+      });
+      expect(writeText).not.toHaveBeenCalled();
+      visible = true;
+      await act(async () => {
+        await copy('Total: 12.30');
+      });
+      expect(writeText).toHaveBeenCalledOnce();
+      expect(outcome(container)).toMatchObject({
+        status: 'copied',
+        count: '3',
+      });
+    });
+
+    it('offers neither effect in the transcript view', () => {
+      vi.stubEnv('MODE', 'transcript');
+      try {
+        const { rerender } = renderApp(display);
+        rerender(<McpAppRuntime display={display} />);
+        expect(appBridgeMocks.lastCapabilities).toBeDefined();
+        expect(appBridgeMocks.lastCapabilities).not.toHaveProperty(
+          'downloadFile',
+        );
+        expect(appBridgeMocks.lastCapabilities).not.toHaveProperty([
+          'experimental',
+          'qwen-code/generated-ui-copy',
+        ]);
+        expect(appBridgeMocks.last?.ondownloadfile).toBeUndefined();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('starts a sanitized download and refuses links or binary content', async () => {
+      const clicked: HTMLAnchorElement[] = [];
+      vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(
+        function (this: HTMLAnchorElement) {
+          clicked.push(this);
+        },
+      );
+      URL.createObjectURL ??= () => 'blob:download';
+      URL.revokeObjectURL ??= () => {};
+      const container = host();
+      await act(async () => {
+        await expect(
+          download({ uri: 'file:///../plans.exe' }),
+        ).resolves.toEqual({});
+      });
+      expect(clicked.map((link) => link.download)).toEqual(['plans.exe.csv']);
+      expect(outcome(container)).toEqual({
+        status: 'downloaded',
+        count: '1',
+        text: 'mcpApp.generatedUi.effect.downloaded',
+      });
+      await act(async () => {
+        await expect(download({ blob: 'AAAA' })).resolves.toEqual({
+          isError: true,
+        });
+        await expect(
+          appBridgeMocks.last!.ondownloadfile!({
+            contents: [{ type: 'resource_link', uri: 'https://example.com' }],
+          }),
+        ).resolves.toEqual({ isError: true });
+      });
+      expect(clicked).toHaveLength(1);
+      expect(outcome(container)).toMatchObject({
+        status: 'refused',
+        count: '3',
+      });
     });
   });
 
