@@ -1023,6 +1023,10 @@ public class HarnessCoordinator {
                 }
                 if (item.end()) {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
+                    if (store.parkTurnForAction(turn.tenantId(), turn.sessionId(),
+                            turn.turnId(), owner)) {
+                        return true;
+                    }
                     throw new IllegalStateException(
                             "Hosted Harness stream ended before a terminal"
                                     + " event");

@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
@@ -188,11 +189,12 @@ final class AgentSessionCommands {
             // D7-2: a user cancel is due at once, never behind the Runtime
             // recovery park's recheck window.
             int updated = jdbc.update("UPDATE ma_turn SET status ="
-                            + " 'CANCELLING', retry_after = NULL, gmt_modified = ?,"
-                            + " version = version + 1 WHERE tenant_id = ? AND"
+                            + " 'CANCELLING', retry_after = NULL,"
+                            + " error_code = CASE WHEN error_code = ? THEN NULL ELSE error_code END,"
+                            + " gmt_modified = ?, version = version + 1 WHERE tenant_id = ? AND"
                             + " session_id = ? AND turn_id = ? AND status IN"
                             + " ('ACCEPTED', 'RUNNING')",
-                    now, tenantId, sessionId, turnId);
+                    AgentStateStore.HARNESS_ACTION_PARKED, now, tenantId, sessionId, turnId);
             commandEffect = updated == 1;
             if (commandEffect) {
                 eventJournal.appendEvent(tenantId, sessionId, turnId,

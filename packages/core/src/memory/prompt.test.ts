@@ -1260,26 +1260,50 @@ describe("the main session's resident auto-memory policy", () => {
     ['the user tier', 'USER memory (cross-project'],
     ['the project tier', 'PROJECT memory (this project only'],
     ['the team tier', 'TEAM memory (this project, shared'],
-    ['remember and forget', 'If the user explicitly asks you to remember'],
-    ['the user type and its scope', '`user` — the user'],
-    ['the feedback scope', 'PROJECT only for a project-wide convention'],
+    [
+      'saving and updating immediately',
+      'remember or update a memory, save the change now',
+    ],
+    [
+      'forget and its index update',
+      'find and remove the matching entry and its private index pointer',
+    ],
+    [
+      'the user type and its scope',
+      '`user` (role, goals, expertise, preferences) goes to USER',
+    ],
+    [
+      'the feedback scope',
+      'PROJECT for conventions every contributor must follow',
+    ],
     ['absolute dates', 'Convert relative dates to absolute ones'],
-    ['the reference scope', '`reference` — where to find information'],
-    ['the body structure', '**Why:** line and a **How to apply:** line'],
-    ['secrets stay out of TEAM', 'You MUST NOT save API keys, tokens'],
-    ['the generated team index', 'never edit it by hand'],
-    ['what not to save', 'not even when the user asks'],
-    ['the frontmatter template', 'usage_scenarios:'],
-    ['the category list', '`category` is exactly one of: basic_information'],
-    ['the same-directory index', 'lives in the SAME directory you wrote to'],
-    ['no frontmatter in the index', 'The index has no frontmatter'],
-    ['the index line limit', 'will be truncated, so keep every index concise'],
-    ['no content in the index', 'Never write memory content directly'],
-    ['deduplication', 'should be updated instead'],
-    ['when to read memory', 'always when they ask you to check, recall'],
-    ['ignoring memory', 'If the user says to *ignore*'],
-    ['the drift caveat', 'A memory records what was true when it was written'],
-    ['verifying before recommending', 'check the current state'],
+    ['the reference scope', 'PROJECT, or USER for personal resources'],
+    ['the body structure', '**Why:** and **How to apply:** lines'],
+    ['secrets stay out of TEAM', 'Never save API keys, tokens, credentials'],
+    [
+      'the generated team index',
+      'Write only the topic file because the TEAM index is generated',
+    ],
+    ['what not to save', 'temporary details even when asked'],
+    ['the frontmatter template', 'the lists `keywords` and `usage_scenarios`'],
+    ['the category list', 'Pick one category from basic_information'],
+    ['metadata limits', 'keep it within 64 characters'],
+    ['the same-directory index', "in the same directory's `MEMORY.md`"],
+    [
+      'no body or frontmatter in the index',
+      'Use only pointers under ~150 characters, without frontmatter',
+    ],
+    ['the index line limit', 'Lines after 200 are truncated'],
+    ['deduplication', 'Check the current catalog for duplicates first'],
+    ['when to read memory', 'asks to check, recall, or remember'],
+    [
+      'ignoring memory',
+      'If asked to ignore memory, do not read, apply, cite, or mention it',
+    ],
+    [
+      'checking stale memory',
+      'Check the current state before relying on a memory or recommending anything it names',
+    ],
   ])('keeps %s', (_what, anchor) => {
     expect(resident).toContain(anchor);
   });
@@ -1289,9 +1313,7 @@ describe("the main session's resident auto-memory policy", () => {
     expect(resident).not.toMatch(/\bskill\b/);
   });
 
-  // The per-request price of the policy: 4,451 characters with these paths
-  // and no team, against 15,868 for the full prompt. Raising the budget is a
-  // decision about what every request of every session carries.
+  // The resident policy is carried on each request; pin the compact budget.
   it('stays within its budget', () => {
     const solo = buildResidentAutoMemoryPrompt(PROJECT_DIR, USER, undefined);
     const full = buildManagedAutoMemoryPrompt(
@@ -1304,7 +1326,7 @@ describe("the main session's resident auto-memory policy", () => {
       },
     );
 
-    expect(solo.length).toBeLessThanOrEqual(4_600);
+    expect(solo.length).toBeLessThanOrEqual(3_000);
     expect(solo.length).toBeLessThan(full.length / 3);
   });
 });

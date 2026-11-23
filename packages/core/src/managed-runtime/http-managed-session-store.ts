@@ -194,6 +194,7 @@ export interface HttpManagedSessionStores {
   supportsWakeDispatch(): boolean;
   /** Whether this control plane lets a background Session suspend behind the pull. */
   supportsRuntimeObservation(): boolean;
+  supportsActionParking(): boolean;
   readonly journalStore: ManagedSessionJournalStore;
   readonly resourceStore: ManagedSessionResourceStore;
   readonly publication: HttpToolPublicationOwner;
@@ -439,6 +440,7 @@ export function createHttpManagedSessionStores(
     supportsExecutionDiagnostics: () => client.supportsExecutionDiagnostics(),
     supportsWakeDispatch: () => client.supportsWakeDispatch(),
     supportsRuntimeObservation: () => client.supportsRuntimeObservation(),
+    supportsActionParking: () => client.supportsActionParking(),
     journalStore: new HttpManagedSessionJournalStore(client),
     resourceStore: resources,
     publication: {
@@ -991,6 +993,7 @@ interface WriterGrant {
   readonly activationLeaseRenewal: boolean;
   readonly wakeDispatch: boolean;
   readonly runtimeObservation: boolean;
+  readonly actionParking: boolean;
   readonly activationLease?: ManagedSessionActivationLease;
   readonly writerGeneration: number;
   readonly leaseUntil: number;
@@ -1063,6 +1066,10 @@ class ManagedSessionStoreHttpClient {
 
   supportsRuntimeObservation(): boolean {
     return this.grant?.runtimeObservation === true;
+  }
+
+  supportsActionParking(): boolean {
+    return this.grant?.actionParking === true;
   }
   readonly sessionKey: ManagedSessionKey;
   private readonly baseUrl: string;
@@ -3139,6 +3146,7 @@ class ManagedSessionStoreHttpClient {
         leaseUntil: renewed.leaseUntil,
         wakeDispatch: renewed.wakeDispatch,
         runtimeObservation: renewed.runtimeObservation,
+        actionParking: renewed.actionParking,
       };
       this.scheduleRenewal();
     })();
@@ -3783,6 +3791,7 @@ function parseWriterGrant(value: unknown): WriterGrant {
     activationLeaseRenewal: record['activationLeaseRenewal'] === true,
     wakeDispatch: record['wakeDispatch'] === true,
     runtimeObservation: record['runtimeObservation'] === true,
+    actionParking: record['actionParking'] === true,
     ...(record['activationLease'] == null
       ? {}
       : { activationLease: parseActivationLease(record['activationLease']) }),
