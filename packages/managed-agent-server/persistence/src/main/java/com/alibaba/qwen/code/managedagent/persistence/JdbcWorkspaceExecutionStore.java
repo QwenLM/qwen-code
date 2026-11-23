@@ -463,6 +463,7 @@ public class JdbcWorkspaceExecutionStore
     public void releaseConfined(ContextBinding binding, RuntimeSessionRecord session, RuntimeBindingRecord runtime) {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+            String key = storageKey(binding);
             var handle = runtime.getResourceHandle();
             List<Boolean> current = jdbc.query("SELECT runtime_generation, provision_request_id, resource_handle_version,"
                     + " resource_handle_json, binding_state FROM ma_runtime_binding WHERE binding_id = ? FOR UPDATE",
@@ -476,19 +477,18 @@ public class JdbcWorkspaceExecutionStore
             if (!current.equals(List.of(true))) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            String key = storageKey(binding);
-            List<String> effective = jdbc.query("SELECT execution_storage_key FROM ma_runtime_session WHERE"
+            List<String> effective = jdbc.query("SELECT execution_storage_id FROM ma_runtime_session WHERE"
                     + " binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? AND harness_session_id = ?"
                     + " AND session_state = 'RELEASING' AND is_rewind_pending = FALSE FOR UPDATE",
-                    (row, index) -> row.getString("execution_storage_key"), runtime.getBindingId(), runtime.getGeneration(),
+                    (row, index) -> row.getString("execution_storage_id"), runtime.getBindingId(), runtime.getGeneration(),
                     session.getRuntimeSessionId(), session.getSession().getHarnessSessionId());
             if (effective.size() != 1 || effective.getFirst() != null && !key.equals(effective.getFirst())) {
                 throw WorkspaceExecutionStore.unavailable();
             }
-            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = NULL"
-                    + " WHERE execution_storage_key = ? AND binding_id = ? AND runtime_generation = ?"
+            int cleared = jdbc.update("UPDATE ma_runtime_session SET execution_storage_id = NULL"
+                    + " WHERE execution_storage_id = ? AND binding_id = ? AND runtime_generation = ?"
                     + " AND runtime_session_id = ? AND harness_session_id = ? AND session_state = 'RELEASING'"
-                    + " AND is_rewind_pending = FALSE", key, runtime.getBindingId(), runtime.getGeneration(),
+                    + " AND is_rewind_pending = FALSE", ManagedSchemaKeys.identity(key), runtime.getBindingId(), runtime.getGeneration(),
                     session.getRuntimeSessionId(), session.getSession().getHarnessSessionId());
             releaseMembers(jdbc, key, cleared);
         });

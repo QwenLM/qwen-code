@@ -55,6 +55,15 @@ final class RuntimeBrokerSupport {
         return isProtocolV3(reference) || isPublicationV3(reference);
     }
 
+    static void requireConfinedExecutionReference(RuntimeScope scope, Map<String, Object> reference, boolean dispatch) {
+        if (WorkspaceExecutionProfile.isConfined(scope.getCapabilityDigest())
+                && (dispatch || !"deferred".equals(reference.get("dispatchMode"))
+                    || reference.containsKey("publicationId") || reference.containsKey("runtimeProtocol")
+                    || ProviderRuntimeProtocol.isReference(reference))) {
+            throw WorkspaceExecutionProfile.confinementDenied();
+        }
+    }
+
     static void requireSameSession(RuntimeSession actual,
             RuntimeSession requested) {
         if (!actual.getHarnessSessionId().equals(

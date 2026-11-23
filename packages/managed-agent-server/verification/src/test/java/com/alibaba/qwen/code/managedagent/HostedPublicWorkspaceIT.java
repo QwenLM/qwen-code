@@ -893,7 +893,7 @@ class HostedPublicWorkspaceIT {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_turn WHERE session_id = ? AND status = 'COMPLETED'",
                         Integer.class, session)).isEqualTo(expected);
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE harness_session_id = ?"
-                        + " AND execution_storage_key IS NOT NULL", Integer.class, session)).isZero();
+                        + " AND execution_storage_id IS NOT NULL", Integer.class, session)).isZero();
             });
             assertThat(answered.size() - answeredBefore).isEqualTo(1);
         }
@@ -926,7 +926,7 @@ class HostedPublicWorkspaceIT {
             org.assertj.core.api.Assertions.assertThatThrownBy(() ->
                     broker.releaseMount(session, runtimeSession, claim, null).toCompletableFuture().join())
                     .hasRootCauseInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
-            assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT execution_storage_id FROM ma_runtime_session WHERE runtime_session_id = ?",
                     String.class, runtimeSession)).isNotBlank();
             assertThat(writer.isAlive()).isTrue();
             String operation = request("POST", "/v1/agents/sessions/" + session + "/close",
@@ -935,7 +935,7 @@ class HostedPublicWorkspaceIT {
                     "/v1/agents/sessions/" + session + "/operations/" + operation, null, null, "actor", 200)
                     .path("status").asText()).isEqualTo("completed"));
             assertThat(writer.waitFor(5, TimeUnit.SECONDS)).isTrue();
-            assertThat(jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+            assertThat(jdbc.queryForObject("SELECT execution_storage_id FROM ma_runtime_session WHERE runtime_session_id = ?",
                     String.class, runtimeSession)).isNull();
             assertThat(json.readTree(Files.readString(registration)).path("state").asText()).isEqualTo("RETIRED");
             assertThat(jdbc.queryForObject("SELECT drain_receipt_json FROM ma_runtime_binding WHERE binding_id = ?",

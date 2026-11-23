@@ -151,6 +151,24 @@ class WorkspaceExecutionMembershipMySqlIT {
     }
 
     @Test
+    void confinedHandbackClearsTheCanonicalStorageIdExactlyOnce() throws Exception {
+        var fixture = new Fixture(source, jdbc, store);
+        var runtime = fixture.runtime("confined-handback");
+        var workspace = fixture.session.workspace();
+        authority.claim(workspace, runtime.session());
+        assertThat(authority.hasHolder(runtime.binding())).isTrue();
+        checkMembers(fixture);
+
+        var releasing = fixture.bindings.beginSessionRelease(fixture.sessions, fixture.executions, runtime.session());
+        assertThat(releasing.getState()).isEqualTo(RuntimeSessionRecord.State.RELEASING);
+        authority.releaseConfined(workspace, releasing, runtime.binding());
+        authority.releaseConfined(workspace, releasing, runtime.binding());
+
+        assertThat(authority.hasHolder(runtime.binding())).isFalse();
+        checkMembers(fixture);
+    }
+
+    @Test
     void operatorPreparationLocksTheDirectoryBeforeTheBinding() throws Exception {
         var fixture = new Fixture(source, jdbc, store);
         var runtime = fixture.runtime("operator");

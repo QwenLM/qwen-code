@@ -1629,12 +1629,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
             bindingRegistry.requireReadySessionRecord(context);
             Map<String, Object> safeReference = immutableMap(reference,
                     "reference");
-            if (WorkspaceExecutionProfile.isConfined(context.session().getScope().getCapabilityDigest())
-                    && (dispatch || !"deferred".equals(safeReference.get("dispatchMode"))
-                        || safeReference.containsKey("publicationId") || safeReference.containsKey("runtimeProtocol")
-                        || ProviderRuntimeProtocol.isReference(safeReference))) {
-                throw WorkspaceExecutionProfile.confinementDenied();
-            }
+            RuntimeBrokerSupport.requireConfinedExecutionReference(context.session().getScope(), safeReference, dispatch);
             String referenceSessionId = referenceString(safeReference,
                     "sessionId");
             if (!context.session().getRuntimeSessionId().equals(

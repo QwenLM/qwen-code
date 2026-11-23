@@ -576,18 +576,18 @@ public class RuntimeHarnessDrainTest {
             var jdbc = new JdbcTemplate(source);
             var ownership = new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source));
             String physical = "a".repeat(64);
-            jdbc.update("INSERT INTO ma_storage (alias_key,tenant_id,storage_id,physical_key,"
+            jdbc.update("INSERT INTO ma_storage (tenant_id,storage_id,physical_id,"
                             + "storage_kind,registration_state,registration_revision,registration_json)"
-                            + " VALUES (?,?,?,?,'LOCAL','REGISTERED',1,'{}')",
-                    RuntimeAdmissionFences.storageAliasKey("tenant", "storage"), "tenant", "storage", physical);
-            jdbc.update("INSERT INTO ma_storage_owner (storage_key,storage_kind,mount_state) VALUES (?,'LOCAL','READY')", physical);
+                            + " VALUES (?,?,?,'LOCAL','REGISTERED',1,'{}')",
+                    "tenant", "storage", physical);
+            jdbc.update("INSERT INTO ma_storage_owner (physical_id,storage_kind,mount_state) VALUES (?,'LOCAL','READY')", physical);
             var context = new ContextBinding("tenant", "workspace", 1, "storage", ".", "fixture", 1);
             bindings.admitSession(sessions, candidate(original, "original"));
             var member = sessions.findById(scope, "original");
             ownership.claim(context, member);
             assertTrue(ownership.hasHolder(original));
             assertEquals(1L, memberCount(jdbc, physical));
-            String storageKeyQuery = "SELECT execution_storage_key FROM ma_runtime_session"
+            String storageKeyQuery = "SELECT execution_storage_id FROM ma_runtime_session"
                     + " WHERE binding_id = ? AND runtime_generation = ?";
             assertEquals(physical, jdbc.queryForObject(storageKeyQuery, String.class,
                     original.getBindingId(), original.getGeneration()));
@@ -714,7 +714,7 @@ public class RuntimeHarnessDrainTest {
     }
 
     private static long memberCount(JdbcTemplate template, String physical) {
-        return template.queryForObject("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?", Long.class, physical);
+        return template.queryForObject("SELECT member_count FROM ma_storage_owner WHERE physical_id = ?", Long.class, physical);
     }
 
     private static Path newTestDelegation() throws Exception {
