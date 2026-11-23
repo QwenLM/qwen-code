@@ -4244,7 +4244,11 @@ The response identifies `sessionId`, `operationId`, `eventEpoch`, and
 `state`. `200 retired` confirms the native recorder flushed and closed.
 `202 retiring` and `202 result_unknown` prohibit migration or replay. Poll
 `GET /session/:id/retirements/:operationId` for that exact receipt. An unknown
-outcome retains the source fence, including across daemon restart. A `404`
+outcome retains the source fence, including across daemon restart. The owning
+daemon can record a delayed strict close confirmation for up to 120 seconds.
+Only a matching acknowledgement confirms retirement. Transport loss, restart
+before that acknowledgement, and expiry of that observation window leave the
+source fenced for reconciliation. A `404`
 means no matching receipt is available. It does not certify an attempted
 operation's failure.
 

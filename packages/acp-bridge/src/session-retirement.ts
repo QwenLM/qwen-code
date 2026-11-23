@@ -166,7 +166,8 @@ export class SessionRetirementLedger {
       !previous ||
       previous.operationId !== identity.operationId ||
       previous.eventEpoch !== identity.eventEpoch ||
-      previous.state !== 'retiring'
+      (previous.state !== 'retiring' &&
+        !(previous.state === 'result_unknown' && state === 'retired'))
     )
       throw new Error('Session retirement ownership changed');
     const receipt = { ...identity, state };

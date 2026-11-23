@@ -69,6 +69,23 @@ describe('native retirement ledger', () => {
     expect(() => reopened.assertOpen(identity.sessionId)).toThrow('fenced');
   });
 
+  it('accepts a delayed acknowledgement only for the exact fenced generation', () => {
+    const ledger = new SessionRetirementLedger(runtime, '/source');
+    ledger.begin(identity);
+    ledger.settle(identity, 'result_unknown');
+    expect(() =>
+      ledger.settle({ ...identity, eventEpoch: randomUUID() }, 'retired'),
+    ).toThrow();
+    expect(() =>
+      ledger.settle({ ...identity, operationId: randomUUID() }, 'retired'),
+    ).toThrow();
+    expect(ledger.settle(identity, 'retired')).toEqual({
+      ...identity,
+      state: 'retired',
+    });
+    expect(() => ledger.settle(identity, 'result_unknown')).toThrow();
+  });
+
   it('permits same-operation retry after definitive refusal before close', () => {
     const ledger = new SessionRetirementLedger(runtime, '/source');
     ledger.begin(identity);

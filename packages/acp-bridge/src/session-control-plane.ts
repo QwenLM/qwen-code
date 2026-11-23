@@ -2572,6 +2572,9 @@ function maxChildHeap(a: ChildHeapReport, b: ChildHeapReport): ChildHeapReport {
   };
 }
 
+const RETIREMENT_ADMISSION_WAIT_MS = 10_000;
+const RETIREMENT_NATIVE_RECEIPT_WAIT_MS = 120_000;
+
 export function createSessionControlPlane(
   opts: BridgeOptions,
   createHarness: typeof createChannelHarness,
@@ -7304,6 +7307,7 @@ export function createSessionControlPlane(
       requireFlush?: boolean;
       onlyIfUnheld?: boolean;
       timeoutMs?: number;
+      receiptTimeoutMs?: number;
       cancelReason?: 'user';
     },
   ): Promise<boolean> => {
@@ -7334,8 +7338,9 @@ export function createSessionControlPlane(
           ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
         },
       );
-      const observedCloseRequest = opts?.timeoutMs
-        ? withTimeout(closeRequest, opts.timeoutMs, label)
+      const receiptTimeoutMs = opts?.receiptTimeoutMs ?? opts?.timeoutMs;
+      const observedCloseRequest = receiptTimeoutMs
+        ? withTimeout(closeRequest, receiptTimeoutMs, label)
         : closeRequest;
       const response = await raceLongLived(
         opts?.throwOnFailure === true
@@ -10259,6 +10264,9 @@ export function createSessionControlPlane(
               : closeOpts?.cancelReason,
           ...(closeOpts?.agentCloseTimeoutMs !== undefined
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
+            : {}),
+          ...(retirement
+            ? { receiptTimeoutMs: RETIREMENT_NATIVE_RECEIPT_WAIT_MS }
             : {}),
         },
       );
@@ -13878,32 +13886,54 @@ export function createSessionControlPlane(
               );
             }
             retiringSessions.add(sessionId);
+
+            const observeNativeReceipt =
+              async (): Promise<SessionRetirementReceipt> => {
+                try {
+                  await closeSessionImpl(
+                    sessionId,
+                    context,
+                    {
+                      requireIdle: true,
+                      requireAgentClose: true,
+                      reason: 'retirement',
+                      agentCloseTimeoutMs: RETIREMENT_ADMISSION_WAIT_MS,
+                    },
+                    identity,
+                  );
+                } catch (error) {
+                  const recorded = retirementLedger.read(sessionId);
+                  if (
+                    recorded?.operationId !== operationId ||
+                    recorded.eventEpoch !== eventEpoch
+                  )
+                    throw error;
+                  return recorded.state === 'retiring'
+                    ? retirementLedger.settle(identity, 'result_unknown')
+                    : recorded;
+                }
+                return retirementLedger.settle(identity, 'retired');
+              };
+            const observer = observeNativeReceipt().finally(() => {
+              retiringSessions.delete(sessionId);
+            });
             try {
-              await closeSessionImpl(
-                sessionId,
-                context,
-                {
-                  requireIdle: true,
-                  requireAgentClose: true,
-                  reason: 'retirement',
-                  agentCloseTimeoutMs: 10_000,
-                },
-                identity,
+              return await withTimeout(
+                observer,
+                RETIREMENT_ADMISSION_WAIT_MS,
+                'retirement acknowledgement',
               );
-              return retirementLedger.settle(identity, 'retired');
             } catch (error) {
+              if (!(error instanceof BridgeTimeoutError)) throw error;
               const recorded = retirementLedger.read(sessionId);
               if (
                 recorded?.operationId !== operationId ||
                 recorded.eventEpoch !== eventEpoch
               )
                 throw error;
-              if (recorded.state === 'retiring') {
-                return retirementLedger.settle(identity, 'result_unknown');
-              }
-              return recorded;
-            } finally {
-              retiringSessions.delete(sessionId);
+              return recorded.state === 'retiring'
+                ? retirementLedger.settle(identity, 'result_unknown')
+                : recorded;
             }
           },
         }
