@@ -25,7 +25,21 @@ test('without Add, repeat history activation retains history focus and retained 
   await history.tap();
   await expect(search).toBeFocused();
   await search.fill('abc');
+  await page.evaluate(() => {
+    const state = window as unknown as { draftFocusins: number };
+    state.draftFocusins = 0;
+    document
+      .querySelector('textarea[data-web-shell-composer-editor]')!
+      .addEventListener('focusin', () => {
+        state.draftFocusins += 1;
+      });
+  });
   await history.tap();
+  expect(
+    await page.evaluate(
+      () => (window as unknown as { draftFocusins: number }).draftFocusins,
+    ),
+  ).toBe(0);
   await expect(search).toBeFocused();
   await page.keyboard.type('xyz');
   await expect(search).toHaveValue('xyz');
