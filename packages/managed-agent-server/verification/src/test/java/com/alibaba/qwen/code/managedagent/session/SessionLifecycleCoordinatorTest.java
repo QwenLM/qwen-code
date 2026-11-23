@@ -497,7 +497,7 @@ class SessionLifecycleCoordinatorTest {
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(world.jdbc.getDataSource()));
         assertThatThrownBy(() -> transactions.execute(ignored -> world.store.beginWorkspaceLifecycle(
                 "tenant", world.child, OperationKind.CLOSE,
-                com.alibaba.qwen.code.managedagent.workspace.ChildActorId.of(world.session),
+                com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of(world.session),
                 "actor", "spoof", "digest", true)))
                 .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
         world.jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ?", "tenant");

@@ -198,7 +198,7 @@ class SessionRecoveryServiceTest {
     // still unsettled. Without the certificate the same rows still block.
     private void oweBackgroundWork() {
         jdbc.update("INSERT INTO ma_session_record VALUES ('tenant', 'session', 'DOMAIN', 'ready')");
-        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
         jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
     }
 

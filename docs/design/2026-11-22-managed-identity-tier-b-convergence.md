@@ -48,18 +48,18 @@ redesign. Converging each budget from its real producer eliminates those blocker
 
 ## Converged budgets
 
-| Class | Columns | Budget |
-|---|---|---|
-| Our-code minted | `item_id`, `content_part_id`, `transaction_id`, `command_id`, `activation_id`, `writer_id`, `ma_session_head.operation_id`, `source_scope_id`, `parent_child_run_id`, ma_channel_segment `delivery_id`/`segment_id`, PR `binding_id`, `idempotency_key` (most namespaces) | `VARCHAR(128)` |
-| Composite resource mints | `resource_id` (ma_resource **and** ma_resource_ref) | `VARCHAR(256)` |
-| childRunId union | `record_id`, `child_run_id`, `execution_call_id`, `delivery_id` (CHILD_RESULT) | `VARCHAR(256)` |
-| Delivery segment | ma_delivery `segment_id` (= `delivery_id` + ":" + ordinal 0..63, ≤256+1+2) | `VARCHAR(320)` |
-| Short bounded | `isolation_key` | `VARCHAR(64)` |
-| Composite contract-safe | `provision_request_id` / `loss_evidence_id` | `VARCHAR(160)` / `VARCHAR(192)` |
-| GitHub spec-based | PR `owner` / `repo` | `VARCHAR(64)` / `VARCHAR(128)` |
-| Platform spec-based | `account_id`, `sender_id`, `chat_id`, `thread_id` | `VARCHAR(256)` |
-| Maintainer-chosen 128 | `model_id`, `tool_call_id`, `runtime_instance_id`, `runtime_lease_id` | `VARCHAR(128)` |
-| Keep binary | all canonical `*_ref`, digests, ciphertext, object keys | `VARBINARY` |
+| Class                    | Columns                                                                                                                                                                                                                                                                   | Budget                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| Our-code minted          | `item_id`, `content_part_id`, `transaction_id`, `command_id`, `activation_id`, `writer_id`, `ma_session_head.operation_id`, `source_scope_id`, `parent_child_run_id`, ma_channel_segment `delivery_id`/`segment_id`, PR `binding_id`, `idempotency_key` (most namespaces) | `VARCHAR(128)`                  |
+| Composite resource mints | `resource_id` (ma_resource **and** ma_resource_ref)                                                                                                                                                                                                                       | `VARCHAR(256)`                  |
+| childRunId union         | `record_id`, `child_run_id`, `execution_call_id`, `delivery_id` (CHILD_RESULT)                                                                                                                                                                                            | `VARCHAR(256)`                  |
+| Delivery segment         | ma_delivery `segment_id` (= `delivery_id` + ":" + ordinal 0..63, ≤256+1+2)                                                                                                                                                                                                | `VARCHAR(320)`                  |
+| Short bounded            | `isolation_key`                                                                                                                                                                                                                                                           | `VARCHAR(64)`                   |
+| Composite contract-safe  | `provision_request_id` / `loss_evidence_id`                                                                                                                                                                                                                               | `VARCHAR(160)` / `VARCHAR(192)` |
+| GitHub spec-based        | PR `owner` / `repo`                                                                                                                                                                                                                                                       | `VARCHAR(64)` / `VARCHAR(128)`  |
+| Platform spec-based      | `account_id`, `sender_id`, `chat_id`, `thread_id`                                                                                                                                                                                                                         | `VARCHAR(256)`                  |
+| Maintainer-chosen 128    | `model_id`, `tool_call_id`, `runtime_instance_id`, `runtime_lease_id`                                                                                                                                                                                                     | `VARCHAR(128)`                  |
+| Keep binary              | all canonical `*_ref`, digests, ciphertext, object keys                                                                                                                                                                                                                   | `VARBINARY`                     |
 
 ### childRunId union rationale
 
@@ -111,15 +111,15 @@ admit the full 256 end-to-end is a separate follow-up.
 
 ## Index arithmetic (converged; canonical refs kept VARBINARY)
 
-| Index | Converged bytes | Was | Result |
-|---|---:|---:|---|
-| `uk_ma_resource_ref_business_key` (resource_id@256) | 2072 | 3096 | resolved; ma_resource_ref.resource_id converts |
-| `idx_ma_message_execution` (item_id@128) | 1792 | 4096 | resolved |
-| `uk_ma_channel_segment_identity` (@128) | 1680 | 4752 | resolved |
-| `uk_ma_pr_watch_binding_business_key` (owner@64/repo@128) | 1432 | 4760 | resolved |
-| `idx_runtime_binding_scope` (isolation@64) | 2432 | 4224 | resolved |
-| `idx_ma_resource_delete_intent` (resource_id@256) | 2576 | 3600 | resolved |
-| `uk_ma_delivery_identity` (delivery@256/scope@128) | ≤2064 | 4368 | fits |
+| Index                                                     | Converged bytes |  Was | Result                                         |
+| --------------------------------------------------------- | --------------: | ---: | ---------------------------------------------- |
+| `uk_ma_resource_ref_business_key` (resource_id@256)       |            2072 | 3096 | resolved; ma_resource_ref.resource_id converts |
+| `idx_ma_message_execution` (item_id@128)                  |            1792 | 4096 | resolved                                       |
+| `uk_ma_channel_segment_identity` (@128)                   |            1680 | 4752 | resolved                                       |
+| `uk_ma_pr_watch_binding_business_key` (owner@64/repo@128) |            1432 | 4760 | resolved                                       |
+| `idx_runtime_binding_scope` (isolation@64)                |            2432 | 4224 | resolved                                       |
+| `idx_ma_resource_delete_intent` (resource_id@256)         |            2576 | 3600 | resolved                                       |
+| `uk_ma_delivery_identity` (delivery@256/scope@128)        |           ≤2064 | 4368 | fits                                           |
 
 All seven problem indexes fit ≤3072 with converged budgets.
 

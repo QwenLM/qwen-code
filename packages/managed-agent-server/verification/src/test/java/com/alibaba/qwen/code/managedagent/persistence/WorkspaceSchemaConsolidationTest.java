@@ -101,7 +101,7 @@ class WorkspaceSchemaConsolidationTest {
                     + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', ?, ?, 'root', 1, 'storage', '.', ?, 1, ?, ?, ?, ?)",
                     id, now, now, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
                     WorkspaceExecutionProfile.POLICY_REF, ("parent".equals(id) ? "actor"
-                            : com.alibaba.qwen.code.managedagent.workspace.ChildActorId.of("parent")),
+                            : com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of("parent")),
                     "parent".equals(id) ? null : "parent");
         }
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'root', ?, 'OWNER')",
@@ -113,7 +113,7 @@ class WorkspaceSchemaConsolidationTest {
         authority.authorize(child);
         jdbc.update("DELETE FROM ma_workspace_access WHERE tenant_id = ? AND workspace_id = ?", "tenant", "root");
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role) VALUES ('tenant', 'root', ?, 'OWNER')",
-                com.alibaba.qwen.code.managedagent.workspace.ChildActorId.of("parent")
+                com.alibaba.qwen.code.runtimebroker.managedworkspace.ChildActorId.of("parent")
                         .getBytes(StandardCharsets.UTF_8));
         assertThatThrownBy(() -> authority.authorize(child)).isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class);
     }

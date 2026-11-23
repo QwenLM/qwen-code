@@ -1,4 +1,4 @@
-package com.alibaba.qwen.code.managedagent.workspace;
+package com.alibaba.qwen.code.runtimebroker.managedworkspace;
 
 import org.junit.jupiter.api.Test;
 

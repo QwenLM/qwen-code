@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
@@ -613,7 +612,7 @@ public class JdbcChildResultRelayStore
         // the body with the same integrity gate the join used to apply.
         String body = messages.getFirst()[1] == null
                 ? messages.getFirst()[0]
-                : messageBodyText(tenantId, sessionId, ManagedIdentityRef.decode(
+                : ChildMessageBodyText.read(jdbc, tenantId, sessionId, ManagedIdentityRef.decode(
                         messages.getFirst()[1].getBytes(StandardCharsets.US_ASCII)).get(2));
         try {
             JsonNode parts = MAPPER.readTree(body);
@@ -633,26 +632,6 @@ public class JdbcChildResultRelayStore
         } catch (java.io.IOException error) {
             throw new IllegalStateException("Message parts are invalid", error);
         }
-    }
-
-    private String messageBodyText(String tenantId, String sessionId, String resourceId) {
-        return jdbc.query(
-                "SELECT inline_bytes, kind, schema_version, byte_length, sha256, state, deletion_operation_ref"
-                        + " FROM ma_resource WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
-                (result, row) -> {
-                    byte[] bytes = result.getBytes("inline_bytes");
-                    if (!"REFERENCED".equals(result.getString("state"))
-                            || !"managed-message-parts".equals(result.getString("kind"))
-                            || result.getInt("schema_version") != 1
-                            || result.getString("deletion_operation_ref") != null || bytes == null
-                            || bytes.length != result.getLong("byte_length")
-                            || !ToolPublicationContract.sha256(bytes).equals(result.getString("sha256"))) {
-                        throw new IllegalStateException("Child message body resource is unavailable or corrupt");
-                    }
-                    return new String(bytes, StandardCharsets.UTF_8);
-                }, tenantId, sessionId, resourceId)
-                .stream().findFirst()
-                .orElseThrow(() -> new IllegalStateException("Child message body resource is unavailable or corrupt"));
     }
 
     private static String operationKey(String kind, String tenant, String parent, String run) {

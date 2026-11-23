@@ -1356,13 +1356,17 @@ public final class JdbcRepositoryContract {
                 prefix + "-indexed-digest"));
         tamper(dataSource, "execution_call_id", indexedId, indexedId + " ");
         assertNull(repository.findByExecutionCallId(indexedId));
+        // The runtime-session tamper must stay admissible (no trailing space):
+        // reading the record validates it before the reference guard runs. A
+        // valid identity that disagrees with the reference still trips the
+        // guard, and the raw exact lookup now finds the active row under it.
         tamper(dataSource, "runtime_session_id", id,
-                prefix + "-other-session ");
+                prefix + "-other-session");
         assertEquals("reference identity does not match execution identity",
                 assertThrows(IllegalArgumentException.class,
                         () -> repository.findByExecutionCallId(id))
                         .getMessage());
-        assertFalse(repository.hasActiveByRuntimeSession(
+        assertTrue(repository.hasActiveByRuntimeSession(
                 prefix + "-other-session"));
     }
 

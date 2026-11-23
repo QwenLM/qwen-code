@@ -42,18 +42,18 @@ Tier A 已把简单的服务端铸造身份转为有界 `VARCHAR`。剩余 Tier 
 
 ## 收敛预算
 
-| 类别 | 列 | 预算 |
-|---|---|---|
-| 我们的代码铸造 | `item_id`、`content_part_id`、`transaction_id`、`command_id`、`activation_id`、`writer_id`、`ma_session_head.operation_id`、`source_scope_id`、`parent_child_run_id`、ma_channel_segment `delivery_id`/`segment_id`、PR `binding_id`、`idempotency_key`（多数命名空间） | `VARCHAR(128)` |
-| 复合 resource 铸造 | `resource_id`（ma_resource **及** ma_resource_ref） | `VARCHAR(256)` |
-| childRunId union | `record_id`、`child_run_id`、`execution_call_id`、`delivery_id`（CHILD_RESULT） | `VARCHAR(256)` |
-| 投递分段 | ma_delivery `segment_id`（= `delivery_id` + ":" + ordinal 0..63，≤256+1+2） | `VARCHAR(320)` |
-| 短确定值 | `isolation_key` | `VARCHAR(64)` |
-| 复合契约安全 | `provision_request_id` / `loss_evidence_id` | `VARCHAR(160)` / `VARCHAR(192)` |
-| GitHub 规格 | PR `owner` / `repo` | `VARCHAR(64)` / `VARCHAR(128)` |
-| 平台规格 | `account_id`、`sender_id`、`chat_id`、`thread_id` | `VARCHAR(256)` |
-| 维护者选定 128 | `model_id`、`tool_call_id`、`runtime_instance_id`、`runtime_lease_id` | `VARCHAR(128)` |
-| 保留二进制 | 所有 canonical `*_ref`、摘要、密文、对象键 | `VARBINARY` |
+| 类别               | 列                                                                                                                                                                                                                                                                      | 预算                            |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------- |
+| 我们的代码铸造     | `item_id`、`content_part_id`、`transaction_id`、`command_id`、`activation_id`、`writer_id`、`ma_session_head.operation_id`、`source_scope_id`、`parent_child_run_id`、ma_channel_segment `delivery_id`/`segment_id`、PR `binding_id`、`idempotency_key`（多数命名空间） | `VARCHAR(128)`                  |
+| 复合 resource 铸造 | `resource_id`（ma_resource **及** ma_resource_ref）                                                                                                                                                                                                                     | `VARCHAR(256)`                  |
+| childRunId union   | `record_id`、`child_run_id`、`execution_call_id`、`delivery_id`（CHILD_RESULT）                                                                                                                                                                                         | `VARCHAR(256)`                  |
+| 投递分段           | ma_delivery `segment_id`（= `delivery_id` + ":" + ordinal 0..63，≤256+1+2）                                                                                                                                                                                             | `VARCHAR(320)`                  |
+| 短确定值           | `isolation_key`                                                                                                                                                                                                                                                         | `VARCHAR(64)`                   |
+| 复合契约安全       | `provision_request_id` / `loss_evidence_id`                                                                                                                                                                                                                             | `VARCHAR(160)` / `VARCHAR(192)` |
+| GitHub 规格        | PR `owner` / `repo`                                                                                                                                                                                                                                                     | `VARCHAR(64)` / `VARCHAR(128)`  |
+| 平台规格           | `account_id`、`sender_id`、`chat_id`、`thread_id`                                                                                                                                                                                                                       | `VARCHAR(256)`                  |
+| 维护者选定 128     | `model_id`、`tool_call_id`、`runtime_instance_id`、`runtime_lease_id`                                                                                                                                                                                                   | `VARCHAR(128)`                  |
+| 保留二进制         | 所有 canonical `*_ref`、摘要、密文、对象键                                                                                                                                                                                                                              | `VARBINARY`                     |
 
 ### childRunId union 理由
 
@@ -101,15 +101,15 @@ child-operation 路径由 320 收敛到 256。relay ledger 还会把 `childRunId
 
 ## 索引核算（收敛后；canonical ref 保留 VARBINARY）
 
-| 索引 | 收敛字节 | 原 | 结果 |
-|---|---:|---:|---|
-| `uk_ma_resource_ref_business_key`（resource_id@256） | 2072 | 3096 | 解决；ma_resource_ref.resource_id 可转 |
-| `idx_ma_message_execution`（item_id@128） | 1792 | 4096 | 解决 |
-| `uk_ma_channel_segment_identity`（@128） | 1680 | 4752 | 解决 |
-| `uk_ma_pr_watch_binding_business_key`（owner@64/repo@128） | 1432 | 4760 | 解决 |
-| `idx_runtime_binding_scope`（isolation@64） | 2432 | 4224 | 解决 |
-| `idx_ma_resource_delete_intent`（resource_id@256） | 2576 | 3600 | 解决 |
-| `uk_ma_delivery_identity`（delivery@256/scope@128） | ≤2064 | 4368 | fit |
+| 索引                                                       | 收敛字节 |   原 | 结果                                   |
+| ---------------------------------------------------------- | -------: | ---: | -------------------------------------- |
+| `uk_ma_resource_ref_business_key`（resource_id@256）       |     2072 | 3096 | 解决；ma_resource_ref.resource_id 可转 |
+| `idx_ma_message_execution`（item_id@128）                  |     1792 | 4096 | 解决                                   |
+| `uk_ma_channel_segment_identity`（@128）                   |     1680 | 4752 | 解决                                   |
+| `uk_ma_pr_watch_binding_business_key`（owner@64/repo@128） |     1432 | 4760 | 解决                                   |
+| `idx_runtime_binding_scope`（isolation@64）                |     2432 | 4224 | 解决                                   |
+| `idx_ma_resource_delete_intent`（resource_id@256）         |     2576 | 3600 | 解决                                   |
+| `uk_ma_delivery_identity`（delivery@256/scope@128）        |    ≤2064 | 4368 | fit                                    |
 
 收敛预算下七个问题索引全部 ≤3072。
 

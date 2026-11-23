@@ -1,4 +1,4 @@
-package com.alibaba.qwen.code.managedagent.workspace;
+package com.alibaba.qwen.code.runtimebroker.managedworkspace;
 
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.apache.commons.codec.digest.DigestUtils;
