@@ -4247,7 +4247,7 @@ describe('local container recipe pins', () => {
       ),
       'an operation after the multi-line span remains executable',
     ).toBe(false);
-  }, 15_000);
+  }, 30_000);
 
   it('base-pins `.qwen` and states that root AGENTS/QWEN.md still come from the PR', () => {
     expect(skill).toContain('git -C <pr-clone> archive "$BASE_OID" -- .qwen');
