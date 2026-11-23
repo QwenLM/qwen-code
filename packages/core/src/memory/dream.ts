@@ -6,18 +6,23 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
-import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
-  getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
 } from './paths.js';
 import { listTrustedMemoryMarkdownFiles } from './trusted-memory-filesystem.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
-import { rebuildManagedAutoMemoryIndex } from './indexer.js';
+import {
+  rebuildManagedAutoMemoryIndex,
+  rebuildProjectMemoryIndexLocked,
+} from './indexer.js';
+import {
+  updateProjectMemoryMetadata,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
+import type { AutoMemoryType } from './types.js';
 import { logMemoryDream, MemoryDreamEvent } from '../telemetry/index.js';
 import * as path from 'node:path';
 import {
@@ -246,7 +251,17 @@ async function runDreamByAgent(
       skipPreviouslyInvalid: true,
     });
     abortSignal?.throwIfAborted();
-    operations = await applyDreamOperations(memoryRoot, before, abortSignal);
+    operations = await withProjectMemoryCommit(memoryRoot, async () => {
+      const applied = await applyDreamOperations(
+        memoryRoot,
+        before,
+        abortSignal,
+      );
+      if (applied.deletedPaths.length > 0) {
+        await rebuildProjectMemoryIndexLocked(memoryRoot);
+      }
+      return applied;
+    });
     after = await snapshotDreamFiles(memoryRoot);
     for (const deletedPath of operations.deletedPaths) {
       writtenPaths.add(deletedPath);
@@ -412,23 +427,18 @@ async function updateDreamMetadataResult(
   sessionId?: string,
   hasChanges = touchedTopics.length > 0,
 ): Promise<void> {
-  const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
-    const content = await fs.readFile(metadataPath, 'utf-8');
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    metadata.lastDreamAt = now.toISOString();
-    metadata.lastDreamTouchedTopics = touchedTopics;
-    metadata.lastDreamStatus = hasChanges ? 'updated' : 'noop';
-    if (sessionId !== undefined) {
-      metadata.lastDreamSessionId = sessionId;
-      metadata.recentSessionIdsSinceDream = [];
-    }
-    await atomicWriteFile(
-      metadataPath,
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      { encoding: 'utf-8' },
-    );
+    await updateProjectMemoryMetadata(projectRoot, now, (metadata) => {
+      const iso = now.toISOString();
+      if (metadata.lastDreamAt && metadata.lastDreamAt > iso) return;
+      metadata.lastDreamAt = iso;
+      metadata.lastDreamTouchedTopics = touchedTopics;
+      metadata.lastDreamStatus = hasChanges ? 'updated' : 'noop';
+      if (sessionId !== undefined) {
+        metadata.lastDreamSessionId = sessionId;
+        metadata.recentSessionIdsSinceDream = [];
+      }
+    });
   } catch {
     // Best-effort metadata bump.
   }

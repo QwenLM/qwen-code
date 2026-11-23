@@ -41,6 +41,7 @@ import {
   setupStartupWorktree,
   buildStartupWorktreeNotice,
   persistStartupWorktreeSidecar,
+  readWorktreeProjectMemoryOwner,
   WorktreeOwnershipConflictError,
 } from './worktreeStartup.js';
 import {
@@ -492,6 +493,38 @@ describe('persistStartupWorktreeSidecar', () => {
       getSessionService: () => sessionService,
     } as unknown as Config;
   }
+
+  it('rejects a session marker and sidecar pointing to a different repository worktree', async () => {
+    tempRepo = await makeTempRepo();
+    const otherRepo = await makeTempRepo();
+    try {
+      const worktreePath = path.join(tempRepo, '.qwen', 'worktrees', 'foreign');
+      const sessionId = '12345678-aaaa-4000-8000-123456789abc';
+      await fs.mkdir(path.dirname(worktreePath), { recursive: true });
+      await exec('git', ['worktree', 'add', '-q', '--detach', worktreePath], {
+        cwd: otherRepo,
+      });
+      await writeWorktreeSessionMarker(worktreePath, sessionId);
+      const config = makeConfig(tempRepo, sessionId);
+      await writeWorktreeSession(
+        config.getSessionService().getWorktreeSessionPath(sessionId),
+        {
+          slug: 'foreign',
+          worktreePath,
+          worktreeBranch: '',
+          originalCwd: tempRepo,
+          projectMemoryOwner: tempRepo,
+          originalBranch: 'main',
+          originalHeadCommit: '',
+        },
+      );
+      await expect(
+        readWorktreeProjectMemoryOwner(config, worktreePath),
+      ).resolves.toBeUndefined();
+    } finally {
+      await fs.rm(otherRepo, { recursive: true, force: true });
+    }
+  });
 
   it.each(['missing', 'foreign-host'] as const)(
     'keeps an unverifiable %s owner when re-attaching',

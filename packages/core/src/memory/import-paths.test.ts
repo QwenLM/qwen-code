@@ -27,7 +27,7 @@ afterEach(async () => {
   clearAutoMemoryRootCache();
   await fs.rm(root, { recursive: true, force: true });
 });
-it('shares imported knowledge across linked worktrees while ordinary memory and independent clones stay isolated', async () => {
+it('shares imported knowledge across linked worktrees while independent clones stay isolated', async () => {
   const main = path.join(root, 'main');
   const linked = path.join(root, 'linked');
   const clone = path.join(root, 'clone');
@@ -64,7 +64,6 @@ it('shares imported knowledge across linked worktrees while ordinary memory and 
     expect(() => getImportedProjectMemoryRoot(forged)).toThrow(
       'Invalid linked worktree',
     );
-    expect(getAutoMemoryRoot(linked)).not.toBe(getAutoMemoryRoot(main));
     await fs.mkdir(path.join(imported, 'imported', 'synthetic'), {
       recursive: true,
     });

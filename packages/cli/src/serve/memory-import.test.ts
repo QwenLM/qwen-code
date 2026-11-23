@@ -10,6 +10,7 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { MemoryImportService } from '../memory-import/service.js';
 import {
   createWorkspaceGenerationGuard,
@@ -20,8 +21,10 @@ import { mountMemoryImportRoutes } from './memory-import.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   getAutoMemoryRoot,
+  getLegacyProjectMemoryRoot,
   runWithMemoryProjectScope,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
+import { WORKTREE_SESSION_FILE } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { previewSource } from '../memory-import/source.js';
 const source = {
   version: 1,
@@ -128,6 +131,107 @@ async function terminal(app: express.Application, base: string, id: string) {
   return value!;
 }
 describe('selected-workspace memory import HTTP', () => {
+  it('previews only a selected workspace’s legacy worktree and imports into that preview target', async () => {
+    const h = await setup(true);
+    const workspace = h.secondary.workspaceCwd;
+    const repo = path.dirname(workspace);
+    const task = path.join(root, 'task');
+    const git = (...args: string[]) =>
+      execFileSync(
+        'git',
+        ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args],
+        { cwd: repo, stdio: 'pipe' },
+      );
+    git('init', '--quiet');
+    git('commit', '--allow-empty', '-m', 'Initial', '--quiet');
+    git('worktree', 'add', '-b', 'task', task, '--quiet');
+    const sessionId = 'worktree-session';
+    await fs.writeFile(path.join(task, WORKTREE_SESSION_FILE), sessionId);
+    const old = Storage.runWithResolvedRuntimeBaseDir(
+      h.secondary.sessionRuntimeBaseDir,
+      () => getLegacyProjectMemoryRoot(task),
+    );
+    const chats = Storage.runWithResolvedRuntimeBaseDir(
+      h.secondary.sessionRuntimeBaseDir,
+      () => path.join(new Storage(workspace).getProjectDir(), 'chats'),
+    );
+    await fs.mkdir(old, { recursive: true });
+    await fs.writeFile(
+      path.join(old, 'rollback.md'),
+      'Validate rollback paths.',
+    );
+    await fs.mkdir(chats, { recursive: true });
+    await fs.writeFile(
+      path.join(chats, `${sessionId}.worktree.json`),
+      JSON.stringify({
+        workspaceCwd: workspace,
+        originalCwd: repo,
+        worktreePath: task,
+        worktreeBranch: 'task',
+        slug: 'task',
+        originalBranch: 'main',
+        originalHeadCommit: '',
+      }),
+    );
+    const base = '/workspaces/secondary/memory/import';
+    const before = await fs.readdir(h.secondary.sessionRuntimeBaseDir);
+    const { body: preview } = await request(h.app)
+      .get(`${base}/worktree-preview`)
+      .expect(200);
+    expect(preview.sections).toMatchObject([
+      { sourceProject: old, content: 'Validate rollback paths.' },
+    ]);
+    expect(preview.target.scope).toBe('workspace');
+    expect(
+      (
+        await request(h.app)
+          .get('/workspaces/primary/memory/import/worktree-preview')
+          .expect(200)
+      ).body.sections,
+    ).toEqual([]);
+    await request(h.app)
+      .get(`${base}/worktree-preview`)
+      .query({ source: old })
+      .expect(400);
+    expect(await fs.readdir(h.secondary.sessionRuntimeBaseDir)).toEqual(before);
+    expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    const confirmed = {
+      source: 'worktree',
+      target: preview.target,
+      digest: preview.digest,
+      idempotencyKey: 'worktree',
+    };
+    await request(h.app)
+      .post(`${base}/batches`)
+      .set('x-confirm', 'yes')
+      .send({
+        ...confirmed,
+        selection: [{ id: preview.sections[0].id, scope: 'user' }],
+      })
+      .expect(400);
+    expect(h.secondary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+    const submitted = await request(h.app)
+      .post(`${base}/batches`)
+      .set('x-confirm', 'yes')
+      .send({
+        ...confirmed,
+        selection: [{ id: preview.sections[0].id, scope: 'project' }],
+      })
+      .expect(202);
+    expect((await terminal(h.app, base, submitted.body.id))['status']).toBe(
+      'completed',
+    );
+    expect(
+      await fs.readFile(
+        path.join(preview.target.memoryRoot, 'MEMORY.md'),
+        'utf8',
+      ),
+    ).toContain('Rollback checks');
+    expect(await fs.readFile(path.join(old, 'rollback.md'), 'utf8')).toBe(
+      'Validate rollback paths.',
+    );
+    expect(h.primary.bridge.invokeWorkspaceCommand).not.toHaveBeenCalled();
+  });
   it('previews client contents with no local source access or model call', async () => {
     const h = await setup();
     const response = await request(h.app)

@@ -430,10 +430,14 @@ import {
 import {
   getAutoMemoryRoot,
   getAutoMemoryIndexPath,
+  getAutoMemoryTrustedAnchor,
+  getMemoryProjectOwner,
   getTeamAutoMemoryRoot,
   getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
+  runWithMemoryProjectOwner,
 } from '../memory/paths.js';
+import { isSubpath } from '../utils/paths.js';
 import {
   type AutoMemoryIndexRead,
   readAutoMemoryIndexWithStats,
@@ -2602,6 +2606,12 @@ function containsErrorByIdentity(error: unknown, candidate: unknown): boolean {
 
 const DERIVED_CONFIG = Symbol('derivedConfig');
 
+interface ProjectMemoryWorktree {
+  root: string;
+  owner: string;
+  memoryBaseDir?: string;
+}
+
 function isDerivedConfig(config: Config): boolean {
   return (
     (config as Config & { [DERIVED_CONFIG]?: boolean })[DERIVED_CONFIG] === true
@@ -2617,6 +2627,7 @@ export type DerivedConfigOverrides = Partial<
     | 'getCwd'
     | 'getWorkingDir'
     | 'getProjectRoot'
+    | 'getProjectMemoryOwner'
     | 'getPlanFilePath'
     | 'getWorkspaceContext'
     | 'getFileService'
@@ -2857,11 +2868,17 @@ export function deriveWorktreeConfig(
     options.customIgnoreFiles,
   );
   const workspaceContext = new WorkspaceContext(worktreePath);
+  const parentRoot = base.getProjectRoot();
+  const memoryOwner = base.getProjectMemoryOwner?.() ?? {
+    cwd: getMemoryProjectOwner(parentRoot),
+    memoryBaseDir: getAutoMemoryTrustedAnchor(parentRoot),
+  };
   const derived = deriveConfig(base, {
     getTargetDir: () => worktreePath,
     getCwd: () => worktreePath,
     getWorkingDir: () => worktreePath,
     getProjectRoot: () => worktreePath,
+    getProjectMemoryOwner: () => memoryOwner,
     getFileService: () => fileService,
     getWorkspaceContext: () => workspaceContext,
   });
@@ -3061,6 +3078,8 @@ export class Config {
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
+  private projectMemoryWorkspace?: string;
+  private projectMemoryWorktree?: ProjectMemoryWorktree;
   private workspaceContext: WorkspaceContext;
   private readonly debugMode: boolean;
   private readonly inputFormat: InputFormat;
@@ -5716,6 +5735,15 @@ export class Config {
     loadReason: Exclude<InstructionLoadReason, 'include'> = 'refresh',
     signal?: AbortSignal,
   ): Promise<void> {
+    return this.runWithProjectMemoryOwner(() =>
+      this.refreshHierarchicalMemoryInContext(loadReason, signal),
+    );
+  }
+
+  private async refreshHierarchicalMemoryInContext(
+    loadReason: Exclude<InstructionLoadReason, 'include'>,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (this.executionEnvironment) return;
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
@@ -5918,6 +5946,9 @@ export class Config {
           managedAutoMemoryIndex,
           userSection,
           teamSection,
+          this.getContentGeneratorConfig()?.contextWindowSize ??
+            this.modelsConfig.getGenerationConfig().contextWindowSize ??
+            tokenLimit(this.getModel(), 'input'),
         );
         this.autoMemoryPrompt = buildResidentAutoMemoryPrompt(
           memoryDir,
@@ -8345,7 +8376,11 @@ export class Config {
   async relocateWorkingDirectory(
     newDir: string,
     expectedCanonicalDir?: string,
-    opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
+    opts?: {
+      skipProcessChdir?: boolean;
+      skipArtifactMigration?: boolean;
+      projectMemoryWorktree?: ProjectMemoryWorktree;
+    },
   ): Promise<{
     memoryRefreshError?: unknown;
     mcpRefreshError?: unknown;
@@ -8414,6 +8449,9 @@ export class Config {
     }
 
     this.backgroundTaskRegistry.disposeResidentAgents();
+    if (opts?.projectMemoryWorktree) {
+      this.bindProjectMemoryToWorktree(opts.projectMemoryWorktree);
+    }
     this.targetDir = expected;
     this.cwd = expected;
     await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
@@ -8497,6 +8535,37 @@ export class Config {
 
   getProjectRoot(): string {
     return this.targetDir;
+  }
+
+  bindProjectMemoryToWorkspace(): void {
+    this.projectMemoryWorkspace ??= this.storage.getProjectRoot();
+  }
+
+  bindProjectMemoryToWorktree(worktree: ProjectMemoryWorktree): void {
+    this.projectMemoryWorktree = worktree;
+  }
+
+  getProjectMemoryOwner(
+    projectRoot = this.getProjectRoot(),
+  ): { cwd: string; memoryBaseDir: string } | undefined {
+    if (this.projectMemoryWorkspace) {
+      return {
+        cwd: this.projectMemoryWorkspace,
+        memoryBaseDir: this.sessionRuntimeBaseDir,
+      };
+    }
+    const task = this.projectMemoryWorktree;
+    return task && isSubpath(task.root, projectRoot)
+      ? {
+          cwd: task.owner,
+          memoryBaseDir: task.memoryBaseDir ?? this.sessionRuntimeBaseDir,
+        }
+      : undefined;
+  }
+
+  runWithProjectMemoryOwner<T>(run: () => T): T {
+    const owner = this.getProjectMemoryOwner();
+    return owner ? runWithMemoryProjectOwner(owner, run) : run();
   }
 
   getCwd(): string {

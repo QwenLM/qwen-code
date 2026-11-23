@@ -213,6 +213,8 @@ class EnterWorktreeInvocation extends BaseToolInvocation<
           worktreePath: result.worktree.path,
           worktreeBranch: result.worktree.branch,
           originalCwd: projectRoot,
+          projectMemoryOwner: cwd,
+          workspaceCwd: this.config.getProjectMemoryOwner?.()?.cwd,
           originalBranch: baseBranch ?? 'HEAD',
           originalHeadCommit,
           // Absent today (enter_worktree creates without carry); recorded for

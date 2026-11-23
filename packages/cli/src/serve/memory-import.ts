@@ -7,11 +7,18 @@ import type { Application, Request, Response, RequestHandler } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import type { MemoryImportBatchProposal } from '@qwen-code/qwen-code-core/memory/import-model.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
-import { runWithMemoryProjectScope } from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
+  getLegacyProjectMemoryRoot,
+  runWithMemoryProjectScope,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   previewSource,
   MemoryImportRequestError,
 } from '../memory-import/source.js';
+import {
+  assertWorktreeSelectionScope,
+  previewWorktreeMemory,
+} from '../memory-import/worktree-source.js';
 import {
   MemoryImportService,
   MemoryImportNotFoundError,
@@ -151,6 +158,29 @@ export function mountMemoryImportRoutes(
       );
   };
   const base = '/workspaces/:workspace/memory/import';
+  const worktreePreview = (runtime: WorkspaceRuntime) => {
+    const excludedRoots = new Set(
+      deps.workspaceRegistry
+        .list()
+        .filter(
+          (other) =>
+            other !== runtime &&
+            other.sessionRuntimeBaseDir === runtime.sessionRuntimeBaseDir,
+        )
+        .map((other) => getLegacyProjectMemoryRoot(other.workspaceCwd)),
+    );
+    return previewWorktreeMemory(runtime.workspaceCwd, { excludedRoots });
+  };
+  app.get(
+    `${base}/worktree-preview`,
+    handle((req, runtime) => {
+      if (Object.keys(req.query).length)
+        throw new MemoryImportRequestError(
+          'Workspace worktree previews accept no source override.',
+        );
+      return worktreePreview(runtime);
+    }),
+  );
   app.post(
     `${base}/preview`,
     deps.mutate({ strict: true }),
@@ -160,7 +190,19 @@ export function mountMemoryImportRoutes(
     `${base}/batches`,
     deps.mutate({ strict: true }),
     handle(async (req, runtime) => {
+      if (req.body?.source === 'worktree')
+        assertWorktreeSelectionScope(req.body.selection);
       await assertManagedMemoryAvailable(runtime);
+      if (req.body?.source === 'worktree') {
+        const preview = await worktreePreview(runtime);
+        return (await service(runtime)).submitWorktree(
+          preview,
+          req.body.selection,
+          req.body.idempotencyKey,
+          req.body.target,
+          req.body.digest,
+        );
+      }
       return (await service(runtime)).submit(
         req.body?.source,
         req.body?.selection,

@@ -65,6 +65,8 @@ export interface WorktreeSession {
   originalCwd: string;
   /** Registered daemon workspace root for route-owned worktree attestation. */
   workspaceCwd?: string;
+  /** Standalone launch directory when --worktree moved CWD before startup. */
+  projectMemoryOwner?: string;
   originalBranch: string;
   /**
    * HEAD commit SHA captured at the moment the worktree was created.
@@ -145,6 +147,8 @@ function isValidWorktreeSession(value: unknown): value is WorktreeSession {
     typeof v['originalCwd'] === 'string' &&
     (v['workspaceCwd'] === undefined ||
       typeof v['workspaceCwd'] === 'string') &&
+    (v['projectMemoryOwner'] === undefined ||
+      typeof v['projectMemoryOwner'] === 'string') &&
     typeof v['originalBranch'] === 'string' &&
     typeof v['originalHeadCommit'] === 'string' &&
     (v['worktreeBase'] === undefined ||

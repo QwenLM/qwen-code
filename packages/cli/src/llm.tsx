@@ -10,6 +10,7 @@ import {
 } from './config/environment.js';
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { MODEL_CATALOG_REFRESH_ENV } from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
+import { setStandaloneProjectMemoryOwner } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { validateExecutionSandboxSelection } from './config/execution-sandbox-settings.js';
 import {
   AuthType,
@@ -80,6 +81,7 @@ import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
   persistStartupWorktreeSidecar,
+  readWorktreeProjectMemoryOwner,
   buildStartupWorktreeNotice,
   WorktreeOwnershipConflictError,
   type StartupWorktreeContext,
@@ -1004,6 +1006,14 @@ export async function main() {
   // cwd, and the startup-level chdir would not propagate. Reject the
   // combination with a clear error rather than silently dropping --worktree.
   let startupWorktreeContext: StartupWorktreeContext | null = null;
+  const launchMemoryBaseDir =
+    argv.worktree !== undefined
+      ? Storage.runWithRuntimeBaseDir(
+          settings.merged.advanced?.runtimeOutputDir,
+          process.cwd(),
+          () => Storage.getRuntimeBaseDir(),
+        )
+      : undefined;
   if (argv.worktree !== undefined && (argv.acp || argv.experimentalAcp)) {
     writeStderrLine(
       '--worktree cannot be combined with --acp / --experimental-acp. ' +
@@ -1125,6 +1135,36 @@ export async function main() {
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
+    if (!argv.acp && !argv.experimentalAcp) {
+      if (startupWorktreeContext) {
+        config.bindProjectMemoryToWorktree({
+          root: process.cwd(),
+          owner:
+            startupWorktreeContext.projectMemoryOwner ??
+            startupWorktreeContext.repoRoot,
+          memoryBaseDir: launchMemoryBaseDir,
+        });
+      } else if (argv.resume !== undefined || argv.continue) {
+        const resumed = await readWorktreeProjectMemoryOwner(
+          config,
+          config.getTargetDir(),
+        );
+        if (resumed) {
+          config.bindProjectMemoryToWorktree({
+            ...resumed,
+            memoryBaseDir: Storage.runWithRuntimeBaseDir(
+              settings.merged.advanced?.runtimeOutputDir,
+              resumed.owner,
+              () => Storage.getRuntimeBaseDir(),
+            ),
+          });
+        }
+      }
+      // TTY callbacks can start outside the bootstrap async context.
+      setStandaloneProjectMemoryOwner((cwd) =>
+        config.getProjectMemoryOwner(cwd),
+      );
+    }
 
     // The interactive UI segments text through Intl.Segmenter; on an ICU-less
     // Node the first segmentation segfaults the process (#11747). Probe here,

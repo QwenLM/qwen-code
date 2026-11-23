@@ -6,6 +6,12 @@
 
 import * as fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { rebuildProjectMemoryIndexLocked } from './indexer.js';
+import {
+  assertProjectMemoryCommit,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
   getAutoMemoryExtractCursorPath,
@@ -71,20 +77,44 @@ export async function ensureAutoMemoryScaffold(
   now = new Date(),
 ): Promise<void> {
   const root = getAutoMemoryRoot(projectRoot);
-  await fs.mkdir(root, { recursive: true });
-
-  await writeFileIfMissing(
-    getAutoMemoryIndexPath(projectRoot),
-    createDefaultAutoMemoryIndex(),
-  );
-  await writeFileIfMissing(
-    getAutoMemoryMetadataPath(projectRoot),
-    JSON.stringify(createDefaultAutoMemoryMetadata(now), null, 2) + '\n',
-  );
-  await writeFileIfMissing(
-    getAutoMemoryExtractCursorPath(projectRoot),
-    JSON.stringify(createDefaultAutoMemoryExtractCursor(now), null, 2) + '\n',
-  );
+  await withProjectMemoryCommit(root, async () => {
+    await fs.mkdir(root, { recursive: true });
+    for (const [filePath, state] of [
+      [
+        getAutoMemoryMetadataPath(projectRoot),
+        createDefaultAutoMemoryMetadata(now),
+      ],
+      [
+        getAutoMemoryExtractCursorPath(projectRoot),
+        createDefaultAutoMemoryExtractCursor(now),
+      ],
+    ] as const) {
+      try {
+        if (!(await fs.lstat(filePath)).isFile()) {
+          throw new Error(
+            `Project memory state requires a regular file: ${filePath}`,
+          );
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        await atomicWriteFile(filePath, `${JSON.stringify(state, null, 2)}\n`, {
+          encoding: 'utf-8',
+          noFollow: true,
+          assertCanCommit: assertProjectMemoryCommit,
+        });
+      }
+    }
+    const indexExists = await fs
+      .lstat(getAutoMemoryIndexPath(projectRoot))
+      .then(
+        () => true,
+        (error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') throw error;
+          return false;
+        },
+      );
+    if (!indexExists) await rebuildProjectMemoryIndexLocked(root);
+  });
 }
 
 export async function readAutoMemoryIndex(

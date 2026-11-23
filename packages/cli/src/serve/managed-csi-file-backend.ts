@@ -542,6 +542,7 @@ export class ManagedCsiFileBackend
           working.missing.shift();
         }
         const address = addressOf(working.parent, working.missing[0]);
+        params.assertCanCommit?.();
         const handle = await fs.open(
           address,
           constants.O_RDWR |
@@ -560,6 +561,7 @@ export class ManagedCsiFileBackend
       }
       const leaf = working.leaf;
       await this.checkAlias(leaf.stats);
+      if (original !== undefined) params.assertCanCommit?.();
       changed = true;
       await this.writeBytes(leaf.handle, bytes, 0, signal);
       await leaf.handle.truncate(bytes.length);

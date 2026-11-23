@@ -12,8 +12,10 @@ import lockfile from 'proper-lockfile';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getImportedProjectMemoryRoot } from '@qwen-code/qwen-code-core/memory/import-paths.js';
 import {
+  AUTO_MEMORY_INDEX_FILENAME,
   getUserAutoMemoryRoot,
   getMemoryRootTrustedAnchor,
+  resolveProjectMemoryTarget,
 } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   scanAutoMemorySnapshot,
@@ -23,7 +25,14 @@ import {
   tokenizeMemoryRecallTerms,
   tokenizeMemoryRecallText,
 } from '@qwen-code/qwen-code-core/memory/recall.js';
-import { rebuildAutoMemoryIndexAtRoot } from '@qwen-code/qwen-code-core/memory/indexer.js';
+import {
+  rebuildAutoMemoryIndexAtRoot,
+  rebuildProjectMemoryIndexLocked,
+} from '@qwen-code/qwen-code-core/memory/indexer.js';
+import {
+  assertProjectMemoryCommit,
+  withProjectMemoryCommit,
+} from '@qwen-code/qwen-code-core/memory/project-commit.js';
 import {
   validateMemoryImportBatchProposal,
   memoryImportReservation,
@@ -35,13 +44,25 @@ import {
   MEMORY_IMPORT_BUDGET,
   packMemoryImportSections,
 } from '@qwen-code/qwen-code-core/memory/import-budget.js';
-import { resolveTrustedMemoryFile } from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
+import {
+  listTrustedMemoryMarkdownFiles,
+  resolveTrustedMemoryFile,
+} from '@qwen-code/qwen-code-core/memory/trusted-memory-filesystem.js';
 import {
   digest,
   previewSource,
   MemoryImportRequestError,
+  type ImportPreview,
   type ImportSection,
 } from './source.js';
+import {
+  assertWorktreePreview,
+  assertWorktreeSelectionScope,
+  assertWorktreeTarget,
+  worktreeTargetKey,
+  type WorktreeImportPreview,
+  type WorktreeImportTarget,
+} from './worktree-source.js';
 
 export class MemoryImportNotFoundError extends Error {
   readonly code = 'ENOENT';
@@ -66,6 +87,7 @@ export interface ImportTask {
   status: 'queued' | 'running' | 'completed' | 'partial' | 'cancelled';
   createdAt: string;
   updatedAt: string;
+  target?: WorktreeImportTarget;
   items: ImportItemResult[];
   usage: { modelCalls: number; reservedTokens: number };
   budget: { maxCalls: number; maxReservedTokens: number };
@@ -109,6 +131,9 @@ export interface ImportServiceOptions {
     signal: AbortSignal,
   ) => Promise<MemoryImportBatchProposal>;
 }
+const worktreeBatchPrefix = 'worktree-';
+const unavailableWorktreeTask =
+  'This worktree memory import is unavailable for the current target. Preview again and confirm the current selection.';
 const exists = async (file: string) =>
   fs.lstat(file).then(
     () => true,
@@ -306,7 +331,19 @@ export class MemoryImportService {
     }
     return readJson<T>(file);
   }
+  private worktreeTarget(readOnly = true): WorktreeImportTarget {
+    return resolveProjectMemoryTarget(this.options.projectRoot, { readOnly });
+  }
+  private worktreeBatches(target = this.worktreeTarget()): string {
+    return path.join(
+      this.state,
+      'worktree-batches',
+      digest(worktreeTargetKey(target)),
+    );
+  }
   private taskDir(id: string): string {
+    if (/^worktree-[a-f0-9]{64}$/.test(id))
+      return path.join(this.worktreeBatches(), id);
     if (!/^[a-f0-9]{64}$/.test(id))
       throw new MemoryImportRequestError('Invalid import batch ID.');
     return path.join(this.state, 'batches', this.owner, id);
@@ -337,13 +374,10 @@ export class MemoryImportService {
       current = parent;
     }
   }
-  private async prepare(): Promise<void> {
+  private async prepare(batches: string): Promise<void> {
     this.options.assertActive();
     await this.assertRuntimeOutsideGit();
-    await privateDirectory(
-      path.join(this.state, 'batches', this.owner),
-      this.base,
-    );
+    await privateDirectory(batches, this.base);
   }
   private async locked<T>(
     directory: string,
@@ -396,7 +430,27 @@ export class MemoryImportService {
     key: unknown,
   ): Promise<ImportTask> {
     this.options.assertActive();
-    const preview = previewSource(input);
+    return this.submitPreview(previewSource(input), selections, key);
+  }
+  async submitWorktree(
+    preview: WorktreeImportPreview,
+    selections: unknown,
+    key: unknown,
+    confirmedTarget: unknown,
+    confirmedDigest: unknown,
+  ): Promise<ImportTask> {
+    this.options.assertActive();
+    assertWorktreePreview(preview, confirmedTarget, confirmedDigest);
+    assertWorktreeSelectionScope(selections);
+    assertWorktreeTarget(this.worktreeTarget(), preview.target);
+    return this.submitPreview(preview, selections, key, preview.target);
+  }
+  private async submitPreview(
+    preview: ImportPreview,
+    selections: unknown,
+    key: unknown,
+    target?: WorktreeImportTarget,
+  ): Promise<ImportTask> {
     if (
       typeof key !== 'string' ||
       !/^[\w-]{1,128}$/.test(key) ||
@@ -433,58 +487,67 @@ export class MemoryImportService {
       throw new MemoryImportRequestError(
         'Selected contextual source exceeds the retained snapshot limit.',
       );
-    const requestDigest = digest(JSON.stringify(selected));
-    const id = digest(`${this.owner}\0${key}`);
-    await this.prepare();
-    const dir = this.taskDir(id);
-    return this.locked(
-      path.join(this.state, 'admission', this.owner),
-      async () => {
-        this.options.assertActive();
-        if (await exists(path.join(dir, 'task.json'))) {
-          const task = await this.readState<StoredTask>(
-            path.join(dir, 'task.json'),
-          );
-          if (task.requestDigest !== requestDigest)
-            throw new MemoryImportRequestError(
-              'Idempotency key was already used with a different selection.',
-            );
-          this.kick(id);
-          return publicTask(task);
-        }
-        await privateDirectory(dir, this.base);
-        await writeJson(path.join(dir, 'source.json'), { sections: selected });
-        const now = new Date().toISOString();
-        const task: StoredTask = {
-          version: 1,
-          kind: 'task',
-          id,
-          status: 'queued',
-          createdAt: now,
-          updatedAt: now,
-          requestDigest,
-          usage: { modelCalls: 0, reservedTokens: 0 },
-          budget: {
-            maxCalls: MEMORY_IMPORT_BUDGET.maxCalls,
-            maxReservedTokens: MEMORY_IMPORT_BUDGET.maxReservedTokens,
-          },
-          items: selected.map((section) => ({
-            id: section.id,
-            scope: section.scope,
-            status: 'pending',
-          })),
-        };
-        await writeJson(path.join(dir, 'task.json'), task);
-        this.kick(id);
-        return publicTask(task);
-      },
+    const bucket = target ? digest(worktreeTargetKey(target)) : this.owner;
+    const requestDigest = digest(
+      JSON.stringify(target ? [target, selected] : selected),
     );
+    const id =
+      (target ? worktreeBatchPrefix : '') + digest(`${bucket}\0${key}`);
+    const batches = target
+      ? this.worktreeBatches(target)
+      : path.dirname(this.taskDir(id));
+    await this.prepare(batches);
+    const dir = path.join(batches, id);
+    return this.locked(path.join(this.state, 'admission', bucket), async () => {
+      this.options.assertActive();
+      if (target) {
+        assertWorktreeTarget(this.worktreeTarget(), target);
+        assertWorktreeTarget(this.worktreeTarget(false), target);
+      }
+      if (await exists(path.join(dir, 'task.json'))) {
+        const task = await this.readState<StoredTask>(
+          path.join(dir, 'task.json'),
+        );
+        if (task.requestDigest !== requestDigest)
+          throw new MemoryImportRequestError(
+            'Idempotency key was already used with a different selection.',
+          );
+        this.kick(id, dir);
+        return publicTask(task);
+      }
+      await privateDirectory(dir, this.base);
+      await writeJson(path.join(dir, 'source.json'), { sections: selected });
+      const now = new Date().toISOString();
+      const task: StoredTask = {
+        version: 1,
+        kind: 'task',
+        id,
+        status: 'queued',
+        createdAt: now,
+        updatedAt: now,
+        ...(target ? { target } : {}),
+        requestDigest,
+        usage: { modelCalls: 0, reservedTokens: 0 },
+        budget: {
+          maxCalls: MEMORY_IMPORT_BUDGET.maxCalls,
+          maxReservedTokens: MEMORY_IMPORT_BUDGET.maxReservedTokens,
+        },
+        items: selected.map((section) => ({
+          id: section.id,
+          scope: section.scope,
+          status: 'pending',
+        })),
+      };
+      await writeJson(path.join(dir, 'task.json'), task);
+      this.kick(id, dir);
+      return publicTask(task);
+    });
   }
-  private kick(id: string): void {
+  private kick(id: string, dir = this.taskDir(id)): void {
     if (this.workers.has(id)) return;
     // A worker owns its task lock independently of submit's admission lock.
     const worker = heldLocks
-      .exit(() => this.run(id))
+      .exit(() => this.run(id, dir))
       .catch(() => {
         /* Durable state is retained for retry/recovery. */
       })
@@ -496,36 +559,52 @@ export class MemoryImportService {
   }
   async recover(): Promise<void> {
     this.options.assertActive();
-    const root = path.join(this.state, 'batches', this.owner);
-    if (!(await exists(root))) return;
+    if (!(await exists(this.state))) return;
     await this.assertRuntimeOutsideGit();
-    await privateDirectory(root, this.base);
-    for (const id of (await fs.readdir(root)).filter((id) =>
-      /^[a-f0-9]{64}$/.test(id),
-    )) {
-      // Isolate a damaged batch: one unreadable task must not stop the
-      // recovery of its siblings. The damaged batch stays on disk for an
-      // explicit retry/status call to report.
-      const task = await this.readState<StoredTask>(
-        path.join(this.taskDir(id), 'task.json'),
-      ).catch(() => undefined);
-      if (task && (task.status === 'running' || task.status === 'queued'))
-        this.kick(id);
+    for (const { root, ids } of await this.batchDirectories()) {
+      for (const id of ids) {
+        const dir = path.join(root, id);
+        const task = await this.readState<StoredTask>(
+          path.join(dir, 'task.json'),
+        ).catch(() => undefined);
+        if (task && (task.status === 'running' || task.status === 'queued'))
+          this.kick(id, dir);
+      }
     }
+  }
+  private async batchDirectories(): Promise<
+    Array<{ root: string; ids: string[] }>
+  > {
+    const roots = [
+      {
+        root: path.join(this.state, 'batches', this.owner),
+        filter: /^[a-f0-9]{64}$/,
+      },
+    ];
+    if (await exists(path.join(this.state, 'worktree-batches')))
+      roots.push({
+        root: this.worktreeBatches(),
+        filter: /^worktree-[a-f0-9]{64}$/,
+      });
+    const batches: Array<{ root: string; ids: string[] }> = [];
+    for (const { root, filter } of roots) {
+      if (!(await exists(root))) continue;
+      await privateDirectory(root, this.base);
+      batches.push({
+        root,
+        ids: (await fs.readdir(root)).filter((id) => filter.test(id)),
+      });
+    }
+    return batches;
   }
   async list(): Promise<ImportTask[]> {
     this.options.assertActive();
-    const root = path.join(this.state, 'batches', this.owner);
-    if (!(await exists(root))) return [];
-    await privateDirectory(root, this.base);
     const result: ImportTask[] = [];
-    for (const id of (await fs.readdir(root)).filter((id) =>
-      /^[a-f0-9]{64}$/.test(id),
-    )) {
-      // Skip a damaged batch rather than failing the whole listing; its
-      // explicit status call still reports the storage failure.
-      const task = await this.get(id).catch(() => undefined);
-      if (task) result.push(task);
+    for (const { ids } of await this.batchDirectories()) {
+      for (const id of ids) {
+        const task = await this.get(id).catch(() => undefined);
+        if (task) result.push(task);
+      }
     }
     return result.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
@@ -534,12 +613,19 @@ export class MemoryImportService {
     const task = await this.readState<StoredTask>(
       path.join(this.taskDir(id), 'task.json'),
     ).catch((cause: unknown) => {
-      if ((cause as NodeJS.ErrnoException).code === 'ENOENT')
+      if ((cause as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (id.startsWith(worktreeBatchPrefix))
+          throw new MemoryImportRequestError(unavailableWorktreeTask, {
+            cause,
+          });
         throw new MemoryImportNotFoundError('Import batch not found.', {
           cause,
         });
+      }
       throw cause;
     });
+    if (id.startsWith(worktreeBatchPrefix))
+      assertWorktreeTarget(this.worktreeTarget(), task.target);
     if (
       task.status !== 'completed' &&
       (await exists(path.join(this.taskDir(id), 'cancel.json')))
@@ -575,16 +661,18 @@ export class MemoryImportService {
 
   async retry(id: string): Promise<ImportTask> {
     await this.get(id);
-    await this.prepare();
     // A worker registered by submit() or a previous retry is still running:
     // wait for it instead of returning early, otherwise explicit retry loses
     // the race and failed items stay unpromoted.
     await this.workers.get(id);
     const dir = this.taskDir(id);
+    await this.prepare(path.dirname(dir));
     const result = await this.locked(dir, async () => {
       const task = await this.readState<StoredTask>(
         path.join(dir, 'task.json'),
       );
+      if (id.startsWith(worktreeBatchPrefix))
+        assertWorktreeTarget(this.worktreeTarget(), task.target);
       if (task.status === 'completed') return publicTask(task);
       await fs.rm(path.join(dir, 'cancel.json'), { force: true });
       for (const item of task.items)
@@ -597,15 +685,14 @@ export class MemoryImportService {
       await writeJson(path.join(dir, 'task.json'), task);
       return publicTask(task);
     });
-    this.kick(id);
+    this.kick(id, dir);
     return result;
   }
   async idle(id: string): Promise<ImportTask> {
     await this.workers.get(id);
     return this.get(id);
   }
-  private async run(id: string): Promise<void> {
-    const dir = this.taskDir(id);
+  private async run(id: string, dir: string): Promise<void> {
     const controller = new AbortController();
     this.controllers.set(id, controller);
     await this.locked(
@@ -615,6 +702,11 @@ export class MemoryImportService {
           path.join(dir, 'task.json'),
         );
         if (!['queued', 'running'].includes(task.status)) return;
+        const target = id.startsWith(worktreeBatchPrefix)
+          ? task.target
+          : undefined;
+        if (id.startsWith(worktreeBatchPrefix))
+          assertWorktreeTarget(this.worktreeTarget(), target);
         const source = await this.readState<RetainedSource>(
           path.join(dir, 'source.json'),
         );
@@ -639,12 +731,14 @@ export class MemoryImportService {
               await this.importSection(
                 section,
                 id,
+                target,
                 signal,
                 (before, ledger, proposalSignal) =>
                   this.prepareProposal(
                     section,
                     source,
                     task,
+                    dir,
                     before,
                     ledger,
                     proposalSignal,
@@ -662,7 +756,8 @@ export class MemoryImportService {
             item.status = 'failed';
             item.reason =
               error instanceof ImportBudgetError ||
-              error instanceof ImportContextError
+              error instanceof ImportContextError ||
+              error instanceof MemoryImportRequestError
                 ? error.message
                 : 'Import could not finish. Existing memories were preserved; retry after resolving runtime, model or storage availability.';
           }
@@ -684,11 +779,11 @@ export class MemoryImportService {
     section: ImportSection & { scope: Scope },
     source: RetainedSource,
     task: StoredTask,
+    dir: string,
     before: { existing: MemoryImportModelInput['existing'] },
     ledger: Ledger,
     signal: AbortSignal,
   ): Promise<MemoryImportProposal> {
-    const dir = this.taskDir(task.id);
     const journalFile = path.join(dir, 'proposals.json');
     const journals = (await exists(journalFile))
       ? await this.readState<PreparedBatch[]>(journalFile)
@@ -824,10 +919,38 @@ export class MemoryImportService {
       };
     return journal.proposal.items.find((item) => item.id === section.id)!;
   }
-  private async snapshot(scope: Scope): Promise<{
+  private async snapshot(
+    scope: Scope,
+    target?: WorktreeImportTarget,
+  ): Promise<{
     version: string;
     existing: MemoryImportModelInput['existing'];
   }> {
+    if (target) {
+      const root = target.memoryRoot;
+      const files = await listTrustedMemoryMarkdownFiles(
+        root,
+        getMemoryRootTrustedAnchor(root),
+        AUTO_MEMORY_INDEX_FILENAME,
+        {
+          onUnreadableDir: () => {
+            throw new Error('Existing memory scan is incomplete.');
+          },
+        },
+      );
+      const all = await Promise.all(
+        files.map(async ({ relativePath, resolvedPath }) => ({
+          ref: `project:${relativePath}`,
+          content: await fs.readFile(resolvedPath, 'utf8'),
+        })),
+      );
+      return {
+        version: digest(JSON.stringify(all)),
+        existing: all.filter(({ ref, content }) =>
+          parseAutoMemoryTopicDocument(ref, content),
+        ),
+      };
+    }
     const snapshot = await scanAutoMemorySnapshot(this.options.projectRoot, {
       scopes: [scope],
       trustedProject: true,
@@ -847,6 +970,7 @@ export class MemoryImportService {
   private async importSection(
     section: ImportSection & { scope: Scope },
     batchId: string,
+    target: WorktreeImportTarget | undefined,
     signal: AbortSignal,
     propose: (
       before: { existing: MemoryImportModelInput['existing'] },
@@ -855,16 +979,43 @@ export class MemoryImportService {
     ) => Promise<MemoryImportProposal>,
     assertCommit: () => Promise<void>,
   ): Promise<ImportItemResult> {
+    const scope = section.scope;
+    if (target) {
+      assertWorktreeTarget(this.worktreeTarget(), target);
+      if (scope !== 'project')
+        throw new MemoryImportRequestError(
+          'Worktree sources can only be imported into project memory.',
+        );
+    }
     const root =
-      section.scope === 'user'
+      target?.memoryRoot ??
+      (scope === 'user'
         ? getUserAutoMemoryRoot()
-        : getImportedProjectMemoryRoot(this.options.projectRoot, true);
+        : getImportedProjectMemoryRoot(this.options.projectRoot, true));
+    const snapshot = () => this.snapshot(scope, target);
+    const rebuildIndex = () =>
+      scope === 'project'
+        ? rebuildProjectMemoryIndexLocked(root)
+        : rebuildAutoMemoryIndexAtRoot(root, scope);
+    const commit = <T>(run: () => Promise<T>): Promise<T> =>
+      scope === 'project'
+        ? withProjectMemoryCommit(root, async () => {
+            signal.throwIfAborted();
+            this.options.assertActive();
+            if (target) assertWorktreeTarget(this.worktreeTarget(), target);
+            return run();
+          })
+        : run();
     const scopeState = path.join(this.state, 'scopes', digest(root));
     return this.locked(
       scopeState,
       async (signal) => {
         signal.throwIfAborted();
         this.options.assertActive();
+        if (target) {
+          assertWorktreeTarget(this.worktreeTarget(), target);
+          await privateDirectory(path.dirname(root), this.base);
+        }
         if ((await exists(root)) && (await fs.lstat(root)).isSymbolicLink())
           throw new ImportContextError(
             'Memory import does not support a symlinked memory root. Use a non-symlink memory root before retrying; existing memories were not changed.',
@@ -892,76 +1043,89 @@ export class MemoryImportService {
           status,
           ...(reason ? { reason } : {}),
         });
-        if (previous?.phase === 'intent') {
+        if (!target && previous?.phase === 'intent') {
           const stage = path.join(scopeState, previous.stage);
           if (
             (await exists(stage)) &&
             !(await exists(path.join(root, 'imported', key))) &&
-            (await this.snapshot(section.scope)).version !==
-              previous.memoryVersion
+            (await snapshot()).version !== previous.memoryVersion
           ) {
             await discardUnpublishedIntent(stage);
             previous = undefined;
           }
         }
         if (previous) {
-          const stage = path.join(scopeState, previous.stage);
-          const destination = path.join(root, 'imported', key);
-          if (
-            previous.phase === 'intent' &&
-            (await exists(stage)) &&
-            !(await exists(destination))
-          ) {
-            for (const output of previous.outputs) {
-              const file = path.join(stage, path.basename(output.relativePath));
-              if (digest(await fs.readFile(file, 'utf8')) !== output.digest)
-                throw new Error('Invalid staged import.');
-            }
-            signal.throwIfAborted();
-            this.options.assertActive();
-            await privateDirectory(path.join(root, 'imported'), this.base);
-            signal.throwIfAborted();
-            this.options.assertActive();
-            await assertCommit();
-            heldLocks.getStore()?.throwIfAborted();
-            await fs.rename(stage, destination);
-          }
-          for (const output of previous.outputs) {
-            const file = await resolveTrustedMemoryFile(
-              root,
-              getMemoryRootTrustedAnchor(root),
-              output.relativePath,
-            );
+          const prior = previous;
+          return commit(async () => {
+            const stage = path.join(scopeState, prior.stage);
+            const destination = path.join(root, 'imported', key);
             if (
-              !file ||
-              digest(await fs.readFile(file, 'utf8')) !== output.digest
-            )
-              return outcome(
-                'conflict',
-                'Previously imported memory was edited or forgotten; it will not be restored.',
+              prior.phase === 'intent' &&
+              (await exists(stage)) &&
+              !(await exists(destination))
+            ) {
+              for (const output of prior.outputs) {
+                const file = path.join(
+                  stage,
+                  path.basename(output.relativePath),
+                );
+                if (digest(await fs.readFile(file, 'utf8')) !== output.digest)
+                  throw new Error('Invalid staged import.');
+              }
+              signal.throwIfAborted();
+              this.options.assertActive();
+              await privateDirectory(path.join(root, 'imported'), this.base);
+              if ((await snapshot()).version !== prior.memoryVersion) {
+                await discardUnpublishedIntent(stage);
+                return outcome(
+                  'conflict',
+                  'Existing memory changed before publication.',
+                );
+              }
+              signal.throwIfAborted();
+              this.options.assertActive();
+              await assertCommit();
+              heldLocks.getStore()?.throwIfAborted();
+              assertProjectMemoryCommit();
+              await fs.rename(stage, destination);
+            }
+            for (const output of prior.outputs) {
+              const file = await resolveTrustedMemoryFile(
+                root,
+                getMemoryRootTrustedAnchor(root),
+                output.relativePath,
               );
-          }
-          previous.phase = 'committed';
-          await writeJson(ledgerPath, ledger);
-          await rebuildAutoMemoryIndexAtRoot(root, section.scope);
-          if (previous.batchId === batchId)
-            return {
-              ...previous.outcome,
-              id: section.id,
-              scope: section.scope,
-            };
-          return outcome(
-            previous.outcome.status === 'added'
-              ? 'duplicate'
-              : previous.outcome.status,
-            'This source has already been processed.',
-          );
+              if (
+                !file ||
+                digest(await fs.readFile(file, 'utf8')) !== output.digest
+              )
+                return outcome(
+                  'conflict',
+                  'Previously imported memory was edited or forgotten; it will not be restored.',
+                );
+            }
+            prior.phase = 'committed';
+            await writeJson(ledgerPath, ledger);
+            await rebuildIndex();
+            if (prior.batchId === batchId)
+              return {
+                ...prior.outcome,
+                id: section.id,
+                scope: section.scope,
+              };
+            return outcome(
+              prior.outcome.status === 'added'
+                ? 'duplicate'
+                : prior.outcome.status,
+              'This source has already been processed.',
+            );
+          });
         }
-        const before = await this.snapshot(section.scope);
+        const before = await snapshot();
         const proposal = await propose(before, ledger, signal);
         signal.throwIfAborted();
         this.options.assertActive();
-        if ((await this.snapshot(section.scope)).version !== before.version)
+        if ((await snapshot()).version !== before.version)
           return outcome(
             'conflict',
             'Existing memory changed during consolidation; preview and retry the source.',
@@ -1098,25 +1262,28 @@ export class MemoryImportService {
           outcome: result,
         };
         await writeJson(ledgerPath, ledger);
-        signal.throwIfAborted();
-        this.options.assertActive();
-        await privateDirectory(path.join(root, 'imported'), this.base);
-        signal.throwIfAborted();
-        this.options.assertActive();
-        if ((await this.snapshot(section.scope)).version !== before.version) {
-          await discardUnpublishedIntent(stage);
-          return outcome(
-            'conflict',
-            'Existing memory changed before publication.',
-          );
-        }
-        await assertCommit();
-        heldLocks.getStore()?.throwIfAborted();
-        await fs.rename(stage, path.join(root, 'imported', key));
-        ledger[key].phase = 'committed';
-        await writeJson(ledgerPath, ledger);
-        await rebuildAutoMemoryIndexAtRoot(root, section.scope);
-        return result;
+        return commit(async () => {
+          signal.throwIfAborted();
+          this.options.assertActive();
+          await privateDirectory(path.join(root, 'imported'), this.base);
+          signal.throwIfAborted();
+          this.options.assertActive();
+          if ((await snapshot()).version !== before.version) {
+            await discardUnpublishedIntent(stage);
+            return outcome(
+              'conflict',
+              'Existing memory changed before publication.',
+            );
+          }
+          await assertCommit();
+          heldLocks.getStore()?.throwIfAborted();
+          assertProjectMemoryCommit();
+          await fs.rename(stage, path.join(root, 'imported', key));
+          ledger[key].phase = 'committed';
+          await writeJson(ledgerPath, ledger);
+          await rebuildIndex();
+          return result;
+        });
       },
       signal,
     );

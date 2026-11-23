@@ -14,6 +14,11 @@ import {
 } from '../sandbox/runtime-file.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import {
+  commitProjectMemoryWrite,
+  getProjectMemoryWriteRoot,
+  projectMemoryIndexWriteError,
+} from '../memory/project-write.js';
+import {
   checkTeamMemorySecrets,
   checkWorkspaceTeamMemorySecrets,
 } from '../memory/team-memory-secret-guard.js';
@@ -314,10 +319,16 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     const io = this.config.getFileSystemService().textFileIo;
     if (!io) return this.executeObserved(abortSignal);
     try {
-      return await io.withMutation(
-        this.params.file_path,
-        abortSignal,
-        (mutation) => this.executeObserved(abortSignal, mutation),
+      const file = this.params.file_path;
+      const projectVersion = getProjectMemoryWriteRoot(
+        this.config.getProjectRoot(),
+        file,
+        false,
+      )
+        ? captureRuntimeFileVersion(this.config, file, true)
+        : undefined;
+      return await io.withMutation(file, abortSignal, (mutation) =>
+        this.executeObserved(abortSignal, mutation, projectVersion),
       );
     } catch (error) {
       if (abortSignal.aborted) throw error;
@@ -328,13 +339,26 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   private async executeObserved(
     abortSignal: AbortSignal,
     mutation?: TextFileMutation,
+    projectVersion?: ReturnType<typeof captureRuntimeFileVersion>,
   ): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
 
     let sandboxFileVersion: ReturnType<typeof captureRuntimeFileVersion>;
+    const projectMemoryRoot = getProjectMemoryWriteRoot(
+      this.config.getProjectRoot(),
+      file_path,
+      mutation === undefined,
+    );
     try {
-      sandboxFileVersion = captureRuntimeFileVersion(this.config, file_path);
+      sandboxFileVersion =
+        projectVersion !== undefined
+          ? projectVersion
+          : captureRuntimeFileVersion(
+              this.config,
+              file_path,
+              projectMemoryRoot !== undefined,
+            );
     } catch (error) {
       const message = `${file_path}: ${getErrorMessage(error)}`;
       return {
@@ -572,10 +596,11 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // directories on the failure path (rejected new-file writes
     // would otherwise litter the filesystem with empty mkdir'd
     // ancestors).
-    if (!mutation && !fileExists && !this.config.getShellExecutionSandbox?.()) {
+    const createParent =
+      !mutation && !fileExists && !this.config.getShellExecutionSandbox?.();
+    if (createParent && !projectMemoryRoot) {
       fs.mkdirSync(dirName, { recursive: true });
     }
-
     try {
       const writeParams = {
         path: file_path,
@@ -587,15 +612,27 @@ class WriteFileToolInvocation extends BaseToolInvocation<
           lineEnding: detectedLineEnding,
         },
       };
-      const committedStats = mutation
-        ? await mutation.write(writeParams)
-        : (await writeRuntimeFile(
+      const committedStats = await commitProjectMemoryWrite(
+        projectMemoryRoot,
+        file_path,
+        sandboxFileVersion,
+        async (assertCanCommit) => {
+          if (createParent && projectMemoryRoot) {
+            fs.mkdirSync(dirName, { recursive: true });
+          }
+          const params = assertCanCommit
+            ? { ...writeParams, assertCanCommit }
+            : writeParams;
+          if (mutation) return mutation.write(params);
+          await writeRuntimeFile(
             this.config,
-            writeParams,
+            params,
             sandboxFileVersion,
             abortSignal,
-          ),
-          undefined);
+          );
+          return undefined;
+        },
+      );
 
       // Track AI contribution for commit attribution.
       // Pass null only when the file truly did not exist before this write;
@@ -814,6 +851,12 @@ The user has the ability to modify \`content\`. If modified, this will be stated
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute: ${filePath}`;
     }
+    const indexError = projectMemoryIndexWriteError(
+      this.config.getProjectRoot(),
+      filePath,
+      !this.config.getFileSystemService().textFileIo,
+    );
+    if (indexError) return indexError;
 
     try {
       if (

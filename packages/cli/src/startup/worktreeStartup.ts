@@ -21,6 +21,7 @@
  * those need a constructed `Config` and live in {@link persistStartupWorktreeSidecar}.
  */
 
+import { realpath } from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   createWorktreeSessionMarker,
@@ -39,6 +40,8 @@ import {
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { resolveGitMemoryLocation } from '@qwen-code/qwen-code-core/memory/git-memory-identity.js';
+import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
@@ -94,6 +97,8 @@ export interface StartupWorktreeContext {
   branch: string;
   /** Repo top level captured before chdir. */
   repoRoot: string;
+  /** Exact launch directory, including a workspace below the repository root. */
+  projectMemoryOwner?: string;
   /** Branch that was checked out at worktree-creation time. */
   originalBranch: string;
   /** HEAD SHA captured at worktree-creation time (for WorktreeExitDialog). */
@@ -302,6 +307,7 @@ export async function setupStartupWorktree(
         slug,
         branch: registered.branch,
         repoRoot,
+        projectMemoryOwner: launchCwd,
         originalBranch: originalBranch ?? DETACHED_HEAD,
         originalHeadCommit: registered.headCommit,
         isPullRequest,
@@ -375,6 +381,7 @@ export async function setupStartupWorktree(
       slug,
       branch: result.worktree.branch,
       repoRoot,
+      projectMemoryOwner: launchCwd,
       originalBranch: originalBranch ?? DETACHED_HEAD,
       // For PR worktrees, the worktree's HEAD starts at the fetched PR
       // tip — not at the parent repo's HEAD. Use the SHA we locked in
@@ -531,6 +538,7 @@ export async function persistStartupWorktreeSidecar(
     worktreePath: context.worktreePath,
     worktreeBranch: context.branch,
     originalCwd: context.repoRoot,
+    projectMemoryOwner: context.projectMemoryOwner,
     originalBranch: context.originalBranch,
     originalHeadCommit: context.originalHeadCommit,
   });
@@ -540,6 +548,49 @@ export async function persistStartupWorktreeSidecar(
   // with `--worktree <previous-slug>`. We only swap the sidecar's slug.
 
   return { overrodeResumedWorktree, overriddenSlug, sidecarPath };
+}
+
+export async function readWorktreeProjectMemoryOwner(
+  config: Config,
+  workingDirectory: string,
+): Promise<{ root: string; owner: string } | undefined> {
+  if (!/[\\/][.]qwen[\\/]worktrees[\\/]/.test(workingDirectory)) return;
+  try {
+    const sessionId = config.getSessionId();
+    const session = await readWorktreeSession(
+      config.getSessionService().getWorktreeSessionPath(sessionId),
+    );
+    if (!session?.projectMemoryOwner || session.supersededBy) return;
+    const [owner, original, root, cwd] = await Promise.all(
+      [
+        session.projectMemoryOwner,
+        session.originalCwd,
+        session.worktreePath,
+        workingDirectory,
+      ].map((entry) => realpath(entry)),
+    );
+    const origin = resolveGitMemoryLocation(original);
+    const originCommonDir =
+      origin.identity?.commonDir ?? origin.separateCommonDir;
+    const ownerGit = resolveGitMemoryLocation(owner);
+    const worktree = resolveGitMemoryLocation(root).identity;
+    if (
+      !isSubpath(original, owner) ||
+      root === path.join(original, '.qwen', 'worktrees') ||
+      !isSubpath(path.join(original, '.qwen', 'worktrees'), root) ||
+      !isSubpath(root, cwd) ||
+      worktree?.kind !== 'linked' ||
+      worktree.commonDir !== originCommonDir ||
+      (ownerGit.identity?.commonDir ?? ownerGit.separateCommonDir) !==
+        originCommonDir ||
+      (await readWorktreeSessionMarker(root)) !== sessionId
+    ) {
+      return;
+    }
+    return { root, owner };
+  } catch {
+    return undefined;
+  }
 }
 
 /**

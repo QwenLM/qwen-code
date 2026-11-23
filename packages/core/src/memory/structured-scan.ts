@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { isMap, isScalar, isSeq, parseDocument } from 'yaml';
@@ -102,6 +103,14 @@ export interface ScannedAutoMemoryDocument {
   usageScenarios: string[];
   body: string;
   mtimeMs: number;
+}
+
+const projectSourceHashes = new WeakMap<ScannedAutoMemoryDocument, string>();
+
+export function getScannedProjectMemorySourceHash(
+  doc: ScannedAutoMemoryDocument,
+): string | undefined {
+  return projectSourceHashes.get(doc);
 }
 
 export interface StructuredAutoMemoryValidation {
@@ -408,7 +417,7 @@ export function parseAutoMemoryTopicDocument(
   }
   const description = stringValue(parsedFrontmatter['description']) ?? '';
 
-  return {
+  const doc: ScannedAutoMemoryDocument = {
     scope,
     type: rawType as AutoMemoryType,
     filePath,
@@ -428,6 +437,13 @@ export function parseAutoMemoryTopicDocument(
     body: bodyContent.trim(),
     mtimeMs,
   };
+  if (scope === 'project') {
+    projectSourceHashes.set(
+      doc,
+      createHash('sha256').update(content).digest('hex'),
+    );
+  }
+  return doc;
 }
 
 async function listMarkdownFiles(

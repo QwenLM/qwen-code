@@ -19,8 +19,9 @@ import { assertShellSandboxCwd } from './runtime-shell-policy.js';
 export function captureRuntimeFileVersion(
   config: Config,
   filePath: string,
+  requireVersion = false,
 ): SandboxFileVersion | null | undefined {
-  if (!config.getShellExecutionSandbox?.()) return undefined;
+  if (!requireVersion && !config.getShellExecutionSandbox?.()) return undefined;
   return getSandboxFileVersion(filePath);
 }
 
@@ -43,6 +44,7 @@ export async function writeRuntimeFile(
     params.content,
     params._meta,
   );
+  params.assertCanCommit?.();
   await writeSandboxFile(
     policy,
     {

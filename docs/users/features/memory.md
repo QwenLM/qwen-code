@@ -95,7 +95,13 @@ Qwen doesn't save everything — only things that would actually be useful next 
 
 ### Where it's stored
 
-Auto-memory files live at `~/.qwen/projects/<project>/memory/`. All branches of the same checkout share the same memory folder, so what Qwen learns in one branch is available in others. Each linked git worktree gets its own memory folder, matching the per-worktree isolation of chats and other session state — repository-wide conventions you want in every worktree belong in [team memory](#team-memory-shared-with-collaborators).
+In standalone Qwen Code, the main checkout and verified linked Git worktrees share private project auto-memory. You can save a project lesson in a worktree and recall it in a fresh session in the main checkout. Open `/memory` to find the active folder. In `qwen serve`, each registered workspace has its own project memory by default. Task worktrees keep the memory of the workspace that owns the session.
+
+On upgrade, Qwen uses the primary checkout's existing memory when it can verify ownership during initialization. If the first session starts in a linked worktree, Qwen selects a shared repository store. Old stores remain on disk. Run `qwen memory import worktree --json` to preview historical topics and the target store offline. Use `--scope workspace` from a registered workspace to target the same scope as `qwen serve`, or `--source <path>` to preview a specific old checkout or memory folder. The model organizes entries only after you explicitly confirm a selection.
+
+To confirm, save the preview's `target` and `digest` along with a `selection` array of `{ "id": "<topic ID>", "scope": "project" }` objects. Pass that file to `qwen memory import worktree --apply --selection <file> --idempotency-key <key>` with the same scope and source options. Reuse the key when repeating the same submission.
+
+If a non-bare primary checkout was created with `--separate-git-dir` and the Git metadata has no backlink, that checkout keeps its own memory. Its verified linked worktrees share a repository store. Launching Qwen directly from the parent of a separate metadata directory named `.git` is unsupported because Git treats that parent as a primary checkout.
 
 Everything saved is plain markdown — you can open, edit, or delete any file at any time.
 

@@ -6,12 +6,11 @@
 
 import * as fs from 'node:fs/promises';
 import { type MemoryManager, type MemoryTaskRecord } from './manager.js';
+import { getAutoMemoryIndexPath, getAutoMemoryRoot } from './paths.js';
 import {
-  getAutoMemoryExtractCursorPath,
-  getAutoMemoryIndexPath,
-  getAutoMemoryMetadataPath,
-  getAutoMemoryRoot,
-} from './paths.js';
+  readProjectMemoryCursor,
+  readProjectMemoryMetadata,
+} from './project-commit.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import type {
   AutoMemoryExtractCursor,
@@ -40,15 +39,6 @@ export interface ManagedAutoMemoryStatus {
   migrationTasks: MemoryTaskRecord[];
 }
 
-async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(content) as T;
-  } catch {
-    return undefined;
-  }
-}
-
 export async function getManagedAutoMemoryStatus(
   projectRoot: string,
   manager: MemoryManager,
@@ -58,10 +48,8 @@ export async function getManagedAutoMemoryStatus(
 
   const [indexContent, cursor, metadata, docs] = await Promise.all([
     fs.readFile(indexPath, 'utf-8').catch(() => ''),
-    readJsonFile<AutoMemoryExtractCursor>(
-      getAutoMemoryExtractCursorPath(projectRoot),
-    ),
-    readJsonFile<AutoMemoryMetadata>(getAutoMemoryMetadataPath(projectRoot)),
+    readProjectMemoryCursor(root).catch(() => undefined),
+    readProjectMemoryMetadata(projectRoot).catch(() => undefined),
     scanAutoMemoryTopicDocuments(projectRoot),
   ]);
 

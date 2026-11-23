@@ -7,6 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   getAutoMemoryConsolidationLockPath,
@@ -59,6 +60,7 @@ describe('auto-memory storage scaffold', () => {
     resetMemoryState();
 
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-'));
+    tempDir = await fs.realpath(tempDir);
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
   });
@@ -87,7 +89,8 @@ describe('auto-memory storage scaffold', () => {
   const makeCheckout = async (...names: string[]) => {
     const repo = path.join(tempDir, 'repo');
     const workspaces = names.map((name) => path.join(repo, 'workspaces', name));
-    await fs.mkdir(path.join(repo, '.git'), { recursive: true });
+    await fs.mkdir(repo);
+    execFileSync('git', ['init', '--quiet', repo], { stdio: 'pipe' });
     for (const workspace of workspaces) {
       await fs.mkdir(workspace, { recursive: true });
     }
@@ -132,6 +135,7 @@ describe('auto-memory storage scaffold', () => {
     delete process.env['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
     const runtimeDir = useRuntimeDir();
     const [repo, workspaceA, workspaceB] = await makeCheckout('agent', 'nambz');
+    await fs.mkdir(managedRoot(runtimeDir, repo), { recursive: true });
 
     expect(getAutoMemoryRoot(workspaceA)).toBe(managedRoot(runtimeDir, repo));
     expect(getAutoMemoryRoot(workspaceB)).toBe(managedRoot(runtimeDir, repo));
@@ -167,6 +171,7 @@ describe('auto-memory storage scaffold', () => {
 
     try {
       const [repo, workspaceA] = await makeCheckout('agent');
+      await fs.mkdir(managedRoot(runtimeDir, repo), { recursive: true });
 
       expect(getAutoMemoryRoot(workspaceA)).toBe(managedRoot(runtimeDir, repo));
       expect(getAutoMemoryRoot(workspaceA)).toBe(managedRoot(runtimeDir, repo));
@@ -179,7 +184,7 @@ describe('auto-memory storage scaffold', () => {
     }
   });
 
-  it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
+  it('keeps unverified linked worktrees separate from the purported main checkout', async () => {
     const runtimeDir = useRuntimeDir();
     clearAutoMemoryRootCache();
 

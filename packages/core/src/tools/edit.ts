@@ -28,6 +28,11 @@ import {
 import type { SandboxFileVersion } from '../sandbox/file-version.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import {
+  commitProjectMemoryWrite,
+  getProjectMemoryWriteRoot,
+  projectMemoryIndexWriteError,
+} from '../memory/project-write.js';
+import {
   checkTeamMemorySecrets,
   checkWorkspaceTeamMemorySecrets,
 } from '../memory/team-memory-secret-guard.js';
@@ -165,6 +170,7 @@ export interface EditToolParams {
 
 interface CalculatedEdit {
   sandboxFileVersion?: SandboxFileVersion | null;
+  projectMemoryRoot?: string;
   currentContent: string | null;
   newContent: string;
   occurrences: number;
@@ -236,16 +242,26 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     params: EditToolParams,
     original?: TextFileObservation,
     signal?: AbortSignal,
+    projectVersion?: SandboxFileVersion | null,
   ): Promise<CalculatedEdit> {
+    const projectMemoryRoot = getProjectMemoryWriteRoot(
+      this.config.getProjectRoot(),
+      params.file_path,
+      !this.config.getFileSystemService().textFileIo,
+    );
+    const sandboxFileVersion =
+      projectVersion !== undefined
+        ? projectVersion
+        : captureRuntimeFileVersion(
+            this.config,
+            params.file_path,
+            projectMemoryRoot !== undefined,
+          );
     const observation =
       original ??
       (await this.config
         .getFileSystemService()
         .textFileIo?.inspect(params.file_path, signal));
-    const sandboxFileVersion = captureRuntimeFileVersion(
-      this.config,
-      params.file_path,
-    );
     const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
     let fileExists = observation
@@ -561,6 +577,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       currentContent,
       newContent,
       sandboxFileVersion,
+      projectMemoryRoot,
       occurrences,
       error,
       isNewFile,
@@ -694,11 +711,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
       const io = this.config.getFileSystemService().textFileIo;
-      return io
-        ? await io.withMutation(this.params.file_path, signal, (mutation) =>
-            this.executeObserved(signal, mutation),
-          )
-        : await this.executeObserved(signal);
+      if (!io) return await this.executeObserved(signal);
+      const file = this.params.file_path;
+      const projectVersion = getProjectMemoryWriteRoot(
+        this.config.getProjectRoot(),
+        file,
+        false,
+      )
+        ? captureRuntimeFileVersion(this.config, file, true)
+        : undefined;
+      return await io.withMutation(file, signal, (mutation) =>
+        this.executeObserved(signal, mutation, projectVersion),
+      );
     } catch (error) {
       if (signal.aborted) throw error;
       return this.writeFailure(error);
@@ -708,6 +732,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   private async executeObserved(
     signal: AbortSignal,
     mutation?: TextFileMutation,
+    projectVersion?: SandboxFileVersion | null,
   ): Promise<ToolResult> {
     let editData: CalculatedEdit;
     try {
@@ -715,6 +740,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         this.params,
         mutation?.original,
         signal,
+        projectVersion,
       );
     } catch (error) {
       if (signal.aborted) {
@@ -835,22 +861,31 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // directories on the failure path — a real (if minor) FS
       // litter that the previous order created on every rejected
       // edit.
-      if (!mutation && !this.config.getShellExecutionSandbox?.()) {
-        this.ensureParentDirectoriesExist(this.params.file_path);
-      }
-
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
       let committedStats: Stats | undefined;
       const write = async (params: Parameters<typeof writeRuntimeFile>[1]) => {
-        if (mutation) committedStats = await mutation.write(params);
-        else
-          await writeRuntimeFile(
-            this.config,
-            params,
-            editData.sandboxFileVersion,
-            signal,
-          );
+        await commitProjectMemoryWrite(
+          editData.projectMemoryRoot,
+          params.path,
+          editData.sandboxFileVersion,
+          async (assertCanCommit) => {
+            if (!mutation && !this.config.getShellExecutionSandbox?.()) {
+              this.ensureParentDirectoriesExist(this.params.file_path);
+            }
+            const request = assertCanCommit
+              ? { ...params, assertCanCommit }
+              : params;
+            if (mutation) committedStats = await mutation.write(request);
+            else
+              await writeRuntimeFile(
+                this.config,
+                request,
+                editData.sandboxFileVersion,
+                signal,
+              );
+          },
+        );
       };
       if (editData.isNewFile) {
         const userEncoding = this.config.getDefaultFileEncoding();
@@ -1142,6 +1177,12 @@ Expectation for required parameters:
     if (!path.isAbsolute(params.file_path)) {
       return `File path must be absolute: ${params.file_path}`;
     }
+    const indexError = projectMemoryIndexWriteError(
+      this.config.getProjectRoot(),
+      params.file_path,
+      !this.config.getFileSystemService().textFileIo,
+    );
+    if (indexError) return indexError;
 
     const teamMemoryError = (
       this.config.getFileSystemService().textFileIo

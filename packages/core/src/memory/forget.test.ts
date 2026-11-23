@@ -12,6 +12,7 @@ import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 import {
+  parseAutoMemoryTopicDocument,
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
 } from './scan.js';
@@ -138,6 +139,47 @@ const match = (
 ): AutoMemoryForgetMatch => ({ topic, summary, filePath, entryIndex });
 const expectGone = (filePath: string) =>
   expect(fs.stat(filePath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+it('preserves a project topic edited after /forget selected it', async () => {
+  await inTempDir('forget-conflict-', async (_tempDir, projectRoot) => {
+    const root = getAutoMemoryRoot(projectRoot);
+    await fs.mkdir(root, { recursive: true });
+    const filePath = path.join(root, 'deployment.md');
+    const old = frontmatter(
+      ['type: project', 'name: Deployment'],
+      'Deploy to Beijing',
+    );
+    const latest = frontmatter(
+      ['type: project', 'name: Deployment'],
+      'Deploy to Beijing only on Thursdays',
+    );
+    await fs.writeFile(filePath, old);
+    const parsed = parseAutoMemoryTopicDocument(
+      filePath,
+      old,
+      0,
+      'deployment.md',
+      'project',
+    );
+    expect(parsed).toBeTruthy();
+    scans([parsed!]);
+    const selection = await selectManagedAutoMemoryForgetCandidates(
+      projectRoot,
+      'Deploy to Beijing',
+    );
+    expect(selection.matches).toHaveLength(1);
+    await fs.writeFile(filePath, latest);
+
+    const result = await forgetManagedAutoMemoryMatches(
+      projectRoot,
+      selection.matches,
+    );
+
+    expect(result.removedEntries).toEqual([]);
+    expect(result.systemMessage).toContain('changed since selection');
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(latest);
+  });
+});
 
 // Runs `body` in a fresh temp dir holding an empty `project/`. With
 // `memoryBase`, the auto-memory roots are redirected under it meanwhile.

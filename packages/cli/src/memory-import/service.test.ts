@@ -11,9 +11,14 @@ import lockfile from 'proper-lockfile';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { scanAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import { getImportedProjectMemoryRoot } from '@qwen-code/qwen-code-core/memory/import-paths.js';
-import { getUserAutoMemoryRoot } from '@qwen-code/qwen-code-core/memory/paths.js';
+import {
+  getUserAutoMemoryRoot,
+  runWithMemoryProjectScope,
+} from '@qwen-code/qwen-code-core/memory/paths.js';
+import { withProjectMemoryCommit } from '@qwen-code/qwen-code-core/memory/project-commit.js';
 import { MemoryImportService } from './service.js';
 import { digest, previewSource } from './source.js';
+import { previewWorktreeMemory } from './worktree-source.js';
 import type {
   MemoryImportProposal,
   MemoryImportModelInput,
@@ -74,6 +79,228 @@ function service(
 const selection = () => [
   { id: previewSource(source).sections[0].id, scope: 'project' },
 ];
+
+describe('confirmed worktree import', () => {
+  async function oldLibrary() {
+    const source = path.join(root, 'old-memory');
+    await fs.mkdir(source);
+    const filename = path.join(source, 'lesson.md');
+    await fs.writeFile(filename, 'The old library stays unchanged.');
+    const preview = await previewWorktreeMemory(project, { source });
+    return {
+      filename,
+      preview,
+      item: { id: preview.sections[0].id, scope: 'project' },
+    };
+  }
+
+  it('binds publication to the offline target and rejects user scope or a stale preview', () =>
+    context(() =>
+      runWithMemoryProjectScope('git-root', async () => {
+        const { filename, preview, item } = await oldLibrary();
+        const propose = vi.fn(
+          async (): Promise<MemoryImportProposal> => ({
+            decision: 'new',
+            reason: 'Durable knowledge.',
+            documents: [doc],
+          }),
+        );
+        const svc = service(propose);
+        await expect(
+          svc.submitWorktree(
+            preview,
+            [{ ...item, scope: 'user' }],
+            'bad-scope',
+            preview.target,
+            preview.digest,
+          ),
+        ).rejects.toThrow('only be imported into project memory');
+        await expect(
+          svc.submitWorktree(
+            preview,
+            [item],
+            'bad-target',
+            { ...preview.target, scope: 'workspace' },
+            preview.digest,
+          ),
+        ).rejects.toThrow('Preview again');
+        await expect(
+          svc.submitWorktree(
+            preview,
+            [item],
+            'bad-digest',
+            preview.target,
+            'stale',
+          ),
+        ).rejects.toThrow('Preview again');
+        expect(propose).not.toHaveBeenCalled();
+        await expect(fs.stat(runtime)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        const batch = await svc.submitWorktree(
+          preview,
+          [item],
+          'accepted',
+          preview.target,
+          preview.digest,
+        );
+        expect(batch.target).toEqual(preview.target);
+        const done = await svc.idle(batch.id);
+        expect(done.items[0].status).toBe('added');
+        const published = path.join(
+          preview.target.memoryRoot,
+          'imported',
+          item.id,
+          '0.md',
+        );
+        expect(await fs.readFile(published, 'utf8')).toBe(doc);
+        expect(
+          await fs.readFile(
+            path.join(preview.target.memoryRoot, 'MEMORY.md'),
+            'utf8',
+          ),
+        ).toContain('Review migrations');
+        expect(await fs.readFile(filename, 'utf8')).toBe(
+          'The old library stays unchanged.',
+        );
+        expect(propose).toHaveBeenCalledTimes(1);
+        await runWithMemoryProjectScope('workspace', async () => {
+          await expect(service(propose).retry(batch.id)).rejects.toThrow(
+            'Preview again',
+          );
+        });
+        expect(propose).toHaveBeenCalledTimes(1);
+      }),
+    ));
+
+  it.each(['first publication', 'recovered publication'])(
+    'discards a stale stage at %s',
+    (scenario) =>
+      context(() =>
+        runWithMemoryProjectScope('git-root', async () => {
+          const { preview, item } = await oldLibrary();
+          const root = preview.target.memoryRoot;
+          const native = path.join(root, 'native.md');
+          const edited = doc.replace('every schema', 'only additive schema');
+          const saveNative = () =>
+            withProjectMemoryCommit(root, async () => {
+              await fs.mkdir(root, { recursive: true });
+              await fs.writeFile(native, edited);
+            });
+          const original = fs.rename;
+          let injected = false;
+          const rename = vi
+            .spyOn(fs, 'rename')
+            .mockImplementation(async (from, to) => {
+              if (
+                !injected &&
+                scenario === 'recovered publication' &&
+                path.basename(String(from)).startsWith('stage-')
+              ) {
+                injected = true;
+                throw new Error('Interrupted before publishing staged files');
+              }
+              await original(from, to);
+              if (
+                !injected &&
+                scenario === 'first publication' &&
+                path.basename(String(to)) === 'ledger.json'
+              ) {
+                injected = true;
+                await saveNative();
+              }
+            });
+          const propose = vi.fn(
+            async (): Promise<MemoryImportProposal> => ({
+              decision: 'new',
+              reason: 'Durable knowledge.',
+              documents: [doc],
+            }),
+          );
+          const svc = service(propose);
+          const batch = await svc.submitWorktree(
+            preview,
+            [item],
+            'publication',
+            preview.target,
+            preview.digest,
+          );
+          let result = await svc.idle(batch.id);
+          rename.mockRestore();
+          if (scenario === 'recovered publication') {
+            expect(result.status).toBe('partial');
+            await saveNative();
+            const recovered = service(propose);
+            await recovered.retry(batch.id);
+            result = await recovered.idle(batch.id);
+          }
+          expect(result.items[0].status).toBe('conflict');
+          expect(propose).toHaveBeenCalledTimes(1);
+          expect(await fs.readFile(native, 'utf8')).toBe(edited);
+          await expect(
+            fs.stat(path.join(root, 'imported', item.id)),
+          ).rejects.toMatchObject({ code: 'ENOENT' });
+          const state = path.join(
+            runtime,
+            'memory-import',
+            'scopes',
+            digest(root),
+          );
+          expect(await fs.readdir(state)).toEqual(['ledger.json']);
+        }),
+      ),
+  );
+
+  it('leaves a pending batch untouched during recovery with a different target scope', () =>
+    context(() =>
+      runWithMemoryProjectScope('git-root', async () => {
+        const { preview, item } = await oldLibrary();
+        const propose = vi
+          .fn<() => Promise<MemoryImportProposal>>()
+          .mockRejectedValueOnce(new Error('Interrupted model'))
+          .mockResolvedValue({
+            decision: 'new',
+            reason: 'Durable knowledge.',
+            documents: [doc],
+          });
+        const first = service(propose);
+        const batch = await first.submitWorktree(
+          preview,
+          [item],
+          'interrupted',
+          preview.target,
+          preview.digest,
+        );
+        expect((await first.idle(batch.id)).status).toBe('partial');
+        const { owner, scope, memoryRoot } = preview.target;
+        const taskFile = path.join(
+          runtime,
+          'memory-import',
+          'worktree-batches',
+          digest(JSON.stringify([owner, scope, memoryRoot])),
+          batch.id,
+          'task.json',
+        );
+        const stored = JSON.parse(await fs.readFile(taskFile, 'utf8'));
+        stored.status = 'queued';
+        stored.items[0].status = 'pending';
+        const queued = JSON.stringify(stored);
+        await fs.writeFile(taskFile, queued);
+        await runWithMemoryProjectScope('workspace', async () => {
+          const wrong = service(propose);
+          await wrong.recover();
+          await expect(wrong.get(batch.id)).rejects.toThrow('Preview again');
+        });
+        expect(propose).toHaveBeenCalledTimes(1);
+        expect(await fs.readFile(taskFile, 'utf8')).toBe(queued);
+        const same = service(propose);
+        await same.recover();
+        expect((await same.idle(batch.id)).items[0].status).toBe('added');
+        expect(propose).toHaveBeenCalledTimes(2);
+      }),
+    ));
+});
+
 describe('durable memory import', () => {
   it.each(['LF', 'CRLF'])(
     'uses native metadata parsing with %s closing-fence whitespace',

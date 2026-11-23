@@ -132,6 +132,7 @@ import {
 import {
   clearAutoMemoryRootCache,
   getAutoMemoryIndexPath,
+  getMemoryProjectOwner,
   getUserAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
 } from '../memory/paths.js';
@@ -10114,6 +10115,63 @@ describe('Server Config (config.ts)', () => {
     ).rejects.toMatchObject({
       errorKind: 'session_writer_unavailable',
     });
+  });
+
+  it('keeps the registered memory owner across working directory changes', async () => {
+    const config = makeConfig();
+    const owner = config.getProjectRoot();
+    const sibling = makeConfig({ targetDir: path.join(owner, 'independent') });
+    config.bindProjectMemoryToWorkspace();
+    sibling.bindProjectMemoryToWorkspace();
+    const currentOwner = (current: Config) =>
+      current.runWithProjectMemoryOwner(() =>
+        getMemoryProjectOwner(current.getProjectRoot()),
+      );
+    const branchRoot = path.join(NEW_DIR, 'branch');
+    const branchSubdirectory = path.join(branchRoot, 'src');
+    for (const root of [NEW_DIR, branchRoot]) {
+      await config.relocateWorkingDirectory(root, root, SKIP_MOVE_SIDE_EFFECTS);
+      expect(currentOwner(config)).toBe(owner);
+      expect(config.getProjectRoot()).toBe(root);
+      expect(currentOwner(sibling)).toBe(sibling.getProjectRoot());
+    }
+    await config.relocateWorkingDirectory(
+      branchSubdirectory,
+      branchSubdirectory,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(currentOwner(config)).toBe(owner);
+
+    await config.relocateWorkingDirectory(
+      sibling.getProjectRoot(),
+      sibling.getProjectRoot(),
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(currentOwner(config)).toBe(owner);
+    expect(config.storage.getProjectRoot()).toBe(owner);
+  });
+
+  it('keeps the startup memory base in a task subdirectory and uses destination ownership outside it', async () => {
+    const config = makeConfig();
+    const owner = config.getProjectRoot();
+    const nested = path.join(NEW_DIR, 'nested');
+    const launchMemoryBase = path.join(owner, 'relative-runtime');
+    config.bindProjectMemoryToWorktree({
+      root: NEW_DIR,
+      owner,
+      memoryBaseDir: launchMemoryBase,
+    });
+    await config.relocateWorkingDirectory(
+      nested,
+      nested,
+      SKIP_MOVE_SIDE_EFFECTS,
+    );
+    expect(config.getProjectMemoryOwner()).toEqual({
+      cwd: owner,
+      memoryBaseDir: launchMemoryBase,
+    });
+    await config.relocateWorkingDirectory(owner, owner, SKIP_MOVE_SIDE_EFFECTS);
+    expect(config.getProjectMemoryOwner()).toBeUndefined();
   });
 
   it('relocateWorkingDirectory should carry the session pr-bound callback to the fresh SessionService', async () => {

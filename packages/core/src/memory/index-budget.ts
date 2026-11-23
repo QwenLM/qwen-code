@@ -109,11 +109,13 @@ export interface IndexTrimResult {
 export function trimIndexToBudgetDetailed(
   lines: readonly string[],
   priorityPrefixLength = 0,
+  maxLines = MAX_INDEX_LINES,
+  maxChars = MAX_INDEX_CHARS,
 ): IndexTrimResult {
-  const entries = lines.slice(0, MAX_INDEX_LINES);
-  const overLineCap = lines.slice(MAX_INDEX_LINES);
+  const entries = lines.slice(0, maxLines);
+  const overLineCap = lines.slice(maxLines);
   const raw = entries.join('\n');
-  if (raw.length <= MAX_INDEX_CHARS) {
+  if (raw.length <= maxChars) {
     return { content: raw, dropped: overLineCap };
   }
 
@@ -127,14 +129,14 @@ export function trimIndexToBudgetDetailed(
     [0, boundary],
     [boundary, entries.length],
   ]) {
-    for (const limit of [MAX_INDEX_LINE_CHARS, MAX_INDEX_CHARS]) {
+    for (const limit of [MAX_INDEX_LINE_CHARS, maxChars]) {
       for (let index = start; index < end; index++) {
         const line = entries[index];
         if (kept.has(index) || line.length > limit) {
           continue;
         }
         const next = size + (kept.size > 0 ? 1 : 0) + line.length;
-        if (next > MAX_INDEX_CHARS) {
+        if (next > maxChars) {
           continue;
         }
         size = next;

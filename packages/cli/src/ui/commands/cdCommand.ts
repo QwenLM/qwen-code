@@ -9,12 +9,14 @@ import * as path from 'node:path';
 import { CommandKind, type SlashCommand } from './types.js';
 import { getSingleDirPathCompletions } from './directoryCommand.js';
 import { resolvePath } from '@qwen-code/qwen-code-core';
+import { getMemoryProjectOwner } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   isFolderTrustEnabled,
   loadTrustedFolders,
   TrustLevel,
 } from '../../config/trustedFolders.js';
 import { t } from '../../i18n/index.js';
+import { readWorktreeProjectMemoryOwner } from '../../startup/worktreeStartup.js';
 
 const MAX_PENDING_TRUST_CONFIRMATIONS = 50;
 const pendingTrustedPathConfirmations = new Map<string, string>();
@@ -194,9 +196,14 @@ export const cdCommand: SlashCommand = {
 
     const warnings: string[] = [];
     try {
+      const projectMemoryWorktree =
+        getMemoryProjectOwner(realTargetPath) === realTargetPath
+          ? await readWorktreeProjectMemoryOwner(config, realTargetPath)
+          : undefined;
       const relocation = await config.relocateWorkingDirectory(
         realTargetPath,
         realTargetPath,
+        ...(projectMemoryWorktree ? [{ projectMemoryWorktree }] : []),
       );
       if (relocation.memoryRefreshError) {
         warnings.push(

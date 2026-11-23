@@ -257,6 +257,7 @@ import {
 import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/services/backgroundShellRegistry.js';
 import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { resolveProjectMemoryTarget } from '@qwen-code/qwen-code-core/memory/paths.js';
 import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
 import { logUserFeedback } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
 import {
@@ -1067,7 +1068,11 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     config.storage.getProjectTempDir(),
     path.join(config.storage.getProjectDir(), 'subagents'),
     path.join(config.getSessionRuntimeBaseDir(), 'tmp'),
-    getAutoMemoryRoot(config.getTargetDir()),
+    config.runWithProjectMemoryOwner
+      ? config.runWithProjectMemoryOwner(() =>
+          getAutoMemoryRoot(config.getTargetDir()),
+        )
+      : getAutoMemoryRoot(config.getTargetDir()),
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
@@ -2841,7 +2846,9 @@ async function resolveQwenMemoryPaths(params: {
     params.cwd,
     fallbackFilename,
   );
-  const autoMemoryDir = getAutoMemoryRoot(params.projectRoot);
+  const autoMemoryDir = resolveProjectMemoryTarget(params.projectRoot, {
+    readOnly: true,
+  }).memoryRoot;
 
   // Resolve-only: `getMemoryPaths` is a read query, so it must not create
   // files or directories as a side effect (the old code ran ensureMemoryFile
@@ -17183,6 +17190,14 @@ class QwenAgent implements Agent {
         ? undefined
         : () => getProjectHooksForApproval(settings),
     );
+    if (
+      this.isTrustedManagedParent() &&
+      process.env[QWEN_CODE_SERVE_ENV] === '1' &&
+      !provisionalWorkspace &&
+      !agentHostReadOnly
+    ) {
+      config.bindProjectMemoryToWorkspace();
+    }
     workflowAncestorTrustSession.config = config;
     // /clear rotates the recording ID while the ACP transport keeps its ID.
     workflowAncestorTrustSession.sessionId = normalizeSessionIdForLookup(

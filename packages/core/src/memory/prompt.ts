@@ -204,7 +204,10 @@ function descriptionFreeIndexEntry(
   return { min, max };
 }
 
-function truncateManagedAutoMemoryIndex(indexContent: string): string {
+function truncateManagedAutoMemoryIndex(
+  indexContent: string,
+  smallWindow = false,
+): string {
   const trimmed = normalizeContent(indexContent).trim();
   const noticeStart = Math.max(
     trimmed.lastIndexOf(INDEX_TRUNCATION_NOTICE_START),
@@ -222,6 +225,19 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const entries = entryContent.split('\n');
   const lineCount = entries.length;
   const charCount = entryContent.length;
+  if (smallWindow) {
+    if (lineCount <= 100 && charCount <= 12_500 && !hasWriterNotice)
+      return trimmed;
+    const notice =
+      '> More project memory may be available. Search the topic files when this index is incomplete.';
+    const { content } = trimIndexToBudgetDetailed(
+      entries,
+      0,
+      99,
+      12_500 - notice.length - 1,
+    );
+    return content ? `${content}\n${notice}` : notice;
+  }
   const wasLineTruncated = lineCount > MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
   const wasCharTruncated = charCount > MAX_INDEX_CHARS;
 
@@ -347,7 +363,7 @@ export const TEAM_SCOPE_SECTION: readonly string[] = [
   '- `user` memories are always private — never save them to TEAM.',
   '- `project` memories stay private to you by default. Save to TEAM only for durable shared facts every contributor needs — not time-bound state like freezes or in-flight task status, which stays private and decays.',
   '- You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials. It is visible to everyone who can read the repository, and such writes are rejected automatically.',
-  '- For TEAM memory you only write the memory file (Step 1). Its `MEMORY.md` index is generated automatically from the saved files — do NOT hand-edit the team index (that two-step rule applies only to the private directories).',
+  '- For TEAM memory, write only the topic file. Its `MEMORY.md` index is generated automatically from the saved files.',
   '',
 ];
 
@@ -376,13 +392,14 @@ export const MEMORY_PERSISTENCE_SECTION: readonly string[] = [
 function renderIndexBlock(
   memoryDir: string,
   indexContent: string | null | undefined,
+  smallWindow = false,
 ): string[] {
   const trimmed = indexContent?.trim();
   return [
     `## ${memoryDir}/MEMORY.md`,
     '',
     trimmed
-      ? truncateManagedAutoMemoryIndex(trimmed)
+      ? truncateManagedAutoMemoryIndex(trimmed, smallWindow)
       : 'Your MEMORY.md is currently empty. When you save new memories, they will appear here.',
   ];
 }
@@ -392,6 +409,7 @@ function buildIndexSections(
   indexContent: string | null | undefined,
   userSection: UserAutoMemorySection | undefined,
   teamSection: TeamAutoMemorySection | undefined,
+  smallWindow = false,
 ): string[] {
   const sections: string[] = [];
   if (userSection !== undefined) {
@@ -400,7 +418,7 @@ function buildIndexSections(
       '',
     );
   }
-  sections.push(...renderIndexBlock(memoryDir, indexContent));
+  sections.push(...renderIndexBlock(memoryDir, indexContent, smallWindow));
   if (teamSection !== undefined) {
     sections.push(
       '',
@@ -475,13 +493,16 @@ export function buildManagedAutoMemoryPrompt(
     ? [
         '## How to save memories',
         '',
-        'Saving a memory is a two-step process:',
-        '',
-        '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        'Write the memory to its own file inside the directory chosen by its `<scope>`, organising it under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
         '',
         ...MEMORY_FRONTMATTER_EXAMPLE,
         '',
-        '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. If a trailing warning is present, insert new pointers above it so it stays last. Never write memory content directly into `MEMORY.md`.',
+        'Write only the topic file. The runtime generates the project `MEMORY.md` index.',
+        ...(userSection
+          ? [
+              'For USER memory, add one pointer to its own `MEMORY.md` as `- [Title](file.md) — one-line hook` under ~150 characters. Keep any trailing warning last.',
+            ]
+          : []),
         '',
         `- Every \`MEMORY.md\` index is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
         ...MEMORY_WRITING_RULES,
@@ -490,13 +511,11 @@ export function buildManagedAutoMemoryPrompt(
     : [
         '## How to save memories',
         '',
-        'Saving a memory is a two-step process:',
-        '',
-        '**Step 1** — write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
+        'Write the memory to its own file under the matching type subdirectory (e.g., `user/role.md`, `feedback/testing.md`) using this frontmatter format:',
         '',
         ...MEMORY_FRONTMATTER_EXAMPLE,
         '',
-        `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. If a trailing warning is present, insert new pointers above it so it stays last. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
+        'Write only the topic file. The runtime generates the project `MEMORY.md` index.',
         '',
         `- \`${memoryDir}/MEMORY.md\` is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
         ...MEMORY_WRITING_RULES,
@@ -559,7 +578,7 @@ export function buildResidentAutoMemoryPrompt(
     '',
     'Read relevant memory proactively and whenever the user refers to earlier work or asks to check, recall, or remember. If asked to ignore memory, do not read, apply, cite, or mention it. Check the current state before relying on a memory or recommending anything it names. Update or remove outdated entries.',
     '',
-    'When explicitly asked to remember or update a memory, save the change now. Check the current catalog for duplicates first. Search relevant roots if the catalog is incomplete or inconclusive. When asked to forget, find and remove the matching entry and its private index pointer.',
+    'When explicitly asked to remember or update a memory, save the change now. Check the current catalog for duplicates first. Search relevant roots if the catalog is incomplete or inconclusive. When asked to forget, remove the matching entry and update the USER index if applicable.',
     '',
     '- `user` (role, goals, expertise, preferences) goes to USER.',
     '- `feedback` (corrections and confirmed approaches) goes to USER by default, PROJECT for conventions every contributor must follow.',
@@ -578,7 +597,7 @@ export function buildResidentAutoMemoryPrompt(
     'Use 2–6 discriminative keywords, unique case-insensitively, with at most 2 exact identifiers last. Use 1–3 future tasks that differ from the description as usage_scenarios. Double-quote each keyword and scenario and keep it within 64 characters.',
     'For feedback and project, lead with the rule or fact, then add **Why:** and **How to apply:** lines.',
     '',
-    `For USER and PROJECT, keep one pointer per entry in the same directory's \`MEMORY.md\`: \`- [Title](type/name.md) — one-line hook\`. Use only pointers under ~150 characters, without frontmatter. Keep any truncation notice last. Lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} are truncated.`,
+    'Write only topic files for PROJECT. The runtime generates its `MEMORY.md`. For USER, keep one pointer per entry in its own `MEMORY.md` as `- [Title](type/name.md) — one-line hook`. Use only pointers under ~150 characters, without frontmatter. Keep any truncation notice last.',
   ];
   return lines.join('\n');
 }
@@ -590,6 +609,7 @@ export function buildAutoMemoryIndexContext(
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
+  contextWindowSize?: number,
 ): string {
   if (
     !indexContent?.trim() &&
@@ -611,6 +631,9 @@ export function buildAutoMemoryIndexContext(
         indexContent,
         userSection,
         teamSection,
+        contextWindowSize !== undefined &&
+          contextWindowSize > 0 &&
+          contextWindowSize < 128_000,
       ).join('\n'),
     ].join('\n'),
   );

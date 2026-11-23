@@ -214,11 +214,11 @@ export class AcpFileSystemService implements FileSystemService {
   async writeTextFile(
     params: CoreWriteTextFileRequest,
   ): Promise<WriteTextFileResponse> {
-    if (!this.capabilities.writeTextFile) {
+    if (!this.capabilities.writeTextFile || params.assertCanCommit) {
       return this.fallback.writeTextFile(params);
     }
 
-    const { toolWriteOrigin, _meta: requestMeta, ...wireParams } = params;
+    const { toolWriteOrigin, _meta: requestMeta, path } = params;
     const finalContent =
       requestMeta?.['bom'] && params.content.charCodeAt(0) !== 0xfeff
         ? '\uFEFF' + params.content
@@ -227,7 +227,7 @@ export class AcpFileSystemService implements FileSystemService {
 
     try {
       await this.connection.writeTextFile({
-        ...wireParams,
+        path,
         content: finalContent,
         ...(wireMeta !== undefined ? { _meta: wireMeta } : {}),
         sessionId: this.sessionId,

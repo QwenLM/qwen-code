@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { assertProjectMemoryCommit } from './project-commit.js';
 import { validateStructuredAutoMemoryDocument } from './scan.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,
@@ -262,6 +263,7 @@ export async function applyDreamOperations(
 
     for (const { filePath } of resolvedDeletes) {
       abortSignal?.throwIfAborted();
+      assertProjectMemoryCommit();
       await fs.unlink(filePath);
     }
 

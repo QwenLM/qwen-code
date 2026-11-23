@@ -52,6 +52,10 @@ import {
 } from './types.js';
 import { renderWriterKeywordVocabularySnapshot } from './writer-keyword-vocabulary.js';
 import { MEMORY_METADATA_ITEM_BOUNDS } from './prompt.js';
+import {
+  assertProjectMemoryCommit,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_MIGRATION');
 
@@ -412,45 +416,51 @@ export async function commitMigratedMemoryMetadata(
 ): Promise<'committed' | 'conflict' | 'invalid'> {
   const merged = mergeMetadata(candidate, metadata);
   if (!merged || !merged.validation.valid) return 'invalid';
-  if (!canCommit()) return 'conflict';
-  const trustedFile = await resolveTrustedMemoryFile(
-    candidate.root,
-    getMemoryRootTrustedAnchor(candidate.root),
-    candidate.relativePath,
-  );
-  if (
-    !trustedFile ||
-    (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
-      trustedFile
-  ) {
-    return 'conflict';
-  }
-  const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
-  if (current === null || hash(current) !== candidate.sourceHash) {
-    return 'conflict';
-  }
-  try {
-    await atomicWriteFile(trustedFile, merged.content, {
-      encoding: 'utf-8',
-      noFollow: true,
-      assertCanCommit: () => {
-        if (!canCommit()) throw new MigrationConflictError();
-        let latest: string;
-        try {
-          latest = fsSync.readFileSync(trustedFile, 'utf-8');
-        } catch {
-          throw new MigrationConflictError();
-        }
-        if (hash(latest) !== candidate.sourceHash) {
-          throw new MigrationConflictError();
-        }
-      },
-    });
-  } catch (error) {
-    if (error instanceof MigrationConflictError) return 'conflict';
-    throw error;
-  }
-  return 'committed';
+  const commit = async (): Promise<'committed' | 'conflict'> => {
+    if (!canCommit()) return 'conflict';
+    const trustedFile = await resolveTrustedMemoryFile(
+      candidate.root,
+      getMemoryRootTrustedAnchor(candidate.root),
+      candidate.relativePath,
+    );
+    if (
+      !trustedFile ||
+      (await fs.realpath(candidate.filePath).catch(() => undefined)) !==
+        trustedFile
+    ) {
+      return 'conflict';
+    }
+    const current = await fs.readFile(trustedFile, 'utf-8').catch(() => null);
+    if (current === null || hash(current) !== candidate.sourceHash) {
+      return 'conflict';
+    }
+    try {
+      await atomicWriteFile(trustedFile, merged.content, {
+        encoding: 'utf-8',
+        noFollow: true,
+        assertCanCommit: () => {
+          assertProjectMemoryCommit();
+          if (!canCommit()) throw new MigrationConflictError();
+          let latest: string;
+          try {
+            latest = fsSync.readFileSync(trustedFile, 'utf-8');
+          } catch {
+            throw new MigrationConflictError();
+          }
+          if (hash(latest) !== candidate.sourceHash) {
+            throw new MigrationConflictError();
+          }
+        },
+      });
+    } catch (error) {
+      if (error instanceof MigrationConflictError) return 'conflict';
+      throw error;
+    }
+    return 'committed';
+  };
+  return candidate.scope === 'project'
+    ? withProjectMemoryCommit(candidate.root, commit)
+    : commit();
 }
 
 function parseAgentMetadata(text: string | undefined): GeneratedMemoryMetadata {

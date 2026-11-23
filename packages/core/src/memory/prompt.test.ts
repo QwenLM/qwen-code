@@ -24,6 +24,26 @@ import {
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
+  it('loads a smaller project catalog only for small model contexts', () => {
+    const index = Array.from(
+      { length: 200 },
+      (_, i) => `- [Topic ${i}](project/topic-${i}.md)`,
+    ).join('\n');
+    const loaded = (size?: number) =>
+      buildAutoMemoryIndexContext(
+        '/project',
+        index,
+        undefined,
+        undefined,
+        size,
+      );
+    const smaller = loaded(64_000);
+    expect(smaller.match(/^- \[Topic/gm)).toHaveLength(99);
+    expect(smaller).toContain('Search the topic files');
+    expect(loaded(128_000).match(/^- \[Topic/gm)).toHaveLength(200);
+    expect(loaded().match(/^- \[Topic/gm)).toHaveLength(200);
+  });
+
   it('keeps the structured main-model contract minimal', () => {
     const prompt = buildStructuredAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
@@ -1203,7 +1223,7 @@ describe('managed auto-memory prompt helpers', () => {
       );
 
       for (const rule of [
-        'Saving a memory is a two-step process:',
+        'Write only the topic file. The runtime generates the project `MEMORY.md` index.',
         'You MUST access memory when the user explicitly asks',
         'Keep one independently retrievable fact or rule per file.',
         'Keep the name, description, type, category, keywords, and usage_scenarios fields',
@@ -1214,20 +1234,18 @@ describe('managed auto-memory prompt helpers', () => {
       }
       if (tier === 'multi') {
         expect(prompt).toContain(
-          '**Step 1** — write the memory to its own file inside the directory chosen by its `<scope>`',
+          'Write the memory to its own file inside the directory chosen by its `<scope>`',
         );
         expect(prompt).toContain(
-          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory',
+          'For USER memory, add one pointer to its own `MEMORY.md`',
         );
         expect(prompt).toContain('in any of your memory directories');
         expect(prompt).toContain('— never save them to TEAM');
       } else {
         expect(prompt).toContain(
-          '**Step 1** — write the memory to its own file under the matching type subdirectory',
+          'Write the memory to its own file under the matching type subdirectory',
         );
-        expect(prompt).toContain(
-          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path)`,
-        );
+        expect(prompt).not.toContain('For USER memory, add one pointer');
       }
     },
   );
@@ -1266,7 +1284,7 @@ describe("the main session's resident auto-memory policy", () => {
     ],
     [
       'forget and its index update',
-      'find and remove the matching entry and its private index pointer',
+      'remove the matching entry and update the USER index if applicable',
     ],
     [
       'the user type and its scope',
@@ -1288,12 +1306,15 @@ describe("the main session's resident auto-memory policy", () => {
     ['the frontmatter template', 'the lists `keywords` and `usage_scenarios`'],
     ['the category list', 'Pick one category from basic_information'],
     ['metadata limits', 'keep it within 64 characters'],
-    ['the same-directory index', "in the same directory's `MEMORY.md`"],
+    [
+      'the same-directory user index',
+      'For USER, keep one pointer per entry in its own `MEMORY.md`',
+    ],
     [
       'no body or frontmatter in the index',
       'Use only pointers under ~150 characters, without frontmatter',
     ],
-    ['the index line limit', 'Lines after 200 are truncated'],
+    ['the generated project index', 'Write only topic files for PROJECT'],
     ['deduplication', 'Check the current catalog for duplicates first'],
     ['when to read memory', 'asks to check, recall, or remember'],
     [

@@ -5,6 +5,8 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import { getImportedProjectMemoryRoot } from './import-paths.js';
 import type { Config } from '../config/config.js';
@@ -24,17 +26,24 @@ import {
   rebuildUserAutoMemoryIndex,
 } from './indexer.js';
 import {
-  getAutoMemoryMetadataPath,
+  getAutoMemoryRoot,
+  getProjectAutoMemoryRoots,
   isAutoMemPath,
   isUserAutoMemPath,
 } from './paths.js';
 import {
+  getScannedProjectMemorySourceHash,
   scanAllAutoMemoryTopicDocuments,
   scanAllUserAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
+import type { AutoMemoryType } from './types.js';
+import {
+  assertProjectMemoryCommit,
+  updateProjectMemoryMetadata,
+  withProjectMemoryCommit,
+} from './project-commit.js';
 
 const debugLogger = createDebugLogger('MEMORY_FORGET');
 
@@ -100,6 +109,25 @@ interface IndexedForgetCandidate extends AutoMemoryForgetMatch {
   why?: string;
   howToApply?: string;
   mtimeMs: number;
+  sourceHash?: string;
+}
+
+const selectedFileHashes = new WeakMap<AutoMemoryForgetMatch, string>();
+
+function hashFileContent(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function toForgetMatch({
+  topic,
+  summary,
+  filePath,
+  entryIndex,
+  sourceHash,
+}: IndexedForgetCandidate): AutoMemoryForgetMatch {
+  const match = { topic, summary, filePath, entryIndex };
+  if (sourceHash) selectedFileHashes.set(match, sourceHash);
+  return match;
 }
 
 export type AutoMemoryStorageScope = 'user' | 'project';
@@ -160,6 +188,7 @@ async function listIndexedForgetCandidates(
     abortSignal?.throwIfAborted();
     for (const doc of docs) {
       abortSignal?.throwIfAborted();
+      const sourceHash = getScannedProjectMemorySourceHash(doc);
       const entries = parseAutoMemoryEntries(doc.body);
       for (let i = 0; i < entries.length; i++) {
         const entry = entries[i];
@@ -177,6 +206,7 @@ async function listIndexedForgetCandidates(
           why: entry.why,
           howToApply: entry.howToApply,
           mtimeMs: doc.mtimeMs,
+          sourceHash,
         });
       }
     }
@@ -359,12 +389,7 @@ async function selectByModel(
   const matches = candidates
     .filter((candidate) => selectedIds.has(candidate.id))
     .slice(0, limit)
-    .map(({ topic, summary, filePath, entryIndex }) => ({
-      topic,
-      summary,
-      filePath,
-      entryIndex,
-    }));
+    .map(toForgetMatch);
 
   return {
     matches,
@@ -403,12 +428,7 @@ function selectByHeuristic(
         .sort(byMtimeMsDesc),
     ),
     limit,
-  ).map(({ topic, summary, filePath, entryIndex }) => ({
-    topic,
-    summary,
-    filePath,
-    entryIndex,
-  }));
+  ).map(toForgetMatch);
 
   return {
     matches,
@@ -464,17 +484,7 @@ export async function selectManagedAutoMemoryForgetCandidates(
 
 async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
   try {
-    const content = await fs.readFile(
-      getAutoMemoryMetadataPath(projectRoot),
-      'utf-8',
-    );
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    await atomicWriteFile(
-      getAutoMemoryMetadataPath(projectRoot),
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      { encoding: 'utf-8' },
-    );
+    await updateProjectMemoryMetadata(projectRoot, now, () => {});
   } catch {
     // Best-effort metadata bump.
   }
@@ -508,6 +518,7 @@ export async function forgetManagedAutoMemoryMatches(
   const removedEntries: AutoMemoryForgetMatch[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
   const touchedScopes = new Set<AutoMemoryStorageScope>();
+  const conflicts = new Set<string>();
 
   // Group matches by file so we can do per-entry removal rather than
   // blindly deleting entire files (which would destroy unrelated entries in
@@ -519,85 +530,131 @@ export async function forgetManagedAutoMemoryMatches(
     matchesByFile.set(match.filePath, existing);
   }
 
+  const projectRoots = getProjectAutoMemoryRoots(projectRoot, true);
   for (const [filePath, fileMatches] of matchesByFile) {
     try {
       options.abortSignal?.throwIfAborted();
-      const rawContent = await fs.readFile(filePath, 'utf-8');
-      options.abortSignal?.throwIfAborted();
-      const fmMatch = rawContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-
-      if (!fmMatch) {
-        // No frontmatter — delete the whole file.
-        options.abortSignal?.throwIfAborted();
-        await fs.unlink(filePath);
-        removedEntries.push(...fileMatches);
-        for (const m of fileMatches) touchedTopics.add(m.topic);
-        touchedScopes.add(classifyMemoryScope(filePath, projectRoot));
-        continue;
-      }
-
-      const [, frontmatter, rawBody] = fmMatch;
-      const allEntries = parseAutoMemoryEntries(rawBody.trim());
-      const matchesByIndex = new Map<number, AutoMemoryForgetMatch>();
-      for (const match of fileMatches) {
+      const scope = classifyMemoryScope(filePath, projectRoot);
+      const apply = async (expectedHash?: string) => {
+        const rawContent = await fs
+          .readFile(filePath, 'utf-8')
+          .catch((error: unknown) => {
+            if (
+              expectedHash !== undefined &&
+              (error as NodeJS.ErrnoException).code === 'ENOENT'
+            )
+              return undefined;
+            throw error;
+          });
         if (
-          Number.isInteger(match.entryIndex) &&
-          match.entryIndex! >= 0 &&
-          match.entryIndex! < allEntries.length &&
-          normalizeSummary(allEntries[match.entryIndex!].summary) ===
-            normalizeSummary(match.summary)
+          rawContent === undefined ||
+          (expectedHash !== undefined &&
+            hashFileContent(rawContent) !== expectedHash)
         ) {
-          matchesByIndex.set(match.entryIndex!, match);
+          conflicts.add(filePath);
+          return;
         }
-      }
-      let removedFileEntries: AutoMemoryForgetMatch[];
-      let kept: ManagedAutoMemoryEntry[];
-      if (matchesByIndex.size > 0) {
-        removedFileEntries = [...matchesByIndex.entries()]
-          .sort(([a], [b]) => a - b)
-          .map(([, match]) => match);
-        kept = allEntries.filter((_entry, index) => !matchesByIndex.has(index));
-      } else {
-        const remainingBySummary = new Map<string, number>();
+        options.abortSignal?.throwIfAborted();
+        const fmMatch = rawContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+
+        if (!fmMatch) {
+          // No frontmatter — delete the whole file.
+          options.abortSignal?.throwIfAborted();
+          assertProjectMemoryCommit();
+          await fs.unlink(filePath);
+          removedEntries.push(...fileMatches);
+          for (const m of fileMatches) touchedTopics.add(m.topic);
+          touchedScopes.add(scope);
+          return;
+        }
+
+        const [, frontmatter, rawBody] = fmMatch;
+        const allEntries = parseAutoMemoryEntries(rawBody.trim());
+        const matchesByIndex = new Map<number, AutoMemoryForgetMatch>();
         for (const match of fileMatches) {
-          const key = normalizeSummary(match.summary);
-          remainingBySummary.set(key, (remainingBySummary.get(key) ?? 0) + 1);
+          if (
+            Number.isInteger(match.entryIndex) &&
+            match.entryIndex! >= 0 &&
+            match.entryIndex! < allEntries.length &&
+            normalizeSummary(allEntries[match.entryIndex!].summary) ===
+              normalizeSummary(match.summary)
+          ) {
+            matchesByIndex.set(match.entryIndex!, match);
+          }
         }
-        kept = allEntries.filter((entry) => {
-          const key = normalizeSummary(entry.summary);
-          const remaining = remainingBySummary.get(key) ?? 0;
-          if (remaining === 0) return true;
-          remainingBySummary.set(key, remaining - 1);
-          return false;
-        });
-        removedFileEntries = fileMatches.slice(
-          0,
-          allEntries.length - kept.length,
-        );
-      }
-      if (removedFileEntries.length === 0) {
-        continue;
-      }
+        let removedFileEntries: AutoMemoryForgetMatch[];
+        let kept: ManagedAutoMemoryEntry[];
+        if (matchesByIndex.size > 0) {
+          removedFileEntries = [...matchesByIndex.entries()]
+            .sort(([a], [b]) => a - b)
+            .map(([, match]) => match);
+          kept = allEntries.filter(
+            (_entry, index) => !matchesByIndex.has(index),
+          );
+        } else {
+          const remainingBySummary = new Map<string, number>();
+          for (const match of fileMatches) {
+            const key = normalizeSummary(match.summary);
+            remainingBySummary.set(key, (remainingBySummary.get(key) ?? 0) + 1);
+          }
+          kept = allEntries.filter((entry) => {
+            const key = normalizeSummary(entry.summary);
+            const remaining = remainingBySummary.get(key) ?? 0;
+            if (remaining === 0) return true;
+            remainingBySummary.set(key, remaining - 1);
+            return false;
+          });
+          removedFileEntries = fileMatches.slice(
+            0,
+            allEntries.length - kept.length,
+          );
+        }
+        if (removedFileEntries.length === 0) {
+          return;
+        }
 
-      if (kept.length === 0) {
-        options.abortSignal?.throwIfAborted();
-        await fs.unlink(filePath);
+        if (kept.length === 0) {
+          options.abortSignal?.throwIfAborted();
+          assertProjectMemoryCommit();
+          await fs.unlink(filePath);
+        } else {
+          const heading = getAutoMemoryBodyHeading(rawBody);
+          const newBody = renderAutoMemoryBody(heading, kept);
+          options.abortSignal?.throwIfAborted();
+          await atomicWriteFile(
+            filePath,
+            `---\n${frontmatter}\n---\n\n${newBody}\n`,
+            {
+              encoding: 'utf-8',
+              noFollow: scope === 'project',
+              assertCanCommit: assertProjectMemoryCommit,
+            },
+          );
+        }
+
+        removedEntries.push(...removedFileEntries);
+        for (const m of removedFileEntries) {
+          touchedTopics.add(m.topic);
+        }
+        touchedScopes.add(scope);
+      };
+      if (scope === 'project') {
+        const ownerRoot =
+          projectRoots.find((root) => {
+            const relative = path.relative(root, filePath);
+            return (
+              relative !== '..' &&
+              !relative.startsWith(`..${path.sep}`) &&
+              !path.isAbsolute(relative)
+            );
+          }) ?? getAutoMemoryRoot(projectRoot);
+        const hash =
+          selectedFileHashes.get(fileMatches[0]) ??
+          hashFileContent(await fs.readFile(filePath, 'utf-8'));
+        await withProjectMemoryCommit(ownerRoot, () => apply(hash));
       } else {
-        const heading = getAutoMemoryBodyHeading(rawBody);
-        const newBody = renderAutoMemoryBody(heading, kept);
-        options.abortSignal?.throwIfAborted();
-        await atomicWriteFile(
-          filePath,
-          `---\n${frontmatter}\n---\n\n${newBody}\n`,
-          { encoding: 'utf-8' },
-        );
+        await apply();
       }
-
-      removedEntries.push(...removedFileEntries);
-      for (const m of removedFileEntries) {
-        touchedTopics.add(m.topic);
-      }
-      touchedScopes.add(classifyMemoryScope(filePath, projectRoot));
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
       debugLogger.warn(
@@ -639,15 +696,21 @@ export async function forgetManagedAutoMemoryMatches(
     }
   }
 
+  const summary =
+    removedEntries.length > 0
+      ? `Managed auto-memory forgot ${removedEntries.length} entr${removedEntries.length === 1 ? 'y' : 'ies'} from: ${[...touchedTopics].map((topic) => `${topic}/`).join(', ')}`
+      : undefined;
+  const conflictNotice =
+    conflicts.size > 0
+      ? `Skipped ${conflicts.size} project memory file(s) changed since selection. Run /forget again to review the latest content.`
+      : undefined;
   return {
     query: '',
     removedEntries,
     touchedTopics: [...touchedTopics],
     touchedScopes: sortTouchedScopes(touchedScopes),
     systemMessage:
-      removedEntries.length > 0
-        ? `Managed auto-memory forgot ${removedEntries.length} entr${removedEntries.length === 1 ? 'y' : 'ies'} from: ${[...touchedTopics].map((topic) => `${topic}/`).join(', ')}`
-        : undefined,
+      [summary, conflictNotice].filter(Boolean).join(' ') || undefined,
   };
 }
 

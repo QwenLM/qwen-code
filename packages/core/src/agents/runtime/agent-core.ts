@@ -1002,7 +1002,10 @@ export class AgentCore {
   }
 
   runInHookFrame<T>(fn: () => T): T {
-    return runWithHookExecutionOwner(this.hookExecutionOwner, fn);
+    const run = () => runWithHookExecutionOwner(this.hookExecutionOwner, fn);
+    return this.runtimeContext.runWithProjectMemoryOwner
+      ? this.runtimeContext.runWithProjectMemoryOwner(run)
+      : run();
   }
 
   /**

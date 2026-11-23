@@ -32,7 +32,8 @@ vi.mock('../agents/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 
-vi.mock('./indexer.js', () => ({
+vi.mock('./indexer.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./indexer.js')>()),
   rebuildManagedAutoMemoryIndex: vi.fn(),
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
