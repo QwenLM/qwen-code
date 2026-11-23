@@ -853,6 +853,7 @@ const {
       capabilities: {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
       },
+      workspaceCwd: undefined as string | undefined,
       brand: undefined as DaemonBrand | undefined,
       brandSettled: false,
       status: 'connected' as 'connected' | 'error',
@@ -1106,7 +1107,11 @@ const {
       settingsReloading: false,
       settingsError: undefined as Error | undefined,
       latestSettingsHookOptions: undefined as
-        | { autoLoad?: boolean; enabled?: boolean }
+        | {
+            workspaceCwd?: string;
+            autoLoad?: boolean;
+            enabled?: boolean;
+          }
         | undefined,
       latestProvidersHookOptions: undefined as
         | { autoLoad?: boolean; enabled?: boolean }
@@ -1129,6 +1134,8 @@ const {
           value: unknown,
         ) => Promise<unknown>;
       } | null,
+      latestSettingsWorkspaceControl: null as ReactNode,
+      latestSettingsWorkspaceDirectoriesSection: null as ReactNode,
       artifactPanelExtra: null as ReactNode,
       captureArtifactPanelOnly: false,
       latestArtifactPanelProps: null as React.ComponentProps<
@@ -1318,7 +1325,11 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       refreshHead: vi.fn(),
       loadOrdinal: vi.fn(),
     }),
-    useSettings: (options?: { autoLoad?: boolean; enabled?: boolean }) => {
+    useSettings: (options?: {
+      workspaceCwd?: string;
+      autoLoad?: boolean;
+      enabled?: boolean;
+    }) => {
       testState.latestSettingsHookOptions = options;
       return {
         settings: testState.settings,
@@ -1793,6 +1804,8 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       settingsState: NonNullable<typeof testState.latestSettingsState>;
       initialCategory?: string;
       presentation?: WebShellSettingsOptions;
+      workspaceControl?: ReactNode;
+      workspaceDirectoriesSection?: ReactNode;
       onSubDialog?: (key: string, scope: 'user' | 'workspace') => void;
       onLanguageChange?: (
         language: string,
@@ -1814,6 +1827,9 @@ vi.mock('./components/messages/SettingsMessage', async () => {
       testState.latestSettingsState = props.settingsState;
       testState.latestSettingsInitialCategory = props.initialCategory;
       testState.latestSettingsPresentation = props.presentation;
+      testState.latestSettingsWorkspaceControl = props.workspaceControl ?? null;
+      testState.latestSettingsWorkspaceDirectoriesSection =
+        props.workspaceDirectoriesSection ?? null;
       testState.latestModelManagement =
         props.modelManagementSectionProps ?? null;
       return React.createElement(
@@ -13620,6 +13636,7 @@ beforeEach(() => {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
   mockWorkspace.baseUrl = '';
+  mockWorkspace.workspaceCwd = undefined;
   mockUseWorkspaceSessionLiveState.mockClear();
   mockUseDaemonSessionActivityBridge.mockReset();
   mockUseDaemonSessionActivityBridge.mockImplementation(() => ({
@@ -13843,6 +13860,8 @@ beforeEach(() => {
   testState.latestSettingsHookOptions = undefined;
   testState.latestProvidersHookOptions = undefined;
   testState.latestSettingsState = null;
+  testState.latestSettingsWorkspaceControl = null;
+  testState.latestSettingsWorkspaceDirectoriesSection = null;
   testState.latestSettingsInitialCategory = undefined;
   testState.latestSettingsPresentation = undefined;
   testState.latestModelManagement = null;
@@ -51199,6 +51218,88 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockSessionActions.refreshCommands).toHaveBeenCalledOnce();
     expect(onLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('aligns the Settings workspace switcher with a secondary session and an explicit primary selection', async () => {
+    mockWorkspace.workspaceCwd = '/work/primary';
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/work/primary',
+      features: ['workspace_settings', 'workspace_directories'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/work/primary',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(mockConnection.sessionId).toBe('session-1');
+
+    const workspaceSelect = () =>
+      testState.latestSettingsWorkspaceControl as React.ReactElement<{
+        value: string;
+        onValueChange: (cwd: string) => void;
+      }>;
+    const directories = () =>
+      testState.latestSettingsWorkspaceDirectoriesSection as React.ReactElement<{
+        workspaceCwd?: string;
+      }>;
+
+    // The default Settings surface reads the session workspace, not primary.
+    expect(workspaceSelect().props.value).toBe('/work/secondary');
+    expect(directories().props.workspaceCwd).toBe('/work/secondary');
+
+    act(() => workspaceSelect().props.onValueChange('/work/primary'));
+    await flush();
+    expect(workspaceSelect().props.value).toBe('/work/primary');
+    expect(directories().props.workspaceCwd).toBe('/work/primary');
+    expect(testState.latestSettingsHookOptions).toEqual({
+      workspaceCwd: '/work/primary',
+      autoLoad: true,
+      enabled: true,
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="change-language-workspace"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+    expect(mockWorkspaceActions.setUiLanguage).toHaveBeenLastCalledWith(
+      'en',
+      'workspace',
+      '/work/primary',
+    );
+
+    act(() => workspaceSelect().props.onValueChange('/work/secondary'));
+    await flush();
+    expect(workspaceSelect().props.value).toBe('/work/secondary');
+    expect(directories().props.workspaceCwd).toBe('/work/secondary');
+    // Selecting the session workspace again unmounts the secondary bridge.
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
   });
 
   it('maps a Chinese UI language choice to the daemon language code', async () => {

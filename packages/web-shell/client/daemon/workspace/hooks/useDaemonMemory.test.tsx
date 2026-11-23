@@ -157,6 +157,34 @@ describe('useDaemonMemory.readMemoryFile', () => {
     expect(actions.readWorkspaceFile).toHaveBeenCalledWith(WORKSPACE_PATH);
   });
 
+  it('keeps global fallback reads on the unscoped client inside a workspace-scoped memory dialog', async () => {
+    scopedHandle.workspaceMemory.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/secondary',
+      initialized: true,
+      files: [
+        {
+          kind: 'memory_file',
+          path: GLOBAL_PATH,
+          scope: 'global',
+          bytes: 7,
+        },
+      ],
+    });
+    actions.readWorkspaceFile.mockResolvedValue({
+      content: 'global\n',
+      truncated: false,
+    });
+
+    const hook = captureMemoryHook({ workspaceCwd: '/secondary' });
+    await expect(hook.readMemoryFile(GLOBAL_PATH)).resolves.toEqual({
+      content: 'global\n',
+      truncated: false,
+    });
+    expect(actions.readWorkspaceFile).toHaveBeenCalledWith(GLOBAL_PATH);
+    expect(scopedHandle.readWorkspaceFile).not.toHaveBeenCalled();
+  });
+
   it('routes workspace-scoped reads and writes through workspaceByCwd while keeping global writes unscoped', async () => {
     client.workspaceByCwd.mockClear();
     actions.writeMemory.mockClear();

@@ -69,6 +69,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type ReactNode,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
 } from 'react';
@@ -3749,7 +3750,7 @@ function SecondaryWorkspaceSettingsBridge({
   render,
 }: {
   workspaceCwd: string;
-  reloadRef: { current: (() => Promise<void>) | undefined };
+  reloadRef: { current: (() => Promise<unknown>) | undefined };
   render: (state: ReturnType<typeof useSettings>) => ReactNode;
 }) {
   const state = useSettings({ workspaceCwd, autoLoad: true, enabled: true });
@@ -15537,20 +15538,21 @@ export function App({
     autoLoad: projectFeaturesAvailable,
     enabled: projectFeaturesAvailable,
   });
-  const primaryRegisteredWorkspaceCwd =
-    ordinaryWorkspaces.find((entry) => entry.primary)?.cwd ??
-    workspace.workspaceCwd;
+  const uiLanguageWorkspaceCwd =
+    effectiveSessionContext?.kind === 'live'
+      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
+      : getComposerWorkspaceCwd();
   const secondarySettingsWorkspaceCwd =
     settingsWorkspaceCwd &&
-    settingsWorkspaceCwd !== primaryRegisteredWorkspaceCwd &&
+    settingsWorkspaceCwd !== uiLanguageWorkspaceCwd &&
     ordinaryWorkspaces.some(
       (entry) => entry.cwd === settingsWorkspaceCwd && entry.trusted,
     )
       ? settingsWorkspaceCwd
       : undefined;
-  const secondarySettingsReloadRef = useRef<(() => Promise<void>) | undefined>(
-    undefined,
-  );
+  const secondarySettingsReloadRef = useRef<
+    (() => Promise<unknown>) | undefined
+  >(undefined);
   useEffect(() => {
     const isKnownTrustedWorkspace = (cwd: string) =>
       ordinaryWorkspaces.length > 0
@@ -16323,10 +16325,6 @@ export function App({
     });
   }, [brandResolved, brandNameValue, brandLogoUri]);
 
-  const uiLanguageWorkspaceCwd =
-    effectiveSessionContext?.kind === 'live'
-      ? (workspace.capabilities?.workspaceCwd ?? workspace.workspaceCwd)
-      : getComposerWorkspaceCwd();
   const handleSettingsLanguageChange = useCallback(
     (
       nextLanguage: WebShellLanguage,
@@ -25956,7 +25954,7 @@ export function App({
                                 <Select
                                   value={
                                     secondarySettingsWorkspaceCwd ??
-                                    primaryRegisteredWorkspaceCwd
+                                    uiLanguageWorkspaceCwd
                                   }
                                   onValueChange={(cwd) =>
                                     setSettingsWorkspaceCwd(cwd)
@@ -25987,7 +25985,10 @@ export function App({
                             workspaceDirectoriesSection={
                               workspaceDirectoriesSupported ? (
                                 <WorkspaceDirectoriesSection
-                                  workspaceCwd={secondarySettingsWorkspaceCwd}
+                                  workspaceCwd={
+                                    secondarySettingsWorkspaceCwd ??
+                                    uiLanguageWorkspaceCwd
+                                  }
                                 />
                               ) : undefined
                             }

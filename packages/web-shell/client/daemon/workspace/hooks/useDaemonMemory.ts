@@ -65,6 +65,11 @@ export function useDaemonMemory(options: DaemonMemoryOptions = {}) {
         // Preserve its read-only marker for withheld content or a torn read.
         return { content: '', truncated: true };
       }
+      if (file?.scope === 'global') {
+        // A workspace-scoped `/file` route cannot read the user's home
+        // QWEN.md on legacy daemons that omit inline memory content.
+        return workspaceActions.readWorkspaceFile(filePath);
+      }
       return readFile(filePath);
     },
     [readFile, workspaceActions, workspaceClient],
