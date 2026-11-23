@@ -17,6 +17,7 @@ import {
 import type { GenerateContentResponse, Part } from '@google/genai';
 import {
   BaseLlmClient,
+  isMainRouteSelector,
   type GenerateJsonOptions,
   type GenerateTextOptions,
 } from './baseLlmClient.js';
@@ -2236,5 +2237,76 @@ describe('BaseLlmClient', () => {
         expect(sentBudget()).toBeUndefined();
       });
     });
+  });
+});
+
+/**
+ * The shared "main route" predicate (#16473). These cells pin the selector
+ * shapes whose semantics CHANGED when the compression gate's inline block was
+ * replaced by this predicate — reverting the predicate to the gate's
+ * `selector.split('\0')` semantics must redden the cells marked DELTA
+ * (#16573 round-2 finding 1: three undocumented shapes; finding 2: the
+ * documented one had no committed guard at all).
+ */
+describe('isMainRouteSelector', () => {
+  const MAIN_MODEL = 'main-model';
+  const MAIN_BASE_URL = 'https://main.invalid/v1';
+  const config = {
+    getModel: () => MAIN_MODEL,
+    getContentGeneratorConfig: () => ({
+      authType: 'qwen-oauth',
+      baseUrl: MAIN_BASE_URL,
+    }),
+    getFastModel: () => undefined,
+    getAllConfiguredModels: () => [],
+  } as unknown as Config;
+
+  const main = (selector: string) =>
+    expect(isMainRouteSelector(selector, config)).toBe(true);
+  const cold = (selector: string) =>
+    expect(isMainRouteSelector(selector, config)).toBe(false);
+
+  it('routes the bare main model to the main generator', () => {
+    main(MAIN_MODEL);
+  });
+
+  it('routes a provider-qualified main selector to the main generator', () => {
+    main('qwen-oauth:main-model');
+  });
+
+  it('routes the main model pinned to the main base URL', () => {
+    main(`main-model\0${MAIN_BASE_URL}`);
+  });
+
+  it('keeps a foreign model cold', () => {
+    cold('other-model');
+    cold(`other-model\0${MAIN_BASE_URL}`);
+  });
+
+  it('keeps a main model pinned to another endpoint cold', () => {
+    cold('main-model\0https://other.invalid/v1');
+  });
+
+  it('keeps a main model under another authType cold', () => {
+    cold('openai:main-model');
+  });
+
+  it('DELTA 1: reads a trailing empty pin as unpinned (#16573)', () => {
+    // OLD gate: split('\0') makes the pin '' and '' !== baseUrl -> cold.
+    main(`main-model\0`);
+  });
+
+  it('DELTA 2: drops the pin when the model part is empty (#16573)', () => {
+    // OLD gate: '' resolves through inherit to the main model but the pin
+    // 'https://other.invalid/v1' mismatches -> cold. The predicate drops
+    // the pin for an empty model part, so this is MAIN.
+    main(`\0https://other.invalid/v1`);
+  });
+
+  it('DELTA 3: pins on everything after the first NUL (#16573)', () => {
+    // OLD gate: split('\0') pins on the SECOND segment, which matches the
+    // main base URL -> main. The predicate keeps 'url\0extra' as one pin,
+    // which mismatches -> cold.
+    cold(`main-model\0${MAIN_BASE_URL}\0extra`);
   });
 });
