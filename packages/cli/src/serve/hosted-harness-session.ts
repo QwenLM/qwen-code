@@ -67,6 +67,7 @@ import {
 import {
   hostedActionParkRegistration,
   hostedApprovalResumeShapeRefusal,
+  hostedCommandStepResumeShapeRefusal,
   registerHostedActionPark,
   type HostedActionParkRefusal,
   type HostedActionParkRegistration,
@@ -5166,8 +5167,6 @@ export function registerHostedHarnessSessionRoutes(
       return 'turn_mismatch';
     if (session.recoveredTurn !== undefined) return 'recovered_turn';
     if (session.definition?.['lineage'] !== undefined) return 'lineage';
-    const shape = hostedApprovalResumeShapeRefusal(session, brokerOptions);
-    if (shape) return shape;
     if (
       session.stores?.supportsActionParking?.() !== true ||
       session.stores?.supportsWakeDispatch?.() !== true
@@ -5197,7 +5196,14 @@ export function registerHostedHarnessSessionRoutes(
       registration.promptId,
     );
     if (!continuation) return 'no_continuation';
-    if (continuation.plan.commandStep !== undefined) return 'command_step';
+    const commandStep = continuation.plan.commandStep;
+    const shape = commandStep
+      ? hostedCommandStepResumeShapeRefusal(session, brokerOptions)
+      : hostedApprovalResumeShapeRefusal(session, brokerOptions);
+    if (shape) return shape;
+    // Recovery admits a command step on an MCP Session, but parking one waits
+    // for MCP parking (#18149 Stage 4).
+    if (commandStep && session.mcp) return 'mcp';
     if (
       (await hostedOriginalPromptText(
         session.managed,
@@ -8700,9 +8706,9 @@ export function registerHostedHarnessSessionRoutes(
         ((takeover &&
           hostedApprovalResumeShapeRefusal(session, brokerOptions) ===
             undefined) ||
-          (session.toolProfile &&
-            brokerOptions &&
-            extensionsCommandStepTakeover))
+          (extensionsCommandStepTakeover &&
+            hostedCommandStepResumeShapeRefusal(session, brokerOptions) ===
+              undefined))
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
         if (
@@ -9102,7 +9108,9 @@ export function registerHostedHarnessSessionRoutes(
         (hasUnsettledInput(session, unsettledThrough) &&
           !resume &&
           !settlePromptId &&
-          !session.hooks &&
+          // A Hooks Session otherwise recovers through this load, but only a
+          // takeover may resume a parked command step (R9-1).
+          (!session.hooks || commandStepPark) &&
           !recovery &&
           !inapplicableAnswer)
       ) {
