@@ -60,13 +60,26 @@ export function boundMonitorObservationLines(
       retainedBytes +
       (retained.length > 0 ? 1 : 0) +
       Buffer.byteLength(line, 'utf8');
-    if (nextBytes + 1 + markerBytes > OBSERVATION_WINDOW_MAX_BYTES) break;
+    if (nextBytes + 1 + markerBytes > OBSERVATION_WINDOW_MAX_BYTES) {
+      if (retained.length === 0 && nextBytes <= OBSERVATION_WINDOW_MAX_BYTES) {
+        retained.push(line);
+        retainedBytes = nextBytes;
+      }
+      break;
+    }
     retained.push(line);
     retainedBytes = nextBytes;
   }
 
   const omitted = lines.length - retained.length;
-  return [...retained, `... ${omitted} more lines omitted`];
+  const marker = `... ${omitted} more lines omitted`;
+  if (
+    retainedBytes + 1 + Buffer.byteLength(marker, 'utf8') >
+    OBSERVATION_WINDOW_MAX_BYTES
+  ) {
+    return retained;
+  }
+  return [...retained, marker];
 }
 
 /** The text of one due monitor observation, wrapped for its matching turn. */

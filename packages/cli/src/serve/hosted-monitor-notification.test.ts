@@ -114,6 +114,15 @@ describe('monitor task-notification envelope', () => {
     const bounded = boundMonitorObservationLines(['x'.repeat(70_000), 'next']);
     expect(bounded).toEqual(['... 2 more lines omitted']);
   });
+
+  it('keeps a nearly fitting first line within budget instead of emptying the window', () => {
+    const first = 'x'.repeat(32_760);
+    const bounded = boundMonitorObservationLines([first, 'Error: aborted']);
+    expect(bounded).toEqual([first]);
+    expect(Buffer.byteLength(bounded.join('\n'), 'utf8')).toBeLessThanOrEqual(
+      32 * 1024,
+    );
+  });
 });
 
 describe('pending session inputs', () => {

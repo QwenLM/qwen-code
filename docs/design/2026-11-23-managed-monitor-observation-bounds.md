@@ -28,7 +28,7 @@ For the resident lane, this creates an arbitrarily large stored observation, ext
 
 The shared `boundMonitorObservationLines` helper accepts one window and returns at most 1,000 lines, including the optional omission marker. Its raw line-text budget is 32 KiB, including newline separators and the marker.
 
-A window already within both limits is returned unchanged. Otherwise, the helper keeps the longest legal prefix of complete source lines. It never slices a source line or a multibyte character. The final item is `... N more lines omitted`, where `N` is the exact number of unretained source lines. A single over-budget line is omitted rather than sliced.
+A window already within both limits is returned unchanged. Otherwise, the helper keeps the longest legal prefix of complete window entries. It never slices an entry or a multibyte character. The final item is `... N more lines omitted`, where `N` is the exact number of unretained window entries. Window entries need not correspond to original source lines because each lane's existing partial-line handling runs earlier and can split or discard source-line fragments. A single over-budget entry is omitted rather than sliced. If the first complete entry fits but the accurate omission marker does not, the helper preserves that entry without adding a marker instead of returning an empty observation.
 
 `HostedMonitorLoop.flush` applies the helper once and uses the result for both `monitors.observe` and `buildMonitorNotificationInput`. `WorkerMonitorPolicy.flush` does the same before constructing the notification resource and calling `enqueueObservation`. `HostedShellPublisher.finalizeBackground` applies the same helper to an ownerless watch tail whose observation arm never attached, then uses the bounded array for both the tail observation and its wake input. Existing XML escaping, display-control sanitization, and observation schemas remain unchanged.
 
@@ -41,23 +41,23 @@ The constants remain private implementation limits rather than new operator sett
 - Empty and already bounded windows preserve their content.
 - The marker counts toward both the 1,000-line result and the 32 KiB raw line-text budget.
 - UTF-8 byte length, not JavaScript string length, determines the raw byte budget.
-- The omission marker reports all omitted source lines, including lines dropped because of either limit.
+- The omission marker reports all omitted window entries, including entries dropped because of either limit.
 - Existing small observations, notification tags, wake linkage, and quota settlement remain unchanged.
 
 ## Validation
 
-Helper tests cover unchanged small windows, exact line and byte boundaries, line-count truncation, multibyte UTF-8 text, an individually over-budget line, and a literal byte-budget case whose expected retained count, omission count, and total bytes fail if the marker is removed from the guard.
+Helper tests cover unchanged small windows, exact line and byte boundaries, line-count truncation, multibyte UTF-8 text, an individually over-budget line, a nearly full first entry that must not be dropped or exceed the budget, and a literal byte-budget case whose expected retained count, omission count, and total bytes fail if the marker is removed from the guard.
 
 Resident tests use the fake executor, manual clock, actual session authority, and local resource store. They independently cover periodic and exit flushes, observation and notification identity, exact omission counts, byte limits, and one observation sequence per original window. A separate ownerless-tail test drives the real publisher through final delivery with no observation arm attached and verifies both the stored observation and wake input.
 
 Worker tests drive the real `WorkerMonitorPolicy` and inspect the staged delivery entry. Plain-text and XML-heavy cases assert the serialized request limit, shared observation and notification lines, exact omission counts, and raw byte limit. A separate publisher and applier path runs small and oversized windows through final delivery and verifies that the observation commits once and the monitor record settles.
 
-The original plain-text regression produced a 1,426,041-byte request and left the oversized applier case at observation sequence zero. The first 64 KiB implementation also failed the XML-heavy case at 651,558 bytes. The final shared implementation passes all 93 tests across the four focused files, including the ownerless-tail and literal byte-guard regressions. Repository type, formatting, lint, and diff checks are recorded with the PR evidence.
+The original plain-text regression produced a 1,426,041-byte request and left the oversized applier case at observation sequence zero. The first 64 KiB implementation also failed the XML-heavy case at 651,558 bytes. The final shared implementation passes all 94 tests across the four focused files, including the ownerless-tail and literal byte-guard regressions. Repository type, formatting, lint, and diff checks are recorded with the PR evidence.
 
 ## Acceptance criteria
 
 - Every observation in either lane contains at most 1,000 lines and at most 32 KiB of raw line text.
-- Truncated windows have one accurate omission marker and no partial source line.
+- Truncated windows have one accurate omission marker and no partial window entry, except that a nearly full first entry is preserved without a marker when the marker itself cannot fit.
 - Observation and notification contain the same bounded content.
 - Plain-text and XML-heavy worker entries fit the delivery request limit, and the oversized applier case settles.
 - Periodic and exit flushes preserve existing sequence, quota, and settlement behavior.
