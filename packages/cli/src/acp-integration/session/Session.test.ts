@@ -5300,32 +5300,31 @@ describe('Session', () => {
       },
     );
 
-    it('waits for a shell moved by a later Send now in the same batch', async () => {
-      const shellCalls = ['first', 'second'].map((id) => ({
-        id,
-        name: 'run_shell_command',
-        args: { command: 'cat fixture.txt' },
-      }));
-      const shellIds = ['bg_0123abcd', 'bg_1234abcd'];
-      const send = useSharedRounds(
-        [...shellCalls.map(toolCall), finished()],
-        [text('Both tasks are running.'), finished()],
+    /** Holds a shared batch of `calls` open; the test settles its calls. */
+    function useHeldSharedBatch(calls: FunctionCall[]) {
+      useSharedRounds(
+        [...calls.map(toolCall), finished()],
+        [text('Answered.'), finished()],
       );
-      let batch: Parameters<typeof runAcpToolBatch>[1] | undefined;
-      let finishBatch!: () => void;
-      const releaseBatch = new Promise<void>((resolve) => {
-        finishBatch = resolve;
-      });
+      const held: {
+        options?: Parameters<typeof runAcpToolBatch>[1];
+        release?: () => void;
+      } = {};
       runAcpToolBatchSpy.mockImplementationOnce(
-        async (_host: unknown, options: NonNullable<typeof batch>) => {
-          batch = options;
-          await releaseBatch;
+        async (
+          _host: unknown,
+          options: NonNullable<(typeof held)['options']>,
+        ) => {
+          held.options = options;
+          await new Promise<void>((resolve) => {
+            held.release = resolve;
+          });
           return {
-            parts: options.requests.map((request, index) => ({
+            parts: options.requests.map((request) => ({
               functionResponse: {
                 id: request.callId,
                 name: request.name,
-                response: { output: shellIds[index] },
+                response: { output: 'done' },
               },
             })),
             results: [],
@@ -5333,35 +5332,114 @@ describe('Session', () => {
           };
         },
       );
+      const requestCancel = vi.fn();
+      Object.assign(mockBackgroundShellRegistry, { requestCancel });
+      return { held, requestCancel };
+    }
+    const shellCall = (id: string) => ({
+      id,
+      name: 'run_shell_command',
+      args: { command: 'npm test' },
+    });
+    /** Hands the batch's call `index` over as movable and clicks Send now. */
+    function moveShell(
+      options: NonNullable<Parameters<typeof runAcpToolBatch>[1]>,
+      index: number,
+      shellId: string,
+    ) {
+      const controller = new AbortController();
+      options.onShellMovable?.(options.requests[index].callId, controller);
+      session.sendMidTurnInputNow();
+      const reason = controller.signal.reason as Extract<
+        ShellAbortReason,
+        { kind: 'background' }
+      >;
+      expect(reason.kind).toBe('background');
+      reason.onRegistered?.(shellId);
+    }
+    const nextTick = () =>
+      new Promise<void>((resolve) => setImmediate(resolve));
+
+    it('waits for a shell moved by a later Send now before ending the turn for other tools', async () => {
+      const { held } = useHeldSharedBatch([
+        shellCall('first'),
+        shellCall('second'),
+        { id: 'read', name: 'read_file', args: {} },
+      ]);
       const done = prompt();
-      await vi.waitFor(() => expect(batch).toBeDefined());
-      const { requests, onShellMovable, onCallSettled, signal } = batch!;
-      const move = (index: number) => {
-        const controller = new AbortController();
-        onShellMovable?.(requests[index].callId, controller);
-        session.sendMidTurnInputNow();
-        const reason = controller.signal.reason as Extract<
-          ShellAbortReason,
-          { kind: 'background' }
-        >;
-        expect(reason.kind).toBe('background');
-        reason.onRegistered?.(shellIds[index]);
-      };
+      await vi.waitFor(() => expect(held.options).toBeDefined());
+      const options = held.options!;
 
-      move(0);
-      move(1);
-      onCallSettled?.(requests[0].callId, 'success');
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      const abortedBeforeSecondSettled = signal.aborted;
-      onCallSettled?.(requests[1].callId, 'success');
-      finishBatch();
+      moveShell(options, 0, 'bg_0123abcd');
+      moveShell(options, 1, 'bg_1234abcd');
+      options.onCallSettled?.(options.requests[0].callId, 'success');
+      await nextTick();
+      const abortedBeforeSecondSettled = options.signal.aborted;
+      options.onCallSettled?.(options.requests[1].callId, 'success');
+      await nextTick();
+      const abortedAfterSecondSettled = options.signal.aborted;
+      held.release!();
 
-      const result = await done;
+      await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
       expect(abortedBeforeSecondSettled).toBe(false);
-      expect(result.stopReason).toBe('end_turn');
-      const followup = JSON.stringify(send.mock.calls[1]?.[0]);
-      expect(followup).toContain(shellIds[0]);
-      expect(followup).toContain(shellIds[1]);
+      expect(abortedAfterSecondSettled).toBe(true);
+    });
+
+    it('answers in the same turn when only moved shells were left', async () => {
+      const { held, requestCancel } = useHeldSharedBatch([shellCall('only')]);
+      const done = prompt();
+      await vi.waitFor(() => expect(held.options).toBeDefined());
+      const options = held.options!;
+
+      moveShell(options, 0, 'bg_0123abcd');
+      options.onCallSettled?.(options.requests[0].callId, 'success');
+      held.release!();
+
+      await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(options.signal.aborted).toBe(false);
+      expect(requestCancel).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['keeps', 'cancelled', false],
+      ['stops', 'error', true],
+    ] as const)(
+      '%s a moved shell whose call settles %s without Stop',
+      async (_verb, status, stopped) => {
+        const { held, requestCancel } = useHeldSharedBatch([shellCall('only')]);
+        const done = prompt();
+        await vi.waitFor(() => expect(held.options).toBeDefined());
+        const options = held.options!;
+
+        moveShell(options, 0, 'bg_0123abcd');
+        // `cancelled`: the turn ended for another reason while PostToolUse
+        // ran; `error`: PostToolUse rejected the result.
+        options.onCallSettled?.(options.requests[0].callId, status);
+        held.release!();
+        await done;
+
+        expect(requestCancel.mock.calls).toEqual(
+          stopped ? [['bg_0123abcd']] : [],
+        );
+      },
+    );
+
+    it('stops a moved shell when the user stops the turn', async () => {
+      const { held, requestCancel } = useHeldSharedBatch([shellCall('only')]);
+      const done = prompt();
+      await vi.waitFor(() => expect(held.options).toBeDefined());
+      const options = held.options!;
+
+      moveShell(options, 0, 'bg_0123abcd');
+      const stopping = session.cancelPendingPrompt();
+      const stoppedAtOnce = requestCancel.mock.calls.slice();
+      options.onCallSettled?.(options.requests[0].callId, 'cancelled');
+      held.release!();
+
+      await stopping;
+      await expect(done).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(stoppedAtOnce).toEqual([['bg_0123abcd']]);
+      expect(requestCancel).toHaveBeenCalledOnce();
     });
 
     it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
@@ -34867,6 +34945,20 @@ describe('Session', () => {
               ],
               expect.objectContaining({ status: 'success' }),
             );
+            // The sibling that never ran is recorded as cancelled.
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).toHaveBeenCalledWith(
+              [
+                expect.objectContaining({
+                  functionResponse: expect.objectContaining({
+                    id: 'r',
+                    name: 'read_file',
+                  }),
+                }),
+              ],
+              expect.objectContaining({ status: 'cancelled' }),
+            );
           });
 
           it('keeps the turn open when the only shell sibling is a replay', async () => {
@@ -34974,6 +35066,13 @@ describe('Session', () => {
             session.sendMidTurnInputNow();
             // The same turn answers the input, then the host stops it.
             await streaming;
+            // A cancel aimed at another prompt leaves the moved shell alone.
+            session.cancelPromptAdmission(
+              new AbortController(),
+              'qwen:user-cancel',
+            );
+            await nextTick();
+            expect(requestCancel).not.toHaveBeenCalled();
             session.cancelPromptAdmission(cancellation, 'qwen:user-cancel');
 
             await expect(done).resolves.toMatchObject({

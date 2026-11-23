@@ -163,8 +163,9 @@ then interrupts the other tools.
    assigns a `bg_` ID and returns it to the session through `onRegistered`
    once the task is in the registry. The batch counts pending top-level
    executable calls, including scheduled calls awaiting execution. Nested
-   calls and replays are excluded. If only shells being moved remain, the
-   batch ends, the tool boundary drains, and the same turn answers. If other
+   calls and replays are excluded. If only shells being moved remain and every
+   move is accepted, the batch ends, the tool boundary drains, and the same
+   turn answers. If other
    tools remain, the PR 1 interrupt waits for the moved shells' tool calls to
    settle. An earlier interrupt would replace their results with the
    interrupt text. The model would lose the background ID and might run the
@@ -176,7 +177,9 @@ then interrupts the other tools.
 3. The tool result gives the background ID, output location and status. It
    tells the model that the command kept running in the background to make
    room for the user's message. If `PostToolUse` rejects the tool result,
-   the agent requests cancellation of the promoted process.
+   the agent requests cancellation of the promoted process. A call cancelled
+   because its turn ended for another reason, such as a new prompt, keeps the
+   command running: only Stop and a `PostToolUse` rejection cancel it.
 4. When such a shell ends later, ACP's existing background shell notification
    reports it.
 5. Stop cancels the shells moved by its turn. It requests cancellation

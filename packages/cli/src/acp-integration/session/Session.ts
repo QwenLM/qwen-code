@@ -4209,15 +4209,6 @@ export class Session implements SessionContext {
         shell.move = move;
         if (this.shellsMovedFor?.turn !== turn) {
           this.shellsMovedFor = { turn, shells: [] };
-          turn.addEventListener(
-            'abort',
-            () => {
-              if (turn.reason === USER_CANCEL_ABORT_REASON) {
-                this.#stopShellsMovedFor(turn);
-              }
-            },
-            { once: true },
-          );
         }
         this.shellsMovedFor.shells.push(shell);
         promote.abort({
@@ -16623,7 +16614,10 @@ export class Session implements SessionContext {
         this.#trackMovableShell(callId, abortSignal, promote),
       onCallSettled: (callId, status) => {
         if (!openCalls.delete(callId)) return;
-        if (status !== 'success') {
+        // A PostToolUse rejection settles the call as an error. A call
+        // cancelled with its turn keeps its command running unless the user
+        // stopped the turn, which stops the turn's moved shells itself.
+        if (status === 'error') {
           this.#stopMovedShell(this.movableShells.get(callId));
         }
         this.#settleMovableShell(callId);

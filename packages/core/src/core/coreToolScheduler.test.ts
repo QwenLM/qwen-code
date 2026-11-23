@@ -16199,12 +16199,16 @@ describe('CoreToolScheduler shell-tool promote integration (#3831 PR-2)', () => 
       (call) =>
         call.request.callId === 'shell-1' && call.status === 'executing',
     );
-    expect(executing).toContainEqual(
-      expect.objectContaining({
-        pid: 12345,
-        promoteAbortController: exposedAc,
-      }),
-    );
+    // The exact controller the shell combined into its signal, not a copy.
+    expect(exposedAc).toBeInstanceOf(AbortController);
+    expect(
+      executing.some(
+        (call) =>
+          call.status === 'executing' &&
+          call.pid === 12345 &&
+          call.promoteAbortController === exposedAc,
+      ),
+    ).toBe(true);
     expect(executing.at(-1)).toMatchObject({
       pid: undefined,
       promoteAbortController: undefined,

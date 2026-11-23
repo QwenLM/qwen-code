@@ -5700,11 +5700,13 @@ describe('ShellTool', () => {
         const onRegistered = vi.fn((shellId: string) =>
           expect(shellId).toBe(registeredEntry().shellId),
         );
+        const onRefused = vi.fn();
         await vi.waitFor(() => expect(setPromoteAc).toHaveBeenCalledTimes(1));
         (setPromoteAc.mock.calls[0][0] as AbortController).abort({
           kind: 'background',
           forUserMessage: true,
           onRegistered,
+          onRefused,
         });
         resolveShellExecution({
           output: '',
@@ -5716,12 +5718,29 @@ describe('ShellTool', () => {
         });
         const result = await promise;
 
-        const { shellId } = registeredEntry();
+        const { shellId, outputPath } = registeredEntry();
         expect(onRegistered).toHaveBeenCalledExactlyOnceWith(shellId);
+        expect(onRefused).not.toHaveBeenCalled();
         expectText(result.llmContent, [
           `Foreground command "npm test" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you. The user's message follows.`,
+          `Output snapshot at promote time saved to: ${outputPath}`,
           `task_stop({ task_id: '${shellId}' })`,
         ]);
+      });
+
+      it('does not offer promotion for a shell that has no process', async () => {
+        // A PTY capacity refusal resolves the handle without a pid and with a
+        // settled, non-aborted result: there is nothing to move.
+        mockShellExecutionService.mockImplementationOnce(() => ({
+          pid: undefined,
+          result: Promise.resolve(
+            shellResult({ output: '', exitCode: 1, aborted: false }),
+          ),
+        }));
+        const { promise, setPromoteAc } = executeWithPromote(build('npm test'));
+        await promise;
+
+        expect(setPromoteAc).not.toHaveBeenCalled();
       });
 
       it('aborting entry.abortController kills the child via SIGTERM/SIGKILL and marks the registry entry cancelled', async () => {
