@@ -7607,7 +7607,7 @@ class QwenAgent implements Agent {
     await this.runInSessionContext(session, async () => {
       const abortReason = getPromptCancelAbortReason(params._meta);
       try {
-        await session.cancelPendingPrompt(abortReason);
+        await session.cancelPendingPrompt(abortReason, true);
       } catch (error) {
         if (!isNotCurrentlyGeneratingCancelError(error)) {
           throw error;
