@@ -1,5 +1,7 @@
 # Hosted Workspace Runtime 隔离设计
 
+[English](2026-11-21-managed-hosted-confinement.md)
+
 [#15081](https://github.com/QwenLM/qwen-code/issues/15081) · [#12380](https://github.com/QwenLM/qwen-code/issues/12380) · [#14667](https://github.com/QwenLM/qwen-code/issues/14667) · [初始设计 #15163](https://github.com/QwenLM/qwen-code/pull/15163)
 
 ## 背景与范围

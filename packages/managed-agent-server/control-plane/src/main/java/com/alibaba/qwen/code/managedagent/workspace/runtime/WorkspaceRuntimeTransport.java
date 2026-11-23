@@ -611,14 +611,6 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             return delegate.release(lease, session);
         }
         Context context = context(lease, session, false);
-        if (confined(session)) {
-            return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
-                    .thenCompose(ignored -> verifyConfinedHandback.apply(context.runtime()))
-                    .thenApply(ignored -> {
-                        ownership.releaseConfined(context.binding(), context.session(), context.runtime());
-                        return true;
-                    });
-        }
         String detach = detachKey(context);
         // RELEASING fences later claims; an absent holder needs no physical
         // release unless a mount handback left the worker's detach owed.
@@ -628,6 +620,14 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 && !detachOwed.contains(detach)
                 && !isHeld(context)) {
             return CompletableFuture.completedFuture(true);
+        }
+        if (confined(session)) {
+            return delegate.activateWorkspace(context.runtime(), context.session(), context.binding(), false)
+                    .thenCompose(ignored -> verifyConfinedHandback.apply(context.runtime()))
+                    .thenApply(ignored -> {
+                        ownership.releaseConfined(context.binding(), context.session(), context.runtime());
+                        return true;
+                    });
         }
         return delegate.release(lease, session).thenCompose(released -> {
             if (!Boolean.TRUE.equals(released)) {

@@ -195,6 +195,8 @@ export class WorkspaceActivations {
         if (
           active &&
           (!executor.isAdmissionOpen ||
+            (executor.isConfined &&
+              executor.isSessionAdmissionClosed(sessionId)) ||
             this.sessions.get(sessionId) === false ||
             (boot.capabilityDigest === RESIDENT_WORKSPACE_CAPABILITY_DIGEST &&
               [...this.sessions].some(

@@ -37,6 +37,7 @@ import { isHostedMemoryTool } from './hosted-memory-session.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 import { readHostedTurnApprovalSelection } from './hosted-approval-selection.js';
 import { isHostedWorkspacePublicShellProfile } from './hosted-workspace-profiles.js';
+import { CONFINED_SHELL_PROFILE } from './managed-private-root.js';
 
 /**
  * #17260: the saved continuation was captured under a public-child
@@ -246,6 +247,17 @@ export async function readHostedApprovalContinuation(
       'Original assistant batch does not match the continuation.',
     );
   const publicShell = plan.publicChildModel !== undefined;
+  const savedDefinition =
+    publicShell ||
+    plan.calls.some((item) => item.call?.name === 'run_shell_command')
+      ? JSON.parse(
+          (await session.resources.read(header.definitionRef)).toString('utf8'),
+        )
+      : undefined;
+  const confinedShell =
+    plan.runtime !== null &&
+    savedDefinition?.toolProfile === CONFINED_SHELL_PROFILE &&
+    savedDefinition.foregroundOnly === true;
   if (publicShell) {
     const model = plan.publicChildModel!;
     parsePublicChildModelRoute(model.route);
@@ -256,12 +268,9 @@ export async function readHostedApprovalContinuation(
       Buffer.byteLength(model.modelId) > 512
     )
       throw new Error('Invalid public child model pin.');
-    const definition = JSON.parse(
-      (await session.resources.read(header.definitionRef)).toString('utf8'),
-    );
     if (
-      definition.publicChildAgentsVersion !== 1 ||
-      !isHostedWorkspacePublicShellProfile(definition.toolProfile)
+      savedDefinition?.publicChildAgentsVersion !== 1 ||
+      !isHostedWorkspacePublicShellProfile(savedDefinition.toolProfile)
     )
       throw new HostedPublicChildRecoveryProfileChanged();
   }
@@ -294,11 +303,13 @@ export async function readHostedApprovalContinuation(
                 item.publicationId,
               ))))) ||
       !item.call ||
+      (confinedShell && item.call.name !== 'run_shell_command') ||
       !(
         NATIVE_TOOLS.has(item.call.name) ||
         isHostedMemoryTool(item.call.name) ||
         (plan.commandStep && item.call.name === 'skill') ||
         publicPlanExit ||
+        (confinedShell && item.call.name === 'run_shell_command') ||
         (publicShell && ['agent', 'run_shell_command'].includes(item.call.name))
       ) ||
       item.call.prompt_id !== promptId ||

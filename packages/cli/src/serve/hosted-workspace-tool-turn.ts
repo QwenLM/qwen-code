@@ -4473,7 +4473,7 @@ export class HostedWorkspaceToolTurn {
           digest: item.requestDigest,
           argsDigest: item.argsDigest,
           inputDigest:
-            item.call.name === 'run_shell_command'
+            item.call.name === 'run_shell_command' && !this.confined
               ? managedToolDigest(input.input)
               : undefined,
           isShell: item.call.name === 'run_shell_command',
@@ -4561,10 +4561,12 @@ export class HostedWorkspaceToolTurn {
       (!commandStep && (this.hooks || this.mcp)) ||
       batch.requests.some(
         (request) =>
+          (this.confined && request.call.name !== 'run_shell_command') ||
           !(
             singlePlanExit ||
             singleQuestion ||
             request.memory ||
+            (this.confined && request.call.name === 'run_shell_command') ||
             (commandStep && request.call.name === 'skill') ||
             (this.publicChildren &&
               ['agent', 'run_shell_command'].includes(request.call.name)) ||

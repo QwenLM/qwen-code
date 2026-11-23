@@ -150,7 +150,8 @@ public class WorkspaceProfileLifecycleVerifier {
                 if (hold(execution) || !execution.getReference().keySet().equals(
                         java.util.Set.of("sessionId", "promptId", "callId", "argsDigest", "dispatchMode"))
                         || !"deferred".equals(execution.getReference().get("dispatchMode"))
-                        || !inlineInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest())) {
+                        || (!notStarted(execution)
+                            && !inlineInputs.contains(execution.getRuntimeSessionId() + ":" + execution.getRequestDigest()))) {
                     unsettled();
                 }
                 continue;

@@ -446,6 +446,44 @@ class ManagedWorkspaceAdmissionTest {
                 .andExpect(jsonPath("$.capabilities.foregroundShell").doesNotHaveJsonPath());
     }
 
+    @Test
+    void confinedShellFlagChangesPreserveReplayButBlockFreshTurns() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String actor = "actor-a";
+        String workspace = "ws-shell";
+        String storage = "storage-shell";
+        register(tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, workspace, actor, true);
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getHarness().setApprovalMode("default");
+        properties.getRuntimeBroker().setProviderOptions(Map.of("private-rootfs", "/private-root-fixture"));
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, storage, "/workspace")));
+        var rules = new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules();
+        var enabled = VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, rules);
+        var tx = new TransactionTemplate(transactionManager);
+        String digest = "sha256:" + "a".repeat(64);
+        String discoveredProfile = tx.execute(status -> enabled.creationToolProfile(tenant, actor, "qwen-code", null, workspace));
+        assertThat(discoveredProfile).isEqualTo(WorkspaceToolProfiles.CONFINED_SHELL);
+        String session = tx.execute(status -> enabled.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant).actorId(actor).agentId("qwen-code")
+                .idempotencyKey("confined").requestDigest(digest)
+                .selection(new WorkspaceSelection(workspace, ".")).build())).sessionId();
+        assertThat(enabled.requireSession(tenant, session).toolProfile()).isEqualTo(WorkspaceToolProfiles.CONFINED_SHELL);
+        var input = List.<Map<String, Object>>of(Map.of("type", "text", "text", "go"));
+        var original = tx.execute(status -> enabled.insertTurnCommand(tenant, "SUBMIT_INPUT",
+                "original", digest, session, input, digest, actor));
+        properties.getHarness().setWorkspaceShellEnabled(false);
+        var disabled = VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties, rules);
+        assertThat(tx.execute(status -> disabled.insertTurnCommand(tenant, "SUBMIT_INPUT",
+                "original", digest, session, input, digest, actor)).turnId()).isEqualTo(original.turnId());
+        assertThatThrownBy(() -> tx.execute(status -> disabled.insertTurnCommand(tenant, "SUBMIT_INPUT",
+                "fresh", digest, session, input, digest, actor)))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"default", "auto-edit"})
     void shellFlagChangesPreserveCreationAndTurnReplayButBlockFreshWorkAndLifecycle(String mode) {

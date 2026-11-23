@@ -129,7 +129,16 @@ final class AgentSessionAdmissions {
         }
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
-        return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
+        boolean external = workspaces.isExternal(workspace.binding());
+        if (external) {
+            return null;
+        }
+        return selectsPrivateRoot(external, sessionPolicies.isSshWorkspace(workspace.binding()))
+                ? WorkspaceToolProfiles.CONFINED_SHELL : pin.toolProfile();
+    }
+
+    private boolean selectsPrivateRoot(boolean external, boolean sshWorkspace) {
+        return privateRootEnabled && !external && !sshWorkspace;
     }
 
     Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
@@ -185,7 +194,7 @@ final class AgentSessionAdmissions {
         AgentSessionPolicies.AgentPin pin = ExternalWorkspaceSessionPolicies.creationPin(external, workspaces, workspace.binding(), resolvedPin, command);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         boolean sshWorkspace = sessionPolicies.isSshWorkspace(workspace.binding());
-        if (privateRootEnabled && !external && !sshWorkspace) {
+        if (selectsPrivateRoot(external, sshWorkspace)) {
             if (!workspaceShellEnabled || !"qwen-code".equals(agentId) || resolvedPin.digest() != null
                     || !WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())
                     || !".".equals(workspace.binding().getCwdRelative()) || worktree != null

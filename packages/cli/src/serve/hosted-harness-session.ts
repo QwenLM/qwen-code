@@ -5801,7 +5801,8 @@ export function registerHostedHarnessSessionRoutes(
       requestedProfile === CONFINED_SHELL_PROFILE &&
       (!contract.lifecycleV2Profiles?.includes(CONFINED_SHELL_PROFILE) ||
         hasHostedExternalExcludedOptions(body, requestedProfile) ||
-        body?.['foregroundOnly'] !== true)
+        ((create || body?.['foregroundOnly'] !== undefined) &&
+          body?.['foregroundOnly'] !== true))
     )
       return error(res, 409, CONFINEMENT_DENIED);
     if (
@@ -7260,7 +7261,8 @@ export function registerHostedHarnessSessionRoutes(
       const savedProfile = definition?.['toolProfile'];
       if (
         savedProfile === CONFINED_SHELL_PROFILE &&
-        (hasHostedExternalExcludedOptions(definition, savedProfile) ||
+        (!contract.lifecycleV2Profiles?.includes(CONFINED_SHELL_PROFILE) ||
+          hasHostedExternalExcludedOptions(definition, savedProfile) ||
           definition?.['foregroundOnly'] !== true ||
           hasHostedExternalExcludedOptions(body, savedProfile))
       ) {

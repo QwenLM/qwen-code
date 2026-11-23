@@ -427,7 +427,7 @@ export class ManagedToolExecutor {
   private capturePreparationStarted = false;
   private historyControlOutcomeUnknown = false;
   private ledgerIntegrityFailed = false;
-  private readonly pendingStarts = new Set<Promise<unknown>>();
+  private readonly pendingStarts = new Map<Promise<unknown>, string>();
   private startFailureObserved = false;
   private readonly fileHistories = new Map<string, ManagedRuntimeFileHistory>();
   private readonly historyControls = new Set<string>();
@@ -522,7 +522,7 @@ export class ManagedToolExecutor {
   async csiRetirementInventory(retirementId: string, sessionId: string) {
     this.sealAdmission(retirementId);
     const joined = await Promise.allSettled([
-      ...this.pendingStarts,
+      ...this.pendingStarts.keys(),
       ...[...this.entries.values()].flatMap((entry) =>
         entry.promise ? [entry.promise] : [],
       ),
@@ -635,7 +635,7 @@ export class ManagedToolExecutor {
         );
       this.closing = true;
       await Promise.all([
-        ...this.pendingStarts,
+        ...this.pendingStarts.keys(),
         ...[...this.entries.values()].flatMap((entry) =>
           entry.promise ? [entry.promise] : [],
         ),
@@ -684,7 +684,7 @@ export class ManagedToolExecutor {
         );
       return Promise.resolve(history.state());
     }
-    return this.trackStart(() =>
+    return this.trackStart(sessionId, () =>
       this.controlFileHistoryAdmitted(ownerSessionId, sessionId, operation),
     );
   }
@@ -804,7 +804,9 @@ export class ManagedToolExecutor {
   async readWorkspaceContext(
     sessionId: string,
   ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
-    return this.trackStart(() => this.readWorkspaceContextAdmitted(sessionId));
+    return this.trackStart(sessionId, () =>
+      this.readWorkspaceContextAdmitted(sessionId),
+    );
   }
 
   async admitsProjectSkillPath(
@@ -1021,10 +1023,14 @@ export class ManagedToolExecutor {
     this.providerSessions.delete(sessionId);
   }
 
+  isSessionAdmissionClosed(sessionId: string): boolean {
+    return this.closedSessions.has(sessionId);
+  }
+
   closeConfinedSessionAdmission(sessionId: string): boolean {
     this.closedSessions.add(sessionId);
     return (
-      this.pendingStarts.size === 0 &&
+      !Array.from(this.pendingStarts.values()).includes(sessionId) &&
       ![...this.entries.values()].some(
         (entry) =>
           entry.reference.sessionId === sessionId &&
@@ -1064,7 +1070,7 @@ export class ManagedToolExecutor {
     input: Record<string, unknown>,
     measure?: true,
   ): Promise<ManagedToolResultPayload> {
-    return this.trackStart(() =>
+    return this.trackStart(reference.sessionId, () =>
       this.executeAdmitted(reference, toolName, input, measure),
     );
   }
@@ -1075,18 +1081,6 @@ export class ManagedToolExecutor {
     input: Record<string, unknown>,
     measure?: true,
   ): Promise<ManagedToolResultPayload> {
-    if (
-      this.isConfined &&
-      (measure || toolName !== ShellTool.Name || !admitsConfinedShell(input))
-    )
-      return {
-        executionStatus: 'not_started',
-        responseParts: [],
-        error: {
-          type: CONFINEMENT_DENIED,
-          message: 'Only confined foreground Shell is admitted.',
-        },
-      };
     if (
       this.options.sshForegroundOnly &&
       toolName === ShellTool.Name &&
@@ -1181,6 +1175,18 @@ export class ManagedToolExecutor {
       }
       return join(existing, reference, toolName, inputJson);
     }
+    if (
+      this.isConfined &&
+      (measure || toolName !== ShellTool.Name || !admitsConfinedShell(input))
+    )
+      return {
+        executionStatus: 'not_started',
+        responseParts: [],
+        error: {
+          type: CONFINEMENT_DENIED,
+          message: 'Only confined foreground Shell is admitted.',
+        },
+      };
     this.assertAdmissionOpen();
     const tools =
       input['managedExtension'] === undefined
@@ -1282,7 +1288,9 @@ export class ManagedToolExecutor {
       readonly measure?: true;
     },
   ): Promise<ManagedToolV3View> {
-    return this.trackStart(() => this.executeV3Admitted(request));
+    return this.trackStart(request.reference.sessionId, () =>
+      this.executeV3Admitted(request),
+    );
   }
 
   private async executeV3Admitted(
@@ -2309,7 +2317,7 @@ export class ManagedToolExecutor {
       }
     }
     await Promise.allSettled([
-      ...this.pendingStarts,
+      ...this.pendingStarts.keys(),
       ...[...this.entries.values()].flatMap((entry) =>
         entry.promise ? [entry.promise] : [],
       ),
@@ -2415,14 +2423,17 @@ export class ManagedToolExecutor {
     ]);
   }
 
-  private trackStart<T>(action: () => Promise<T>): Promise<T> {
+  private trackStart<T>(
+    sessionId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
     if (this.closing) {
       return Promise.reject(
         new ManagedToolUnavailableError('Managed Runtime worker is closing.'),
       );
     }
     const pending = action();
-    this.pendingStarts.add(pending);
+    this.pendingStarts.set(pending, sessionId);
     void pending.then(
       () => this.pendingStarts.delete(pending),
       () => {

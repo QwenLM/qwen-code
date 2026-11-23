@@ -627,7 +627,7 @@ public class RuntimeHarnessDrainTest {
                 Supplier<CompletionStage<Void>> drain = () -> authority == null
                         ? broker.drainHarnessSession("tenant", "harness")
                         : broker.drainHarnessResources("tenant", "harness", authority, false);
-                mountCommand("mount", "--bind", sibling.toString(), leaf.toString());
+                bindMount(sibling, leaf);
                 try {
                     var rejected = assertThrows(ExecutionException.class,
                             () -> drain.get().toCompletableFuture().get(10, TimeUnit.SECONDS));
@@ -656,7 +656,7 @@ public class RuntimeHarnessDrainTest {
                 assertTrue(canary.isAlive());
 
                 Files.createDirectory(leaf);
-                mountCommand("mount", "--bind", sibling.toString(), leaf.toString());
+                bindMount(sibling, leaf);
                 try {
                     var replayed = restored.stopDrained(retired).toCompletableFuture().get(5, TimeUnit.SECONDS);
                     assertTrue(replayed.matches(retired));
@@ -696,7 +696,7 @@ public class RuntimeHarnessDrainTest {
                 }
 
                 Path procs = delegated.resolve("qwen-runtime-" + unit.resourceId()).resolve("cgroup.procs");
-                mountCommand("mount", "--bind", procs.toString(), procs.toString());
+                bindMount(procs, procs);
                 try {
                     mountCommand("mount", "-o", "remount,bind,ro", procs.toString());
                     var refused = assertThrows(ExecutionException.class,
@@ -723,8 +723,31 @@ public class RuntimeHarnessDrainTest {
 
     private static void mountCommand(String... args) throws Exception {
         var process = new ProcessBuilder(args).inheritIO().start();
-        assertTrue(process.waitFor(5, TimeUnit.SECONDS));
-        assertEquals(0, process.exitValue());
+        try {
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS));
+            assertEquals(0, process.exitValue());
+        } finally {
+            if (process.isAlive()) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    private static void bindMount(Path source, Path target) throws Exception {
+        try {
+            mountCommand("mount", "--bind", source.toString(), target.toString());
+        } catch (Exception | AssertionError failure) {
+            try {
+                mountCommand("umount", target.toString());
+            } catch (Exception | AssertionError cleanupFailure) {
+                failure.addSuppressed(cleanupFailure);
+            }
+            if (failure instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            throw failure;
+        }
     }
 
     private static void cleanupDelegation(Path delegated) throws Exception {

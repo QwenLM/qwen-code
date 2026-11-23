@@ -973,6 +973,70 @@ const reference = {
   callId: 'call-a',
   argsDigest: managedToolDigest(input),
 };
+
+describe('confined Shell executor', () => {
+  const success = {
+    executionStatus: 'success' as const,
+    responseParts: [{ type: 'text' as const, text: 'original' }],
+  };
+
+  function executor(
+    gate = Promise.resolve(),
+    confinedShell = vi.fn(async () => success),
+  ) {
+    return new ManagedToolExecutor(
+      async ({ sessionId }) => {
+        await gate;
+        return {
+          sessionId,
+          directory: '/workspace',
+          tools: new Map(),
+          admitsDirectory: () => true,
+        };
+      },
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { confinedShell },
+    );
+  }
+
+  it('keeps the original result when a changed replay is refused', async () => {
+    const launch = vi.fn(async () => success);
+    const runtime = executor(undefined, launch);
+    const shell = 'run_shell_command';
+    expect(await runtime.execute(reference, shell, input)).toEqual(success);
+    await expect(
+      runtime.execute(reference, shell, { ...input, is_background: true }),
+    ).rejects.toBeInstanceOf(ManagedToolConflictError);
+    expect(await runtime.execute(reference, shell, input)).toEqual(success);
+    expect(launch).toHaveBeenCalledTimes(1);
+  });
+
+  it('fences only the Session whose pending start could still launch', async () => {
+    const gate = deferred();
+    const launch = vi.fn(async () => success);
+    const runtime = executor(gate.promise, launch);
+    const pending = runtime.execute(reference, 'run_shell_command', input);
+
+    expect(runtime.closeConfinedSessionAdmission('other-session')).toBe(true);
+    expect(runtime.closeConfinedSessionAdmission(reference.sessionId)).toBe(
+      false,
+    );
+    expect(runtime.isSessionAdmissionClosed(reference.sessionId)).toBe(true);
+    gate.resolve();
+    await expect(pending).rejects.toBeInstanceOf(ManagedToolConflictError);
+    expect(runtime.closeConfinedSessionAdmission(reference.sessionId)).toBe(
+      true,
+    );
+    expect(launch).not.toHaveBeenCalled();
+  });
+});
+
 const capture = {
   tenantId: 'tenant-a',
   sessionId: 'session-a',

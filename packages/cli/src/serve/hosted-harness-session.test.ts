@@ -33,6 +33,7 @@ import {
   type SseAdmissionCaps,
 } from './daemon-status.js';
 import { getSseOccupancy } from './sse-occupancy.js';
+import { PRIVATE_ROOT_CAPABILITY_DIGEST } from './managed-private-root.js';
 import type { Part } from '@google/genai';
 import supertest from 'supertest';
 import {
@@ -731,6 +732,7 @@ async function app(
     coldOpenLimit?: number;
   },
   caps?: SseAdmissionCaps,
+  lifecycleV2Profiles = ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
 ) {
   const result = express();
   result.use(express.json());
@@ -738,7 +740,7 @@ async function app(
     `sha256:${'a'.repeat(64)}`,
     BOOT_ID,
 
-    ['hosted-workspace-shell/1', 'hosted-workspace-mcp/1'],
+    lifecycleV2Profiles,
     instanceId,
   );
   const contract = extensionPackages
@@ -20235,6 +20237,39 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).post(`/session/${admittedId}/detach`))
       .set('X-Qwen-Client-Id', loaded.body.clientId as string)
       .expect(204);
+  });
+
+  it('inherits confined foreground-only on load and rechecks cold capability', async () => {
+    const profile = 'hosted-workspace-confined-shell/1';
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    const server = await app(true, undefined, true, undefined, undefined, [
+      profile,
+    ]);
+    const load = (listener: Server, options: Record<string, unknown> = {}) =>
+      headers(supertest(listener).post(`/session/${SESSION_ID}/load`)).send({
+        managedSessionStore: store(),
+        passiveManagedRuntimeRecovery: true,
+        ...options,
+      });
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: profile,
+        approvalMode: 'default',
+        foregroundOnly: true,
+      })
+      .expect(200);
+    await load(server).expect(200);
+    await load(server, { foregroundOnly: false }).expect(409);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const disabled = await app(true);
+    const refused = await load(disabled).expect(409);
+    expect(refused.body.code).toBe('managed_runtime_confinement_denied');
+    await load(server).expect(200);
   });
 
   it.each([
@@ -47251,8 +47286,15 @@ describe('idle suspension', () => {
     }
   });
 
-  // A write_file approval the model raises once; only a resumed Turn ends.
-  function mockApprovalTurn(): void {
+  // An approval the model raises once; only a resumed Turn ends.
+  function mockApprovalTurn(confined = false): void {
+    if (confined) {
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(PRIVATE_ROOT_CAPABILITY_DIGEST);
+    }
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
       async function (this: HostedWorkspaceBroker) {
         this.runtime = {
@@ -47281,9 +47323,11 @@ describe('idle suspension', () => {
         if (resumeFromToolResults)
           return { text: 'resumed', model: 'test-model' };
         const call = {
-          name: 'write_file',
+          name: confined ? 'run_shell_command' : 'write_file',
           callId: 'park-original-call',
-          args: { file_path: 'notes.txt', content: 'hello' },
+          args: confined
+            ? { command: 'pwd' }
+            : { file_path: 'notes.txt', content: 'hello' },
           isClientInitiated: false,
           prompt_id: PROMPT_ID,
         };
@@ -47310,13 +47354,17 @@ describe('idle suspension', () => {
     server: Server,
     prompt: unknown[] = [{ type: 'text', text: 'write notes' }],
     deadlineMs?: number,
+    confined = false,
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        toolProfile: 'hosted-workspace-files/1',
+        toolProfile: confined
+          ? 'hosted-workspace-confined-shell/1'
+          : 'hosted-workspace-files/1',
+        ...(confined ? { foregroundOnly: true } : {}),
         approvalMode: 'default',
         approvalTimeoutMs: 60_000,
       })
@@ -47368,17 +47416,38 @@ describe('idle suspension', () => {
     );
   }
 
-  it('parks a recoverable approval and resumes it through cold recovery', async () => {
+  const exerciseColdApprovalRecovery = async (confined: boolean) => {
     state.wakeDispatch = true;
     state.actionParking = true;
     state.wakeStamps.length = 0;
-    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    state.approvalSelections.set(SESSION_ID, {
+      mode: 'default',
+      revision: 0,
+    });
     const park = vi.spyOn(HostedApprovalWaiters.prototype, 'park');
-    mockApprovalTurn();
+    mockApprovalTurn(confined);
     try {
-      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const lifecycle = [
+        'hosted-workspace-shell/1',
+        'hosted-workspace-confined-shell/1',
+      ];
+      const createHarness = () =>
+        app(
+          true,
+          undefined,
+          true,
+          { idleSuspendMs: 150 },
+          undefined,
+          lifecycle,
+        );
+      const server = await createHarness();
       // The Turn deadline lands before the 60s approval expiry.
-      const clientId = await promptApproval(server, undefined, 30_000);
+      const clientId = await promptApproval(
+        server,
+        undefined,
+        30_000,
+        confined,
+      );
       await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
         timeout: 5000,
       });
@@ -47412,7 +47481,7 @@ describe('idle suspension', () => {
         parkedTurn: {
           promptId: PROMPT_ID,
           wakeAt: deadline,
-          approvalRevision: 0,
+          ...(confined ? {} : { approvalRevision: 0 }),
         },
       });
       const requestId = journal.events.findLast(
@@ -47420,13 +47489,14 @@ describe('idle suspension', () => {
           event.kind === 'action.changed' &&
           event.payload['state'] === 'requested',
       )!.payload['requestId'] as string;
+      const recovered = confined ? await createHarness() : server;
       const loaded = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/load`),
+        supertest(recovered).post(`/session/${SESSION_ID}/load`),
       )
         .send({ managedSessionStore: store(), driveRuntimeRecovery: true })
         .expect(200);
       await headers(
-        supertest(server).post(
+        supertest(recovered).post(
           `/session/${SESSION_ID}/actions/${requestId}/resolve`,
         ),
       )
@@ -47440,7 +47510,7 @@ describe('idle suspension', () => {
       await vi.waitFor(
         async () => {
           expect(
-            (await statusOf(server, loaded.body.clientId as string)).body,
+            (await statusOf(recovered, loaded.body.clientId as string)).body,
           ).toMatchObject({ hasActivePrompt: false, recoveryBlocked: false });
         },
         { timeout: 5000 },
@@ -47467,7 +47537,7 @@ describe('idle suspension', () => {
       await vi.waitFor(
         async () => {
           expect(
-            (await statusOf(server, loaded.body.clientId as string)).status,
+            (await statusOf(recovered, loaded.body.clientId as string)).status,
           ).toBe(404);
         },
         { timeout: 5000 },
@@ -47477,7 +47547,12 @@ describe('idle suspension', () => {
       state.actionParking = false;
       state.approvalSelections.clear();
     }
-  });
+  };
+
+  it.each([false, true])(
+    'parks a recoverable approval and resumes it through cold recovery (confined: %s)',
+    exerciseColdApprovalRecovery,
+  );
 
   it('denies a parked approval after cold recovery without executing the sealed call', async () => {
     state.wakeDispatch = true;

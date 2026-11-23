@@ -1627,7 +1627,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         context.lock();
         try {
             bindingRegistry.requireReadySessionRecord(context);
-            transport.requireExecutionAdmission(context.lease(), context.session());
             Map<String, Object> safeReference = immutableMap(reference,
                     "reference");
             if (WorkspaceExecutionProfile.isConfined(context.session().getScope().getCapabilityDigest())
@@ -1662,12 +1661,19 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 throw invalid("runtime_reference_invalid",
                         "reference must be well-formed text");
             }
-            try {
-                record = bindingRepository.admitExecution(sessionRepository,
-                        executionRepository, candidate);
-            } catch (IllegalArgumentException exception) {
-                throw conflict("runtime_execution_conflict",
-                        "execution identity is already in use", exception);
+            record = executionRepository.findByIdempotencyKey(idempotencyKey);
+            if (record == null) {
+                transport.requireExecutionAdmission(context.lease(), context.session());
+                try {
+                    record = bindingRepository.admitExecution(sessionRepository,
+                            executionRepository, candidate);
+                } catch (IllegalArgumentException exception) {
+                    throw conflict("runtime_execution_conflict",
+                            "execution identity is already in use", exception);
+                }
+            } else if (record.sameRequest(candidate) && dispatch && (record.getState() == ToolExecutionRecord.State.PREPARED
+                    || record.getState() == ToolExecutionRecord.State.DISPATCHING)) {
+                transport.requireExecutionAdmission(context.lease(), context.session());
             }
             if (!record.sameRequest(candidate)) {
                 throw conflict("runtime_idempotency_conflict",

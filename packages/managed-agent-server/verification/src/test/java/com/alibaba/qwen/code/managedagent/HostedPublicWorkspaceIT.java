@@ -878,6 +878,7 @@ class HostedPublicWorkspaceIT {
         assertThat(jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE session_id = ?", String.class, session))
                 .isEqualTo("hosted-workspace-confined-shell/1");
         for (int turn = 1; turn <= 2; turn++) {
+            int answeredBefore = answered.size();
             if (turn == 2) {
                 request("POST", "/v1/agents/sessions/" + session + "/events",
                         Map.of("type", "agent.session.input.message", "input", input), "confined-second", "actor", 202);
@@ -894,10 +895,12 @@ class HostedPublicWorkspaceIT {
                 assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_runtime_session WHERE harness_session_id = ?"
                         + " AND execution_storage_key IS NOT NULL", Integer.class, session)).isZero();
             });
+            assertThat(answered.size() - answeredBefore).isEqualTo(1);
         }
         assertThat(Files.readString(root.resolve("shell-proof.txt"))).isEqualTo("once\nonce\n");
         assertThat(root.resolve("detached-started")).exists();
-        assertThat(root.resolve("detached-survived")).doesNotExist();
+        await().during(Duration.ofSeconds(4)).atMost(Duration.ofSeconds(8))
+                .untilAsserted(() -> assertThat(root.resolve("detached-survived")).doesNotExist());
         String binding = jdbc.queryForObject("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ?"
                 + " AND isolation_key = ?", String.class, tenant, session);
         assertThat(jdbc.queryForObject("SELECT capability_digest FROM ma_runtime_binding WHERE binding_id = ?",

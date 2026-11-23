@@ -386,7 +386,10 @@ public final class LocalProcessRuntimeProvisioner
 
     @Override
     public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
-        if (WorkspaceExecutionProfile.isConfined(binding.getRequest().getScope().getCapabilityDigest())
+        // The Broker commits the handle before launch; its drain claim fences late startup.
+        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
+                && binding.getAttestationGeneration() == 0;
+        if (!createIntent && WorkspaceExecutionProfile.isConfined(binding.getRequest().getScope().getCapabilityDigest())
                 && !RuntimeProviderKinds.isLocalProcessCgroup(binding.getResourceHandle())) {
             return CompletableFuture.failedFuture(LocalRuntimeStore.blocked());
         }
@@ -397,9 +400,6 @@ public final class LocalProcessRuntimeProvisioner
                 || binding.getProvisionSeed() == null) {
             return OperatorRuntimeRecovery.super.stopDrained(binding);
         }
-        // The Broker commits the handle before launch; its drain claim fences late startup.
-        boolean createIntent = binding.getResourceHandle() == null && binding.getLease() == null
-                && binding.getAttestationGeneration() == 0;
         return submit(() -> store.locked(binding.getRequest(),
                 binding.getProvisionSeed(), binding.getResourceHandle(), createIntent, (resource, registration) -> {
                 boolean originalBootStopped = trustedRebootRecovery && store.rebooted(registration);
