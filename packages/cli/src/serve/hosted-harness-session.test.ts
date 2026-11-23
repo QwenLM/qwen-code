@@ -49407,7 +49407,9 @@ describe('idle suspension', () => {
   });
 
   // The crash aftermath must leave a checkpoint the next turn can start
-  // from: a wait left at await_action failed every later wake turn.
+  // from: a wait left at await_action failed every later wake turn. A wait
+  // with no saved continuation (an uncaptured batch) is one the pump cannot
+  // resume, so it still meets the aftermath.
   it('settles a monitor wake that died in its approval wait so its continuation can run', async () => {
     domainEnablement.monitorRun = true;
     state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
@@ -49436,6 +49438,9 @@ describe('idle suspension', () => {
       throw new Error('The waiting Turn unexpectedly continued.');
     });
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const saved = vi
+      .spyOn(approvalContinuation, 'findHostedApprovalContinuation')
+      .mockResolvedValue(undefined);
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -49557,6 +49562,7 @@ describe('idle suspension', () => {
         .set('X-Qwen-Client-Id', loaded.body.clientId as string)
         .expect(204);
     } finally {
+      saved.mockRestore();
       waiting.mockRestore();
       state.approvalSelections.clear();
     }
