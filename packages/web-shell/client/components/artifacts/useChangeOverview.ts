@@ -92,8 +92,11 @@ export function useChangeOverview(
         // A `review`-provenance binding is a PR merely mentioned in a
         // review/verify command, not this session's delivery; exclude it so a
         // foreign PR's scale is not presented as the session's own work.
-        // Legacy bindings without a source stay included.
-        boundPrs = (summary?.prs ?? []).filter((pr) => pr.source !== 'review');
+        // Legacy bindings without a source stay included. Summary bindings
+        // are oldest-first; present the latest delivery unit first.
+        boundPrs = (summary?.prs ?? [])
+          .filter((pr) => pr.source !== 'review')
+          .reverse();
         baseBranch =
           summary?.branch?.baseBranch ?? summary?.worktree?.baseBranch;
         // The immutable commit the session started from. The session's own
