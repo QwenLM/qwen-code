@@ -766,9 +766,12 @@ jobs:
       }}
     outputs:
       version_refusal: '${{ steps.push_release_branch.outputs.version_refusal }}'
+      reused_commit: '${{ steps.push_release_branch.outputs.reused_commit }}'
     # Serialize each real/dry release tag; never cancel an active publish.
     concurrency:
-      group: 'release-publish-${{ needs.prepare.outputs.release_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
+      # Group by npm channel (not release tag) so a newer version cannot
+      # publish on the same channel while an older version is resuming.
+      group: 'release-publish-${{ needs.prepare.outputs.npm_tag }}-${{ needs.prepare.outputs.is_dry_run }}'
       cancel-in-progress: false
     timeout-minutes: 90
     environment:
@@ -849,6 +852,8 @@ jobs:
           IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
+          RELEASE_SHA: '${{ needs.prepare.outputs.release_sha }}'
+          NPM_TAG: '${{ needs.prepare.outputs.npm_tag }}'
           CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
         run: '.release-workflow/.github/scripts/run-release-step.sh push-release-branch'
 
@@ -864,7 +869,9 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Build Bundle and Prepare Package'
-        if: "${{ needs.build_release.result != 'success' }}"
+        # A resume rebuilds from the adopted commit through these two steps
+        # so the trusted reset/checkout pair also covers the retry path.
+        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: '.release-workflow/.github/scripts/run-release-step.sh build-package'
@@ -873,7 +880,7 @@ jobs:
       - *checkout_release_workflow_scripts
 
       - name: 'Build Standalone Archives'
-        if: "${{ needs.build_release.result != 'success' }}"
+        if: "${{ needs.build_release.result != 'success' || steps.push_release_branch.outputs.reused_commit == 'true' }}"
         env:
           RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
           QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"

@@ -60,7 +60,7 @@ public final class ToolPublicationRetentionClockFixtureMain {
             jdbc.update("DELETE FROM ma_event_stream WHERE tenant_id = ?", tenant);
             jdbc.update("DELETE FROM ma_session_head WHERE tenant_id = ?", tenant);
             jdbc.update("DELETE FROM ma_session WHERE tenant_id = ?", tenant);
-            jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_key = ?", ToolPublicationRetentionStore.hash(tenant));
+            jdbc.update("DELETE FROM ma_tenant_guard WHERE guard_domain = 'output_publication' AND tenant_id = ?", tenant);
         }
     }
 

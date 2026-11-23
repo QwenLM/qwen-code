@@ -3490,7 +3490,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
+          'Allow the bundled ripgrep binary. When true (the default), a healthy system-level "rg" is preferred and the bundled binary is used only if PATH rg is missing or cannot run. When false, only the system-level "rg" command is used. This setting is only effective when tools.useRipgrep is true.',
         showInDialog: false,
       },
       workflowsEnabled: {
@@ -4919,6 +4919,21 @@ const SETTINGS_SCHEMA = {
           'the worktrees directory itself) are rejected. Missing ' +
           'source dirs and existing destination paths are silently ' +
           'skipped (no overwrite, no failure).',
+        showInDialog: false,
+      },
+      maxRetained: {
+        type: 'number',
+        label: 'Maximum Retained Session Worktrees',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 15,
+        description:
+          'Reserved for the future worktree retention sweep tracked in ' +
+          '#17237. This value is not yet applied. Deleting a chat snapshots ' +
+          'its worktree before removal when capture is required. The ' +
+          'retention sweep and restore-on-reopen are not implemented in this ' +
+          'slice. Does not affect tool/agent worktrees, which keep their ' +
+          'existing cleanup semantics.',
         showInDialog: false,
       },
     },

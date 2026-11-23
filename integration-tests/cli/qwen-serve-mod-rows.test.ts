@@ -68,6 +68,7 @@ describe('Mod rows through the daemon', () => {
     writeFileSync(
       path.join(plugin, 'hooks/register.js'),
       `let renders = 0;
+      let thoughts = 0;
       let turns = 0;
       export function register(on) {
         on('session.start', async ($, e, next) => {
@@ -85,6 +86,8 @@ describe('Mod rows through the daemon', () => {
           }
           return next({ ...e, props: { ...e.props, text: 'zh ' + ++renders + ': ' + e.props.text } });
         });
+        on('ui.render', { component: 'Thinking' }, ($, e, next) =>
+          next({ ...e, props: { ...e.props, text: 'zh thought ' + ++thoughts + ': ' + e.props.text } }));
       }`,
     );
 
@@ -101,11 +104,9 @@ describe('Mod rows through the daemon', () => {
         return { content: 'Rewritten answer' };
       }
       if (body['stream'] !== true) return { content: '{}' };
-      return {
-        content: messages.includes('Produce another reply')
-          ? 'Answer 2'
-          : 'Answer 1',
-      };
+      return messages.includes('Produce another reply')
+        ? { content: 'Answer 2' }
+        : { reasoningChunks: ['Plan ', 'the answer.'], content: 'Answer 1' };
     });
     const env = {
       HOME: home,
@@ -204,17 +205,39 @@ describe('Mod rows through the daemon', () => {
         status: 'answered',
         props: { text: 'zh 2: Answer 1', isFirstOfReply: false },
       });
-      // A site the Web Shell does not draw yet is no row of the session's.
+      // A thought is a row of its own, answered once for every client.
+      const thought = {
+        component: 'Thinking',
+        props: { text: 'Plan the answer.' },
+      };
+      const rewrittenThought = {
+        status: 'answered',
+        props: { text: 'zh thought 1: Plan the answer.' },
+      };
+      expect(
+        await client.askSessionModRow(session.sessionId, thought, asked),
+      ).toEqual(rewrittenThought);
+      expect(await client.askSessionModRow(session.sessionId, thought)).toEqual(
+        rewrittenThought,
+      );
+      // A site the Web Shell does not draw is no row of the session's.
       expect(
         await client.askSessionModRow(
           session.sessionId,
-          { component: 'Thinking', props: { text: 'Answer 1' } },
+          { component: 'AbovePrompt', props: { view: 'prompt' } },
           asked,
         ),
       ).toEqual({ status: 'unhooked' });
-      await expect(
-        client.askSessionModRow(session.sessionId, invalidRow, asked),
-      ).rejects.toMatchObject(invalidRowError);
+      for (const invalid of [
+        invalidRow,
+        {
+          component: 'Thinking',
+          props: { text: 'Plan the answer.', isFirstOfReply: true },
+        },
+      ])
+        await expect(
+          client.askSessionModRow(session.sessionId, invalid, asked),
+        ).rejects.toMatchObject(invalidRowError);
 
       const logs: unknown[] = [];
       const done = new AbortController();
@@ -288,6 +311,15 @@ describe('Mod rows through the daemon', () => {
         'Answer 2',
         '[Mod row-probe] completed 2',
       ]);
+      // The replayed thought is the row the page asked for.
+      expect(
+        replay
+          .flatMap((event) => normalizeDaemonEvent(event))
+          .flatMap((event) =>
+            event.type === 'thought.text.delta' ? [event.text] : [],
+          )
+          .join(''),
+      ).toBe(thought.props.text);
       const pendingRow = client
         .askSessionModRow(
           session.sessionId,

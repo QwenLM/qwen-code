@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.springframework.jdbc.core.JdbcTemplate;
 
@@ -70,12 +69,9 @@ final class JournalLifecycleAuthorization {
         } else if (!"DRAINING"
                 .equals(
                         jdbc.queryForObject(
-                                "SELECT phase FROM ma_session_head WHERE tenant_key = ? AND"
-                                    + " harness_key = ? AND tenant_id = ? AND harness_session_id ="
-                                    + " ?",
+                                "SELECT phase FROM ma_session_head WHERE tenant_id = ? AND"
+                                    + " harness_session_id = ?",
                                 String.class,
-                                RuntimeAdmissionFences.harnessDrainKey(tenantId),
-                                RuntimeAdmissionFences.harnessDrainKey(sessionId),
                                 tenantId,
                                 sessionId))) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_hooks_unsettled");

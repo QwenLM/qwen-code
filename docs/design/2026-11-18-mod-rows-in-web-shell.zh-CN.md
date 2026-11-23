@@ -2,7 +2,7 @@
 
 [English](2026-11-18-mod-rows-in-web-shell.md) | [简体中文](2026-11-18-mod-rows-in-web-shell.zh-CN.md)
 
-状态：已实现。本文让 Web Shell 绘制 Mod 对回复行的改写，在 #13749 跟踪。它建立在 [ACP 会话中的 Mod](2026-11-18-mods-in-acp-sessions.zh-CN.md) 和 [Mod 回复行](2026-11-10-mod-assistant-message-rows.zh-CN.md) 之上。思考行在下一步。
+状态：已实现。本文让 Web Shell 绘制 Mod 对回复行的改写，在 #13749 跟踪。它建立在 [ACP 会话中的 Mod](2026-11-18-mods-in-acp-sessions.zh-CN.md) 和 [Mod 回复行](2026-11-10-mod-assistant-message-rows.zh-CN.md) 之上。思考行在 [Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 中完成。
 
 ## 问题与现状
 
@@ -19,10 +19,10 @@ Mod 能在 ACP 会话中运行之后，Web Shell 会话会加载工作区的 Mod
 
 非目标：
 
-- 思考行（下一步）、prompt 上方的横条，以及代替整行绘制的树。
+- 思考行（由 [Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 加入）、prompt 上方的横条，以及代替整行绘制的树。
 - 在 `$.ui.invalidate('ui.render')` 时重绘页面已经持有的行。
 - ACP-over-HTTP 传输上的 Mod 行，以及其他 ACP 客户端（Zed、VS Code companion）中的 Mod 行。
-- 移除 `MessageRewriteMiddleware`。思考行也完成后再移除。
+- 移除 `MessageRewriteMiddleware`，[Web Shell 中的 Mod 思考行](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md) 将其作为一项单独的决定。
 
 ## 兼容契约
 
@@ -41,7 +41,7 @@ Mod 能在 ACP 会话中运行之后，Web Shell 会话会加载工作区的 Mod
 
 ### 能力与 surface
 
-daemon 的 bridge 在 ACP `initialize` 的客户端能力中写明它的 Web Shell 绘制哪些行站点：`_meta["qwen.modRows"]: ["AssistantMessage"]`。客户端绘制行站点时，子进程让该客户端每个会话的 Mod 在 `desktop` surface 上运行，并提供其中自己能作答的站点。Zed 和 VS Code companion 不发送这项能力，它们的会话保持原样。surface 在加载时读取，所以它属于 daemon，而不是当时打开的某个页面：经 daemon 由其他客户端驱动的会话也报告 `desktop`。daemon 在 `/capabilities` 中通告 `session_mod_rows`，Web Shell 只在此时发起请求。desktop 上 `isInteractive` 为 true，因为 Web Shell 的 prompt 前有人。
+daemon 的 bridge 在 ACP `initialize` 的客户端能力中声明 Web Shell 绘制的行站点。本阶段声明的是 `_meta["qwen.modRows"]: ["AssistantMessage"]`。[思考行设计](2026-11-20-mod-thinking-rows-in-web-shell.zh-CN.md)在列表中加入了 `Thinking`。客户端绘制行站点时，子进程让该客户端每个会话的 Mod 在 `desktop` surface 上运行，并提供其中自己能作答的站点。Zed 和 VS Code companion 不发送这项能力，它们的会话保持原样。surface 在加载时读取，所以它属于 daemon，而不是当时打开的某个页面：经 daemon 由其他客户端驱动的会话也报告 `desktop`。daemon 在 `/capabilities` 中通告 `session_mod_rows`，Web Shell 只在此时发起请求。desktop 上 `isInteractive` 为 true，因为 Web Shell 的 prompt 前有人。
 
 Mod 宿主把"是不是 ACP 会话"和 surface 分开，所以 desktop 会话仍遵循 ACP 宿主的规则：不触发 prompt 和工具中间件，日志经 ACP 通知发出，上下文数字取自会话自己的 chat。
 
@@ -77,7 +77,7 @@ SDK 将每个 `mod_log` 显示为一行信息 `[Mod <plugin>] <text>`，与终�
 - bridge、daemon 路由和 SDK：`initialize` 声明站点，行被转发。路由检查请求体，对不在运行中的会话返回 404。SDK 认识 `mod_log`，把它画在正在流式输出的回复下方，并发出行请求。
 - Web Shell：asker 一次请求一行，跳过已释放的行，保存答案，失败后重新请求，收到 unhooked 后停止。回复行绘制改写、复制原文；只在完成且在屏幕上时请求，离开屏幕后保留答案。列表标出回复行及其 `isFirstOfReply`（跳过思考和 Mod 日志行），没有能力时一行都不标。命令输出带上它的来源。
 
-一个集成测试运行装有 Mod、且 Mod 关闭的真实 `qwen serve`。能力已通告，会话答 unhooked。通过设置路由打开 Mod 时响应说需要重启，但下一个会话就加载了 Mod，一次 prompt 完成。行被改写；第二个客户端请求同一行时得到第一次的答案，hook 的计数不增加；标志不同则再次运行 hook。`Thinking` 答 unhooked，不匹配的 props 失败，事件流中带有 `mod_log` 行 `start desktop true ["desktop"]`。对没有该能力的客户端，ACP 集成测试仍看到 `null`。
+一个集成测试运行装有 Mod、且 Mod 关闭的真实 `qwen serve`。能力已通告，会话答 unhooked。通过设置路由打开 Mod 时响应说需要重启，但下一个会话就加载了 Mod，一次 prompt 完成。行被改写；第二个客户端请求同一行时得到第一次的答案，hook 的计数不增加；标志不同则再次运行 hook。Web Shell 不绘制的站点答 unhooked，不匹配的 props 失败，事件流中带有 `mod_log` 行 `start desktop true ["desktop"]`。对没有该能力的客户端，ACP 集成测试仍看到 `null`。
 
 在真实 Web Shell 中做了同样的浏览器检查，回复分多段流式输出，中间有一次读文件。两个回复块在实时阶段各渲染一次；刷新后、在第二个标签页中、以及重新展开已结束的回合时，都显示第一次的答案，复制得到原文。
 
@@ -90,4 +90,3 @@ SDK 将每个 `mod_log` 显示为一行信息 `[Mod <plugin>] <text>`，与终�
 - `$.ui.invalidate('ui.render')` 不会重绘页面已经持有的行；页面要到刷新后才会重新请求。之后可以加一个通知，告诉页面重新请求。
 - `mod_log` 行与其他帧一样占用会话事件 ring 的位置。
 - 在途请求计入空闲清理所检查的会话工作。hook 等待模型时，用户主动关闭会话可以取消请求。
-- Web Shell 会话中，`Thinking` 的 hook 加载时不会收到"不会运行"的诊断（因为会话为回复行触发 `ui.render`），在思考行完成之前也不会被调用。

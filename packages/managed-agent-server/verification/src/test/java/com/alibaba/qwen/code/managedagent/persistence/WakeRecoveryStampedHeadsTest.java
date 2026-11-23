@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -36,22 +35,26 @@ class WakeRecoveryStampedHeadsTest {
     private long revision;
     private long sequence;
 
-    @BeforeEach
-    void setup() {
+    protected DataSource dataSource() {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:wake-stamped-" + UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+        return source;
+    }
+
+    @BeforeEach
+    void setup() {
+        var source = dataSource();
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create,"
                 + " gmt_modified) VALUES ('tenant', 'session', 'qwen-code', 'ACTIVE', 1, 1)");
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision,"
                         + " committed_sequence, compacted_through_revision, writer_generation, activation_epoch,"
                         + " writer_lease_until, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', 'session', 'session', 'MANAGED_SESSION',"
-                        + " 'SEALED', 0, 0, 0, 1, 0, 1, 1, 1)",
-                ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"));
+                        + " VALUES ('tenant', 'workspace', 'session', 'session', 'MANAGED_SESSION',"
+                        + " 'SEALED', 0, 0, 0, 1, 0, 1, 1, 1)");
     }
 
     @Test
@@ -123,14 +126,14 @@ class WakeRecoveryStampedHeadsTest {
     private void copySession(String session, String source) {
         jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, status, gmt_create, gmt_modified)"
                 + " VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 1, 1)", session);
-        jdbc.update("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_session_head (tenant_id, workspace_id,"
                         + " session_id, harness_session_id, head_kind, state, journal_revision, committed_sequence,"
                         + " compacted_through_revision, writer_generation, activation_epoch,"
-                        + " writer_lease_until, gmt_create, gmt_modified) SELECT tenant_key, ?, tenant_id, workspace_id,"
+                        + " writer_lease_until, gmt_create, gmt_modified) SELECT tenant_id, workspace_id,"
                         + " ?, ?, head_kind, state, journal_revision, committed_sequence, compacted_through_revision,"
                         + " writer_generation, activation_epoch, writer_lease_until, gmt_create, gmt_modified"
                         + " FROM ma_session_head WHERE session_id = ?",
-                ManagedSchemaKeys.key(session), session, session, "session");
+                session, session, "session");
         for (var row : jdbc.queryForList("SELECT * FROM ma_session_journal_tx WHERE session_id = ?", "session")) {
             byte[] bytes = new String((byte[]) row.get("record_bytes"), StandardCharsets.UTF_8)
                     .replace("\"sessionId\":\"session\"", "\"sessionId\":\"" + session + "\"")

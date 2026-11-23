@@ -24,6 +24,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
+import { resolveDaemonExportChannel } from '../config/acp-channel-fallback.js';
 import type {
   DaemonMetricsBucket,
   DaemonPerfSnapshot,
@@ -52,6 +53,7 @@ import {
   MutableOriginAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import { gzipJsonResponses } from './gzip-response.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import {
   CredentialStore,
@@ -231,7 +233,6 @@ import {
   registerHostedPackagePreparation,
   HOSTED_PACKAGE_PREPARATION_PREFIX,
 } from './hosted-package-preparation.js';
-import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -933,6 +934,13 @@ export function createServeApp(
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
+  // Resolved once per daemon from the frozen launch env; both transcript
+  // export surfaces (workspace sessions and standalone conversations) share
+  // it so a co-resident daemon cannot relabel either.
+  const exportChannel = resolveDaemonExportChannel(
+    opts.profile,
+    daemonEnvAtBoot,
+  );
   const maxRegisteredWorkspaces = resolveMaxRegisteredWorkspaces(
     opts.maxRegisteredWorkspaces,
     daemonEnvAtBoot,
@@ -2062,6 +2070,7 @@ export function createServeApp(
     );
     standaloneSessionService = new StandaloneSessionService({
       daemonLog,
+      exportChannel,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -2630,12 +2639,19 @@ export function createServeApp(
 
   installJsonBodyParser(app);
 
+  // Gzip JSON API responses for clients that negotiate it (#6181). Mounted
+  // after authenticate + rate limiter on purpose: auth/rate-limit rejections
+  // are tiny bodies from (possibly unauthenticated) callers and must not pay
+  // a compression tax. Web Shell session loads stream multi-megabyte
+  // transcript JSON — the wrapper compresses those while leaving SSE, static
+  // assets, and attachment downloads untouched (see gzip-response.ts).
+  app.use(gzipJsonResponses());
+
   const hostedHarness =
     opts.profile === 'hosted-harness'
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
-  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   let stopHostedPackagePreparation: (() => Promise<void>) | undefined;
   if (hostedHarness) {
     const broker =
@@ -2645,17 +2661,6 @@ export function createServeApp(
             token: opts.managedRuntimeBrokerToken,
           }
         : undefined;
-    if (opts.hostedCsiSessionStoreUrl && broker) {
-      const privateSessions = registerHostedCsiSessionRoutes(
-        app,
-        hostedHarness,
-        opts.hostedCsiSessionStoreUrl,
-        broker,
-        (id) => ordinary.owns(id),
-      );
-      stopHostedCsiSessions = privateSessions.stopLocal;
-      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
-    }
     const ordinary = registerHostedHarnessSessionRoutes(
       app,
       hostedHarness,
@@ -3683,6 +3688,7 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    exportChannel,
     // Late-bound: the refresh timer is started before this app exists, so the
     // serve root installs the hook on locals and it is read per restore.
     onSessionRestored: ({ workspaceCwd, sessionId }) => {
@@ -4583,7 +4589,6 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
-        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

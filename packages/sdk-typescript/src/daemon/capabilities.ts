@@ -72,6 +72,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_sub_session_send: { since: 'v1' },
   session_prompt: { since: 'v1' },
   session_turn_status: { since: 'v1' },
+  // `POST /session/:id/feedback` records a per-turn satisfied/not-satisfied
+  // mark into the owning session's telemetry pipeline (`user_feedback`).
+  // Clients pre-flight this tag before offering the marks; older daemons
+  // keep the answer footer unchanged.
+  session_turn_feedback: { since: 'v1' },
   // Prompts and mid-turn messages reference session-scoped image and file
   // attachments by their stored filename.
   session_attachments: { since: 'v1' },
@@ -601,6 +606,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Trusted, memory-only live-state snapshots for selected workspaces in one
   // request (`POST /sessions/live-state`).
   workspace_session_live_state_batch: { since: 'v1' },
+  // Restart recovery: `POST /sessions/recovery` lists sessions whose newest
+  // prompt ledger record did not settle, and `POST /sessions/recovery/continue`
+  // resumes a selected batch. The scan is read-only; continuation reuses the
+  // ordinary restore and live-session-owner continuation paths.
+  restart_recovery: { since: 'v1' },
   // Workspace-qualified metadata updates for active, inactive, and archived
   // persisted sessions.
   workspace_session_metadata: { since: 'v1' },

@@ -13,7 +13,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -453,28 +452,24 @@ public final class HostedGateTestSupport {
                 .registerSingleton("toolPublicationOss", new AliyunObjectStoreClient(oss)));
     }
 
-    // The extension-record JDBC read, led by the Session's scope key: the
+    // The extension-record JDBC read, led by the Session's (tenant_id, session_id): the
     // unindexed tenant+session-only form scans every byte the lane has
     // written so far, so the record read leads with the same key.
     static List<JsonNode> extensionRecords(JdbcTemplate jdbc, String tenant,
             String sessionId, String domain) {
         try {
-            String scope = ManagedSessionStore.sessionScopeKey(tenant,
-                    sessionId);
             var rows = jdbc.queryForList(
                     "SELECT record_id, record_resource_id FROM"
-                            + " ma_session_record WHERE session_scope_key = ?"
-                            + " AND tenant_id = ? AND session_id = ? AND"
+                            + " ma_session_record WHERE tenant_id = ? AND session_id = ? AND"
                             + " domain = ? ORDER BY gmt_create, record_id",
-                    scope, tenant, sessionId, domain);
+                    tenant, sessionId, domain);
             var records = new ArrayList<JsonNode>();
             for (var row : rows) {
                 var resources = jdbc.queryForList(
                         "SELECT CONVERT(inline_bytes USING utf8mb4) AS body"
-                                + " FROM ma_resource WHERE session_scope_key"
-                                + " = ? AND resource_id = ? AND tenant_id = ?"
-                                + " AND session_id = ?", scope,
-                        row.get("record_resource_id"), tenant, sessionId);
+                                + " FROM ma_resource WHERE tenant_id = ?"
+                                + " AND session_id = ? AND resource_id = ?",
+                        tenant, sessionId, row.get("record_resource_id"));
                 assertThat(resources).as(domain + " record body").hasSize(1);
                 records.add(JSON.readTree(
                         resources.getFirst().get("body").toString()));

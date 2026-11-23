@@ -1077,6 +1077,15 @@ vi.mock('../config/loadedSettingsAdapter.js', () => ({
     return settings;
   }),
 }));
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/loggers.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/telemetry/loggers.js')
+    >()),
+    logUserFeedback: vi.fn(),
+  }),
+);
 vi.mock('../config/config.js', async () => {
   const { APPROVAL_MODES, ApprovalMode } = await import(
     '@qwen-code/qwen-code-core'
@@ -1202,6 +1211,7 @@ import {
   createManagedExternalToolGuard,
 } from './acpAgent.js';
 import type { LoadedSettings } from '../config/settings.js';
+import { logUserFeedback } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
 import type { CliArgs } from '../config/config.js';
 import {
   AuthType,
@@ -3787,6 +3797,150 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  describe('sessionFeedback ext method', () => {
+    async function startFeedbackAgent(sessionId: string) {
+      await setupSessionMocks(sessionId);
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      await agent.initialize({ clientCapabilities: {} });
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      return { agent, agentPromise };
+    }
+
+    it('maps up to GOOD(3) and emits with the session Config identity', async () => {
+      const { agent, agentPromise } = await startFeedbackAgent('feedback-up');
+
+      const result = await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        { sessionId: 'feedback-up', promptId: 'prompt-1', rating: 'up' },
+      );
+
+      expect(result).toEqual({ recorded: true });
+      expect(logUserFeedback).toHaveBeenCalledTimes(1);
+      const [, event] = vi.mocked(logUserFeedback).mock.calls[0];
+      expect(event).toMatchObject({
+        'event.name': 'user_feedback',
+        session_id: 'feedback-up',
+        rating: 3,
+        model: 'm',
+        approval_mode: 'default',
+        prompt_id: 'prompt-1',
+      });
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('maps down to BAD(1)', async () => {
+      const { agent, agentPromise } = await startFeedbackAgent('feedback-down');
+
+      const result = await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        { sessionId: 'feedback-down', promptId: 'prompt-2', rating: 'down' },
+      );
+
+      expect(result).toEqual({ recorded: true });
+      expect(logUserFeedback).toHaveBeenCalledTimes(1);
+      const [, event] = vi.mocked(logUserFeedback).mock.calls[0];
+      expect(event).toMatchObject({ rating: 1, prompt_id: 'prompt-2' });
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('skips emission when ui.enableUserFeedback is false', async () => {
+      const { agent, agentPromise } = await startFeedbackAgent(
+        'feedback-suppressed',
+      );
+      vi.mocked(loadSettings).mockReturnValue(
+        makeSessionSettings({
+          mcpServers: {},
+          ui: { enableUserFeedback: false },
+        }),
+      );
+
+      const result = await agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionFeedback,
+        {
+          sessionId: 'feedback-suppressed',
+          promptId: 'prompt-3',
+          rating: 'up',
+        },
+      );
+
+      expect(result).toEqual({ recorded: false });
+      expect(logUserFeedback).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('rejects invalid payloads without emitting', async () => {
+      const { agent, agentPromise } =
+        await startFeedbackAgent('feedback-invalid');
+      const invalid: Array<{
+        payload: Record<string, unknown>;
+        message: string;
+      }> = [
+        { payload: { rating: 'up' }, message: 'Invalid or missing promptId' },
+        {
+          payload: { promptId: '', rating: 'up' },
+          message: 'Invalid or missing promptId',
+        },
+        {
+          payload: { promptId: 42, rating: 'up' },
+          message: 'Invalid or missing promptId',
+        },
+        {
+          payload: { promptId: 'prompt-4', rating: 'fine' },
+          message: "`rating` must be 'up' or 'down'",
+        },
+        {
+          payload: { promptId: 'prompt-4', rating: null },
+          message: "`rating` must be 'up' or 'down'",
+        },
+      ];
+      for (const { payload, message } of invalid) {
+        await expect(
+          agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionFeedback, {
+            sessionId: 'feedback-invalid',
+            ...payload,
+          }),
+        ).rejects.toThrow(message);
+      }
+      expect(logUserFeedback).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
+
+    it('rejects an unknown session without emitting', async () => {
+      const { agent, agentPromise } =
+        await startFeedbackAgent('feedback-known');
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionFeedback, {
+          sessionId: 'feedback-unknown',
+          promptId: 'prompt-5',
+          rating: 'up',
+        }),
+      ).rejects.toThrow('Session not found');
+      expect(logUserFeedback).not.toHaveBeenCalled();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    });
   });
 
   it('rechecks local holds after active turns drain during conditional close', async () => {
@@ -16144,11 +16298,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('loads persisted workflow snapshots into the session task history', async () => {
+  it('recovers workflow history only on the first workflow-inclusive tasks request', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
+    const siblingSessionId = '22222222-2222-2222-2222-222222222222';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.isWorkflowsEnabled.mockReturnValue(true);
-    Object.assign(innerConfig, {
+    const taskRegistries = {
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         getAll: vi.fn().mockReturnValue([]),
       }),
@@ -16161,7 +16316,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getWorkflowRunRegistry: vi.fn().mockReturnValue({
         list: vi.fn().mockReturnValue([]),
       }),
-    });
+    };
+    Object.assign(innerConfig, taskRegistries);
     const persistedSnapshot = {
       runId: 'wf_saved',
       description: 'Review and fix',
@@ -16181,8 +16337,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       endTime: 2_000,
     };
     mockListWorkflowSnapshots
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([persistedSnapshot]);
+      .mockResolvedValueOnce([persistedSnapshot])
+      .mockResolvedValueOnce([persistedSnapshot])
+      .mockResolvedValueOnce([]);
 
     const agentPromise = runAcpAgent(
       mockConfig,
@@ -16197,17 +16354,47 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const siblingConfig = await setupSessionMocks(siblingSessionId);
+    siblingConfig.isWorkflowsEnabled.mockReturnValue(true);
+    Object.assign(siblingConfig, taskRegistries);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    expect(mockClaimInterruptedWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
     const legacyTasks = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionTasks,
       { sessionId },
     );
-    const tasks = await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
-      sessionId,
-      includeWorkflows: true,
-    });
-
     expect(legacyTasks).toMatchObject({ sessionId, tasks: [] });
-    expect(tasks).toMatchObject({
+    expect(mockClaimInterruptedWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
+
+    const readWorkflowTasks = (id = sessionId) =>
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTasks, {
+        sessionId: id,
+        includeWorkflows: true,
+      });
+    innerConfig.isWorkflowsEnabled.mockReturnValue(false);
+    await expect(readWorkflowTasks()).resolves.toMatchObject({
+      sessionId,
+      tasks: [],
+    });
+    expect(mockClaimInterruptedWorkflowRuns).not.toHaveBeenCalled();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
+    innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+
+    let finishRecovery!: () => void;
+    mockClaimInterruptedWorkflowRuns.mockImplementationOnce(
+      () =>
+        new Promise<[]>((resolve) => {
+          finishRecovery = () => resolve([]);
+        }),
+    );
+    const first = readWorkflowTasks();
+    const concurrent = readWorkflowTasks(siblingSessionId);
+    expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
+    expect(mockListWorkflowSnapshots).not.toHaveBeenCalled();
+    finishRecovery();
+    const workflowTasks = {
       sessionId,
       tasks: [
         {
@@ -16218,10 +16405,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           isHistorical: true,
         },
       ],
+    };
+    await expect(first).resolves.toMatchObject(workflowTasks);
+    await expect(concurrent).resolves.toMatchObject({
+      ...workflowTasks,
+      sessionId: siblingSessionId,
     });
-    expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(2);
-    // A run the previous process left unfinished becomes history before the
-    // session first reads it.
+    await expect(readWorkflowTasks()).resolves.toMatchObject({
+      sessionId,
+      tasks: [],
+    });
+    expect(mockListWorkflowSnapshots).toHaveBeenCalledTimes(3);
     expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledOnce();
     expect(mockClaimInterruptedWorkflowRuns).toHaveBeenCalledWith(innerConfig);
     expect(
@@ -20689,6 +20883,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
     innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+    const { isWorkflowRunPersistenceActive } = await import(
+      '@qwen-code/qwen-code-core/agents/workflow-run-registry.js'
+    );
+    mockClaimInterruptedWorkflowRun.mockImplementationOnce(
+      async (config: Config, runId: string) => {
+        expect(isWorkflowRunPersistenceActive(config, runId)).toBe(false);
+      },
+    );
     const agentPromise = runAcpAgent(
       mockConfig,
       makeSessionSettings(),
@@ -20711,6 +20913,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         action: 'delete-history',
       }),
     ).resolves.toEqual({ changed: true });
+    expect(mockClaimInterruptedWorkflowRun).toHaveBeenCalledWith(
+      innerConfig,
+      'wf_abcd',
+    );
     expect(lastSessionMock!.deleteWorkflowHistory).toHaveBeenCalledWith(
       'wf_abcd',
     );

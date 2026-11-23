@@ -1305,6 +1305,12 @@ export interface BridgeSessionSummary {
   pendingInteractionCount?: number;
   /** True when the most recently completed turn failed. */
   hasTurnError?: boolean;
+  /**
+   * Persisted prompt-ledger evidence that the session's latest prompt was cut
+   * off mid-flight; a list-surface hint that opening the session can offer
+   * "Continue execution". Absent without ledger evidence; never `false`.
+   */
+  needsContinuation?: boolean;
   /** Present for live sessions in status and workspace-list responses. */
   turnError?: {
     message: string;
@@ -1521,12 +1527,28 @@ export interface BridgeClientRequestContext {
   onPromptAdmitted?: () => void;
   /** Internal cancellation while a guarded prompt waits for its ACP write. */
   dispatchSignal?: AbortSignal;
+  /**
+   * For continuation requests, resolve accepted only after the first dispatch
+   * fence succeeds and the ACP write begins. Do not wait for the turn to finish.
+   */
+  requireDispatchAck?: boolean;
   /** Internal signal when the prompt write begins and may reach the ACP child. */
   onPromptWriteStarted?: () => void;
   /** Internal signal after the bridge writes the queued prompt to ACP. */
   onPromptDispatched?: () => void;
   /** Internal authorization check when dequeuing a prompt and before its ACP write. */
   assertCanDispatch?: () => void;
+  /**
+   * Internal authorization check after the agent classifies a continuation
+   * and before the bridge admits its turn. HTTP routes never receive it as
+   * request input; an old workspace generation may throw to refuse the turn.
+   */
+  assertCanContinue?: () => void;
+  /**
+   * If supplied, admit only this actual interruption classification, not a
+   * stale classification previously read by a recovery-listing caller.
+   */
+  expectedInterruption?: 'interrupted_prompt' | 'interrupted_turn';
   /** Approval mode required for the delegated turn. */
   expectedApprovalMode?: ApprovalMode;
   /** The live mode before the switch. Older children still enforce expectedApprovalMode. */
@@ -1911,6 +1933,21 @@ export interface BridgeTurnStatus {
   resultTruncated?: boolean;
   resultCode?: TurnResultCode;
   originatorClientId?: string;
+}
+
+/** A per-turn satisfied/not-satisfied mark bound for telemetry. */
+export interface BridgeSessionFeedbackRequest {
+  /** The turn's admitted prompt id — the daemon's per-turn identity. */
+  promptId: string;
+  rating: 'up' | 'down';
+}
+
+export interface BridgeSessionFeedbackResult {
+  /**
+   * False when the session workspace's `ui.enableUserFeedback` setting
+   * suppresses collection; true once the event reached `logUserFeedback`.
+   */
+  recorded: boolean;
 }
 
 export interface BridgeDaemonStatusLimits {
@@ -2922,6 +2959,8 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
   ): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    /** Present only when admission refused the actual interruption type. */
+    reason?: 'interruption_mismatch';
     /**
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
@@ -3088,6 +3127,20 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     row: { component: string; props: Record<string, unknown> },
     context?: BridgeClientRequestContext,
   ): Promise<BridgeModRowAnswer>;
+
+  /**
+   * Record a per-turn satisfied/not-satisfied mark into the owning
+   * session's telemetry pipeline. Thin pass-through to
+   * `qwen/control/session/feedback`: the ACP child maps the rating onto
+   * `UserFeedbackRating` and calls `logUserFeedback` with its own session
+   * Config, so model and approval mode come from the session's authority,
+   * not the caller. Throws `SessionNotFoundError` for unknown ids.
+   */
+  rateSessionTurn(
+    sessionId: string,
+    req: BridgeSessionFeedbackRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<BridgeSessionFeedbackResult>;
 
   /**
    * Run a stateless, tool-free text generation request in the ACP child and
