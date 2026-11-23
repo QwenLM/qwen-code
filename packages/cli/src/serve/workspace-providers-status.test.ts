@@ -819,6 +819,156 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(true);
   });
 
+  it('projects Kimi K3 reasoning for a custom OpenAI-compatible route', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'kimi-k3.1-pro' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'kimi-k3.1-pro',
+            baseUrl: 'https://gateway.example.test/v1',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'kimi-k3.1-pro');
+
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'max',
+        options: [{ value: 'low' }, { value: 'high' }, { value: 'max' }],
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: 'max',
+            thinkingMandatory: true,
+          },
+        },
+      },
+    ]);
+  });
+
+  it.each([
+    {
+      name: 'inferred K3 with a samplingParams effort',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: { samplingParams: { reasoning_effort: 'low' } },
+      currentValue: 'low',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'partial K3 with a winning extra_body effort',
+      modelId: 'kimi-k3.1-pro',
+      capabilities: { reasoning: { defaultEffort: 'high' } },
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'high' },
+        extra_body: { reasoning_effort: 'low' },
+      },
+      currentValue: 'low',
+      defaultEffort: 'high',
+    },
+    {
+      name: 'inferred K3 with a final null placeholder',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'low' },
+        extra_body: { reasoning_effort: null },
+      },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'inferred K3 with a final empty placeholder',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: { reasoning_effort: 'low' },
+        extra_body: { reasoning_effort: '' },
+      },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'inferred K3 with an explicit nested effort',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: {
+        samplingParams: {
+          reasoning: { effort: 'high' },
+          reasoning_effort: 'low',
+        },
+      },
+      currentValue: 'high',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'mandatory K3 with a raw off value',
+      modelId: 'kimi-k3',
+      capabilities: undefined,
+      generationConfig: { extra_body: { reasoning_effort: 'none' } },
+      currentValue: 'max',
+      defaultEffort: 'max',
+    },
+    {
+      name: 'K3 with a complete explicit profile',
+      modelId: 'kimi-k3',
+      capabilities: {
+        reasoning: {
+          profile: 'openai-reasoning',
+          efforts: ['low', 'high'],
+          defaultEffort: 'high',
+        },
+      },
+      generationConfig: { extra_body: { reasoning_effort: 'low' } },
+      currentValue: 'high',
+      defaultEffort: 'high',
+      completeProfile: true,
+    },
+  ])('projects the OpenRouter raw effort for $name', async (testCase) => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: testCase.modelId },
+      modelProviders: {
+        openai: [
+          {
+            id: testCase.modelId,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            capabilities: testCase.capabilities,
+            generationConfig: testCase.generationConfig,
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === testCase.modelId);
+    expect(model?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: testCase.currentValue,
+        _meta: {
+          'qwenCode/reasoning': {
+            defaultEffort: testCase.defaultEffort,
+            ...('completeProfile' in testCase
+              ? {}
+              : { thinkingMandatory: true }),
+          },
+        },
+      },
+    ]);
+  });
+
   it.each([
     {
       persisted: 'medium' as const,
