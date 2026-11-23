@@ -41,7 +41,7 @@ export type HostedActionParkRefusal =
   | 'other_unsettled_input'
   | 'action_not_requested'
   | 'no_continuation'
-  | 'prompt_text_missing'
+  | 'original_prompt_missing'
   | 'approval_selection_unavailable'
   | 'approval_mode_allows';
 
