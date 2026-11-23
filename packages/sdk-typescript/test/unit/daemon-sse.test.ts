@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseSseStream, SseFramingError } from '../../src/daemon/sse.js';
+import {
+  parseNamedSseStream,
+  parseSseStream,
+  SseFramingError,
+  type NamedSseFrame,
+} from '../../src/daemon/sse.js';
 import type { DaemonEvent } from '../../src/daemon/types.js';
 
 function bodyFromString(s: string): ReadableStream<Uint8Array> {
@@ -434,5 +439,65 @@ describe('parseSseStream', () => {
     const events = await collect(parseSseStream(stream));
     expect(events).toHaveLength(1);
     expect(events[0]?.data as string).toBe('中');
+  });
+
+  it('parseNamedSseStream shares CRLF framing, split multi-byte tail flush, abort cancellation, and 16 MiB cap', async () => {
+    const crlfAndSplit =
+      ': comment\r\n\r\nevent: start\r\ndata: {"v":1,"total":2}\r\n\r\nevent: session\ndata: {"v":1,"title":"中文"}';
+    const bytes = new TextEncoder().encode(crlfAndSplit);
+    const splitAt = bytes.length - 1;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, splitAt));
+        controller.enqueue(bytes.slice(splitAt));
+        controller.close();
+      },
+    });
+    const frames: NamedSseFrame[] = [];
+    for await (const frame of parseNamedSseStream(stream)) {
+      frames.push(frame);
+    }
+    expect(frames).toEqual([
+      { event: 'start', data: { v: 1, total: 2 } },
+      { event: 'session', data: { v: 1, title: '中文' } },
+    ]);
+
+    // Abort while parked on read() exits cleanly
+    const abortController = new AbortController();
+    const parkedBody = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        abortController.signal.addEventListener('abort', () => {
+          streamController.error(
+            new DOMException('BodyStreamBuffer was aborted', 'AbortError'),
+          );
+        });
+      },
+    });
+    const parkedIter = parseNamedSseStream(parkedBody, abortController.signal);
+    const pendingNext = parkedIter.next();
+    abortController.abort();
+    await expect(pendingNext).resolves.toEqual({
+      done: true,
+      value: undefined,
+    });
+
+    // Overflowing 16 MiB without separator throws SseFramingError naming parseNamedSseStream
+    const hugeChunk = new TextEncoder().encode(
+      'x'.repeat(16 * 1024 * 1024 + 8),
+    );
+    const hugeBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(hugeChunk);
+      },
+    });
+    await expect(async () => {
+      for await (const _ of parseNamedSseStream(hugeBody)) {
+        // unreachable
+      }
+    }).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SseFramingError &&
+        err.message.includes('parseNamedSseStream'),
+    );
   });
 });

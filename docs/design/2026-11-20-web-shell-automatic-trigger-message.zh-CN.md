@@ -2,6 +2,10 @@
 
 [English](2026-11-20-web-shell-automatic-trigger-message.md) | [简体中文](2026-11-20-web-shell-automatic-trigger-message.zh-CN.md)
 
+## 实现状态
+
+已在 [#17970](https://github.com/QwenLM/qwen-code/pull/17970) 合入，时间为 2026-11-22，合并提交为 [`2806006c8e`](https://github.com/QwenLM/qwen-code/commit/2806006c8e)。下文的问题描述记录该实现之前的行为。
+
 ## 问题与现状
 
 自调节 `/loop` 唤醒或 cron 触发会以带 `source: 'loop'` 或 `source: 'cron'` 的 user 角色记录进入 transcript。其 prompt 并不是用户当时亲自输入的消息。

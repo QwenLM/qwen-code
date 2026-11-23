@@ -2,6 +2,10 @@
 
 [English](2026-11-20-web-shell-automatic-trigger-message.md) | [简体中文](2026-11-20-web-shell-automatic-trigger-message.zh-CN.md)
 
+## Implementation status
+
+Implemented in [#17970](https://github.com/QwenLM/qwen-code/pull/17970) on 2026-11-22 ([`2806006c8e`](https://github.com/QwenLM/qwen-code/commit/2806006c8e)). The problem description below captured the behavior before that merge.
+
 ## Problem and current state
 
 A self-paced `/loop` wakeup or a cron fire is recorded as a user-role transcript entry with `source: 'loop'` or `source: 'cron'`. Its prompt is not a message that the person typed at that moment.
@@ -108,7 +112,7 @@ Add scoped styles to `UserMessage.module.css`, reusing the existing scheduled-ta
 
 ## Validation plan
 
-The actual CI merge tree at `71161df9` measured 2,154,340 bytes before the alias-preserving expansion fix. The subsequent metadata-boundary and schema-narrowing work measured **2,154,390 bytes** at that stage. With upstream ChatSurface merged, both normal production builds and the CI merge-tree builds report **2,155,023 bytes** of identity-injected JavaScript and **2,428,500 bytes** of separated component CSS. The preceding 2,154,390 measurement is historical and does not describe the new shared inputs. The warning baseline is therefore **`2,155,023`**, with a hard ceiling of **`2,155,453` bytes**, preserving 430 bytes for toolchain variance. These values reflect the actual current merge, not a test-mode or branch-only estimate, and the recalibration does not hide growth or waive a real conflict by arbitrarily raising the ceiling.
+The actual CI merge tree at `71161df9` measured 2,154,340 bytes before the alias-preserving expansion fix. The subsequent metadata-boundary, attachment-reference-validation, and schema-narrowing work measured **2,154,390 bytes** at that stage. With upstream ChatSurface merged, both normal production builds and the CI merge-tree builds report **2,155,023 bytes** of identity-injected JavaScript and **2,428,500 bytes** of separated component CSS. The preceding 2,154,390 measurement is historical and does not describe the new shared inputs. The warning baseline is therefore **`2,155,023`**, with a hard ceiling of **`2,155,453` bytes**, preserving 430 bytes for toolchain variance. These values reflect the actual current merge, not a test-mode or branch-only estimate, and the recalibration does not hide growth or waive a real conflict by arbitrarily raising the ceiling.
 
 - Unit-test both `cron` and `loop`, ordinary/unknown sources, per-run priority, disclosure, short-echo suppression, lazy built-in rendering, attachments, editing, content changes, attachment-count changes, and editing-state changes that synchronously collapse the outgoing detail before parser work, empty content, document expansion, and preservation of real `Loop tick — ` prefixed instructions in interactive and document views. Verify that switching only the source aliases (`cron` ↔ `loop`) keeps already-expanded details without rebuilding their renderer. Verify that the automatic-trigger title is localized for every supported catalog.
 - Verify that changing only the source on an existing `MessageItem` updates the forwarded props, and that an ordinary expanded message becomes compact when its source becomes automatic.
