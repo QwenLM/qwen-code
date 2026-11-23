@@ -55,6 +55,7 @@ import {
 } from '../../utils/subagentNameContext.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import type { ToolCallRequestInfo } from '../../core/turn.js';
 import { ToolMode } from '../../tools/code-mode.js';
 import {
   getAgentName,
@@ -89,7 +90,7 @@ import {
   type WaitingToolCall,
 } from '../../core/coreToolScheduler.js';
 import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call-args.js';
-import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import { Kind, ToolConfirmationOutcome } from '../../tools/tools.js';
 import { runAgentLoop } from '../../core/agent-loop.js';
 import * as agentLoopRollout from '../../config/agent-loop-rollout.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
@@ -2181,6 +2182,290 @@ describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
         await processing;
         scheduleSpy.mockRestore();
       }
+      checkToolSteps();
+    },
+  );
+});
+
+describe('AgentCore truncation output budget', () => {
+  // A response the output limit cut off: total − prompt = 12288 − 8192 = 4096
+  // tokens spent of the 8192 the send layer used.
+  const CUT_OFF_USAGE = {
+    totalTokenCount: 12288,
+    promptTokenCount: 8192,
+    candidatesTokenCount: 4096,
+  };
+  const BUDGET = { usedTokens: 4096, limitTokens: 8192 };
+  const CUT_OFF_CALL = {
+    id: 'call-cut',
+    name: 'write_file',
+    args: { file_path: 'a.txt', content: 'half-written' },
+  };
+  const TOOLS_LIST = [{ name: 'write_file' } as FunctionDeclaration];
+
+  function buildAgent(
+    shared: boolean,
+    kernel: boolean,
+    overrides: Record<string, unknown> = {},
+  ): AgentCore {
+    return new AgentCore(
+      'truncation-budget-agent',
+      {
+        isUnifiedAgentLoopEnabled: () => shared,
+        getSkipLoopDetection: () => false,
+        isEventBusAgentLoopEnabled: () => kernel,
+        getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
+        getDebugLogger: vi
+          .fn()
+          .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+        getToolOutputBatchBudget: vi
+          .fn()
+          .mockReturnValue(Number.POSITIVE_INFINITY),
+        getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+        getSessionId: vi.fn().mockReturnValue('truncation-budget-session'),
+        ...overrides,
+      } as unknown as Config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+  }
+
+  const CUT_OFF_CHUNK = {
+    functionCalls: [CUT_OFF_CALL],
+    candidates: [
+      {
+        content: { parts: [{ functionCall: CUT_OFF_CALL }] },
+        finishReason: 'MAX_TOKENS',
+      },
+    ],
+    usageMetadata: CUT_OFF_USAGE,
+  };
+
+  /**
+   * Starts a run whose first response streams `firstSend` (a cut-off
+   * `write_file` call by default) and whose later responses just finish.
+   * Returns the run, its controller, and the tool results finalized so far.
+   * A mocked scheduler never completes its batch, so a test aborts the
+   * controller to end the run once it has what it came for.
+   */
+  function startRound(core: AgentCore, firstSend: unknown[] = [CUT_OFF_CHUNK]) {
+    let sent = 0;
+    const chat = {
+      sendMessageStream: async () =>
+        sent++ === 0
+          ? (async function* () {
+              // A bare payload is a model chunk; anything else is a stream
+              // event of its own, such as a retry.
+              for (const event of firstSend) {
+                yield event && typeof event === 'object' && 'type' in event
+                  ? event
+                  : { type: 'chunk', value: event };
+              }
+            })()
+          : streamOf({
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Done.' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              },
+            }),
+      getHistoryToolCallFingerprints: () => [],
+      getLastRequestMaxOutputTokens: () => BUDGET.limitTokens,
+    } as unknown as LlmChat;
+    const responses: Part[] = [];
+    core
+      .getEventEmitter()
+      .on(AgentEventType.TOOL_RESPONSES_FINALIZED, ({ responses: batch }) => {
+        responses.push(
+          ...(batch.flatMap(({ responseParts }) => responseParts) as Part[]),
+        );
+      });
+    // The loop detector is not under test here.
+    const detector = [
+      vi
+        .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
+        .mockReturnValue(false),
+      vi
+        .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+        .mockReturnValue(false),
+      vi
+        .spyOn(LoopDetectionService.prototype, 'recordToolResult')
+        .mockReturnValue(false),
+    ];
+    const controller = new AbortController();
+    const run = core
+      .runReasoningLoop(
+        chat,
+        [{ role: 'user', parts: [{ text: 'Go.' }] }],
+        TOOLS_LIST,
+        controller,
+      )
+      .finally(() => {
+        for (const spy of detector) spy.mockRestore();
+      });
+    return { run, controller, responses };
+  }
+
+  /** The single request a mocked scheduler was given. */
+  async function scheduledRequest(
+    core: AgentCore,
+    firstSend: unknown[] = [CUT_OFF_CHUNK],
+  ): Promise<ToolCallRequestInfo> {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockResolvedValue(undefined);
+    const { run, controller } = startRound(core, firstSend);
+    try {
+      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+      // `schedule` takes one request or a batch; the agent always sends a
+      // batch.
+      const scheduled = scheduleSpy.mock.calls[0]?.[0];
+      if (!Array.isArray(scheduled)) throw new Error('expected a batch');
+      return scheduled[0];
+    } finally {
+      controller.abort();
+      await run;
+      scheduleSpy.mockRestore();
+    }
+  }
+
+  it.each(LOOPS)(
+    'carries the cut response budget to the scheduled request ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
+      const request = await scheduledRequest(buildAgent(shared, kernel));
+
+      // The subagent builds its own requests in place of the Turn's, so the
+      // budget has to reach them as the truncation mark does (#17306).
+      expect(request).toMatchObject({
+        callId: 'call-cut',
+        name: 'write_file',
+        wasOutputTruncated: true,
+        outputBudgetAtTruncation: BUDGET,
+      });
+      checkToolSteps();
+    },
+  );
+
+  // A retried attempt is a new response: the cut attempt's budget must not
+  // be stamped on its calls, as its truncation mark is not.
+  it.each(LOOPS)(
+    'does not carry a cut attempt budget over a retry ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
+      const request = await scheduledRequest(buildAgent(shared, kernel), [
+        CUT_OFF_CHUNK,
+        {
+          type: 'retry',
+          retryInfo: {
+            message: 'retrying',
+            attempt: 1,
+            maxRetries: 3,
+            delayMs: 0,
+            skipDelay: true,
+          },
+        },
+        {
+          functionCalls: [CUT_OFF_CALL],
+          candidates: [
+            { content: { parts: [{ functionCall: CUT_OFF_CALL }] } },
+          ],
+        },
+      ]);
+
+      expect(request).toMatchObject({
+        callId: 'call-cut',
+        wasOutputTruncated: false,
+      });
+      expect(request).not.toHaveProperty('outputBudgetAtTruncation');
+      checkToolSteps();
+    },
+  );
+
+  it.each(LOOPS)(
+    'leaves the budget off when the cut reports only zeroed counts ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
+      const request = await scheduledRequest(buildAgent(shared, kernel), [
+        {
+          functionCalls: [CUT_OFF_CALL],
+          candidates: [
+            {
+              content: { parts: [{ functionCall: CUT_OFF_CALL }] },
+              finishReason: 'MAX_TOKENS',
+            },
+          ],
+          // OpenAI converters stamp every count with `|| 0`.
+          usageMetadata: {
+            totalTokenCount: 0,
+            promptTokenCount: 0,
+            candidatesTokenCount: 0,
+          },
+        },
+      ]);
+
+      expect(request).toMatchObject({
+        callId: 'call-cut',
+        wasOutputTruncated: true,
+      });
+      expect(request).not.toHaveProperty('outputBudgetAtTruncation');
+      checkToolSteps();
+    },
+  );
+
+  it.each(LOOPS)(
+    'leaves the truncation mark and the budget off an uncut response ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
+      const request = await scheduledRequest(buildAgent(shared, kernel), [
+        {
+          functionCalls: [CUT_OFF_CALL],
+          candidates: [
+            { content: { parts: [{ functionCall: CUT_OFF_CALL }] } },
+          ],
+          usageMetadata: CUT_OFF_USAGE,
+        },
+      ]);
+
+      expect(request).toMatchObject({
+        callId: 'call-cut',
+        wasOutputTruncated: false,
+      });
+      expect(request).not.toHaveProperty('outputBudgetAtTruncation');
+      checkToolSteps();
+    },
+  );
+
+  it.each(LOOPS)(
+    'names the spent and limit tokens when refusing a cut-off edit ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
+      const core = buildAgent(shared, kernel, {
+        getToolRegistry: () => ({
+          getTool: vi.fn(),
+          ensureTool: async (name: string) =>
+            name === 'write_file'
+              ? { name, kind: Kind.Edit, build: vi.fn() }
+              : undefined,
+        }),
+      });
+
+      const { run, responses } = startRound(core);
+      await run;
+
+      // The scheduler's own data-loss guard refuses before the tool runs,
+      // and the refusal now tells the model what the cut spent (#17306).
+      expect(JSON.stringify(responses)).toContain(
+        'truncated due to max_tokens limit',
+      );
+      expect(JSON.stringify(responses)).toContain(
+        'used 4096 of the 8192-token output limit',
+      );
       checkToolSteps();
     },
   );

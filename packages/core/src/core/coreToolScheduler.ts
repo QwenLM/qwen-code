@@ -617,6 +617,34 @@ export const INCOMPLETE_ARGS_EDIT_REJECTION =
   'skeleton first and add the rest with incremental edits. ' +
   'Do NOT retry unchanged.';
 
+/**
+ * The sentence a truncation rejection adds when the cut's budget is known:
+ * what the response spent of the output limit and, only when the usage
+ * corroborates the cut (used ≥ half the limit), the advice to size each part
+ * of a split write. A provider can cut far below the configured ceiling
+ * (#16417's own DeepSeek case: cut near 3K against a 64K ceiling), and
+ * telling the model to size parts "well under 64K" when 95% of that budget
+ * was never spent licenses a retry an order of magnitude too large
+ * (#16417 R1-2). Empty for an unknown budget.
+ *
+ * Shared by the scheduler and the ACP session's own executor, which applies
+ * the scheduler's partial-edit guard itself (#17306).
+ */
+export function truncationBudgetNote(
+  budget: { usedTokens: number; limitTokens: number } | undefined,
+): string {
+  if (!budget) return '';
+  const usageCorroboratesCut = budget.usedTokens >= budget.limitTokens / 2;
+  return (
+    ` This response used ${budget.usedTokens} of the ` +
+    `${budget.limitTokens}-token output limit.` +
+    (usageCorroboratesCut
+      ? ` No single response can carry the whole file — size ` +
+        `each part well under that limit.`
+      : '')
+  );
+}
+
 function setToolSpanFailure(
   span: Span,
   failureKind: string,
@@ -3645,26 +3673,9 @@ export class CoreToolScheduler {
             // recorded, for the same reason as the directive below: the
             // numbers vary call-to-call, so folding them into the key would
             // reset the retry count at every truncation (#16417).
-            // The "size each part" guidance is emitted only when the usage
-            // corroborates the cut (used ≥ half the limit) — a provider can
-            // cut far below the configured ceiling (#16417's own DeepSeek
-            // case: cut near 3K against a 64K ceiling), and telling the
-            // model to size parts "well under 64K" when 95% of that budget
-            // was never spent licenses a retry an order of magnitude too
-            // large (#16417 R1-2).
-            const budget = reqInfo.outputBudgetAtTruncation;
-            const usageCorroboratesCut =
-              budget !== undefined &&
-              budget.usedTokens >= budget.limitTokens / 2;
-            const budgetNote =
-              truncated && budget
-                ? ` This response used ${budget.usedTokens} of the ` +
-                  `${budget.limitTokens}-token output limit.` +
-                  (usageCorroboratesCut
-                    ? ` No single response can carry the whole file — size ` +
-                      `each part well under that limit.`
-                    : '')
-                : '';
+            const budgetNote = truncated
+              ? truncationBudgetNote(reqInfo.outputBudgetAtTruncation)
+              : '';
             // The directive is appended after the rejectionMessage key was
             // recorded: recordRetryableToolError prunes the tool's other keys,
             // so folding the directive into the key would reset the count at

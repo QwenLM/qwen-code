@@ -33,6 +33,7 @@ import {
   TOOL_INTERRUPTED_FOR_USER_MESSAGE,
   TRUNCATION_EDIT_REJECTION,
   TRUNCATION_RETRY_LOOP_DIRECTIVE,
+  truncationBudgetNote,
   USER_MESSAGE_INTERRUPT_ABORT_REASON,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
@@ -53,6 +54,7 @@ import {
 import {
   getStructuredErrorCause,
   LlmEventType,
+  outputBudgetAtTruncation,
   type StructuredError,
 } from '@qwen-code/qwen-code-core/core/turn.js';
 import { toolCallArgumentsWereIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
@@ -1002,6 +1004,12 @@ export type DaemonToolLoopState = {
 /** What the send wrapper knows about one model response, for its calls. */
 type ModelResponseFacts = {
   outputTruncated: boolean;
+  /**
+   * What the output limit's cut spent, when both numbers were measured —
+   * the fact `turn.ts` puts on `outputBudgetAtTruncation`. Read only for a
+   * truncated response.
+   */
+  outputBudgetAtTruncation?: ToolCallRequestInfo['outputBudgetAtTruncation'];
   /** Tools whose refused partial edit this response already counted. */
   refusedPartialEdits: Set<string>;
 };
@@ -9435,6 +9443,11 @@ export class Session implements SessionContext {
                 );
                 if (event.value.reason === FinishReason.MAX_TOKENS) {
                   attempt.outputTruncated = true;
+                  // The client records the budget on the round's requests
+                  // before it reports the cut; one response has one budget.
+                  attempt.outputBudgetAtTruncation = toolRequests.find(
+                    (request) => request.outputBudgetAtTruncation !== undefined,
+                  )?.outputBudgetAtTruncation;
                 }
                 break;
               case LlmEventType.Retry:
@@ -11886,6 +11899,10 @@ export class Session implements SessionContext {
               FinishReason.MAX_TOKENS
             ) {
               attempt.outputTruncated = true;
+              attempt.outputBudgetAtTruncation = outputBudgetAtTruncation(
+                event.value.usageMetadata,
+                chat.getLastRequestMaxOutputTokens?.(),
+              );
             }
           } else if (event.type === StreamEventType.COMPRESSED) {
             config.resetWorkflowModeContext?.();
@@ -18203,6 +18220,8 @@ export class Session implements SessionContext {
               : 0;
           const loopProtection = this.config.getLoopProtection();
           const stops = loopProtection === 'stop';
+          // As in the scheduler: the refusal names the budget the cut spent
+          // until the count calls for the retry directive instead (#17306).
           const refusal = await earlyErrorResponse(
             new Error(
               count >= INVALID_PARAMS_REMINDER_AT
@@ -18211,7 +18230,11 @@ export class Session implements SessionContext {
                       ? TRUNCATION_RETRY_LOOP_DIRECTIVE
                       : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
                   }${stops ? ' Another refused write stops this turn.' : ''}`
-                : rejection,
+                : `${rejection}${
+                    outputTruncated
+                      ? truncationBudgetNote(response?.outputBudgetAtTruncation)
+                      : ''
+                  }`,
             ),
             toolName,
             {
