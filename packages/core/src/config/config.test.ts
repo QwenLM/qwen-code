@@ -7745,11 +7745,13 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('follows the env overrides that drive the switches', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless');
-        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless');
+        // Name surfaces whose defaults are off, so each env override shows.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'hosted');
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'acp');
         const config = makeConfig();
-        expect(config.getAgentLoopPath('headless')).toBe('kernel');
-        expect(config.getAgentLoopPath('hosted')).toBe('legacy');
+        expect(config.getAgentLoopPath('acp')).toBe('kernel');
+        expect(config.getAgentLoopPath('hosted')).toBe('shared');
+        expect(config.getAgentLoopPath('ink')).toBe('shared');
       });
 
       it('keeps headless on the shared loop when the kernel is turned off', () => {
