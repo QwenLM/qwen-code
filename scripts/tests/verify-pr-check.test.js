@@ -2086,6 +2086,19 @@ describe('executionApproval host binding', () => {
     }
   });
 
+  it('rejects an unsupported source even with otherwise valid comment approval evidence', () => {
+    const unsupported = commentApproval({ source: 'ci-lane' });
+    expect(
+      executionApprovalErrors(
+        JSON.stringify(unsupported),
+        snapshot(unsupported),
+        verified,
+      ),
+    ).toEqual([
+      'executionApproval source must be local-trust or comment, with its matching basis',
+    ]);
+  });
+
   it('requires a host context and a verified digest even for an old valid waiver', () => {
     const legacy = {
       mode: 'waived',
