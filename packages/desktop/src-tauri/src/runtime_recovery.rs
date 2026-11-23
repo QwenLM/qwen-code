@@ -195,6 +195,12 @@ impl RecoveryHandle {
         if !process_alive(&process).map_err(inspect_error)? {
             return Err("Desktop daemon exited before recovery registration.".to_string());
         }
+        let mut contents = serde_json::to_vec(&record)
+            .map_err(|error| format!("Failed to serialize Desktop recovery record: {error}"))?;
+        contents.push(b'\n');
+        if contents.len() as u64 > MAX_RECORD_BYTES {
+            return Err("Desktop recovery record exceeds its size limit.".to_string());
+        }
         let path = directory.join(format!(
             "runtime-{pid}-{}.json",
             record.identity.start_ticks
@@ -211,9 +217,7 @@ impl RecoveryHandle {
                 .mode(0o600)
                 .open(&temporary)
                 .map_err(|error| format!("Failed to create Desktop recovery record: {error}"))?;
-            serde_json::to_writer(&mut file, &record)
-                .map_err(|error| format!("Failed to serialize Desktop recovery record: {error}"))?;
-            file.write_all(b"\n")
+            file.write_all(&contents)
                 .and_then(|()| file.sync_all())
                 .map_err(|error| format!("Failed to write Desktop recovery record: {error}"))?;
             fs::rename(&temporary, &path)
@@ -756,6 +760,43 @@ mod tests {
             record.base_url = address.to_string();
             assert!(validate_record(&record).is_err(), "accepted {address}");
         }
+    }
+
+    #[test]
+    fn publishes_at_the_record_limit_without_replacing_it_on_overflow() {
+        let fixture = Fixture::new();
+        let initial = fixture.publish(std::process::id());
+        let mut record = initial.record.clone();
+        record.namespace.qwen_home = Some(PathBuf::new());
+        let base_len = serde_json::to_vec(&record).unwrap().len() + 1;
+        let padding = MAX_RECORD_BYTES as usize - base_len;
+        let publish = |padding| {
+            let mut namespace = record.namespace.clone();
+            namespace.qwen_home = Some(PathBuf::from("a".repeat(padding)));
+            RecoveryHandle::publish(
+                &fixture.0,
+                &fixture.0,
+                &namespace,
+                initial.record.pid,
+                initial.url(),
+                initial.token(),
+                false,
+            )
+        };
+
+        let at_limit = publish(padding).unwrap().unwrap();
+        assert_eq!(
+            fs::metadata(&at_limit.path).unwrap().len(),
+            MAX_RECORD_BYTES
+        );
+        assert!(read_record(&at_limit.path).unwrap().namespace == at_limit.record.namespace);
+
+        assert_eq!(
+            publish(padding + 1).err().as_deref(),
+            Some("Desktop recovery record exceeds its size limit.")
+        );
+        assert_eq!(fs::read_dir(&fixture.0).unwrap().count(), 1);
+        assert!(read_record(&at_limit.path).unwrap().namespace == at_limit.record.namespace);
     }
 
     #[test]

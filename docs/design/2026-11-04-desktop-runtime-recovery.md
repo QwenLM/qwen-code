@@ -41,6 +41,9 @@ but differently spelled root overrides may therefore start a separate backend.
 Bundled runtime paths are not stored because AppImage mount paths change on
 relaunch. Prototype records without namespace identity fail closed.
 
+Records are capped at 16 KiB including the final newline. Publication rejects
+longer records before replacing any existing file.
+
 Startup checks matching records before spawning. It opens a Linux pidfd and
 checks process identity before sending any bearer to the loopback health
 endpoint. Dead or reused processes have stale records; an inaccessible,
