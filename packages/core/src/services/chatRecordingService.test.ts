@@ -3579,6 +3579,39 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('conversation file permissions', () => {
+    const transcriptPath = () =>
+      '/test/project/root/.gemini/projects/test-project/chats/test-session-id.jsonl';
+
+    it('creates the transcript with owner-only permissions', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      service.recordUserMessage([{ text: 'hello' }]);
+      await service.flush();
+
+      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+        transcriptPath(),
+        '',
+        expect.objectContaining({ flag: 'wx', mode: 0o600 }),
+      );
+    });
+
+    it('tightens a transcript left world-readable by an earlier version', async () => {
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('EEXIST'), { code: 'EEXIST' });
+      });
+      const chmodSync = vi
+        .spyOn(fs, 'chmodSync')
+        .mockImplementation(() => undefined);
+
+      service.recordUserMessage([{ text: 'hello' }]);
+      await service.flush();
+
+      expect(chmodSync).toHaveBeenCalledWith(transcriptPath(), 0o600);
+    });
+  });
+
   describe('legacy recorder', () => {
     const activateReduced = (
       state: Parameters<ChatRecordingService['activate']>[3],

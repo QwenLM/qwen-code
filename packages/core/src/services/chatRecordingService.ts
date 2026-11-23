@@ -1633,7 +1633,14 @@ export class ChatRecordingService {
 
   private createConversationFile(filePath: string): void {
     try {
-      fs.writeFileSync(filePath, '', { flag: 'wx', encoding: 'utf8' });
+      // Transcripts persist tool output verbatim, which can embed
+      // credentials; omitting mode lets Node apply 0o666 & ~umask, leaving the
+      // log world-readable under the common 022 umask.
+      fs.writeFileSync(filePath, '', {
+        flag: 'wx',
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         const message = error instanceof Error ? error.message : String(error);
