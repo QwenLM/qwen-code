@@ -11,7 +11,7 @@ final class ManagedConfigStore {
     }
 
     public static boolean blocked(JdbcTemplate jdbc, String tenantId, String sessionId) {
-        return !jdbc.queryForList("SELECT record_key FROM ma_session_record WHERE tenant_id=?"
+        return !jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE tenant_id=?"
                 + " AND session_id=? AND record_kind='DOMAIN' AND domain='config_install' AND record_id=?"
                 + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", tenantId, sessionId, ManagedMcpSettings.RECORD_ID).isEmpty();
     }

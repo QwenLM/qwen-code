@@ -282,7 +282,7 @@ class ManagedApprovalSelectionTest {
     }
 
     private String workspace() {
-        String tenant = "approval-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         jdbc.update(
                 "INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, 'ws',"

@@ -97,9 +97,9 @@ function createControlledStream() {
   return { push, close, fail, iterable };
 }
 
-async function flushBatch() {
+async function flushBatch(delayMs = 60) {
   await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 5));
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   });
 }
 
@@ -266,6 +266,24 @@ describe('useWorkspaceArtifactLibrary', () => {
 
       expect(result.current.rows).toHaveLength(20);
       expect(sortSpy.mock.calls.length).toBeLessThanOrEqual(2);
+
+      // Trickle path: 12 events arriving across separate macrotask turns within
+      // the 50ms floor coalesce rather than sorting once per event.
+      sortSpy.mockClear();
+      for (let i = 20; i < 32; i += 1) {
+        stream.push({
+          type: 'session',
+          ...makeEnvelope(`sess-${i}`, [
+            makeArtifact(`art-${i}`, {
+              updatedAt: `2026-11-21T11:${String(i).padStart(2, '0')}:00.000Z`,
+            }),
+          ]),
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+      await flushBatch();
+      expect(result.current.rows).toHaveLength(32);
+      expect(sortSpy.mock.calls.length).toBeLessThan(6);
     } finally {
       sortSpy.mockRestore();
     }

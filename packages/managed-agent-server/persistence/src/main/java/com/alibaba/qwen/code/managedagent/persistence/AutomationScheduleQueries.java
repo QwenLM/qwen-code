@@ -21,9 +21,8 @@ final class AutomationScheduleQueries {
         if (actorId == null || actorId.isEmpty()) {
             return new SchedulePage(List.of(), false);
         }
-        byte[] actorKey;
         try {
-            actorKey = ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
+            ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             return new SchedulePage(List.of(), false);
         }
@@ -38,25 +37,27 @@ final class AutomationScheduleQueries {
                         + " AND a.actor_id = ? AND a.role IN ('READER', 'OPERATOR', 'OWNER')"
                         + " UNION ALL SELECT CONCAT(c.tenant_id, '!'), CONCAT(c.workspace_id, '!')"
                         + " FROM ma_workspace c JOIN readable_workspace p"
-                        + " ON c.tenant_id = " + unsuffixedIdentity("p.tenant_identity", h2)
-                        + " AND c.parent_workspace_id = " + unsuffixedIdentity("p.workspace_identity", h2)
+                        + " ON c.tenant_id = " + unsuffixedTenant("p.tenant_identity")
+                        + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("c.parent_workspace_id", h2)
+                        + " = " + unsuffixedIdentity("p.workspace_identity", h2)
                         + " WHERE c.tenant_id = ? AND c.workspace_kind = 'CHILD_GIT')"
                         + " SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s")
                         + " FROM ma_schedule s WHERE s.tenant_id = ?"
                         + " AND EXISTS (SELECT 1 FROM readable_workspace r WHERE s.tenant_id = "
-                        + unsuffixedIdentity("r.tenant_identity", h2)
-                        + " AND s.workspace_id = " + unsuffixedIdentity("r.workspace_identity", h2) + ")"
+                        + unsuffixedTenant("r.tenant_identity")
+                        + " AND " + ManagedSchemaJdbcTemplate.binaryIdentity("s.workspace_id", h2)
+                        + " = " + unsuffixedIdentity("r.workspace_identity", h2) + ")"
                         + " AND EXISTS (SELECT 1 FROM ma_session ms WHERE ms.tenant_id = s.tenant_id"
                         + " AND ms.session_id = s.session_id AND (ms.owner_only = 0"
                         + " OR COALESCE(ms.owner_actor_key, ms.creator_actor_key) = ?))";
         List<ScheduleRow> rows = cursor == null
                 ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
                         + " s.schedule_id DESC LIMIT ?", mapper, tenantId,
-                        actorKey, tenantId, tenantId, actorKey, limit + 1)
+                        actorId, tenantId, tenantId, actorId, limit + 1)
                 : jdbc.query(select + " AND (s.gmt_create < ?"
                         + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
                         + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
-                        + " LIMIT ?", mapper, tenantId, actorKey, tenantId, tenantId, actorKey,
+                        + " LIMIT ?", mapper, tenantId, actorId, tenantId, tenantId, actorId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.scheduleId(), limit + 1);
         boolean hasMore = rows.size() > limit;
@@ -68,6 +69,10 @@ final class AutomationScheduleQueries {
         // Strip only the CTE's PAD SPACE sentinel for indexed joins; H2 needs UTF-8 bytes first.
         String binary = h2 ? "STRINGTOUTF8(" + identity + ")" : identity;
         return "SUBSTRING(" + binary + ", 1, OCTET_LENGTH(" + binary + ") - 1)";
+    }
+
+    private static String unsuffixedTenant(String identity) {
+        return "SUBSTRING(" + identity + ", 1, CHAR_LENGTH(" + identity + ") - 1)";
     }
 
     /**

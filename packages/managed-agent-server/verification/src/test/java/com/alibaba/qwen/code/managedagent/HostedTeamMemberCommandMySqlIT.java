@@ -92,7 +92,7 @@ class HostedTeamMemberCommandMySqlIT {
 
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newHttpClient();
-    private final String tenant = "h4eb3-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final AtomicReference<Throwable> modelFailure =
             new AtomicReference<>();
     // Member reports seen by the scripted lead across her wake turns. A
