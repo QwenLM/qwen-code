@@ -183,7 +183,6 @@ class QueryStore {
       headers: {
         Authorization: `Bearer ${submission.store.token}`,
         'X-Qwen-Tenant-Id': submission.store.tenantId,
-        'X-Qwen-Managed-Max-Readable-Storage-Version': '4',
         'Content-Type': 'application/json',
         'Cache-Control': 'no-store',
       },

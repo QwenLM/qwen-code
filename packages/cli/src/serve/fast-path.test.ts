@@ -226,8 +226,18 @@ function pickServeFastPathComparable(
   if (settings.env) {
     out.env = settings.env;
   }
-  if (settings.general?.chatRecording !== undefined) {
-    out.general = { chatRecording: settings.general.chatRecording };
+  if (
+    settings.general?.chatRecording !== undefined ||
+    settings.general?.language !== undefined
+  ) {
+    out.general = {
+      ...(settings.general.chatRecording !== undefined
+        ? { chatRecording: settings.general.chatRecording }
+        : {}),
+      ...(settings.general.language !== undefined
+        ? { language: settings.general.language }
+        : {}),
+    };
   }
   if (settings.advanced?.excludedEnvVars !== undefined) {
     out.advanced = {
@@ -720,6 +730,7 @@ describe('serve fast path argument parsing', () => {
         ['--max-pending-prompts-per-session', '5'],
       ],
       ['max-connections', ['--max-connections', '256']],
+      ['max-sse-connections', ['--max-sse-connections', '204']],
       ['event-ring-size', ['--event-ring-size', '8000']],
       ['event-ring-max-bytes', ['--event-ring-max-bytes', '1048576']],
       [
@@ -1855,6 +1866,11 @@ describe('serve fast path environment bootstrap', () => {
           advanced: {
             excludedEnvVars: ['FAST_PATH_USER_EXCLUDED'],
           },
+          // Exercises both general arms of the projection. This fixture's
+          // user scope enables folder trust and the workspace is not trusted,
+          // so the workspace's general is dropped before the merge: both keys
+          // must come from the user scope to reach the compared objects.
+          general: { language: 'zh-CN', chatRecording: false },
           security: { folderTrust: { enabled: true } },
           tools: { approvalMode: 'auto' },
         }),
@@ -1914,6 +1930,131 @@ describe('serve fast path environment bootstrap', () => {
     const settings = loadServeFastPathSettings(tempWorkspace);
 
     expect(settings.advanced?.runtimeOutputDir).toBe('.qwen-runtime');
+  });
+
+  it('carries general.language so the daemon can resolve the prompt locale', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general?.language).toBe('zh');
+  });
+
+  it('tolerates a non-string general.language without discarding the summary', () => {
+    // Throwing here would take the whole summary down — the permission policy
+    // and the PR-watch subscription with it — so the reader drops the bad value
+    // and resolveChannelLocale reads the absence as English.
+    const qwenHome = useTempQwenHome();
+    const ws = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-bad-')),
+    );
+    tempWorkspace = ws;
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        general: { language: 42 },
+        policy: { permissionStrategy: 'consensus', consensusQuorum: 3 },
+        advanced: { runtimeOutputDir: '.runtime' },
+      }),
+    );
+
+    const settings = loadServeFastPathSettings(ws);
+
+    expect(settings.general?.language).toBeUndefined();
+    expect(settings.policy?.permissionStrategy).toBe('consensus');
+    expect(settings.advanced?.runtimeOutputDir).toBe('.runtime');
+  });
+
+  it('keeps chatRecording when language is also set', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-both-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { chatRecording: false, language: 'zh-CN' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general).toEqual({
+      chatRecording: false,
+      language: 'zh-CN',
+    });
+  });
+
+  it('lets a workspace general.language override the user scope while folder trust is off', () => {
+    // The daemon boot reads the bound workspace's merged settings, so this is
+    // the value both PR-watch seams follow — daemon-wide, not per workspace.
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-scope-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 'en' } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general?.language).toBe('zh');
+  });
+
+  it('ignores the workspace general.language when folder trust is on and no rule trusts it', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-untrusted-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        general: { language: 'en' },
+        security: { folderTrust: { enabled: true } },
+      }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general?.language).toBe('en');
+  });
+
+  it('merges general per key across the user and workspace scopes', () => {
+    // Folder trust is off, so the workspace participates; each scope sets a
+    // different general key and both must survive the merge.
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-merge-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { chatRecording: false } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general).toEqual({ language: 'zh', chatRecording: false });
   });
 
   it('retains unrelated boot settings when workspace startup channels are malformed', () => {
@@ -2065,6 +2206,115 @@ describe('serve fast path environment bootstrap', () => {
     expect(loadServeFastPathSettings(tempWorkspace).serve?.maxSessions).toBe(
       16,
     );
+  });
+
+  it('loads serve.sessionPrWatch from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must not spend daemon-wide gh budget or inject
+    // prompts into sessions across workspaces.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['head_change'] } },
+      }),
+    );
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.sessionPrWatch).toBeUndefined();
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual([
+      'serve.sessionPrWatch',
+    ]);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: {
+          sessionPrWatch: { events: ['ci_failure'], wakeDormant: false },
+        },
+      }),
+    );
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.sessionPrWatch).toEqual({
+      events: ['ci_failure'],
+      wakeDormant: false,
+    });
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual([
+      'serve.sessionPrWatch',
+    ]);
+  });
+
+  it('carries serve.sessionPrWatch through every operator scope merge', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-merge-')),
+    );
+    // Each step merges one more scope over the previous answer. The merge
+    // copies serve keys explicitly, so a key the picker carries but the
+    // merge does not is dropped here rather than at the pick.
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['state_change'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['state_change'] });
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['head_change'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['head_change'] });
+
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['merge_conflict'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['merge_conflict'] });
+  });
+
+  it('keeps serve.sessionPrWatch beside the other serve keys in one summary', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-siblings-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: {
+          maxSessions: 64,
+          sessionPrWatch: { events: ['head_change'], actions: { fix: 'go' } },
+        },
+      }),
+    );
+
+    // The workspace channels and the operator keys reach one summary
+    // together: neither the pick's presence test nor the merge's spread
+    // may clobber a sibling.
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+      maxSessions: 64,
+      sessionPrWatch: { events: ['head_change'], actions: { fix: 'go' } },
+    });
   });
 
   it('keeps operator settings when the workspace document cannot be read', () => {

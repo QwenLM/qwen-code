@@ -1,22 +1,15 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.PublicationJournalFixture;
-import com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.StorageReadPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -39,7 +32,6 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.time.Duration;
-import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -70,7 +62,7 @@ public class ToolPublicationAsyncVerificationTest {
         DataSource source = dataSource();
         com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         bucket = new Bucket();
-        fixture = PublicationJournalFixture.create(source, null, bucket, null);
+        fixture = PublicationJournalFixture.create(source, bucket, null);
         fixture.reserve();
         key = fixture.binding.path("sessionKey");
         data = replacement();
@@ -109,6 +101,25 @@ public class ToolPublicationAsyncVerificationTest {
                 bytes, ToolPublicationContract.sha256(bytes));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"stdout", "stderr"})
+    void asynchronousSegmentVerificationPreservesTheSegmentReceipt(String stream) {
+        byte[] bytes = "captured output".getBytes(StandardCharsets.UTF_8);
+        String digest = ToolPublicationContract.sha256(bytes);
+        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-receipt", stream, 0,
+                bytes, digest).path("state").asText()).isEqualTo("PENDING");
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        JsonNode verified = status("segment-receipt");
+        assertThat(verified.path("state").asText()).isEqualTo("SUCCEEDED");
+        JsonNode expected = JSON.createObjectNode().put("captureId", "capture-1").put("streamId", stream)
+                .put("ordinal", 0).put("byteLength", bytes.length).put("digest", digest);
+        assertThat(verified.path("receipt")).isEqualTo(expected);
+        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-receipt", stream, 0,
+                bytes, digest)).isEqualTo(verified);
+    }
+
     private void due(String operation) {
         fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_id = ?", operation);
     }
@@ -120,120 +131,16 @@ public class ToolPublicationAsyncVerificationTest {
                                 recovery, "test_recovery")).recoveryStatus()).isEqualTo(recovery));
     }
 
-    private DataSource acceptCsiOperation() {
-        DataSource source = dataSource();
-        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
-        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
-        fixture = PublicationJournalFixture.create(source, registration);
-        fixture.reserve();
-        fixture.store.verifyDispatch(fixture.executions.findByExecutionCallId("execution-1"),
-                "pub-1", PUBLICATION_TOKEN);
-        var claim = fixture.executions.claimDispatch("execution-1", "dispatcher", Duration.ofMinutes(1));
-        fixture.bindings.authorizeDispatch(new JdbcRuntimeSessionRepository(source), fixture.executions,
-                claim, "dispatcher", claim.getDispatchGeneration());
-        key = fixture.binding.path("sessionKey");
-        data = replacement();
-        assertThat(publish("csi", 0, "stored").path("state").asText()).isEqualTo("PENDING");
-        return source;
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"released", "registration"})
-    void permanentCsiAuthorityLossLeavesTheQueueAndRemainsFailedAfterDeadline(String failure) {
-        acceptCsiOperation();
-        if (failure.equals("released")) {
-            var runtime = fixture.bindings.findById("binding-1");
-            assertThat(fixture.bindings.compareAndSet(runtime,
-                    runtime.withState(RuntimeBindingRecord.State.RELEASED, runtime.getLease(), Instant.now())))
-                    .isNotNull();
-            assertThat(fixture.jdbc.queryForObject("SELECT active_binding_id FROM ma_runtime_slot",
-                    String.class)).isNull();
-        } else {
-            fixture.jdbc.update("UPDATE ma_storage SET registration_json = '{}'");
-        }
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("csi").path("state").asText()).isEqualTo("FAILED");
-        assertThat(status("csi").path("error").path("code").asText())
-                .isEqualTo("managed_tool_publication_runtime_unavailable");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
-                Timestamp.class)).isNull();
-        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
-                Timestamp.valueOf("2000-01-01 00:00:00"));
-        assertThat(status("csi").path("state").asText()).isEqualTo("FAILED");
-        assertThat(data.verifyNextOperation()).isFalse();
-        assertThat(bucket.opens).hasValue(0);
-    }
-
-    @Test
-    void settledCsiRetirementStillVerifiesAcceptedWork() {
-        acceptCsiOperation();
-        var registration = new WorkspaceCsiRegistration("tenant-1", "fixture-storage", "fixture-cluster",
-                "fixture", "fixture-claim", "fixture-pvc", "fixture-volume", "fixture-pv",
-                "fixture.csi", "fixture-handle", "fixture-backend", "fixture-serial", "/workspace", 1);
-        new WorkspaceCsiReservationStore(fixture.jdbc, fixture.manager, JSON).beginRetirement(
-                registration, fixture.bindings, fixture.bindings.findById("binding-1"),
-                fixture.csiReservation, UUID.randomUUID().toString());
-        var execution = fixture.executions.findByExecutionCallId("execution-1");
-        assertThat(fixture.executions.compareAndSet(execution, execution.withResult(
-                java.util.Map.of("executionStatus", "success"), execution.getLastSequence(), Instant.now()),
-                "dispatcher", execution.getDispatchGeneration())).isNotNull();
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("csi").path("state").asText()).isEqualTo("SUCCEEDED");
-    }
-
-    @Test
-    void missingReplicaCredentialKeyDoesNotBecomePermanentCsiFailure() {
-        DataSource source = acceptCsiOperation();
-        var bindings = new JdbcRuntimeBindingRepository(source,
-                new AesGcmSecretProtector("other-replica-key", new byte[32]));
-        var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
-                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10));
-        var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
-                Duration.ofSeconds(10), Duration.ofSeconds(2),
-                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
-        assertThat(other.verifyNextOperation()).isTrue();
-        assertThat(other.verifyNextOperation()).isFalse();
-        assertThat(status("csi").path("state").asText()).isEqualTo("PENDING");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > " + ManagedSchemaTime.SQL_NOW + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", Boolean.class)).isTrue();
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class))
-                .isEqualTo("csi");
-        due("csi");
-        assertThat(data.verifyNextOperation()).isTrue();
-        assertThat(status("csi").path("state").asText()).isEqualTo("SUCCEEDED");
-    }
-
-    @Test
-    void unavailableReplicaKeyDoesNotKeepAnExpiredCandidateDue() {
-        DataSource source = acceptCsiOperation();
-        var bindings = new JdbcRuntimeBindingRepository(source,
-                new AesGcmSecretProtector("other-replica-key", new byte[32]));
-        var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
-                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10));
-        var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
-                Duration.ofSeconds(10), Duration.ofSeconds(2),
-                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
-        fixture.jdbc.update("UPDATE ma_operation SET deadline = ?",
-                Timestamp.valueOf("2000-01-01 00:00:00"));
-        assertThat(other.verifyNextOperation()).isFalse();
-        assertThat(status("csi").path("state").asText()).isEqualTo("EXPIRED");
-        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
-                Timestamp.class)).isNull();
-        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM ma_output_capture", String.class)).isNull();
-        assertThat(bucket.opens).hasValue(0);
-    }
-
     @ParameterizedTest
     @ValueSource(strings = {"null", "{"})
     void malformedCandidateInputsFailWithoutEscapingTheScan(String encoded) {
         publish("healthy", 0, "bytes");
         data.finish(key, "pub-1", PUBLICATION_TOKEN, "bad-inputs", terminal(10));
         fixture.jdbc.update("UPDATE ma_operation SET verification_request_json = ?,"
-                        + " verification_next_at = ? WHERE operation_id = X'6261642d696e70757473'",
+                        + " verification_next_at = ? WHERE operation_id = 'bad-inputs'",
                 encoded.equals("null") ? null : encoded, Timestamp.valueOf("2000-01-01 00:00:00"));
         fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = ?"
-                        + " WHERE operation_id = X'6865616c746879'",
+                        + " WHERE operation_id = 'healthy'",
                 Timestamp.valueOf("2000-01-02 00:00:00"));
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("bad-inputs").path("state").asText()).isEqualTo("FAILED");
@@ -271,7 +178,7 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("accepted").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.opens).hasValue(0);
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
-                + " AND operation_id = X'6163636570746564' AND capture_state = 'VERIFIED'", Integer.class)).isZero();
+                + " AND operation_id = 'accepted' AND capture_state = 'VERIFIED'", Integer.class)).isZero();
         data = replacement();
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -315,9 +222,8 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
                 .withBean(JdbcManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
                         fixture.jdbc, new JdbcManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
-                        WriterCredentialPolicy.unbound(), fixture.bindings))
+                        WriterCredentialPolicy.unbound()))
                 .withBean(HarnessRules.class, SdkHarnessRules::new)
-                .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
                 .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)
                 .withBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class, () -> fixture.bindings)
                 .withBean(org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder.class,
@@ -369,7 +275,7 @@ public class ToolPublicationAsyncVerificationTest {
             @Override
             public void commit(TransactionStatus transaction) {
                 var values = fixture.jdbc.queryForList("SELECT is_verification_ready FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                        + " AND operation_id = X'636f6d6d6974'", Boolean.class);
+                        + " AND operation_id = 'commit'", Boolean.class);
                 if (values.size() == 1 && values.getFirst()) {
                     ready.countDown();
                     Bucket.await(release);
@@ -583,11 +489,11 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void lostSlotBeforeClaimCanRetryAfterTheSlotIsRestored() {
         publish("slot", 0, "bytes");
-        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = X'6f74686572'");
+        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = 'other'");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("slot").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.opens).hasValue(0);
-        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = X'736c6f74'");
+        fixture.jdbc.update("UPDATE ma_output_capture SET active_operation_id = 'slot'");
         due("slot");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("slot").path("state").asText()).isEqualTo("SUCCEEDED");
@@ -664,7 +570,7 @@ public class ToolPublicationAsyncVerificationTest {
     void expiredPrefixCannotRecoverAndSealRecoveryRejectsAddedSegments() {
         verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
         data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout");
-        fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'707265666978'",
+        fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = 'prefix'",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         try (var verifier = manualVerifier(data)) {
             verifier.runOnce();
@@ -672,7 +578,7 @@ public class ToolPublicationAsyncVerificationTest {
                     .hasMessageContaining("prefix cannot be recovered");
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, 1,
                     ToolPublicationContract.sha256(new byte[] {1}));
-            fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'7365616c'",
+            fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = 'seal'",
                     Timestamp.valueOf("2000-01-01 00:00:00"));
             verifier.runOnce();
             verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "extra", "stdout", 1, new byte[] {2}, null);
@@ -769,15 +675,15 @@ public class ToolPublicationAsyncVerificationTest {
             try {
                 assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
                 long oldEpoch = fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                        + " AND operation_id = X'74616b656f766572'", Long.class);
+                        + " AND operation_id = 'takeover'", Long.class);
                 fixture.jdbc.update("UPDATE ma_operation SET claim_until = ?, verification_next_at = ?"
-                                + " WHERE operation_id = X'74616b656f766572'",
+                                + " WHERE operation_id = 'takeover'",
                         Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
                 var successor = workers.submit(second::runOnce);
                 try {
                     assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(fixture.jdbc.queryForObject("SELECT claim_generation FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')"
-                            + " AND operation_id = X'74616b656f766572'", Long.class)).isEqualTo(oldEpoch + 1);
+                            + " AND operation_id = 'takeover'", Long.class)).isEqualTo(oldEpoch + 1);
                     bucket.readRelease.countDown();
                     assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
                     assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
@@ -864,7 +770,7 @@ public class ToolPublicationAsyncVerificationTest {
         }
         assertThat(status("lapse").path("state").asText()).isEqualTo("PENDING");
         assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at IS NOT NULL"
-                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = X'6c61707365'", Boolean.class)).isTrue();
+                + " FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH') AND operation_id = 'lapse'", Boolean.class)).isTrue();
         fixture.jdbc.update("UPDATE ma_session_head SET activation_expires_at = ?",
                 expires.longValue());
         fixture.jdbc.update("UPDATE ma_output_capture SET expires_at = ?", grant.longValue());
@@ -884,7 +790,7 @@ public class ToolPublicationAsyncVerificationTest {
         byte[] body = terminal(10);
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", body).path("state").asText())
                 .isEqualTo("PENDING");
-        fixture.jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'",
+        fixture.jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = 'terminal'",
                 new byte[] {1});
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -893,7 +799,7 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class))
                 .isEqualTo("OPEN");
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
-                + " AND slot_key = X'7465726d696e616c'", Integer.class)).isZero();
+                + " AND slot_key = 'terminal'", Integer.class)).isZero();
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
                 + " AND capture_state <> 'VERIFIED'", Integer.class)).isZero();
         assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body).path("state").asText())
@@ -951,7 +857,7 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("bad-seal").path("state").asText()).isEqualTo("FAILED");
-        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture WHERE seal_manifest_resource_key IS NOT NULL", Integer.class))
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_output_capture WHERE seal_manifest_resource_ref IS NOT NULL", Integer.class))
                 .isZero();
     }
 
@@ -1018,7 +924,7 @@ public class ToolPublicationAsyncVerificationTest {
                 assertThat(fixture.jdbc.queryForObject("SELECT producer_phase FROM ma_output_capture", String.class))
                         .isEqualTo("FINISHING");
                 assertThat(fixture.jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
-                        + " AND slot_key = X'7465726d696e616c'", String.class)).isEqualTo("CANDIDATE");
+                        + " AND slot_key = 'terminal'", String.class)).isEqualTo("CANDIDATE");
                 assertThat(fixture.jdbc.queryForObject("SELECT producer_used_bytes FROM ma_output_capture", Long.class))
                         .isPositive();
                 due("finish");

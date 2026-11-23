@@ -27,21 +27,31 @@ const memory = vi.hoisted(() => ({
 }));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const { useCallback, useReducer } = await import('react');
   const actual =
     await importOriginal<
       typeof import('@qwen-code/web-shell/daemon-react-sdk')
     >();
   return {
     ...actual,
-    useMemory: () => ({
-      files: memory.files,
-      status: memory.status,
-      loading: false,
-      error: undefined,
-      readMemoryFile: memory.readMemoryFile,
-      reload: memory.reload,
-      writeMemory: memory.writeMemory,
-    }),
+    useMemory: () => {
+      const [, rerender] = useReducer((version) => version + 1, 0);
+      const reloadWithOutcome = useCallback(async () => {
+        const data = await memory.reload();
+        rerender();
+        return { data, superseded: false };
+      }, []);
+      return {
+        files: memory.files,
+        status: memory.status,
+        loading: false,
+        error: undefined,
+        readMemoryFile: memory.readMemoryFile,
+        reload: memory.reload,
+        reloadWithOutcome,
+        writeMemory: memory.writeMemory,
+      };
+    },
   };
 });
 
@@ -56,7 +66,7 @@ async function flush() {
   });
 }
 
-async function mountOnUserTab() {
+async function mountPanel() {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -68,6 +78,10 @@ async function mountOnUserTab() {
     );
   });
   await flush();
+}
+
+async function mountOnUserTab() {
+  await mountPanel();
   act(() => button('User').click());
   await flush();
 }
@@ -78,6 +92,11 @@ function button(label: string): HTMLButtonElement {
   );
   if (!match) throw new Error(`button not found: ${label}`);
   return match;
+}
+
+async function refreshMemory() {
+  act(() => button('Refresh').click());
+  await flush();
 }
 
 function type(textarea: HTMLTextAreaElement, text: string) {
@@ -120,6 +139,214 @@ afterEach(() => {
 });
 
 describe('MemoryMessage', () => {
+  it('retries a failed content read from the mounted panel refresh control', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error('temporary read failure'),
+    );
+    await mountOnUserTab();
+    expect(button('Edit').disabled).toBe(true);
+
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'recovered memory\n',
+      truncated: false,
+    });
+    memory.reload.mockResolvedValue(memory.status);
+    const readsBeforeRefresh = memory.readMemoryFile.mock.calls.length;
+
+    await refreshMemory();
+
+    expect(memory.reload).toHaveBeenCalledTimes(1);
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(readsBeforeRefresh + 1);
+    expect(container.textContent).toContain('recovered memory');
+    expect(button('Edit').disabled).toBe(false);
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('reads the selected file once each time the panel opens', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'existing memory\n',
+      truncated: false,
+    });
+    memory.reload.mockResolvedValue(memory.status);
+
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: '/workspace/QWEN.md',
+        scope: 'workspace',
+        bytes: 42,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files };
+
+    await mountPanel();
+
+    expect(memory.reload).not.toHaveBeenCalled();
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(1);
+
+    act(() => root.unmount());
+    container.remove();
+    await mountPanel();
+
+    expect(memory.reload).not.toHaveBeenCalled();
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a refreshed truncated file read-only', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error('temporary read failure'),
+    );
+    await mountOnUserTab();
+    memory.reload.mockResolvedValue(memory.status);
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'partial',
+      truncated: true,
+    });
+
+    await refreshMemory();
+
+    expect(container.textContent).toContain('partial');
+    expect(container.textContent).not.toContain('Memory refreshed.');
+    expect(button('Edit').disabled).toBe(true);
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('keeps failed content read-only when refreshing the list fails', async () => {
+    memory.readMemoryFile.mockRejectedValue(
+      new Error('temporary read failure'),
+    );
+    await mountOnUserTab();
+    const readsBeforeRefresh = memory.readMemoryFile.mock.calls.length;
+    // useDaemonResource returns undefined for failed or superseded reloads.
+    memory.reload.mockResolvedValue(undefined);
+
+    await refreshMemory();
+
+    expect(memory.readMemoryFile).toHaveBeenCalledTimes(readsBeforeRefresh);
+    expect(button('Edit').disabled).toBe(true);
+    expect(container.textContent).not.toContain('Memory refreshed');
+    expect(container.textContent).toContain(
+      'Could not refresh memory. Please try again.',
+    );
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('clears a pending content load if refresh finds the file was removed', async () => {
+    memory.readMemoryFile.mockReturnValue(new Promise(() => {}));
+    await mountOnUserTab();
+    memory.reload.mockImplementation(async () => {
+      memory.files = [];
+      memory.status = { ...memory.status!, files: [], fileCount: 0 };
+      return memory.status;
+    });
+
+    await refreshMemory();
+
+    expect(container.textContent).not.toContain('Loading memory file');
+    expect(container.textContent).toContain('Memory refreshed.');
+    expect(button('Edit').disabled).toBe(false);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')?.disabled).toBe(false);
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it('does not restore the previous tab when a pending refresh completes', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'user memory\n',
+      truncated: false,
+    });
+    await mountOnUserTab();
+    let finishRefresh!: (status: DaemonWorkspaceMemoryStatus) => void;
+    memory.reload.mockImplementation(
+      () => new Promise((resolve) => (finishRefresh = resolve)),
+    );
+    await refreshMemory();
+    act(() => button('Workspace').click());
+    await flush();
+
+    await act(async () => finishRefresh(memory.status!));
+
+    expect(container.textContent).not.toContain('user memory');
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+    expect(memory.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps editing when a refresh completes without cancellation', async () => {
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'existing memory\n',
+      truncated: false,
+    });
+    await mountOnUserTab();
+    act(() => button('Edit').click());
+    await flush();
+    memory.reload.mockResolvedValue(memory.status);
+    memory.readMemoryFile.mockResolvedValue({
+      content: 'refreshed memory\n',
+      truncated: false,
+    });
+
+    await refreshMemory();
+
+    expect(container.querySelector('textarea')?.value).toBe(
+      'refreshed memory\n',
+    );
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+  });
+
+  it.each(['before', 'after'] as const)(
+    'keeps view mode when editing is cancelled %s the refreshed list arrives',
+    async (cancelWhen) => {
+      memory.readMemoryFile.mockResolvedValue({
+        content: 'existing memory\n',
+        truncated: false,
+      });
+      await mountOnUserTab();
+      act(() => button('Edit').click());
+      await flush();
+      type(container.querySelector('textarea')!, 'unsaved draft\n');
+
+      let finishRefresh!: (status: DaemonWorkspaceMemoryStatus) => void;
+      memory.reload.mockImplementation(
+        () => new Promise((resolve) => (finishRefresh = resolve)),
+      );
+      let finishRead!: (result: {
+        content: string;
+        truncated: boolean;
+      }) => void;
+      memory.readMemoryFile.mockImplementation(
+        () => new Promise((resolve) => (finishRead = resolve)),
+      );
+      const readsBeforeRefresh = memory.readMemoryFile.mock.calls.length;
+      await refreshMemory();
+      if (cancelWhen === 'after') {
+        await act(async () => finishRefresh(memory.status!));
+      }
+
+      act(() => button('cancel').click());
+      await flush();
+      expect(container.querySelector('textarea')).toBeNull();
+      if (cancelWhen === 'before') {
+        await act(async () => finishRefresh(memory.status!));
+      }
+      await act(async () =>
+        finishRead({ content: 'refreshed memory\n', truncated: false }),
+      );
+
+      expect(container.querySelector('textarea')).toBeNull();
+      expect(container.textContent).toContain('refreshed memory');
+      expect(container.textContent).not.toContain('unsaved draft');
+      expect(container.textContent).not.toContain('Loading memory file');
+      expect(button('Edit').disabled).toBe(false);
+      expect(memory.readMemoryFile).toHaveBeenCalledTimes(
+        readsBeforeRefresh + 1,
+      );
+      expect(memory.reload).toHaveBeenCalledTimes(1);
+      expect(memory.writeMemory).not.toHaveBeenCalled();
+    },
+  );
+
   it('keeps the User tab read-only when its file cannot be read', async () => {
     memory.readMemoryFile.mockRejectedValue(
       new Error(`GET /file: path escapes workspace: ${GLOBAL_PATH}`),
@@ -179,6 +406,73 @@ describe('MemoryMessage', () => {
 
     expect(container.textContent).toContain('partial');
     expect(button('Edit').disabled).toBe(true);
+  });
+
+  it('keeps withheld workspace content read-only without offering a replacement', async () => {
+    const workspacePath = '/workspace/QWEN.md';
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: workspacePath,
+        scope: 'workspace',
+        bytes: 32,
+        truncated: true,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files, totalBytes: 32 };
+    memory.readMemoryFile.mockResolvedValue({ content: '', truncated: true });
+
+    await mountOnUserTab();
+    act(() => button('Workspace').click());
+    await flush();
+
+    expect(memory.readMemoryFile).toHaveBeenLastCalledWith(workspacePath);
+    expect(container.textContent).toContain(
+      'The complete memory file text is unavailable. Editing is disabled.',
+    );
+    expect(container.textContent).not.toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(true);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')).toBeNull();
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+
+    act(() => button('User').click());
+    await flush();
+    expect(container.textContent).toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
+  });
+
+  it('shows an existing empty file without the missing-file placeholder', async () => {
+    const workspacePath = '/workspace/QWEN.md';
+    memory.files = [
+      {
+        kind: 'memory_file',
+        path: workspacePath,
+        scope: 'workspace',
+        bytes: 0,
+      },
+    ];
+    memory.status = { ...memory.status!, files: memory.files, totalBytes: 0 };
+    memory.readMemoryFile.mockResolvedValue({ content: '', truncated: false });
+
+    await mountOnUserTab();
+    act(() => button('Workspace').click());
+    await flush();
+
+    expect(memory.readMemoryFile).toHaveBeenLastCalledWith(workspacePath);
+    expect(container.textContent).toContain(workspacePath);
+    expect(container.textContent).not.toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
+    act(() => button('Edit').click());
+    await flush();
+    expect(container.querySelector('textarea')?.value).toBe('');
+    expect(memory.writeMemory).not.toHaveBeenCalled();
+
+    act(() => button('User').click());
+    await flush();
+    expect(container.textContent).toContain('No memory files found.');
+    expect(button('Edit').disabled).toBe(false);
   });
 
   // #13100's destructive step: an outstanding status load makes `files`

@@ -11,9 +11,9 @@
  * replay then measures what the runtime and host can do today, independent of
  * any model's generation quality.
  *
- * Where the API has no mechanism (clipboard, download, persisted state), the
- * document still provides the contract's control, so the check observes the
- * missing capability instead of a missing element.
+ * Where the API has no mechanism (clipboard, download), the document still
+ * provides the contract's control, so the check observes the missing
+ * capability instead of a missing element.
  */
 
 export interface GeneratedUiDocument {
@@ -101,8 +101,20 @@ export const checklistDocument: GeneratedUiDocument = {
   css: '#items{list-style:none;padding:0}',
   javascript: `
 // Fixed row slots: handlers can only be registered at initialization.
-var SLOTS=8, items=[], history=[];
-function snapshot(){history.push(JSON.stringify(items));if(history.length>20)history.shift();}
+var SLOTS=8, HISTORY=20, items=[], history=[];
+function valid(list){return Array.isArray(list)&&list.length<=SLOTS&&list.every(function(item){return !!item&&typeof item.text==='string'&&typeof item.done==='boolean';});}
+var saved=ui.state.get();
+if(saved&&valid(saved.items)&&Array.isArray(saved.history)&&saved.history.every(valid)){items=saved.items;history=saved.history.slice(-HISTORY);}
+function snapshot(){history.push(items.map(function(item){return {text:item.text,done:item.done};}));if(history.length>HISTORY)history.shift();}
+// Keep the list and its undo history with the conversation; past 16 KiB,
+// drop the oldest undo steps.
+function save(){
+  for(;;){
+    try{ui.state.set({items:items,history:history});return;}
+    catch(error){if(!(error instanceof RangeError)||!history.length)throw error;history.shift();}
+  }
+}
+function commit(){save();render();}
 function render(){
   var filter=ui.input('filter').value, shown=0;
   for(var i=0;i<SLOTS;i++){
@@ -116,15 +128,15 @@ function render(){
 ui.on('add','click',function(){
   var text=ui.input('new-item').value.trim();
   if(!text||items.length>=SLOTS) return;
-  snapshot(); items.push({text:text,done:false}); ui.value('new-item',''); render();
+  snapshot(); items.push({text:text,done:false}); ui.value('new-item',''); commit();
 });
 for(var s=0;s<SLOTS;s++)(function(i){
-  ui.on('item-'+(i+1)+'-check','change',function(e){if(!items[i])return;snapshot();items[i].done=e.checked;render();});
-  ui.on('item-'+(i+1)+'-delete','click',function(){if(!items[i])return;snapshot();items.splice(i,1);render();});
-  ui.on('item-'+(i+1)+'-text','change',function(e){var text=e.value.trim();if(!items[i]||!text||text===items[i].text)return;snapshot();items[i].text=text;render();});
+  ui.on('item-'+(i+1)+'-check','change',function(e){if(!items[i])return;snapshot();items[i].done=e.checked;commit();});
+  ui.on('item-'+(i+1)+'-delete','click',function(){if(!items[i])return;snapshot();items.splice(i,1);commit();});
+  ui.on('item-'+(i+1)+'-text','change',function(e){var text=e.value.trim();if(!items[i]||!text||text===items[i].text)return;snapshot();items[i].text=text;commit();});
 })(s);
 ui.on('filter','change',render);
-ui.on('undo','click',function(){if(!history.length)return;items=JSON.parse(history.pop());render();});
+ui.on('undo','click',function(){if(!history.length)return;items=history.pop();commit();});
 render();
 `,
 };

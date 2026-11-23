@@ -62,6 +62,7 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         '36',
       );
     case 'session.source.changed':
+    case 'session.sub_session_task.changed':
       return '';
     case 'session.artifact.changed':
       return terminalLine(

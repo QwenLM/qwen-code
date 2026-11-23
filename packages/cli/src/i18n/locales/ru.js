@@ -8,6 +8,54 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  user: 'пользователь',
+  assistant: 'ассистент',
+  thinking: 'размышление',
+  task: 'задача',
+  compaction: 'сжатие',
+  info: 'информация',
+  warning: 'предупреждение',
+  retry: 'повтор',
+  'stop-hook': 'хук остановки',
+  'away-recap': 'сводка за время отсутствия',
+  'user-shell': 'команда пользователя',
+  advisor: 'советник',
+  'arena-agent': 'агент арены',
+  'arena-session': 'сессия арены',
+  goal: 'цель',
+  'Protected input': 'Защищённый ввод',
+  'Focused input. Cursor: {{position}}':
+    'Поле ввода в фокусе. Курсор: {{position}}',
+  'Unfocused input.': 'Поле ввода не в фокусе.',
+  'Focused Prompt: {{value}}': 'Строка запроса в фокусе: {{value}}',
+  'Prompt: {{value}}': 'Запрос: {{value}}',
+  'Focused Input: {{value}}': 'Ввод в фокусе: {{value}}',
+  'Input: {{value}}': 'Ввод: {{value}}',
+  'Placeholder: {{value}}': 'Подсказка: {{value}}',
+  'Cursor: {{position}}': 'Курсор: {{position}}',
+  'Selected {{value}}': 'Выбрано {{value}}',
+  'Disabled {{value}}': 'Недоступно {{value}}',
+  'Focused Toggle on: {{value}}': 'В фокусе, переключатель включён: {{value}}',
+  'Focused Toggle off: {{value}}':
+    'В фокусе, переключатель выключен: {{value}}',
+  'Toggle on: {{value}}': 'Переключатель включён: {{value}}',
+  'Toggle off: {{value}}': 'Переключатель выключен: {{value}}',
+  'Conversation cleared.': 'Беседа очищена.',
+  '{{role}}: {{value}}': '{{role}}: {{value}}',
+  'Revision {{value}}': 'Исправление {{value}}',
+  Dialog: 'Диалог',
+  'Dialog closed. Focus: prompt.': 'Диалог закрыт. Фокус: строка запроса.',
+  'Dialog closed.': 'Диалог закрыт.',
+  'Waiting for confirmation': 'Ожидание подтверждения',
+  'Working. Escape to cancel.': 'Выполняется. Escape для отмены.',
+  'History items {{start}}-{{end}} of {{total}}':
+    'История {{start}}-{{end}} из {{total}}.',
+  'Worktree: {{value}}': 'Рабочее дерево: {{value}}',
+  'Workflow mode: on': 'Режим рабочего процесса: включён',
+  'Workflow mode: on (unavailable)':
+    'Режим рабочего процесса: включён (недоступен)',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    'Shift+Вверх/Вниз или PageUp/PageDown для чтения; Ctrl+Home/End для первого/последнего.',
   'Generated UI': 'Generated UI',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',
@@ -104,6 +152,7 @@ export default {
   Auth: 'Аутентификация',
   Model: 'Модель',
   'Fast Model': 'Быстрая модель',
+  'Agent Loop': 'Цикл агента',
   Sandbox: 'Песочница',
   'Session ID': 'ID сессии',
   'Base URL': 'Base URL',
@@ -454,7 +503,7 @@ export default {
   'Skip Startup Context': 'Пропустить начальный контекст',
   'Enable OpenAI Logging': 'Включить логирование OpenAI',
   'OpenAI Logging Directory': 'Директория логов OpenAI',
-  Timeout: 'Таймаут',
+  Timeout: 'Тайм-аут',
   'Max Retries': 'Макс. количество попыток',
   'Load Memory From Include Directories':
     'Загружать память из включенных директорий',
@@ -1110,6 +1159,8 @@ export default {
     'Не удалось сжать историю чата, потому что сводка сжатия была усечена.',
   'Could not compress chat history due to an API error.':
     'Не удалось сжать историю чата из-за ошибки API.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Не удалось сжать историю чата: она слишком велика для контекстного окна.',
   // ============================================================================
   // Команды - Директория
   // ============================================================================
@@ -1255,7 +1306,7 @@ export default {
     'Пожалуйста, посетите этот URL для авторизации:',
   'Waiting for authorization': 'Ожидание авторизации',
   'Time remaining:': 'Осталось времени:',
-  'Qwen OAuth Authentication Timeout': 'Таймаут авторизации Qwen OAuth',
+  'Qwen OAuth Authentication Timeout': 'Тайм-аут авторизации Qwen OAuth',
   'OAuth token expired (over {{seconds}} seconds). Please select authentication method again.':
     'Токен OAuth истек (более {{seconds}} секунд). Пожалуйста, выберите метод авторизации снова.',
   'Press any key to return to authentication type selection.':
@@ -1381,8 +1432,8 @@ export default {
   '(ctrl+g to view)': '(ctrl+g для просмотра)',
   '{{count}} {{name}} file': '{{count}} файл {{name}}',
   '{{count}} {{name}} files': '{{count}} файла(ов) {{name}}',
-  '{{count}} MCP server': '{{count}} MCP server',
-  '{{count}} MCP servers': '{{count}} MCP servers',
+  '{{count}} MCP server': '{{count}} MCP-сервер',
+  '{{count}} MCP servers': '{{count}} MCP-серверов',
   '{{count}} Blocked': '{{count}} заблокирован(о)',
   '(ctrl+t to view)': '(ctrl+t для просмотра)',
   '(ctrl+t to toggle)': '(ctrl+t для переключения)',
@@ -2158,21 +2209,21 @@ export default {
     'Планировщик не увидел временную метку этого dream-запуска; следующий цикл dream может запуститься раньше обычного.',
   // === History collapse/expand commands ===
   'Set history to collapse by default when resuming a session':
-    'Set history to collapse by default when resuming a session',
+    'При возобновлении сессии сворачивать историю по умолчанию',
   'Set history to expand by default when resuming a session':
-    'Set history to expand by default when resuming a session',
+    'При возобновлении сессии разворачивать историю по умолчанию',
   'Expand the currently collapsed history transcript':
-    'Expand the currently collapsed history transcript',
+    'Развернуть свёрнутую сейчас историю',
   'Control history display preferences and visibility':
-    'Control history display preferences and visibility',
+    'Управление отображением и видимостью истории',
   'History will be collapsed by default for future resumed sessions.':
-    'History will be collapsed by default for future resumed sessions.',
+    'В будущих возобновлённых сессиях история будет свёрнута по умолчанию.',
   'History will be expanded by default for future resumed sessions.':
-    'History will be expanded by default for future resumed sessions.',
+    'В будущих возобновлённых сессиях история будет развёрнута по умолчанию.',
   'History is already expanded in this session.':
-    'History is already expanded in this session.',
+    'История в этой сессии уже развёрнута.',
   'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
-    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+    'Использование: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'История свёрнута: {{n}} сообщений скрыто. Используйте /history expand-now для отображения.',
 
@@ -2287,34 +2338,35 @@ export default {
   // ============================================================================
   // reload-plugins command
   // ============================================================================
-  '{{count}} extension': '{{count}} extension',
-  '{{count}} extensions': '{{count}} extensions',
-  '{{count}} command': '{{count}} command',
-  '{{count}} commands': '{{count}} commands',
-  '{{count}} skill': '{{count}} skill',
-  '{{count}} skills': '{{count}} skills',
-  '{{count}} agent': '{{count}} agent',
-  '{{count}} agents': '{{count}} agents',
-  '{{count}} workflow': '{{count}} workflow',
-  '{{count}} workflows': '{{count}} workflows',
-  '{{count}} hook': '{{count}} hook',
-  '{{count}} hooks': '{{count}} hooks',
-  '{{count}} extension MCP server': '{{count}} extension MCP server',
-  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
-  '{{count}} extension LSP server': '{{count}} extension LSP server',
-  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
-  'Reload extension changes from disk': 'Reload extension changes from disk',
-  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
-  'Reload failed: {{message}}': 'Reload failed: {{message}}',
-  'Reload failed.': 'Reload failed.',
+  '{{count}} extension': '{{count}} расширение',
+  '{{count}} extensions': '{{count}} расширений',
+  '{{count}} command': '{{count}} команда',
+  '{{count}} commands': '{{count}} команд',
+  '{{count}} skill': '{{count}} навык',
+  '{{count}} skills': '{{count}} навыков',
+  '{{count}} agent': '{{count}} агент',
+  '{{count}} agents': '{{count}} агентов',
+  '{{count}} workflow': '{{count}} рабочий процесс',
+  '{{count}} workflows': '{{count}} рабочих процессов',
+  '{{count}} hook': '{{count}} хук',
+  '{{count}} hooks': '{{count}} хуков',
+  '{{count}} extension MCP server': '{{count}} MCP-сервер расширения',
+  '{{count}} extension MCP servers': '{{count}} MCP-серверов расширения',
+  '{{count}} extension LSP server': '{{count}} LSP-сервер расширения',
+  '{{count}} extension LSP servers': '{{count}} LSP-серверов расширения',
+  'Reload extension changes from disk':
+    'Перезагрузить изменения расширений с диска',
+  'Reloaded extensions: {{summary}}': 'Перезагружены расширения: {{summary}}',
+  'Reload failed: {{message}}': 'Перезагрузка не удалась: {{message}}',
+  'Reload failed.': 'Перезагрузка не удалась.',
   'Extensions changed on disk. Run /reload-plugins to apply updates.':
-    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+    'Расширения на диске изменились. Выполните /reload-plugins, чтобы применить обновления.',
   'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
-    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+    'Не удалось обновить содержимое расширений: {{message}}. Выполните /reload-plugins, чтобы применить обновления.',
   'Failed to refresh extension content. Run /reload-plugins to apply updates.':
-    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+    'Не удалось обновить содержимое расширений. Выполните /reload-plugins, чтобы применить обновления.',
   'Extension reload did not complete. Run /reload-plugins to try again.':
-    'Extension reload did not complete. Run /reload-plugins to try again.',
+    'Перезагрузка расширений не завершилась. Выполните /reload-plugins, чтобы повторить попытку.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
@@ -2382,4 +2434,756 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Изменения куратора автоматических навыков доступны только в доверенных рабочих пространствах. Сделайте эту папку доверенной с помощью `/trust` и повторите попытку.',
   'Kept model as {{model}}': 'Оставлена модель {{model}}',
+
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    'Недельные кредиты израсходованы.{{reset}} Можно подождать или выполнить /upgrade, чтобы получить больше кредитов.',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    'Недельные кредиты израсходованы.{{reset}} Повторите попытку после обновления лимита.',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    'Кредиты израсходованы.{{reset}} Повторите попытку после обновления лимита.',
+  ' Your credits are expected to reset in {{time}}.':
+    ' Кредиты должны обновиться через {{time}}.',
+  '{{days}} and {{hours}}': '{{days}} и {{hours}}',
+  '1 day': '1 день',
+  '{{count}} days': '{{count}} дней',
+  '1 hour': '1 час',
+  '{{count}} hours': '{{count}} часов',
+  Retry: 'Повторить',
+  'Connecting…': 'Подключение…',
+  'Loading models from provider…': 'Загрузка моделей провайдера…',
+  'Recommended models · provider list unavailable, showing built-ins':
+    'Рекомендуемые модели · список провайдера недоступен, показаны встроенные',
+  'Cannot disable an extension-provided MCP server here.':
+    'Здесь нельзя отключить MCP-сервер, предоставленный расширением.',
+  'Cleared authentication for "{{name}}".':
+    'Аутентификация для «{{name}}» очищена.',
+  'MCP "{{name}}" disabled for all projects.':
+    'MCP «{{name}}» отключён для всех проектов.',
+  'Enable extension "{{name}}" to manage this MCP server.':
+    'Включите расширение «{{name}}», чтобы управлять этим MCP-сервером.',
+  'Extension-provided MCP servers cannot be favorited.':
+    'MCP-серверы, предоставленные расширением, нельзя добавить в избранное.',
+  'User level': 'Уровень пользователя',
+  'Project level': 'Уровень проекта',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    'Вставка изображения из буфера обмена недоступна: не удалось загрузить нативный модуль буфера. Переустановите Qwen Code или используйте установку через npm.',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    'Вставка изображения из буфера обмена недоступна: не найдена поддерживаемая утилита. В Linux установите `wl-clipboard` (Wayland) или `xclip` (X11) либо задайте DISPLAY/WAYLAND_DISPLAY в среде без дисплея.',
+  ' · {{marketplace}} (Tab to clear)': ' · {{marketplace}} (Tab — сбросить)',
+  '"{{name}}" {{state}}.': '«{{name}}» {{state}}.',
+  '(Tab / ←→ to switch)': '(Tab / ←→ — переключить)',
+  '+ Add new marketplace': '+ Добавить маркетплейс',
+  '+ Install a new extension': '+ Установить новое расширение',
+  Actions: 'Действия',
+  'Add Marketplace': 'Добавить маркетплейс',
+  'Add a marketplace in the Sources tab to discover extensions.':
+    'Добавьте маркетплейс на вкладке «Источники», чтобы находить расширения.',
+  'Add new': 'Добавить',
+  'Add to Favorites': 'Добавить в избранное',
+  'Added "{{name}}" to favorites.': '«{{name}}» добавлено в избранное.',
+  'Added marketplace "{{name}}".': 'Маркетплейс «{{name}}» добавлен.',
+  'Adding...': 'Добавление...',
+  'Back to extension list': 'Назад к списку расширений',
+  'Browse extensions ({{count}})': 'Обзор расширений ({{count}})',
+  'By: {{a}}': 'Автор: {{a}}',
+  'Change scope': 'Изменить область',
+  'Change scope for "{{name}}":': 'Изменить область для «{{name}}»:',
+  'Changing scope...': 'Изменение области...',
+  'Uninstalling "{{name}}"...': 'Удаление «{{name}}»...',
+  'Update available for "{{name}}".': 'Для «{{name}}» доступно обновление.',
+  '"{{name}}" is already up to date.': '«{{name}}» уже актуально.',
+  'Checking "{{name}}" for updates...': 'Проверка обновлений для «{{name}}»...',
+  '"{{name}}" does not support update checks.':
+    '«{{name}}» не поддерживает проверку обновлений.',
+  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).':
+    '«{{name}}» нельзя проверить на обновления (плагины маркетплейса Claude обновляются переустановкой).',
+  'Failed to check "{{name}}" for updates.':
+    'Не удалось проверить обновления для «{{name}}».',
+  'Claude plugin marketplace': 'Маркетплейс плагинов Claude',
+  Commands: 'Команды',
+  'Components:': 'Компоненты:',
+  'Could not load this marketplace.': 'Не удалось загрузить этот маркетплейс.',
+  'Current: {{scope}}': 'Текущая: {{scope}}',
+  Disabled: 'Отключено',
+  Discover: 'Обзор',
+  'Disabling "{{name}}"...': 'Отключение «{{name}}»...',
+  'Disabling MCP "{{name}}"...': 'Отключение MCP «{{name}}»...',
+  'Discover extensions': 'Найти расширения',
+  'Discovering extensions...': 'Поиск расширений...',
+  'Enabling "{{name}}"...': 'Включение «{{name}}»...',
+  'Enabling MCP "{{name}}"...': 'Включение MCP «{{name}}»...',
+  'Enter extension source:': 'Укажите источник расширения:',
+  'Enter marketplace source (Claude format):':
+    'Укажите источник маркетплейса (формат Claude):',
+  'Examples:': 'Примеры:',
+  'Extension details': 'Сведения о расширении',
+  'Extension v{{version}}': 'Расширение v{{version}}',
+  'Extensions are not available in this environment.':
+    'Расширения недоступны в этой среде.',
+  'Failed to open {{url}}': 'Не удалось открыть {{url}}',
+  Favorites: 'Избранное',
+  'Global (User Scope)': 'Глобально (область пользователя)',
+  'Install Extension': 'Установить расширение',
+  'Install for the current workspace (project scope)':
+    'Установить для текущей рабочей области (область проекта)',
+  'Install for you (user scope)': 'Установить для вас (область пользователя)',
+  'Install {{count}} extension(s) to which scope?':
+    'В какую область установить расширения ({{count}})?',
+  Installed: 'Установлено',
+  'Installed extension "{{name}}".': 'Установлено расширение «{{name}}».',
+  'Installed extensions ({{count}}):': 'Установленные расширения ({{count}}):',
+  'Installed {{count}} extension(s).': 'Установлено расширений: {{count}}.',
+  '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
+    '{{name}}: установлено, но откат области не удался — расширение может быть отключено во всех областях; включите его снова на вкладке «Установлено».',
+  'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':
+    'Не удалось изменить область, откат тоже не удался — «{{name}}» может быть отключено во всех областях. Включите его снова на вкладке «Установлено». ({{error}})',
+  'Installed {{ok}}, failed {{fail}}: {{detail}}':
+    'Установлено {{ok}}, ошибок {{fail}}: {{detail}}',
+  'Installing...': 'Установка...',
+  'Last updated: {{date}}': 'Последнее обновление: {{date}}',
+  MCP: 'MCP',
+  'MCP "{{name}}" {{state}}.': 'MCP «{{name}}» {{state}}.',
+  'MCP servers': 'MCP-серверы',
+  'Mark for Update': 'Отметить для обновления',
+  Marketplaces: 'Маркетплейсы',
+  'No extensions discovered.': 'Расширения не найдены.',
+  'No extensions match your search.': 'Нет расширений, соответствующих поиску.',
+  'No extensions or marketplaces added yet.':
+    'Пока не добавлены ни расширения, ни маркетплейсы.',
+  'No homepage available.': 'Домашняя страница недоступна.',
+  'No installable extensions selected.': 'Не выбраны расширения для установки.',
+  'No plugins or MCP servers installed.':
+    'Плагины и MCP-серверы не установлены.',
+  None: 'Нет',
+  'Note: Uninstall permanently removes this extension.':
+    'Примечание: удаление безвозвратно убирает это расширение.',
+  'Open homepage': 'Открыть домашнюю страницу',
+  'Project (Workspace)': 'Проект (рабочая область)',
+  'Refreshed {{count}} extension(s).': 'Обновлено расширений: {{count}}.',
+  'Remove from Favorites': 'Убрать из избранного',
+  'Remove marketplace': 'Удалить маркетплейс',
+  'Remove marketplace "{{name}}"?': 'Удалить маркетплейс «{{name}}»?',
+  'Removed "{{name}}" from favorites.': '«{{name}}» убрано из избранного.',
+  'Removed marketplace "{{name}}".': 'Маркетплейс «{{name}}» удалён.',
+  'Scope:': 'Область:',
+  'Set "{{name}}" scope to {{scope}}.':
+    'Область «{{name}}» установлена: {{scope}}.',
+  Sources: 'Источники',
+  'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back':
+    'Ввод — поиск · Пробел — переключить · Enter — открыть · Ctrl+R — обновить · Esc — назад',
+  Uninstall: 'Удалить',
+  'Uninstalled "{{name}}".': '«{{name}}» удалено.',
+  'Update Now': 'Обновить сейчас',
+  'Update marketplace': 'Обновить маркетплейс',
+  'Update marketplace (last updated {{date}})':
+    'Обновить маркетплейс (последнее обновление {{date}})',
+  'Could not update marketplace "{{name}}".':
+    'Не удалось обновить маркетплейс «{{name}}».',
+  'Updated "{{name}}".': '«{{name}}» обновлено.',
+  'Updated marketplace "{{name}}".': 'Маркетплейс «{{name}}» обновлён.',
+  'Use the Discover tab to find and install plugins.':
+    'Используйте вкладку «Обзор», чтобы находить и устанавливать плагины.',
+  'Version: {{v}}': 'Версия: {{v}}',
+  'Will install:': 'Будет установлено:',
+  'Would open: {{url}}': 'Откроется: {{url}}',
+  'Y/Enter to confirm · N/Esc to cancel':
+    'Y/Enter — подтвердить · N/Esc — отмена',
+  'Press R to retry · Esc to go back': 'R — повторить · Esc — назад',
+  'Enter to select · R refresh · Esc to go back':
+    'Enter — выбрать · R — обновить · Esc — назад',
+  'from {{marketplace}}': 'из {{marketplace}}',
+  installed: 'установлено',
+  '{{count}} Agents': '{{count}} агентов',
+  '{{count}} Workflows': '{{count}} рабочих процессов',
+  '{{count}} Commands': '{{count}} команд',
+  '{{count}} MCP': '{{count}} MCP',
+  '{{count}} Skills': '{{count}} навыков',
+  '{{count}} available extensions': '{{count}} доступных расширений',
+  '↑ more above': '↑ ещё выше',
+  '↑↓ navigate · Enter open · d remove marketplace · Esc close':
+    '↑↓ — навигация · Enter — открыть · d — удалить маркетплейс · Esc — закрыть',
+  '↑↓ navigate · Enter select · Esc close':
+    '↑↓ — навигация · Enter — выбрать · Esc — закрыть',
+  '↑↓ navigate · Enter select · d remove marketplace · Esc close':
+    '↑↓ — навигация · Enter — выбрать · d — удалить маркетплейс · Esc — закрыть',
+  '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close':
+    '↑↓ — навигация · Пробел — вкл/выкл · f — избранное · Enter — сведения · Esc — закрыть',
+  '↓ more below': '↓ ещё ниже',
+  '⚠ Make sure you trust an extension before installing, updating, or using it. We cannot verify what MCP servers, files, or other software an extension includes, or that it works as intended. See the extension homepage for more information.':
+    '⚠ Устанавливайте, обновляйте и используйте только те расширения, которым доверяете. Мы не можем проверить, какие MCP-серверы, файлы или другое ПО входит в расширение и работает ли оно как заявлено. Подробности — на домашней странице расширения.',
+  'toolDisplayName.Exec': 'Выполнение кода',
+  'toolDisplayName.Edit': 'Правка',
+  'toolDisplayName.WriteFile': 'Запись файла',
+  'toolDisplayName.ReadFile': 'Чтение файла',
+  'toolDisplayName.ZoomImage': 'Масштаб изображения',
+  'toolDisplayName.Grep': 'Grep',
+  'toolDisplayName.Glob': 'Glob',
+  'toolDisplayName.Shell': 'Запуск команды',
+  'toolDisplayName.Shell Command': 'Команда Shell',
+  'toolDisplayName.TodoList': 'Список задач',
+  'toolDisplayName.Goal': 'Цель',
+  'toolDisplayName.UpdateGoal': 'Обновить цель',
+  'toolDisplayName.ProposeGoal': 'Предложить цель',
+  'toolDisplayName.SaveMemory': 'Сохранить память',
+  'toolDisplayName.ManageMemory': 'Управление памятью',
+  'toolDisplayName.SearchMemory': 'Поиск в памяти',
+  'toolDisplayName.Agent': 'Agent',
+  'toolDisplayName.Advisor': 'Советник',
+  'toolDisplayName.Artifact': 'Артефакт',
+  'toolDisplayName.RecordArtifact': 'Записать артефакт',
+  'toolDisplayName.RecordSource': 'Записать источник',
+  'toolDisplayName.ReportFindings': 'Сообщить о находках',
+  'toolDisplayName.DisplayImage': 'Показать изображение',
+  'toolDisplayName.Skill': 'Навык',
+  'toolDisplayName.EnterPlanMode': 'Войти в режим планирования',
+  'toolDisplayName.ExitPlanMode': 'Выйти из режима планирования',
+  'toolDisplayName.WebFetch': 'Загрузка из сети',
+  'toolDisplayName.WebSearch': 'Поиск в сети',
+  'toolDisplayName.ListFiles': 'Список файлов',
+  'toolDisplayName.Lsp': 'LSP',
+  'toolDisplayName.AskUserQuestion': 'Вопрос пользователю',
+  'toolDisplayName.CronCreate': 'Создать расписание',
+  'toolDisplayName.CronList': 'Список расписаний',
+  'toolDisplayName.CronDelete': 'Удалить расписание',
+  'toolDisplayName.AutofixPr': 'Автоисправление PR',
+  'toolDisplayName.LoopWakeup': 'Пробуждение цикла',
+  'toolDisplayName.CreateSubSession': 'Создать подсессию',
+  'toolDisplayName.ListAgents': 'Список Agent',
+  'toolDisplayName.TaskCreate': 'Создать задачу',
+  'toolDisplayName.TaskUpdate': 'Обновить задачу',
+  'toolDisplayName.TaskList': 'Список задач',
+  'toolDisplayName.TaskStop': 'Остановить задачу',
+  'toolDisplayName.TeamCreate': 'Создать команду',
+  'toolDisplayName.TeamDelete': 'Удалить команду',
+  'toolDisplayName.TeamPlanApproval': 'Утверждение плана команды',
+  'toolDisplayName.SendMessage': 'Отправить сообщение',
+  'toolDisplayName.RequestShutdown': 'Запросить завершение',
+  'toolDisplayName.StructuredOutput': 'Структурированный вывод',
+  'toolDisplayName.Monitor': 'Мониторинг',
+  'toolDisplayName.NotebookEdit': 'Правка Notebook',
+  'toolDisplayName.ToolSearch': 'Поиск инструментов',
+  'toolDisplayName.ToolCall': 'Вызов инструмента',
+  'toolDisplayName.EnterWorktree': 'Войти в Worktree',
+  'toolDisplayName.ExitWorktree': 'Выйти из Worktree',
+  'toolDisplayName.Workflow': 'Рабочий процесс',
+  'toolDisplayName.ReadMcpResource': 'Чтение ресурса MCP',
+  'toolDisplayName.ImageGen': 'Генерация изображения',
+  'toolDisplayName.DownsampleImage': 'Понизить разрешение изображения',
+  'toolDisplayName.DownscaleVideo': 'Понизить разрешение видео',
+  'toolDisplayName.DownsampleAudio': 'Понизить частоту аудио',
+  'toolDisplayName.ExtractKeyframes': 'Извлечь ключевые кадры',
+  'toolDisplayName.ExtractAudio': 'Извлечь аудиодорожку',
+  'toolDisplayName.ClipVideo': 'Обрезать видео',
+  'toolDisplayName.ClipImage': 'Обрезать изображение',
+  'toolDisplayName.ClipAudio': 'Обрезать аудио',
+  'toolDisplayName.CaptionImage': 'Описание изображения',
+  'toolDisplayName.CaptionAudio': 'Описание аудио',
+  'toolDisplayName.OcrImage': 'Распознать текст на изображении',
+  'toolDisplayName.UnderstandVideoSegments': 'Понять сегменты видео',
+  'toolDisplayName.ConvertImage': 'Преобразовать изображение',
+  'toolDisplayName.TranscribeAudio': 'Транскрибировать аудио',
+  'toolDisplayName.RecallMediaMemory': 'Вспомнить медиапамять',
+  '[fixed-only: runs via media policies, not the model]':
+    '[только политики: запускается политиками медиа, не моделью]',
+  'show paths for current session files and logs':
+    'показать пути к файлам и журналам текущей сессии',
+  'Move this session to a new working directory':
+    'Переместить эту сессию в новый рабочий каталог',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    'Дождитесь завершения фоновых агентов или остановите их в /tasks, прежде чем менять каталог.',
+  'Fast context compression without AI. Strips old tool outputs and thinking parts.':
+    'Быстрое сжатие контекста без ИИ. Удаляет старые выводы инструментов и фрагменты рассуждений.',
+  'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
+    'Копировать в буфер: ответ, код (по языку), LaTeX или Mermaid. N — N-е с конца сообщение, index — номер блока',
+  'Show working-tree change stats versus HEAD':
+    'Показать статистику изменений рабочего дерева относительно HEAD',
+  'Could not determine current working directory.':
+    'Не удалось определить текущий рабочий каталог.',
+  'Failed to compute git diff stats':
+    'Не удалось вычислить статистику git diff',
+  'No diff available. Either this is not a git repository, HEAD is missing, or a merge/rebase/cherry-pick/revert is in progress.':
+    'Diff недоступен. Это не git-репозиторий, отсутствует HEAD, либо выполняется merge/rebase/cherry-pick/revert.',
+  'Clean working tree — no changes against HEAD.':
+    'Рабочее дерево чистое — нет изменений относительно HEAD.',
+  '{{count}} file changed, +{{added}} / -{{removed}}':
+    '{{count}} файл изменён, +{{added}} / -{{removed}}',
+  '{{count}} files changed, +{{added}} / -{{removed}}':
+    '{{count}} файлов изменено, +{{added}} / -{{removed}}',
+  '{{count}} file changed': '{{count}} файл изменён',
+  '{{count}} files changed': '{{count}} файлов изменено',
+  '…and {{hidden}} more (showing first {{shown}})':
+    '…и ещё {{hidden}} (показаны первые {{shown}})',
+  '(binary)': '(двоичный)',
+  '(binary, new)': '(двоичный, новый)',
+  '(new)': '(новый)',
+  '(new, partial)': '(новый, частично)',
+  '(deleted)': '(удалён)',
+  '(binary, deleted)': '(двоичный, удалён)',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    'Создать переиспользуемый навык из источника знаний (файл, URL, разговор или текст).',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    'Текущая модель или провайдер не поддерживают нативный ввод видео для /learn. Переключитесь на модель с поддержкой видео у OpenAI-совместимого провайдера и повторите попытку.',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'URL страниц YouTube нельзя отправить как нативный видеоввод. Скачайте видео в рабочую область и передайте локальный путь к файлу в /learn.',
+  'The local video could not be attached for /learn.':
+    'Не удалось прикрепить локальное видео для /learn.',
+  'Code Mode Only (Experimental)': 'Только режим кода (экспериментально)',
+  'Mods (Experimental)': 'Mods (экспериментально)',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    'Включает экспериментальные Mods из включённых расширений в доверенном локальном терминале, сессиях без интерфейса и ACP. Требуется перезапуск.',
+  'Show skill-specific usage statistics.':
+    'Показать статистику использования по навыкам.',
+  'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).':
+    'Область установки расширения: "user" (глобально, по умолчанию) или "project" (только текущая рабочая область).',
+  'Extension "{{name}}" installed successfully and enabled for the current workspace.':
+    'Расширение «{{name}}» успешно установлено и включено для текущей рабочей области.',
+  'Marketplace "{{name}}" not found.': 'Маркетплейс «{{name}}» не найден.',
+  'No marketplace sources added yet.':
+    'Источники маркетплейсов ещё не добавлены.',
+  'No marketplaces added yet.': 'Маркетплейсы ещё не добавлены.',
+  'Adds a marketplace source (Claude format).':
+    'Добавляет источник маркетплейса (формат Claude).',
+  'The marketplace source to add: owner/repo (GitHub), a git or https URL, or a local path.':
+    'Источник маркетплейса: owner/repo (GitHub), git- или https-URL либо локальный путь.',
+  'Removes a marketplace source.': 'Удаляет источник маркетплейса.',
+  'The name of the marketplace to remove.': 'Имя удаляемого маркетплейса.',
+  'Lists configured marketplace sources.':
+    'Показывает настроенные источники маркетплейсов.',
+  'Re-fetches a marketplace source and its plugin listing.':
+    'Повторно загружает источник маркетплейса и список плагинов.',
+  'The name of the marketplace to update.': 'Имя обновляемого маркетплейса.',
+  'Manage marketplace sources for discovering extensions.':
+    'Управление источниками маркетплейсов для поиска расширений.',
+  'You need at least one command before continuing.':
+    'Чтобы продолжить, нужна хотя бы одна команда.',
+  '--registry is only applicable for npm extensions.':
+    '--registry применим только к npm-расширениям.',
+  'Custom npm registry URL (only for npm extensions).':
+    'URL пользовательского npm-реестра (только для npm-расширений).',
+  '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).':
+    '--ref неприменим к npm-расширениям. Используйте суффикс @version (например, @scope/package@1.2.0).',
+  'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).':
+    'Устанавливает расширение из URL git-репозитория, локального пути, npm-пакета с областью (@scope/name) или маркетплейса Claude (marketplace-url:plugin-name).',
+  Description: 'Описание',
+  'Delete Session': 'Удалить сессию',
+  'List installed extensions': 'Показать установленные расширения',
+  'Safe mode is on, so no hooks run in this session.':
+    'Включён безопасный режим, поэтому хуки в этой сессии не выполняются.',
+  'Bare mode is on, so no hooks run in this session.':
+    'Включён минимальный режим, поэтому хуки в этой сессии не выполняются.',
+  'All hooks are disabled by the disableAllHooks setting.':
+    'Все хуки отключены настройкой disableAllHooks.',
+  'Timeout:': 'Тайм-аут:',
+  'Status message:': 'Сообщение о статусе:',
+  'Condition:': 'Условие:',
+  'Options:': 'Параметры:',
+  'Skill:': 'Навык:',
+  'runs in background': 'выполняется в фоне',
+  'runs once': 'выполняется один раз',
+  sequential: 'последовательно',
+  'the background agent could not be started.':
+    'не удалось запустить фонового агента.',
+  'Import MCP servers from Claude configs':
+    'Импортировать MCP-серверы из конфигураций Claude',
+  'View resources': 'Показать ресурсы',
+  resource: 'ресурс',
+  resources: 'ресурсов',
+  'needs authentication': 'требуется аутентификация',
+  'No resources available for this server.':
+    'У этого сервера нет доступных ресурсов.',
+  'Resources for {{serverName}}': 'Ресурсы {{serverName}}',
+  'No resource selected': 'Ресурс не выбран',
+  'Resource Detail': 'Сведения о ресурсе',
+  'URI:': 'URI:',
+  'MIME Type:': 'Тип MIME:',
+  'Size:': 'Размер:',
+  '{{count}} bytes': '{{count}} байт',
+  'Reference in chat': 'Сослаться в чате',
+  'MCP server': 'MCP-сервер',
+  'MCP resource server': 'MCP-сервер ресурсов',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
+    'Переключить модель этой сессии (--fast — модель подсказок, --voice — модель голосовой транскрипции, [model-id] — переключить сразу).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Переключить модель этой сессии (--fast — модель подсказок, --voice — модель голосовой транскрипции, --vision — модель визуального моста, --project — сохранить в настройках проекта, --global — сохранить в пользовательских настройках, [model-id] — переключить сразу или [model-id] [prompt] — одноразовый запрос на другой модели; встроенный запрос отправляется как есть, без раскрытия @file).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Переключить модель этой сессии (--fast — модель подсказок, --voice — модель голосовой транскрипции, --vision — модель визуального моста, --compaction — модель сжатия чата, --image — модель генерации изображений, --project — сохранить в настройках проекта, --global — сохранить в пользовательских настройках, [model-id] — переключить сразу или [model-id] [prompt] — одноразовый запрос на другой модели; встроенный запрос отправляется как есть, без раскрытия @file).',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    'В этом режиме одноразовое встроенное переключение недоступно — сначала выполните «/model {{model}}», затем отправьте запрос.',
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    'Одноразовое встроенное переключение не меняет провайдера. «{{model}}» относится к другому провайдеру — сначала выполните «/model {{model}}», затем отправьте запрос.',
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    '⚠ «{{model}}» не является известной моделью с поддержкой изображений; визуальный мост может не обработать картинки.',
+  'Toggle voice dictation input': 'Переключить голосовой ввод',
+  'Set the model for voice transcription':
+    'Задать модель голосовой транскрипции',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    'Задать модель с поддержкой изображений для расшифровки картинок при текстовой основной модели',
+  'Set the model used to generate images':
+    'Задать модель генерации изображений',
+  'Set the model used for chat compression (auto-compaction)':
+    'Задать модель сжатия чата (автосжатие)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'Сохранить выбор модели в настройках проекта (область рабочей области)',
+  'Persist the model selection to the user settings (global scope)':
+    'Сохранить выбор модели в пользовательских настройках (глобальная область)',
+  'Select Fast Model': 'Выбрать быструю модель',
+  'Select Vision Model': 'Выбрать модель зрения',
+  'Select Image Model': 'Выбрать модель изображений',
+  'Select Compaction Model': 'Выбрать модель сжатия',
+  'Select Voice Model': 'Выбрать голосовую модель',
+  'Vision Model': 'Модель зрения',
+  'Image Model': 'Модель изображений',
+  'Compaction Model': 'Модель сжатия',
+  'Compaction model override cleared': 'Переопределение модели сжатия снято',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    'Текущая модель сжатия: {{compactionModel}}\nИспользуйте «/model --compaction <model-id>», чтобы задать модель сжатия, или «/model --compaction clear», чтобы снять переопределение.',
+  'not set (falls back to the main model)':
+    'не задана (используется основная модель)',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    'Настройте модели в settings.modelProviders и задайте нужные переменные окружения. В интерактивном режиме выполните /auth, чтобы настроить или сменить провайдера, либо /model --compaction без модели, чтобы выбрать из уже настроенных.',
+  'Voice Model': 'Голосовая модель',
+  'Selected compaction model is unavailable.':
+    'Выбранная модель сжатия недоступна.',
+  'Selected voice model is unavailable.':
+    'Выбранная голосовая модель недоступна.',
+  'Selected image model is unavailable.':
+    'Выбранная модель изображений недоступна.',
+  "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
+    'Голосовая модель «{{model}}» настроена несколько раз. Удалите дубликаты идентификаторов, прежде чем выбирать её для транскрипции.',
+  'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
+    'Голосовой ввод: {{status}} (режим: {{mode}}, {{modelText}}).',
+  'model: {{voiceModel}}': 'модель: {{voiceModel}}',
+  'no voice model selected': 'голосовая модель не выбрана',
+  'Voice dictation disabled.': 'Голосовой ввод отключён.',
+  'Usage: /voice [hold|tap|off|status]':
+    'Использование: /voice [hold|tap|off|status]',
+  'No voice model selected. Run /model --voice to choose one before enabling voice dictation.':
+    'Голосовая модель не выбрана. Выполните /model --voice, чтобы выбрать её перед включением голосового ввода.',
+  'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.':
+    'Голосовой ввод включён (режим нажатия). Нажмите Пробел в пустой строке, чтобы начать; нажмите ещё раз или сделайте паузу, чтобы остановить и отправить. Используется {{voiceModel}}.',
+  'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.':
+    'Голосовой ввод включён (режим удержания). Удерживайте Пробел в пустой строке, чтобы диктовать с {{voiceModel}}.',
+  'No models are configured.': 'Модели не настроены.',
+  'Configured models: {{models}}.': 'Настроенные модели: {{models}}.',
+  'Configure a unique model id in settings.modelProviders or run /model --voice to select an available model.':
+    'Задайте уникальный идентификатор модели в settings.modelProviders или выполните /model --voice, чтобы выбрать доступную модель.',
+  "Voice model '{{modelName}}' is not configured.":
+    'Голосовая модель «{{modelName}}» не настроена.',
+  "Voice model '{{modelName}}' cannot be used for transcription.":
+    'Голосовую модель «{{modelName}}» нельзя использовать для транскрипции.',
+  "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.":
+    'Голосовую модель «{{modelName}}» нельзя использовать для транскрипции. Настройте OpenAI-совместимую модель с baseUrl в settings.modelProviders.',
+  'Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.':
+    'Настройте OpenAI-совместимую модель с baseUrl в settings.modelProviders.',
+  'Microphone access is denied. Enable it for your terminal in System Settings → Privacy & Security → Microphone, then restart voice dictation.':
+    'Доступ к микрофону запрещён. Разрешите его для терминала в «Системные настройки → Конфиденциальность и безопасность → Микрофон», затем снова запустите голосовой ввод.',
+  'Voice dictation is not supported on {{platform}}.':
+    'Голосовой ввод не поддерживается на {{platform}}.',
+  'Voice dictation needs microphone access, which is unavailable in this WSL session. Use WSLg/PulseAudio, or run Qwen Code on a host with a microphone.':
+    'Голосовому вводу нужен доступ к микрофону, который недоступен в этой сессии WSL. Используйте WSLg/PulseAudio или запустите Qwen Code на хосте с микрофоном.',
+  'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.':
+    'Голосовому вводу нужен доступ к микрофону. macOS запросит разрешение при первой записи — подтвердите его и начните снова. Пока открыт диалог, первая запись может быть пустой.',
+  'Voice: recording': 'Голос: запись',
+  'Voice: transcribing': 'Голос: транскрипция',
+  'Voice: refining': 'Голос: уточнение',
+  'listening…': 'слушаю…',
+  'transcribing…': 'транскрипция…',
+  'refining…': 'уточнение…',
+  'For teams · Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models':
+    'Для команд · Платно · До 6 000 запросов / 5 ч · Все модели Alibaba Cloud Coding Plan',
+  'For individual developers · Pay per model call · 5-hour/weekly quotas':
+    'Для индивидуальных разработчиков · Оплата за вызов модели · Квоты на 5 часов / неделю',
+  Subscribe: 'Подписаться',
+  'Paid subscription plans from Alibaba Cloud ModelStudio':
+    'Платные подписки Alibaba Cloud ModelStudio',
+  'Select Subscription Plan': 'Выберите тарифный план',
+  'Alibaba Cloud Token Plan': 'Alibaba Cloud Token Plan',
+  'Pay-as-you-go tokens · Configure ModelStudio standard API key':
+    'Оплата токенов по факту · Настройте стандартный API Key ModelStudio',
+  'For individuals · Pay-as-you-go tokens · Dedicated Token Plan endpoint':
+    'Для частных лиц · Оплата токенов по факту · Отдельная конечная точка Token Plan',
+  'For teams/companies · Credits deducted by token usage · Dedicated API key and base URL':
+    'Для команд и компаний · Кредиты списываются по расходу токенов · Отдельные API Key и base URL',
+  'Token Plan documentation': 'Документация Token Plan',
+  'Qwen Subscription': 'Qwen Subscription',
+  'Qwen Account with Subscription': 'Аккаунт Qwen с подпиской',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    'Разблокируйте Qwen Code + Agent с тарифом Plus/Pro на chat.qwen.ai',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    'Открываю chat.qwen.ai в браузере… Войдите там, чтобы подключить Qwen Code.',
+  "If the browser didn't open, visit:":
+    'Если браузер не открылся, перейдите по адресу:',
+  'Waiting for sign-in…': 'Ожидание входа…',
+  'c to copy link · Esc to cancel': 'c — скопировать ссылку · Esc — отмена',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    'Время аутентификации истекло. Повторите попытку или выберите другой способ входа.',
+  'Signed in as {{email}}': 'Вы вошли как {{email}}',
+  'Signed in successfully · {{email}}': 'Вход выполнен · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    'Текущий тариф: Qwen {{plan}}. Qwen Code готов.',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    'Модель: {{model}}. Выполните /upgrade, чтобы сменить тариф, /usage — посмотреть использование, /model — переключить модели, /effort — изменить глубину рассуждений.',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    'Частые команды: /usage   /upgrade   /model   /effort   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})':
+    'Вы вошли как {{email}} (Qwen {{plan}})',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} активен · использование входит в тариф',
+  'Model: {{model}}': 'Модель: {{model}}',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Code входит в Qwen Plus и Pro',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    'Вы вошли в аккаунт {{plan}}, в который не входит Qwen Code. Выберите Plus или Pro в браузере; этот терминал продолжит работу автоматически после подписки.',
+  'Waiting for your subscription to become active…':
+    'Ожидание активации подписки…',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    'Сессия Qwen истекла. Выполните /auth, чтобы войти снова.',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    'Учётные данные больше недействительны. Выполните /auth, чтобы войти снова.',
+  'Checking your subscription…': 'Проверка подписки…',
+  'Retry Connection': 'Повторить подключение',
+  'View Plans': 'Посмотреть тарифы',
+  'Opens the Qwen Code plans page in your browser':
+    'Открывает страницу тарифов Qwen Code в браузере',
+  'Switch Provider': 'Сменить провайдера',
+  'Use another account': 'Использовать другой аккаунт',
+  'Choose another model provider': 'Выбрать другого провайдера модели',
+  'Sign out': 'Выйти',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    'Enter — выбрать, ↑↓ — навигация · Esc — закрыть',
+  ' (this project)': ' (этот проект)',
+  ' (global)': ' (глобально)',
+  'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
+    'Текущая голосовая модель: {{voiceModel}}\nИспользуйте «/model --voice <model-id>», чтобы задать голосовую модель.',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    'Текущая модель зрения: {{visionModel}}\nИспользуйте «/model --vision <model-id>», чтобы задать модель визуального моста.',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    'Задать тайм-аут визуального моста в секундах (используется с --vision)',
+  '--timeout can only be used with --vision.':
+    '--timeout можно использовать только с --vision.',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    'Недопустимое значение --timeout "{{value}}". Используйте положительное целое число секунд, например 60, 60s или 90000ms.',
+  'Vision bridge timeout: {{timeout}}':
+    'Тайм-аут визуального моста: {{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    'Сохранён тайм-аут визуального моста {{timeout}}{{scope}}. Настройка с более высоким приоритетом оставляет действующий тайм-аут {{effectiveTimeout}}.',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    'Тайм-аут визуального моста: {{timeout}}\nИспользуйте «/model --vision --timeout <секунды>», чтобы изменить его.',
+  '{{timeout}} (default)': '{{timeout}} (по умолчанию)',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    'Текущая модель изображений: {{imageModel}}\nИспользуйте «/model --image <model-id>», чтобы задать модель генерации изображений.',
+  "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
+    'Голосовая модель «{{modelName}}» неоднозначна. Задайте уникальный идентификатор модели перед использованием /model --voice.',
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    'Модель изображений «{{modelName}}» совпадает с несколькими настроенными конечными точками. Выполните /model --image без аргумента и выберите нужную.',
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    'Модель изображений «{{modelName}}» должна объявить действительный HTTPS baseUrl и переменную окружения с учётными данными.',
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    '«{{model}}» должна объявить действительный HTTPS baseUrl и переменную окружения с учётными данными.',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q — в очередь · ↑ — править сообщения в очереди',
+  'Enter to steer · Ctrl+Q to queue': 'Enter — направить · Ctrl+Q — в очередь',
+  '{{count}} queued': '{{count}} в очереди',
+  'Queue message for the next turn':
+    'Поставить сообщение в очередь на следующий ход',
+  '{{count}} session': '{{count}} сессия',
+  '{{count}} sessions': '{{count}} сессий',
+  '{{count}} topic': '{{count}} тема',
+  '{{count}} topics': '{{count}} тем',
+  '{{count}} tokens': '{{count}} токенов',
+  '{{count}} tool call': '{{count}} вызов инструмента',
+  '{{count}} tool calls': '{{count}} вызовов инструментов',
+  '{{count}} event': '{{count}} событие',
+  '{{count}} events': '{{count}} событий',
+  '{{count}} dropped': '{{count}} отброшено',
+  'pid {{pid}}': 'pid {{pid}}',
+  'exit {{exitCode}}': 'код выхода {{exitCode}}',
+  'Sessions reviewing': 'Сессии на проверке',
+  Progress: 'Прогресс',
+  'Resume blocked': 'Возобновление заблокировано',
+  'Working dir': 'Рабочий каталог',
+  'Output file': 'Файл вывода',
+  'Topics touched ({{count}})': 'Затронутые темы ({{count}})',
+  '{{count}} more': 'ещё {{count}}',
+  'to queue for the next turn': 'поставить в очередь на следующий ход',
+  'You can get your Token Plan API key here':
+    'API Key Token Plan можно получить здесь',
+  'API key is stored in settings.env. You can migrate it to a .env file for better security.':
+    'API Key хранится в settings.env. Для большей безопасности его можно перенести в файл .env.',
+  'New model configurations are available for Alibaba Cloud Coding Plan. Update now?':
+    'Для Alibaba Cloud Coding Plan доступны новые конфигурации моделей. Обновить сейчас?',
+  'Coding Plan configuration updated successfully. New models are now available.':
+    'Конфигурация Coding Plan успешно обновлена. Новые модели уже доступны.',
+  'Coding Plan API key not found. Please re-authenticate with Coding Plan.':
+    'API Key Coding Plan не найден. Повторите аутентификацию через Coding Plan.',
+  QwenCloud: 'QwenCloud',
+  'QwenCloud · Access Method': 'QwenCloud · способ доступа',
+  'Official recommended setup: Token Plan or Standard API Key':
+    'Рекомендуемая официальная настройка: Token Plan или стандартный API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    'Оплата по факту · Подключение с существующим API Key платформы',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    'Подписка с ежемесячной квотой кредитов · Отдельная конечная точка (персональная и командная редакции)',
+  'China — 千问AI平台': 'Китай — 千问AI平台',
+  'International — QwenCloud': 'Международный — QwenCloud',
+  Platform: 'Платформа',
+  'Enter Token Plan API Key': 'Введите API Key Token Plan',
+  'Get or set any setting by dot-path key':
+    'Получить или задать любую настройку по ключу с точечной нотацией',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    'Недопустимое булево значение: «{{value}}». Используйте "true" или "false".',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    'Числовую настройку нельзя переключать. Укажите значение: key=<number>.',
+  'Invalid number value: "{{value}}".':
+    'Недопустимое числовое значение: «{{value}}».',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    'Строковую настройку нельзя переключать. Укажите значение: key=<value>.',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    'Настройку-перечисление нельзя переключать. Укажите одно из: {{options}}.',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    'Недопустимое значение перечисления: «{{value}}». Допустимые значения: {{options}}.',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    'Настройку типа «{{type}}» нельзя задать через /config. Отредактируйте settings.json напрямую.',
+  'Unsupported setting type: "{{type}}".':
+    'Неподдерживаемый тип настройки: «{{type}}».',
+  'Available settings:': 'Доступные настройки:',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    'Неизвестный ключ настройки: «{{key}}». Возможно, имелось в виду «{{suggestion}}»?',
+  'Unknown setting key: "{{key}}".': 'Неизвестный ключ настройки: «{{key}}».',
+  'Failed to set "{{key}}": {{error}}':
+    'Не удалось задать «{{key}}»: {{error}}',
+  'Set {{key}} = {{value}}': 'Задано {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '(Чтобы настройка вступила в силу, нужен перезапуск.)',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '(Настройка, связанная с безопасностью — убедитесь, что не раскрываете учётные данные.)',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    'Установка tools.approvalMode в "yolo" через /config заблокирована из соображений безопасности. Если понимаете риски, отредактируйте settings.json напрямую.',
+  '(empty)': '(пусто)',
+  'Choose the output style that shapes how responses are written ({{styles}}, or a custom style name).':
+    'Выберите стиль вывода, который определяет форму ответов ({{styles}} или имя пользовательского стиля).',
+  'It is saved but does not apply while this workspace is untrusted.':
+    'Сохранено, но не применяется, пока эта рабочая область не является доверенной.',
+  'Set or control a session goal': 'Задать или изменить цель сессии',
+  'Show current process memory diagnostics':
+    'Показать диагностику памяти текущего процесса',
+  'Record a CPU profile for Chrome DevTools analysis':
+    'Записать CPU-профиль для анализа в Chrome DevTools',
+  'Roll back a standalone update to the previous version':
+    'Откатить автономное обновление к предыдущей версии',
+  'Rollback is not available in ACP mode.': 'Откат недоступен в режиме ACP.',
+  'Rollback is only available for standalone installations.':
+    'Откат доступен только для автономных установок.',
+  'Rollback successful. Restart your terminal to use the previous version.':
+    'Откат выполнен. Перезапустите терминал, чтобы использовать предыдущую версию.',
+  'Rollback failed:': 'Откат не удался:',
+  'Rollback on Windows requires manual intervention. Rename qwen-code.old to qwen-code in your installation directory.':
+    'В Windows откат нужно выполнить вручную. Переименуйте qwen-code.old в qwen-code в каталоге установки.',
+  'Configure the Advisor model': 'Настроить модель Advisor',
+  'Disable Advisor': 'Отключить Advisor',
+  'Select Advisor Model': 'Выбрать модель Advisor',
+  'Advisor disabled': 'Advisor отключён',
+  'Advisor set to {{model}}': 'Advisor установлен на {{model}}',
+  'Selected Advisor model is unavailable.':
+    'Выбранная модель Advisor недоступна.',
+  'Advisor configuration is unavailable.': 'Конфигурация Advisor недоступна.',
+  'No compression needed.': 'Сжатие не требуется.',
+  'Session duration: {{duration}}': 'Длительность сессии: {{duration}}',
+  'Prompts: {{count}}': 'Запросы: {{count}}',
+  'API requests: {{count}}': 'Запросы API: {{count}}',
+  'Tokens — prompt: {{prompt}}, output: {{output}}':
+    'Токены — ввод: {{prompt}}, вывод: {{output}}',
+  'Tool calls: {{total}} ({{success}} ok, {{fail}} fail)':
+    'Вызовы инструментов: {{total}} (успешно {{success}}, ошибок {{fail}})',
+  'Files: +{{added}} / -{{removed}} lines':
+    'Файлы: +{{added}} / -{{removed}} строк',
+  prompt: 'ввод',
+  output: 'вывод',
+  cached: 'кэш',
+  'Estimated cost: ${{cost}}': 'Ориентировочная стоимость: ${{cost}}',
+  'No model usage data yet.': 'Пока нет данных об использовании моделей.',
+  'No tool usage data yet.': 'Пока нет данных об использовании инструментов.',
+  'N/A': 'N/A',
+  days: 'дней',
+  'Tool calls': 'Вызовы инструментов',
+  'Code changes': 'Изменения кода',
+  Name: 'Имя',
+  '↑ tabs · r to cycle dates · esc to close':
+    '↑ вкладки · r — переключить даты · esc — закрыть',
+  Cost: 'Стоимость',
+  Session: 'Сессия',
+  'Failed to load stats. Press r to retry.':
+    'Не удалось загрузить статистику. Нажмите r, чтобы повторить.',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ Пробел в истории: предыдущий разговор был потерян до этой точки (сбой хранилища) и не удалось восстановить.',
+  'Precondition check': 'Проверка предусловия',
+  'Precondition not met — this scheduled run was skipped.':
+    'Предусловие не выполнено — этот запланированный запуск пропущен.',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    'Проверка предусловия отменена — этот запланированный запуск пропущен.',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    'Проверка предусловия прервана — этот запланированный запуск пропущен.',
+  'The precondition check failed — this scheduled run was skipped.':
+    'Проверка предусловия не удалась — этот запланированный запуск пропущен.',
+  'Running this scheduled task in a new session: {{link}}':
+    'Запланированная задача запускается в новой сессии: {{link}}',
+  'This scheduled run could not be started: {{error}}':
+    'Не удалось запустить это запланированное выполнение: {{error}}',
+  'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)':
+    'Просмотреть сообщения из других сессий Qwen Code (accept | deny) и управлять доверенными контроллерами (controllers | revoke)',
+  'Create a git commit with an AI-drafted message':
+    'Создать git-коммит с сообщением, составленным ИИ',
+  'Could not request an authorization link. Please try signing in again.':
+    'Не удалось запросить ссылку авторизации. Попробуйте войти снова.',
+  'Could not complete authorization. Please try signing in again.':
+    'Не удалось завершить авторизацию. Попробуйте войти снова.',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    'Не удалось прочитать или сохранить учётные данные Qwen. Проверьте права на локальные файлы и свободное место на диске.',
+  'Could not refresh your Qwen session. Please try again.':
+    'Не удалось обновить сессию Qwen. Повторите попытку.',
+  'You are signed out locally, but the remote session could not be revoked.':
+    'Локальный выход выполнен, но удалённую сессию отозвать не удалось.',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    'Не удалось удалить локальные учётные данные Qwen. Проверьте права на локальные файлы.',
+  'Authorization or access was denied.': 'Авторизация или доступ отклонены.',
+  'Too many requests. Please try again later.':
+    'Слишком много запросов. Повторите попытку позже.',
+  'The network request failed or timed out.':
+    'Сетевой запрос не удался или истекло время ожидания.',
+  'The service returned an invalid response.':
+    'Служба вернула некорректный ответ.',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    'Модель: {{model}} · Выполните /usage, чтобы посмотреть использование тарифа',
+  'Type your request, or /usage': 'Введите запрос или /usage',
+  'Try:': 'Попробуйте:',
+  'Open Qwen subscription plans': 'Открыть тарифы подписки Qwen',
+  'Could not open your browser. Visit {{url}}':
+    'Не удалось открыть браузер. Перейдите по адресу {{url}}',
+  'Qwen subscription plans: {{url}}': 'Тарифы подписки Qwen: {{url}}',
+  'Sign out of your Qwen account': 'Выйти из аккаунта Qwen',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    'Для этого подключения /logout не нужен. Чтобы сменить провайдера модели, используйте /auth.',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    'Эта команда доступна только при входе через Qwen Subscription. Выполните /auth, чтобы войти в Qwen Subscription.',
+  'Wait for the current response to finish before signing out.':
+    'Дождитесь завершения текущего ответа, прежде чем выходить.',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    'Выход выполнен, но сохранённый выбор способа аутентификации очистить не удалось.',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    'Вы вышли из Qwen. Используйте /auth, чтобы войти в другой аккаунт.',
+  'Tip: Run /usage to see your plan usage.':
+    'Подсказка: выполните /usage, чтобы посмотреть использование тарифа.',
+  'Copied to clipboard': 'Скопировано в буфер обмена',
+  'Copy failed': 'Не удалось скопировать',
+  '(API error: {{error}})': '(ошибка API: {{error}})',
+  'API error': 'Ошибка API',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · повтор через {{seconds}} с · попытка {{attempt}}/{{max}}',
+  '←/→ browse earlier answers': '←/→ листать предыдущие ответы',
+  'c copy': 'c копировать',
+  'x clear history': 'x очистить историю',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    'Подсказка: используйте /btw, чтобы задать короткий побочный вопрос, не прерывая текущую работу',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '(Модель попыталась вызвать {{tool}} вместо прямого ответа. Переформулируйте вопрос или задайте его в основном разговоре.)',
 };

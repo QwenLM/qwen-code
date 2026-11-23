@@ -35,12 +35,10 @@ const workflowFiles = readdirSync(workflowsDir).filter((f) =>
   /\.ya?ml$/.test(f),
 );
 
-// Single shared recipe for the review-config bot login; every suite that pins
-// it reads this constant so the extraction cannot drift between call sites.
-const botLogin =
-  parse(workflow)
-    .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
-    ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
+// The gates compare the requested reviewer against this repository-variable
+// expression; the literal remains the offline fallback.
+const botLogin = 'qwen-code-review-bot';
+const botLoginExpression = `(vars.REVIEW_BOT_LOGIN || '${botLogin}')`;
 
 // The supersede kill dir is minted under RUNNER_TEMP with a fixed prefix and
 // never exported (R4-1), so the replay's forge stub can only DISCOVER it by
@@ -3016,6 +3014,95 @@ describe('review worktree prebuild (issue #10108)', () => {
   });
 });
 
+describe('review execution sandbox opt-in (#9556)', () => {
+  // `required` opts the PR's own install/build/test into the #9556 execution
+  // sandbox, but only where the runner can honour it: the policy comes from
+  // the preflight's outputs. Read the key and the policy vocabulary out of the
+  // CLI source so a rename on either side reds this test instead of silently
+  // resolving to `off` (the default) with CI green — the failure mode the
+  // expression-length and unpullable-image incidents already taught us.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/sandboxed-exec.ts',
+    'utf8',
+  );
+  const envName = source.match(/env\['(QWEN_REVIEW_SANDBOX)'\]/)?.[1];
+  const policies = source
+    .match(/const POLICIES[^=]*=\s*\[([^\]]+)\]/)?.[1]
+    ?.split(',')
+    .map((p) => p.trim().replace(/'/g, ''));
+
+  it('sets the policy the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_SANDBOX');
+    // The literal is the preflight's output, not a constant: `required` on a
+    // runner that cannot satisfy it fails the PR's own install rather than
+    // containing it.
+    expect(review.env[envName]).toBe(
+      '${{ steps.review_sandbox.outputs.policy }}',
+    );
+    expect(policies).toContain('required');
+    expect(policies).toContain('off');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+
+  it('decides the policy from a probe that runs before any reviewed command', () => {
+    const steps = doc.jobs['review-pr'].steps;
+    const preflightIndex = steps.findIndex(
+      (s) => s.name === 'Resolve review sandbox',
+    );
+    const reviewIndex = steps.findIndex((s) => s.name === 'Run review');
+    expect(preflightIndex).toBeGreaterThan(-1);
+    expect(preflightIndex).toBeLessThan(reviewIndex);
+    const preflight = steps[preflightIndex];
+    expect(preflight.id).toBe('review_sandbox');
+    expect(preflight['continue-on-error']).toBeUndefined();
+    // A daemon round trip, not presence on PATH: a client with no daemon is
+    // the shape that then refuses every reviewed command inside the prebuild.
+    expect(preflight.run).toContain('info > /dev/null');
+    // The binary is pinned in step env, like the other sandboxed jobs: the
+    // export is derived from its stdout, so a PATH shadow must not steer it.
+    expect(preflight.env.SANDBOX_COMMAND).toBe('/usr/bin/docker');
+    // The image resolves through the repo's resolver, so a tag that is not on
+    // GHCR is caught here instead of being reported as the PR's broken install.
+    expect(preflight.run).toContain('resolve-sandbox-image.mjs');
+    expect(preflight.run).toContain('sandboxImageUri');
+    // The decision is published, not implied: the output feeds `Run review`,
+    // and the summary line is how a run that ran uncontained says so.
+    expect(preflight.run).toContain('policy=$policy" >> "$GITHUB_OUTPUT"');
+    expect(preflight.run).toContain('sandbox_policy=$policy');
+    expect(preflight.run).toContain('::warning::');
+    // `off` is the default and the only fallback: a policy the CLI cannot
+    // parse resolves to `off` too, so anything else here would silently pick
+    // the wrong side.
+    expect(preflight.run).toMatch(/policy='off'/);
+    expect(preflight.run).toMatch(/policy='required'/);
+  });
+
+  it('binds the resolved image through the step output, not $GITHUB_ENV', () => {
+    // Later steps can append $GITHUB_ENV; only the expression context is
+    // unsteerable, so the consumer must bind the resolver's OUTPUT and pin the
+    // endpoint the daemon resolves through (#9527).
+    expect(review.env.QWEN_SANDBOX_IMAGE).toBe(
+      '${{ steps.review_sandbox.outputs.image }}',
+    );
+    expect(review.env.DOCKER_HOST).toBe('');
+    expect(review.env.DOCKER_CONTEXT).toBe('default');
+  });
+});
+
 describe('workflow expression length', () => {
   // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
   // and GitHub caps a single expression at 21000 characters. Blowing that cap
@@ -3336,12 +3423,11 @@ describe('qwen pr review concurrency routing', () => {
     );
   });
 
-  it('gates the review_requested jobs on the published bot login', () => {
+  it('gates the review_requested jobs on the configurable bot login', () => {
     // The group expression no longer names the requested reviewer; the
-    // job-level gates still must. Pin the surviving literal against the
-    // review-config constant so a bot rename cannot desync the sites.
+    // job-level gates still must use the same configurable identity.
     expect(parse(workflow).jobs['precheck-pr'].if).toContain(
-      `github.event.requested_reviewer.login == '${botLogin}'`,
+      `github.event.requested_reviewer.login == ${botLoginExpression}`,
     );
   });
 });
@@ -3360,12 +3446,18 @@ describe('review_requested burst coalescing (#8945)', () => {
     [
       String.raw`\(\s*github\.event_name != 'pull_request_target' \|\|`,
       String.raw`\s*github\.event\.action != 'review_requested' \|\|`,
-      String.raw`\s*github\.event\.requested_reviewer\.login == '${botLogin}'\s*\)`,
+      String.raw`\s*github\.event\.requested_reviewer\.login == `,
+      String.raw`\(vars\.REVIEW_BOT_LOGIN \|\| 'qwen-code-review-bot'\)\s*\)`,
     ].join(''),
   );
 
-  it('resolves the bot login from review-config, not a paraphrase', () => {
-    expect(botLogin).toBe('qwen-code-ci-bot');
+  it('resolves the bot login through the repository variable', () => {
+    const setConstants = doc.jobs['review-config'].steps.find(
+      (s) => s.name === 'Set review constants',
+    );
+    expect(setConstants.run).toBe(
+      'echo "bot_login=${{ vars.REVIEW_BOT_LOGIN || \'qwen-code-review-bot\' }}" >> "$GITHUB_OUTPUT"',
+    );
   });
 
   it('filters non-bot review_requested events before authorize spends compute', () => {
@@ -3380,7 +3472,7 @@ describe('review_requested burst coalescing (#8945)', () => {
     const cond = doc.jobs['review-config'].if;
     expect(cond).toContain("github.event.action == 'review_requested'");
     expect(cond).toContain(
-      `github.event.requested_reviewer.login == '${botLogin}'`,
+      `github.event.requested_reviewer.login == ${botLoginExpression}`,
     );
   });
 });
@@ -4102,7 +4194,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           'for a in "$@"; do if [ "$prev" = "--jq" ]; then filter="$a"; fi; prev="$a"; done',
           'if [ "$cmd" = "api" ] && [ "$sub" = "user" ]; then',
           '  [ "${SCENARIO:-}" = "lookup_fail" ] && exit 1',
-          '  echo "qwen-code-ci-bot"; exit 0',
+          '  echo "qwen-code-review-bot"; exit 0',
           'fi',
           // The never-started guard asks this run's job list whether review-pr
           // ever got a runner. It runs the step's REAL --jq filter over the
@@ -4588,7 +4680,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+            reviews: reviewFixture(
+              'qwen-code-review-bot',
+              'HEADSHA1',
+              AFTER,
+              body,
+            ),
           });
           expect(r.status, body).toBe(0);
           expect(r.posted, body).toBe('');
@@ -4609,7 +4706,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         // — see the attribute-by-TIME test below.
         const cases = {
           stale: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             BEFORE,
             COMPOSED_REVIEW_BODIES[0],
@@ -4621,7 +4718,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             COMPOSED_REVIEW_BODIES[0],
           ),
           pending: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             null,
             COMPOSED_REVIEW_BODIES[0],
@@ -4657,7 +4754,12 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER, body),
+            reviews: reviewFixture(
+              'qwen-code-review-bot',
+              'HEADSHA1',
+              AFTER,
+              body,
+            ),
           });
           expect(r.posted, body).not.toBe('');
         }
@@ -4681,7 +4783,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'HEADSHA1',
             MID_RERUN,
             COMPOSED_REVIEW_BODIES[0],
@@ -4705,7 +4807,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
             prHead: 'HEADSHA1',
             runCreated: RUN_CREATED,
             runStartedAttempt: RUN_RESTARTED,
-            reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+            reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
           });
           expect(r.posted, scenario).not.toBe('');
           expect(r.stdout, scenario).toContain(
@@ -4729,7 +4831,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
         });
         expect(r.posted).not.toBe('');
       },
@@ -4745,7 +4847,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           prHead: 'HEADSHA1',
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
-          reviews: reviewFixture('qwen-code-ci-bot', 'HEADSHA1', AFTER),
+          reviews: reviewFixture('qwen-code-review-bot', 'HEADSHA1', AFTER),
         });
         expect(r.posted).not.toBe('');
       },
@@ -4769,7 +4871,7 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
           runCreated: RUN_CREATED,
           runStartedAttempt: RUN_RESTARTED,
           reviews: reviewFixture(
-            'qwen-code-ci-bot',
+            'qwen-code-review-bot',
             'OLDSHA',
             AFTER,
             COMPOSED_REVIEW_BODIES[0],

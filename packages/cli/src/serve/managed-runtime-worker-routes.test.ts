@@ -38,8 +38,13 @@ import {
   MANAGED_CSI_ATTEST_ROUTE,
   MANAGED_CSI_DRAIN_ROUTE,
 } from './managed-csi-worker.js';
-import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
+import {
+  MANAGED_OBSERVATION_PULL_ROUTE,
+  MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+  MANAGED_SHELL_PUBLISHER_ROUTE,
+} from './managed-shell-publisher.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
+import { EXTERNAL_PUBLICATION_ROUTES } from './managed-external-publication.js';
 import {
   startManagedRuntimeAttestationWorker,
   type ManagedRuntimeAttestationWorkerHandle,
@@ -272,7 +277,13 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
         capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
         publication: true,
       }),
-      keys([...MANAGED_CONTEXT_WORKER_ROUTES, ...MANAGED_TOOL_RESULT_ROUTES]),
+      // The main listener shares the publication channels with the
+      // dedicated listener (#15685), so the plan gates them too.
+      keys([
+        ...MANAGED_CONTEXT_WORKER_ROUTES,
+        ...MANAGED_TOOL_RESULT_ROUTES,
+        ...EXTERNAL_PUBLICATION_ROUTES,
+      ]),
     ],
     [
       'workspace with remote publishers',
@@ -285,6 +296,8 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
         ...MANAGED_TOOL_RESULT_ROUTES,
         PUBLICATION_INSTALL_ROUTE,
         MANAGED_SHELL_PUBLISHER_ROUTE,
+        MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+        MANAGED_OBSERVATION_PULL_ROUTE,
       ]),
     ],
     [
@@ -294,6 +307,8 @@ describe('resolveManagedRuntimeWorkerRoutePlan', () => {
         ...MANAGED_CONTEXT_WORKER_ROUTES,
         ...MANAGED_TOOL_RESULT_ROUTES,
         MANAGED_SHELL_PUBLISHER_ROUTE,
+        MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+        MANAGED_OBSERVATION_PULL_ROUTE,
       ]),
     ],
     [
@@ -338,6 +353,8 @@ const UNIVERSE = keys([
   ...EXTENSION_ROUTES,
   ...CSI_ROUTES,
   MANAGED_SHELL_PUBLISHER_ROUTE,
+  MANAGED_SHELL_PUBLISHER_DETACH_ROUTE,
+  MANAGED_OBSERVATION_PULL_ROUTE,
   PUBLICATION_INSTALL_ROUTE,
   SSH_ROUTE,
   { method: 'POST', path: '/internal/managed-runtime/v3/definitely-unknown' },

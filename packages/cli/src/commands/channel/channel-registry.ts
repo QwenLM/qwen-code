@@ -425,12 +425,22 @@ function ensureBuiltins(): Promise<void> {
             ({ callbackPlugin }) => ({ plugin: callbackPlugin }),
           ),
         },
+        {
+          name: 'wecom-webhook',
+          promise: import('@qwen-code/channel-wecom').then(
+            ({ webhookPlugin }) => ({ plugin: webhookPlugin }),
+          ),
+        },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         {
           name: 'feishu-webhook',
           promise: import('@qwen-code/channel-feishu').then(
             ({ webhookPlugin }) => ({ plugin: webhookPlugin }),
           ),
+        },
+        {
+          name: 'generic-webhook',
+          promise: import('@qwen-code/channel-generic-webhook'),
         },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
         { name: 'github', promise: import('@qwen-code/channel-github') },

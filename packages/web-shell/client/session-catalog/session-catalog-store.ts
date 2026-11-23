@@ -869,12 +869,19 @@ export class SessionCatalogStore {
         const liveActivityTime =
           liveUpdatedAt !== undefined ? Date.parse(liveUpdatedAt) : Number.NaN;
         if (Number.isFinite(liveActivityTime)) absorbed.add(session.sessionId);
-        const updatedAt =
+        const activityAdvances =
           liveUpdatedAt !== undefined &&
           Number.isFinite(liveActivityTime) &&
-          liveActivityTime > getSessionActivityTime(session)
-            ? liveUpdatedAt
-            : session.updatedAt;
+          liveActivityTime > getSessionActivityTime(session);
+        const updatedAt = activityAdvances ? liveUpdatedAt : session.updatedAt;
+        // A terminal observed in the current bridge that is newer than the
+        // row's persisted activity supersedes the cut-off hint: the
+        // continuation (or a fresh prompt) already settled, so the stale
+        // ledger evidence must not wait for the rate-limited full catalog
+        // reconcile to clear.
+        const needsContinuation = activityAdvances
+          ? undefined
+          : session.needsContinuation;
         if (
           session.clientCount === clientCount &&
           session.hasActivePrompt === hasActivePrompt &&
@@ -886,6 +893,7 @@ export class SessionCatalogStore {
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
           session.hasTurnError === hasTurnError &&
+          session.needsContinuation === needsContinuation &&
           session.updatedAt === updatedAt
         ) {
           return session;
@@ -902,6 +910,7 @@ export class SessionCatalogStore {
           isWaitingForPermission,
           isWaitingForUserQuestion,
           hasTurnError,
+          needsContinuation,
           ...(updatedAt !== undefined ? { updatedAt } : {}),
         };
       });

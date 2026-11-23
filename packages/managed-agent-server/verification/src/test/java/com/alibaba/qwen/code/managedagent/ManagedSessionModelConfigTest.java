@@ -76,7 +76,7 @@ class ManagedSessionModelConfigTest {
 
     @BeforeEach
     void setup() {
-        tenant = "model-config-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
                 + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
@@ -99,7 +99,7 @@ class ManagedSessionModelConfigTest {
                 registry, properties, new SdkHarnessRules(),
                 new com.alibaba.qwen.code.managedagent.adapters.workspace.LocalWorktreeFiles(),
                 new JdbcManagedSessionSkills(jdbc, json, new RequestDigests(), null),
-                null, null, null, null, null, null, configs);
+                null, null, null, null, null, configs);
         harness = mock(HarnessConnector.class);
         when(harness.supportsModelConfiguration()).thenReturn(true);
         when(harness.supportsModelSelection()).thenReturn(true);

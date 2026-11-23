@@ -15,6 +15,7 @@ import {
   getAllSettingKeys,
   getDialogSettingKeys,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_TIGHTEN_ONLY_SETTINGS,
   // Business logic utilities
   TEST_ONLY,
@@ -477,6 +478,41 @@ describe('SettingsUtils', () => {
           ).toEqual(allKeys);
           expect(allKeys).toContain(restrictedKey);
         });
+
+        it.each(WORKSPACE_RESTRICTED_ROOT_SETTINGS)(
+          'hides the root-level %s only in Workspace scope',
+          (key) => {
+            vi.mocked(getSettingsSchema).mockReturnValue({
+              [key]: {
+                type: 'number',
+                label: key,
+                category: 'General',
+                requiresRestart: false,
+                default: 5,
+                showInDialog: true,
+              },
+              visionModel: {
+                type: 'string',
+                label: 'Vision Model',
+                category: 'General',
+                requiresRestart: false,
+                default: '',
+                showInDialog: true,
+              },
+            } as unknown as ReturnType<typeof getSettingsSchema>);
+
+            expect(getDialogSettingKeys()).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: false }),
+            ).toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).not.toContain(key);
+            expect(
+              getDialogSettingKeys({ excludeWorkspaceRestricted: true }),
+            ).toContain('visionModel');
+          },
+        );
       });
 
       it('should return only settings marked for dialog display', () => {
@@ -1114,6 +1150,44 @@ describe('SettingsUtils', () => {
         expect(nextBooleanSettingValue(undefined, false)).toBe(true);
         expect(nextBooleanSettingValue(false)).toBe(true);
         expect(nextBooleanSettingValue(true)).toBe(false);
+      });
+
+      it('moves an unset boolean to the value its definition asks for', () => {
+        expect(nextBooleanSettingValue(undefined, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(false, undefined, true)).toBe(true);
+        expect(nextBooleanSettingValue(true, undefined, true)).toBe(false);
+      });
+
+      it('turns the unified agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.unifiedAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
+      });
+
+      it('turns the event-bus agent loop on from its unset state', async () => {
+        const { getSettingsSchema: getRealSettingsSchema } =
+          await vi.importActual<typeof import('./settingsSchema.js')>(
+            './settingsSchema.js',
+          );
+        const definition =
+          getRealSettingsSchema().experimental.properties.eventBusAgentLoop;
+        expect(
+          nextBooleanSettingValue(
+            undefined,
+            definition.default,
+            definition.unsetToggleValue,
+          ),
+        ).toBe(true);
       });
     });
 

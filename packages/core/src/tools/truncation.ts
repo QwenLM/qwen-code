@@ -69,20 +69,47 @@ export const TOOL_OUTPUT_TRUNCATED_PREFIX =
 export const PERSISTED_OUTPUT_STUB_PREFIX = '<persisted-output>';
 
 /**
+ * Header emitted by the send-path finalizer when it moves tool output into a
+ * durable artifact. Keep the full artifact phrase: the bare truncation notice
+ * is also used when no file could be saved.
+ */
+export const PERSISTED_OUTPUT_ARTIFACT_PREFIX =
+  'Tool output truncated. Persisted tool-output artifact';
+export const PERSISTED_OUTPUT_ARTIFACTS_PREFIX =
+  'Tool output truncated. Persisted tool-output artifacts';
+
+export const WEB_FETCH_URL_PREFIX = 'URL: ';
+export const WEB_FETCH_SAVED_TEXT_PREFIX = 'Full extracted text saved to: ';
+const WEB_FETCH_HEADER_LIMIT = 4 * 1024;
+
+/**
  * Whether this tool result already paid to move its bytes to a file, so the
  * text that remains is the only reference a consumer can page back from.
  *
- * Two producers spill: `buildStub` (the `<persisted-output>` envelope) and
+ * Four producers spill: `buildStub` (the `<persisted-output>` envelope),
  * `truncateAndSaveToFile`'s `envelope` (the `Tool output was too large...`
- * one). Both write a saved-path header; only the second one leads with the
- * truncation sentinel instead of the stub tag, so keying on the tag alone
- * misses the shell/MCP spill that `run_shell_command` emits most often.
- * Bounded envelopes that could NOT save (`Full output could not be saved`,
- * `Could not save full output to file`) carry no path and return false: there
- * is nothing to orphan, so they stay clearable.
+ * one), the send-path finalizer's artifact header, and `web_fetch`'s
+ * saved-text note behind its metadata header. Bounded envelopes that could
+ * NOT save (`Full output could not be saved`, `Could not save full output to
+ * file`) carry no path and return false: there is nothing to orphan, so they
+ * stay clearable.
  */
 export function isPersistedOutputStub(content: string): boolean {
   if (content.startsWith(PERSISTED_OUTPUT_STUB_PREFIX)) return true;
+  if (content.startsWith(PERSISTED_OUTPUT_ARTIFACT_PREFIX)) return true;
+  if (content.startsWith(WEB_FETCH_URL_PREFIX)) {
+    // The saved-text note belongs to web_fetch's metadata header, before the
+    // fetched content. Do not match the body, which may quote the phrase.
+    const headerEnd = content.indexOf('\n\n');
+    const savedAt = content.indexOf(`\n${WEB_FETCH_SAVED_TEXT_PREFIX}`);
+    if (
+      savedAt >= 0 &&
+      savedAt < WEB_FETCH_HEADER_LIMIT &&
+      (headerEnd === -1 || savedAt < headerEnd)
+    ) {
+      return true;
+    }
+  }
   if (!content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) return false;
   // The header is the envelope's second line; matching the whole body would
   // also hit the preview, where the truncated content may quote this phrase.

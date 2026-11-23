@@ -6,7 +6,7 @@ import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,12 +48,11 @@ class ManagedMessagePagingTest {
         view = new TransactionTemplate(new DataSourceTransactionManager(source));
         view.setReadOnly(true);
         view.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);
-        jdbc.update("INSERT INTO ma_session(tenant_id,session_id,agent_id,gmt_create,gmt_modified,"
-                        + "tenant_key,session_key,session_scope_key) VALUES(?,?,?,0,0,?,?,?)",
-                "tenant", "session", "qwen-code", ManagedSchemaKeys.key("tenant"),
-                ManagedSchemaKeys.key("session"), ManagedSessionStore.sessionScopeKey("tenant", "session"));
+        jdbc.update("INSERT INTO ma_session(tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                        + " VALUES(?,?,?,0,0)",
+                "tenant", "session", "qwen-code");
         jdbc.update("INSERT INTO ma_event_stream(tenant_id,session_id,stream_kind,stream_id,"
-                + "last_sequence,covered_sequence,gmt_modified) VALUES(?,?,'SESSION',X'',0,0,0)", "tenant", "session");
+                + "last_sequence,covered_sequence,gmt_modified) VALUES(?,?,'SESSION','',0,0,0)", "tenant", "session");
     }
 
     private void seed(int count, boolean ties) {
@@ -70,7 +69,7 @@ class ManagedMessagePagingTest {
 
     private void progress(long sequence) {
         jdbc.update("UPDATE ma_event_stream SET covered_sequence=?,last_sequence=? WHERE tenant_id=?"
-                + " AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", sequence, sequence, "tenant", "session");
+                + " AND session_id=? AND stream_kind='SESSION' AND stream_id=''", sequence, sequence, "tenant", "session");
     }
 
     private StoreModels.MessagePage read(String cursor, int limit, boolean backward) {
@@ -189,10 +188,11 @@ class ManagedMessagePagingTest {
         String resource = resource(bytes);
         assertThat(read(null, 1, true).items().getFirst().content())
                 .extracting(StoreModels.ItemPartRecord::text).containsExactly("resource body");
-        jdbc.update("UPDATE ma_resource SET sha256=? WHERE resource_key=?", "0".repeat(64), resource);
+        jdbc.update("UPDATE ma_resource SET sha256=? WHERE tenant_id='tenant' AND session_id='session' AND resource_id=?",
+                "0".repeat(64), resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("digest differs");
-        jdbc.update("UPDATE ma_resource SET sha256=?,session_scope_key=? WHERE resource_key=?",
-                WorkspaceEvidenceResources.digest(bytes), ManagedSessionStore.sessionScopeKey("other", "session"), resource);
+        jdbc.update("UPDATE ma_resource SET sha256=?,tenant_id=?,session_id=? WHERE tenant_id='tenant' AND session_id='session' AND resource_id=?",
+                WorkspaceEvidenceResources.digest(bytes), "other", "session", resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("unavailable");
     }
 
@@ -200,28 +200,19 @@ class ManagedMessagePagingTest {
     void budgetsActualResourceBytesBeforeLoadingASelectedBody() {
         seed(1, false);
         String resource = resource(new byte[8 * 1024 * 1024 + 1]);
-        jdbc.update("UPDATE ma_resource SET byte_length=1 WHERE resource_key=?", resource);
+        jdbc.update("UPDATE ma_resource SET byte_length=1 WHERE tenant_id='tenant' AND session_id='session' AND resource_id=?", resource);
         assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("byte budget");
         assertThat(jdbc.messageReads).isZero();
     }
 
     private String resource(byte[] bytes) {
-        String scope = ManagedSessionStore.sessionScopeKey("tenant", "session");
-        String key = ManagedSessionStore.resourceKey(scope, "page-parts");
-        jdbc.update("INSERT INTO ma_resource(resource_key,session_scope_key,tenant_id,session_id,resource_id,"
+        jdbc.update("INSERT INTO ma_resource(tenant_id,session_id,resource_id,"
                         + "kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,last_verified_at)"
-                        + " VALUES(?,?,?,?,'page-parts','managed-message-parts',1,?,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
-                key, scope, "tenant", "session", bytes.length, WorkspaceEvidenceResources.digest(bytes), bytes);
-        jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", key, id(1));
-        return key;
-    }
-
-    @Test
-    void refusesPrivateCsiSessionsWithoutBorrowingTheirJournalAsMessages() {
-        seed(2, false);
-        jdbc.update("UPDATE ma_session SET tool_profile='csi-files-retirement/1' WHERE tenant_id=? AND session_id=?",
-                "tenant", "session");
-        assertThatThrownBy(() -> read(null, 1, true)).hasMessageContaining("private CSI");
+                        + " VALUES(?,?,'page-parts','managed-message-parts',1,?,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
+                "tenant", "session", bytes.length, WorkspaceEvidenceResources.digest(bytes), bytes);
+        jdbc.update("UPDATE ma_message SET body_resource_ref=? WHERE item_id=?",
+                ManagedIdentityRefs.resourceRef("tenant", "session", "page-parts"), id(1));
+        return "page-parts";
     }
 
     @Test

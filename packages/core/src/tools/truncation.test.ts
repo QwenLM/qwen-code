@@ -974,6 +974,25 @@ The full output has been saved to: not a header, just text`;
     expect(isPersistedOutputStub('ordinary tool output')).toBe(false);
   });
 
+  it('recognizes the finalizer and web_fetch saved-path headers', () => {
+    const singular =
+      'Tool output truncated. Persisted tool-output artifact: /tmp/tool-results/one.txt\n\npreview';
+    const plural =
+      'Tool output truncated. Persisted tool-output artifacts:\n- /tmp/tool-results/one.txt\n- /tmp/tool-results/two.txt\n\npreview';
+    const webFetch =
+      'URL: https://example.com\nStatus: 200 OK | Content-Type: text/plain | Size: 100,000 bytes\nFull extracted text saved to: /tmp/tool-results/web-fetch.txt\n\nsummary';
+    const quotedAfterHeader =
+      'URL: https://example.com\nStatus: 200 OK | Content-Type: text/plain | Size: 100 bytes\n\nFull extracted text saved to: quoted, not a producer note';
+
+    expect(isPersistedOutputStub(singular)).toBe(true);
+    expect(isPersistedOutputStub(plural)).toBe(true);
+    expect(isPersistedOutputStub(webFetch)).toBe(true);
+    expect(isPersistedOutputStub('Tool output truncated.\n\npreview')).toBe(
+      false,
+    );
+    expect(isPersistedOutputStub(quotedAfterHeader)).toBe(false);
+  });
+
   // The predicate is positional: the saved-path header must be line 2 of the
   // envelope. Hand-built bodies above cannot catch a producer that stops
   // emitting it there, so assert against what the producers actually write.

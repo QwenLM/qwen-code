@@ -10,6 +10,7 @@ import {
   runWithHookExecutionOwner,
 } from '../hooks/hook-execution-context.js';
 import type { SessionSourceService } from '../services/session-sources.js';
+import type { GeneratedUiStateService } from '../services/generated-ui-state.js';
 import type { RequestLifecycleEvent } from '../telemetry/request-lifecycle.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 
@@ -28,6 +29,7 @@ import {
 } from '../core/reasoning-overrides.js';
 import { getBuiltinDeepSeekReasoning } from '../core/deepseek-reasoning.js';
 import { getRequestModel } from '../core/request-model.js';
+import { ModelAvailabilityService } from '../core/model-availability-service.js';
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
@@ -165,6 +167,13 @@ import type {
   LspStatusSnapshot,
 } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
+import {
+  resolveAgentLoopSwitch,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
+  type AgentLoopPath,
+} from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
@@ -173,6 +182,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { clearCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
   authoredSkillName,
@@ -489,6 +499,17 @@ const DEFAULT_TOOL_SEARCH_THRESHOLD = 0;
 // lock, so the horizon only bounds how long a reader treats an activation
 // without a live lock as possibly current.
 const MANAGED_ACTIVATION_LEASE_MS = 5 * 60 * 1000;
+
+function normalizeVisionBridgeTimeoutMs(
+  timeoutMs: number | undefined,
+): number | undefined {
+  return timeoutMs !== undefined &&
+    Number.isInteger(timeoutMs) &&
+    timeoutMs > 0 &&
+    timeoutMs <= 2_147_483_647
+    ? timeoutMs
+    : undefined;
+}
 
 /** The recorder's view of a Managed Session log. */
 function managedRecordWriter(
@@ -1449,6 +1470,8 @@ export interface ConfigParameters {
   unifiedAgentLoopEnabled?: boolean;
   /** Experimental: run the shared agent loop on the event bus. */
   eventBusAgentLoopEnabled?: boolean;
+  /** Experimental: track model health across requests for the fallback chain. */
+  modelAvailabilityTracking?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -2486,12 +2509,36 @@ export interface SubSessionSpawnRequest {
   model?: string;
   /** Optional display name for the sub-session in the session list. */
   name?: string;
+  /** Registered workspace (absolute path or id) to run the sub-session in;
+   * absent means the caller's workspace. */
+  workspace?: string;
+  workspaceGeneration?: string;
+  /** The named workspace was selected under YOLO without one-time approval. */
+  requiresYolo?: true;
+  /** The authorization was automatic under AUTO and requires that mode still. */
+  requiresAutoMode?: true;
+  /** An existing session in `workspace` to send the prompt to. */
+  sessionId?: string;
 }
+
+export interface SubSessionWorkspaceBinding {
+  workspaceId: string;
+  workspaceCwd: string;
+  workspaceGeneration: string;
+  /** Derived from launcher identity; used for approval, not launch authorization. */
+  sameWorkspace: boolean;
+}
+
+export type SubSessionWorkspaceResolver = (
+  workspace: string,
+) => Promise<SubSessionWorkspaceBinding>;
 
 /** Result returned to the `create_sub_session` tool. `result` (the sub-session's
  * first-turn output) is present only for `completion: 'first-turn'`. */
 export interface SubSessionSpawnResult {
   sessionId: string;
+  /** Canonical destination for a cross-workspace session link. */
+  workspaceCwd?: string;
   result?: string;
   stopReason?: string;
   /** Whether the parent lineage was durably persisted to the sub-session's
@@ -3267,8 +3314,10 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly unifiedAgentLoopEnabled: boolean = false;
-  private readonly eventBusAgentLoopEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean | undefined;
+  private readonly eventBusAgentLoopEnabled: boolean | undefined;
+  private readonly modelAvailabilityTracking: boolean;
+  private modelAvailabilityService: ModelAvailabilityService | undefined;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3439,7 +3488,7 @@ export class Config {
   private reasoningSnapshot?: ReasoningSnapshot;
   private latestReasoningSnapshot?: ReasoningSnapshot;
   private imageModel?: string;
-  private readonly visionBridgeTimeoutMs: number | undefined;
+  private visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -3736,8 +3785,13 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
-    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled ?? false;
+    // Deliberately not `?? false`: these are tri-state. Unset must stay
+    // undefined so the resolver falls through to the per-surface built-in
+    // default; collapsing to false here would make "not set" indistinguishable
+    // from "explicitly off" and block a later per-surface default flip.
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
+    this.modelAvailabilityTracking = params.modelAvailabilityTracking ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -4084,13 +4138,9 @@ export class Config {
     // schema still accepts via /config) would throw RangeError or silently
     // degrade to a 1ms timeout, killing every bridge turn. Reject anything the
     // timer can't take and fall back to the built-in default.
-    this.visionBridgeTimeoutMs =
-      params.visionBridgeTimeoutMs !== undefined &&
-      Number.isInteger(params.visionBridgeTimeoutMs) &&
-      params.visionBridgeTimeoutMs > 0 &&
-      params.visionBridgeTimeoutMs <= 2_147_483_647
-        ? params.visionBridgeTimeoutMs
-        : undefined;
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(
+      params.visionBridgeTimeoutMs,
+    );
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -4231,6 +4281,8 @@ export class Config {
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
+    const ripgrepAbort = new AbortController();
+    let ripgrepAvailability: Promise<boolean> | undefined;
     try {
       if (this.shellExecutionSandbox)
         this.shellExecutionSandbox = await probeShellSandbox(
@@ -4253,9 +4305,28 @@ export class Config {
           : undefined,
       );
       await this.bindSessionExecutionEngine();
+      // Overlap ACP's binary health check with resource I/O in this request.
+      if (
+        this.getExperimentalZedIntegration() &&
+        this.getUseRipgrep() &&
+        this.sessionExecutionEngine !== 'managed' &&
+        !this.getExecutionEnvironment() &&
+        !this.shellExecutionSandbox &&
+        !this.getBareMode()
+      ) {
+        ripgrepAvailability = canUseRipgrep(
+          this.getUseBuiltinRipgrep(),
+          AbortSignal.any([
+            ripgrepAbort.signal,
+            this.executionShutdown.signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        );
+        void ripgrepAvailability.catch(() => undefined);
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      await this.initializeInternal(options);
+      await this.initializeInternal(options, ripgrepAvailability);
       this.workflowModeReady = true;
       if (this.initialWorkflowMode !== undefined) {
         const enabled = this.initialWorkflowMode;
@@ -4293,6 +4364,9 @@ export class Config {
         });
       }
       throw error;
+    } finally {
+      ripgrepAbort.abort();
+      await ripgrepAvailability?.catch(() => undefined);
     }
   }
 
@@ -4319,6 +4393,7 @@ export class Config {
 
   private async initializeInternal(
     options?: ConfigInitializeOptions,
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
@@ -4888,6 +4963,7 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
+      ripgrepAvailability,
     );
     options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
@@ -6776,6 +6852,7 @@ export class Config {
     this.workflowModePublishedState = undefined;
     this.refreshWorkflowMode();
     this.sessionSourceService = this.sessionSourceServiceFactory?.();
+    this.generatedUiStateService = this.generatedUiStateServiceFactory?.();
     this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
@@ -6789,6 +6866,15 @@ export class Config {
     this.toolResultBudget.bytesWritten = 0;
     this.getMemoryPressureMonitor()?.resetForNewSession();
     this.fileHistoryService = undefined;
+    // The availability ledger and the background prompt-id registry belong to
+    // the outgoing conversation. A rewind/resume can reuse a prompt id (the
+    // transcript seeds the mint counter), so carrying either across the swap
+    // would let a stale mark skip a recovered fallback, or a reused notification
+    // id exclude a new foreground turn. Reset both unconditionally — even a
+    // same-id resume replaces the conversation (P2). Dropping the lazy service
+    // instance discards every mark and the last turn key.
+    this.modelAvailabilityService = undefined;
+    this.llmClient?.clearBackgroundInteractionPromptIds?.();
     refreshSessionContext(this.sessionId);
     // The commit-attribution singleton accumulates per-file AI edits
     // and a session-scoped prompt counter — both stop being meaningful
@@ -7568,6 +7654,24 @@ export class Config {
   }
 
   /**
+   * Whether the model fallback chain should consult the per-session model
+   * health ledger (experimental, opt-in). When false the chain behaves exactly
+   * as it did before the ledger existed.
+   */
+  isModelAvailabilityTrackingEnabled(): boolean {
+    return this.modelAvailabilityTracking;
+  }
+
+  /**
+   * Session-scoped model health ledger, created lazily. Only consulted when
+   * `isModelAvailabilityTrackingEnabled()` is true.
+   */
+  getModelAvailabilityService(): ModelAvailabilityService {
+    this.modelAvailabilityService ??= new ModelAvailabilityService();
+    return this.modelAvailabilityService;
+  }
+
+  /**
    * Read the active reasoning-effort tier from the live content-generator
    * config. Returns undefined when thinking is disabled (`reasoning: false`) or
    * no tier is set (the model/provider default applies).
@@ -7805,6 +7909,14 @@ export class Config {
   }
 
   /**
+   * Update the vision bridge timeout at runtime (`/model --vision --timeout`).
+   * Values the constructor would reject fall back to the built-in default.
+   */
+  setVisionBridgeTimeoutMs(timeoutMs: number | undefined): void {
+    this.visionBridgeTimeoutMs = normalizeVisionBridgeTimeoutMs(timeoutMs);
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */
@@ -7895,6 +8007,7 @@ export class Config {
       // different image support must update them, or the vision-bridge gate and
       // image-stripping read the previous model's modalities.
       this.contentGeneratorConfig.modalities = config.modalities;
+      this.contentGeneratorConfig.imageDetail = config.imageDetail;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -7902,6 +8015,10 @@ export class Config {
       if ('modalities' in sources) {
         this.contentGeneratorConfigSources['modalities'] =
           sources['modalities'];
+      }
+      if ('imageDetail' in sources) {
+        this.contentGeneratorConfigSources['imageDetail'] =
+          sources['imageDetail'];
       }
       if ('samplingParams' in sources) {
         this.contentGeneratorConfigSources['samplingParams'] =
@@ -8123,6 +8240,9 @@ export class Config {
       `${this.sessionId}.worktree.json`,
       `${this.sessionId}.pr.json`,
       `${this.sessionId}.title.json`,
+      `${this.sessionId}.branch.json`,
+      `${this.sessionId}.artifacts.json`,
+      `${this.sessionId}.goal.json`,
     ].map((fileName) => ({
       from: path.join(oldChatsDir, fileName),
       to: path.join(newChatsDir, fileName),
@@ -8306,10 +8426,17 @@ export class Config {
     // later `gh pr create` in this session must still reach the bridge.
     const sessionPrBoundCallback =
       this.sessionService?.getSessionPrBoundCallback();
+    const sessionGoalChangedCallback =
+      this.sessionService?.getSessionGoalChangedCallback();
     this.sessionService = undefined;
     if (sessionPrBoundCallback) {
       this.getSessionService().setSessionPrBoundCallback(
         sessionPrBoundCallback,
+      );
+    }
+    if (sessionGoalChangedCallback) {
+      this.getSessionService().setSessionGoalChangedCallback(
+        sessionGoalChangedCallback,
       );
     }
     this.fileHistoryService = undefined;
@@ -10830,16 +10957,38 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
-  isUnifiedAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
-    return this.unifiedAgentLoopEnabled;
+  isUnifiedAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'],
+      setting: this.unifiedAgentLoopEnabled,
+      surface,
+      surfaceDefault: UNIFIED_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    });
   }
 
-  isEventBusAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] === '1') {
-      return true;
-    }
-    return this.eventBusAgentLoopEnabled;
+  isEventBusAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'],
+      setting: this.eventBusAgentLoopEnabled,
+      surface,
+      surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+    });
+  }
+
+  /**
+   * The loop path a surface runs: unified off -> legacy; otherwise the kernel
+   * only when the event-bus switch is on AND the surface's execution branch
+   * actually enters it, else shared. Speculation and the Hosted Harness never
+   * read the event-bus switch (their rounds always run on the shared loop), so
+   * both are capped at shared even with both switches on.
+   */
+  getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
+    if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
+    if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
+    if (surface === 'speculation' || surface === 'hosted') return 'shared';
+    return 'kernel';
   }
 
   /**
@@ -10883,6 +11032,22 @@ export class Config {
   getSessionSourceService(): SessionSourceService | undefined {
     return Object.hasOwn(this, 'sessionSourceService')
       ? this.sessionSourceService
+      : undefined;
+  }
+
+  private generatedUiStateService?: GeneratedUiStateService;
+  private generatedUiStateServiceFactory?: () => GeneratedUiStateService;
+
+  setGeneratedUiStateServiceFactory(
+    factory: () => GeneratedUiStateService,
+  ): void {
+    this.generatedUiStateServiceFactory = factory;
+    this.generatedUiStateService = factory();
+  }
+
+  getGeneratedUiStateService(): GeneratedUiStateService | undefined {
+    return Object.hasOwn(this, 'generatedUiStateService')
+      ? this.generatedUiStateService
       : undefined;
   }
 
@@ -12840,7 +13005,14 @@ export class Config {
         .restore(records ?? [])
         .then(() => runtime);
     }
-    void this.goalRuntimeReady.catch(() => undefined);
+    // Restore itself writes nothing (the runtime's invariant); refresh the
+    // list-facing goal projection once it settles, so a session journaled
+    // before the sidecar existed gains its sidebar marker on this load.
+    void this.goalRuntimeReady
+      .then((restoredRuntime) => {
+        recorder.refreshGoalProjection(restoredRuntime.getSnapshot().goal);
+      })
+      .catch(() => undefined);
   }
 
   /**
@@ -13242,6 +13414,9 @@ export class Config {
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    if (this.skillManager) {
+      clearCollectedSkillEntriesCache(this.skillManager);
+    }
   }
 
   /**
@@ -13601,6 +13776,7 @@ export class Config {
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -13892,7 +14068,8 @@ export class Config {
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep = await (ripgrepAvailability ??
+          canUseRipgrep(this.getUseBuiltinRipgrep()));
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }
@@ -14341,6 +14518,7 @@ export class Config {
   }
 
   private subSessionSpawner?: SubSessionSpawner;
+  private subSessionWorkspaceResolver?: SubSessionWorkspaceResolver;
 
   private currentSessionScheduledTaskCreator?: CurrentSessionScheduledTaskCreator;
 
@@ -14350,8 +14528,16 @@ export class Config {
    * `extMethod`); left unset in interactive TUI / headless, where the tool is
    * therefore never registered. `undefined` clears it on session teardown.
    */
-  setSubSessionSpawner(spawner: SubSessionSpawner | undefined): void {
+  setSubSessionSpawner(
+    spawner: SubSessionSpawner | undefined,
+    resolveWorkspace?: SubSessionWorkspaceResolver,
+  ): void {
     this.subSessionSpawner = spawner;
+    this.subSessionWorkspaceResolver = resolveWorkspace;
+  }
+
+  getSubSessionWorkspaceResolver(): SubSessionWorkspaceResolver | undefined {
+    return this.subSessionWorkspaceResolver;
   }
 
   /** The injected sub-session spawner, or undefined outside daemon mode. */

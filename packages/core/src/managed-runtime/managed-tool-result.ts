@@ -318,6 +318,17 @@ function id(value: unknown, label: string): string {
   return assertManagedSessionStableId(value as ManagedSessionJsonValue, label);
 }
 
+// The raw model tool-call id lands in ma_tool_execution.tool_call_id
+// VARCHAR(128). The shared stable-id rule (maxIdBytes) stays 512 for the
+// other id fields; only callId converges to the 128-character column bound.
+function toolCallId(value: unknown, label: string): string {
+  const callId = id(value, label);
+  if (callId.length > 128) {
+    fail(`${label} exceeds the 128-character tool-call bound.`);
+  }
+  return callId;
+}
+
 function token(value: unknown, label: string): string {
   if (typeof value !== 'string' || !TOKEN_PATTERN.test(value)) {
     fail(`${label} must match ${TOKEN_PATTERN.source}.`);
@@ -618,7 +629,7 @@ export function parseToolResultManifest(value: unknown): ToolResultManifest {
     sessionId: id(manifest.sessionId, 'manifest.sessionId'),
     turnId: id(manifest.turnId, 'manifest.turnId'),
     executionCallId: id(manifest.executionCallId, 'manifest.executionCallId'),
-    callId: id(manifest.callId, 'manifest.callId'),
+    callId: toolCallId(manifest.callId, 'manifest.callId'),
     invocationDigest: id(
       manifest.invocationDigest,
       'manifest.invocationDigest',

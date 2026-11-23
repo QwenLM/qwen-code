@@ -11,6 +11,7 @@ import { DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD } from '../../config/clearCo
 import { sanitizeMimeForPlaceholder } from '../compactionInputSlimming.js';
 import { ToolNames, canonicalToolName } from '../../tools/tool-names.js';
 import { isPersistedOutputStub } from '../../tools/truncation.js';
+import { getToolOutputRecovery } from '../../tools/tool-output-recovery.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
 export const MICROCOMPACT_CLEARED_IMAGE_PREFIX = '[Old inline media cleared:';
@@ -442,20 +443,27 @@ function estimatePartTokens(part: Part): number {
     }
     // Tool results may carry nested media on `functionResponse.parts`
     // (see `coreToolScheduler.createFunctionResponsePart`).
-    const nested = (part.functionResponse as { parts?: unknown }).parts;
-    if (Array.isArray(nested)) {
-      for (const inner of nested as Part[]) {
-        if (inner.inlineData || inner.fileData) {
-          total += MEDIA_PART_TOKEN_ESTIMATE;
-        }
-      }
-    }
+    total += estimateNestedMediaTokens(part);
     return total;
   }
   if (part.inlineData || part.fileData) {
     return MEDIA_PART_TOKEN_ESTIMATE;
   }
   return 0;
+}
+
+/** Token estimate for the media nested on `functionResponse.parts`, excluding the text output. */
+function estimateNestedMediaTokens(part: Part): number {
+  const nested = (part.functionResponse as { parts?: unknown } | undefined)
+    ?.parts;
+  if (!Array.isArray(nested)) return 0;
+  let total = 0;
+  for (const inner of nested as Part[]) {
+    if (inner.inlineData || inner.fileData) {
+      total += MEDIA_PART_TOKEN_ESTIMATE;
+    }
+  }
+  return total;
 }
 
 /** Defensive guard against re-clearing if a future change reshapes a cleared part into a collectable form. */
@@ -506,12 +514,21 @@ function getClearableToolOutput(
   if (typeof output !== 'string') return { chars: 0, persisted: false };
   // A persisted-output stub has already had its oversized content moved to
   // a file; the model keeps recovering it by paging that file back in. Clearing
-  // the stub would trade a preview for nothing (it is already preview-sized)
-  // and destroy the only reference to the saved bytes, so it is never
-  // clearable. Truncations without a saved file keep no such reference and
-  // stay clearable. Both producers count: the `<persisted-output>` tag and the
-  // `Tool output was too large...` envelope `run_shell_command` emits.
-  if (isPersistedOutputStub(output)) {
+  // the stub would destroy the only reference to the saved bytes, so its text
+  // is never clearable. Protection keys on that reference, not on the resident
+  // text being small: producers budget their own previews, and `web_fetch`'s
+  // failed-summarizer fallback keeps as much as ~98K chars behind its saved-path
+  // header. Whatever stays resident still joins the size trigger's total below,
+  // so an oversized preview keeps the valve honest instead of hiding from it.
+  // Truncations without a saved file keep no such reference and stay
+  // clearable. Prefer the Part-aware recovery handle because it covers
+  // every producer without recognizing their model-visible text. The string
+  // fallback remains necessary after JSON serialization or resume drops the
+  // non-enumerable handle.
+  if (
+    (getToolOutputRecovery(part)?.persistedOutputFiles?.length ?? 0) > 0 ||
+    isPersistedOutputStub(output)
+  ) {
     // It is not free, though: the preview its producer budgeted stays resident
     // in the prompt. Counting it as zero would take the largest results out of
     // the size trigger's total and let the valve go blind to them, so the
@@ -750,6 +767,24 @@ function planSizeBasedClearing(
     remainingChars -= chars;
   }
 
+  // Persisted stubs are not spendable — their text is the only reference to
+  // the saved bytes — but nested media on such a part is not part of that
+  // reference and is re-sent on every request. The idle path reaches the
+  // media-strip branch through the `hasNestedMedia` bypass; without these refs
+  // the size trigger would keep reporting a total it refuses to reduce and the
+  // inline bytes would stay resident until an idle pass. They add no
+  // reclaimable chars, so the spend accounting above (and the reported
+  // before/after totals) is unchanged; the clearing loop strips only the media
+  // and leaves the stub text intact.
+  for (const ref of compactableToolRefs) {
+    const key = refKey(ref);
+    if (ref.contentIndex >= history.length || keepToolRefs.has(key)) continue;
+    const part = getPart(virtualHistory, ref);
+    if (!part || !hasNestedMedia(part)) continue;
+    if (!getClearableToolOutput(part, callIdentityById).persisted) continue;
+    clearRefs.push(ref);
+  }
+
   return {
     clearRefs,
     toolRefs: compactableToolRefs,
@@ -903,7 +938,9 @@ export function microcompactHistory(
       // would destroy the only reference to the saved bytes. Zero-character
       // non-media tool refs are never clearable either (mirrors the size
       // path's skip). Both are excluded from keepRecent candidates above, so
-      // without this guard they would be blanked here.
+      // without this guard they would be blanked here. The `hasNestedMedia`
+      // bypass keeps a stub whose media alone is reclaimable in the list; the
+      // clearing loop then drops the media and leaves the text untouched.
       if (toolKeys.has(refKey(r)) && !(part && hasNestedMedia(part))) {
         const { chars, persisted } = getClearableToolOutput(
           part,
@@ -984,12 +1021,25 @@ export function microcompactHistory(
           part.functionResponse &&
           toolName &&
           COMPACTABLE_TOOLS.has(toolName) &&
-          !isErrorResponse(part) &&
+          !isErrorResponse(part)
+        ) {
           // Same predicate the plan counted with. The plan only sees refs it
           // can account for; re-checking here keeps a stub that reached the
           // clear list some other way from losing its saved-output reference.
-          !getClearableToolOutput(part, callIdentityById).persisted
-        ) {
+          if (getClearableToolOutput(part, callIdentityById).persisted) {
+            // The saved-path text must survive, but the nested media is not
+            // part of that reference — and a stub only lands in the clear list
+            // through the `hasNestedMedia` bypass, so refusing the whole ref
+            // would leave the inline bytes resident for the rest of the
+            // conversation. Strip the media, keep the text.
+            if (!hasNestedMedia(part)) return part;
+            tokensSaved += estimateNestedMediaTokens(part);
+            mediaCleared++;
+            touched = true;
+            return {
+              functionResponse: stripNestedMedia(part.functionResponse),
+            };
+          }
           tokensSaved += estimatePartTokens(part);
           toolsCleared++;
           touched = true;

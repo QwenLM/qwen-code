@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionSkills;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -70,8 +69,8 @@ public class JdbcManagedSessionSkills
 
     private String creationJson(String tenant, String session) {
         var rows = jdbc.query("SELECT result_json FROM ma_request_receipt WHERE namespace = 'SESSION_CREATE_ACTOR'"
-                        + " AND tenant_key = ? AND tenant_id = ? AND session_id = ?",
-                (row, index) -> row.getString("result_json"), ManagedSchemaKeys.key(tenant), tenant, session);
+                        + " AND tenant_id = ? AND session_id = ?",
+                (row, index) -> row.getString("result_json"), tenant, session);
         if (rows.isEmpty()) {
             return null;
         }
@@ -87,8 +86,27 @@ public class JdbcManagedSessionSkills
         }
         try {
             var snapshot = json.readValue(value, new TypeReference<Map<String, Object>>() { });
+            if (Integer.valueOf(3).equals(snapshot.get("version"))) {
+                if (!Boolean.TRUE.equals(snapshot.get("serverLoop"))) {
+                    throw conflict();
+                }
+                if (snapshot.containsKey("initialSelection")) {
+                    requireCreationIntent(snapshot, json, digests, true);
+                } else {
+                    if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "serverLoop", "digest"))) {
+                        throw conflict();
+                    }
+                    Map<String, Object> content = new LinkedHashMap<>();
+                    content.put("skills", snapshot.get("skills"));
+                    content.put("serverLoop", true);
+                    if (!digests.digest(content).equals(snapshot.get("digest"))) {
+                        throw conflict();
+                    }
+                }
+                return snapshot.get("skills") == null ? null : AgentDefinitionExtensions.sessionSkills(snapshot.get("skills"));
+            }
             if (Integer.valueOf(2).equals(snapshot.get("version"))) {
-                requireCreationIntent(snapshot, json, digests);
+                requireCreationIntent(snapshot, json, digests, false);
                 return snapshot.get("skills") == null ? null : AgentDefinitionExtensions.sessionSkills(snapshot.get("skills"));
             }
             if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "digest"))
@@ -107,6 +125,25 @@ public class JdbcManagedSessionSkills
         }
     }
 
+    public boolean serverLoopInjected(String tenant, String session) {
+        String value = creationJson(tenant, session);
+        decode(value, json, digests);
+        return serverLoopMarker(value, json);
+    }
+
+    private static boolean serverLoopMarker(String value, ObjectMapper json) {
+        if (value == null) {
+            return false;
+        }
+        try {
+            var snapshot = json.readValue(value, new TypeReference<Map<String, Object>>() { });
+            return Integer.valueOf(3).equals(snapshot.get("version"))
+                    && Boolean.TRUE.equals(snapshot.get("serverLoop"));
+        } catch (Exception error) {
+            throw conflict(error);
+        }
+    }
+
     public Map<String, Object> initialSelection(String tenant, String session) {
         String value = creationJson(tenant, session);
         if (value == null) {
@@ -114,11 +151,13 @@ public class JdbcManagedSessionSkills
         }
         try {
             var snapshot = json.readValue(value, new TypeReference<Map<String, Object>>() { });
-            if (!Integer.valueOf(2).equals(snapshot.get("version"))) {
+            boolean v3 = Integer.valueOf(3).equals(snapshot.get("version"));
+            boolean v2 = Integer.valueOf(2).equals(snapshot.get("version"));
+            if (!v2 && !(v3 && snapshot.containsKey("initialSelection"))) {
                 decode(value, json, digests);
                 return null;
             }
-            Map<String, Object> command = requireCreationIntent(snapshot, json, digests);
+            Map<String, Object> command = requireCreationIntent(snapshot, json, digests, v3);
             String identity = tenant + ":" + session;
             if (!ManagedConfigInstall.derivedOperationId("managed-extension-initial:", identity).equals(command.get("operationId"))
                     || !org.apache.commons.codec.digest.DigestUtils.sha256Hex("managed-extension-initial:" + identity).equals(command.get("actorKey"))) {
@@ -136,6 +175,7 @@ public class JdbcManagedSessionSkills
             List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> pins) {
         String previous = creationJson(tenant, session);
         List<Map<String, Object>> skills = decode(previous, json, digests);
+        boolean serverLoop = serverLoopMarker(previous, json);
         if (initialSelection(tenant, session) != null) {
             throw conflict();
         }
@@ -145,15 +185,18 @@ public class JdbcManagedSessionSkills
                 "expectedRevision", 0, "extensions", json.convertValue(pins, new TypeReference<List<Map<String, Object>>>() { }));
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("skills", skills);
+        if (serverLoop) {
+            content.put("serverLoop", true);
+        }
         content.put("initialSelection", command);
         var snapshot = new LinkedHashMap<>(content);
-        snapshot.put("version", 2);
+        snapshot.put("version", serverLoop ? 3 : 2);
         snapshot.put("digest", digests.digest(content));
         try {
             String value = json.writeValueAsString(snapshot);
             if (jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE namespace='SESSION_CREATE_ACTOR'"
-                            + " AND tenant_key=? AND tenant_id=? AND session_id=? AND (result_json IS NULL OR result_json=?)",
-                    value, ManagedSchemaKeys.key(tenant), tenant, session, previous) != 1) {
+                            + " AND tenant_id=? AND session_id=? AND (result_json IS NULL OR result_json=?)",
+                    value, tenant, session, previous) != 1) {
                 throw conflict();
             }
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
@@ -161,9 +204,16 @@ public class JdbcManagedSessionSkills
         }
     }
 
-    private static Map<String, Object> requireCreationIntent(Map<String, Object> snapshot, ObjectMapper json, RequestDigests digests) {
-        if (!snapshot.keySet().equals(java.util.Set.of("version", "skills", "initialSelection", "digest"))
+    private static Map<String, Object> requireCreationIntent(Map<String, Object> snapshot, ObjectMapper json,
+            RequestDigests digests, boolean withServerLoop) {
+        java.util.Set<String> keys = withServerLoop
+                ? java.util.Set.of("version", "skills", "serverLoop", "initialSelection", "digest")
+                : java.util.Set.of("version", "skills", "initialSelection", "digest");
+        if (!snapshot.keySet().equals(keys)
                 || !(snapshot.get("initialSelection") instanceof Map<?, ?> raw)) {
+            throw conflict();
+        }
+        if (withServerLoop && !Boolean.TRUE.equals(snapshot.get("serverLoop"))) {
             throw conflict();
         }
         @SuppressWarnings("unchecked")
@@ -180,6 +230,9 @@ public class JdbcManagedSessionSkills
         }
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("skills", snapshot.get("skills"));
+        if (withServerLoop) {
+            content.put("serverLoop", true);
+        }
         content.put("initialSelection", command);
         if (!digests.digest(content).equals(snapshot.get("digest"))) {
             throw conflict();
@@ -188,12 +241,28 @@ public class JdbcManagedSessionSkills
     }
 
     public void save(String tenant, String session, List<Map<String, Object>> skills) {
+        save(tenant, session, skills, false);
+    }
+
+    public void save(String tenant, String session, List<Map<String, Object>> skills,
+            boolean serverLoopInjected) {
         try {
-            String value = json.writeValueAsString(Map.of("version", 1, "skills", skills,
-                    "digest", digests.digest(skills)));
+            String value;
+            if (serverLoopInjected) {
+                Map<String, Object> content = new LinkedHashMap<>();
+                content.put("skills", skills);
+                content.put("serverLoop", true);
+                var snapshot = new LinkedHashMap<>(content);
+                snapshot.put("version", 3);
+                snapshot.put("digest", digests.digest(content));
+                value = json.writeValueAsString(snapshot);
+            } else {
+                value = json.writeValueAsString(Map.of("version", 1, "skills", skills,
+                        "digest", digests.digest(skills)));
+            }
             if (jdbc.update("UPDATE ma_request_receipt SET result_json = ? WHERE namespace = 'SESSION_CREATE_ACTOR'"
-                            + " AND tenant_key = ? AND tenant_id = ? AND session_id = ? AND result_json IS NULL",
-                    value, ManagedSchemaKeys.key(tenant), tenant, session) != 1) {
+                            + " AND tenant_id = ? AND session_id = ? AND result_json IS NULL",
+                    value, tenant, session) != 1) {
                 throw conflict();
             }
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {

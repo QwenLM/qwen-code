@@ -81,9 +81,14 @@ const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockMemoryHandler = vi.hoisted(() => vi.fn());
 vi.mock('../commands/memory.js', () => ({
   memoryCommand: {
-    command: 'memory <subcommand> <source>',
-    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
-    handler: mockMemoryHandler,
+    command: 'memory',
+    builder: (parser: import('yargs').Argv) =>
+      parser.command({
+        command: 'import <source>',
+        builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+        handler: mockMemoryHandler,
+      }),
+    handler: () => {},
   },
 }));
 const mockSessionServiceInstance = vi.hoisted(() => ({
@@ -119,11 +124,11 @@ vi.mock('../commands/update.js', () => ({
 // any machine with OPENAI_API_KEY + model + base URL set.
 vi.mock('../commands/batch.js', () => ({
   batchCommand: {
-    // Positionals must be declared: parseArguments runs yargs in strict mode,
-    // so a bare `batch` would reject `status batch_x` before the handler runs.
-    command: 'batch <subcommand> [id]',
+    command: 'batch',
     describe: 'mock batch command',
-    handler: mockBatchHandler,
+    builder: (parser: import('yargs').Argv) =>
+      parser.command({ command: 'status [id]', handler: mockBatchHandler }),
+    handler: () => {},
   },
 }));
 
@@ -1383,6 +1388,35 @@ describe('parseArguments', () => {
     }
   });
 
+  it('should accept managed as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'managed'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('managed');
+  });
+
+  it('reports the managed channel for Hosted Harness ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('managed');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the managed marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'SDK'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('SDK');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 
@@ -1575,6 +1609,27 @@ describe('loadCliConfig', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['unifiedAgentLoop', 'isUnifiedAgentLoopEnabled'],
+    ['eventBusAgentLoop', 'isEventBusAgentLoopEnabled'],
+  ] as const)(
+    'derives %s from settings with the override variable unset',
+    async (setting, getter) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      // The Hosted Harness is off by default for both switches.
+      const defaults = await loadCliConfig({}, argv);
+      expect(defaults[getter]('hosted')).toBe(false);
+      const enabled = await loadCliConfig(
+        { experimental: { [setting]: true } },
+        argv,
+      );
+      expect(enabled[getter]('hosted')).toBe(true);
+    },
+  );
+
   it('derives folderTrust from settings and defaults it to false', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1588,6 +1643,48 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
       true,
     );
+  });
+
+  it('resolves the launcher-marker channel for synthesized ACP argv', async () => {
+    // The Hosted Harness per-turn configs never pass through parseArguments.
+    const argv = {
+      acp: true,
+      sessionId: 'channel-fallback-test',
+      sessionIdGenerated: true,
+    } as CliArgs;
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'daemon',
+    );
+    await loadCliConfig({}, { ...argv, channel: 'SDK' });
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe('SDK');
+  });
+
+  it('resolves the launcher-marker channel for the deprecated experimentalAcp alias', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {
+      experimentalAcp: true,
+      sessionId: 'channel-fallback-alias-test',
+      sessionIdGenerated: true,
+    } as CliArgs);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+  });
+
+  it('leaves the channel unset for non-ACP argv even under a marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {} as CliArgs);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0].channel,
+    ).toBeUndefined();
   });
 
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
@@ -3304,7 +3401,7 @@ describe('loadCliConfig', () => {
     );
   });
 
-  it('keeps the event-bus agent loop disabled by default', async () => {
+  it('leaves the event-bus agent loop setting unset by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
 
@@ -3312,7 +3409,7 @@ describe('loadCliConfig', () => {
 
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
-        eventBusAgentLoopEnabled: false,
+        eventBusAgentLoopEnabled: undefined,
       }),
     );
   });
@@ -3326,6 +3423,89 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
+  it('propagates an explicit event-bus agent loop opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: false } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('leaves the unified agent loop setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: undefined,
+      }),
+    );
+  });
+
+  it('propagates the unified agent loop opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { unifiedAgentLoop: true } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: true,
+      }),
+    );
+
+    await loadCliConfig({ experimental: { unifiedAgentLoop: false } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('propagates the model availability tracking opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: true } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: true,
+      }),
+    );
+
+    await loadCliConfig(
+      { experimental: { modelAvailabilityTracking: false } },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: false,
+      }),
+    );
+  });
+
+  it('leaves the model availability tracking setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelAvailabilityTracking: undefined,
       }),
     );
   });

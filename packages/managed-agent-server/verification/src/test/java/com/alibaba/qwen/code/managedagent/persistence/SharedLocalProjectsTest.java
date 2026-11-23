@@ -158,7 +158,7 @@ class SharedLocalProjectsTest {
                 () -> catalog.guard().migrationSource(catalog.tenant(), storage, 1, operation),
                 () -> catalog.guard().publishMigrationMarker(project.getParent(), new byte[0], registration, operation),
                 () -> catalog.guard().promoteMigration(registration, catalog.guard().identity(project.getParent()), operation, operation),
-                () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(catalog.jdbc(), catalog.manager(), catalog.guard(), catalog.properties()))
+                () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(catalog.jdbc(), catalog.manager(), catalog.guard()))
                         .beginRewind(catalog.binding(imported), mock(RuntimeSessionRecord.class)));
         for (Runnable action : exclusive) {
             assertThatThrownBy(action::run).isInstanceOfSatisfying(RuntimeBrokerException.class,

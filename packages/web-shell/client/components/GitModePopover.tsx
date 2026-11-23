@@ -5,8 +5,14 @@
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
+import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
 import { CircleDotIcon, GitBranchIcon, GitForkIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
+import {
+  deriveStatus,
+  GitBranchChipContent,
+  gitStatusPhrases,
+} from './GitBranchIndicator';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
 import {
@@ -56,27 +62,68 @@ export function validateBranchName(name: string): boolean {
   );
 }
 
+export interface GitModePopoverDraft {
+  selectedMode: SessionGitIntent['mode'];
+  branchName: string;
+}
+
 interface GitModePopoverProps {
   branch: string;
+  status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
   intent: SessionGitIntent;
   onIntentChange: (intent: SessionGitIntent) => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  draft?: GitModePopoverDraft;
+  onDraftChange?: (
+    update: (current: GitModePopoverDraft) => GitModePopoverDraft,
+  ) => void;
 }
 
 export function GitModePopover({
   branch,
+  status,
   compact = false,
   intent,
   onIntentChange,
+  open: openProp,
+  onOpenChange,
+  draft,
+  onDraftChange,
 }: GitModePopoverProps) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = openProp ?? internalOpen;
+  const setOpen = useCallback(
+    (value: boolean) => {
+      setInternalOpen(value);
+      onOpenChange?.(value);
+    },
+    [onOpenChange],
+  );
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  const [selectedMode, setSelectedMode] = useState<
+  const [internalSelectedMode, setInternalSelectedMode] = useState<
     'current' | 'branch' | 'worktree'
   >(intent.mode);
-  const [branchName, setBranchName] = useState(
+  const [internalBranchName, setInternalBranchName] = useState(
     intent.mode === 'branch' ? intent.name : '',
+  );
+  const selectedMode = draft?.selectedMode ?? internalSelectedMode;
+  const branchName = draft?.branchName ?? internalBranchName;
+  const setSelectedMode = useCallback(
+    (value: SessionGitIntent['mode']) => {
+      setInternalSelectedMode(value);
+      onDraftChange?.((current) => ({ ...current, selectedMode: value }));
+    },
+    [onDraftChange],
+  );
+  const setBranchName = useCallback(
+    (value: string) => {
+      setInternalBranchName(value);
+      onDraftChange?.((current) => ({ ...current, branchName: value }));
+    },
+    [onDraftChange],
   );
 
   const contentRef = useRef<HTMLDivElement>(null);
@@ -95,24 +142,24 @@ export function GitModePopover({
         setBranchName(intent.mode === 'branch' ? intent.name : '');
       }
     },
-    [intent],
+    [intent, setOpen, setSelectedMode, setBranchName],
   );
 
   const handleSelectCurrent = useCallback(() => {
     onIntentChange({ mode: 'current' });
     setOpen(false);
-  }, [onIntentChange]);
+  }, [onIntentChange, setOpen]);
 
   const handleConfirmBranch = useCallback(() => {
     if (!branchName || !branchValid) return;
     onIntentChange({ mode: 'branch', name: branchName });
     setOpen(false);
-  }, [branchName, branchValid, onIntentChange]);
+  }, [branchName, branchValid, onIntentChange, setOpen]);
 
   const handleSelectWorktree = useCallback(() => {
     onIntentChange({ mode: 'worktree' });
     setOpen(false);
-  }, [onIntentChange]);
+  }, [onIntentChange, setOpen]);
 
   const handleClear = useCallback(
     (e: React.MouseEvent) => {
@@ -120,7 +167,7 @@ export function GitModePopover({
       onIntentChange({ mode: 'current' });
       setOpen(false);
     },
-    [onIntentChange],
+    [onIntentChange, setOpen],
   );
 
   const isBranch = intent.mode === 'branch';
@@ -130,6 +177,7 @@ export function GitModePopover({
     : isWorktree
       ? t('gitMode.worktree')
       : branch;
+  const statusPhrases = status ? gitStatusPhrases(deriveStatus(status), t) : [];
 
   return (
     <span className={styles.wrap}>
@@ -143,18 +191,18 @@ export function GitModePopover({
                   className={`${styles.chip} ${isBranch ? styles.chipBranch : ''} ${isWorktree ? styles.chipWorktree : ''} ${compact ? styles.chipCompact : ''}`}
                   data-web-shell-git-branch
                   data-testid="git-mode-chip"
-                  aria-label={`${t('gitMode.title')}: ${chipLabel}`}
+                  aria-label={`${t('gitMode.title')}: ${chipLabel}${
+                    statusPhrases.length > 0
+                      ? ` — ${statusPhrases.join(', ')}`
+                      : ''
+                  }`}
                 >
-                  <span className={styles.chipIcon}>
-                    {isWorktree ? (
-                      <GitForkIcon size={14} strokeWidth={1.5} />
-                    ) : (
-                      <GitBranchIcon size={15} strokeWidth={1.5} />
-                    )}
-                  </span>
-                  {!compact && (
-                    <span className={styles.chipText}>{chipLabel}</span>
-                  )}
+                  <GitBranchChipContent
+                    branch={chipLabel}
+                    status={status}
+                    compact={compact}
+                    worktree={isWorktree}
+                  />
                   <svg
                     className={`${styles.chevron} ${open ? styles.chevronOpen : ''}`}
                     viewBox="0 0 16 16"
@@ -168,7 +216,10 @@ export function GitModePopover({
                 </button>
               </PopoverTrigger>
             </TooltipTrigger>
-            <TooltipContent side="top" className="[overflow-wrap:anywhere]">
+            <TooltipContent
+              side="top"
+              className="pointer-events-none [overflow-wrap:anywhere]"
+            >
               {isBranch ? intent.name : branch}
             </TooltipContent>
           </Tooltip>
@@ -327,7 +378,7 @@ export function GitModePopover({
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
                 : selectedMode === 'worktree'
-                  ? '$ git worktree add .qwen/worktrees/<slug>'
+                  ? '$ git worktree add --detach .qwen/worktrees/<slug>'
                   : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (
