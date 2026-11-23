@@ -324,23 +324,13 @@ or manual REST calls.
   (tmux) mode, MCP server testing, and API traffic inspection. The
   `test-engineer` agent invokes this skill internally — you typically don't
   need to use it directly.
-- **Disposable background services** (throwaway `mysqld`, proxies, workers):
-  never leave one running across turns and never point its output at an
-  uncapped file. A leaked `mysqld` whose `/tmp` datadir was removed keeps
-  looping on `MY-012894 Unable to open './#innodb_redo/...'`, and the stray
-  log can reach hundreds of GB within hours — enough to fill the volume. Rules:
-  1. Cap the output: use `--log-error=/tmp/<name>.log` (not `> /tmp/x.log`)
-     and run the server under a shell whose `ulimit -f` is bounded
-     (e.g. `ulimit -f 8388608` ≈ 8 GiB) so a runaway loop dies instead of
-     filling the volume.
-  2. Pair start and stop in the same shell:
-     `trap 'mysqladmin --socket=... -uroot shutdown; kill -9 $PID 2>/dev/null' EXIT INT TERM`,
-     and always pass `--pid-file=`.
-  3. Confirm the process is actually gone (`kill -0 $PID` fails, or
-     `pgrep -f <datadir>` is empty) **before** removing the datadir.
-  4. If a background wrapper reports "terminated by signal 9", that kills only
-     the wrapper — re-check the real child with `pgrep -f <datadir>` and stop
-     it explicitly.
+- **Disposable background services** (throwaway servers, proxies, workers):
+  never leave one running across turns; cap its output (bounded `ulimit -f`,
+  the service's own log file rather than a shell redirect); confirm the
+  process is gone before deleting its state. A background wrapper's
+  "terminated by signal 9" kills only the wrapper — re-check the real child.
+  For disposable MySQL, see
+  [managed-agent-server](packages/managed-agent-server/AGENTS.md).
 
 ## Submitting PRs
 
