@@ -302,7 +302,7 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   I/O 失败均保留原 step 状态；告警子 shell 隔离了日志管道关闭引发的 `SIGPIPE`，使主 step shell 能恢复原状态；
   权限拒绝用例由真实删除探测决定能否运行，而不是仅凭 uid 0 跳过；移除 DAC 能力的 root CI lane 仍会执行。
   探测准备错误或非预期删除错误会显式失败，不会静默丢失覆盖。trap 被钉住只删除下载 helper，不包含 workspace helper 删除目标，并核实真实 workspace helper 字节未被改变。
-  清理与 helper 缺失探针的 `cwd` 和 `GITHUB_WORKSPACE` 都指向私有 workspace，基于 `$PWD` 的删除目标只能命中夹具副本，不能改写真实 checkout。
+  本轮清理与 helper 缺失探针的 `cwd` 和 `GITHUB_WORKSPACE` 都指向私有 workspace，基于 `$PWD` 的删除目标只能命中夹具副本，不能改写真实 checkout。
   以目录作为删除对象，使清理失败不依赖 DAC 能力；无读端 pipe 通过非阻塞读回字节数验证，普通 pipe 则断言唯一告警及残留路径。
   其他 source、seed、挂载及 prune 失败保持 fail-closed；reference 构建直接 source checkout 内的 helper，不需要回退下载。
   reference 测试钉住唯一 helper 赋值与精确的 `source` 语句，排除常见下载器；以空 workspace 实际执行，断言 helper 加载失败在 Maven 前停止、Maven 未调用且下载器未调用。

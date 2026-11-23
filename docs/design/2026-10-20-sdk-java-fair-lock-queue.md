@@ -380,9 +380,10 @@ order this section exists to prevent.
   setup errors and unexpected unlink errors raise failures instead of silently
   removing coverage. The trap is pinned to one downloaded-helper removal, with
   no workspace-helper target, and the real workspace helper's bytes are checked
-  unchanged. Its cwd and GITHUB_WORKSPACE both point at that private fixture,
-  so a `$PWD`-based deletion targets only the fixture copy, not the source
-  checkout. A directory operand makes its cleanup fail independently of DAC
+  unchanged. These new cleanup and missing-helper probes set both cwd and
+  GITHUB_WORKSPACE to that private fixture, so a `$PWD`-based deletion targets
+  only the fixture copy, not the source checkout. A directory operand makes its
+  cleanup fail independently of DAC
   privileges; an unread pipe's drained byte count is checked separately from
   the ordinary pipe's single annotated warning.
   The reference build directly sources its checked-out helper and never

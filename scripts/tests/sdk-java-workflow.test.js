@@ -2042,6 +2042,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     expect(trap).toContain('|| (echo ');
     expect(trap.match(/\brm -f --/g)).toHaveLength(1);
     expect(trap).not.toContain('GITHUB_WORKSPACE');
+    expect(trap).not.toMatch(/\$(?:\{PWD\}|PWD)/);
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -2158,6 +2159,7 @@ describe('SDK Java self-hosted workflow guards', () => {
         const home = join(dir, 'home');
         const runnerTemp = join(dir, 'runner-temp');
         const workspace = join(dir, 'workspace');
+        mkdirSync(workspace, { recursive: true });
         const hostJar = join(
           home,
           '.m2',
@@ -2286,6 +2288,7 @@ cp "\${HELPER_DOWNLOAD_SOURCE}" "$output"
             'bash',
             ['-e', '-c', `${stub}\n${executableBody}`],
             {
+              cwd: workspace,
               encoding: 'utf8',
               timeout: 15000,
               env: {
