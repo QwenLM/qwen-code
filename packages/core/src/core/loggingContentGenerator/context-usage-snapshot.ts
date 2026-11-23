@@ -25,6 +25,7 @@ import { buildSkillLlmContent } from '../../tools/skill-utils.js';
 import { DiscoveredMCPTool } from '../../tools/mcp-tool.js';
 import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
+  EMPTY_AUTO_MEMORY_CATALOG,
   withoutAutoMemorySnapshots,
 } from '../../memory/request-context.js';
 import { ToolNames } from '../../tools/tool-names.js';
@@ -265,6 +266,7 @@ export function createContextUsageSnapshot(
   const last = contents.at(-1);
   const hasCatalog =
     catalog.length > 0 &&
+    catalog !== EMPTY_AUTO_MEMORY_CATALOG &&
     last?.role === 'user' &&
     last.parts?.at(-1)?.text === catalog;
   const snapshotTokens = contents.reduce(

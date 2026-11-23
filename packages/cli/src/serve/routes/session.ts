@@ -19,6 +19,8 @@ import {
 import { GENERATED_UI_CARD_ID_PATTERN } from '@qwen-code/qwen-code-core/services/generated-ui-state.js';
 import { parseLineTolerantWithIntegrity } from '@qwen-code/qwen-code-core/utils/jsonl-utils.js';
 import { writeSessionBranchSidecar } from '@qwen-code/qwen-code-core/services/session-branch-sidecar.js';
+import { encodeSessionTranscriptCursor } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
+import type { SessionTranscriptCursorState } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -368,6 +370,13 @@ interface RegisterSessionRoutesDeps {
   bridge: AcpSessionBridge;
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
+  /**
+   * Channel label for transcript exports, resolved once per daemon at boot
+   * (hosted-harness → managed, desktop shell → desktop, otherwise daemon).
+   * Reading the shared process.env marker at request time would let a
+   * co-resident daemon relabel this daemon's exports.
+   */
+  exportChannel?: string;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
   /**
    * Fired after a load/resume makes a session live, so the PR watch can deliver
@@ -1100,6 +1109,172 @@ export function registerSessionRoutes(
     return codec;
   };
 
+  // Daemon-local transcript read shared by the workspace-qualified route and
+  // the default (singular) route. Reading in the daemon process keeps the
+  // index cache alive across ACP child exits (session switch, the session
+  // idle TTL, a child crash/respawn), so default-route pagination stops
+  // rebuilding the whole transcript on every cold reopen. The cache is an
+  // in-memory Map, so a daemon restart still rebuilds it once. readerCodec
+  // selects how incoming cursors and snapshots are decoded: the workspace
+  // route passes
+  // its per-runtime codec; the singular route passes undefined so the reader
+  // falls back to the persisted per-workspace key the ACP child also uses,
+  // keeping cursors issued by either side interchangeable. encodeCursor must
+  // sign with that same key. Ownership is still enforced by each route's
+  // runtime resolution before this helper runs; the loadable re-check here
+  // mirrors the workspace route and tolerates an active conflict the caller
+  // already admitted.
+  const readDaemonLocalTranscriptPage = async (
+    runtime: WorkspaceRuntime,
+    sessionId: string,
+    opts: {
+      limit?: number;
+      cursor?: string;
+      direction?: 'backward';
+      beforeRecordId?: string;
+      atRecordId?: string;
+      snapshot?: string;
+    },
+    readerCodec: SessionTranscriptCursorCodec | undefined,
+    encodeCursor: (state: SessionTranscriptCursorState) => string,
+    assertRuntimeGenerationOpen?: () => void,
+    recheckLoadable = true,
+  ) => {
+    const { limit, cursor, direction, beforeRecordId, atRecordId, snapshot } =
+      opts;
+    return runWithWorkspaceRuntimeStorage(runtime, async () => {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      // The default route's resolution already gated loadability: the
+      // active-runtime path asserts it (allowActiveConflict:false) and the
+      // persisted fallback only returns loadable conversations. The readPage
+      // ENOENT mapping below still distinguishes archived/conflict/missing, so
+      // the redundant re-check is skipped. The workspace route's resolution
+      // does not gate loadability, so it keeps the re-check.
+      if (recheckLoadable && cursor === undefined) {
+        await assertSessionLoadable(
+          runtime.workspaceCwd,
+          sessionId,
+          runtime.sessionRuntimeBaseDir,
+          { allowActiveConflict: true },
+        );
+      }
+      const reader = new SessionTranscriptReader(
+        runtime.workspaceCwd,
+        readerCodec,
+      );
+      const getLivePromptState = (): {
+        live: boolean;
+        activePrompt: boolean;
+      } => {
+        try {
+          return {
+            live: true,
+            activePrompt:
+              runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
+          };
+        } catch (error) {
+          if (error instanceof SessionNotFoundError) {
+            return { live: false, activePrompt: false };
+          }
+          throw error;
+        }
+      };
+      const promptStateBeforeRead = getLivePromptState();
+      if (
+        cursor === undefined &&
+        direction === 'backward' &&
+        promptStateBeforeRead.live
+      ) {
+        try {
+          if (runtime.bridge.flushSessionTranscript) {
+            await runtime.bridge.flushSessionTranscript(sessionId);
+          } else {
+            await runtime.bridge.getSessionTranscriptPage({
+              sessionId,
+              direction,
+              limit: 1,
+            });
+          }
+        } catch (error) {
+          if (!(error instanceof SessionNotFoundError)) throw error;
+        }
+      }
+      let page;
+      try {
+        page = await reader.readPage(sessionId, {
+          ...(limit !== undefined ? { limit } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+          ...(direction !== undefined ? { direction } : {}),
+          ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
+          ...(atRecordId !== undefined ? { atRecordId } : {}),
+          ...(snapshot !== undefined ? { snapshot } : {}),
+          maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw error;
+        }
+        if (cursor !== undefined || snapshot !== undefined) {
+          throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+        }
+        const location = await service.getSessionLocation(sessionId);
+        if (location === 'archived') {
+          throw new SessionArchivedError(sessionId);
+        }
+        if (location === 'conflict') {
+          throw new SessionConflictError(sessionId);
+        }
+        throw new SessionNotFoundError(sessionId);
+      }
+      if (page.records.some((record) => record.sessionId !== sessionId)) {
+        throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+      }
+      const activePromptAfterRead = getLivePromptState().activePrompt;
+      const replay = await replayTranscriptRecordPage({
+        sessionId,
+        page,
+        finalizeDangling:
+          !promptStateBeforeRead.activePrompt && !activePromptAfterRead,
+        encodeCursor,
+      });
+      assertRuntimeGenerationOpen?.();
+      const cursorTooLarge =
+        replay.nextCursor !== undefined &&
+        Buffer.byteLength(replay.nextCursor) >
+          WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES;
+      return {
+        v: 1 as const,
+        sessionId,
+        events: replay.updates.map((update) =>
+          redactSdkSurfaceEvent(
+            {
+              v: 1 as const,
+              type: 'session_update' as const,
+              data: update,
+            },
+            runtime.trusted,
+          ),
+        ),
+        ...(replay.nextCursor && !cursorTooLarge
+          ? { nextCursor: replay.nextCursor }
+          : {}),
+        hasMore: cursorTooLarge ? false : replay.hasMore,
+        startTime: replay.startTime,
+        lastUpdated: replay.lastUpdated,
+        ...(replay.partial || cursorTooLarge
+          ? {
+              partial: true as const,
+              replayError: cursorTooLarge
+                ? TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR
+                : replay.replayError,
+            }
+          : {}),
+        ...(page.targetRecordId ? { targetRecordId: page.targetRecordId } : {}),
+        ...(page.hasOlder !== undefined ? { hasOlder: page.hasOlder } : {}),
+      };
+    });
+  };
+
   const logSessionRoutingFailure = (
     route: string,
     resolutionKind: string,
@@ -1721,7 +1896,7 @@ export function registerSessionRoutes(
               sessionId,
               format,
               archiveState: target.archiveState,
-              config: { getChannel: () => 'daemon' },
+              config: { getChannel: () => deps.exportChannel ?? 'daemon' },
             });
           });
         })(),
@@ -7214,11 +7389,9 @@ export function registerSessionRoutes(
       return;
     }
 
-    let workspaceTrusted = false;
     try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
           const runtime = await resolveTranscriptSessionRuntime(
             res,
             route,
@@ -7226,32 +7399,32 @@ export function registerSessionRoutes(
             cursor !== undefined || snapshot !== undefined,
           );
           if (!runtime) return undefined;
-          workspaceTrusted = runtime.trusted;
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTranscriptPage({
+          // Read daemon-local so the index cache survives ACP child exits
+          // (session switch, idle TTL, child respawn) instead of rebuilding
+          // in a fresh child on every cold reopen. undefined readerCodec =>
+          // the reader's persisted per-workspace key, the same key the ACP
+          // child signs cursors with, so cursors issued by either side stay
+          // interchangeable. Ownership is enforced by the resolution above.
+          return readDaemonLocalTranscriptPage(
+            runtime,
             sessionId,
-            ...(limit !== undefined ? { limit } : {}),
-            ...(cursor !== undefined ? { cursor } : {}),
-            ...(direction !== undefined ? { direction } : {}),
-            ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
-            ...(atRecordId !== undefined ? { atRecordId } : {}),
-            ...(snapshot !== undefined ? { snapshot } : {}),
-          });
-          assertRuntimeGenerationOpen?.();
-          return page;
-        },
+            { limit, cursor, direction, beforeRecordId, atRecordId, snapshot },
+            undefined,
+            (state) =>
+              encodeSessionTranscriptCursor(state, runtime.workspaceCwd),
+            assertRuntimeGenerationOpen,
+            false,
+          );
+        }),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(
-        {
-          ...result,
-          events: (compactedReplayMode === 'summary'
-            ? summarizeReplay(result.events ?? [])
-            : (result.events ?? [])
-          ).map((event) => redactSdkSurfaceEvent(event, workspaceTrusted)),
-        },
+        compactedReplayMode === 'summary'
+          ? { ...result, events: summarizeReplay(result.events) }
+          : result,
         sessionId,
       );
       res
@@ -7354,136 +7527,15 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          return runWithWorkspaceRuntimeStorage(runtime, async () => {
-            const service = createWorkspaceRuntimeSessionService(runtime);
-            if (cursor === undefined) {
-              await assertSessionLoadable(
-                runtime.workspaceCwd,
-                sessionId,
-                runtime.sessionRuntimeBaseDir,
-                { allowActiveConflict: true },
-              );
-            }
-            const codec = getTranscriptCursorCodec(runtime);
-            const reader = new SessionTranscriptReader(
-              runtime.workspaceCwd,
-              codec,
-            );
-            const getLivePromptState = (): {
-              live: boolean;
-              activePrompt: boolean;
-            } => {
-              try {
-                return {
-                  live: true,
-                  activePrompt:
-                    runtime.bridge.getSessionSummary(sessionId).hasActivePrompt,
-                };
-              } catch (error) {
-                if (error instanceof SessionNotFoundError) {
-                  return { live: false, activePrompt: false };
-                }
-                throw error;
-              }
-            };
-            const promptStateBeforeRead = getLivePromptState();
-            if (
-              cursor === undefined &&
-              direction === 'backward' &&
-              promptStateBeforeRead.live
-            ) {
-              try {
-                if (runtime.bridge.flushSessionTranscript) {
-                  await runtime.bridge.flushSessionTranscript(sessionId);
-                } else {
-                  await runtime.bridge.getSessionTranscriptPage({
-                    sessionId,
-                    direction,
-                    limit: 1,
-                  });
-                }
-              } catch (error) {
-                if (!(error instanceof SessionNotFoundError)) throw error;
-              }
-            }
-            let page;
-            try {
-              page = await reader.readPage(sessionId, {
-                ...(limit !== undefined ? { limit } : {}),
-                ...(cursor !== undefined ? { cursor } : {}),
-                ...(direction !== undefined ? { direction } : {}),
-                ...(beforeRecordId !== undefined ? { beforeRecordId } : {}),
-                ...(atRecordId !== undefined ? { atRecordId } : {}),
-                ...(snapshot !== undefined ? { snapshot } : {}),
-                maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
-              });
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-                throw error;
-              }
-              if (cursor !== undefined || snapshot !== undefined) {
-                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-              }
-              const location = await service.getSessionLocation(sessionId);
-              if (location === 'archived') {
-                throw new SessionArchivedError(sessionId);
-              }
-              if (location === 'conflict') {
-                throw new SessionConflictError(sessionId);
-              }
-              throw new SessionNotFoundError(sessionId);
-            }
-            if (page.records.some((record) => record.sessionId !== sessionId)) {
-              throw new SessionTranscriptSnapshotUnavailableError(sessionId);
-            }
-            const activePromptAfterRead = getLivePromptState().activePrompt;
-            const replay = await replayTranscriptRecordPage({
-              sessionId,
-              page,
-              finalizeDangling:
-                !promptStateBeforeRead.activePrompt && !activePromptAfterRead,
-              encodeCursor: (state) => codec.encode(state),
-            });
-            assertRuntimeGenerationOpen?.();
-            const cursorTooLarge =
-              replay.nextCursor !== undefined &&
-              Buffer.byteLength(replay.nextCursor) >
-                WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES;
-            return {
-              v: 1 as const,
-              sessionId,
-              events: replay.updates.map((update) =>
-                redactSdkSurfaceEvent(
-                  {
-                    v: 1 as const,
-                    type: 'session_update' as const,
-                    data: update,
-                  },
-                  runtime.trusted,
-                ),
-              ),
-              ...(replay.nextCursor && !cursorTooLarge
-                ? { nextCursor: replay.nextCursor }
-                : {}),
-              hasMore: cursorTooLarge ? false : replay.hasMore,
-              startTime: replay.startTime,
-              lastUpdated: replay.lastUpdated,
-              ...(replay.partial || cursorTooLarge
-                ? {
-                    partial: true as const,
-                    replayError: cursorTooLarge
-                      ? TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR
-                      : replay.replayError,
-                  }
-                : {}),
-              ...(page.targetRecordId
-                ? { targetRecordId: page.targetRecordId }
-                : {}),
-              ...(page.hasOlder !== undefined
-                ? { hasOlder: page.hasOlder }
-                : {}),
-            };
-          });
+          const codec = getTranscriptCursorCodec(runtime);
+          return readDaemonLocalTranscriptPage(
+            runtime,
+            sessionId,
+            { limit, cursor, direction, beforeRecordId, atRecordId, snapshot },
+            codec,
+            (state) => codec.encode(state),
+            assertRuntimeGenerationOpen,
+          );
         }),
       );
       if (result === undefined) return;
@@ -7797,9 +7849,8 @@ export function registerSessionRoutes(
     }
 
     try {
-      const result = await archiveCoordinator.runSharedMany(
-        [sessionId],
-        async () => {
+      const result = await runWithoutDebugLogSession(() =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
           const runtime = await resolveTranscriptSessionRuntime(
             res,
             route,
@@ -7810,15 +7861,63 @@ export function registerSessionRoutes(
           const assertRuntimeGenerationOpen =
             captureRuntimeGenerationAssertion(runtime);
           assertRuntimeGenerationOpen?.();
-          const page = await runtime.bridge.getSessionTurnIndexPage({
-            sessionId,
-            ...(snapshot !== undefined ? { snapshot } : {}),
-            ...(start !== undefined ? { start } : {}),
-            ...(limit !== undefined ? { limit } : {}),
+          // Read daemon-local so turn navigation's anchor snapshot survives
+          // ACP child exit, the same reason as the default transcript route.
+          // undefined codec => the persisted per-workspace key, matching the
+          // default transcript route that consumes this snapshot. Resolution
+          // already asserted loadability, so skip the redundant re-check.
+          return runWithWorkspaceRuntimeStorage(runtime, async () => {
+            // Mirror the child handler's live-first-page flush barrier: a
+            // snapshot-less read must drain the recorder so a just-accepted
+            // turn is not omitted from the index and its anchor snapshot. Stay
+            // behind the liveness check so a cold session does not ensure a
+            // child (which would undo the cold-start win); the workspace-
+            // qualified turn-index route carries no such barrier (no-bridge).
+            if (snapshot === undefined) {
+              let live = false;
+              try {
+                runtime.bridge.getSessionSummary(sessionId);
+                live = true;
+              } catch (error) {
+                if (!(error instanceof SessionNotFoundError)) throw error;
+              }
+              if (live) {
+                try {
+                  await runtime.bridge.flushSessionTranscript?.(sessionId);
+                } catch (error) {
+                  if (!(error instanceof SessionNotFoundError)) throw error;
+                }
+              }
+            }
+            try {
+              const page = await new SessionTranscriptReader(
+                runtime.workspaceCwd,
+              ).readTurnIndexPage(sessionId, {
+                ...(snapshot !== undefined ? { snapshot } : {}),
+                ...(start !== undefined ? { start } : {}),
+                ...(limit !== undefined ? { limit } : {}),
+              });
+              assertRuntimeGenerationOpen?.();
+              return page;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+                throw error;
+              }
+              if (snapshot !== undefined) {
+                throw new SessionTranscriptSnapshotUnavailableError(sessionId);
+              }
+              const service = createWorkspaceRuntimeSessionService(runtime);
+              const location = await service.getSessionLocation(sessionId);
+              if (location === 'archived') {
+                throw new SessionArchivedError(sessionId);
+              }
+              if (location === 'conflict') {
+                throw new SessionConflictError(sessionId);
+              }
+              throw new SessionNotFoundError(sessionId);
+            }
           });
-          assertRuntimeGenerationOpen?.();
-          return page;
-        },
+        }),
       );
       if (result === undefined) return;
       const serialized = serializeWorkspaceTranscriptResponse(

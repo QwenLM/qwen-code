@@ -267,6 +267,21 @@ describe('QwenLogger', () => {
       expect(payload.properties?.['base_url']).toBe('https://api.example.com');
     });
 
+    it.each(['managed', 'daemon', 'desktop', 'SDK', 'VSCode', 'ACP', 'CI'])(
+      'reports the runtime channel %s on properties.channel',
+      async (channel) => {
+        const config = makeFakeConfig({ getChannel: () => channel });
+        const payload = await rumPayload(QwenLogger.getInstance(config)!);
+        expect(payload.properties?.['channel']).toBe(channel);
+      },
+    );
+
+    it('omits properties.channel when the config resolves no channel', async () => {
+      const config = makeFakeConfig({ getChannel: () => undefined });
+      const payload = await rumPayload(QwenLogger.getInstance(config)!);
+      expect(payload.properties?.['channel']).toBeUndefined();
+    });
+
     // The source.json cases can only check the payload's shape: exercising
     // real source information needs actual file system operations.
     it('includes source when source.json exists with valid source', async () => {

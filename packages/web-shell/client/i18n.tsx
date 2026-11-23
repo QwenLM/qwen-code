@@ -18,6 +18,7 @@ import { MANAGED_TASK_MESSAGES_EN } from './components/managed/managed-task-mess
 import { BROWSER_NOTIFICATION_MESSAGES_EN } from './browser-notifications/messages.js';
 import { WORKSPACE_REGISTRATION_MESSAGES_EN } from './components/managed/managed-workspace-messages.js';
 import { ARTIFACT_LIBRARY_MESSAGES_EN } from './components/managed/managed-artifact-library-messages.js';
+import { WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN } from './components/artifacts/workspace-artifact-library-messages.js';
 import { MANAGED_MCP_MESSAGES_EN } from './components/managed/managed-mcp-messages.js';
 import {
   createContext,
@@ -1231,6 +1232,12 @@ const EN: Messages = {
   'composerMobile.commands': 'All commands',
   'composerMobile.searchCommands': 'Search commands',
   'composerMobile.history': 'Input history',
+  'composerMobile.acceptFollowup': 'Accept suggestion',
+  'composerMobile.dismissFollowup': 'Dismiss suggestion',
+  'composerMobile.caretUp': 'Move cursor up',
+  'composerMobile.caretDown': 'Move cursor down',
+  'composerMobile.caretRight': 'Move cursor right',
+  'composerMobile.insertSlash': 'Insert slash',
   'composerMobile.stop': 'Stop',
   'composerMobile.attachments': (v) =>
     `Attached files/images: ${v?.count ?? 0}`,
@@ -2877,7 +2884,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
   'queue.sendNow': 'Send now',
   'queue.sendNowTip':
-    'Send queued messages now. Interrupts the model if it is responding or calling tools',
+    'Send queued messages now. May interrupt the current response or tools. Eligible shell commands continue in the background.',
   'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
@@ -5418,6 +5425,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...MANAGED_LIFECYCLE_MESSAGES_EN,
   ...WORKSPACE_REGISTRATION_MESSAGES_EN,
   ...ARTIFACT_LIBRARY_MESSAGES_EN,
+  ...WORKSPACE_ARTIFACT_LIBRARY_MESSAGES_EN,
   ...MANAGED_MCP_MESSAGES_EN,
   ...MANAGED_EXTENSION_MESSAGES_EN,
   ...TRAJECTORY_EXECUTION_MESSAGES_EN,

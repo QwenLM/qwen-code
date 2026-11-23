@@ -71,6 +71,7 @@ public class ManagedPrWatchService {
     public PrWatchBindingView create(String tenantId, String channelId,
             PrWatchCreateRequest request) {
         ChannelInstance instance = requireInstance(tenantId, channelId);
+        requireRepositoryIdentity(request.owner(), request.repo());
         List<String> events = request.events().stream().distinct().sorted()
                 .toList();
         for (String event : events) {
@@ -116,6 +117,7 @@ public class ManagedPrWatchService {
     public PrWatchBindingView retire(String tenantId, String channelId,
             PrWatchRetireRequest request) {
         requireInstance(tenantId, channelId);
+        requireRepositoryIdentity(request.owner(), request.repo());
         PrWatchBinding binding = requireBinding(tenantId, channelId,
                 request.owner(), request.repo(), request.prNumber());
         bindings.retire(tenantId, channelId, request.owner(), request.repo(),
@@ -126,6 +128,7 @@ public class ManagedPrWatchService {
     public PrWatchAdmission inject(String tenantId, String channelId,
             PrWatchInjectRequest request) {
         ChannelInstance instance = requireInstance(tenantId, channelId);
+        requireRepositoryIdentity(request.owner(), request.repo());
         if (!"connected".equals(instance.state())) {
             throw new ManagedAgentException(409, "channel_disconnected",
                     "The channel is not connected.");
@@ -422,6 +425,12 @@ public class ManagedPrWatchService {
                 .orElseThrow(() -> new ManagedAgentException(404,
                         "pr_watch_binding_not_found",
                         "The PR-watch binding was not found."));
+    }
+
+    /** owner/repo land in VARCHAR(64)/VARCHAR(128) under PAD SPACE. */
+    private static void requireRepositoryIdentity(String owner, String repo) {
+        ManagedChannelService.requireNoTrailingSpace(owner, "The PR owner");
+        ManagedChannelService.requireNoTrailingSpace(repo, "The PR repository");
     }
 
     private ChannelInstance requireInstance(String tenantId,

@@ -156,9 +156,9 @@ final class RuntimeBindingRegistry {
 
     CompletionStage<SessionContext> requireSession(
             String harnessSessionId, String runtimeSessionId) {
-        String harnessId = BrokerValues.requireId(harnessSessionId,
+        String harnessId = BrokerValues.requireHarnessSessionId(harnessSessionId,
                 "harnessSessionId");
-        String runtimeId = BrokerValues.requireId(runtimeSessionId,
+        String runtimeId = BrokerValues.requireRuntimeSessionId(runtimeSessionId,
                 "runtimeSessionId");
         CompletableFuture<SessionContext> context = sessions.get(runtimeId);
         if (context == null) {

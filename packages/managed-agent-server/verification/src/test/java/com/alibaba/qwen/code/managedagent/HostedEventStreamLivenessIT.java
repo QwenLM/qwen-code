@@ -83,7 +83,7 @@ class HostedEventStreamLivenessIT {
     private final CountDownLatch modelHeld = new CountDownLatch(1);
     private final CountDownLatch releaseModel = new CountDownLatch(1);
     private final StringBuilder output = new StringBuilder();
-    private final String tenant = "hosted-liveness-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final ExecutorService modelExecutor =
             Executors.newCachedThreadPool();
     private final ListAppender<ILoggingEvent> coordinatorLog =
