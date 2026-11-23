@@ -74,13 +74,22 @@ import type {
   ChannelPromptImage,
   ChannelLoopToolCreateInput,
   ChannelLoopToolResult,
+  ChannelWorkflowOrigin,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-import { ChannelPromptCancelledError } from './ChannelAgentBridge.js';
+import {
+  BACKGROUND_WORKFLOW_APPROVAL_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  ChannelPromptCancelledError,
+  MID_TURN_QUEUE_MAX_CHARS,
+  MID_TURN_QUEUE_MAX_MESSAGES,
+  parseChannelWorkflowOrigin,
+} from './ChannelAgentBridge.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
+import type { BackgroundOutputTarget } from './background-output-coordinator.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
   buildChannelWebhookPrompt,
@@ -101,11 +110,6 @@ import {
   selectRelevantChannelMemoryFromIndex,
   type ChannelMemoryRecallIndex,
 } from './channel-memory-recall.js';
-
-interface BackgroundResponseDeliveryTarget {
-  target: SessionTarget;
-  sourceLabel?: string;
-}
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -214,6 +218,14 @@ interface PreflightInboundOptions {
    * public replies. Every other group, sender and pairing check still runs.
    */
   waiveGroupMention?: boolean;
+  /**
+   * Admit a private bound delivery that only fails the sender gate. For the
+   * comment watch delivering the channel account's own comments: the sender
+   * allowlist guidance excludes that account, but the watch is operator opt-in
+   * and private. Group, DM, pairing and route checks still run; only the sender
+   * gate is waived. The public path never sets this.
+   */
+  waiveGroupSender?: boolean;
 }
 
 interface ChannelMemoryRecallCacheEntry {
@@ -362,6 +374,7 @@ type PendingPermission = {
   sessionId: string;
   runId?: string;
   target: SessionTarget;
+  workflowOrigin?: ChannelWorkflowOrigin;
   request: PermissionRequestEvent['request'];
   sourceLabel?: string;
   taskName?: string;
@@ -379,6 +392,26 @@ type PendingPermissionLookup =
 type CollectBufferEntry = {
   text: string;
   envelope: Envelope;
+  /**
+   * Arrival ordinal shared with the mid-turn queue, so a message taken back
+   * from that queue can be merged into this buffer in true arrival order.
+   */
+  sequence: number;
+  /** Admitted by the bounded inject-rejection fallback, not plain `collect`. */
+  injectFallback?: boolean;
+};
+/** A message handed to the running turn's mid-turn queue, in arrival order. */
+type PendingInjectedMessage = {
+  text: string;
+  envelope: Envelope;
+  /** Arrival ordinal shared with the collect buffer, for ordered settlement. */
+  sequence: number;
+  /**
+   * The pending group history this message's accepted injection consumed, in
+   * arrival order. A message the child never drains is replayed as its own
+   * turn, and that turn must get the same backfill instead of losing it.
+   */
+  groupHistory: GroupHistoryEntry[];
 };
 type NamedTurnBinding = {
   sessionId: string | null;
@@ -550,8 +583,40 @@ export abstract class ChannelBase {
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
   private readonly activeBtw: Map<string, ActiveBtw> = new Map();
+  /**
+   * Arrival ordinal stamped on every message admitted to the collect buffer or
+   * the mid-turn queue. Both structures hold messages of the same turn and are
+   * merged at its boundary, so only a shared counter can restore their
+   * interleaved arrival order.
+   */
+  private inboundOrdinal = 0;
   /** Per-session message buffer for collect mode. */
   private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
+  /**
+   * Accepted mid-turn injections of the session's RUNNING turn, in arrival
+   * order. At the turn boundary the channel takes back whatever the bridge
+   * never drained and replays it as a new turn instead of letting it leak into
+   * the next one.
+   */
+  private readonly midTurnInjections: Map<string, PendingInjectedMessage[]> =
+    new Map();
+  /**
+   * Sessions whose current turn already routed a message to the bounded
+   * inject→collect fallback: subsequent messages must follow it there, or a
+   * later injected instruction could overtake an earlier parked one. This gate
+   * also carries the fallback's capacity accounting.
+   */
+  private readonly injectDegradedSessions = new Set<string>();
+  /**
+   * Sessions whose current turn already parked a message in the collect buffer
+   * for any reason (media, a slash command, a foreign chat/thread, an
+   * unauthorized member, a rejected injection): later messages must park too
+   * to keep arrival order, but as plain `collect` entries, outside the bounded
+   * fallback's accounting.
+   */
+  private readonly injectOrderLockedSessions = new Set<string>();
+  /** Sessions already told (once) that their bridge cannot inject at all. */
+  private readonly injectUnsupportedNotified = new Set<string>();
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
@@ -593,6 +658,8 @@ export abstract class ChannelBase {
   };
   private readonly pendingPermissions = new Map<string, PendingPermission>();
   private readonly pendingPermissionsByChat = new Map<string, string[]>();
+  // A workflow may settle its approval while the named-task lookup awaits.
+  private readonly preparingWorkflowApprovals = new Set<string>();
   private readonly channelLoopToolHandler = {
     canHandle: (sessionId: string) =>
       this.router.getTarget(sessionId)?.channelName === this.name,
@@ -632,9 +699,20 @@ export abstract class ChannelBase {
   async dispatchBackgroundResponse(
     sessionId: string,
     text: string,
-    _context?: BackgroundResponseContext,
+    context?: BackgroundResponseContext,
   ): Promise<void> {
     if (text.trim().length === 0) return;
+    if (context?.kind === 'workflow') {
+      const origin = context.channelWorkflowOrigin;
+      if (!origin) return;
+      const delivery = await this.resolveBackgroundResponseDelivery(
+        sessionId,
+        origin,
+      );
+      if (!delivery || !this.workflowTarget(sessionId, origin)) return;
+      await this.deliverBackgroundResponseToTarget(sessionId, text, delivery);
+      return;
+    }
     const delivery = await this.resolveBackgroundResponseDelivery(sessionId);
     if (!delivery || this.router.getTarget(sessionId) !== delivery.target) {
       return;
@@ -644,8 +722,11 @@ export abstract class ChannelBase {
 
   protected getBackgroundResponseSourceLabel(
     sessionId: string,
+    workflowOrigin?: ChannelWorkflowOrigin,
   ): string | undefined {
-    const target = this.router.getTarget(sessionId);
+    const target = workflowOrigin
+      ? this.workflowTarget(sessionId, workflowOrigin)
+      : this.router.getTarget(sessionId);
     const presentation = this.namedSessions?.presentation(sessionId);
     if (
       !target ||
@@ -662,14 +743,19 @@ export abstract class ChannelBase {
 
   protected async resolveBackgroundResponseDelivery(
     sessionId: string,
-  ): Promise<BackgroundResponseDeliveryTarget | undefined> {
-    let target = this.router.getTarget(sessionId);
+    workflowOrigin?: ChannelWorkflowOrigin,
+  ): Promise<BackgroundOutputTarget | undefined> {
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(sessionId, workflowOrigin)
+        : this.router.getTarget(sessionId);
+    let target = getTarget();
     if (!target || target.channelName !== this.name) return undefined;
     let sourceLabel: string | undefined;
     if (this.namedSessions) {
       const presentation =
         await this.namedSessions.resolvePresentation(sessionId);
-      const currentTarget = this.router.getTarget(sessionId);
+      const currentTarget = getTarget();
       const currentPresentation = this.namedSessions.presentation(sessionId);
       if (
         !presentation ||
@@ -687,21 +773,38 @@ export abstract class ChannelBase {
       target = currentTarget;
       sourceLabel = this.createSourceLabel(presentation, target);
     }
-    return { target, sourceLabel };
+    return {
+      target,
+      sourceLabel,
+      ...(workflowOrigin ? { workflowOrigin } : {}),
+    };
   }
 
   protected async deliverBackgroundResponseToTarget(
     sessionId: string,
     text: string,
-    delivery: BackgroundResponseDeliveryTarget,
+    delivery: BackgroundOutputTarget,
   ): Promise<void> {
-    const { target, sourceLabel } = delivery;
+    const { target, sourceLabel, workflowOrigin } = delivery;
+    if (workflowOrigin && !workflowOrigin.userInitiated) {
+      await this.pushProactive(target, text, sourceLabel);
+      return;
+    }
     if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
       if (sourceLabel) {
         await this.pushProactive(target, text, sourceLabel);
       } else {
         await this.pushProactive(target, text);
       }
+      return;
+    }
+    if (workflowOrigin) {
+      await this.sendThreadMessage(
+        target.chatId,
+        target.threadId,
+        text,
+        sourceLabel,
+      );
       return;
     }
     if (sourceLabel) {
@@ -902,7 +1005,22 @@ export abstract class ChannelBase {
   async dispatchPermissionRequest(
     event: PermissionRequestEvent,
   ): Promise<void> {
-    const target = this.permissionTargetForEvent(event);
+    const backgroundWorkflow =
+      event.request.toolCall._meta?.[BACKGROUND_WORKFLOW_APPROVAL_META_KEY] ===
+      true;
+    const workflowOrigin = backgroundWorkflow
+      ? parseChannelWorkflowOrigin(
+          event.request.toolCall._meta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY],
+        )
+      : undefined;
+    if (backgroundWorkflow && workflowOrigin?.channelName !== this.name) {
+      return;
+    }
+    const getTarget = () =>
+      workflowOrigin
+        ? this.workflowTarget(event.sessionId, workflowOrigin)
+        : this.permissionTargetForEvent(event.sessionId);
+    const target = getTarget();
     if (!target) {
       try {
         await this.bridge.respondToPermission?.(event.requestId, {
@@ -919,11 +1037,15 @@ export abstract class ChannelBase {
     let taskName: string | undefined;
     if (this.namedSessions) {
       let presentation: NamedSessionTaskReference | undefined;
+      if (backgroundWorkflow) {
+        this.preparingWorkflowApprovals.add(event.requestId);
+      }
       try {
         presentation = await this.namedSessions.resolvePresentation(
           event.sessionId,
         );
       } catch (err) {
+        this.preparingWorkflowApprovals.delete(event.requestId);
         try {
           await this.bridge.respondToPermission?.(event.requestId, {
             outcome: { outcome: 'cancelled' },
@@ -935,7 +1057,13 @@ export abstract class ChannelBase {
         }
         throw err;
       }
-      const currentTarget = this.permissionTargetForEvent(event);
+      if (
+        backgroundWorkflow &&
+        !this.preparingWorkflowApprovals.delete(event.requestId)
+      ) {
+        return;
+      }
+      const currentTarget = getTarget();
       const currentPresentation = this.namedSessions.presentation(
         event.sessionId,
       );
@@ -961,7 +1089,9 @@ export abstract class ChannelBase {
         }
         return;
       }
-      const active = this.activePrompts.get(event.sessionId);
+      const active = backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId);
       sourceLabel = active
         ? active.sourceLabel
         : this.createSourceLabel(presentation, target);
@@ -983,8 +1113,11 @@ export abstract class ChannelBase {
     const pending: PendingPermission = {
       requestId: event.requestId,
       sessionId: event.sessionId,
-      runId: this.activePrompts.get(event.sessionId)?.runId,
+      runId: backgroundWorkflow
+        ? undefined
+        : this.activePrompts.get(event.sessionId)?.runId,
       target,
+      ...(workflowOrigin ? { workflowOrigin } : {}),
       request: event.request,
       ...(sourceLabel ? { sourceLabel } : {}),
       ...(taskName ? { taskName } : {}),
@@ -996,13 +1129,15 @@ export abstract class ChannelBase {
     requestIds.push(event.requestId);
     this.pendingPermissionsByChat.set(chatKey, requestIds);
     try {
-      const presentation = this.tryPresentUserInput(pending);
-      if (presentation && (await presentation)) {
-        return;
-      }
-      const permissionPresentation = this.tryPresentPermission(pending);
-      if (permissionPresentation && (await permissionPresentation)) {
-        return;
+      if (!backgroundWorkflow) {
+        const presentation = this.tryPresentUserInput(pending);
+        if (presentation && (await presentation)) {
+          return;
+        }
+        const permissionPresentation = this.tryPresentPermission(pending);
+        if (permissionPresentation && (await permissionPresentation)) {
+          return;
+        }
       }
       const text = this.formatPermissionRequest(pending);
       if (
@@ -1372,14 +1507,55 @@ export abstract class ChannelBase {
     return pending.responsePromise;
   }
 
-  private permissionTargetForEvent(
-    event: PermissionRequestEvent,
+  protected workflowTarget(
+    sessionId: string,
+    origin: ChannelWorkflowOrigin,
   ): SessionTarget | undefined {
-    const routeTarget = this.router.getTarget(event.sessionId);
+    const routed = this.router.getTarget(sessionId);
+    if (
+      origin.channelName !== this.name ||
+      routed?.channelName !== this.name ||
+      (origin.messageRoute !== undefined &&
+        !this.messageRoutes.has(origin.messageRoute)) ||
+      !this.router.isSessionLive(sessionId)
+    ) {
+      return undefined;
+    }
+    if (this.namedSessions) {
+      return this.sameTaskOwner(origin, routed) ? origin : undefined;
+    }
+    if (
+      this.router.getSession(
+        this.name,
+        origin.senderId,
+        origin.chatId,
+        origin.threadId,
+        origin.messageRoute,
+      ) === sessionId
+    ) {
+      return origin;
+    }
+    // Webhook sessions can have a synthetic routing key while retaining the
+    // actual delivery target.
+    if (
+      !origin.userInitiated &&
+      this.sameTaskOwner(origin, routed) &&
+      origin.threadId === routed.threadId &&
+      origin.messageRoute === routed.messageRoute
+    ) {
+      return origin;
+    }
+    return undefined;
+  }
+
+  private permissionTargetForEvent(
+    sessionId: string,
+  ): SessionTarget | undefined {
+    const routeTarget = this.router.getTarget(sessionId);
     if (!routeTarget || routeTarget.channelName !== this.name) {
       return undefined;
     }
-    const active = this.activePrompts.get(event.sessionId);
+    const active = this.activePrompts.get(sessionId);
     if (!active) {
       return routeTarget;
     }
@@ -1400,6 +1576,7 @@ export abstract class ChannelBase {
   }
 
   dispatchPermissionResolved(event: PermissionResolvedEvent): void {
+    this.preparingWorkflowApprovals.delete(event.requestId);
     const pending = this.pendingPermissions.get(event.requestId);
     if (!pending) {
       return;
@@ -1526,6 +1703,7 @@ export abstract class ChannelBase {
         }
         this.cancelBtw(sessionId);
         this.dropCollectBuffer(sessionId);
+        this.dropMidTurnInjections(sessionId);
         this.instructedSessions.delete(sessionId);
         this.unattendedMemorySessions.delete(sessionId);
         this.removePendingPermissionsForSession(sessionId);
@@ -1873,6 +2051,10 @@ export abstract class ChannelBase {
     return this.supportsProactiveTarget(target);
   }
 
+  protected canDeliverBackgroundWorkflow(_target: SessionTarget): boolean {
+    return true;
+  }
+
   protected async pushProactive(
     target: SessionTarget,
     text: string,
@@ -2129,16 +2311,148 @@ export abstract class ChannelBase {
     }
   }
 
+  /**
+   * Settle the turn's accepted mid-turn injections at its boundary: whatever
+   * the bridge never drained (a tool-free turn drains nothing, and a turn that
+   * ends before the child's next drain would otherwise leak the text into the
+   * NEXT turn) is taken back and queued for replay as its own turn. Runs after
+   * the prompt settled and only while this turn still owns the session.
+   */
+  private settleUndrainedMidTurnInjections(sessionId: string): void {
+    this.injectDegradedSessions.delete(sessionId);
+    this.injectOrderLockedSessions.delete(sessionId);
+    const pending = this.midTurnInjections.get(sessionId);
+    if (!pending || pending.length === 0) return;
+    this.midTurnInjections.delete(sessionId);
+    const undrained = this.bridge.takeUndrainedMidTurnMessages?.(sessionId);
+    if (!undrained || undrained.length === 0) return;
+    // A drain always consumes from the head of the queue, so the leftovers are
+    // exactly the tail of this turn's accepted injections.
+    const replay = pending.slice(
+      Math.max(0, pending.length - undrained.length),
+    );
+    if (replay.length === 0) return;
+    // Each replayed message was accepted mid-turn and consumed its backfill at
+    // acceptance. Hand the consumed entries back before the replay turn runs,
+    // so it composes the same wrapper instead of answering a reference it can
+    // no longer resolve. Restore newest-last: a later injection consumed newer
+    // entries, and each restore prepends, so iterating backwards keeps the
+    // store's arrival order.
+    for (let i = replay.length - 1; i >= 0; i--) {
+      this.restoreInjectedGroupHistory(replay[i]!);
+    }
+    let buffer = this.collectBuffers.get(sessionId);
+    if (!buffer) {
+      buffer = [];
+      this.collectBuffers.set(sessionId, buffer);
+    }
+    // A message the bounded fallback parked after these injections were
+    // accepted must not be replayed ahead of them, so merge by arrival ordinal
+    // rather than appending the recovered tail.
+    for (const entry of replay) {
+      buffer.push({
+        text: entry.text,
+        envelope: entry.envelope,
+        sequence: entry.sequence,
+      });
+    }
+    buffer.sort((a, b) => a.sequence - b.sequence);
+    process.stderr.write(
+      `[${this.name}] inject: ${replay.length} mid-turn message(s) were not drained before the turn ended; replaying as a new turn for session ${sessionId}\n`,
+    );
+  }
+
+  /**
+   * Drop the session's queued (not yet drained) mid-turn injections, e.g. when
+   * the running turn is cancelled: they are already invalid for the cancelled
+   * turn and must not surface in the next one out of context. Surfaces the drop
+   * through the same buffer-drop notification the collect path uses, but only
+   * for the not-yet-drained tail: injections the child already drained reached
+   * the running turn, so reporting them as dropped would contradict the
+   * transport state adapters acknowledge from that notification.
+   */
+  private dropMidTurnInjections(sessionId: string): void {
+    this.injectDegradedSessions.delete(sessionId);
+    this.injectOrderLockedSessions.delete(sessionId);
+    this.injectUnsupportedNotified.delete(sessionId);
+    const pending = this.midTurnInjections.get(sessionId);
+    this.midTurnInjections.delete(sessionId);
+    // Take the bridge's leftovers before clearing them: their count is the
+    // authoritative number of accepted injections the child never received.
+    const undrainedCount =
+      this.bridge.takeUndrainedMidTurnMessages?.(sessionId).length;
+    this.bridge.dropMidTurnMessages?.(sessionId);
+    if (!pending || pending.length === 0) return;
+    // A drain always consumes from the head of the admission ledger, so the
+    // undrained messages are exactly its tail. Bridges without the accessor
+    // cannot tell, and keep the older whole-ledger behaviour.
+    const dropped =
+      undrainedCount === undefined
+        ? pending
+        : pending.slice(
+            Math.max(
+              0,
+              pending.length - Math.min(undrainedCount, pending.length),
+            ),
+          );
+    if (dropped.length === 0) return;
+    const chatId = dropped[0]!.envelope.chatId;
+    const messageIds = dropped
+      .map((entry) => entry.envelope.messageId)
+      .filter((id): id is string => id !== undefined);
+    try {
+      this.onPromptBufferDropped(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDropped threw for injected messages in session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
   private drainCollectBufferForCurrentPrompt(
     sessionId: string,
     stillCurrent: boolean,
     taskLabel: string,
   ): void {
+    if (!stillCurrent) return;
+    this.settleUndrainedMidTurnInjections(sessionId);
     const buffer = this.collectBuffers.get(sessionId);
-    if (!stillCurrent || !buffer || buffer.length === 0) {
+    if (!buffer || buffer.length === 0) {
       return;
     }
     this.collectBuffers.delete(sessionId);
+    // A session-scoped session can hold buffered messages from more than one
+    // route: a message whose chat/thread does not own the running turn parks
+    // here. The replay is attributed to the LAST entry's route, so coalescing
+    // two routes into one turn would answer one of them in the wrong chat —
+    // the exact harm `runningTurnOwnsEnvelope` prevents for mid-turn
+    // injections. Replay each contiguous run of one route as its own turn in
+    // arrival order: grouping every entry of a route instead would let a later
+    // message overtake an earlier one from another route, and these replays
+    // share one session's arrival order.
+    const ordered = [...buffer].sort((a, b) => a.sequence - b.sequence);
+    let run: CollectBufferEntry[] = [];
+    for (const entry of ordered) {
+      if (
+        run.length > 0 &&
+        this.routeKey(run[0]!.envelope) !== this.routeKey(entry.envelope)
+      ) {
+        this.replayCollectedEntries(sessionId, run, taskLabel);
+        run = [];
+      }
+      run.push(entry);
+    }
+    if (run.length > 0) {
+      this.replayCollectedEntries(sessionId, run, taskLabel);
+    }
+  }
+
+  /** Replay one route's buffered messages as a single turn. */
+  private replayCollectedEntries(
+    sessionId: string,
+    buffer: CollectBufferEntry[],
+    taskLabel: string,
+  ): void {
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
@@ -2147,6 +2461,8 @@ export abstract class ChannelBase {
       ...lastEnvelope,
       text: coalesced,
       alreadyPrefixed: true,
+      // The replay must become its own turn; `inject` skips it by this marker.
+      collectReplay: true,
       referencedText: undefined,
       mentionedMemberIds: undefined,
       attachments: undefined,
@@ -2377,6 +2693,7 @@ export abstract class ChannelBase {
           sessionId,
           promptToSend,
           promptState,
+          job.target,
           job.id,
           options.timeoutMs,
         );
@@ -2677,6 +2994,7 @@ export abstract class ChannelBase {
           sessionId,
           promptToSend,
           promptState,
+          target,
           taskId,
           options.timeoutMs,
         );
@@ -2782,11 +3100,13 @@ export abstract class ChannelBase {
     sessionId: string,
     promptText: string,
     promptState: ActivePrompt,
+    workflowOrigin: SessionTarget,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
     const prompt = promptBridge.prompt(sessionId, promptText, {
       displayText: sanitizeDisplayText(promptText),
+      workflowOrigin,
     });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
@@ -2929,7 +3249,13 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.dropCollectBuffer(sessionId);
-        this.removePendingPermissionsForSession(sessionId, 'run_cancelled');
+        // The cancelled turn can still drain its mid-turn queue as it winds
+        // down, so its queued injections are dropped with the collect buffer —
+        // otherwise they would surface in the user's NEXT turn out of context.
+        this.dropMidTurnInjections(sessionId);
+        this.removePendingPermissionsForSession(sessionId, 'run_cancelled', {
+          preserveBackgroundWorkflows: reason !== 'clear',
+        });
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
@@ -2984,6 +3310,103 @@ export abstract class ChannelBase {
       .filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
+  /** Route identity of a chat/thread pair; comparisons stay in one place. */
+  private routeKey(target: {
+    chatId: string;
+    threadId?: string | undefined;
+  }): string {
+    return `${target.chatId}\u0000${target.threadId ?? ''}`;
+  }
+
+  /** The running turn's output route is bound to its originating chat/thread. */
+  private runningTurnOwnsEnvelope(
+    active: ActivePrompt,
+    envelope: Envelope,
+  ): boolean {
+    return this.routeKey(active) === this.routeKey(envelope);
+  }
+
+  private nextInboundOrdinal(): number {
+    return ++this.inboundOrdinal;
+  }
+
+  private recordInjectedMessage(
+    sessionId: string,
+    text: string,
+    envelope: Envelope,
+    groupHistory: GroupHistoryEntry[],
+  ): void {
+    let pending = this.midTurnInjections.get(sessionId);
+    if (!pending) {
+      pending = [];
+      this.midTurnInjections.set(sessionId, pending);
+    }
+    pending.push({
+      text,
+      envelope,
+      sequence: this.nextInboundOrdinal(),
+      groupHistory,
+    });
+  }
+
+  /**
+   * Return the pending group history a replayed injected message consumed when
+   * it was accepted to the store, so the message's own turn composes the same
+   * backfill the running turn saw. Entries are restored ahead of anything
+   * recorded since the acceptance, which is newer by construction.
+   */
+  private restoreInjectedGroupHistory(entry: PendingInjectedMessage): void {
+    if (entry.groupHistory.length === 0) return;
+    const limit = this.groupHistoryLimit(entry.envelope);
+    if (limit <= 0) return;
+    try {
+      this.groupHistory.recordFront(
+        this.groupHistoryKey(entry.envelope),
+        entry.groupHistory,
+        limit,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to restore group history for a replayed injected message: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private notifyPromptInjected(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    try {
+      this.onPromptInjected(chatId, sessionId, messageId);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptInjected threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private logInjectUnsupported(sessionId: string): void {
+    if (this.injectUnsupportedNotified.has(sessionId)) return;
+    this.injectUnsupportedNotified.add(sessionId);
+    process.stderr.write(
+      `[${this.name}] inject: bridge for session ${sanitizeLogText(sessionId, 64)} cannot queue mid-turn messages; buffering as collect (inject requires an ACP-bridge-backed channel)\n`,
+    );
+  }
+
+  private async notifyInjectRefused(
+    envelope: Envelope,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.sendThreadMessage(envelope.chatId, envelope.threadId, text);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] inject: failed to tell ${envelope.senderId} their message was refused: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
   private logCancelSessionFailure(sessionId: string, err: unknown): void {
     process.stderr.write(
       `[${sanitizeLogText(this.name, 64)}] cancelSession failed for session=${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
@@ -3018,6 +3441,10 @@ export abstract class ChannelBase {
     this.router.handleSessionDied(sessionId);
     this.instructedSessions.delete(sessionId);
     this.unattendedMemorySessions.delete(sessionId);
+    this.midTurnInjections.delete(sessionId);
+    this.injectDegradedSessions.delete(sessionId);
+    this.injectOrderLockedSessions.delete(sessionId);
+    this.injectUnsupportedNotified.delete(sessionId);
     this.removePendingPermissionsForSession(sessionId);
   }
 
@@ -3066,6 +3493,23 @@ export abstract class ChannelBase {
   }
 
   protected onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
+  /**
+   * Called when the running turn ACCEPTED this message into its mid-turn queue.
+   * Unlike `onPromptBuffered` the message starts no turn of its own, so an
+   * adapter that tracks per-message state can keep it until the running turn's
+   * `onPromptEnd` fires — that is the turn which reads the injected text.
+   * Injected messages are text-only: media parks for a replay turn and inline
+   * images are refused, so no media resource is retained for injection. If the
+   * turn ends before the bridge drains the message, it is replayed as its own
+   * turn: that replay fires the ordinary `onPromptStart`/`onPromptEnd` hooks
+   * and carries the replay envelope's IDs, not the injected message's.
+   */
+  protected onPromptInjected(
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
@@ -3318,9 +3762,17 @@ export abstract class ChannelBase {
   private removePendingPermissionsForSession(
     sessionId: string,
     reason: UserInputSettlementReason = 'cancelled',
+    options?: { preserveBackgroundWorkflows: boolean },
   ): void {
     const requestIds = Array.from(this.pendingPermissions)
-      .filter(([, pending]) => pending.sessionId === sessionId)
+      .filter(
+        ([, pending]) =>
+          pending.sessionId === sessionId &&
+          (!options?.preserveBackgroundWorkflows ||
+            pending.request.toolCall._meta?.[
+              BACKGROUND_WORKFLOW_APPROVAL_META_KEY
+            ] !== true),
+      )
       .map(([requestId]) => requestId);
     for (const requestId of requestIds) {
       this.removePendingPermission(requestId, reason);
@@ -3328,6 +3780,7 @@ export abstract class ChannelBase {
   }
 
   private clearPendingPermissions(): void {
+    this.preparingWorkflowApprovals.clear();
     for (const requestId of Array.from(this.pendingPermissions.keys())) {
       this.removePendingPermission(requestId, 'cancelled');
     }
@@ -3433,7 +3886,16 @@ export abstract class ChannelBase {
     pending: PendingPermission,
     requireOwner: boolean,
   ): boolean {
-    if (requireOwner) {
+    const origin = pending.workflowOrigin;
+    if (origin) {
+      if (
+        !this.workflowTarget(pending.sessionId, origin) ||
+        (requireOwner &&
+          (!origin.userInitiated || origin.senderId !== envelope.senderId))
+      ) {
+        return false;
+      }
+    } else if (requireOwner) {
       const active = this.activePrompts.get(pending.sessionId);
       if (
         !active ||
@@ -3920,6 +4382,9 @@ export abstract class ChannelBase {
   }
 
   private bypassesNamedTurnBinding(envelope: Envelope): boolean {
+    // A tagged (automated) sender's text is prose, so it never takes a
+    // command/bang bypass: it binds a named turn like any other message.
+    if (envelope.senderTag) return false;
     const parsed = this.parseCommand(envelope.text);
     if (parsed && this.commands.has(parsed.command)) return true;
     const bangText = envelope.text.trimStart();
@@ -4329,6 +4794,7 @@ export abstract class ChannelBase {
           // or resurrect via collect-drain — the just-cleared session.
           const active = this.activePrompts.get(id);
           this.dropCollectBuffer(id);
+          this.dropMidTurnInjections(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
             const settled = await this.cancelAndAwaitActive(active, id);
@@ -6298,6 +6764,33 @@ export abstract class ChannelBase {
     }
   }
 
+  private peekPendingGroupHistory(envelope: Envelope): GroupHistoryEntry[] {
+    const limit = this.groupHistoryLimit(envelope);
+    if (limit <= 0) {
+      return [];
+    }
+    try {
+      const entries = this.groupHistory.peek(
+        this.groupHistoryKey(envelope),
+        limit,
+      );
+      if (
+        this.config.groupPolicy === 'pairing' &&
+        !this.groupGate.isGroupApproved(envelope.chatId)
+      ) {
+        return [];
+      }
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to peek group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+      return [];
+    }
+  }
+
   private forgetPendingGroupHistory(envelope: Envelope): void {
     if (envelope.messageId === undefined) return;
     try {
@@ -6486,6 +6979,13 @@ export abstract class ChannelBase {
       this.privatePolicy === 'pairing' &&
       !senderGate.isAllowed(envelope.senderId)
     ) {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
+    // Private comment-watch delivery of the channel account's own comments: the
+    // group/DM/route checks above already ran; only the sender gate is waived.
+    if (options.waiveGroupSender === true) {
       this.markPreflighted(envelope);
       return true;
     }
@@ -6877,9 +7377,13 @@ export abstract class ChannelBase {
       await this.recordObservedContact(envelope);
       this.onObservedContact(envelope);
     }
-    const parsed = this.parseCommand(envelope.text);
+    // Automated senders (see Envelope.senderTag) get prose treatment: their
+    // command-shaped text reaches the model instead of this channel's local
+    // commands and memory intents.
+    const automated = envelope.senderTag !== undefined;
+    const parsed = automated ? null : this.parseCommand(envelope.text);
     let memoryIntent: ResolvedChannelMemoryIntent | null =
-      parsed?.command === 'btw'
+      automated || parsed?.command === 'btw'
         ? null
         : parseChannelMemoryIntent(envelope.text);
     let memoryIntentFromClassifier = false;
@@ -6887,6 +7391,7 @@ export abstract class ChannelBase {
       this.deletePendingChannelMemoryMutation(envelope);
     }
     if (
+      !automated &&
       !memoryIntent &&
       parsed?.command !== 'btw' &&
       this.shouldClassifyChannelMemoryIntent(envelope.text)
@@ -6971,7 +7476,9 @@ export abstract class ChannelBase {
     // Phase 0 has no per-sender trust model (the [sender] marker is NOT a trust
     // boundary). Any group is multi-operator — even a user-scope group, which is
     // NOT a "shared session" — so an allowed member could `!rm -rf /` the host.
-    const bangText = envelope.text.trimStart();
+    // An automated sender's text is never a shell command (Envelope.senderTag),
+    // so it skips both the refusal and the execution arms below.
+    const bangText = automated ? '' : envelope.text.trimStart();
     if (bangText.startsWith('!')) {
       if (envelope.isGroup || this.isSharedSession(envelope)) {
         // Audit a blocked host-shell attempt — a group/shared member trying `!`
@@ -7140,8 +7647,17 @@ export abstract class ChannelBase {
       }
 
       const recognizedSlashCommand =
+        !automated &&
         this.isSlashCommand(envelope.text) &&
         this.isRecognizedCommand(envelope.text, sessionId);
+      // Adapter-tagged automated sender (Envelope.senderTag): rendered here,
+      // after prompt sanitization, because a line-leading `[tag]` inside `text`
+      // would be peeled by unwrapStartOfLineTags. Self-prefixing adapters
+      // (`alreadyPrefixed`) render the tag themselves.
+      const senderTagBar =
+        !envelope.alreadyPrefixed && envelope.senderTag?.trim()
+          ? `[${sanitizeSenderName(envelope.senderTag)}] `
+          : '';
       // Prepend referenced (quoted) message text for reply context
       let promptText = envelope.text;
 
@@ -7174,7 +7690,7 @@ export abstract class ChannelBase {
         const who = sanitizeSenderName(
           envelope.senderName || envelope.senderId || 'unknown',
         );
-        promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+        promptText = `${senderTagBar}[${who}] ${sanitizePromptText(promptText)}`;
         // Render the non-bot mention marker AFTER sanitization (like the
         // [Replying to:] wrapper below). Inside `text` it would pass through
         // sanitizePromptText, which strips brackets only on content <=64 chars
@@ -7193,6 +7709,10 @@ export abstract class ChannelBase {
             promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
           }
         }
+      } else if (senderTagBar) {
+        // No sender attribution to attach the tag to (per-user 1:1 DM), so the
+        // tag opens the prompt on its own.
+        promptText = `${senderTagBar}${promptText}`;
       }
 
       if (envelope.referencedText) {
@@ -7273,14 +7793,199 @@ export abstract class ChannelBase {
       if (active) {
         // A prompt is already running for this session
         switch (mode) {
-          case 'collect': {
+          case 'collect':
+          case 'inject': {
+            // `inject` hands the text to the bridge's mid-turn queue so the
+            // agent reads it inside the RUNNING turn, at its next drain
+            // boundary. The queue carries plain text only and the RUNNING
+            // turn's route decides where the answer goes, so a message whose
+            // route/content it cannot carry (a recognized slash command, a
+            // chat/thread its turn does not own, an unauthorized member's
+            // text, a collect replay) parks in `collectBuffers` exactly as
+            // `collect` would instead of being injected. A bridge without the
+            // capability, or one rejecting injections, also falls back. Media
+            // carrying inline image bytes is refused visibly before any parking
+            // path: the replay envelope strips attachments and imageBase64, so
+            // parking it would silently destroy the picture with no notice to
+            // the sender. Media saved to a local path is different — its
+            // `saved to:` line is plain text that survives the replay — so it
+            // still parks. Every fallback below lands in `collectBuffers` and
+            // is replayed as its own turn once this one ends, so nothing
+            // parked here is reported as delivered.
+            let injectFallback = false;
+            let injectRejectReason: string | undefined;
+            if (mode === 'inject' && !envelope.collectReplay) {
+              if (images.length > 0) {
+                // Inline image bytes cannot survive a collect replay (the
+                // replay envelope strips attachments/imageBase64), so parking
+                // this message would silently drop the picture. Refuse before
+                // the capability arm and every other parking gate: the sender
+                // has no reason to resend otherwise.
+                process.stderr.write(
+                  `[${this.name}] inject: refusing message with image(s) from ${envelope.senderId} for session ${sessionId} (mid-turn injection is text-only)\n`,
+                );
+                await this.notifyInjectRefused(
+                  envelope,
+                  'Mid-turn injection supports text-only messages. Send this again after the current task finishes, or use a different dispatch mode.',
+                );
+                return;
+              }
+              if (!this.bridge.queueMidTurnMessage) {
+                // Daemon-managed bridges have no mid-turn surface. Say so once
+                // per session so a configured `inject` is not silently `collect`
+                // with no operator-visible reason.
+                this.logInjectUnsupported(sessionId);
+              } else if (envelope.attachments?.length) {
+                // The attachment lines (a `saved to:` path) are plain text, so
+                // buffer the message: the adapter keeps the file for the
+                // buffered message and the replay turn reads it from the path.
+              } else if (recognizedSlashCommand) {
+                // A command only executes on the prompt path; injected it
+                // reaches the model as prose with a prefix that defeats slash
+                // parsing. Let it become its own turn.
+              } else if (!this.isAuthorizedForSharedSession(envelope)) {
+                process.stderr.write(
+                  `[${this.name}] inject denied for ${envelope.senderId} in shared session (chat=${sanitizeLogText(envelope.chatId, 64)}); buffering instead\n`,
+                );
+              } else if (!this.runningTurnOwnsEnvelope(active, envelope)) {
+                // The running turn's output route is bound to its originating
+                // chat; injecting another chat's (session-scope-collapsed)
+                // message would answer it in the wrong chat.
+                process.stderr.write(
+                  `[${this.name}] inject skipped for ${envelope.senderId}: chat ${sanitizeLogText(envelope.chatId, 64)}/thread ${sanitizeLogText(envelope.threadId ?? '', 64)} is not the running turn's target; buffering instead\n`,
+                );
+              } else if (this.injectDegradedSessions.has(sessionId)) {
+                // An earlier message of this turn is already parked in the
+                // bounded fallback; keep arrival order instead of letting this
+                // one overtake it into the running turn.
+                injectFallback = true;
+                injectRejectReason = 'ordered after a parked message';
+              } else if (this.injectOrderLockedSessions.has(sessionId)) {
+                // An earlier message of this turn is parked in the collect
+                // buffer for another reason; keep arrival order without
+                // charging the bounded fallback's accounting.
+                process.stderr.write(
+                  `[${this.name}] inject: NOT delivered mid-turn (an earlier message of this turn is parked); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
+                );
+              } else {
+                // The injected text must carry the same group-history backfill
+                // a queued turn would get, or the agent answers a reference
+                // ("the third one") it cannot resolve. The pending history is
+                // only PEEKED here: a rejected injection parks the unwrapped
+                // text so the replay composes a single fresh wrapper, and an
+                // accepted one drains it right after the queue accepts it.
+                const pendingHistory = this.peekPendingGroupHistory(envelope);
+                const injectText = this.prependGroupHistoryContext(
+                  envelope,
+                  promptText,
+                  pendingHistory,
+                );
+                const receipt = this.bridge.queueMidTurnMessage(
+                  sessionId,
+                  injectText,
+                );
+                if (receipt.accepted) {
+                  // Consume the history this injection carried. No await
+                  // between the accepted queue call and this drain, so no other
+                  // turn can deliver the same backfill. The consumed entries
+                  // ride on the ledger entry: acceptance is not delivery, and a
+                  // turn that ends without a drain point replays this message
+                  // as its own turn, which must still compose that backfill.
+                  this.drainPendingGroupHistory(envelope);
+                  // Record the RAW text, not `injectText`: the wrapper above is
+                  // for the running turn only. If the running turn ends before
+                  // draining this message, the ledger entry is replayed as its
+                  // own turn, and that replay composes a fresh wrapper of its
+                  // own — storing the wrapped text would nest a stale wrapper
+                  // and present the previous backfill as the message to answer.
+                  this.recordInjectedMessage(
+                    sessionId,
+                    promptText,
+                    envelope,
+                    pendingHistory,
+                  );
+                  process.stderr.write(
+                    `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
+                  );
+                  this.notifyPromptInjected(
+                    envelope.chatId,
+                    sessionId,
+                    envelope.messageId,
+                  );
+                  return;
+                }
+                // A rejected injection opens the fallback for the rest of this
+                // turn: messages must stay in arrival order.
+                this.injectDegradedSessions.add(sessionId);
+                injectFallback = true;
+                injectRejectReason = receipt.reason;
+              }
+            }
+            if (injectFallback) {
+              // Bounded fallback: retained only until this turn ends, then
+              // replayed in arrival order. It bounds the injections the bridge
+              // REJECTED from its mid-turn queue together with the later
+              // same-turn messages parked behind them to keep that order
+              // (bounds shared from ChannelAgentBridge); plain collect-mode
+              // buffering is unbounded and unchanged. A single rejected message
+              // whose own text exceeds the character bound is kept in that
+              // ordinary collect buffer instead of being refused.
+              const fallbackEntries = (
+                this.collectBuffers.get(sessionId) ?? []
+              ).filter((entry) => entry.injectFallback);
+              const fallbackChars = fallbackEntries.reduce(
+                (total, entry) => total + entry.text.length,
+                0,
+              );
+              const overBound =
+                fallbackEntries.length >= MID_TURN_QUEUE_MAX_MESSAGES ||
+                (fallbackEntries.length > 0 &&
+                  fallbackChars + promptText.length > MID_TURN_QUEUE_MAX_CHARS);
+              if (overBound) {
+                // Metadata only: the refused text is the user's private
+                // message and the sanitizer does not redact it.
+                process.stderr.write(
+                  `[${this.name}] inject: could not queue mid-turn message (capacity) and the fallback buffer is full; refusing message from ${envelope.senderId} for session ${sessionId} (${promptText.length} chars)\n`,
+                );
+                await this.notifyInjectRefused(
+                  envelope,
+                  'This message was not delivered: the current task is still running and too many follow-up messages are already waiting. Please resend it once the current task finishes.',
+                );
+                return;
+              }
+              if (
+                fallbackEntries.length === 0 &&
+                promptText.length > MID_TURN_QUEUE_MAX_CHARS
+              ) {
+                // A single message larger than the fallback's whole budget
+                // cannot be held there without defeating the bound's purpose;
+                // plain collect retains it unbounded, like every other mode.
+                process.stderr.write(
+                  `[${this.name}] inject: message from ${envelope.senderId} for session ${sessionId} exceeds the fallback bound; buffering as plain collect\n`,
+                );
+                injectFallback = false;
+              } else {
+                process.stderr.write(
+                  `[${this.name}] inject: NOT delivered mid-turn (${injectRejectReason}); buffered for the next turn from ${envelope.senderId} into session ${sessionId}\n`,
+                );
+              }
+            }
             // Buffer the message; it will be coalesced when the active prompt finishes
             let buffer = this.collectBuffers.get(sessionId);
             if (!buffer) {
               buffer = [];
               this.collectBuffers.set(sessionId, buffer);
             }
-            buffer.push({ text: promptText, envelope });
+            const entry: CollectBufferEntry = {
+              text: promptText,
+              envelope,
+              sequence: this.nextInboundOrdinal(),
+            };
+            if (injectFallback) entry.injectFallback = true;
+            buffer.push(entry);
+            // A parked message gates the rest of the turn: a later injection
+            // would overtake it, so every follower parks here too.
+            this.injectOrderLockedSessions.add(sessionId);
             try {
               this.onPromptBuffered(
                 envelope.chatId,
@@ -7354,6 +8059,7 @@ export abstract class ChannelBase {
               this.removePendingPermissionsForSession(
                 sessionId,
                 'run_cancelled',
+                { preserveBackgroundWorkflows: true },
               );
             }
             // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
@@ -7610,15 +8316,36 @@ export abstract class ChannelBase {
         // bridge only after the latest recovery has restored session routing.
         await this.waitForBridgeRecovery();
         const promptBridge = this.bridge;
+        let turnNotice = '';
+        const onTurnNotice = (sid: string, notice: string) => {
+          if (sid === sessionId) turnNotice = notice;
+        };
         promptBridge.on('textChunk', onChunk);
+        promptBridge.on('turnNotice', onTurnNotice);
         promptBridge.on('responseBoundary', onResponseBoundary);
 
         let taskResultPartial = false;
+        let answerDelivered = false;
         try {
           if (!this.canStartInboundTurn()) {
             throw new ChannelPromptCancelledError();
           }
-          const response = await promptBridge.prompt(sessionId, promptToSend, {
+          const workflowTarget: SessionTarget = {
+            channelName: this.name,
+            chatId: envelope.chatId,
+            threadId: envelope.threadId,
+            senderId: envelope.senderId,
+            isGroup: envelope.isGroup,
+            messageRoute: envelope.messageRoute,
+          };
+          let response = await promptBridge.prompt(sessionId, promptToSend, {
+            workflowOrigin: {
+              ...workflowTarget,
+              userInitiated: true,
+              ...(!this.canDeliverBackgroundWorkflow(workflowTarget)
+                ? { backgroundWorkflowBlocked: true }
+                : {}),
+            },
             ...(this.config.outputMode === 'per_task'
               ? {
                   outputMode: 'per_task' as const,
@@ -7643,6 +8370,11 @@ export abstract class ChannelBase {
           // If cancelled, skip sending the response
           if (!promptState.cancelled && response) {
             promptState.deliveryStarted = true;
+            if (turnNotice) {
+              response = response.slice(turnNotice.length + 2);
+            }
+          }
+          if (!promptState.cancelled && response) {
             const segment = this.ensureOutputSegment(sessionId, promptState);
             if (segment && taskResultPartial) segment.partial = true;
             await this.onResponseComplete(
@@ -7651,8 +8383,34 @@ export abstract class ChannelBase {
               sessionId,
               segment,
             );
+            answerDelivered = true;
             if (segment && promptState.activeSegmentId === segment.segmentId) {
               promptState.activeSegmentId = undefined;
+            }
+          }
+          if (!promptState.cancelled && turnNotice) {
+            // Keep notices out of stream buffers and let the answer consume
+            // adapter-specific reply metadata (such as DingTalk mentions) first.
+            try {
+              await this.sendResponseMessage(
+                envelope.chatId,
+                turnNotice,
+                sessionId,
+                sourceLabel,
+              );
+            } catch (err) {
+              // The prompt result is `turnNotice || body`, so on an empty body
+              // the notice is the turn's only delivery: rethrow instead of
+              // reporting a completed turn the user never received.
+              if (!answerDelivered) throw err;
+              // The answer is already delivered, so the turn's outcome is fixed
+              // (see the deliveryStarted invariant below): log the failed
+              // notice instead of letting it rewrite completed into failed.
+              // The notice was sliced out of the answer above, so this line is
+              // the only remaining record of what the user never received.
+              process.stderr.write(
+                `[${this.name}] turn notice delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)} (dropped notice: ${sanitizeLogText(turnNotice, 200)})\n`,
+              );
             }
           }
           // Once delivery started the turn's outcome is fixed — don't let a
@@ -7730,6 +8488,7 @@ export abstract class ChannelBase {
           throw err;
         } finally {
           promptBridge.off('textChunk', onChunk);
+          promptBridge.off('turnNotice', onTurnNotice);
           promptBridge.off('responseBoundary', onResponseBoundary);
           // Identity guard: a turn that wedged past /clear's bounded wait gets
           // EVICTED — /clear gives up on active.done, deletes activePrompts, and a

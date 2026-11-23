@@ -21,6 +21,7 @@ import {
   stopParkedRuntimeExecutions,
   settleParkedTurnCancelled,
   answerCommittedTurnCalls,
+  answerResumedTurnCalls,
   recoverHostedRuntimeTurn,
   HostedRecoveryQuiescingError,
   RecoveryDeclined,
@@ -129,6 +130,61 @@ describe('recoverHostedRuntimeTurn', () => {
       ...(refs ? { create: refs, requireNew: true } : {}),
     });
   }
+
+  it.each([
+    'context_remember',
+    'context_forget',
+    'context_get',
+    'context_search',
+  ])(
+    'preserves an unconfirmed personal memory outcome during generic recovery: %s',
+    async (name) => {
+      const session = await open('boot-1', true);
+      try {
+        await createManagedHarnessHandle(session).ensureRunnable();
+        await session.sink.write({
+          uuid: 'memory-batch',
+          parentUuid: null,
+          sessionId: SESSION_ID,
+          timestamp: new Date().toISOString(),
+          type: 'assistant',
+          cwd: root,
+          version: 'hosted-harness/1',
+          daemonPromptId: PROMPT_ID,
+          message: {
+            role: 'model',
+            parts: [{ functionCall: { id: 'memory-call', name, args: {} } }],
+          },
+        });
+        const input = {
+          session,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+        };
+        expect(await answerResumedTurnCalls(input)).toBe(1);
+        expect(await answerResumedTurnCalls(input)).toBe(0);
+        const results = (await session.sink.project()).filter(
+          (entry) => entry.type === 'tool_result',
+        );
+        expect(results).toHaveLength(1);
+        const response =
+          results[0].message?.parts?.[0].functionResponse?.response;
+        expect(response?.['executionStatus']).toBe('unknown');
+        expect(response?.['status']).toBe(
+          ['context_remember', 'context_forget'].includes(name)
+            ? 'unknown'
+            : 'unavailable',
+        );
+        expect(String(response?.['error'])).toContain(
+          'do not automatically retry',
+        );
+        expect(String(response?.['error'])).not.toContain('never ran');
+      } finally {
+        await session.close();
+      }
+    },
+  );
 
   /** Drives a fresh session to a parked await_runtime checkpoint. */
   async function parkAtAwaitRuntime(
@@ -677,7 +733,7 @@ describe('recoverHostedRuntimeTurn', () => {
           'managed-action-options',
           Buffer.from(
             JSON.stringify({
-              v: 1,
+              v: 3,
               requestId: ACTION_ID,
               turnId: PROMPT_ID,
               functionCallId: 'call-1',
@@ -1013,6 +1069,183 @@ describe('recoverHostedRuntimeTurn', () => {
         }),
       ]);
       expect(recovered.drivable).toBe(true);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('settles an all-abandoned park whose runtime acquire is refused as lost', async () => {
+    // #17542: an out-of-band termination leaves the binding LOST with loss
+    // evidence but no writer-stop proof, so no replacement may be
+    // provisioned and acquire answers runtime_broker_runtime_lost. The
+    // generation's executions are already terminally abandoned; the
+    // takeover must read them from the durable ledger without a live
+    // session and report them known so the coordinator can cancel over
+    // them, instead of failing the load into an endless park.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(503, 'runtime_broker_runtime_lost'),
+    );
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'abandoned',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'abandoned' },
+        }),
+      ]);
+      // The coordinator drives the cancellation over the abandoned fence;
+      // continuation stays blocked by the settled-state requirement, not
+      // by this marker.
+      expect(recovered.drivable).toBe(true);
+      // The skipped adopt acquired nothing: no lease is owed and the passive
+      // path runs no compensation release.
+      expect(recovered.acquiredRuntime).toBe(false);
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps the lost refusal when a parked execution is not provably abandoned', async () => {
+    // Safety counterpart: writer-stop is unproven, so an execution the
+    // Broker cannot prove terminally abandoned must keep the load failing
+    // retriably — never settle over a writer that may still be live.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(503, 'runtime_broker_runtime_lost'),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'unknown',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toMatchObject({
+        status: 503,
+        code: 'runtime_broker_runtime_lost',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps the lost refusal when only some parked executions are abandoned', async () => {
+    // A mixed park must not settle: the abandoned fence proves nothing about
+    // the sibling whose outcome is still unknown, so the whole load keeps the
+    // lost refusal rather than cancelling over a possibly-live writer.
+    await parkAtAwaitRuntime('write_file', false, false, true, 'exec-2');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(503, 'runtime_broker_runtime_lost'),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      async (executionCallId: string) =>
+        executionCallId === EXECUTION_ID
+          ? { state: 'abandoned' }
+          : { state: 'unknown' },
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toMatchObject({
+        status: 503,
+        code: 'runtime_broker_runtime_lost',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps the lost refusal when a durable status read faults', async () => {
+    // A read that cannot answer is not an abandoned proof: the lost branch
+    // folds the fault into the captured refusal and parks, fail-closed.
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(503, 'runtime_broker_runtime_lost'),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockRejectedValue(
+      new Error('broker transport fault'),
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toMatchObject({
+        status: 503,
+        code: 'runtime_broker_runtime_lost',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps the lost refusal when no execution is pending', async () => {
+    // The lost tolerance reads an all-abandoned pending park; an all-settled
+    // park has no abandoned fence to prove, so the refusal stands and the load
+    // parks as before rather than settling over the lost generation.
+    await parkAtAwaitRuntime('write_file', false, true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(503, 'runtime_broker_runtime_lost'),
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      ).rejects.toMatchObject({
+        status: 503,
+        code: 'runtime_broker_runtime_lost',
+      });
     } finally {
       await replacement.close();
     }

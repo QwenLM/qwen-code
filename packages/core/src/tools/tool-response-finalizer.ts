@@ -25,6 +25,8 @@ import {
 } from './tool-result-boundary-diagnostics.js';
 import {
   normalizeToolResultCallId,
+  PERSISTED_OUTPUT_ARTIFACT_PREFIX,
+  PERSISTED_OUTPUT_ARTIFACTS_PREFIX,
   persistAndTruncateToolResult,
 } from './truncation.js';
 import {
@@ -130,8 +132,8 @@ function recoveryOf(
 function recoveryHeader(files: string[] | undefined): string {
   return files?.length
     ? files.length === 1
-      ? `Tool output truncated. Persisted tool-output artifact: ${files[0]}`
-      : `Tool output truncated. Persisted tool-output artifacts:\n${files.map((file) => `- ${file}`).join('\n')}`
+      ? `${PERSISTED_OUTPUT_ARTIFACT_PREFIX}: ${files[0]}`
+      : `${PERSISTED_OUTPUT_ARTIFACTS_PREFIX}:\n${files.map((file) => `- ${file}`).join('\n')}`
     : TOOL_OUTPUT_TRUNCATED_NOTICE;
 }
 
@@ -492,7 +494,9 @@ export async function finalizeToolResponses(
   includeTopLevelText = true,
   budgetSource: ToolOutputBudgetSource = 'batch',
   logResultSize = true,
+  isFinished?: () => boolean,
 ): Promise<ToolResponseBudgetEntry[]> {
+  if (isFinished?.()) return entries;
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
     ? consumeAssociatedFinalizerEntries(entries)
@@ -665,6 +669,7 @@ export async function finalizeToolResponses(
         persistedOutputFiles: [],
       };
     }
+    if (isFinished?.()) return entries;
   }
 
   const finalized = replaceTextSlots(withPersistence, slots, allocations);

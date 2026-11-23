@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CODE_FENCE_RE } from './pending-rendered-height.js';
+import {
+  CODE_FENCE_RE,
+  isClosingCodeFence,
+} from './pending-rendered-height.js';
 
 /*
 **Background & Purpose:**
@@ -43,15 +46,15 @@ so rendered history chunks do not break fenced code blocks unnecessarily.
 
 /**
  * Finds the next standalone fenced-code delimiter at or after `from`, using
- * MarkdownDisplay's line-matching rules and returning its index, fence character
- * and the FULL run length. The run length matters: `indexOf('```')` matches
+ * MarkdownDisplay's line-matching rules and returning its index and full match.
+ * The run length matters: `indexOf('```')` matches
  * only the first 3 chars of a longer run, so callers must advance past the whole
  * run (index + length) or a 6-backtick fence would be miscounted as two.
  */
 const findNextFence = (
   content: string,
   from: number,
-): { index: number; char: '`' | '~'; length: number } | null => {
+): { index: number; match: RegExpExecArray } | null => {
   let lineStart = from === 0 ? 0 : content.lastIndexOf('\n', from - 1) + 1;
   while (lineStart < content.length) {
     const newlineIndex = content.indexOf('\n', lineStart);
@@ -70,16 +73,18 @@ const findNextFence = (
         lineStart = lineEnd + 1;
         continue;
       }
-      const match = CODE_FENCE_RE.exec(content.slice(lineStart, lineEnd));
+      const contentEnd =
+        newlineIndex !== -1 && content[lineEnd - 1] === '\r'
+          ? lineEnd - 1
+          : lineEnd;
+      const match = CODE_FENCE_RE.exec(content.slice(lineStart, contentEnd));
       if (!match) {
         lineStart = lineEnd + 1;
         continue;
       }
-      const delimiter = match[1]!;
       return {
         index: delimiterStart,
-        char: delimiter[0] === '`' ? '`' : '~',
-        length: delimiter.length,
+        match,
       };
     }
     lineStart = lineEnd + 1;
@@ -94,34 +99,34 @@ const findNextFence = (
  * followed it on the same line (e.g. "python", "ts"), so a split can re-open an
  * identical fence. Open/close matching mirrors CommonMark / MarkdownDisplay: a
  * fence only closes a block opened with the SAME character AND a run at least as
- * long, so a ``` inside a ~~~ block — or a shorter run inside a longer fence —
- * does not toggle the state.
+ * long, followed only by spaces/tabs. A ``` inside a ~~~ block, a shorter run,
+ * or a marker followed by content does not toggle the state.
  */
 const getEnclosingFence = (
   content: string,
   indexToTest: number,
   onClosed?: (startIndex: number, endIndex: number) => void,
 ): { startIndex: number; delimiter: string; infoString: string } | null => {
-  let open: { char: '`' | '~'; len: number; index: number } | null = null;
+  let open: { delimiter: string; index: number } | null = null;
   let searchPos = 0;
   while (searchPos < content.length) {
     const fence = findNextFence(content, searchPos);
     if (!fence || fence.index >= indexToTest) break;
     if (!open) {
-      open = { char: fence.char, len: fence.length, index: fence.index };
-    } else if (fence.char === open.char && fence.length >= open.len) {
+      open = { delimiter: fence.match[1]!, index: fence.index };
+    } else if (isClosingCodeFence(fence.match, open.delimiter)) {
       onClosed?.(open.index, fence.index);
       open = null;
     }
-    searchPos = fence.index + fence.length;
+    searchPos = fence.index + fence.match[1]!.length;
   }
   if (!open) return null;
   const newlineIndex = content.indexOf('\n', open.index);
   const fenceLineEnd = newlineIndex === -1 ? content.length : newlineIndex;
   return {
     startIndex: open.index,
-    delimiter: content.slice(open.index, open.index + open.len),
-    infoString: content.slice(open.index + open.len, fenceLineEnd),
+    delimiter: open.delimiter,
+    infoString: content.slice(open.index + open.delimiter.length, fenceLineEnd),
   };
 };
 

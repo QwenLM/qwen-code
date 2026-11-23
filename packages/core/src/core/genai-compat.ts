@@ -34,6 +34,7 @@ export const FinishReason = {
 export type FunctionCallingConfigMode = GenAiFunctionCallingConfigMode;
 export const FunctionCallingConfigMode = {
   ANY: 'ANY' as GenAiFunctionCallingConfigMode,
+  NONE: 'NONE' as GenAiFunctionCallingConfigMode,
 } as const;
 
 // Content conversion is adapted from @google/genai 2.6.0's `_isPart` and

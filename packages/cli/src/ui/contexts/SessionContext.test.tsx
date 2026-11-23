@@ -295,6 +295,9 @@ describe('SessionStatsContext', () => {
       totalTtftMs: 100,
       totalGenerationDurationMs: 400,
       totalThroughputOutputTokens: 20,
+      totalTimedGenerationDurationMs: 400,
+      totalOutputSpeedTokens: 20,
+      totalOutputSpeedDurationMs: 500,
       last: {
         model: 'qwen3-coder',
         ttftMs: 100,
@@ -361,6 +364,59 @@ describe('SessionStatsContext', () => {
     expect(previous?.model.bySource).toEqual({ main: 20 });
     unmount();
     uiTelemetryService.reset();
+  });
+
+  it('decouples the mint counter from the user-visible Prompts statistic (R9-5)', () => {
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    expect(result.current.stats.promptCount).toBe(0);
+    expect(result.current.stats.userPromptCount).toBe(0);
+
+    // A background mint (notification/goal/retry) advances only the mint
+    // counter, so the next minted id is unique without inflating the statistic.
+    act(() => {
+      result.current.startNewPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(1);
+    expect(result.current.stats.userPromptCount).toBe(0);
+
+    // A user-initiated turn advances both counters.
+    act(() => {
+      result.current.startNewPrompt();
+      result.current.recordUserPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(2);
+    expect(result.current.stats.userPromptCount).toBe(1);
+
+    // recordUserPrompt alone advances only the user statistic.
+    act(() => {
+      result.current.recordUserPrompt();
+    });
+    expect(result.current.stats.promptCount).toBe(2);
+    expect(result.current.stats.userPromptCount).toBe(2);
+    unmount();
+  });
+
+  it('seeds the visible Prompts statistic from the user-turn count on resume (S1)', () => {
+    const { result, unmount } = renderHook(() => useSessionStats(), {
+      wrapper: SessionStatsProvider,
+    });
+    // The mint-counter seed (10) can exceed the user-turn count (3) when
+    // background mints claimed higher ids; the visible statistic must resume
+    // from the user-turn count, not the mint seed.
+    act(() => {
+      result.current.seedPromptCount(10, 3);
+    });
+    expect(result.current.stats.promptCount).toBe(10);
+    expect(result.current.stats.userPromptCount).toBe(3);
+    // Without an explicit user seed the legacy single-seed behavior holds.
+    act(() => {
+      result.current.seedPromptCount(12);
+    });
+    expect(result.current.stats.promptCount).toBe(12);
+    expect(result.current.stats.userPromptCount).toBe(12);
+    unmount();
   });
 
   it('should throw an error when useSessionStats is used outside of a provider', () => {

@@ -169,9 +169,47 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     ['packages/cli/src/dualOutput/index.ts', ['component', 'integration']],
+    [
+      'packages/cli/src/ui/opentui/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-memory-status.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/opentui-dialog-mount.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/hooks/useLaunchEditor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/commands/memoryCommand.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/core/src/memory/paths.ts', ['component', 'integration']],
+    [
+      'packages/core/src/utils/memory-constants.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/core/src/utils/editor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-memory-manager.test.ts',
+      ['component', 'integration'],
+    ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/shared-model-round.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
     ['pnpm-lock.yaml', lanes],
     ['packages/cli/package.json', lanes],
@@ -230,6 +268,8 @@ describe('TUI product evidence', () => {
           selected.includes('recovery'),
         );
       }
+      if (selected.length === 0)
+        expect(outputs.reason).toBe('Outside the TUI build/test closure');
       if (selected.length === 1)
         expect(outputs.reason).toContain(
           'maintainers should consider manual full',
@@ -370,6 +410,7 @@ describe('TUI product evidence', () => {
       'tui-foreground-shell',
       'tui-extension-acquisition',
       'tui-dual-output',
+      'tui-memory-manager',
     ],
   };
   it.each(
@@ -637,11 +678,16 @@ describe('TUI product evidence', () => {
   const excludedTrees = (yamlText) =>
     parse(yamlText)
       .packages.filter((entry) => entry.startsWith('!'))
-      .map((entry) => entry.slice(1));
+      .map((entry) => entry.slice(1))
+      .filter((tree) => !/[*?[\]{}]/.test(tree));
 
   it('excludes every tree the pnpm workspace itself leaves out', async () => {
     const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
-    expect(excluded.length).toBeGreaterThan(0);
+    expect([...excluded].sort()).toEqual([
+      'packages/desktop',
+      'packages/live-host',
+      'packages/mobile-shell',
+    ]);
     for (const tree of excluded) {
       const { outputs } = await impact([
         { filename: `${tree}/placeholder.ts` },
@@ -651,7 +697,7 @@ describe('TUI product evidence', () => {
     }
   });
 
-  it('reconciles negations spelled with a trailing comment or another scope', () => {
+  it('reconciles literal negations across YAML spellings and ignores globs', () => {
     expect(
       excludedTrees(
         [
@@ -659,6 +705,10 @@ describe('TUI product evidence', () => {
           "  - 'packages/*'",
           "  - '!packages/desktop' # promoted to its own release later",
           "  - '!integrations/generated-ui'",
+          "  - '!**/fixtures/**'",
+          "  - '!packages/fixture?'",
+          "  - '!packages/[ab]'",
+          "  - '!packages/{foo,bar}'",
           '',
         ].join('\n'),
       ),
@@ -992,10 +1042,15 @@ describe('e2e workflow', () => {
       e2eRunScript.match(/--exclude '\*\*\/qwen-serve-routes\.test\.ts'/g),
     ).toHaveLength(1);
     expect(
+      e2eRunScript.match(
+        /--exclude '\*\*\/cli\/qwen-serve-liveness-grace\.test\.ts'/g,
+      ),
+    ).toHaveLength(1);
+    expect(
       e2eRunScript.match(/--exclude '\*\*\/sdk-typescript\/\*\*'/g),
     ).toHaveLength(1);
     expect(e2eRunScript).toContain(
-      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts --poolOptions.forks.maxForks=1',
+      'run_vitest sdk-typescript cli/qwen-serve-routes.test.ts cli/qwen-serve-liveness-grace.test.ts --poolOptions.forks.maxForks=1',
     );
     expect(e2eRunScript).not.toContain('--poolOptions.forks.singleFork');
     // The arrangement is load-bearing: the batch must run first and the
@@ -1004,13 +1059,16 @@ describe('e2e workflow', () => {
     // the pattern tolerates formatting-only rewrites (continuations, comment
     // lines, trailing spaces) so a benign edit cannot turn CI red.
     expect(e2eRunScript).toMatch(
-      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
+      /run_vitest "\$\{bulk_args\[@\]\}"[ \t]*&&[ \t]*\\?\n?(?:[ \t]*#[^\n]*\n)*[ \t]*run_vitest sdk-typescript cli\/qwen-serve-routes\.test\.ts cli\/qwen-serve-liveness-grace\.test\.ts --poolOptions\.forks\.maxForks=1[ \t]*\n\}/,
     );
     // Text pins never touch the tree: renaming the file or directory these
     // filters name silently returns the suites to the three-fork batch.
     expect(existsSync('integration-tests/cli/qwen-serve-routes.test.ts')).toBe(
       true,
     );
+    expect(
+      existsSync('integration-tests/cli/qwen-serve-liveness-grace.test.ts'),
+    ).toBe(true);
     expect(existsSync('integration-tests/sdk-typescript')).toBe(true);
     expect(existsSync('integration-tests/channel-plugin.test.ts')).toBe(true);
     expect(
@@ -1028,6 +1086,129 @@ describe('e2e workflow', () => {
         file.endsWith('.test.ts'),
       ),
     ).toBe(true);
+  });
+
+  describe('agent-loop legs (#17045)', () => {
+    // The nightly signal each surface's default change waits on: a Linux
+    // sandbox:none leg and an OpenTUI leg with the shared loop on, and the
+    // same two legs with both switches on (the event-bus kernel). Pushes
+    // keep the current loop only. These pins evaluate the workflow's actual
+    // matrix and env expressions — a substring pin would pass on a leg that
+    // exists but wires the wrong switch.
+    const jobs = ['e2e-test-linux', 'e2e-interactive-opentui'];
+    const runStepName = {
+      'e2e-test-linux': 'Run E2E tests',
+      'e2e-interactive-opentui': 'Run interactive E2E tests (OpenTUI)',
+    };
+    const arms = ['current', 'unified', 'kernel'];
+    const stripExpression = (raw) => String(raw).trim().slice(3, -2).trim();
+    // Like the macOS shard guard below: an unmodeled term must throw, not
+    // evaluate as undefined — a leg that wires an unmodeled github.* / matrix
+    // term would otherwise pass these pins while running the wrong switch.
+    const strict = (value) =>
+      value && typeof value === 'object'
+        ? new Proxy(value, {
+            get(target, prop) {
+              if (typeof prop === 'symbol' || prop in target)
+                return strict(target[prop]);
+              throw new Error(
+                `agent-loop expression carries an unmodeled term: ${String(prop)}`,
+              );
+            },
+          })
+        : value;
+    const evalExpression = (expression, context) =>
+      new Function(
+        ...Object.keys(context),
+        // GitHub expressions allow hyphenated property names
+        // (matrix.agent-loop); JavaScript reads that as subtraction.
+        `return (${expression.replace(/(\w+)\.([\w-]*-[\w-]*)/g, "$1['$2']")});`,
+      )(...Object.values(context).map(strict));
+    const agentLoopValues = (job, eventName) =>
+      evalExpression(
+        stripExpression(yml.jobs[job].strategy.matrix['agent-loop']),
+        { github: { event_name: eventName }, fromJSON: JSON.parse },
+      );
+    const switchEnv = (job, arm) => {
+      const step = yml.jobs[job].steps.find(
+        (candidate) => candidate.name === runStepName[job],
+      );
+      return [
+        'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+        'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+      ].map((key) =>
+        evalExpression(stripExpression(step.env[key]), {
+          matrix: { 'agent-loop': arm },
+        }),
+      );
+    };
+
+    it.each(jobs)('%s runs only the current loop on push', (job) => {
+      expect(agentLoopValues(job, 'push')).toEqual(['current']);
+    });
+
+    it.each(jobs)(
+      '%s runs all three loop arms on schedule and dispatch',
+      (job) => {
+        for (const eventName of ['schedule', 'workflow_dispatch']) {
+          expect(agentLoopValues(job, eventName), eventName).toEqual(arms);
+        }
+      },
+    );
+
+    it('keeps both jobs on the identical matrix expression', () => {
+      // One expression, two jobs: a divergence would let one surface's
+      // nightly signal accrue on arms the other never runs.
+      expect(String(yml.jobs[jobs[0]].strategy.matrix['agent-loop'])).toBe(
+        String(yml.jobs[jobs[1]].strategy.matrix['agent-loop']),
+      );
+    });
+
+    it('excludes both switch legs from the docker sandbox', () => {
+      expect(yml.jobs['e2e-test-linux'].strategy.matrix.exclude).toEqual([
+        { sandbox: 'sandbox:docker', 'agent-loop': 'unified' },
+        { sandbox: 'sandbox:docker', 'agent-loop': 'kernel' },
+      ]);
+    });
+
+    it.each(jobs)('%s never cancels a sibling loop arm', (job) => {
+      expect(yml.jobs[job].strategy['fail-fast']).toBe(false);
+    });
+
+    it.each(jobs)('%s wires the switches per arm', (job) => {
+      expect(switchEnv(job, 'current')).toEqual(['0', '0']);
+      expect(switchEnv(job, 'unified')).toEqual(['1', '0']);
+      expect(switchEnv(job, 'kernel')).toEqual(['1', '1']);
+    });
+
+    it.each(jobs)('%s names each leg after its loop', (job) => {
+      const name = (arm) =>
+        String(yml.jobs[job].name).replace(
+          /\$\{\{(.*?)\}\}/g,
+          (_, expression) =>
+            evalExpression(expression.trim(), {
+              matrix: {
+                sandbox: 'sandbox:none',
+                shard: '1/1',
+                'agent-loop': arm,
+              },
+            }),
+        );
+      expect(name('current')).not.toContain('unified agent loop');
+      expect(name('current')).not.toContain('event-bus kernel');
+      expect(name('unified')).toContain(' - unified agent loop');
+      expect(name('kernel')).toContain(' - event-bus kernel');
+    });
+
+    it('keeps the OpenTUI leg on the opentui renderer in every arm', () => {
+      // The matrix adds loop arms, not renderer arms: a leg that silently
+      // fell back to ink would pass as a false OpenTUI signal.
+      const step = yml.jobs['e2e-interactive-opentui'].steps.find(
+        (candidate) =>
+          candidate.name === runStepName['e2e-interactive-opentui'],
+      );
+      expect(step.run).toContain('QWEN_E2E_RENDERER=opentui');
+    });
   });
 
   describe('sandbox image preparation', () => {
@@ -1163,6 +1344,11 @@ describe('e2e workflow', () => {
     it('keeps the Docker build environment', () => {
       expect(runStep.env.QWEN_SANDBOX).toContain("'docker'");
       expect(runStep.env.VERBOSE).toBe('true');
+      // The two matrix legs have to pin opposite arms. An empty value means
+      // "no override" and would let both legs follow the
+      // `experimental.unifiedAgentLoop` default, so the scheduled signal that
+      // gates the default flip would report green while comparing nothing.
+      expect(runStep.env.QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP).toContain("'0'");
     });
 
     it('reaps only the sandbox containers owned by its matrix job', () => {

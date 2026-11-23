@@ -1,10 +1,12 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.HexFormat;
 
 public final class RuntimeRequestKeys {
     private RuntimeRequestKeys() { }
@@ -12,20 +14,26 @@ public final class RuntimeRequestKeys {
     public static String requestKey(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
         if (request.isManagedContext()) {
-            return digest("managed-context/1", scope.getTenantId(),
+            return ManagedIdentityRefs.requireRef(ManagedIdentityRefs.RUNTIME_REQUEST_REF_BYTES,
+                    "Runtime request reference (workspaceId/canonicalCwd/capabilityDigest)",
+                    "managed-context/1", scope.getTenantId(),
                     scope.getWorkspaceId(), scope.getWorkspaceGeneration(),
                     scope.getCanonicalCwd(), scope.getCapabilityDigest(),
                     scope.getIsolationClass(), request.getIsolationKey(),
                     request.getProvisionerKind(), request.getStorageId());
         }
-        return digest(scope.getTenantId(), scope.getWorkspaceId(),
+        return ManagedIdentityRefs.requireRef(ManagedIdentityRefs.RUNTIME_REQUEST_REF_BYTES,
+                "Runtime request reference (workspaceId/canonicalCwd/capabilityDigest)",
+                scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass(),
                 request.getIsolationKey(), request.getProvisionerKind());
     }
 
     public static String scopeKey(RuntimeScope scope) {
-        return digest(scope.getTenantId(), scope.getWorkspaceId(),
+        return ManagedIdentityRefs.requireRef(ManagedIdentityRefs.RUNTIME_SCOPE_REF_BYTES,
+                "Runtime scope reference (workspaceId/canonicalCwd/capabilityDigest)",
+                scope.getTenantId(), scope.getWorkspaceId(),
                 scope.getWorkspaceGeneration(), scope.getCanonicalCwd(),
                 scope.getCapabilityDigest(), scope.getIsolationClass());
     }
@@ -47,6 +55,6 @@ public final class RuntimeRequestKeys {
                 digest.update(bytes);
             }
         }
-        return java.util.HexFormat.of().formatHex(digest.digest());
+        return HexFormat.of().formatHex(digest.digest());
     }
 }

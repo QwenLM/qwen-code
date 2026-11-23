@@ -16,6 +16,7 @@ import {
 import {
   assertVersionUnreleased,
   runAssertVersionCli,
+  runAssertChannelResumableCli,
 } from '../assert-release-version.mjs';
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -664,7 +665,7 @@ describe('getVersion', () => {
       );
     });
 
-    it('should reject a stable release derived below the published latest version', () => {
+    it('should bump the stable base past the published latest when the preview lags it', () => {
       const mockWithOlderPreviewVersions = (command) => {
         if (
           command.includes('npm view') &&
@@ -685,10 +686,442 @@ describe('getVersion', () => {
         return mockExecSync(command);
       };
       vi.mocked(execSync).mockImplementation(mockWithOlderPreviewVersions);
+      // The checked-out ref is on the same release line as published latest.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.0' }),
+      );
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.9.1');
+      expect(result.npmTag).toBe('latest');
+      expect(result.previousReleaseTag).toBe('v0.6.1');
+    });
+
+    it('should keep the preview-derived base when the latest dist-tag is missing', () => {
+      // First stable release: previews exist but nothing has shipped stable,
+      // so the rollback-aware latest lookup returns null.
+      const mockWithMissingLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.7.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          throw new Error('npm error code E404');
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.7.0-preview.0', '0.7.0-preview.1']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithMissingLatest);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should ignore an invalid latest dist-tag when deriving the stable base', () => {
+      const mockWithInvalidLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.7.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return 'banana';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.7.0-preview.0', '0.7.0-preview.1']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithInvalidLatest);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.7.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should read the published latest through the rollback-aware lookup', () => {
+      // A rolled-back `latest` dist-tag must not become the stable base:
+      // 0.11.0 is the highest published stable even though the tag says
+      // 0.9.2, and publishing 0.9.3 would move the tag backwards.
+      const mockWithRolledBackLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.2';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.9.0-preview.1', '0.9.2', '0.11.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithRolledBackLatest);
+      // The ref is on the 0.11 line; only the dist-tag was rolled back.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.11.0' }),
+      );
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.11.1');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should refuse a versionless stable release dispatched from a ref behind latest', () => {
+      // A release/0.25 dispatch resolves against the global dist-tags, which
+      // have moved on to 0.26. Bumping would publish 0.25 branch content as
+      // 0.26.9 under `latest`, so the stale dispatch must abort.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.25.9' }),
+      );
+      const mockWithOlderReleaseLine = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.3-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.3-preview.0', '0.26.8']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithOlderReleaseLine);
 
       expect(() => getVersion({ type: 'stable' })).toThrow(
-        'Derived stable version 0.7.0 is lower than published latest 0.9.0',
+        'is ahead of the checked-out package.json version',
       );
+    });
+
+    it('should refuse an older ref even when the preview base is ahead of latest', () => {
+      // Mid-cycle the preview tag runs ahead of the published stable. A
+      // release/0.25 dispatch must still abort instead of publishing its
+      // content as the future minor.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.25.9' }),
+      );
+      const mockWithAheadPreview = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.27.0-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.9';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.9', '0.27.0-preview.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithAheadPreview);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'is ahead of the checked-out package.json version',
+      );
+    });
+
+    it('should refuse a stale ref when the preview base is ahead and no bump happens', () => {
+      // release/v0.26 at 0.26.8 with `latest` also 0.26.8: the preview tag
+      // already carries 0.27.0, so no bump is computed and only a direct
+      // base-vs-ref comparison can refuse publishing 0.26 content as 0.27.0.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.26.8' }),
+      );
+      const mockWithAheadPreviewAtLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.27.0-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.8', '0.27.0-preview.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithAheadPreviewAtLatest);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'Derived base 0.27.0 is on a different release line than the checked-out package.json version 0.26.8',
+      );
+    });
+
+    it('should allow the ordinary next patch when the checked-out ref matches latest', () => {
+      // main after v0.26.8: package.json 0.26.8, `latest` 0.26.8, and the
+      // Tuesday preview already targets 0.26.9. A versionless stable dispatch
+      // promotes that preview; it is not a cross-line release.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.26.8' }),
+      );
+      const mockWithNextPatchPreview = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.9-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.8', '0.26.9-preview.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNextPatchPreview);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.26.9');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should refuse a stable release when the ref is behind latest on the same line', () => {
+      // release/0.26.5 predates the 0.26.8 stable. Bumping it to 0.26.9
+      // would publish older content over a newer stable.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.26.5' }),
+      );
+      const mockWithStaleRef = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.3-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.8';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.3-preview.0', '0.26.8']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithStaleRef);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'is ahead of the checked-out package.json version',
+      );
+    });
+
+    it('should release a new minor when the checked-out ref is ahead of latest', () => {
+      // The ordinary new-minor dispatch: the preview tag already carries the
+      // next minor while the ref's base is ahead of `latest`.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.27.0' }),
+      );
+      const mockWithNextMinorPreview = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.27.0-preview.0';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.9';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.9', '0.27.0-preview.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNextMinorPreview);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.27.0');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should refuse a ref ahead of latest when the preview base lags it', () => {
+      // The preview tag still carries 0.26 while the ref is already 0.27.0.
+      // Bumping the lagging preview base to 0.26.10 would publish the 0.27.0
+      // content as a 0.26 patch on `latest`.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.27.0' }),
+      );
+      const mockWithLaggingPreview = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.26.9';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.26.0-preview.1', '0.26.9']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithLaggingPreview);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'would publish the checked-out 0.27.0 content on an older release line',
+      );
+    });
+
+    it('should allow a bump that lands exactly on the checked-out ref version', () => {
+      // A ref at 0.9.1 publishing the next patch after latest 0.9.0 is the
+      // ordinary release; the cross-line guard must stay strictly-below.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.1' }),
+      );
+      const mockWithExactRefBump = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.7.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.7.0-preview.0',
+            '0.7.0-preview.1',
+            '0.9.0',
+          ]);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithExactRefBump);
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.9.1');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should refuse a stale ref when no preview has ever been published', () => {
+      // The package.json fallback skipped the stale-ref check, so a ref at
+      // 0.8.0 could select 0.8.x while latest had already moved to 0.9.0.
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.8.0' }),
+      );
+      const mockWithNoPreviewRoute = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          throw new Error('npm error code E404');
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.8.0', '0.9.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithNoPreviewRoute);
+
+      expect(() => getVersion({ type: 'stable' })).toThrow(
+        'is ahead of the checked-out package.json version',
+      );
+    });
+
+    it('should bump the stable base when the preview base equals the published latest', () => {
+      // The common ordering: previews for X.Y.Z exist, then X.Y.Z ships
+      // stable. The equality arm keeps the derived version unpublished
+      // even when the existence probes cannot confirm it.
+      const mockWithEqualLatest = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0-preview.1';
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=latest') &&
+          !command.includes('versions --json')
+        )
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify(['0.9.0-preview.1', '0.9.0']);
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithEqualLatest);
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.0' }),
+      );
+
+      const result = getVersion({ type: 'stable' });
+      expect(result.releaseVersion).toBe('0.9.1');
+      expect(result.npmTag).toBe('latest');
+    });
+
+    it('should describe the bumped stable base as a candidate, not the released version', () => {
+      const mockWithTaggedCandidate = (command) => {
+        if (
+          command.includes('npm view') &&
+          command.includes('--tag=preview') &&
+          !command.includes('versions --json')
+        )
+          throw new Error('npm error code E404');
+        if (command.includes('npm view') && command.includes('--tag=latest'))
+          return '0.9.0';
+        if (command.includes('npm view') && command.includes('versions --json'))
+          return JSON.stringify([
+            '0.7.0-preview.0',
+            '0.7.0-preview.1',
+            '0.9.0',
+          ]);
+        if (
+          command.includes('npm view @qwen-code/channel-telegram@0.9.1 version')
+        )
+          return '0.9.1';
+        return mockExecSync(command);
+      };
+      vi.mocked(execSync).mockImplementation(mockWithTaggedCandidate);
+      vi.mocked(readFileSync).mockReturnValue(
+        JSON.stringify({ version: '0.9.0' }),
+      );
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const result = getVersion({ type: 'stable' });
+
+      expect(result.releaseVersion).toBe('0.9.2');
+      expect(errorSpy.mock.calls.flat().join('\n')).toContain(
+        'bumping the stable base to at least 0.9.1.',
+      );
+      errorSpy.mockRestore();
     });
   });
 
@@ -736,9 +1169,10 @@ describe('assertVersionUnreleased', () => {
   };
 
   // The push-time refusal must tell the operator where the version was
-  // found and that re-running cannot fix a partial publish.
+  // found and how a partial publish resumes (matching branch reused, then
+  // per-package skip) instead of pointing at manual recovery.
   const refusalMessage = (foundOn) =>
-    `Version 1.2.3 has already shipped; refusing to force-push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release, complete the remaining artifacts manually — re-running this job will keep failing here while the version stays published.`;
+    `Version 1.2.3 has already shipped; refusing to push the release branch over it. Found on: ${foundOn}. If a previous attempt published only part of the release and its release branch still exists, re-run the failed job — the push step reuses the branch when its contents match and the publish step skips already-published packages. If the branch was deleted, restore it from the original release commit or recover the remaining packages manually.`;
 
   it('pins the full published-package set', () => {
     // Changing private flags must not accidentally expand the release surface.
@@ -751,6 +1185,7 @@ describe('assertVersionUnreleased', () => {
       '@qwen-code/channel-dws',
       '@qwen-code/channel-feishu',
       '@qwen-code/channel-github',
+      '@qwen-code/channel-msteams',
       '@qwen-code/channel-qqbot',
       '@qwen-code/channel-telegram',
       '@qwen-code/channel-wecom',
@@ -973,5 +1408,136 @@ describe('assertVersionUnreleased', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(runAssertVersionCli('1.2.3')).toBe(0);
     expect(logSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('runAssertChannelResumableCli', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const tagsAll = (value) => (command) => {
+    if (command.includes('npm view')) return `${value}\n`;
+    throw new Error(`unexpected command: ${command}`);
+  };
+
+  it('resumes when every published package is at or behind the version', () => {
+    // The v0.28.2 shape: the CLI publishes last, so a partial release left
+    // latest on the previous version; resuming moves it forward.
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.2'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(0);
+    expect(logSpy).not.toHaveBeenCalled();
+    for (const pkg of PUBLISHED_PACKAGES) {
+      expect(execSync).toHaveBeenCalledWith(`npm view ${pkg} dist-tags.latest`);
+    }
+  });
+
+  it('refuses when any workspace package is ahead even if the CLI is behind', () => {
+    // Two partial releases: 1.2.3 shipped only A, then 1.2.4 shipped A and B
+    // before both died ahead of the CLI. pnpm would skip A but re-point B's
+    // tag back to 1.2.3 — the CLI's own tag cannot speak for B.
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command === `npm view ${PUBLISHED_PACKAGES[1]} dist-tags.latest`) {
+        return '1.2.4\n';
+      }
+      if (command.includes('npm view')) return '1.2.2\n';
+      throw new Error(`unexpected command: ${command}`);
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      `::error::npm latest for ${PUBLISHED_PACKAGES[1]} is 1.2.4, past 1.2.3. Resuming would regress the dist-tag.`,
+    );
+  });
+
+  it('treats a never-published package (E404) as safe to publish', () => {
+    vi.mocked(execSync).mockImplementation((command) => {
+      if (command === `npm view ${PUBLISHED_PACKAGES[1]} dist-tags.latest`) {
+        throw new Error('npm error code E404');
+      }
+      if (command.includes('npm view')) return '1.2.3\n';
+      throw new Error(`unexpected command: ${command}`);
+    });
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(0);
+  });
+
+  it('fails closed with the retryable exit when a probe errors', () => {
+    vi.mocked(execSync).mockImplementation(() => {
+      throw new Error('npm error code ECONNRESET');
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(2);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('::error::Failed to verify'),
+    );
+  });
+
+  it('refuses a garbage channel value instead of treating it as absent', () => {
+    vi.mocked(execSync).mockImplementation(tagsAll('not-a-version'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Cannot compare npm latest'),
+    );
+  });
+
+  it('orders preview channels by semver precedence', () => {
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3-preview.10'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.2.3-preview.2', 'preview')).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('is 1.2.3-preview.10, past 1.2.3-preview.2'),
+    );
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3-preview.2'));
+    expect(runAssertChannelResumableCli('1.2.3-preview.10', 'preview')).toBe(0);
+  });
+
+  it('compares core numbers numerically and ranks a stable above its prereleases', () => {
+    // The guard compares without an external dependency, so the two rules
+    // a string compare gets wrong are pinned here: 1.10.0 is ahead of
+    // 1.9.0, and a shipped stable outranks any prerelease of that version.
+    vi.mocked(execSync).mockImplementation(tagsAll('1.10.0'));
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('1.9.0', 'latest')).toBe(1);
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3'));
+    expect(runAssertChannelResumableCli('1.2.3-preview.2', 'preview')).toBe(1);
+    vi.mocked(execSync).mockImplementation(tagsAll('1.2.3-preview.2'));
+    expect(runAssertChannelResumableCli('1.2.3', 'latest')).toBe(0);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('is 1.2.3, past 1.2.3-preview.2'),
+    );
+  });
+
+  it('resumes an equal nightly but refuses a different same-day nightly', () => {
+    // Same-date nightlies end in unordered short SHAs: semver cannot prove
+    // which published first, so an unequal suffix refuses conservatively.
+    vi.mocked(execSync).mockImplementation(
+      tagsAll('1.2.3-nightly.20261121.abc1234'),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(
+      runAssertChannelResumableCli('1.2.3-nightly.20261121.abc1234', 'nightly'),
+    ).toBe(0);
+    expect(
+      runAssertChannelResumableCli('1.2.3-nightly.20261121.fedcba9', 'nightly'),
+    ).toBe(1);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining('short SHAs cannot prove publish order'),
+    );
+  });
+
+  it('exits 4 on malformed version or tag input', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(runAssertChannelResumableCli('', 'latest')).toBe(4);
+    expect(runAssertChannelResumableCli('1.2.3', 'latest; rm')).toBe(4);
+    expect(logSpy).toHaveBeenCalledWith(
+      '::error::assert-channel-resumable requires a release version and a plain dist-tag, e.g. --version=1.2.3 --tag=latest',
+    );
+    expect(execSync).not.toHaveBeenCalled();
   });
 });

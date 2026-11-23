@@ -14,10 +14,12 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
@@ -26,6 +28,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
@@ -68,7 +71,8 @@ class RoutingRuntimeProvisionerTest {
         var ssh = new Provider("ssh-process", true);
         try (var router = new RoutingRuntimeProvisioner(Map.of(local.kind(), local, ssh.kind(), ssh), scope -> ssh.kind())) {
             var request = router.createRequest(SCOPE, "harness");
-            var binding = new InMemoryRuntimeBindingRepository().findOrCreate(request);
+            var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
+            var binding = bindings.findOrCreate(request);
             assertFalse(router.supportsDrainedStop(), "one provider cannot enable another provider's global gate");
             assertTrue(router.supportsDrainedStop(binding));
             assertTrue(router.supportsStartupRecovery(new RuntimeResourceHandle(ssh.kind(), 1, Map.of())));
@@ -110,7 +114,7 @@ class RoutingRuntimeProvisionerTest {
         try (var router = new RoutingRuntimeProvisioner(Map.of(provider.kind(), provider), scope -> provider.kind(),
                 (kind, lease) -> {}, released::add)) {
             var request = router.createRequest(SCOPE, "harness");
-            var bindings = new InMemoryRuntimeBindingRepository();
+            var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
             var binding = bindings.findOrCreate(request);
             var claim = bindings.claimOperation(binding.getBindingId(), "owner", Duration.ofMinutes(1));
             var lease = await(router.provision(request, claim.getProvisionSeed()));
@@ -132,7 +136,8 @@ class RoutingRuntimeProvisionerTest {
     @Test
     void brokerAdoptsThroughRouterUsingTheSavedKindInsteadOfTheRouterName() throws Exception {
         var provider = new Provider("ssh-process", true);
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var request = provider.createRequest(SCOPE, "harness");
         var initial = bindings.findOrCreate(request);
         var claimed = bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(30));
@@ -180,13 +185,20 @@ class RoutingRuntimeProvisionerTest {
         };
         try (var router = new RoutingRuntimeProvisioner(Map.of(provider.kind(), provider), ignored -> provider.kind());
                 var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(SCOPE), router, transport,
-                        bindings, new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
+                        bindings, new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
                         "restored", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
             var restored = await(service.recoverBinding(initial.getBindingId(), initial.getGeneration()));
             assertEquals(RuntimeBindingRecord.State.READY, restored.getState());
             assertEquals(1, provider.observations);
             assertEquals(1, provider.starts, "recovery observes the original resource instead of provisioning");
         }
+    }
+
+    private static JdbcDataSource source() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:routing-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        return source;
     }
 
     private static <T> T await(CompletionStage<T> stage) throws Exception {

@@ -96,11 +96,28 @@ jobs:
           echo "Publish input: ${{ github.event.inputs.publish }}"
           echo "GitHub ref: ${{ github.ref }}"
 
+      # buildkitd (docker-container driver) inherits neither the runner's
+      # proxy env nor the host network; on the mainland release hosts its
+      # direct registry dial hits poisoned DNS and the image build dies
+      # before any application step (#16039, #16162). The probe emits
+      # driver opts only where a working local proxy exists, so hosted and
+      # HK runners keep the default direct route.
+      - name: 'Detect egress proxy for buildkitd'
+        id: 'buildkit_proxy'
+        run: |
+          {
+            echo 'driver_opts<<EOF'
+            bash .github/scripts/buildkitd-proxy-opts.sh
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
       - name: 'Set up QEMU'
         uses: 'docker/setup-qemu-action@v4' # ratchet:exclude
 
       - name: 'Set up Docker Buildx'
         uses: 'docker/setup-buildx-action@v4' # ratchet:exclude
+        with:
+          driver-opts: '${{ steps.buildkit_proxy.outputs.driver_opts }}'
 
       - name: 'Extract metadata (tags, labels) for Docker'
         id: 'meta'

@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grep 引擎性能基准 · main GrepTool vs preview RipGrepTool</title>
+    <style>
+      :root {
+        --bg: #f7f8fa;
+        --panel: #fff;
+        --ink: #1f2430;
+        --muted: #6b7280;
+        --line: #e5e7eb;
+        --main: #2563eb;
+        --main-bg: #eff6ff;
+        --prev: #7c3aed;
+        --prev-bg: #f5f3ff;
+        --warn: #b45309;
+        --warn-bg: #fffbeb;
+        --ok: #047857;
+        --ok-bg: #ecfdf5;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        line-height: 1.65;
+      }
+      main {
+        max-width: 1080px;
+        margin: 0 auto;
+        padding: 32px 24px 80px;
+      }
+      header.hero {
+        background: linear-gradient(135deg, #1e3a8a, #5b21b6);
+        color: #fff;
+        border-radius: 14px;
+        padding: 28px 32px;
+        margin-bottom: 24px;
+      }
+      header.hero h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      header.hero p {
+        margin: 4px 0;
+        opacity: 0.92;
+        font-size: 13.5px;
+      }
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 24px 28px;
+        margin-bottom: 20px;
+      }
+      h2 {
+        font-size: 19px;
+        margin: 0 0 10px;
+        padding-bottom: 8px;
+        border-bottom: 2px solid var(--line);
+      }
+      h3 {
+        font-size: 16px;
+        margin: 22px 0 8px;
+      }
+      p,
+      li {
+        font-size: 14px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 12px 0;
+        font-size: 13px;
+      }
+      th,
+      td {
+        border: 1px solid var(--line);
+        padding: 7px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: #f9fafb;
+      }
+      code {
+        font-family: 'SF Mono', Menlo, Consolas, monospace;
+        font-size: 12.5px;
+        background: #f3f4f6;
+        padding: 1px 5px;
+        border-radius: 4px;
+      }
+      .badge {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 700;
+        padding: 1px 8px;
+        border-radius: 10px;
+      }
+      .badge.main {
+        background: var(--main-bg);
+        color: var(--main);
+        border: 1px solid #bfdbfe;
+      }
+      .badge.prev {
+        background: var(--prev-bg);
+        color: var(--prev);
+        border: 1px solid #ddd6fe;
+      }
+      .callout {
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin: 12px 0;
+        font-size: 13.5px;
+      }
+      .callout.warn {
+        background: var(--warn-bg);
+        border: 1px solid #fde68a;
+        color: var(--warn);
+      }
+      .callout.key {
+        background: var(--ok-bg);
+        border: 1px solid #a7f3d0;
+        color: var(--ok);
+      }
+      .ev {
+        color: var(--muted);
+        font-size: 12px;
+        font-family: 'SF Mono', Menlo, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header class="hero">
+        <h1>Grep 引擎性能基准报告</h1>
+        <p>
+          main <code>GrepTool</code>（git grep → system grep → JS 回退）vs
+          v1.0.0-preview <code>RipGrepTool</code>（ripgrep）
+        </p>
+        <p>
+          测量日期：2026-11-17 · Apple M4 / 10 核 · git 2.50.1 (Apple Git-155) ·
+          BSD grep 2.6.0-FreeBSD · ripgrep 15.0.0
+        </p>
+        <p>
+          语料：qwen-code 工作树（15,131 个 git 跟踪文件 + 138MB gitignore 的
+          dist/）。<strong>node_modules 不在实测语料内</strong>：修复前的 system
+          grep 与 JS 回退都已排除它（前者用 §1 列出的
+          <code>--exclude-dir</code>，后者把同一份列表交给 globStream 的
+          <code>ignore</code>），初版此行把它算进“污染”是错的。
+        </p>
+        <p>
+          配套 PR：GrepTool 回退链 gitignore scope 修复 · 原始数据见同目录
+          bench-grep-*.json · scope 边界复现见 scope-repro.sh
+        </p>
+      </header>
+
+      <section>
+        <h2>1 · 方法</h2>
+        <ul>
+          <li>
+            argv 逐字取自两边工具源码：main git grep 含
+            <code>NO_EXEC_CONFIG</code>（<code
+              >-c core.fsmonitor= -c log.showSignature=false</code
+            >）+ <code>--untracked -n -z -E --ignore-case -e P</code>；main
+            system grep 含 5 个
+            <code>--exclude-dir</code
+            >（node_modules/.git/bower_components/.svn/.hg）+
+            <code>-r -n -H -E --null -e P .</code>；preview rg 含
+            <code>--hidden</code> + 6 个 VCS
+            <code>--glob</code>（!.git/!.svn/!.hg/!.bzr/!.jj/!.sl）+
+            <code>--max-columns 500</code>，files 模式
+            <code>-l --null</code>、content 模式
+            <code>--json -n</code>，路径操作数 <code>.</code>。
+          </li>
+          <li>
+            <strong>rg 必须带路径操作数</strong>：无路径且 stdin 非 TTY 时 rg 读
+            stdin，会永久阻塞（基准 harness 曾踩此坑；preview 源码在
+            <code>--</code> 后传 searchTarget）。
+          </li>
+          <li>
+            采样：快引擎 1 预热 + 5 测量取中位；system grep（单轮 ~60s）与 JS
+            回退 1 预热 + 1 测量（样本量已披露）。每项完成即增量落盘。
+          </li>
+          <li>
+            归一化组：rg 加 <code>-i</code> 对齐 main
+            的忽略大小写默认，隔离"引擎速度"与"默认语义"两个变量。<strong
+              >评审前该默认并不覆盖策略 2</strong
+            >：策略 1（git grep）传 <code>--ignore-case</code>、策略 3（JS）用
+            <code>new RegExp(pattern, 'i')</code>，而策略 2 的两条 system grep
+            argv 都不含 <code>-i</code>，与工具描述承诺的 “Case-insensitive by
+            default” 相矛盾（同一语料上 47,678 → 50,567，差 2,889/50,567 ≈
+            5.7%）。
+            <strong
+              >评审后已给 scoped argv 补上 <code>--ignore-case</code></strong
+            >，因此下文“修复后”的 system grep 计数就是 shipped 行为；只在无 git
+            环境才会走的递归 argv 仍缺该标志，属 main 既有缺口，列为 follow-up。
+          </li>
+          <li>
+            计时含 stdout 传输与流式计数（不累积全文：system grep 单轮输出
+            1.2GB，超 V8 字符串上限）。
+          </li>
+          <li>
+            子进程生命周期：harness 对每个 child 挂 abort/超时
+            SIGKILL，并在父进程退出时清理——被 SIGKILL 的父进程不会运行 exit
+            handler，孤儿 rg 会阻塞在写满的管道上（实测挂起 1h+、0 CPU）。
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>2 · 引擎矩阵（main 回退链修复前）</h2>
+        <table>
+          <tr>
+            <th>模式</th>
+            <th>策略</th>
+            <th>中位耗时</th>
+            <th>匹配数</th>
+            <th>stdout</th>
+          </tr>
+          <tr>
+            <td rowspan="6">common word<br /><code>function</code></td>
+            <td><span class="badge main">main</span> git grep（默认路径）</td>
+            <td>737 ms</td>
+            <td>50,567</td>
+            <td>5.5 MB</td>
+          </tr>
+          <tr>
+            <td><span class="badge main">main</span> system grep（回退 2）</td>
+            <td><strong>60,130 ms</strong></td>
+            <td>1,022,948</td>
+            <td>1,219 MB</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="badge prev">preview</span> rg
+              files_with_matches（默认，敏感）
+            </td>
+            <td>244 ms</td>
+            <td>7,147 文件</td>
+            <td>0.4 MB</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="badge prev">preview</span> rg content --json（敏感）
+            </td>
+            <td>148 ms</td>
+            <td>47,678</td>
+            <td>15.9 MB</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="badge prev">preview</span> rg content --json
+              -i（归一化）
+            </td>
+            <td><strong>141 ms</strong></td>
+            <td>50,567</td>
+            <td>16.7 MB</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="badge prev">preview</span> rg files -i（归一化）
+            </td>
+            <td>237 ms</td>
+            <td>7,228 文件</td>
+            <td>0.4 MB</td>
+          </tr>
+          <tr>
+            <td rowspan="6">
+              identifier regex<br /><code
+                >createToolRegistry|registerLazyTool</code
+              >
+            </td>
+            <td><span class="badge main">main</span> git grep</td>
+            <td>2,055 ms</td>
+            <td>114</td>
+            <td>16 KB</td>
+          </tr>
+          <tr>
+            <td><span class="badge main">main</span> system grep</td>
+            <td><strong>125,848 ms</strong></td>
+            <td>1,019</td>
+            <td>4.0 MB</td>
+          </tr>
+          <tr>
+            <td><span class="badge prev">preview</span> rg files（默认）</td>
+            <td>155 ms</td>
+            <td>32 文件</td>
+            <td>2 KB</td>
+          </tr>
+          <tr>
+            <td><span class="badge prev">preview</span> rg content --json</td>
+            <td>137 ms</td>
+            <td>114</td>
+            <td>48 KB</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="badge prev">preview</span> rg content --json -i
+            </td>
+            <td>140 ms</td>
+            <td>114</td>
+            <td>48 KB</td>
+          </tr>
+          <tr>
+            <td><span class="badge prev">preview</span> rg files -i</td>
+            <td>139 ms</td>
+            <td>32 文件</td>
+            <td>2 KB</td>
+          </tr>
+          <tr>
+            <td rowspan="6">
+              absent string<br /><code>zzqxx_absent_token_9f3&#101;</code>
+            </td>
+            <td><span class="badge main">main</span> git grep</td>
+            <td>379 ms</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+          <tr>
+            <td><span class="badge main">main</span> system grep</td>
+            <td><strong>54,172 ms</strong></td>
+            <td>3（来自 ignored 文件）</td>
+            <td>0</td>
+          </tr>
+          <tr>
+            <td><span class="badge prev">preview</span> rg files（默认）</td>
+            <td>141 ms</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+          <tr>
+            <td><span class="badge prev">preview</span> rg content --json</td>
+            <td>138 ms</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+          <tr>
+            <td>
+              <span class="badge prev">preview</span> rg content --json -i
+            </td>
+            <td>140 ms</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+          <tr>
+            <td><span class="badge prev">preview</span> rg files -i</td>
+            <td>141 ms</td>
+            <td>0</td>
+            <td>0</td>
+          </tr>
+        </table>
+        <p>
+          <strong>JS 回退（历史基线，非受控对照）</strong>：49,361 / 50,642 /
+          49,731 ms；记录读取 165,575 文件；匹配 1,079,867 / 1,020 / 4。原始
+          harness 与工作树状态不足以核对，见 §3 表下注。
+        </p>
+        <p>
+          <strong>scope 计数</strong>（'function' 命中文件数）：git grep -l -i =
+          7,237；rg -l（默认敏感）= 7,147；system grep -r -l（修复前）= 78,624。
+        </p>
+        <h3>读数</h3>
+        <ul>
+          <li>
+            rg vs main 默认路径（git grep）：<strong>快 2.7–14.7×</strong>
+            （初版写作 5–15×，低端不成立：common word 737 ms vs 141 ms ≈ 5×、
+            identifier regex 2,055 ms vs 140 ms ≈ 14.7×、absent string 379 ms vs
+            138 ms 仅 ≈ 2.7×）；rg content 恒 ~140ms，不随模式复杂度波动。
+          </li>
+          <li>
+            rg 与 main system-grep 回退的耗时见上表；JS
+            历史基线不作为受控比值。回退的慢
+            <strong>主要</strong>源于 scope 错误（不尊重 gitignore，扫
+            dist/），但初版"不是引擎慢"这句不成立：§3 在同一份语料上修掉 scope
+            之后，回退仍是 git grep 的
+            11.1×/5.5×/14.8×（7,386.9/11,292.1/5,687.8 ms vs 666.6/2,066.1/385.2
+            ms），残余开销与修复后的总耗时同数量级。
+          </li>
+          <li>
+            <strong>scope 等价实证（仅限匹配计数）</strong>：rg -i 匹配数与 git
+            grep 逐模式完全相等（50,567 / 114 / 0）；system grep 20×
+            污染、absent 模式在 ignored 文件命中 3
+            次。<strong>文件数并不相等</strong>：git grep <code>-l -i</code> =
+            7,237 而 rg <code>files -i</code> = 7,228，这 9
+            个文件的差本页未逐项对账（最可能来自二进制与符号链接的处理 差异，见
+            §3 的 (2) 与 §4 的符号链接行），因此"等价"只在匹配计数层面 成立。
+          </li>
+          <li>
+            <strong>absent 模式</strong>：本页用 HTML 字符实体展示标记
+            <code>zzqxx_absent_token_9f3&#101;</code>，避免把完整搜索字面量写入
+            被搜索的源码。fixed-results 中 absent string 各行记为
+            <code>matches: 0</code>；复测时仍需核对当前语料是否含有该标记。
+          </li>
+          <li>
+            <code>--json</code> 代价：同匹配集 16.7MB vs git
+            <code>-z</code> 5.5MB（~3× 传输/解码），但引擎优势覆盖格式开销。
+          </li>
+          <li>
+            默认大小写：rg 敏感 47,678 vs -i 50,567（差 2,889）——采用 preview
+            默认会改变匹配集（行为 breaking）。
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>3 · 修复 main 回退链后的对照</h2>
+        <p>
+          修复（本 PR，含评审后修正）：回退策略 2/3 改用
+          <code>git ls-files -z --cached --others --exclude-standard</code>
+          语料（除 §4 的 force-add 边界外与策略 1 同集合），再按
+          <code>lstat</code> 只保留常规文件——git 同时会列出符号链接、submodule
+          gitlink 与索引里已消失的条目，而 grep
+          对显式操作数会解引用符号链接，读到搜索根之外的内容；语料还要按
+          <code>getGlobExcludes()</code> 导出的目录名过滤，因为
+          <code>--exclude-dir</code> 对显式操作数无效（已实测），而策略 3
+          把同一份列表交给 globStream 的
+          <code>ignore</code>，两条回退必须同集合。 策略 2 用显式文件列表 +
+          128KB ARG_MAX 分批，argv 补上
+          <code>--ignore-case</code> 以符合工具描述与策略 1；持续消费
+          stderr（否则逐文件诊断写满管道后子进程永久阻塞），只把
+          <code>Permission denied</code> 与
+          <code>Is a directory</code>
+          之外的诊断留作有界摘要（与递归分支同一套容忍规则），并在 exit ≥ 2
+          而诊断均属可容忍时保留 grep 已产出的匹配；失败时<strong
+            >落到策略 3 而不是回到未限定语料的递归 grep</strong
+          >，取消则直接抛出而不降级成“没有 git”。策略 3 按语料身份过滤
+          globStream，并在会折叠大小写的平台上（darwin/win32）对两侧一并折叠
+          ——此时 git 报索引拼写、遍历报磁盘拼写，且 <code>--others</code>
+          视二者为同一文件只列前者。新 spawn 均挂 abort kill。git
+          不可用时保留原递归行为。
+        </p>
+        <p>
+          <strong>本节 system grep 的测量命令</strong>：修复后 scoped argv 为
+          <code
+            >grep -n -H -E --null --ignore-case -e P -- &lt;语料分批&gt;</code
+          >，与 harness 逐字一致，因此下表“修复后”的匹配数与耗时即 shipped
+          行为。<strong>“修复前”那一列则不是</strong>：修复前的递归 argv 没有
+          <code>-i</code>（当时 shipped 也没有），所以两列的大小写口径并不相同，
+          详见本节末尾的 (1)。
+        </p>
+        <table>
+          <tr>
+            <th>模式</th>
+            <th>策略</th>
+            <th>修复前中位</th>
+            <th>修复后中位</th>
+            <th>提速</th>
+            <th>修复后匹配数</th>
+            <th>搜索文件数</th>
+          </tr>
+          <tr>
+            <td rowspan="3">common word</td>
+            <td>system grep</td>
+            <td>60,130 ms</td>
+            <td>7,387 ms</td>
+            <td>8.1×</td>
+            <td>50,572</td>
+            <td>15,134（grep 操作数）</td>
+          </tr>
+          <tr>
+            <td>JS 回退</td>
+            <td>49,361 ms</td>
+            <td>6,532 ms</td>
+            <td>未作受控比较</td>
+            <td>50,734</td>
+            <td>读取 15,134（前 165,575）· 仍枚举全树，见表下注</td>
+          </tr>
+          <tr>
+            <td>git grep（未变）</td>
+            <td colspan="2">667–737 ms</td>
+            <td>—</td>
+            <td>50,567</td>
+            <td>≈15,134</td>
+          </tr>
+          <tr>
+            <td rowspan="3">identifier regex</td>
+            <td>system grep</td>
+            <td>125,848 ms</td>
+            <td>11,292 ms</td>
+            <td>11.1×</td>
+            <td>114</td>
+            <td>15,134</td>
+          </tr>
+          <tr>
+            <td>JS 回退</td>
+            <td>50,642 ms</td>
+            <td>6,710 ms</td>
+            <td>未作受控比较</td>
+            <td>114</td>
+            <td>15,134</td>
+          </tr>
+          <tr>
+            <td>git grep（未变）</td>
+            <td colspan="2">2,055–2,066 ms</td>
+            <td>—</td>
+            <td>114</td>
+            <td>≈15,134</td>
+          </tr>
+          <tr>
+            <td rowspan="3">absent string</td>
+            <td>system grep</td>
+            <td>54,172 ms</td>
+            <td>5,688 ms</td>
+            <td>9.5×</td>
+            <td>0</td>
+            <td>15,134</td>
+          </tr>
+          <tr>
+            <td>JS 回退</td>
+            <td>49,731 ms</td>
+            <td>5,476 ms</td>
+            <td>未作受控比较</td>
+            <td>0</td>
+            <td>15,134</td>
+          </tr>
+          <tr>
+            <td>git grep（未变）</td>
+            <td colspan="2">379–385 ms</td>
+            <td>—</td>
+            <td>0</td>
+            <td>≈15,134</td>
+          </tr>
+        </table>
+        <p>
+          <strong>表下注：JS 回退那一列是"读取数"，不是"枚举数"。</strong>
+          修复后 JS 回退仍然用
+          <code>globStream('**/*', { ignore: getGlobExcludes() })</code>
+          遍历整棵树，只是在循环里丢掉不属于语料的条目——降下来的是
+          <code>readFile</code> 次数，遍历本身、逐项 stat 与 ignore
+          匹配仍与树大小成正比。后续在本工作树的独立测量遍历产出
+          <strong>37,071</strong> 个条目，语料为 15,197 个；这不是原始基准的
+          同轮计数。原始 JS 基线记录 165,575 次读取，但未保留足以核对工作树
+          状态与排除参数的证据，因此保留历史原始值，不把它与修复后数据之比
+          作为性能提升结论，也不据此推导枚举减少比例。在"被 gitignore
+          但不属于那五个排除目录名"的仓库里（例如构建产物放在
+          <code>build/</code>、<code>coverage/</code>），JS
+          回退的枚举开销不会因本 PR 消失。system grep
+          那一列没有这个问题：语料直接作为操作数交给 grep，不存在遍历。
+        </p>
+        <p>
+          <strong>适用边界</strong>：上述范围收敛依赖成功取得 Git
+          语料，且路径能以 UTF-8 字符串表示。 Git 不可用或 ls-files
+          失败时仍保留旧递归/无语料 JS 行为；非 UTF-8 文件名可能在解码后被遗漏。
+          两项契约问题留作
+          <a href="https://github.com/QwenLM/qwen-code/issues/17679">#17679</a
+          >，本 PR 不声称已经修复。
+        </p>
+        <p>
+          <strong>修复后 vs preview rg（同轮）</strong>：rg content -i 146 / 144
+          / 170 ms；rg files 237 / 139 / 144 ms → rg 仍比修复后 system grep 快
+          <strong>33–78×</strong>、比修复后 JS 快 <strong>32–47×</strong>、比
+          git grep 快 <strong>2.3–14×</strong>。
+        </p>
+        <div class="callout warn">
+          <strong>残留不等价（披露，评审后更正）</strong>：在上述适用边界内，除
+          §4 的 force-add
+          边界外，修复后<strong>文件集</strong>等价；匹配计数另有两处口径问题。
+          <br /><br />
+          <strong>(1) 大小写：已在评审后关闭。</strong> scoped argv 现在传
+          <code>--ignore-case</code>，与策略 1 和工具描述的 “Case-insensitive by
+          default” 一致，因此下表 50,572 就是 shipped 行为，“vs git grep
+          50,567（+5）”的等价结论成立（残差来自二进制处理，见
+          (2)）。<strong>但上表“修复前”那一列不是同口径</strong>：1,022,948
+          是当时 shipped 的递归 argv（不含 <code>-i</code>）测得的。统一为都不加
+          <code>-i</code> 后是 1,022,948 → 47,796（<strong>21.4×</strong>
+          缩减，比表中数字更大）；统一为都加才是表中的
+          50,572。附带实测（2026-11-17， 本 PR 工作树，模式
+          <code>function</code>，语料 15,197 条、 <code>lstat</code> 过滤剔除 0
+          条、8 批；原始测量时为 15,134 条）：不加 <code>-i</code> 得 47,796
+          匹配、grep 累计 3,689 ms；加 <code>--ignore-case</code> 得 50,690
+          匹配、grep 累计 6,884 ms。只在无 git 环境才走的递归 argv 仍缺
+          <code>-i</code>，属 main 既有缺口，列为 follow-up。 <br /><br />
+          <strong>(2) 二进制处理：初版把原因写反了，此处更正。</strong>
+          初版称“git grep 跳过二进制文件；BSD grep 未加
+          <code>-I</code> 会报告二进制匹配”。实测（macOS，BSD grep
+          2.6.0-FreeBSD）：<code>git grep</code>
+          <strong>并不跳过</strong>，它对每个二进制文件在 stdout 输出一行
+          <em>不带 NUL 框架</em>的
+          <code>Binary file &lt;path&gt; matches</code>（<code>-l</code>
+          计入该文件、<code>-c</code> 记 1）；BSD grep 不加
+          <code>-I</code> 时<strong>同样</strong>把这行写到 stdout。而 GNU grep
+          把它写到 stderr（<code>grep: &lt;path&gt;: binary file matches</code
+          >），对 stdout 贡献 0——<strong
+            >所以同一份代码在 macOS 与 Linux 上的计数本就不同</strong
+          >，这也是 fixed-results JSON 必须记录 grep 实现的原因。JS 回退把一切当
+          utf8 读，是第三个口径（50,734，+167）。初版给的 follow-up “grep 加
+          <code>-I</code>”<strong>不会收敛反而会扩大分歧</strong>：加
+          <code>-I</code> 后 grep 对二进制输出 0 条，而策略 1
+          仍每个二进制文件输出 1 条。真正的对齐有两条路：让策略 2/3
+          也按“每个二进制文件计一条”处理，或让三条策略统一忽略二进制。两者均为
+          follow-up，不在本 PR 范围。
+        </div>
+      </section>
+
+      <section>
+        <h2>4 · 换引擎的副作用清单（决策输入）</h2>
+        <p>
+          隔离临时仓库实证。<strong>复现范围（更正）</strong>：scope-repro.sh
+          覆盖下表的 force-add、<code>.rgignore</code> 与符号链接三行；<strong
+            >submodule 那一行没有任何复现路径</strong
+          >
+          ——脚本里不存在 submodule 步骤，所以初版"复现见
+          scope-repro.sh"对本表整体成立的说法不成立，该行只是阅读 git
+          文档与代码得到的推断，未经实证。
+        </p>
+        <table>
+          <tr>
+            <th>场景</th>
+            <th>main git grep</th>
+            <th>preview rg（含 --hidden）</th>
+          </tr>
+          <tr>
+            <td>force-add 的被 ignore 文件（<code>git add -f</code>）</td>
+            <td>
+              <strong>策略 1 搜不到</strong>（实测更正，git 2.50.1：
+              <code>--untracked</code>
+              对跟踪文件也套用排除规则；不带它、或用 <code>--cached</code>
+              才搜到。初版写作"搜到"，而当时脚本的 fixture 里
+              <code>.gitignore</code> 根本没列 force.txt，
+              <code>git add -f</code> 是空操作，这一行从未被真正复现过）
+            </td>
+            <td><strong>搜不到</strong>（rg 不读 index）</td>
+          </tr>
+          <tr>
+            <td>仓库植入 <code>.rgignore</code>/<code>.ignore</code></td>
+            <td>不受影响</td>
+            <td><strong>文件被隐藏</strong>（新的仓库可控搜索排除面）</td>
+          </tr>
+          <tr>
+            <td>submodule 内容</td>
+            <td>默认不递归</td>
+            <td>当普通目录扫</td>
+          </tr>
+          <tr>
+            <td>符号链接</td>
+            <td>
+              <strong>整个条目跳过</strong>：链接文本与目标都不搜（实测更正，
+              初版写作"读链接文本当内容"）
+            </td>
+            <td>
+              递归遇到时跳过；作为显式操作数则跟随（--follow 才在递归中搜目标）
+            </td>
+          </tr>
+        </table>
+        <p>
+          <strong>本 PR 修复后的回退链落在哪一侧</strong>：符号链接与 submodule
+          gitlink 都被 <code>lstat</code> 过滤掉，语料里根本不会出现它们，因此与
+          git grep
+          的“整个条目跳过”一致，也不会跟随目标。<strong>修复前</strong>：scoped
+          argv 把符号链接当显式操作数交给 grep，而 grep 会解引用显式操作数（rg
+          在同样位置也一样），于是把搜索根之外文件的内容
+          当作仓库内匹配返回，既破坏与策略 1
+          的等价，也绕过只校验搜索根的权限边界。实测本机 BSD grep
+          2.6.0-FreeBSD：<code>grep -- link</code> 跟随并命中目标内容，而
+          <code>grep -r .</code>、<code>grep -R .</code> 与
+          <code>grep -r -- link</code>
+          都不跟随——所以修复前的递归臂并不泄漏，泄漏只出现在新的显式操作数形式
+          上。<strong>同时被关掉的一条既有泄漏</strong>：修复前 JS 回退对
+          globStream 产出的符号链接直接 <code>readFile</code>
+          会跟随目标，语料过滤后该条目不再进入循环。
+        </p>
+        <p>
+          <strong>一处修好 fixture 后才暴露的反向差异</strong>：语料取自
+          <code>ls-files --cached</code>，它<strong>会</strong>列出 force-add
+          的被 ignore 文件，而策略 1 的 <code>git grep --untracked</code>
+          不会（见上表实测更正）。所以在这一个边界上回退搜到的是主策略的
+          <em>超集</em>，"文件集完全等价"的说法在此不成立。本 PR
+          不做进一步收窄——收窄需要再跑一次
+          <code>ls-files --cached -i --exclude-standard</code>
+          并从语料里减掉该集合，属独立改动，列为 follow-up。
+        </p>
+        <ul>
+          <li>
+            <strong>依赖（勘误：初版此项写错了 main 现状）</strong>：初版称
+            "main 现状零外部二进制、无 rg 发布管线"，<strong>不成立</strong>。
+            main 已 vendor 五平台二进制
+            <code
+              >packages/core/vendor/ripgrep/{arm64-darwin,arm64-linux,
+              x64-darwin,x64-linux,x64-win32}</code
+            >；<code>useRipgrep</code> 与
+            <code>useBuiltinRipgrep</code> 默认均为 <code>true</code>；rg
+            可用时把 <code>RipGrepTool</code> 注册到
+            <code>ToolNames.GREP</code>，不可用时才回落到 legacy
+            <code>GrepTool</code>；<code>resolveRipgrep</code> 先 bundled 后系统
+            rg，并含 exec 位修复、健康检查与 macOS 签名。所以"换引擎"在 main
+            已默认发生，<strong>不要据此重复迁移</strong>。真正待比较的是
+            <strong>仍会落到 legacy GrepTool 的消费者与剩余差异</strong>：rg
+            缺失或健康检查失败的环境、显式
+            <code>useRipgrep=false</code>，以及下条列出的集成不匹配。这正是本 PR
+            修复 legacy 回退链的理由：它是无 rg 环境的唯一兜底。preview
+            特意用命令名 <code>rg</code> 而非解析路径防 PATH
+            劫持，这一点仍适用于 main 的系统 rg 分支。
+          </li>
+          <li>
+            <strong>性能正副作用</strong>：rg 不刷新 git index——消除冷 index
+            延迟与 core.fsmonitor helper 执行面（main 现以 NO_EXEC_CONFIG
+            防护）。
+          </li>
+          <li>
+            <strong>性能负副作用</strong>：--json ~3× 字节；files 模式 mtime
+            排序 = O(匹配文件数) stat；保留 -i 放弃 rg 大小写敏感 SIMD 优化。
+          </li>
+          <li>
+            <strong>生命周期</strong>：main 现 grep.ts 的 spawn 无 abort/timeout
+            kill（孤儿风险）；本 PR 已为新 spawn 补 kill；换引擎需把 kill
+            接入调度器 abort 路径并映射 RipgrepTimeoutError。
+          </li>
+          <li>
+            <strong>集成不匹配（整体照搬 preview 工具的成本）</strong>：权限
+            API（config.permission vs
+            getPermissionManager）、执行契约（defineDeclarativeTool/executeWithContext
+            vs class/execute(signal)）、grepReadTracking 缺失、声明 bundle
+            基础设施缺失、默认大小写与参数面 breaking。
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>5 · 结论</h2>
+        <div class="callout key">
+          <strong>本 PR 范围</strong>：修复回退链 scope（必要但不充分）——消除
+          20× 污染与 8–11× 无效扫描；修复后回退 5.5–11.3s，仍比 rg 慢
+          32–78×，应作无 rg 环境兜底。<strong>注</strong>：scoped argv
+          已忽略大小写； 修复前递归 argv 为大小写敏感，不能把两者的全部差值归于
+          scope。 统一大小写口径的补充测量见 §3；JS 历史基线不作受控提速结论。
+        </div>
+        <ul>
+          <li>
+            <strong>建议后续（不在本 PR）</strong>：main 已默认把
+            <code>RipGrepTool</code> 注册为 GREP 工具（见 §4
+            依赖勘误），所以剩下的不是"换引擎"，而是<strong
+              >补齐 rg 路径与 legacy 集成层的差异</strong
+            >，让仍会落到 legacy 的消费者不必依赖它：把
+            PermissionManager、grepReadTracking、截断、策略 1/3
+            的默认忽略大小写与 <code>-z</code> null
+            输出格式（模型契约）以及超时与 deny 结果过滤接到 rg 路径上；git grep
+            降二级、修复后 grep/JS 作三级回退。不整体照搬 preview 的工具实现。
+          </li>
+          <li>
+            <strong>follow-up</strong>：无 Git 语料时的旧递归分支大小写对齐；
+            三条策略的二进制处理决策（见 §3，不把单独加
+            <code>-I</code> 当作对齐）；deny 结果过滤移植；四类 scope
+            边界的接受/补偿决策。
+          </li>
+        </ul>
+        <p class="ev">
+          基准首轮验证：packages/core grep.test.ts 61/61 通过（含新增 scope
+          回归测试）；core tsc --noEmit 退出
+          0。原始数据：bench-grep-results.json（修复前矩阵，中位转录自完整运行日志
+          bench-grep-unfixed-run.log，逐样本数组未保留，json 内含
+          provenance）、bench-grep-js-results.json（JS 修复前 + scope
+          计数，单次测量，无逐样本数组）、bench-grep-fixed-results.json（修复后矩阵，含样本）。
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

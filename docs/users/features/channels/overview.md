@@ -4,6 +4,14 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 
 Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels. [Email](./email) connects a dedicated mailbox through IMAP and SMTP.
 
+For sending results without a conversational bot, [DingTalk Webhook Sending](./dingtalk-webhook),
+[Feishu Webhook Sending](./feishu-webhook) and [WeCom Webhook Sending](./wecom-webhook)
+use a configured group destination. They share the daemon's Channel delivery
+path and do not listen for incoming messages.
+
+[Generic Webhook Sending](./generic-webhook) uses the same delivery path for a
+receiver you control, with a fixed JSON contract and optional Bearer token.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -51,7 +59,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option              | Required         | Description                                                                                                                                                                                                                                                                                                                                           |
 | ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `wecom-callback`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                                                          |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dingtalk-webhook`, `dws`, `wecom`, `wecom-webhook`, `wecom-callback`, `feishu`, `feishu-webhook`, `generic-webhook`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                |
 | `token`             | See description  | Required for Telegram (bot token) and WeCom Callback (verification token). Supports `$ENV_VAR` syntax. See [WeCom Callback](./wecom-callback) for application credentials                                                                                                                                                                             |
 | `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                          |
 | `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                   |
@@ -73,7 +81,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `operators`         | No               | Who may operate a shared session (`/approve`, `/clear`, `/loop`, ...). Unset or empty grants no shared-session operator permissions. See [Shared-Session Operators](#shared-session-operators)                                                                                                                                                        |
 | `groupHistoryLimit` | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many unmentioned group messages from senders admitted by the group member policy for the next bot mention/reply.                                                                                                                                           |
 | `groups`            | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                                                                                                                                                    |
-| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                                                                                                                                                        |
+| `dispatchMode`      | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, `followup`, or `inject`. Not every channel supports every mode: email accepts only `steer` and `followup` and rejects `collect`/`inject`, because each delivery must retain its durable completion claim. See [Dispatch Modes](#dispatch-modes)             |
 
 ### Message Routes
 
@@ -251,6 +259,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
@@ -369,7 +384,7 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 `pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
 
-On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. The `email` channel is the opposite: every delivery is a direct conversation, so `groupPolicy` and `groups` never govern it and the Web Shell editor hides those controls. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
 In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
@@ -481,6 +496,9 @@ Controls what happens when you send a new message while the bot is still process
 - **`steer`** (default) — The bot cancels the current request and starts working on your new message. Best for normal chat, where a follow-up usually means you want to correct or redirect the bot.
 - **`collect`** — Your new messages are buffered. When the current request finishes, all buffered messages are combined into a single follow-up prompt. Good for async workflows where you want to queue up thoughts.
 - **`followup`** — Each message is queued and processed as its own separate turn, in order. Useful for batch workflows where each message is independent.
+- **`inject`** — Your new message is handed to the turn that is already running instead of cancelling it: the agent reads it at its next tool-batch boundary and continues the same turn with it.
+
+`inject` needs a bridge that can extend a running turn. When the bridge does not support that — daemon-managed channels started with `qwen serve` currently do not, and the fallback is logged once per session — the message falls back to `collect` buffering and is coalesced into the follow-up replay prompt once the current one ends. The agent picks up injected messages at the next tool-batch boundary (the bridge's `craft/drainMidTurnQueue` request). The queue for a running turn holds at most 20 messages or 20,000 characters, whichever is reached first. Messages the bridge rejects from that queue fall back to a bounded replay buffer of a further 20 messages / 20,000 characters, and the later messages of the same turn that park behind them to keep arrival order count against that bound too; a message beyond it is refused and the sender is told, so a failed delivery is never silent. A single rejected message whose own text alone exceeds the character bound is the one exception: it is kept in the ordinary `collect` buffer instead of being refused, so no content is lost. A message that is merely ineligible for mid-turn injection — a recognized slash command, a different chat or thread than the running turn, or a member not authorized to operate the shared session — instead parks in the ordinary `collect` buffer, where it is coalesced into the follow-up replay prompt when the current one ends; that buffer is not capped and such a message is never refused. In a shared session only the session's operators are eligible for mid-turn injection (see [Shared-Session Operators](#shared-session-operators)), so with `operators` unset every member's message takes that parking path and `inject` behaves like `collect` there; configure `operators` to use the mode on channels whose scope is shared (`chat_thread`, `single`, or a group under `thread`). An image delivered inline is refused with a visible notice while inject mode has a running turn, regardless of its other eligibility, because a parked replay cannot carry inline media; an attachment saved to a local path is buffered with its path. Anything the running turn never drains is coalesced into that replay prompt when the turn ends instead of leaking into the next turn, so a rejected or undrained injection is never reported as delivered; a cancelled, `/clear`ed or rotated turn discards its queued injections instead of replaying them.
 
 ```json
 {
@@ -597,8 +615,10 @@ Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, W
 
 The Web Shell's **Channel events** page shows a timeline of what every Channel
 in the current workspace did: the inbound messages it accepted, and the ones it
-skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
-rejection, `github_api_error` when reading or handling a GitHub thread failed;
+skipped and why (`reason_filter`, `mention_required`, `duplicate`,
+`edited_comment` for an older GitHub comment that mentions the bot and was
+edited, a sender-gate rejection, `github_api_error` when reading or handling a GitHub
+thread failed;
 a `failed` row with that reason means the thread will be read again), the
 replies it published or suppressed, its inbound task transitions, and how each
 poll went. Pick the workspace whose Channels you want
@@ -657,7 +677,7 @@ qwen channel status --daemon-url http://127.0.0.1:4170 --token secret
 qwen channel stop --daemon-url http://127.0.0.1:4170 --token secret
 ```
 
-This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, every trusted registered workspace's own `serve.channels` setting is restored, and a name that cannot be hosted is skipped with a log instead of stopping the others. `all` remains primary-workspace only. Registering a workspace later restores its channels too — without holding the registration open — once per daemon run, and not at all when the daemon was started with an explicit `--channel` or after `qwen channel stop`. Unlike the boot restore, one name it cannot host costs that workspace its whole list. Without any of these sources, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`, or until a workspace that configures its own `serve.channels` registers.
+This mode starts workspace-grouped channel worker processes owned by `qwen serve`. Workers connect back to the daemon through the SDK and use the same channel adapters. They are separate from the daemon process, so a channel adapter crash does not crash the daemon. An explicit `--channel` selection takes precedence and fails daemon startup if it cannot become ready. On a flagless boot, every trusted registered workspace's own `serve.channels` setting is restored, and a name that cannot be hosted is skipped with a log instead of stopping the others. `all` remains primary-workspace only. Registering a workspace later restores its channels too — without holding the registration open — once per daemon run, and not at all when the daemon was started with an explicit `--channel`, after `qwen channel stop`, or while a boot restore declined for a channel-service lease conflict stands (even after the holder's record disappears) — until a `qwen channel set` commits a selection or the daemon restarts. Unlike the boot restore, one name it cannot host costs that workspace its whole list. Without any of these sources, the daemon does not load channel adapters or reserve the lease until the first `qwen channel set`, or until a workspace that configures its own `serve.channels` registers.
 
 Automatic restore skips invalid startup settings and validation or lease failures that occur before workers start, while preserving unrelated settings. After a worker startup fails, the daemon continues only once cleanup succeeds. A global runtime startup timeout or an unconfirmed worker stop still follows the normal startup-failure path; the service lease remains held while worker termination is unconfirmed. Check the daemon log for messages identifying `serve.channels` when a channel does not restore.
 

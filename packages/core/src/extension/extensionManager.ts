@@ -1999,29 +1999,43 @@ export class ExtensionManager {
         // The Agent Plugins v1 schema defines no workflows.
         extension.workflows = [];
       } else {
-        extension.commands = await loadCommandsFromDir(
-          `${effectiveExtensionPath}/commands`,
-        );
-        extension.contextFiles = getContextFileNames(config)
-          .map((contextFileName) =>
-            path.join(effectiveExtensionPath, contextFileName),
-          )
-          .filter((contextFilePath) => fs.existsSync(contextFilePath));
-        extension.skills = await loadSkillsFromDir(
-          `${effectiveExtensionPath}/skills`,
-          onSkillsDiscoveryError,
-        );
         const agentExecutorRefusals = new Map<string, SubagentError>();
-        extension.agents = await loadSubagentFromDir(
-          `${effectiveExtensionPath}/agents`,
-          agentExecutorRefusals,
-        );
-        extension.agentExecutorRefusals = agentExecutorRefusals;
-        extension.workflows = await loadExtensionWorkflows(
-          effectiveExtensionPath,
-          { name: config.name, displayName: config.displayName },
-          config.workflows,
-        );
+        const results = await Promise.allSettled([
+          loadCommandsFromDir(`${effectiveExtensionPath}/commands`).then(
+            (commands) => {
+              head.extension.commands = commands;
+              head.extension.contextFiles = getContextFileNames(config)
+                .map((contextFileName) =>
+                  path.join(effectiveExtensionPath, contextFileName),
+                )
+                .filter((contextFilePath) => fs.existsSync(contextFilePath));
+            },
+          ),
+          loadSkillsFromDir(
+            `${effectiveExtensionPath}/skills`,
+            onSkillsDiscoveryError,
+          ).then((skills) => {
+            head.extension.skills = skills;
+          }),
+          loadSubagentFromDir(
+            `${effectiveExtensionPath}/agents`,
+            agentExecutorRefusals,
+          ).then((agents) => {
+            head.extension.agents = agents;
+            head.extension.agentExecutorRefusals = agentExecutorRefusals;
+          }),
+          loadExtensionWorkflows(
+            effectiveExtensionPath,
+            { name: config.name, displayName: config.displayName },
+            config.workflows,
+          ).then((workflows) => {
+            head.extension.workflows = workflows;
+          }),
+        ]);
+        // Drain reads before a failure can release the store's read lock.
+        for (const result of results) {
+          if (result.status === 'rejected') throw result.reason;
+        }
       }
 
       if (
@@ -2059,7 +2073,7 @@ export class ExtensionManager {
 
           try {
             const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
-            const parsedHooks = JSON.parse(hooksContent);
+            const parsedHooks = JSON.parse(hooksContent.replace(/^\uFEFF/, ''));
 
             let hooksData;
             if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
@@ -2149,7 +2163,7 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const parsedConfig = JSON.parse(configContent);
+      const parsedConfig = JSON.parse(configContent.replace(/^\uFEFF/, ''));
       const skillStates = parseSkillStates(parsedConfig?.skillStates);
       const rawConfig = recursivelyHydrateStrings(parsedConfig, {
         extensionPath: extensionDir,

@@ -64,6 +64,7 @@ export function GlobalTurnNavigation({
   const viewport = useRef<HTMLDivElement>(null);
   const [top, setTop] = useState(0);
   const [height, setHeight] = useState(360);
+  const [triggerWidth, setTriggerWidth] = useState(0);
   const [focus, setFocus] = useState<number>();
   const pendingFocus = useRef(false);
   const [failed, setFailed] = useState(false);
@@ -86,7 +87,12 @@ export function GlobalTurnNavigation({
   useLayoutEffect(() => {
     const element = viewport.current;
     if (!element) return;
-    const measure = () => setHeight(element.clientHeight || 360);
+    const measure = () => {
+      setHeight(element.clientHeight || 360);
+      setTriggerWidth(
+        element.querySelector('button')?.getBoundingClientRect().width ?? 0,
+      );
+    };
     measure();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(measure);
@@ -259,7 +265,7 @@ export function GlobalTurnNavigation({
                     </TooltipTrigger>
                     <TooltipContent
                       side="right"
-                      sideOffset={8}
+                      sideOffset={36 - triggerWidth}
                       collisionPadding={12}
                       className={`${timelineStyles.sessionTimelinePreview} !animate-none max-w-none ring-0 [&_[data-slot=tooltip-arrow]]:hidden!`}
                     >

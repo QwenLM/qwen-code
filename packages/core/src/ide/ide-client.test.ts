@@ -46,6 +46,8 @@ import {
   getIdeServerHost,
   _resetCachedIdeServerHost,
 } from './ide-client.js';
+import { ideContextStore } from './ideContext.js';
+import { IdeContextNotificationSchema } from './types.js';
 import * as fs from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
 import * as dns from 'node:dns';
@@ -223,6 +225,7 @@ describe('IdeClient', () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     delete process.env['QWEN_CODE_IDE_SERVER_PORT'];
+    ideContextStore.clear();
   });
 
   it('skips the IDE process walk outside VS Code terminals', async () => {
@@ -360,13 +363,16 @@ describe('IdeClient', () => {
       expect(statusOf(ideClient)).toBe(IDEConnectionStatus.Connected);
     });
 
-    it('should try a newer lock-file port when the configured port is stale', async () => {
+    it('scopes IDE trust to the connected lock file after a stale port', async () => {
       process.env['QWEN_CODE_IDE_SERVER_PORT'] = '1111';
       mockFiles({
         [lockFile('1111')]: {
           port: '1111',
           authToken: 'stale-token',
-          workspacePath: '/test/workspace',
+          workspacePath: JSON.stringify([
+            '/test/workspace',
+            '/stale/workspace',
+          ]),
         },
         [lockFile('2222')]: {
           port: '2222',
@@ -397,7 +403,86 @@ describe('IdeClient', () => {
         bearer('fresh-token'),
       );
       expect(statusOf(ideClient)).toBe(IDEConnectionStatus.Connected);
+
+      const onContext = mockClient.setNotificationHandler.mock.calls.findLast(
+        ([schema]) => schema === IdeContextNotificationSchema,
+      )?.[1];
+      onContext?.({
+        jsonrpc: '2.0',
+        method: 'ide/contextUpdate',
+        params: { workspaceState: { isTrusted: true } },
+      });
+      expect(ideContextStore.getWorkspaceTrust('/test/workspace')).toBe(true);
+      expect(ideContextStore.getWorkspaceTrust('/test/workspace/sibling')).toBe(
+        true,
+      );
+      expect(
+        ideContextStore.getWorkspaceTrust('/stale/workspace'),
+      ).toBeUndefined();
     });
+
+    // Each connection seeds the IDE trust roots from the workspace it was
+    // established for: the lock file's path, or the validated env path.
+    it.each([
+      {
+        name: 'lock file port',
+        arrange: () => {
+          process.env['QWEN_CODE_IDE_SERVER_PORT'] = '8080';
+          mockConfigFile({ port: '8080', workspacePath: '/test' });
+        },
+        trusted: '/test/other',
+      },
+      {
+        name: 'lock file stdio',
+        arrange: () => {
+          process.env['QWEN_CODE_IDE_SERVER_PORT'] = '8080';
+          mockConfigFile({
+            stdio: { command: 'test-cmd', args: [] },
+            workspacePath: '/test',
+          });
+        },
+        trusted: '/test/other',
+      },
+      {
+        name: 'env port',
+        arrange: () => {
+          readFile.mockRejectedValue(new Error('File not found'));
+          readdir.mockResolvedValue([]);
+          process.env['QWEN_CODE_IDE_SERVER_PORT'] = '9090';
+        },
+        trusted: '/test/workspace',
+      },
+      {
+        name: 'env stdio',
+        arrange: () => {
+          readFile.mockRejectedValue(new Error('File not found'));
+          readdir.mockResolvedValue([]);
+          process.env['QWEN_CODE_IDE_SERVER_STDIO_COMMAND'] = 'env-cmd';
+          process.env['QWEN_CODE_IDE_SERVER_STDIO_ARGS'] = '[]';
+        },
+        trusted: '/test/workspace',
+      },
+    ])(
+      'scopes IDE trust to the workspace of a $name connection',
+      async ({ arrange, trusted }) => {
+        arrange();
+        mockClient.request.mockResolvedValue({ tools: [] });
+
+        const ideClient = await connectClient();
+        expect(statusOf(ideClient)).toBe(IDEConnectionStatus.Connected);
+
+        const onContext = mockClient.setNotificationHandler.mock.calls.findLast(
+          ([schema]) => schema === IdeContextNotificationSchema,
+        )?.[1];
+        onContext?.({
+          jsonrpc: '2.0',
+          method: 'ide/contextUpdate',
+          params: { workspaceState: { isTrusted: true } },
+        });
+        expect(ideContextStore.getWorkspaceTrust(trusted)).toBe(true);
+        expect(ideContextStore.getWorkspaceTrust('/elsewhere')).toBeUndefined();
+      },
+    );
 
     it('should not retry raw env port when its lock belongs to another workspace', async () => {
       process.env['QWEN_CODE_IDE_SERVER_PORT'] = '1234';

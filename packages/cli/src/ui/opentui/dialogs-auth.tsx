@@ -27,6 +27,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { Command, keyMatchers } from '../keyMatchers.js';
 import {
   useKeyboard,
   usePaste,
@@ -311,6 +312,11 @@ function RadioList({
         return (
           <box
             key={item.key}
+            id={
+              selected
+                ? 'screen-reader-selected-auth'
+                : 'screen-reader-unselected-auth'
+            }
             flexDirection="column"
             marginTop={windowIndex === 0 ? 0 : 1}
           >
@@ -359,27 +365,40 @@ function FieldText({
   active?: boolean;
 }) {
   if (value.length === 0 && placeholder) {
-    if (!active) return <text fg={C.dim}>{placeholder}</text>;
+    if (!active)
+      return (
+        <text id={`screen-reader-caret-inactive-${caret}`} fg={C.dim}>
+          {placeholder}
+        </text>
+      );
     return (
       <>
-        <text bg={C.accent}>{placeholder.slice(0, 1)}</text>
+        <text id={`screen-reader-caret-active-${caret}`} bg={C.accent}>
+          {placeholder.slice(0, 1)}
+        </text>
         <text fg={C.dim}>{placeholder.slice(1)}</text>
       </>
     );
   }
   const spans = caretSpans({ text: value, cursor: caret });
+  const before = sanitizeTerminalText(spans.before);
+  const after = sanitizeTerminalText(spans.after);
   return (
     <>
-      <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
+      {before ? <text fg={C.text}>{before}</text> : null}
       {/* The character belongs to the value whatever owns the focus; only the
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
       {active ? (
-        <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
+        <text id={`screen-reader-caret-active-${caret}`} bg={C.accent}>
+          {sanitizeTerminalText(spans.at) || ' '}
+        </text>
       ) : (
-        <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
+        <text id={`screen-reader-caret-inactive-${caret}`} fg={C.text}>
+          {sanitizeTerminalText(spans.at)}
+        </text>
       )}
-      <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
+      {after ? <text fg={C.text}>{after}</text> : null}
     </>
   );
 }
@@ -390,7 +409,9 @@ function InputLine({
   placeholder,
   active,
   marginTop = 1,
+  secret = false,
 }: {
+  secret?: boolean;
   value: string;
   caret: number;
   placeholder?: string;
@@ -398,8 +419,20 @@ function InputLine({
   marginTop?: number;
 }) {
   return (
-    <box flexDirection="row" marginTop={marginTop}>
-      <text fg={C.accent}>{'> '}</text>
+    <box
+      id={
+        secret
+          ? 'screen-reader-protected-input'
+          : value.length === 0 && placeholder
+            ? 'screen-reader-input-line-placeholder'
+            : 'screen-reader-input-line'
+      }
+      flexDirection="row"
+      marginTop={marginTop}
+    >
+      <text id="screen-reader-input-glyph" fg={C.accent}>
+        {'> '}
+      </text>
       <FieldText
         value={value}
         caret={caret}
@@ -430,6 +463,10 @@ function useLineInputKeys(
     const o = toOriginalKey(key);
     if (o.name === 'return' || o.name === 'enter') {
       if (onSubmit(line.text)) line.settle();
+      return;
+    }
+    if (keyMatchers[Command.CLEAR_INPUT](o)) {
+      line.clear();
       return;
     }
     if (!line.handleKey(o) && isPrintableKeyInput(key)) {
@@ -679,6 +716,7 @@ function ApiKeyStep({
         </box>
       )}
       <InputLine
+        secret
         value={flow.state.apiKey}
         caret={caret}
         placeholder={provider.apiKeyPlaceholder ?? 'sk-...'}
@@ -893,6 +931,8 @@ function ModelsStep({
         if (isPainted(0)) setFocus(0);
       } else if (o.name === 'return' || o.name === 'enter') {
         submit();
+      } else if (keyMatchers[Command.CLEAR_INPUT](o)) {
+        search.clear();
       } else if (!search.handleKey(o) && isPrintableKeyInput(key)) {
         search.insert(key.sequence);
       }
@@ -905,6 +945,10 @@ function ModelsStep({
     }
     if (o.name === 'return' || o.name === 'enter') {
       submit();
+      return;
+    }
+    if (keyMatchers[Command.CLEAR_INPUT](o)) {
+      custom.clear();
       return;
     }
     if (!custom.handleKey(o) && isPrintableKeyInput(key)) {
@@ -1044,6 +1088,11 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
   } = flow.state;
   const ctxIdx = modalityEnabled ? 6 : 2;
   const onCtxRow = focusedConfigIndex === ctxIdx;
+  // One stdin read dispatches every key to the render that armed the handler,
+  // so a ↓ followed by Ctrl+C would clear a row the ↓ already left. Mirror the
+  // flow's index and advance it with the flow's own wraparound count.
+  const focusRef = useRef(focusedConfigIndex);
+  focusRef.current = focusedConfigIndex;
   const ctxField = useLineEdit(contextWindowSize, flow.changeContextWindowSize);
   useKeyboard((key) => {
     if (ctxField.settled) return;
@@ -1051,18 +1100,24 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     // Focus-row navigation restricted to unambiguous shortcuts (ink parity:
     // a letter typed into the context-window field must not move the row).
     if (o.name === 'up' || (o.ctrl && o.name === 'p')) {
+      focusRef.current =
+        focusRef.current <= 0
+          ? flow.advancedOptionCount - 1
+          : focusRef.current - 1;
       flow.moveAdvancedFocusUp();
       return;
     }
     if (o.name === 'down' || (o.ctrl && o.name === 'n')) {
+      focusRef.current =
+        focusRef.current >= flow.advancedOptionCount - 1
+          ? 0
+          : focusRef.current + 1;
       flow.moveAdvancedFocusDown();
       return;
     }
     if (o.name === 'space') {
-      // On the context row Space inserts a space into the field; the flow's
-      // toggleFocusedAdvancedOption has no case for ctxIdx (ink parity).
-      if (onCtxRow) ctxField.insert(' ');
-      else flow.toggleFocusedAdvancedOption();
+      // Space belongs to this row but is not a numeric edit.
+      if (!onCtxRow) flow.toggleFocusedAdvancedOption();
       return;
     }
     if (o.name === 'return') {
@@ -1070,8 +1125,16 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       ctxField.settle();
       return;
     }
-    if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
-      ctxField.insert(key.sequence);
+    if (focusRef.current === ctxIdx && keyMatchers[Command.CLEAR_INPUT](o)) {
+      ctxField.clear();
+      return;
+    }
+    if (
+      focusRef.current === ctxIdx &&
+      !ctxField.handleKey(o) &&
+      isPrintableKeyInput(key)
+    ) {
+      ctxField.insert(key.sequence.replace(/[^0-9]/g, ''));
     }
   });
   // Only the context-window field accepts text; a paste while another row is
@@ -1081,7 +1144,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    ctxField.insert(text);
+    ctxField.insert(text.replace(/[^0-9]/g, ''));
   });
   const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
@@ -1093,7 +1156,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         {t('Optional: configure advanced generation settings.')}
       </text>
       <box flexDirection="row" marginTop={1} paddingLeft={2}>
-        <text fg={rowFg(0)}>
+        <text
+          id={`screen-reader-auth-toggle-${focusedConfigIndex === 0 ? 'focused' : 'unfocused'}-${thinkingEnabled ? 'on' : 'off'}`}
+          fg={rowFg(0)}
+        >
           {`${cursor(0)} ${checkmark(thinkingEnabled)} ${t('Enable thinking')}`}
         </text>
       </box>
@@ -1105,7 +1171,10 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         </text>
       </box>
       <box flexDirection="row" marginTop={1} paddingLeft={2}>
-        <text fg={rowFg(1)}>
+        <text
+          id={`screen-reader-auth-toggle-${focusedConfigIndex === 1 ? 'focused' : 'unfocused'}-${modalityEnabled ? 'on' : 'off'}`}
+          fg={rowFg(1)}
+        >
           {`${cursor(1)} ${checkmark(modalityEnabled)} ${t('Enable modality')}`}
         </text>
       </box>
@@ -1117,20 +1186,33 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       {modalityEnabled && (
         <box flexDirection="row" paddingLeft={6}>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 2 ? 'focused' : 'unfocused'}-${modalityImage ? 'on' : 'off'}`}
             fg={rowFg(2)}
           >{`${cursor(2)} ${checkmark(modalityImage)} Image  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 3 ? 'focused' : 'unfocused'}-${modalityVideo ? 'on' : 'off'}`}
             fg={rowFg(3)}
           >{`${cursor(3)} ${checkmark(modalityVideo)} Video  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 4 ? 'focused' : 'unfocused'}-${modalityAudio ? 'on' : 'off'}`}
             fg={rowFg(4)}
           >{`${cursor(4)} ${checkmark(modalityAudio)} Audio  `}</text>
           <text
+            id={`screen-reader-auth-toggle-${focusedConfigIndex === 5 ? 'focused' : 'unfocused'}-${modalityPdf ? 'on' : 'off'}`}
             fg={rowFg(5)}
           >{`${cursor(5)} ${checkmark(modalityPdf)} PDF`}</text>
         </box>
       )}
-      <box flexDirection="row" marginTop={1} paddingLeft={2}>
+      <box
+        id={
+          contextWindowSize
+            ? 'screen-reader-input-line'
+            : 'screen-reader-input-line-placeholder'
+        }
+        flexDirection="row"
+        marginTop={1}
+        paddingLeft={2}
+      >
         <text
           fg={rowFg(ctxIdx)}
         >{`${cursor(ctxIdx)} ${t('Context window')}: `}</text>
@@ -1268,18 +1350,29 @@ export function OpenTuiAuthDialog(props: AuthDialogProps) {
   return <AuthDialogFlow {...props} config={props.config} />;
 }
 
-function SubscriptionWaitingIndicator() {
+function SubscriptionWaitingIndicator({
+  screenReader = false,
+}: {
+  screenReader?: boolean;
+}) {
   const [frame, setFrame] = useState(0);
   useEffect(() => {
+    // The spinner glyph would change the row's text every tick, defeating the
+    // writer's byte-identical suppression on the screen-reader live lane.
+    if (screenReader) return;
     const timer = setInterval(
       () => setFrame((current) => (current + 1) % SPINNER_FRAMES.length),
       SPINNER_INTERVAL_MS,
     );
     return () => clearInterval(timer);
-  }, []);
+  }, [screenReader]);
   return (
-    <text>
-      <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
+    <text id="screen-reader-live-auth-waiting">
+      {screenReader ? null : (
+        <>
+          <span fg={C.accent}>{SPINNER_FRAMES[frame]}</span>{' '}
+        </>
+      )}
       {t('Waiting for sign-in…')}
     </text>
   );
@@ -1292,6 +1385,7 @@ function SubscriptionView({
   suppressBrowserLaunch,
   availableTerminalHeight,
   onConnect,
+  screenReader,
 }: {
   onBack: () => void;
   onModelSelectionRequired: () => void;
@@ -1299,6 +1393,7 @@ function SubscriptionView({
   onConnect?: (signal: AbortSignal, authorizationUrl: string) => Promise<void>;
   suppressBrowserLaunch?: boolean;
   availableTerminalHeight?: number;
+  screenReader?: boolean;
 }) {
   const flow = useSubscription({
     suppressBrowserLaunch,
@@ -1474,7 +1569,7 @@ function SubscriptionView({
             </>
           )}
           <box marginTop={1}>
-            <SubscriptionWaitingIndicator />
+            <SubscriptionWaitingIndicator screenReader={screenReader} />
           </box>
           <box marginTop={1}>
             <text fg={C.dim}>{t('c to copy link · Esc to cancel')}</text>
@@ -1965,6 +2060,7 @@ function AuthDialogFlow({
       <SubscriptionView
         availableTerminalHeight={availableTerminalHeight}
         suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
+        screenReader={config.getScreenReader()}
         onBack={goBack}
         onModelSelectionRequired={onClose}
         onConnect={async (signal, authorizationUrl) => {

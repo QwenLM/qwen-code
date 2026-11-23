@@ -55,18 +55,18 @@ public class ToolPublicationRetentionStoreTest {
         manager = new DataSourceTransactionManager(source);
         tx = new TransactionTemplate(manager);
         retention = new ToolPublicationRetentionStore(jdbc, manager);
-        tenant = "retention-" + UUID.randomUUID();
+        tenant = UUID.randomUUID().toString();
         session = "session-1";
-        scope = ToolPublicationRetentionStore.hash(tenant + session);
+        scope = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.publicationScopeRef(tenant, "workspace-1", session);
         key = new ObjectMapper().createObjectNode().put("tenantId", tenant)
                 .put("workspaceId", "workspace-1").put("sessionId", session);
-        jdbc.update("INSERT INTO ma_output_capture (scope_key, tenant_key, tenant_id, workspace_id, session_id,"
-                + " publication_id, execution_key, capture_id, binding_json, binding_digest, token_hash, state,"
+        jdbc.update("INSERT INTO ma_output_capture (scope_ref, tenant_id, workspace_id, session_id,"
+                + " publication_id, execution_call_id, capture_id, binding_json, binding_digest, token_hash, state,"
                 + " capture_bytes, producer_bytes, admission_bytes, producer_phase, is_write_evidence, is_accepted_complete,"
                 + " capture_held_bytes, producer_held_bytes, admission_held_bytes, capture_used_bytes)"
-                + " VALUES (?, ?, ?, 'workspace-1', ?, 'pub-1', ?, 'capture-1', '{}', ?, ?, 'FENCED',"
+                + " VALUES (?, ?, 'workspace-1', ?, 'pub-1', 'execution', 'capture-1', '{}', ?, ?, 'FENCED',"
                 + " 1000, 1000, 1000, 'REFERENCED', TRUE, TRUE, 1000, 1000, 1000, 123)",
-                scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, scope, scope, scope);
+                scope, tenant, session, ManagedSchemaKeys.key("binding"), ManagedSchemaKeys.key("token"));
     }
 
     protected void retire() {
@@ -106,8 +106,8 @@ public class ToolPublicationRetentionStoreTest {
     @Test
     void expiredOrRetiredLeaseCannotBeRevivedByAnotherLease() {
         try (var old = retention.read(key)) {
-            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_key = ?",
-                    ToolPublicationRetentionStore.hash(tenant));
+            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_id = ?",
+                    tenant);
             try (var replacement = retention.read(key)) {
                 replacement.check();
                 assertThatThrownBy(old::check).isInstanceOf(ManagedAgentException.class);
@@ -127,10 +127,10 @@ public class ToolPublicationRetentionStoreTest {
         }
         try (var next = retention.read(key)) {
             next.check();
-            assertThat(jdbc.queryForObject("SELECT retirement_generation FROM ma_read_lease WHERE tenant_key = ?",
-                    Long.class, ToolPublicationRetentionStore.hash(tenant))).isEqualTo(7);
-            jdbc.update("UPDATE ma_read_lease SET expires_at = ? WHERE tenant_key = ?",
-                    ToolPublicationRetentionStore.now(jdbc) + 60_000, ToolPublicationRetentionStore.hash(tenant));
+            assertThat(jdbc.queryForObject("SELECT retirement_generation FROM ma_read_lease WHERE tenant_id = ?",
+                    Long.class, tenant)).isEqualTo(7);
+            jdbc.update("UPDATE ma_read_lease SET expires_at = ? WHERE tenant_id = ?",
+                    ToolPublicationRetentionStore.now(jdbc) + 60_000, tenant);
             next.check();
             jdbc.update("DELETE FROM ma_session WHERE tenant_id = ? AND session_id = ?", tenant, session);
             assertThatThrownBy(next::check).isInstanceOf(ManagedAgentException.class);
@@ -160,8 +160,8 @@ public class ToolPublicationRetentionStoreTest {
                 var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
             var result = executor.submit(() -> input.read(new byte[2]));
             assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
-            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_key = ?",
-                    ToolPublicationRetentionStore.hash(tenant));
+            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_id = ?",
+                    tenant);
             resume.countDown();
             assertThatThrownBy(() -> result.get(10, TimeUnit.SECONDS)).hasCauseInstanceOf(ManagedAgentException.class);
         }
@@ -177,8 +177,8 @@ public class ToolPublicationRetentionStoreTest {
             }
         };
         try (var original = retention.read(key)) {
-            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_key = ?",
-                    ToolPublicationRetentionStore.hash(tenant));
+            jdbc.update("UPDATE ma_read_lease SET expires_at = 0 WHERE tenant_id = ?",
+                    tenant);
             assertThatThrownBy(() -> retention.open(scope, "pub-1", "object", objects, original::check))
                     .isInstanceOf(ManagedAgentException.class);
             assertThat(opens).hasValue(0);
@@ -199,14 +199,14 @@ public class ToolPublicationRetentionStoreTest {
                 .isInstanceOf(IllegalStateException.class);
         retention.put(key, scope, "pub-1", "exact-key", new byte[] {1}, objects);
         assertThat(puts).hasValue(1);
-        assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_key = ?",
+        assertThat(jdbc.queryForList("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT' AND scope_kind = 'PUBLICATION' AND scope_id = ?",
                 String.class, scope)).containsExactly("RETURNED");
         retire();
         assertThat(blocker()).isNull();
         assertThatThrownBy(() -> retention.put(key, scope, "pub-1", "exact-key", new byte[] {1}, objects))
                 .isInstanceOf(ManagedAgentException.class);
         assertThat(objects.bytes).containsKey("exact-key");
-        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_ref = ?",
                 Long.class, scope)).isEqualTo(1000);
     }
 
@@ -300,13 +300,13 @@ public class ToolPublicationRetentionStoreTest {
     void incompleteQuarantinedAndLegacyEvidenceRemainProtected() {
         retire();
         assertThat(blocker()).isNull();
-        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = FALSE WHERE scope_ref = ?", scope);
         assertThat(blocker()).isEqualTo("legacy_write_evidence_missing");
-        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = TRUE, is_quarantined = TRUE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_write_evidence = TRUE, is_quarantined = TRUE WHERE scope_ref = ?", scope);
         assertThat(blocker()).isEqualTo("quarantined");
-        jdbc.update("UPDATE ma_output_capture SET is_quarantined = FALSE, is_accepted_complete = FALSE WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_quarantined = FALSE, is_accepted_complete = FALSE WHERE scope_ref = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
-        jdbc.update("UPDATE ma_output_capture SET is_accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_output_capture SET is_accepted_complete = TRUE, producer_phase = 'FINISHING' WHERE scope_ref = ?", scope);
         assertThat(blocker()).isEqualTo("not_accepted_complete");
         jdbc.update("UPDATE ma_session SET is_recovery_protected = TRUE WHERE tenant_id = ?", tenant);
         assertThat(blocker()).isEqualTo("recovery_protected");
@@ -326,7 +326,7 @@ public class ToolPublicationRetentionStoreTest {
                 + " WHERE tenant_id = ? AND session_id = ?", recovery, tenant, session);
         retire();
         assertThat(blocker()).isEqualTo("READY".equals(recovery) ? null : "recovery_protected");
-        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_ref = ?",
                 Long.class, scope)).isEqualTo(1000);
     }
 
@@ -359,7 +359,7 @@ public class ToolPublicationRetentionStoreTest {
     void publicDeleteAndPrivateRetirementCommitAtomicallyAfterWriterStops() {
         var props = new ManagedAgentProperties();
         var publicStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), java.time.Clock.systemUTC(), events -> {},
-                org.mockito.Mockito.mock(ManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                org.mockito.Mockito.mock(JdbcManagedWorkspaceRegistry.class), props, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         String original = session;
         session = tx.execute(status -> publicStore.insertSessionCommand(tenant, "CREATE_SESSION", "create", "digest",
                 "qwen-code", null, null, java.util.List.of(), null).sessionId());
@@ -382,8 +382,26 @@ public class ToolPublicationRetentionStoreTest {
                 new ManagedSessionStoreModels.SealWriterRequest("workspace-1", "writer", 1)));
         assertThat(tx.<Boolean>execute(status -> publicStore.completeOperation(tenant, session, operation.operationId(),
                 "worker", claim.claimGeneration() - 1, false))).isFalse();
+        assertThatThrownBy(() -> tx.executeWithoutResult(status -> {
+            assertThat(publicStore.completeOperation(tenant, session, operation.operationId(),
+                    "worker", claim.claimGeneration(), false)).isTrue();
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                    + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", Long.class)).isEqualTo(2);
+            throw new IllegalStateException("rollback public deletion");
+        })).hasMessage("rollback public deletion");
+        assertThat(publicStore.requireSession(tenant, session).status()).isEqualTo("DELETING");
+        assertThat(jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isNull();
+        assertThat(jdbc.queryForObject("SELECT retention_state FROM ma_output_capture WHERE scope_ref = ?",
+                String.class, scope)).isEqualTo("PINNED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE operation_kind IN"
+                + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", Long.class)).isZero();
         assertThat(tx.<Boolean>execute(status -> publicStore.completeOperation(tenant, session, operation.operationId(),
                 "worker", claim.claimGeneration(), false))).isTrue();
+        assertThat(props.getToolPublication().isGcEnabled()).isFalse();
+        assertThat(jdbc.queryForList("SELECT operation_kind FROM ma_operation WHERE operation_kind IN"
+                + " ('SESSION_RESOURCE_GC', 'CAPTURE_GC')", String.class))
+                .containsExactlyInAnyOrder("SESSION_RESOURCE_GC", "CAPTURE_GC");
         assertThat(publicStore.requireSession(tenant, session).status()).isEqualTo("DELETED");
         assertThat(jdbc.queryForObject("SELECT state FROM ma_session_head WHERE tenant_id = ?",
                 String.class, tenant)).isEqualTo("DELETED");
@@ -411,35 +429,35 @@ public class ToolPublicationRetentionStoreTest {
         retire();
         retention.quarantineResource(scope, "resource-1", "object-1");
         assertThat(blocker()).isEqualTo("quarantined");
-        assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT capture_state FROM ma_resource WHERE scope_ref = ?",
                 String.class, scope)).isEqualTo("QUARANTINED");
-        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_key = ?",
+        assertThat(jdbc.queryForObject("SELECT capture_held_bytes FROM ma_output_capture WHERE scope_ref = ?",
                 Long.class, scope)).isEqualTo(1000);
     }
 
     @Test
     void candidateCountsAllUsedSlotsAndKeepsOperationAndObjectBlockers() {
         jdbc.update("UPDATE ma_output_capture SET producer_used_bytes = 456, admission_used_bytes = 789"
-                + " WHERE scope_key = ?", scope);
+                + " WHERE scope_ref = ?", scope);
         retire();
         assertThat(retention.observe(Duration.ZERO)).singleElement()
                 .extracting(ToolPublicationRetentionStore.Candidate::bytes).isEqualTo(1368L);
         addOperation(OperationKind.OUTPUT_UPLOAD, scope, "pub-1", session, "op-1", "PENDING");
         assertThat(blocker()).isEqualTo("operation_unresolved");
-        jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED' WHERE operation_kind = 'OUTPUT_UPLOAD' AND scope_key = ?", scope);
+        jdbc.update("UPDATE ma_operation SET state = 'SUCCEEDED' WHERE operation_kind = 'OUTPUT_UPLOAD' AND scope_kind = 'PUBLICATION' AND scope_id = ?", scope);
         addCaptureObject(scope, "pub-1", session, "segment:stdout:0", "candidate", null, new byte[] {1}, "CANDIDATE");
         assertThat(blocker()).isEqualTo("object_unverified");
-        jdbc.update("UPDATE ma_resource SET capture_state = 'VERIFIED' WHERE scope_key = ?", scope);
+        jdbc.update("UPDATE ma_resource SET capture_state = 'VERIFIED' WHERE scope_ref = ?", scope);
         assertThat(blocker()).isNull();
     }
 
     @Test
     void retirementSuppressesOutstandingWorkOnlyInItsOwnResultScope() {
         for (String state : java.util.List.of("LEASED", "READY")) {
-            addOperation(OperationKind.TOOL_RESULT_PROJECTION, ManagedToolResultStore.scope(tenant, session),
+            addOperation(OperationKind.TOOL_RESULT_PROJECTION, session,
                     null, session, state, state);
         }
-        addOperation(OperationKind.TOOL_RESULT_PROJECTION, ManagedToolResultStore.scope(tenant, "other"),
+        addOperation(OperationKind.TOOL_RESULT_PROJECTION, "other",
                 null, "other", "other", "LEASED");
         retire();
         var leased = jdbc.queryForMap("SELECT state, claim_until, failure_code FROM ma_operation"
@@ -501,9 +519,8 @@ public class ToolPublicationRetentionStoreTest {
 
     protected void addCaptureObject(String captureScope, String publication, String captureSession,
             String slot, String resourceId, String objectKey, byte[] inline, String captureState) {
-        String resourceScope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, captureSession);
-        jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_key, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, ?, ?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
-                ManagedSchemaKeys.key(resourceScope, resourceId), resourceScope, tenant, captureSession, resourceId,
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, state, scope_ref, publication_id, slot_key, capture_state, capture_object_key, inline_bytes, operation_id, gmt_create) VALUES (?, 'workspace-1', ?, ?, 'managed-tool-result-content', 1, ?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, 'op', " + ManagedSchemaTime.SQL_NOW + ")",
+                tenant, captureSession, resourceId,
                 inline == null ? 1 : inline.length, ToolPublicationRetentionStore.hash(slot),
                 inline == null ? "TOOL_PUBLICATION" : "MYSQL_INLINE", captureScope, publication, slot,
                 captureState, objectKey, inline);
@@ -511,22 +528,32 @@ public class ToolPublicationRetentionStoreTest {
 
     protected String addOperation(OperationKind kind, String opScope, String publication, String targetSession,
             String id, String state) {
-        String target = publication == null ? ManagedSchemaKeys.key(id) : ManagedSchemaKeys.key(publication);
-        String operationKey = ManagedSchemaKeys.operationKey(kind, opScope, target, id);
+        String target = publication == null ? id : publication;
+        String scopeKind = kind == OperationKind.TOOL_RESULT_PROJECTION ? "SESSION" : "PUBLICATION";
+        String operationRef = com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs.operationRef(
+                kind.name(), tenant, scopeKind, opScope, target, id);
         long time = ToolPublicationRetentionStore.now(jdbc);
-        jdbc.update("INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id,"
-                        + " tenant_id, workspace_id, session_id, publication_id, target_kind, target_key, request_digest,"
+        jdbc.update("INSERT INTO ma_operation (operation_ref, scope_kind, scope_id, operation_kind, operation_id,"
+                        + " tenant_id, workspace_id, session_id, publication_id, target_kind, target_id, request_digest,"
                         + " request_json, state, phase, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'workspace-1', ?, ?,"
                         + " 'OUTPUT_CAPTURE', ?, ?, '{}', ?, 'TEST', ?, ?)",
-                operationKey, com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, targetSession), opScope, kind.name(), id,
+                operationRef, scopeKind, opScope, kind.name(), id,
                 tenant, targetSession, publication, target, "b".repeat(64), state, time, time);
-        return operationKey;
+        return operationRef;
     }
 
     protected static class MemoryObjects implements ToolPublicationObjectStore {
         protected final Map<String, byte[]> bytes = new HashMap<>();
         @Override public void putIfAbsent(String key, byte[] value) { bytes.putIfAbsent(key, value.clone()); }
         @Override public InputStream open(String key) { return new ByteArrayInputStream(bytes.get(key)); }
+        @Override public InputStream openRange(String key, long offset, long length, Runnable guard) {
+            guard.run();
+            byte[] value = bytes.get(key);
+            if (value == null || offset < 0 || length < 0 || offset + length > value.length) {
+                throw new IllegalArgumentException("Invalid object range");
+            }
+            return new ByteArrayInputStream(value, (int) offset, (int) length);
+        }
         @Override public void validateConfiguration() {}
     }
 }

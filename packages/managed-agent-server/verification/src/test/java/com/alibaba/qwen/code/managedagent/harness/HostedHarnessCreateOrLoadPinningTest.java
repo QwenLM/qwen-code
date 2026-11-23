@@ -6,7 +6,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
@@ -219,7 +219,7 @@ class HostedHarnessCreateOrLoadPinningTest {
         // client() initialisation, which is the frame under test.
         QwenHostedHarnessConnector connector =
                 new QwenHostedHarnessConnector(properties, sessions,
-                        mock(WorkspaceExecutionStore.class));
+                        mock(JdbcWorkspaceExecutionStore.class));
         AtomicBoolean allOk = new AtomicBoolean(true);
         AtomicInteger probeProgress = new AtomicInteger();
         List<Thread> callers = new ArrayList<>();
@@ -326,7 +326,7 @@ class HostedHarnessCreateOrLoadPinningTest {
                         "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
         QwenHostedHarnessConnector connector =
                 new QwenHostedHarnessConnector(properties, sessions,
-                        mock(WorkspaceExecutionStore.class));
+                        mock(JdbcWorkspaceExecutionStore.class));
         ReflectionTestUtils.setField(connector, "client", client);
         return connector;
     }

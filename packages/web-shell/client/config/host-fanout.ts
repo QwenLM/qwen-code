@@ -68,6 +68,8 @@ export const HOST_FANOUT_POLL_MS = POLL_MS;
 
 export interface HostCapabilitiesState {
   workspaces: DaemonCapabilities['workspaces'];
+  /** Feature tags of the same round, for consumers that gate UI per host. */
+  features: DaemonCapabilities['features'] | undefined;
   status: HostConnectionStatus;
   /** Bumps on every content-changed refresh so poll consumers resubscribe. */
   generation: number;
@@ -123,6 +125,7 @@ async function pollOrigin(origin: string): Promise<void> {
       workspacesSignature(current.workspaces) !==
         workspacesSignature(capabilities.workspaces);
     current.workspaces = capabilities.workspaces;
+    current.features = capabilities.features;
     current.status = 'online';
     if (changed) current.generation += 1;
     publishSnapshot(current);
@@ -142,6 +145,7 @@ async function pollOrigin(origin: string): Promise<void> {
 function publishSnapshot(entry: HostFanoutEntry): void {
   entry.snapshot = {
     workspaces: entry.workspaces,
+    features: entry.features,
     status: entry.status,
     generation: entry.generation,
   };
@@ -190,11 +194,13 @@ function trackOrigin(origin: string): HostFanoutEntry {
   if (!entry) {
     entry = {
       workspaces: undefined,
+      features: undefined,
       status: 'connecting',
       generation: 0,
       listeners: new Set(),
       snapshot: {
         workspaces: undefined,
+        features: undefined,
         status: 'connecting',
         generation: 0,
       },
@@ -247,6 +253,7 @@ export function useHostCapabilities(origin: string): HostCapabilitiesState & {
   }, [origin, refreshTick]);
   const state: HostCapabilitiesState = snapshot ?? {
     workspaces: undefined,
+    features: undefined,
     status: 'connecting',
     generation: 0,
   };

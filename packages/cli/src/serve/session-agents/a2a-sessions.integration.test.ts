@@ -327,14 +327,25 @@ describe('A2A on session agents', () => {
     const turn = turns[0]!;
     turn.input.onEvent({ type: 'permission_request', prompt });
     const answer = turn.input.awaitPermission(prompt);
+    // An attempt that fails before the answer is consumed leaves this pending
+    // until afterEach disposes the orchestrator, which rejects it. Unobserved,
+    // that rejection fails the whole Linux shard even once a retry passes.
+    void answer.catch(() => {});
 
-    await vi.waitFor(async () => {
-      const polled = await call('GetTask', { id: task.id });
-      expect(polled.body.result.status.state).toBe('TASK_STATE_INPUT_REQUIRED');
-      expect(JSON.stringify(polled.body.result.metadata)).toContain(
-        '"localStatus":"awaiting_approval"',
-      );
-    });
+    // Both polls below ride an HTTP round trip through the transport, so the
+    // 1s default window is a loaded-runner flake, not a signal about the port.
+    await vi.waitFor(
+      async () => {
+        const polled = await call('GetTask', { id: task.id });
+        expect(polled.body.result.status.state).toBe(
+          'TASK_STATE_INPUT_REQUIRED',
+        );
+        expect(JSON.stringify(polled.body.result.metadata)).toContain(
+          '"localStatus":"awaiting_approval"',
+        );
+      },
+      { timeout: 5_000 },
+    );
 
     // The workspace owner answers in the session; the caller cannot.
     orchestrator.resolvePermission(task.contextId, task.id, 'p1', 'yes');
@@ -342,9 +353,12 @@ describe('A2A on session agents', () => {
     turn.input.onEvent({ type: 'permission_resolved', requestId: 'p1' });
     turn.finish({ outputText: 'Created a2a.txt.' });
 
-    await vi.waitFor(async () => {
-      const polled = await call('GetTask', { id: task.id });
-      expect(polled.body.result.status.state).toBe('TASK_STATE_COMPLETED');
-    });
+    await vi.waitFor(
+      async () => {
+        const polled = await call('GetTask', { id: task.id });
+        expect(polled.body.result.status.state).toBe('TASK_STATE_COMPLETED');
+      },
+      { timeout: 5_000 },
+    );
   });
 });

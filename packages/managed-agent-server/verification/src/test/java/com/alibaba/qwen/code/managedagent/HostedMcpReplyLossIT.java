@@ -59,7 +59,7 @@ class HostedMcpReplyLossIT {
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
-    private final String tenant = "mcp-loss-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final List<ProxyCall> proxyCalls =
             java.util.Collections.synchronizedList(new java.util.ArrayList<>());
     private volatile boolean dropControls;
@@ -397,12 +397,11 @@ class HostedMcpReplyLossIT {
     }
 
     private JsonNode published(String session, JsonNode ref) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
         String body = jdbc.queryForObject(
                 "SELECT CONVERT(inline_bytes USING utf8mb4) FROM ma_resource"
-                        + " WHERE session_scope_key = ? AND resource_id = ?"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?"
                         + " AND tenant_id = ? AND session_id = ?",
-                String.class, scope, ref.path("resourceId").asText(), tenant,
+                String.class, tenant, session, ref.path("resourceId").asText(), tenant,
                 session);
         assertThat(body).as("published response body").isNotBlank();
         try {
@@ -484,7 +483,7 @@ class HostedMcpReplyLossIT {
                 + " JOIN ma_runtime_binding b ON s.binding_id = b.binding_id"
                 + " AND s.runtime_generation = b.runtime_generation"
                 + " WHERE s.tenant_id = ? AND b.tenant_id = ? AND"
-                + " s.harness_session_id = ? AND s.execution_storage_key IS NOT NULL",
+                + " s.harness_session_id = ? AND s.execution_storage_id IS NOT NULL",
                 Integer.class, tenant, tenant, session.id());
     }
 

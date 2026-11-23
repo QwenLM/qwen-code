@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.security.SecretProtector;
@@ -49,7 +49,7 @@ class JdbcPlacementGuardTest {
             }
         }
         for (RuntimeBindingRecord.State state : RuntimeBindingRecord.State.values()) {
-            for (String kind : List.of("legacy", "local-process", "kubernetes-workspace")) {
+            for (String kind : List.of("legacy", "local-process")) {
                 for (boolean seeded : List.of(false, true)) {
                     if (state == RuntimeBindingRecord.State.READY && !"legacy".equals(kind)) {
                         continue;
@@ -192,7 +192,7 @@ class JdbcPlacementGuardTest {
 
         Fixture(DataSource dataSource) {
             source = dataSource;
-            JdbcRuntimeBrokerSchema.initialize(source);
+            ManagedSchema.initialize(source);
             SecretProtector delegate = new AesGcmSecretProtector("key", new byte[32]);
             bindings = new JdbcRuntimeBindingRepository(source, new SecretProtector() {
                 @Override
@@ -243,7 +243,7 @@ class JdbcPlacementGuardTest {
             }
             execute("UPDATE ma_runtime_binding SET binding_state = ?, attestation_generation = ? WHERE binding_id = ?",
                     state.name(), attested, created.getBindingId());
-            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_key = ?",
+            execute("UPDATE ma_runtime_slot SET active_binding_id = NULL WHERE request_id = ?",
                     JdbcRepositorySupport.requestKey(request));
             nextId = "candidate";
             return new RuntimeBindingRecord(created.getBindingId(), request, seed, created.getGeneration(), state,

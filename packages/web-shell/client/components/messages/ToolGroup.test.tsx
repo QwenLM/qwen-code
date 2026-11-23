@@ -2,8 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonToolTranscriptBlock } from '@qwen-code/sdk/daemon';
-import type { ACPToolCall } from '../../adapters/types';
+import type {
+  DaemonModRowAnswer,
+  DaemonToolTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
+import type { ACPToolCall, PermissionRequest } from '../../adapters/types';
 import type { DaemonSessionWorkflowTaskStatus } from '@qwen-code/sdk/daemon';
 import type { SessionContentGenerator } from './AssistantMessage';
 import {
@@ -12,6 +15,7 @@ import {
 } from '../../adapters/toolClassification';
 import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
 import { getTranslator, I18nProvider } from '../../i18n';
+import { sanitizeControlChars } from './toolFormatting';
 import {
   WebShellCustomizationProvider,
   type MarkdownRenderContext,
@@ -23,6 +27,10 @@ import {
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
+import {
+  createToolRevealStore,
+  ToolRevealProvider,
+} from '../../toolRevealContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import {
@@ -174,7 +182,7 @@ function renderToolGroup(
     | boolean = 'interactive',
   onOpenSubagent?: (tool: ACPToolCall) => void,
   onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
-  language: 'en' | 'zh-CN' = 'en',
+  language: 'en' | 'zh-CN' | 'zh-TW' = 'en',
   generateContent?: SessionContentGenerator,
   mcpAppHostUrl?: string,
   documentExpanded = true,
@@ -793,7 +801,10 @@ describe('tool group summary logic', () => {
 });
 
 describe('tool output session links', () => {
-  function renderSessionLinkTool(readonly: boolean): HTMLElement {
+  function renderSessionLinkTool(
+    readonly: boolean,
+    target = 'child-session',
+  ): HTMLElement {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
@@ -801,7 +812,7 @@ describe('tool output session links', () => {
       <ToolLine
         tool={makeTool({
           toolName: 'custom_tool',
-          rawOutput: '[child](qwen-session://child-session)',
+          rawOutput: `[child](qwen-session://${target})`,
         })}
         forceExpanded
       />
@@ -823,10 +834,21 @@ describe('tool output session links', () => {
     return container;
   }
 
-  it('keeps interactive tool session links clickable by default', () => {
-    const handler = vi.fn();
+  it.each([
+    { target: 'child-session', detail: 'child-session' },
+    {
+      target: 'child-session?workspace=C%3A%5Crepos%5Cproject+%28copy%29',
+      detail: {
+        sessionId: 'child-session',
+        workspaceCwd: 'C:\\repos\\project (copy)',
+        source: 'session-link',
+      },
+    },
+  ])('opens the tool result link to $target', ({ target, detail }) => {
+    const seen: unknown[] = [];
+    const handler = (event: Event) => seen.push((event as CustomEvent).detail);
     window.addEventListener('qwen:open-session', handler);
-    const container = renderSessionLinkTool(false);
+    const container = renderSessionLinkTool(false, target);
     const link = container.querySelector('a[role="button"]');
     expect(link?.textContent).toBe('child');
     act(() => {
@@ -834,8 +856,8 @@ describe('tool output session links', () => {
         new MouseEvent('click', { bubbles: true, cancelable: true }),
       );
     });
-    expect(handler).toHaveBeenCalledOnce();
     window.removeEventListener('qwen:open-session', handler);
+    expect(seen).toEqual([detail]);
   });
 
   it('renders tool session links as inert text in readonly mode', () => {
@@ -1031,6 +1053,234 @@ describe('tool row rendering', () => {
     expect(container.textContent).toContain('Architecture Agent');
   });
 
+  describe('reveal requests from the composer task chips', () => {
+    const workflowTask = (
+      toolUseId: string,
+    ): DaemonSessionWorkflowTaskStatus => ({
+      kind: 'workflow',
+      id: 'wf_reveal',
+      label: 'Reveal run',
+      description: 'Reveal run',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 200,
+      isBackgrounded: true,
+      toolUseId,
+      currentPhase: 'Inspect',
+      phaseVisits: [],
+      dispatches: [
+        {
+          id: 'dispatch-reveal',
+          phaseVisitId: 'phase-inspect',
+          label: 'Reveal Agent',
+          prompt: 'Inspect',
+          status: 'running',
+          dependsOn: [],
+          queuedAt: 1_020,
+          startedAt: 1_030,
+        },
+      ],
+      agentsDispatched: 1,
+      agentsCompleted: 0,
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      recentLogs: [],
+      pendingApprovalCount: 0,
+    });
+
+    function renderGroup(tools: ACPToolCall[], toolUseId: string) {
+      const store = createToolRevealStore();
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const render = (nextTools = tools, pendingApproval?: PermissionRequest) =>
+        act(() => {
+          root.render(
+            <I18nProvider language="en">
+              <ToolRevealProvider store={store}>
+                <WorkflowDetailsProvider tasks={[workflowTask(toolUseId)]}>
+                  <ToolGroup
+                    tools={nextTools}
+                    pendingApproval={pendingApproval}
+                  />
+                </WorkflowDetailsProvider>
+              </ToolRevealProvider>
+            </I18nProvider>,
+          );
+        });
+      render();
+      mounted.push({ root, container });
+      return { container, store, render };
+    }
+
+    it('unfolds a collapsed workflow group when its call is requested', () => {
+      // Background launch: the tool call itself finished, the run goes on.
+      const tool = makeTool({
+        callId: 'wf-call',
+        toolName: 'workflow',
+        status: 'completed',
+      });
+      const { container, store } = renderGroup([tool], 'wf-call');
+      const summary = container.querySelector('button') as HTMLButtonElement;
+      expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+      act(() => store.request('other-call'));
+      expect(summary.getAttribute('aria-expanded')).toBe('false');
+
+      act(() => store.request('wf-call'));
+      expect(summary.getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('opens a request that arrived before the group mounted', () => {
+      const store = createToolRevealStore();
+      store.request('wf-call');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolRevealProvider store={store}>
+              <WorkflowDetailsProvider tasks={[workflowTask('wf-call')]}>
+                <ToolGroup
+                  tools={[
+                    makeTool({
+                      callId: 'wf-call',
+                      toolName: 'workflow',
+                      status: 'completed',
+                    }),
+                  ]}
+                />
+              </WorkflowDetailsProvider>
+            </ToolRevealProvider>
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+
+      expect(
+        container.querySelector('button')?.getAttribute('aria-expanded'),
+      ).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('opens the requested row inside a multi-tool group', () => {
+      const { container, store } = renderGroup(
+        [
+          makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+          makeTool({
+            callId: 'wf-call',
+            toolName: 'workflow',
+            status: 'completed',
+          }),
+        ],
+        'wf-call',
+      );
+      expect(container.textContent).not.toContain('Reveal Agent');
+
+      act(() => store.request('wf-call'));
+
+      expect(
+        container.querySelector('button')?.getAttribute('aria-expanded'),
+      ).toBe('true');
+      expect(container.textContent).toContain('Reveal Agent');
+    });
+
+    it('keeps the revealed workflow open when its group gains tools', () => {
+      vi.useFakeTimers();
+      const workflow = makeTool({
+        callId: 'wf-call',
+        toolName: 'workflow',
+        status: 'completed',
+      });
+      const { container, store, render } = renderGroup([workflow], 'wf-call');
+      try {
+        act(() => store.request('wf-call'));
+        expect(container.textContent).toContain('Reveal Agent');
+        act(() => vi.advanceTimersByTime(1_500));
+
+        render([
+          workflow,
+          makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+        ]);
+
+        expect(
+          container.querySelector('[data-workflow-summary]'),
+        ).not.toBeNull();
+        expect(container.textContent).toContain('Reveal Agent');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      [500, true],
+      [1_500, false],
+    ])(
+      'only replays an approval remount within the reveal grace (%i ms)',
+      (delay, reopened) => {
+        vi.useFakeTimers();
+        try {
+          const tools = [
+            makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+            makeTool({ callId: 'wf-call', toolName: 'workflow' }),
+          ];
+          const { container, store, render } = renderGroup(tools, 'wf-call');
+          act(() => store.request('wf-call'));
+          const row = container.querySelector<HTMLElement>(
+            '[data-transcript-tool-call-id="wf-call"] [role="button"]',
+          )!;
+          act(() => row.click());
+          expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+          act(() => vi.advanceTimersByTime(delay));
+          render(tools, {
+            id: 'shell-approval',
+            toolCallId: 'shell-call',
+            content: [],
+            options: [],
+          });
+
+          expect(
+            container.querySelector('[data-workflow-summary]') !== null,
+          ).toBe(reopened);
+          if (!reopened) {
+            act(() => store.request('wf-call'));
+            expect(
+              container.querySelector('[data-workflow-summary]'),
+            ).not.toBeNull();
+          }
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it('keeps a manually collapsed workflow closed until it is requested again', () => {
+      const tools = [
+        makeTool({ callId: 'shell-call', toolName: 'Shell' }),
+        makeTool({ callId: 'wf-call', toolName: 'workflow' }),
+      ];
+      const { container, store, render } = renderGroup(tools, 'wf-call');
+      act(() => store.request('wf-call'));
+      const row = container.querySelector<HTMLElement>(
+        '[data-transcript-tool-call-id="wf-call"] [role="button"]',
+      )!;
+      act(() => row.click());
+      expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+      render([
+        ...tools,
+        makeTool({ callId: 'next-shell-call', toolName: 'Shell' }),
+      ]);
+      expect(container.querySelector('[data-workflow-summary]')).toBeNull();
+
+      act(() => store.request('wf-call'));
+      expect(container.querySelector('[data-workflow-summary]')).not.toBeNull();
+    });
+  });
+
   it.each([
     ['custom_tool', 'First line.\n' + 'Bounded exported answer. '.repeat(8)],
     [
@@ -1052,7 +1302,13 @@ describe('tool row rendering', () => {
         undefined,
         'document',
       );
-      expect(container.textContent).toContain(text);
+      // Valid JSON is pretty-printed for display; other text is shown exactly
+      // as recorded, including its trailing whitespace.
+      const expected =
+        toolName === 'tool_call'
+          ? JSON.stringify(JSON.parse(text) as unknown, null, 2)
+          : text;
+      expect(container.textContent).toContain(expected);
       expect(container.querySelector('iframe')).toBeNull();
     },
   );
@@ -1326,6 +1582,32 @@ describe('tool row rendering', () => {
     act(() => shell.click());
     expect(shell.getAttribute('aria-expanded')).toBe('true');
     expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+  });
+
+  it('resets a manually expanded row when its tool identity changes', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (callId: string) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <ToolLine tool={makeTool({ callId })} summaryOnly />
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render('first-call');
+    act(() => container.querySelector<HTMLElement>('[role="button"]')!.click());
+    expect(container.querySelector('[class*="expandedCard"]')).not.toBeNull();
+
+    render('next-call');
+    expect(container.querySelector('[class*="expandedCard"]')).toBeNull();
+    expect(
+      container.querySelector('[role="button"]')?.getAttribute('aria-expanded'),
+    ).toBe('false');
   });
 
   it.each(['glob', 'todo_write'])(
@@ -2742,6 +3024,53 @@ describe('thinking rows in the compact summary', () => {
     );
   });
 
+  it('offers the zh-TW thought translation and asks for Traditional Chinese', async () => {
+    const prompts: string[] = [];
+    const generateContent: SessionContentGenerator = async function* (prompt) {
+      prompts.push(prompt);
+      yield {
+        v: 1 as const,
+        type: 'delta' as const,
+        requestId: 'r1',
+        seq: 0,
+        text: '譯文',
+      };
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'r1',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 1,
+        outputTokens: 1,
+      };
+    };
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'zh-TW group thought to translate' }],
+      false,
+      undefined,
+      undefined,
+      'zh-TW',
+      generateContent,
+    );
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const button =
+      container.querySelector<HTMLButtonElement>('button[title="翻譯"]');
+    expect(button).not.toBeNull();
+    await act(async () => button?.click());
+    expect(prompts[0]).toContain('into Traditional Chinese');
+  });
+
   it('keeps the single tool compact when thinking is folded in', () => {
     const container = renderToolGroup(
       [
@@ -2766,6 +3095,352 @@ describe('thinking rows in the compact summary', () => {
     });
     // The single tool renders as a compact line, not a force-expanded dump.
     expect(container.textContent).not.toContain('DUMPED CONTENT');
+  });
+
+  it("asks for a folded thought once it is expanded, and never for a subagent's", async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const ask = vi.fn(async () => ({
+      status: 'answered' as const,
+      props: { text: '先读文件。' },
+    }));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <I18nProvider language="zh-CN">
+          <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+            <ModRowsProvider messages={[]}>
+              <ToolGroup
+                generateContent={vi.fn()}
+                tools={[
+                  makeTool({
+                    callId: 'tool-1',
+                    toolName: 'ReadFile',
+                    status: 'completed',
+                  }),
+                  makeTool({
+                    callId: 'tool-2',
+                    toolName: 'Glob',
+                    status: 'completed',
+                  }),
+                ]}
+                thoughts={[
+                  { content: 'Read the file.\n', beforeToolCallId: 'tool-1' },
+                  {
+                    content: 'Subagent plan',
+                    beforeToolCallId: 'tool-2',
+                    parentToolCallId: 'agent-1',
+                  },
+                ]}
+              />
+            </ModRowsProvider>
+          </ModRowAskerContext.Provider>
+        </I18nProvider>,
+      ),
+    );
+
+    const translateButtons = () =>
+      container.querySelectorAll('button[title="翻译"]').length;
+    act(() => container.querySelector('button')?.click());
+    expect(ask).not.toHaveBeenCalled();
+    expect(translateButtons()).toBe(2);
+    // jsdom has no IntersectionObserver, so a mounted body counts as shown.
+    await act(async () => {
+      for (const header of container.querySelectorAll(
+        '[data-testid="compact-thinking-summary"]',
+      )) {
+        (header as HTMLElement).click();
+      }
+    });
+    expect(ask).toHaveBeenCalledOnce();
+    expect(ask).toHaveBeenCalledWith({
+      component: 'Thinking',
+      props: { text: 'Read the file.' },
+    });
+    const text = container.textContent ?? '';
+    expect(text).toContain('先读文件。');
+    expect(text).not.toContain('Read the file.');
+    expect(text).toContain('Subagent plan');
+    // Only the rewritten thought drops its translate button.
+    expect(translateButtons()).toBe(1);
+  });
+
+  it.each([
+    { layout: 'standalone', dismiss: 'Close' },
+    { layout: 'folded', dismiss: 'Close' },
+    { layout: 'standalone', dismiss: 'Escape' },
+    { layout: 'folded', dismiss: 'Escape' },
+    { layout: 'standalone', dismiss: 'Escape before rewrite' },
+  ])(
+    'keeps translation open until $dismiss for a $layout thought',
+    async ({ layout, dismiss }) => {
+      const { ThinkingMessage } = await import('./AssistantMessage');
+      const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+      const { ModRowsProvider } = await import('./ModAssistantMessage');
+      const rewrite = Promise.withResolvers<DaemonModRowAnswer>();
+      const translation = Promise.withResolvers<void>();
+      const ask = vi.fn(() => rewrite.promise);
+      const generateContent = vi.fn<SessionContentGenerator>(
+        async function* () {
+          yield {
+            v: 1,
+            type: 'delta',
+            requestId: 'thought-translation',
+            seq: 0,
+            text: '正在读取',
+          };
+          await translation.promise;
+          yield {
+            v: 1,
+            type: 'done',
+            requestId: 'thought-translation',
+            model: 'fast-model',
+            modelSource: 'fast',
+          };
+        },
+      );
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const content = `Inspect the ${layout} thought with ${dismiss}.`;
+      const translateButton = () =>
+        container.querySelector<HTMLButtonElement>('button[title="翻译"]');
+      const closeWithEscape = () =>
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+        );
+
+      try {
+        act(() =>
+          root.render(
+            <I18nProvider language="zh-CN">
+              <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+                <ModRowsProvider messages={[]}>
+                  {layout === 'folded' ? (
+                    <ToolGroup
+                      tools={[
+                        makeTool({ callId: 'read', toolName: 'ReadFile' }),
+                      ]}
+                      thoughts={[{ id: 'thought', content }]}
+                      generateContent={generateContent}
+                    />
+                  ) : (
+                    <ThinkingMessage
+                      content={content}
+                      generateContent={generateContent}
+                    />
+                  )}
+                </ModRowsProvider>
+              </ModRowAskerContext.Provider>
+            </I18nProvider>,
+          ),
+        );
+        if (layout === 'folded') {
+          act(() => container.querySelector('button')!.click());
+        }
+        const thoughtSummary = container.querySelector<HTMLButtonElement>(
+          layout === 'folded'
+            ? '[data-testid="compact-thinking-summary"]'
+            : 'button[aria-expanded]',
+        );
+        act(() => thoughtSummary!.click());
+        expect(ask).toHaveBeenCalledOnce();
+        await act(async () => translateButton()!.click());
+        expect(document.body.textContent).toContain('正在读取');
+        const signal = generateContent.mock.calls[0]?.[1]?.signal;
+        expect(signal?.aborted).toBe(false);
+
+        if (dismiss === 'Escape before rewrite') {
+          act(() => closeWithEscape());
+          expect(translateButton()).not.toBeNull();
+          expect(signal?.aborted).toBe(false);
+          await vi.waitFor(() =>
+            expect(document.activeElement).toBe(translateButton()),
+          );
+        }
+        await act(async () =>
+          rewrite.resolve({
+            status: 'answered',
+            props: { text: 'Mod 改写后的思考' },
+          }),
+        );
+        expect(container.textContent).toContain('Mod 改写后的思考');
+        if (dismiss !== 'Escape before rewrite') {
+          expect(document.body.textContent).toContain('正在读取');
+          expect(signal?.aborted).toBe(false);
+          if (dismiss === 'Close') {
+            await act(async () => translation.resolve());
+            const closeButton = Array.from(
+              document.body.querySelectorAll('button'),
+            ).find((button) => button.textContent === '关闭');
+            act(() => closeButton!.click());
+            expect(signal?.aborted).toBe(false);
+          } else {
+            act(() => closeWithEscape());
+          }
+        }
+        await vi.waitFor(() =>
+          expect(document.activeElement).toBe(thoughtSummary),
+        );
+        if (dismiss !== 'Close') expect(signal?.aborted).toBe(true);
+        expect(document.body.textContent).not.toContain('正在读取');
+        expect(translateButton()).toBeNull();
+      } finally {
+        await act(async () => {
+          rewrite.resolve({ status: 'unanswered' });
+          translation.resolve();
+        });
+      }
+    },
+  );
+
+  it.each([
+    { afterReplay: 'Replayed thought', collapsed: false },
+    { afterReplay: 'Original thought', collapsed: true },
+  ])(
+    'restores Translate for a reused folded thought ($afterReplay)',
+    async ({ afterReplay, collapsed }) => {
+      const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+      const { ModRowsProvider } = await import('./ModAssistantMessage');
+      const ask = vi
+        .fn(async (): Promise<DaemonModRowAnswer> => ({ status: 'answered' }))
+        .mockResolvedValueOnce({
+          status: 'answered',
+          props: { text: 'Rewritten thought' },
+        });
+      const asker = new ModRowAsker(ask);
+      const askAfterReplay = vi.fn(async () => ({
+        status: 'unhooked' as const,
+      }));
+      const replayAsker = new ModRowAsker(askAfterReplay);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      const generateContent = vi.fn();
+      const tools = [makeTool({ callId: 'read', toolName: 'ReadFile' })];
+      const draw = (content: string, activeAsker: typeof asker) =>
+        root.render(
+          <I18nProvider language="zh-CN">
+            <ModRowAskerContext.Provider value={activeAsker}>
+              <ModRowsProvider messages={[]}>
+                <ToolGroup
+                  generateContent={generateContent}
+                  tools={tools}
+                  thoughts={[{ id: 'thought', content }]}
+                />
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        );
+      const translateButton = () =>
+        container.querySelector('button[title="翻译"]');
+      const thoughtHeader = () =>
+        container.querySelector<HTMLButtonElement>(
+          '[data-testid="compact-thinking-summary"]',
+        )!;
+
+      act(() => draw('Original thought', asker));
+      act(() => container.querySelector('button')!.click());
+      const openThought = thoughtHeader();
+      await act(async () => openThought.click());
+      expect(container.textContent).toContain('Rewritten thought');
+      expect(translateButton()).toBeNull();
+      if (collapsed) act(() => openThought.click());
+
+      await act(async () => draw(afterReplay, collapsed ? replayAsker : asker));
+      expect(thoughtHeader()).toBe(openThought);
+      expect(translateButton()).not.toBeNull();
+      if (collapsed) {
+        expect(askAfterReplay).not.toHaveBeenCalled();
+        await act(async () => openThought.click());
+        expect(askAfterReplay).toHaveBeenCalledOnce();
+      }
+      expect(collapsed ? askAfterReplay : ask).toHaveBeenLastCalledWith({
+        component: 'Thinking',
+        props: { text: afterReplay },
+      });
+      expect(container.textContent).toContain(afterReplay);
+      expect(container.textContent).not.toContain('Rewritten thought');
+    },
+  );
+
+  it('withdraws a queued thought when its workflow summary closes', async () => {
+    const { ModRowAsker, ModRowAskerContext } = await import('./mod-rows');
+    const { ModRowsProvider } = await import('./ModAssistantMessage');
+    const observers: Array<
+      (entries: Array<{ isIntersecting: boolean }>) => void
+    > = [];
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(
+          callback: (entries: Array<{ isIntersecting: boolean }>) => void,
+        ) {
+          observers.push(callback);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    try {
+      const first = Promise.withResolvers<void>();
+      const ask = vi.fn(async () => ({ status: 'answered' as const }));
+      ask.mockImplementationOnce(async () => {
+        await first.promise;
+        return { status: 'answered' };
+      });
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      mounted.push({ root, container });
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <ModRowAskerContext.Provider value={new ModRowAsker(ask)}>
+              <ModRowsProvider messages={[]}>
+                <ToolGroup
+                  compactSummary
+                  tools={[
+                    makeTool({ callId: 'workflow', toolName: 'workflow' }),
+                  ]}
+                  thoughts={[
+                    { content: 'First thought', beforeToolCallId: 'workflow' },
+                    { content: 'Second thought' },
+                  ]}
+                />
+              </ModRowsProvider>
+            </ModRowAskerContext.Provider>
+          </I18nProvider>,
+        ),
+      );
+
+      const summary = container.querySelector('button')!;
+      act(() => summary.click());
+      act(() => {
+        for (const header of container.querySelectorAll<HTMLElement>(
+          '[data-testid="compact-thinking-summary"]',
+        )) {
+          header.click();
+        }
+      });
+      expect(observers).toHaveLength(2);
+      act(() => {
+        for (const observer of observers) observer([{ isIntersecting: true }]);
+      });
+      expect(ask).toHaveBeenCalledOnce();
+      act(() => summary.click());
+      expect(container.querySelector('[inert]')).not.toBeNull();
+      // The first request can settle before the visibility observer reports the collapse.
+      await act(async () => first.resolve());
+      expect(ask).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('renders thoughts interleaved with their tools in original order', () => {
@@ -3186,45 +3861,644 @@ describe('pending edit approval rows', () => {
       ],
     });
 
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const render = (hostOwnsEditDiffPreview: boolean) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ hostOwnsEditDiffPreview }}>
+              <ToolLine
+                tool={tool}
+                approval={{
+                  id: 'perm-write',
+                  toolCallId: tool.callId,
+                  toolName: 'write',
+                  hasDiffPreview: true,
+                  content: [],
+                  options: [],
+                }}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        );
+      });
+    };
+    mounted.push({ root, container });
+
+    render(false);
+    act(() => container.querySelector<HTMLElement>('[role="button"]')!.click());
+    expect(container.querySelector('[aria-expanded="false"]')).not.toBeNull();
+
     // While the host shows the diff natively the row is deliberately locked:
     // `write` is an edit alias, so the native editor owns the interaction.
-    const hostOwned = renderToolLine(
-      tool,
-      {
-        approval: {
-          id: 'perm-write',
-          toolCallId: tool.callId,
-          toolName: 'write',
-          hasDiffPreview: true,
-          content: [],
-          options: [],
-        },
-      },
-      { hostOwnsEditDiffPreview: true },
-    );
-    expect(hostOwned.querySelector('[class*="lineExpandable"]')).toBeNull();
+    render(true);
+    expect(container.querySelector('[class*="lineExpandable"]')).toBeNull();
 
     // Handing the preview back has to unlock *and* auto-expand it, or the user
     // is left with an approval whose content is nowhere on screen. The expanded
     // renderer already handles the bare name, so only shouldAutoExpand has to
     // agree with isEditToolName about it.
-    const handedBack = renderToolLine(tool, {
-      approval: {
-        id: 'perm-write',
-        toolCallId: tool.callId,
-        toolName: 'write',
-        hasDiffPreview: true,
-        content: [],
-        options: [],
-      },
-    });
-    expect(
-      handedBack.querySelector('[class*="lineExpandable"]'),
-    ).not.toBeNull();
-    expect(handedBack.querySelector('[aria-expanded="true"]')).not.toBeNull();
+    render(false);
+    expect(container.querySelector('[class*="lineExpandable"]')).not.toBeNull();
+    expect(container.querySelector('[aria-expanded="true"]')).not.toBeNull();
     // ...and the edit itself is lookable again — the whole point of the
     // hand-back (#10557). Without content in the fixture the expanded card is
     // empty and the two assertions above pass with nothing on screen.
-    expect(handedBack.textContent).toContain('handed back content');
+    expect(container.textContent).toContain('handed back content');
+  });
+});
+
+describe('generic tool card details', () => {
+  it('pretty-prints arguments and a compact JSON result on expansion', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__github__pull_request_read',
+        args: { method: 'get_check_runs', owner: 'QwenLM' },
+        rawOutput: '{"total_count":38,"check_runs":[{"name":"smoke"}]}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Arguments');
+    expect(text).toContain('Result');
+    expect(text).toContain('"method": "get_check_runs"');
+    expect(text).toContain('"total_count": 38');
+    expect(text).not.toContain('"total_count":38');
+  });
+
+  it('keeps a non-JSON result as plain text', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__echo',
+        rawOutput: 'line one\nline two',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('line one');
+    expect(container.textContent).toContain('line two');
+    expect(container.querySelector('[class*="payloadText"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadJson"]')).toBeNull();
+  });
+
+  it('shows the failure text in the Result block', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__fail',
+        status: 'failed',
+        content: [{ type: 'content', content: { type: 'text', text: 'boom' } }],
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('boom');
+  });
+
+  it('offers Show more for a payload over the inline cap', () => {
+    const tail = 'TAIL-MARKER';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__dump',
+        rawOutput: `${'x'.repeat(4200)}${tail}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('renders a payload under the inline cap whole without Show more', () => {
+    const tail = 'SHORT-TAIL';
+    const rawOutput = `${'a'.repeat(3900 - tail.length)}${tail}`;
+    expect(rawOutput).toHaveLength(3900);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__short', rawOutput }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain(tail);
+    expect(container.textContent).not.toContain('Content truncated');
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Show more',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('offers Show more when pretty-printing grows a payload past the cap', () => {
+    const tail = 'TAIL-MARKER';
+    const items = [
+      ...Array.from({ length: 160 }, (_, i) => ({ id: i, name: 'x' })),
+      { id: 160, name: tail },
+    ];
+    const compact = JSON.stringify(items);
+    // Guard the fixture: the raw payload fits inline, the formatted one does
+    // not, so the button must follow the formatted length.
+    expect(compact.length).toBeLessThanOrEqual(4000);
+    expect(JSON.stringify(items, null, 2).length).toBeGreaterThan(4000);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__grow', rawOutput: compact }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('stops at the expanded cap and keeps the truncation notice', () => {
+    const midMarker = 'MID-MARKER';
+    const pastCap = 'PAST-40K-MARKER';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__huge',
+        rawOutput: `${'x'.repeat(39_900)}${midMarker}${'x'.repeat(100)}${pastCap}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(midMarker);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(midMarker);
+    expect(container.textContent).not.toContain(pastCap);
+    expect(container.textContent).toContain('Content truncated');
+  });
+
+  it('keeps the header description out of the expanded body', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title: 'Inspect check runs',
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(
+      'Inspect check runs',
+    ).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a long description in the expanded card detail', () => {
+    const title =
+      `Inspect check runs ${'and report failures '.repeat(4)}`.trim();
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title,
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(title).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a long search description in the expanded card detail', () => {
+    const title =
+      `Search the repository ${'for matching files '.repeat(4)}`.trim();
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'grep_search',
+        title,
+        args: { pattern: 'needle' },
+        rawOutput: 'No matches found',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(title);
+  });
+
+  it('keeps a malformed todo description in the expanded card detail', () => {
+    const description = 'Malformed todo payload';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'todo_write',
+        title: description,
+        args: { todos: 'not-a-list' },
+      }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(description).length;
+    expect(occurrences - 1).toBe(1);
+  });
+
+  it('keeps a short description when a custom header omits it', () => {
+    const description = 'Inspect check runs';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__inspect',
+        title: description,
+        args: { method: 'get_check_runs' },
+        rawOutput: '{"total_count":38}',
+      }),
+      { forceExpanded: true },
+      { renderToolHeaderExtra: () => <span>custom header</span> },
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(description);
+  });
+
+  it('keeps a short description in a single-tool document detail', () => {
+    const description = 'Inspect check runs';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__inspect',
+          title: description,
+          args: { method: 'get_check_runs' },
+          rawOutput: '{"total_count":38}',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(
+      container.querySelector('[class*="expandedCardDetail"]')?.textContent,
+    ).toContain(description);
+  });
+
+  it('keeps a long description when a single-tool card hides its header', () => {
+    const description = `Inspect check runs ${'and report failures '.repeat(8)}`;
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__inspect',
+          title: description,
+          args: { method: 'get_check_runs' },
+          rawOutput: '{"total_count":38}',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain(description.trim());
+  });
+
+  it('does not render an empty Arguments section', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__empty', args: {}, rawOutput: 'ok' }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain('Arguments');
+    expect(container.textContent).toContain('Result');
+  });
+
+  it('joins every text content block in the Result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__multi',
+        content: [
+          { type: 'content', content: { type: 'text', text: 'first block' } },
+          { type: 'content', content: { type: 'text', text: 'second block' } },
+        ],
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('first block');
+    expect(container.textContent).toContain('second block');
+  });
+
+  it('shows a waiting Result for a pending call with arguments', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'in_progress',
+        args: { method: 'ping' },
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Result');
+    expect(container.textContent).toContain('Waiting for output…');
+  });
+
+  it('shows a waiting Result for a pending call with no payload', () => {
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__slow', status: 'in_progress' }),
+      { forceExpanded: true },
+    );
+
+    const occurrences = (container.textContent ?? '').split(
+      'Waiting for output…',
+    ).length;
+    expect(occurrences - 1).toBe(1);
+    expect(container.textContent).toContain('Result');
+  });
+
+  it('sanitizes control characters in generic payloads', () => {
+    const raw = 'a\u202eb\x1bc';
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__unsafe', rawOutput: raw }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('\\u202e');
+    expect(text).toContain('\\u001b');
+    expect(text).not.toContain('\u202e');
+    expect(text).not.toContain('\x1b');
+  });
+
+  it('sanitizes control characters in generic JSON payloads', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__unsafe-json',
+        rawOutput: '{"n":"a\u202eb"}',
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('\\u202e');
+    expect(text).not.toContain('\u202e');
+  });
+
+  it('offers Show more when escaping grows the payload past the cap', () => {
+    const tail = 'NUL-TAIL';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__nul',
+        rawOutput: `${'\u0000'.repeat(2000)}${tail}`,
+      }),
+      { forceExpanded: true },
+    );
+
+    const payload = container.querySelector('[class*="payloadText"]');
+    expect(payload).not.toBeNull();
+    expect(payload?.textContent?.length ?? 0).toBeLessThanOrEqual(4003);
+    expect(container.textContent).toContain('Content truncated');
+    expect(container.textContent).not.toContain(tail);
+
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('does not repeat a cancelled call input as the result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'completed',
+        wasCancelled: true,
+        args: { method: 'ping' },
+        rawOutput: {
+          status: 'cancelled',
+          reason: '{"method":"ping"}',
+          text: 'partial',
+        },
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('partial');
+    expect(text).not.toContain('"reason"');
+    expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
+  it('does not render the cancelled input dump as the result', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__ping',
+        status: 'completed',
+        wasCancelled: true,
+        args: { method: 'ping' },
+        rawOutput: {
+          status: 'cancelled',
+          reason: '{"method":"ping"}',
+          text: '{"method":"ping"}',
+        },
+      }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Cancelled');
+    expect(text.split('"method": "ping"').length - 1).toBe(1);
+  });
+
+  it.each(['output', 'stdout'] as const)(
+    'keeps cancelled %s output visible',
+    (key) => {
+      const output = `partial-${key}`;
+      const container = renderToolLine(
+        makeTool({
+          toolName: 'mcp__demo__cancel-output',
+          status: 'completed',
+          wasCancelled: true,
+          rawOutput: {
+            status: 'cancelled',
+            reason: '{"method":"ping"}',
+            [key]: output,
+          },
+        }),
+        { forceExpanded: true },
+      );
+
+      const text = container.textContent ?? '';
+      expect(text).toContain(output);
+      expect(text).not.toContain('"reason"');
+    },
+  );
+
+  it('keeps a cancelled string output visible', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__cancel-string',
+        status: 'completed',
+        wasCancelled: true,
+        rawOutput: 'partial-string',
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('partial-string');
+  });
+
+  it('shows Cancelled when a cancelled call has no output', () => {
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__cancel-empty',
+        status: 'completed',
+        wasCancelled: true,
+        rawOutput: {},
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).toContain('Cancelled');
+    expect(container.textContent).not.toContain('Waiting for output…');
+  });
+
+  it('offers Show more for a large arguments payload', () => {
+    const tail = 'ARG-TAIL';
+    const container = renderToolLine(
+      makeTool({
+        toolName: 'mcp__demo__bigargs',
+        args: { body: `${'y'.repeat(4200)}${tail}` },
+      }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+    expect(
+      [...container.querySelectorAll('button')].find(
+        (button) => button.textContent === 'Show more',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('offers Show more when escaping grows the arguments past the cap', () => {
+    const tail = 'ARG-ESCAPED-TAIL';
+    // JSON.stringify escapes C0 bytes but leaves the bidi controls that
+    // sanitizeControlChars renders as `\u202e`, so this payload only crosses
+    // the inline cap once escaping is counted.
+    const args = { note: `${'\u202e'.repeat(500)}${'a'.repeat(3000)}${tail}` };
+    const raw = JSON.stringify(args, null, 2);
+    expect(raw.length).toBeLessThanOrEqual(4000);
+    expect(sanitizeControlChars(raw).length).toBeGreaterThan(4000);
+
+    const container = renderToolLine(
+      makeTool({ toolName: 'mcp__demo__bidiargs', args }),
+      { forceExpanded: true },
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    const more = [...container.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Show more',
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain(tail);
+  });
+
+  it('bounds generic arguments in document mode', () => {
+    const tail = 'ARG-DOCUMENT-TAIL';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__bigargs',
+          args: { content: `${'x'.repeat(50_000)}${tail}` },
+          rawOutput: 'ok',
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).not.toContain(tail);
+    expect(container.textContent).toContain('Content truncated');
+  });
+
+  it('keeps document-mode JSON formatting above the interactive budget', () => {
+    const items = Array.from({ length: 1200 }, (_, i) => ({
+      id: i,
+      name: 'x'.repeat(30),
+    }));
+    const raw = JSON.stringify(items);
+    const formatted = JSON.stringify(items, null, 2);
+    expect(raw.length).toBeGreaterThan(40_000);
+    expect(formatted.length).toBeLessThan(100_000);
+
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__docjson',
+          rawOutput: raw,
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.querySelector('[class*="payloadJson"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).toBeNull();
+  });
+
+  it('shows the full payload without Show more in document mode', () => {
+    const tail = 'DOCUMENT-TAIL';
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__dump',
+          rawOutput: `${'x'.repeat(4200)}${tail}`,
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    expect(container.textContent).toContain(tail);
+    expect(container.textContent).not.toContain('Show more');
+  });
+
+  it('keeps highlighting for a many-line JSON result within the char budget', () => {
+    const items = Array.from({ length: 400 }, (_, i) => ({ id: i }));
+    const container = renderToolGroup(
+      [
+        makeTool({
+          toolName: 'mcp__demo__many',
+          rawOutput: JSON.stringify(items),
+        }),
+      ],
+      {},
+      undefined,
+      'document',
+    );
+
+    // Pretty-printed, the payload spans well over 1000 lines but stays within
+    // the render cap; it must render as a highlighted JSON block, not fall back
+    // to the plain-text container.
+    expect(container.querySelector('[class*="payloadJson"]')).not.toBeNull();
+    expect(container.querySelector('[class*="payloadText"]')).toBeNull();
   });
 });

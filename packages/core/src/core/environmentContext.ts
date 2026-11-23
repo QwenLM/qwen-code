@@ -14,6 +14,10 @@ import type {
 } from '../tools/tool-registry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
+import {
+  getShellConfiguration,
+  getShellDisplayName,
+} from '../utils/shell-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
@@ -28,8 +32,18 @@ export const AUTO_MEMORY_SNAPSHOT_METADATA =
 
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
+/**
+ * Envelope the background registries wrap a notification's `modelText` in
+ * (agents, monitors, shells, workflows, the dropped-notification tally). See
+ * `turn-interruption.ts` for its trust model: role-gated, emitter escaping not
+ * uniform.
+ */
+export const TASK_NOTIFICATION_OPEN = '<task-notification>';
+export const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
 const COMPRESSED_PREFIX_LENGTH = Symbol('compressedPrefixLength');
+export const RETAINED_COMPACTION_TAIL_REMINDER =
+  'The summary above covers only earlier history. The original messages below happened later and are not included in that summary; follow their newer results and instructions when continuing.';
 
 type CompressedSummary = Content & {
   [COMPRESSED_PREFIX_LENGTH]?: number;
@@ -199,12 +213,22 @@ export async function getEnvironmentContext(
   const platform = config.getExecutionEnvironment?.()
     ? ''
     : `My operating system is: ${process.platform}\n`;
+  // Platform alone does not decide shell syntax: on win32 the resolver can
+  // return cmd, PowerShell, or bash reached through Git Bash / MSYS2, and each
+  // wants different syntax. Say which one will run the command, so the model
+  // does not guess from the platform. (WSL reports `linux`, so it takes the
+  // Unix branch in getShellConfiguration and never reaches that choice.)
+  const shell = config.getExecutionEnvironment?.()
+    ? ''
+    : `Shell commands run under: ${getShellDisplayName(
+        getShellConfiguration(),
+      )}\n`;
   const directoryContext = await getDirectoryContextString(config);
 
   const context = `
 This is the Qwen Code. We are setting up the context for our chat.
 Today's date is ${today}.
-${platform}${directoryContext}
+${platform}${shell}${directoryContext}
         `.trim();
 
   return [{ text: context }];
@@ -823,6 +847,17 @@ function detectCompressedPrefixLength(
     ackText !== 'Got it. Thanks for the additional context!'
   ) {
     return 0;
+  }
+  const bridge = history[offset + 2];
+  if (
+    bridge?.role === 'user' &&
+    getApiHistoryPromptId(bridge) === undefined &&
+    bridge.parts?.at(-1)?.text === RETAINED_COMPACTION_TAIL_REMINDER
+  ) {
+    // Unlike the legacy trailing-call restore, the following model entry is
+    // an original operation, not synthetic context. Preserve this boundary
+    // after JSON round trips as well as in live history.
+    return 3;
   }
   const remembered = (firstEntry as CompressedSummary)[
     COMPRESSED_PREFIX_LENGTH

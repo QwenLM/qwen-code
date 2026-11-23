@@ -90,8 +90,8 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   属于未被查文件排除的服务器的失败记录、或某个声明方的拒绝无人背书、或某个
   可能负责被查文件的服务器不可达时，查询拒绝，工具以
   `ToolErrorType.EXECUTION_FAILED` 暴露该拒绝。权威空报告只有既相关、又在
-  扩展名可被表定位时为正向拥有，才算干净；无法被任何表定位的扩展名
-  （`.h`、`.mts`、无扩展名文件）没有可判定的归属，仅按相关性判定，与本变更
+  扩展名可被表或显式映射定位时为正向拥有，才算干净；两者都无法定位的扩展名
+  （没有映射的未知扩展名，以及无扩展名文件）没有可判定的归属，仅按相关性判定，与本变更
   引入归属要求之前一致。非 `file:` URI（`jdt://…`）以另一条路径落入同一不可判定
   情形：`synchronizeDocument` 在发送任何 `didOpen` 之前就返回，服务器为其从未收到
   的文档作答；此处保留该直通而不是拒绝，因为拒绝会破坏那些为自身虚拟文档作答的
@@ -102,9 +102,9 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   应改判为“无依据”是一个待裁决的问题，本变更不作结论。相关性判定会参照诊断表能定位的**全部**扩展名——语言 ID
   映射表、诊断专属别名表，以及 ID 即扩展名的身份映射集合——且 JS/TS 家族扩展是
   单向的：`typescript` 声明覆盖 JavaScript 一侧，而仅声明 `javascript` 的服务器
-  不能声称 `.ts` 或 `.tsx`。拒绝信息会指明是哪一条件不成立：取到了答案且确有
-  被查询服务器应答，但没有任何答案正向拥有被查扩展名；相关答案无法归属到
-  被查文件；或无任何已配置服务器覆盖它。不可能负责被查文件的服务器
+  不能声称 `.ts` 或 `.tsx`。拒绝信息会尽可能指明失败、拒绝或不可达的归属方；
+  否则会区分“有服务器应答但无法归属”和“无任何已配置服务器覆盖该文件”。
+  不可能负责被查文件的服务器
   不会否决文档级查询；工作区级查询在任一已配置服务器不可达、或任一拉取因拒绝
   以外的原因失败时，拒绝给出无依据的干净报告。在查询进行期间才启动完成的服务器
   会在该判定之前被询问，而不会被报告为不可达：每次拉取都会重读实时句柄状态并
@@ -116,6 +116,32 @@ incoming/outgoing 调用在预热前后及请求后进行验证。陈旧、缺�
   公共查询的捕获逻辑不变，可能
   返回空数组或 null；这些**不能证明诊断干净**。
 - 传输不确认通知交付。本变更不重构异步写入或已关闭连接的处理。
+
+### 显式诊断归属
+
+`extensionToLanguage` 的键是直接的归属证据，即使内置扩展名表中没有该键。
+这样的扩展名在已配置服务器之间具有可判定的归属，因此外部服务器的空答案不能
+替代归属方缺失的答案，而失败的外部服务器也不能否决归属方的干净报告。
+显式键必须匹配文档同步的查找方式（小写扩展名，可带前导点）。本改动不引入
+空白归一化；映射值仍贡献已识别的语言别名。
+诊断专用表包含 `.mts`、`.h` 和 `.pyi` 等常见的次要扩展名。表外的非空且不含空白字符
+的语言 ID 会拥有同名扩展名，除非该 ID 同时也是配置中的服务器名称；这一判定无需
+维护封闭的允许列表即可接纳实时语言 ID，同时仍保守处理格式错误的声明和服务器名称键。
+没有任何已识别声明或显式映射的服务器名称键仍被视为未知，并保留保守的否决权。
+没有显式映射的未知扩展名保留上述回退行为。
+工作区符号预热的文件选择保持不变。
+
+已知限制：当一个可归属扩展名无法通过内置表或显式映射从服务器声明的语言 ID
+到达时，归属判定仍会 fail-closed。因此，使用未列出别名的健康服务器可能给出权威的
+干净答案却仍被拒绝（例如以 `pyright` 语言 ID 服务 `.pyi`）。本变更不解决这一来源
+信息缺口，也不改变 fail-closed 行为；是在句柄上携带配置来源信息，还是放宽归属
+要求，需要维护者另行决策。
+
+使用这些归属证据的路径包括诊断归属计数、失败与不支持响应的归属、初始不可用
+服务器报告、新就绪服务器选择，以及最终不可达服务器否决。最终判定使用实时配置
+判断是否可归属，即使查询开始时扩展名未知，新就绪归属方的答案也会计入。
+工作区诊断没有文件扩展名，保留现有的相关性语义。回归测试覆盖自定义映射归属、外部服务器否决、
+未归一化与未知声明、查询期间新增的归属方，以及不变的未知扩展名回退。
 
 ## 成本
 
@@ -166,17 +192,17 @@ unanswered`）；第二个拒绝改用未过滤的 `failures`/`unsupported` 账�
 blame an irrelevant server whose pull resolved to nothing`）。归属拆分另增两项：把
 `serverDeclaredIrrelevant` 的守卫回退为 `KNOWN_DIAGNOSTIC_EXTENSIONS`（`does not
 let a failed sibling veto a clean answer for a placeable extension`，且 `refuses an
-empty answer with no attributable owner from` 的 `pyright` 行会失去其覆盖性理由）；
-从干净答案闸门中去掉 attributable 项（`keeps a clean answer for an extension the
-tables cannot place`，三行全红，另加 `keeps a clean answer for a non-file URI the
-tables cannot place`）。工作区分支与归属表另增四项：工作区 catch 把
+empty answer with no attributable owner from` 的 `pyright` 行会变红）；对无法归属的
+扩展名也强制要求归属（`keeps a clean answer from the declared owner` 的 `Dockerfile`
+行，以及 `keeps a clean answer for a non-file URI the tables cannot place`）。
+工作区分支与归属表另增四项：工作区 catch 把
 `pullUnsupported` 重新并入 `failures`（`keeps a clean workspace report from the
 pull-capable of two servers`、`does not treat a lone -32601 workspace refusal as
 a failed pull`、`names a -32601 workspace refusal beside the failure that did
 veto`）；`serverDeclaredIrrelevant` 的归属谓词回退为
 `KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS`（`does not let a
 downed kotlin sibling veto a clean answer it cannot own`，且 `refuses an empty
-answer with no attributable owner from` 的 `kotlin` 行会失去其覆盖性理由）；
+answer with no attributable owner from` 的 `kotlin` 行会变红）；
 `declaredDiagnosticExtensions` 重新扩展全部四个 JS/TS 家族 ID（`does not let a
 downed javascript sibling veto a clean answer it cannot own` 及其
 `javascriptreact` 孪生用例）；文档分支的 `unreachableDiagnosticServers` 调用去掉
@@ -185,6 +211,14 @@ own`，身份映射各行一同变红）。晚就绪重试另增一项：删掉�
 `newlyReadyDiagnosticHandles` 的 `pending.push`（文档分支对应 `asks a server
 that became ready during the diagnostics query before deciding`，工作区分支对应其
 `workspaceDiagnostics` 孪生用例）。
+
+显式归属另增六个聚焦变异：恢复封闭的同名语言 ID 允许列表（`accepts self-naming
+ownership omitted from the attribution allowlist`）；恢复会读取继承属性的映射访问（`does not
+treat inherited mapping key`）；移除 TypeScript、JavaScript、C/C++ 或 Python 的次要
+扩展名行（`keeps a failed owner as a veto for mapped` 及 `.mts` 拒绝用例）；恢复映射键
+的 trim 过滤（`matches ownership to an untrimmed mapping key`）；删除无点映射查找
+（`accepts a dotless mapping key from the config loader`）；以及用 `answeredRelevant`
+而不是 `answeredAny` 选择终止文案（`reports an answering foreign server as unattributed`）。
 
 按照 AGENTS.md，涉及的服务、管理器及其相邻单元测试此前已重命名为 kebab-case。
 其聚合导出、原生客户端类型导入、集成测试和直接 E2E 测试框架导入已更新。公共类名

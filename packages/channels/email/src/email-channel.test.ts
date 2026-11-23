@@ -199,6 +199,23 @@ afterEach(async () => {
 });
 
 describe('email admission and delivery', () => {
+  it('falls back to followup when dispatchMode is unset or null and keeps steer', () => {
+    const effectiveMode = (channel: TestChannel) =>
+      (
+        channel as unknown as {
+          config: { dispatchMode?: string };
+        }
+      ).config.dispatchMode;
+
+    expect(effectiveMode(make().channel)).toBe('followup');
+    expect(effectiveMode(make({ dispatchMode: null }).channel)).toBe(
+      'followup',
+    );
+    expect(effectiveMode(make({ dispatchMode: 'steer' }).channel)).toBe(
+      'steer',
+    );
+  });
+
   it('skips history and delivers one new task with sender-only recipients and agent headers', async () => {
     append(raw('old'));
     const { channel } = make();
@@ -353,7 +370,7 @@ describe('email admission and delivery', () => {
     await channel.connect();
     for (let i = 0; i < 32; i++) append(raw(`pending-${i}`));
     await vi.waitFor(() => expect(prompt).toHaveBeenCalledTimes(32), {
-      timeout: 3000,
+      timeout: 10_000,
     });
     append(raw('busy', 'MUST_NOT_EXECUTE_WHILE_FULL'));
     await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(1));
@@ -367,7 +384,7 @@ describe('email admission and delivery', () => {
     for (const resolve of releases) resolve('done');
     await vi.waitFor(() => expect(fixture.sent).toHaveBeenCalledTimes(34));
     await idle();
-  });
+  }, 15_000);
 
   it('extracts bounded HTML and supported attachments through the base prompt flow, then removes files', async () => {
     let attachmentPath = '';

@@ -873,6 +873,16 @@ export class LoadedSettings {
     }
   }
 
+  setTopLevelValues(scope: SettingScope, values: Partial<Settings>): void {
+    const settingsFile = this.forScope(scope);
+    saveSettings(settingsFile, values, [], { throwOnWriteFailure: true });
+    for (const [key, value] of Object.entries(values)) {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
+    this._merged = this.computeMergedSettings();
+  }
+
   setValues(
     writes: ReadonlyArray<{
       scope: SettingScope;
@@ -1232,8 +1242,15 @@ function readSettingsLayers(
     // This is okay. The path might not exist yet, and that's a valid state.
   }
 
-  // We expect homedir to always exist and be resolvable.
-  const realHomeDir = resolveHomeDirectory();
+  // The home directory may not exist (e.g. a container user created without
+  // `-m`); like the workspace path above, that's a valid state. Fall back to
+  // the unresolved path so the home-vs-workspace comparison still works.
+  let realHomeDir = path.resolve(homedir());
+  try {
+    realHomeDir = resolveHomeDirectory();
+  } catch (_e) {
+    // This is okay. The path might not exist yet, and that's a valid state.
+  }
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,

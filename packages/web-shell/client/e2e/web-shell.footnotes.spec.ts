@@ -281,14 +281,13 @@ test.describe('footnote source previews', () => {
       const cardId = await initialCard.getAttribute('id');
       const card = page.locator(`[id="${cardId}"]`);
       await page.keyboard.press(key);
-      await page.keyboard.press('Tab');
-      await expect
-        .poll(() =>
-          card.evaluateAll((elements) =>
-            elements.some((element) => element.matches(':focus-within')),
-          ),
-        )
-        .toBe(true);
+      // The card pulls focus into its content on the next animation frame.
+      // Wait for that focus to land before tabbing: a Tab dispatched first
+      // moves focus to the adjacent reference trigger, and this card
+      // dismisses before its pagination can be reached.
+      await expect(
+        card.locator('a[href], button:not(:disabled)').first(),
+      ).toBeFocused();
       const next = card.getByRole('button', { name: /Next/i });
       for (
         let attempts = 0;

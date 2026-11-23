@@ -3,12 +3,12 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.StorageIdentityReader.Identity;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageMarkers.Marker;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -43,7 +43,7 @@ public class WorkspaceStorageGuard {
     private final WorkspaceCreationRoots createdRoots;
     private final boolean enabled;
     private final StorageIdentityReader identities;
-    private SshWorkspaceStore ssh;
+    private JdbcSshWorkspaceStore ssh;
     private final ObjectMapper json = new ObjectMapper();
     private final WorkspaceStorageMarkers markers = new WorkspaceStorageMarkers(json);
 
@@ -71,7 +71,7 @@ public class WorkspaceStorageGuard {
     }
 
     @Autowired
-    void configureSsh(SshWorkspaceStore store, ManagedAgentSettings properties) {
+    void configureSsh(JdbcSshWorkspaceStore store, ManagedAgentSettings properties) {
         this.ssh = properties.getRuntimeBroker().getSsh().getNodes().isEmpty() ? null : store;
     }
 
@@ -85,7 +85,7 @@ public class WorkspaceStorageGuard {
             return "unconfigured";
         }
         var alias = LocalStorageOwners.alias(jdbc, tenantId, storageId, false);
-        if (alias == null || !(alias.get("physical_key") instanceof String physical)) {
+        if (alias == null || !(alias.get("physical_id") instanceof String physical)) {
             return "unverified";
         }
         Registration row = row(physical, false);
@@ -132,7 +132,7 @@ public class WorkspaceStorageGuard {
             long revision, String operationId) {
         requireOwnedRoot(tenantId, storageId);
         if (!enabled || !validId(operationId)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return authorityRead(() -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
@@ -142,7 +142,7 @@ public class WorkspaceStorageGuard {
             Path original = root(tenantId, storageId);
             requireMatching(saved, identity(original), tenantId, storageId);
             if (!marker(saved).equals(markers.read(original))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return new RecoveryRegistration(tenantId, storageId, saved.registrationId(), revision,
                     operationId, saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
@@ -160,7 +160,7 @@ public class WorkspaceStorageGuard {
                     saved.revision(), saved.operationId(), saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
             if (!metadata.equals(expected) || !physical.equals(LocalStorageOwners.physicalKey(new Identity(
                     saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime())))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return null;
         });
@@ -179,7 +179,7 @@ public class WorkspaceStorageGuard {
                 || saved.bindingId() != null || saved.runtimeGeneration() != null
                 || saved.runtimeSessionId() != null || !validId(saved.registrationId())
                 || saved.completedOperationId() != null || occupied(physical, true)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -209,7 +209,7 @@ public class WorkspaceStorageGuard {
     void verifyMaintenanceRecovery(ContextBinding binding) {
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (!enabled) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), true);
     }
@@ -220,7 +220,7 @@ public class WorkspaceStorageGuard {
 
     Path verifiedRoot(ContextBinding binding) {
         if (!enabled) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         verify(binding);
@@ -229,7 +229,7 @@ public class WorkspaceStorageGuard {
 
     Path verifiedRootForRead(ContextBinding binding) {
         if (!enabled) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         String tenant = binding.getTenantId();
         String storage = binding.getStorageId();
@@ -247,14 +247,18 @@ public class WorkspaceStorageGuard {
     }
 
     private Map<String, String> fileRoot(Path path) {
-        Identity actual = identity(path);
-        return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
+        try {
+            Identity actual = identities.readLegacy(path);
+            return Map.of("root", path.toString(), "device", actual.device(), "inode", actual.inode());
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
     }
 
     void registerCreated(String tenantId, String storageId, String operationId) {
         var root = createdRoots.registration(tenantId, storageId, true);
         if (root == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         register(tenantId, storageId, operationId, root.path(), root.expectedIdentity());
     }
@@ -265,12 +269,12 @@ public class WorkspaceStorageGuard {
 
     private void register(String tenantId, String storageId, String operationId, Path root, Identity expectedIdentity) {
         if (!enabled || !validId(operationId)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
-        Identity identity = identity(root);
+        Identity identity = expectedIdentity == null ? identity(root) : identity(root, expectedIdentity);
         if (expectedIdentity != null && !expectedIdentity.equals(identity)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         String key = LocalStorageOwners.physicalKey(identity);
         Registration prepared = transaction.execute(status -> {
@@ -279,53 +283,53 @@ public class WorkspaceStorageGuard {
             if (expectedIdentity != null) {
                 Registration existing = row(key, true);
                 if (existing != null && (!tenantId.equals(existing.tenantId()) || !storageId.equals(existing.storageId()))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             }
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             prepareAlias(tenantId, storageId, key, operationId);
             jdbc.update("INSERT INTO ma_storage_owner"
-                    + " (storage_key, physical_key, tenant_id, storage_id) VALUES (?, ?, ?, ?)"
-                    + " ON DUPLICATE KEY UPDATE storage_key = storage_key",
-                    key, key, tenantId, storageId);
+                    + " (physical_id, tenant_id, storage_id) VALUES (?, ?, ?)"
+                    + " ON DUPLICATE KEY UPDATE physical_id = physical_id",
+                    key, tenantId, storageId);
             Registration row = row(key, true);
             requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if ("READY".equals(row.state()) && row.operationId() == null && row.revision() > 0) {
                 requireMatching(row, identity, tenantId, storageId);
                 return row;
             }
             if (!"UNVERIFIED".equals(row.state())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if (row.operationId() == null && row.registrationId() == null) {
                 String registrationId = UUID.randomUUID().toString();
                 jdbc.update("UPDATE ma_storage_owner SET tenant_id = ?, storage_id = ?,"
                         + " mount_operation_id = ?, mount_root = ?, mount_host_id = ?,"
                         + " mount_device = ?, mount_inode = ?, mount_birth_time = ?, mount_registration_id = ?"
-                        + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'UNVERIFIED'",
+                        + " WHERE physical_id = ? AND storage_kind = 'LOCAL' AND mount_state = 'UNVERIFIED'",
                         tenantId, storageId, operationId, identity.root(), identity.hostId(),
                         identity.device(), identity.inode(), identity.birthTime(), registrationId, key);
                 return row(key, true);
             }
             if (!operationId.equals(row.operationId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             requireMatching(row, identity, tenantId, storageId);
             return row;
         });
         if (prepared == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Marker marker = marker(prepared);
         Path metadataRoot = markerRoot(marker, root, !"READY".equals(prepared.state()));
         if ("READY".equals(prepared.state())) {
             requireMatching(prepared, identity(root), tenantId, storageId);
             if (!marker.equals(markers.read(metadataRoot))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         } else {
             markers.publish(metadataRoot, marker);
@@ -338,26 +342,26 @@ public class WorkspaceStorageGuard {
             requireNoExecutionMembers(key);
             if (row == null || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             requireMatching(row, identity(root), tenantId, storageId);
             if (!marker.equals(marker(row)) || !marker.equals(markers.read(metadataRoot))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             if ("READY".equals(row.state()) && row.operationId() == null && row.revision() > 0) {
                 completeAlias(tenantId, storageId, key);
                 return;
             }
             if (!"UNVERIFIED".equals(row.state()) || !operationId.equals(row.operationId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
-                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE storage_key = ? AND storage_kind = 'LOCAL' "
+                    + " mount_operation_id = NULL, mount_completed_operation_id = ? WHERE physical_id = ? AND storage_kind = 'LOCAL' "
                     + " AND mount_state = 'UNVERIFIED' AND mount_operation_id = ?"
                     + " AND mount_revision = 0", operationId, key, operationId);
             if (changed != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             completeAlias(tenantId, storageId, key);
         });
@@ -365,34 +369,32 @@ public class WorkspaceStorageGuard {
 
     private void prepareAlias(String tenant, String storage, String physical, String operation) {
         String request = "{\"schemaVersion\":1,\"operationId\":\"" + operation + "\"}";
-        jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
-                + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_key IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_key = COALESCE(physical_key, VALUES(physical_key)),"
+        jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
+                + " storage_kind, registration_json, gmt_create, gmt_modified) VALUES (?, ?, ?, 'LOCAL', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")"
+                + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_id IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_id = COALESCE(physical_id, VALUES(physical_id)),"
                 + " storage_kind = CASE WHEN storage_kind = 'UNREGISTERED' THEN 'LOCAL' ELSE storage_kind END,"
                 + " registration_json = COALESCE(registration_json, VALUES(registration_json))",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(storage), tenant, storage, physical, request);
+                tenant, storage, physical, request);
         var alias = LocalStorageOwners.alias(jdbc, tenant, storage, true);
-        if (alias == null || !physical.equals(alias.get("physical_key")) || !"LOCAL".equals(alias.get("storage_kind"))
+        if (alias == null || !physical.equals(alias.get("physical_id")) || !"LOCAL".equals(alias.get("storage_kind"))
                 || !List.of("FENCE_ONLY", "REGISTERED").contains(alias.get("registration_state"))
                 || alias.get("fence_operation_id") != null
                 || !operation.equals(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse((String) alias.get("registration_json")).path("operationId").asText())) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     private void completeAlias(String tenant, String storage, String physical) {
-        if (jdbc.update("UPDATE ma_storage SET gmt_modified = CASE WHEN registration_state <> 'REGISTERED' OR registration_revision IS NULL THEN " + ManagedSchemaTime.SQL_NOW + " ELSE gmt_modified END, registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1) WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage), physical) != 1) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+        if (jdbc.update("UPDATE ma_storage SET gmt_modified = CASE WHEN registration_state <> 'REGISTERED' OR registration_revision IS NULL THEN " + ManagedSchemaTime.SQL_NOW + " ELSE gmt_modified END, registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1) WHERE tenant_id = ? AND storage_id = ? AND physical_id = ? AND storage_kind = 'LOCAL'",
+                tenant, storage, physical) != 1) {
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     public void fence(String tenantId, String storageId, long revision, String operationId) {
         requireOwnedRoot(tenantId, storageId);
         if (!enabled || !validId(operationId)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
@@ -403,7 +405,7 @@ public class WorkspaceStorageGuard {
                         WorkspaceOperations.Kind.STORAGE_MIGRATION, migration, false);
                 if (saved == null || !operationId.equals(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.parse((String) saved.get("request_json"))
                         .path("fenceOperationId").asText())) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             }
             String physical = LocalStorageOwners.lockCovered(jdbc, tenantId, storageId);
@@ -417,13 +419,13 @@ public class WorkspaceStorageGuard {
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET mount_state = 'FENCED', mount_operation_id = ?,"
                     + " mount_completed_operation_id = NULL"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                    + " WHERE physical_id = ? AND storage_kind = 'LOCAL'"
                     + " AND mount_state = 'READY' AND mount_revision = ?"
-                    + " AND holder_key IS NULL AND binding_id IS NULL"
+                    + " AND holder_id IS NULL AND binding_id IS NULL"
                     + " AND runtime_generation IS NULL AND runtime_session_id IS NULL",
                     operationId, physical, revision);
             if (changed != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         });
     }
@@ -432,14 +434,14 @@ public class WorkspaceStorageGuard {
             String operationId) {
         requireOwnedRoot(tenantId, storageId);
         if (!enabled || !validId(operationId)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Path root = root(tenantId, storageId);
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
             if (WorkspaceMigrationAdmission.owner(jdbc, tenantId, storageId) != null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             String physical = LocalStorageOwners.lockCovered(jdbc, tenantId, storageId);
             Registration row = row(physical, true);
@@ -448,7 +450,7 @@ public class WorkspaceStorageGuard {
                     && operationId.equals(row.completedOperationId())) {
                 requireMatching(row, identity(root), tenantId, storageId);
                 if (!marker(row).equals(markers.read(root))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
                 return;
             }
@@ -457,20 +459,20 @@ public class WorkspaceStorageGuard {
                     || row.revision() != revision || !operationId.equals(row.operationId())
                     || row.holderKey() != null || row.bindingId() != null
                     || row.runtimeGeneration() != null || row.runtimeSessionId() != null) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             requireMatching(row, identity(root), tenantId, storageId);
             if (!marker(row).equals(markers.read(root))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             int changed = jdbc.update("UPDATE ma_storage_owner"
                     + " SET mount_state = 'READY', mount_revision = mount_revision + 1,"
                     + " mount_operation_id = NULL, mount_completed_operation_id = ?"
-                    + " WHERE storage_key = ? AND storage_kind = 'LOCAL' AND mount_state = 'FENCED'"
+                    + " WHERE physical_id = ? AND storage_kind = 'LOCAL' AND mount_state = 'FENCED'"
                     + " AND mount_revision = ? AND mount_operation_id = ?",
                     operationId, physical, revision, operationId);
             if (changed != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         });
     }
@@ -484,72 +486,41 @@ public class WorkspaceStorageGuard {
         Identity actual = identity(root);
         if (row == null || !"READY".equals(row.state()) || row.operationId() != null
                 || row.revision() <= 0) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         requireMatching(row, actual, tenantId, storageId);
         verifyHistory(tenantId, storageId, false);
         if (!marker(row).equals(markers.read(markerRoot(marker(row), root, false)))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Path directory = root.resolve(cwd).normalize();
         try {
             if (!directory.startsWith(root)
                     || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
                     || !directory.toRealPath().equals(directory)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException | IllegalArgumentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return root;
     }
 
     private void requireNoExecutionMembers(String physical) {
         if (occupied(physical, true)) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     private boolean occupied(String physical, boolean lock) {
-        List<Number> counts = jdbc.query("SELECT member_count FROM ma_storage_owner WHERE storage_key = ?"
+        List<Number> counts = jdbc.query("SELECT member_count FROM ma_storage_owner WHERE physical_id = ?"
                 + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> (Number) row.getObject("member_count"), physical);
         return !counts.isEmpty() && counts.getFirst().longValue() > 0;
     }
 
     private void verifyHistory(String tenantId, String storageId, boolean probe) {
-        var migrations = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
-                + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED' ORDER BY gmt_modified DESC LIMIT 1",
-                (row, index) -> WorkspaceOperations.operation(row), tenantId,
-                JdbcRuntimeBindingRepository.storageAliasKey(tenantId, storageId));
-        if (!migrations.isEmpty()) {
-            Identity expected;
-            try {
-                expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
-            } catch (IOException error) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            }
-            String home = System.getenv("QWEN_HOME");
-            if (home == null || !Path.of(home).isAbsolute()
-                    || !Path.of(home).resolve("file-history").toString().equals(expected.root())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            }
-            try {
-                if (!Path.of(home).toRealPath().equals(Path.of(home))
-                        || !expected.equals(identities.read(Path.of(expected.root())))) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-                }
-            } catch (NoSuchFileException | AccessDeniedException error) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            } catch (IOException error) {
-                if (probe) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
-                }
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            } catch (RuntimeException error) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
-            }
-        }
+        LocalStorageOwners.verifyHistory(jdbc, json, identities, tenantId, storageId, probe);
     }
 
     // Probe-only verification: identical structural checks to verify(), but
@@ -579,19 +550,19 @@ public class WorkspaceStorageGuard {
         try {
             actual = identities.read(root);
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         } catch (RuntimeException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Registration row = row(key(tenantId, storageId), false);
         if (row == null || !"READY".equals(row.state()) || row.operationId() != null
                 || row.revision() <= 0) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         requireMatching(row, actual, tenantId, storageId);
         verifyHistory(tenantId, storageId, true);
         if (!marker(row).equals(markers.readProbe(markerRoot(marker(row), root, false)))) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         Path directory = root.resolve(cwd).normalize();
         try {
@@ -600,32 +571,32 @@ public class WorkspaceStorageGuard {
                             BasicFileAttributes.class,
                             LinkOption.NOFOLLOW_LINKS).isDirectory()
                     || !directory.toRealPath().equals(directory)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             directory.getFileSystem().provider().checkAccess(directory,
                     AccessMode.READ, AccessMode.EXECUTE);
         } catch (NoSuchFileException | AccessDeniedException
                 | SecurityException | IllegalArgumentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailableTransient(error);
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
     private Registration row(String key, boolean lock) {
-        List<Registration> rows = jdbc.query("SELECT physical_key, tenant_id, storage_id, holder_key,"
+        List<Registration> rows = jdbc.query("SELECT physical_id, tenant_id, storage_id, holder_id,"
                 + " binding_id, runtime_generation, runtime_session_id,"
                 + " mount_revision, mount_state, mount_operation_id, mount_root,"
                 + " mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
                 + " mount_completed_operation_id"
-                + " FROM ma_storage_owner WHERE storage_key = ? AND storage_kind = 'LOCAL'"
+                + " FROM ma_storage_owner WHERE physical_id = ? AND storage_kind = 'LOCAL'"
                 + (lock ? " FOR UPDATE" : ""), (result, index) -> {
-                    if (!key.equals(result.getString("physical_key"))) {
-                        throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    if (!key.equals(ManagedSchemaRows.identity(result, "physical_id"))) {
+                        throw WorkspaceExecutionStore.unavailable();
                     }
                     return new Registration(
                         result.getString("tenant_id"), result.getString("storage_id"),
-                        result.getString("holder_key"), result.getString("binding_id"),
+                        ManagedSchemaRows.identity(result, "holder_id"), result.getString("binding_id"),
                         result.getObject("runtime_generation", Long.class),
                         result.getString("runtime_session_id"), result.getLong("mount_revision"),
                         result.getString("mount_state"), result.getString("mount_operation_id"),
@@ -647,11 +618,11 @@ public class WorkspaceStorageGuard {
             Registration saved = row(physical, true);
             if (saved == null || saved.revision() != revision || !List.of("READY", "FENCED").contains(saved.state())
                     || "FENCED".equals(saved.state()) && !fence.equals(saved.operationId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             requireMatching(saved, identity(root(tenant, storage)), tenant, storage);
             if (!marker(saved).equals(markers.read(root(tenant, storage)))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             return new RecoveryRegistration(tenant, storage, saved.registrationId(), revision, fence,
                     saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
@@ -665,10 +636,11 @@ public class WorkspaceStorageGuard {
     byte[] migrationMarker(String tenant, String storage, Identity target, String registration) {
         requireOwnedRoot(tenant, storage);
         try {
-            return json.writeValueAsBytes(new Marker(2, tenant, storage, target.root(), target.hostId(),
+            return json.writeValueAsBytes(new Marker(target.device().matches("[0-9a-f]{32}") ? 3 : 2,
+                    tenant, storage, target.root(), target.hostId(),
                     target.device(), target.inode(), target.birthTime(), registration));
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -685,18 +657,18 @@ public class WorkspaceStorageGuard {
             if (!Files.isRegularFile(temporary, LinkOption.NOFOLLOW_LINKS)
                     || ((Number) Files.getAttribute(temporary, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() != 1
                     || Files.size(temporary) > expected.length) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             byte[] partial = Files.readAllBytes(temporary);
             if (!java.util.Arrays.equals(partial, java.util.Arrays.copyOf(expected, partial.length))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             Files.delete(temporary);
             try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
                 directory.force(true);
             }
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -707,7 +679,7 @@ public class WorkspaceStorageGuard {
             expected = json.readValue(expectedBytes, Marker.class);
             Registration provenance = row(key(original.tenantId(), original.storageId()), false);
             if (provenance == null || !original.registrationId().equals(provenance.registrationId())) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             Marker old = marker(provenance);
             Marker current = markers.read(root);
@@ -715,7 +687,7 @@ public class WorkspaceStorageGuard {
                 return;
             }
             if (!old.equals(current)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             Path temporary = migrationTemporary(root, operation);
             if (Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
@@ -723,7 +695,7 @@ public class WorkspaceStorageGuard {
                         || ((Number) Files.getAttribute(temporary, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() != 1
                         || Files.size(temporary) != expectedBytes.length
                         || !java.util.Arrays.equals(Files.readAllBytes(temporary), expectedBytes)) {
-                    throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                    throw WorkspaceExecutionStore.unavailable();
                 }
             } else {
                 try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW,
@@ -749,10 +721,10 @@ public class WorkspaceStorageGuard {
                 directory.force(true);
             }
             if (!expected.equals(markers.read(root))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -765,21 +737,21 @@ public class WorkspaceStorageGuard {
             if (!source.hostId().equals(target.hostId()) || !target.equals(identity(Path.of(target.root())))
                     || !new String(migrationMarker(source.tenantId(), source.storageId(), target, registration), StandardCharsets.UTF_8)
                         .equals(markerJson(Path.of(target.root())))) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
             String previous = LocalStorageOwners.lockCovered(jdbc, source.tenantId(), source.storageId());
             String physical = LocalStorageOwners.physicalKey(target);
             if (physical.equals(previous)) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+                throw WorkspaceExecutionStore.unavailable();
             }
-            int created = jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id,"
+            int created = jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, tenant_id, storage_id,"
                     + " mount_root, mount_host_id, mount_device, mount_inode, mount_birth_time, mount_registration_id,"
-                    + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, ?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
-                    physical, physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
+                    + " mount_revision, mount_state, mount_completed_operation_id) VALUES (?, 'LOCAL', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY', ?)",
+                    physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
                     target.birthTime(), registration, source.mountRevision() + 1, operation);
-            if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_key = ?, registration_revision = registration_revision + 1 WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
-                    physical, JdbcRuntimeBindingRepository.storageAliasKey(source.tenantId(), source.storageId()), previous) != 1) {
-                throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_id = ?, registration_revision = registration_revision + 1 WHERE tenant_id = ? AND storage_id = ? AND physical_id = ? AND storage_kind = 'LOCAL'",
+                    physical, source.tenantId(), source.storageId(), previous) != 1) {
+                throw WorkspaceExecutionStore.unavailable();
             }
         });
     }
@@ -788,7 +760,7 @@ public class WorkspaceStorageGuard {
         try {
             return json.writeValueAsString(markers.read(root));
         } catch (IOException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -796,7 +768,7 @@ public class WorkspaceStorageGuard {
         try {
             LocalStorageOwners.requireNonOverlapping(jdbc, identity);
         } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException conflict) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -808,34 +780,56 @@ public class WorkspaceStorageGuard {
     private Path root(String tenantId, String storageId) {
         Path root = configuredRoot(tenantId, storageId);
         if (root == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
         return root;
     }
 
     Identity identity(Path root) {
-        try {
-            return identities.read(root);
-        } catch (IOException | RuntimeException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable(error);
-        }
+        return LocalStorageOwners.identity(jdbc, identities, root);
+    }
+
+    Identity identity(Path root, Identity expected) {
+        return LocalStorageOwners.identity(identities, root, expected);
     }
 
     private void requireMatching(Registration row, Identity identity,
             String tenantId, String storageId) {
+        if (row.device() != null && row.device().matches("[0-9]{1,20}")
+                && identity.device().matches("[0-9a-f]{32}")) {
+            try {
+                Identity legacy = identities.readLegacy(Path.of(identity.root()));
+                if (!identity.hostId().equals(legacy.hostId()) || !identity.inode().equals(legacy.inode())
+                        || !identity.birthTime().equals(legacy.birthTime())) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+                identity = legacy;
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable(error);
+            }
+        }
         var alias = LocalStorageOwners.alias(jdbc, tenantId, storageId, false);
-        if (alias == null || !LocalStorageOwners.physicalKey(identity).equals(alias.get("physical_key"))
+        if (alias == null || !LocalStorageOwners.physicalKey(identity).equals(alias.get("physical_id"))
                 || row.tenantId() == null || row.storageId() == null
                 || !identity.root().equals(row.root()) || !identity.hostId().equals(row.hostId())
                 || !identity.device().equals(row.device()) || !identity.inode().equals(row.inode())
                 || !identity.birthTime().equals(row.birthTime()) || row.registrationId() == null) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
     private Marker marker(Registration row) {
-        return new Marker(2, row.tenantId(), row.storageId(), row.root(), row.hostId(),
+        return new Marker(row.device() != null && row.device().matches("[0-9a-f]{32}") ? 3 : 2,
+                row.tenantId(), row.storageId(), row.root(), row.hostId(),
                 row.device(), row.inode(), row.birthTime(), row.registrationId());
+    }
+
+    Path reattestationMarkerRoot(String physical) {
+        Registration saved = row(physical, false);
+        if (!enabled || saved == null || saved.root() == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return markerRoot(marker(saved), Path.of(saved.root()), false);
     }
 
     void requireOwnedRoot(String tenant, String storage) {

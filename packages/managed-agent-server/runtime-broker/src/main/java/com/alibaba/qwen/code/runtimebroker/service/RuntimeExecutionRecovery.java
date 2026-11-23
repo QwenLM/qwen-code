@@ -17,6 +17,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.failed;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.invalid;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
@@ -33,6 +34,7 @@ final class RuntimeExecutionRecovery {
     private final RuntimeTransport transport;
     private final RuntimeExecutionReconciler executionReconciler;
     private final AtomicBoolean closed;
+    private volatile java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> adoptedSessions;
 
     RuntimeExecutionRecovery(RuntimeBindingRegistry bindingRegistry,
             RuntimeExecutionState executionState,
@@ -48,6 +50,12 @@ final class RuntimeExecutionRecovery {
         this.transport = transport;
         this.executionReconciler = executionReconciler;
         this.closed = closed;
+        this.adoptedSessions = bindingRegistry::requireReadySession;
+    }
+
+    void setAdoptedSessionLookup(
+            java.util.function.BiFunction<String, String, CompletionStage<SessionContext>> lookup) {
+        this.adoptedSessions = lookup;
     }
 
     /**
@@ -62,7 +70,7 @@ final class RuntimeExecutionRecovery {
         requireOpen(closed);
         String invocationId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return bindingRegistry.requireReadySession(harnessSessionId, runtimeSessionId)
+        return adoptedSessions.apply(harnessSessionId, runtimeSessionId)
                 .thenCompose(context -> {
                     ToolExecutionRecord invocation = executionState.requireExecution(context, invocationId);
                     ToolExecutionRecord process = executionState.requireExecution(context, invocationId + ":process");
@@ -93,7 +101,20 @@ final class RuntimeExecutionRecovery {
             return failed(notFound("runtime_execution_not_found",
                     "The background process was not found"));
         }
-        return bindingRegistry.requireReadySession(harnessSessionId, row.getRuntimeSessionId())
+        // Tenant-scoped read-only pre-check before any adoption side effect.
+        // Adoption resolves the tenant from harnessSessionId (not the caller's)
+        // and may recover a binding and send control RPCs that settle rows, so
+        // a mismatched caller tenant must 404 here with zero side effects —
+        // the raw registry lookup this replaces was a read-only map check.
+        if (sessionRepository.findHistorical(
+                tenantId, harnessSessionId, row.getRuntimeSessionId()) == null) {
+            return failed(notFound("runtime_execution_not_found",
+                    "The background process was not found"));
+        }
+        // Adopt the durable Session like observeBackgroundProcess does: a
+        // cancel can land on a Broker that restarted (or a replica) and has
+        // no in-memory registry entry yet, and the raw registry would 404.
+        return adoptedSessions.apply(harnessSessionId, row.getRuntimeSessionId())
                 .thenCompose(context -> {
                     if (!context.session().getScope().getTenantId()
                             .equals(tenantId)) {
@@ -354,6 +375,55 @@ final class RuntimeExecutionRecovery {
                     .exceptionally(failure -> null));
         }
         return chain;
+    }
+
+    /**
+     * The mount handback's guarded second half, after the observe-only sweep:
+     * re-check the claim under the lock, refuse while any operation is active
+     * (the swept background rows excluded), then re-read WITHOUT the exclusion
+     * so a background row the sweep could not prove stopped keeps the mount
+     * instead of being handed back over a running writer (#13800
+     * observe-and-hold). A settled execution whose capture never proved its
+     * writer stopped keeps the mount for good. Kept beside the sweep so the
+     * broker facade stays under its size ratchet.
+     */
+    CompletionStage<Boolean> releaseMountAfterSweep(SessionContext context,
+            String claimId, String runtimeId) {
+        context.lock();
+        try {
+            if (!claimId.equals(context.mountClaim())) {
+                throw conflict("runtime_session_conflict",
+                        "Mount claim was superseded by a later acquire");
+            }
+            if (context.hasActiveControl()
+                    || executionRepository.hasActiveByRuntimeSession(
+                            context.binding().getBindingId(),
+                            context.binding().getGeneration(), runtimeId,
+                            new java.util.HashSet<>(context.backgroundProcesses()))) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active operation");
+            }
+            // The observation settles only provable exits; a background row
+            // still live or unproven keeps the mount. Re-read without the
+            // exclusion so a row the sweep could not settle is never handed
+            // back over.
+            if (executionRepository.hasActiveByRuntimeSession(
+                    context.binding().getBindingId(),
+                    context.binding().getGeneration(), runtimeId)) {
+                throw conflict("runtime_session_busy",
+                        "Runtime Session has an active background process");
+            }
+            if (executionRepository.hasUnprovenCaptureByRuntimeSession(
+                    context.binding().getBindingId(),
+                    context.binding().getGeneration(), runtimeId)) {
+                throw conflict("workspace_writer_unproven",
+                        "A settled execution never proved its writer stopped");
+            }
+            return safeStage(() -> transport.releaseMount(context.lease(),
+                    context.session())).toCompletableFuture();
+        } finally {
+            context.unlock();
+        }
     }
 
     /**

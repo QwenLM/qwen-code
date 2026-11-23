@@ -11,6 +11,7 @@ import {
   stripSuppressOnRestore,
   expandCollapsedHistory,
   computeResumedPromptCountSeed,
+  computeResumedUserTurnCount,
 } from './resumeHistoryUtils.js';
 import { MessageType, ToolCallStatus } from '../types.js';
 import { buildApiHistoryFromConversation } from '@qwen-code/qwen-code-core';
@@ -2563,4 +2564,87 @@ describe('computeResumedPromptCountSeed', () => {
       );
     },
   );
+});
+
+describe('computeResumedUserTurnCount', () => {
+  const userRecord = (subtype?: string, teammateTurn?: boolean): ChatRecord =>
+    ({
+      uuid: `u-${subtype ?? 'plain'}`,
+      parentUuid: null,
+      sessionId: 's',
+      timestamp: '2026-11-18T00:00:00.000Z',
+      cwd: '/workspace',
+      version: '0.27.4',
+      type: 'user',
+      ...(subtype ? { subtype } : {}),
+      ...(teammateTurn ? { teammateTurn: true } : {}),
+      message: { role: 'user', content: 'hi' },
+    }) as unknown as ChatRecord;
+
+  it('counts only genuine user turns, not mid-turn or realtime messages', () => {
+    expect(computeResumedUserTurnCount([])).toBe(0);
+    expect(
+      computeResumedUserTurnCount([
+        userRecord(),
+        userRecord('mid_turn_user_message'),
+        userRecord(),
+        userRecord('realtime_message'),
+        userRecord(),
+      ]),
+    ).toBe(3);
+  });
+
+  it('excludes background and agent records that are type:user but not user prompts (R15-1)', () => {
+    // One plain user prompt plus one background notification record: the
+    // visible statistic counts 1, not 2 — the live counter never advances for
+    // a notification. goal_runtime and the session multi-agent records are
+    // likewise type:user but never a real user prompt.
+    expect(
+      computeResumedUserTurnCount([userRecord(), userRecord('notification')]),
+    ).toBe(1);
+    // cron stays counted: the live counter advances for Cron sends.
+    expect(
+      computeResumedUserTurnCount([
+        userRecord(),
+        userRecord('notification'),
+        userRecord('goal_runtime'),
+        userRecord('agent_mention'),
+        userRecord('agent_message'),
+        userRecord('cron'),
+      ]),
+    ).toBe(2);
+  });
+
+  it('counts a Teammate turn recorded as a notification, but not a cold notification (R17-1)', () => {
+    // A Teammate turn records as subtype:'notification' with teammateTurn:true
+    // and the live counter advances for it, so the resume seed counts it. A
+    // cold background notification (no teammateTurn) stays excluded.
+    expect(
+      computeResumedUserTurnCount([
+        userRecord(),
+        userRecord('notification', true),
+        userRecord('notification'),
+      ]),
+    ).toBe(2);
+    // Without the teammateTurn marker the same notification record is excluded
+    // (this is the assertion that fails if the marker is dropped).
+    expect(
+      computeResumedUserTurnCount([userRecord(), userRecord('notification')]),
+    ).toBe(1);
+  });
+
+  it('stays below the mint seed when background mints claimed higher ids (S1)', () => {
+    // Three user turns plus a background notification that claimed id 9: the
+    // mint seed is 10 (highest claim + 1) while the visible-statistic seed
+    // stays at the user-turn count (3), since the notification is not a user
+    // turn. The fixture actually constructs the higher claim the name describes.
+    const records = [
+      { ...userRecord(), promptId: 's########0' },
+      { ...userRecord(), promptId: 's########1' },
+      { ...userRecord(), promptId: 's########2' },
+      { ...userRecord('notification'), promptId: 's########9' },
+    ];
+    expect(computeResumedUserTurnCount(records)).toBe(3);
+    expect(computeResumedPromptCountSeed(records, 's')).toBe(10);
+  });
 });

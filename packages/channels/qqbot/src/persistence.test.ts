@@ -34,14 +34,28 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: vi.fn(),
 }));
 
+const { mockLoadCredentials } = vi.hoisted(() => ({
+  mockLoadCredentials: vi.fn<() => { appId: string; appSecret: string } | null>(
+    () => null,
+  ),
+}));
+
 vi.mock('./accounts.js', () => ({
   getCredsFilePath: () => '/tmp/test-creds.json',
-  loadCredentials: () => null,
+  loadCredentials: mockLoadCredentials,
   saveCredentials: vi.fn(),
 }));
 
+const { mockQrCodeLogin } = vi.hoisted(() => ({
+  mockQrCodeLogin: vi.fn(async () => ({
+    appId: 'qr-app',
+    appSecret: 'qr-secret',
+  })),
+}));
+
 vi.mock('./login.js', () => ({
-  qrCodeLogin: vi.fn(),
+  qrCodeLogin: mockQrCodeLogin,
+  startQrLogin: vi.fn(),
 }));
 
 // The pure channel-base helpers stay the shipped implementations rather than
@@ -667,4 +681,144 @@ describe('channel-base test double', () => {
     expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
     expect(mocked.unwrapMessageRoutingKey).toBe(actual.unwrapMessageRoutingKey);
   });
+});
+
+describe('shared credentials file adoption', () => {
+  const FOREIGN = { appId: 'OTHER-WORKSPACE-APPID', appSecret: 'other-secret' };
+  const originalServe = process.env['QWEN_CODE_SERVE'];
+
+  const channel = () =>
+    new QQChannel(
+      'qq-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    );
+
+  afterEach(() => {
+    if (originalServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = originalServe;
+    mockLoadCredentials.mockReset();
+    mockLoadCredentials.mockReturnValue(null);
+    vi.restoreAllMocks();
+  });
+
+  it('never adopts the name-keyed file in a daemon worker', async () => {
+    process.env['QWEN_CODE_SERVE'] = '1';
+    mockLoadCredentials.mockReturnValue(FOREIGN);
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const ch = channel();
+    await expect(
+      (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken.call(
+        ch,
+      ),
+    ).rejects.toThrow(/has no appID\/appSecret/);
+    // The file holds another workspace's bot; it must not be consulted at all.
+    expect(mockLoadCredentials).not.toHaveBeenCalled();
+    expect(mockFetchAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('still adopts the file for an interactive CLI run', async () => {
+    delete process.env['QWEN_CODE_SERVE'];
+    mockLoadCredentials.mockReturnValue(FOREIGN);
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'tok',
+      expiresIn: 7200,
+    });
+    const ch = channel();
+    await expect(
+      (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken.call(
+        ch,
+      ),
+    ).resolves.toBeUndefined();
+    expect(mockFetchAccessToken).toHaveBeenCalledWith(
+      FOREIGN.appId,
+      FOREIGN.appSecret,
+    );
+  });
+});
+
+describe('credential-less QR fallback visibility guard', () => {
+  // A stream cannot distinguish a pipe to a human-visible `tee` from a pipe to
+  // a daemon worker, so the guard keys on the supervisor's explicit context.
+  // Every terminal shape must keep working, including the piped ones.
+  const cells: Array<[string, boolean, boolean, boolean, boolean]> = [
+    ['daemon worker, stdout tty', true, true, true, true],
+    ['daemon worker, stdout piped', true, false, false, true],
+    ['terminal, both tty', false, true, true, false],
+    ['terminal, stdout piped through tee', false, false, true, false],
+    ['terminal, stderr redirected', false, true, false, false],
+  ];
+
+  const original = {
+    out: Object.getOwnPropertyDescriptor(process.stdout, 'isTTY'),
+    err: Object.getOwnPropertyDescriptor(process.stderr, 'isTTY'),
+    serve: process.env['QWEN_CODE_SERVE'],
+  };
+  const setTTY = (stream: NodeJS.WriteStream, value: boolean) => {
+    Object.defineProperty(stream, 'isTTY', {
+      value,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  afterEach(() => {
+    for (const [stream, desc] of [
+      [process.stdout, original.out],
+      [process.stderr, original.err],
+    ] as const) {
+      if (desc) Object.defineProperty(stream, 'isTTY', desc);
+      else delete (stream as unknown as Record<string, unknown>)['isTTY'];
+    }
+    if (original.serve === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = original.serve;
+    vi.restoreAllMocks();
+  });
+
+  it.each(cells)(
+    '%s -> throws=%s',
+    async (_label, daemon, stdoutTTY, stderrTTY, shouldThrow) => {
+      if (daemon) process.env['QWEN_CODE_SERVE'] = '1';
+      else delete process.env['QWEN_CODE_SERVE'];
+      setTTY(process.stdout, stdoutTTY);
+      setTTY(process.stderr, stderrTTY);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      mockFetchAccessToken.mockResolvedValue({
+        accessToken: 'tok',
+        expiresIn: 7200,
+      });
+      const ch = new QQChannel(
+        'guard-bot',
+        {
+          type: 'qq',
+          token: '',
+          senderPolicy: 'open' as const,
+          allowedUsers: [],
+          sessionScope: 'user' as const,
+          cwd: '/tmp',
+          groupPolicy: 'disabled' as const,
+          groups: {},
+        },
+        {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      );
+      const fetchToken = (
+        ch as unknown as { fetchToken: () => Promise<void> }
+      ).fetchToken.bind(ch);
+      if (shouldThrow) {
+        await expect(fetchToken()).rejects.toThrow(/has no appID\/appSecret/);
+      } else {
+        await expect(fetchToken()).resolves.toBeUndefined();
+      }
+    },
+  );
 });

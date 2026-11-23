@@ -203,10 +203,19 @@ a timeout or failure still publish), per-RUN concurrency group and 10-minute
 cap like the sibling publishers, `publish-tmux` runner routing, and a sparse
 checkout of only the publisher script, `assign-issue-owner.mjs`, and
 `issue-owners.json`, pinned to `github.sha` with `persist-credentials: false`
-(the `publish-verify` pattern). It downloads the drafts artifact — collected
-with the sibling lanes' symlink/non-regular-file strip — and runs the script
-with the bot PAT. The PAT never enters the triage job's agent environment,
-and the publisher never executes agent-provided code, only data.
+(the `publish-verify` pattern). Because the job may land on the persistent
+pool, it takes the agent jobs' workspace precautions before that checkout:
+ownership restore and a `Recreate runner Git metadata` step, so git metadata
+planted by an earlier run cannot execute in the job that then publishes with
+the PAT (the reset step's placement is pinned by
+`qwen-runner-checkout-workflow.test.js`, whose qwen-triage job list is
+derived from the pool-routed jobs that check out; the ownership restore's
+fallback chain and the publisher's bare-specifier-free import closure are
+pinned by `.github/scripts/qwen-triage-workflow.test.mjs`). It downloads the
+drafts artifact — collected with the sibling lanes' symlink/non-regular-file
+strip — and runs the script with the bot PAT. The PAT never enters the triage
+job's agent environment, and the publisher never executes agent-provided
+code, only data.
 
 Locally, the skill runs the same script at the end of the run with the user's
 own `gh` auth. One protocol, one implementation, two credential contexts.
@@ -314,8 +323,11 @@ openai --approval-mode yolo --prompt '/triage …' --output-format stream-json`.
   pin moves to the `env -i` list; new assertions cover the publish job and
   the drafts artifact strip. The verify-lane runuser-count pin is untouched
   (this change adds no step to that interval).
-- `scripts/tests/qwen-runner-checkout-workflow.test.js` — no change expected:
-  `Recreate runner Git metadata` stays immediately before checkout.
+- `scripts/tests/qwen-runner-checkout-workflow.test.js` — gains
+  `publish-triage` coverage: the qwen-triage entries are now derived from
+  the pool-routed jobs that check out (a hand-typed list is what missed
+  `publish-triage` in the first place); `Recreate runner Git metadata`
+  stays immediately before checkout.
 - `scripts/tests/triage-publish.test.js` — new unit tests for the publisher
   (validation fail-closed cases, dedup, idempotence, resolver, per-action
   failure reporting) against a stubbed `gh`.

@@ -106,10 +106,9 @@ final class HostedCancellationProbe implements AutoCloseable {
 
     private Map<String, Object> owner(Map<String, Object> session) throws Exception {
         String storage = "storage-" + sessions.indexOf(session);
-        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_key = o.storage_key WHERE s.alias_key = ? AND s.tenant_id = ? AND s.storage_id = ?",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
+        var physical = jdbc.queryForMap("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns("o") + " FROM ma_storage_owner o JOIN ma_storage s ON s.physical_id = o.physical_id WHERE s.tenant_id = ? AND s.storage_id = ?",
                 tenant, storage);
-        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_key"
+        var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, runtime_session_id, execution_storage_id"
                 + " FROM ma_runtime_session WHERE tenant_id = ? AND harness_session_id = ?",
                 tenant, session.get("sessionId"));
         member.put("physicalOwner", physical);
@@ -163,10 +162,10 @@ final class HostedCancellationProbe implements AutoCloseable {
         assertThat(original.get("binding_id")).isEqualTo(execution.get("binding_id"));
         assertThat(original.get("runtime_generation")).isEqualTo(execution.get("runtime_generation"));
         assertThat(original.get("runtime_session_id")).isEqualTo(execution.get("runtime_session_id"));
-        assertThat(original.get("execution_storage_key"))
-                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("storage_key"));
+        assertThat(original.get("execution_storage_id"))
+                .isEqualTo(((Map<?, ?>) original.get("physicalOwner")).get("physical_id"));
         if (released) {
-            assertThat(owner.get("execution_storage_key")).isNull();
+            assertThat(owner.get("execution_storage_id")).isNull();
         } else {
             assertThat(owner).as("original owner until confirmed cancellation").isEqualTo(original);
         }

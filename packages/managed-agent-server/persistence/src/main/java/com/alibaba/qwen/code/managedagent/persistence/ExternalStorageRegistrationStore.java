@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -52,7 +52,6 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         String encoded = encode(registration);
         String digest = ManagedSchemaKeys.key(encoded);
         String workspace = registration.alias().tenantWorkspaceId();
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey(tenant, workspace);
         String physical = registration.identity().ownerKey();
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
@@ -67,10 +66,14 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 }
                 return decode(prior.resultJson(), Receipt.class);
             }
-            if (!jdbc.queryForList("SELECT alias_key FROM ma_storage WHERE alias_key = ?", aliasKey).isEmpty()
-                    || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ? AND (storage_id = ? OR workspace_id = ?)", tenant, workspace, workspace).isEmpty()
-                    || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE storage_alias_key = ?", aliasKey).isEmpty()
-                    || !jdbc.queryForList("SELECT physical_key FROM ma_storage_owner WHERE physical_key = ?", physical).isEmpty()) {
+            if (!jdbc.queryForList("SELECT 1 FROM ma_storage WHERE tenant_id = ? AND storage_id = ?",
+                    tenant, workspace).isEmpty()
+                    || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ? AND (storage_id = ? OR workspace_id = ?)",
+                    tenant, workspace, workspace).isEmpty()
+                    || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ? AND storage_id = ?",
+                    tenant, workspace).isEmpty()
+                    || !jdbc.queryForList("SELECT physical_id FROM ma_storage_owner WHERE physical_id = ?",
+                    ManagedSchemaKeys.identity(physical)).isEmpty()) {
                 throw conflict("alias_conflict");
             }
             for (String saved : jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE storage_kind = 'EXTERNAL'", String.class)) {
@@ -80,16 +83,16 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                 }
             }
             try {
-                jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, tenant_id, storage_id,"
-                        + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, ?, 'EXTERNAL', ?, ?)",
-                        physical, physical, tenant, workspace, registration.alias().mountRoot(),
-                        registration.identity().registrationRevision());
-                jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
+                jdbc.update("INSERT INTO ma_storage_owner (physical_id, tenant_id, storage_id,"
+                        + " storage_kind, mount_root, mount_revision) VALUES (?, ?, ?, 'EXTERNAL', ?, ?)",
+                        ManagedSchemaKeys.identity(physical), tenant, workspace,
+                        registration.alias().mountRoot(), registration.identity().registrationRevision());
+                jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
                         + " storage_kind, registration_state, registration_revision, registration_json, gmt_create, gmt_modified)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
-                        + ", " + ManagedSchemaTime.SQL_NOW + ")", aliasKey,
-                        JdbcRuntimeBindingRepository.storageFenceKey(tenant), JdbcRuntimeBindingRepository.storageFenceKey(workspace),
-                        tenant, workspace, physical, registration.identity().registrationRevision(), encoded);
+                        + " VALUES (?, ?, ?, 'EXTERNAL', 'REGISTERED', ?, ?, " + ManagedSchemaTime.SQL_NOW
+                        + ", " + ManagedSchemaTime.SQL_NOW + ")",
+                        tenant, workspace, ManagedSchemaKeys.identity(physical),
+                        registration.identity().registrationRevision(), encoded);
             } catch (DuplicateKeyException duplicate) {
                 // The global lock serializes registration, so the pre-checks above
                 // win first; translate any residual duplicate-key race (or a lock
@@ -111,10 +114,10 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
      *
      * <p>Read-only by construction: no lock, no write, no idempotency record. The
      * lookup uses the same unique business key the write path inserts
-     * ({@link JdbcRuntimeBindingRepository#storageAliasKey}), joins the owner row
+     * (the raw tenant and storage id tuple), joins the owner row
      * on the owner's unique business key, and admits only a {@code REGISTERED} row. It
      * then enforces exactly these fields: the decoded record's alias id equals the
-     * requested alias, its identity owner key equals the stored physical key, its
+     * requested alias, its identity owner key equals the stored physical id reference, its
      * revision equals the stored {@code registration_revision}, and its mount root
      * equals the owner row's {@code mount_root}. {@code mount_revision} is not
      * compared: the owner row tracks the registered revision while
@@ -135,19 +138,17 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
                     "invalid_external_storage_registration",
                     "Invalid external storage registration lookup.", false);
         }
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey(tenant,
-                tenantWorkspaceId);
         List<Map<String, Object>> rows;
         try {
             rows = jdbc.queryForList(
                     "SELECT s.registration_json, s.registration_revision,"
-                            + " s.physical_key, o.mount_root"
+                            + " s.physical_id, o.mount_root"
                             + " FROM ma_storage s JOIN ma_storage_owner o"
-                            + " ON o.storage_key = s.physical_key"
-                            + " WHERE s.alias_key = ?"
+                            + " ON o.physical_id = s.physical_id"
+                            + " WHERE s.tenant_id = ? AND s.storage_id = ?"
                             + " AND s.storage_kind = 'EXTERNAL'"
                             + " AND s.registration_state = 'REGISTERED'",
-                    aliasKey);
+                    tenant, tenantWorkspaceId);
         } catch (RuntimeException failure) {
             // A read that did not complete proves nothing about the registration,
             // so it must not bury a recoverable placement: retry it.
@@ -160,10 +161,9 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
             throw registrationMismatch();
         }
         Map<String, Object> row = rows.get(0);
-        ExternalStorageRegistration registration;
+        RegisteredExternalStorage registration;
         try {
-            registration = decode(String.valueOf(row.get("registration_json")),
-                    ExternalStorageRegistration.class);
+            registration = ExternalStorageRegistry.decodeRegistration((String) row.get("registration_json"));
         } catch (RuntimeException failure) {
             // A record this build cannot decode is indistinguishable from an
             // unreadable one; refusing it permanently would pin the placement.
@@ -174,21 +174,102 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         // catch a row that drifted away from its own persisted record.
         if (registration == null || !(revision instanceof Number number)
                 || !tenantWorkspaceId.equals(
-                        registration.alias().tenantWorkspaceId())
-                || !registration.identity().ownerKey()
-                        .equals(String.valueOf(row.get("physical_key")))
-                || registration.identity().registrationRevision() != number.longValue()
-                || !registration.alias().mountRoot()
-                        .equals(String.valueOf(row.get("mount_root")))) {
+                        registration.tenantWorkspaceId())
+                || !registration.ownerKey().equals(text(row.get("physical_id")))
+                || registration.registrationRevision() != number.longValue()
+                || !registration.mountRoot().equals(row.get("mount_root"))) {
             throw registrationMismatch();
         }
-        return Optional.of(new RegisteredExternalStorage(
-                registration.identity().providerId(),
-                registration.identity().physicalKey(),
-                registration.identity().registrationRevision(),
-                registration.alias().tenantWorkspaceId(),
-                registration.alias().aliasPath(),
-                registration.alias().mountRoot()));
+        return Optional.of(registration);
+    }
+
+    /**
+     * Batch form of {@link #find(String, String)} for Workspace discovery.
+     * The caller evaluates the full registration against its Workspace row;
+     * this read only proves that the durable registration is present,
+     * unambiguous, and self-consistent.
+     */
+    java.util.Map<String, RegistrationState> states(String tenant,
+            java.util.Collection<String> tenantWorkspaceIds) {
+        if (tenantWorkspaceIds.isEmpty()) {
+            return java.util.Map.of();
+        }
+        List<Object> arguments = new java.util.ArrayList<>(tenantWorkspaceIds.size() + 1);
+        arguments.add(tenant);
+        tenantWorkspaceIds.forEach(id -> arguments.add(id));
+        List<StoredRegistration> rows;
+        try {
+            rows = jdbc.query(
+                    "SELECT s.storage_id, s.registration_json, s.registration_revision,"
+                            + " s.physical_id, o.mount_root"
+                            + " FROM ma_storage s JOIN ma_storage_owner o"
+                            + " ON o.physical_id = s.physical_id"
+                            + " WHERE s.tenant_id = ? AND s.storage_id IN ("
+                            + String.join(",", java.util.Collections.nCopies(
+                                    tenantWorkspaceIds.size(), "?"))
+                            + ") AND s.storage_kind = 'EXTERNAL'"
+                            + " AND s.registration_state = 'REGISTERED'",
+                    (row, index) -> {
+                        Object revision = row.getObject("registration_revision");
+                        return new StoredRegistration(row.getString("storage_id"),
+                                row.getString("registration_json"),
+                                revision instanceof Number number ? number : null,
+                                row.getString("physical_id"), row.getString("mount_root"));
+                    },
+                    arguments.toArray());
+        } catch (RuntimeException failure) {
+            throw unavailable();
+        }
+        java.util.Map<String, RegistrationState> result = new java.util.HashMap<>();
+        java.util.Set<String> invalid = new java.util.HashSet<>();
+        for (StoredRegistration row : rows) {
+            String storage = row.storageId();
+            if (storage == null) {
+                continue;
+            }
+            if (invalid.contains(storage)) {
+                continue;
+            }
+            RegisteredExternalStorage registered;
+            try {
+                registered = ExternalStorageRegistry.decodeRegistration(row.encodedRegistration());
+            } catch (RuntimeException failure) {
+                // Workspace discovery is a batch. A record this build cannot
+                // decode disables only its Workspace; one malformed row must
+                // not hide every other readable Workspace on the page.
+                invalid.add(storage);
+                result.remove(storage);
+                continue;
+            }
+            if (result.containsKey(storage)
+                    || registered == null || row.registrationRevision() == null
+                    || !storage.equals(registered.tenantWorkspaceId())
+                    || !registered.ownerKey().equals(row.physicalKey())
+                    || registered.registrationRevision() != row.registrationRevision().longValue()
+                    || !registered.mountRoot().equals(row.mountRoot())) {
+                // The Workspace eligibility check already treats a missing
+                // state as false. Keep the same outcome for a malformed or
+                // ambiguous row without failing the whole page.
+                invalid.add(storage);
+                result.remove(storage);
+                continue;
+            }
+            result.put(storage, new RegistrationState(true, registered.providerId(),
+                    registered.tenantWorkspaceId()));
+        }
+        return result;
+    }
+
+    private record StoredRegistration(String storageId, String encodedRegistration,
+            Number registrationRevision, String physicalKey, String mountRoot) {
+    }
+
+    record RegistrationState(boolean current, String providerId, String tenantWorkspaceId) {
+    }
+
+    private static String text(Object value) {
+        return value instanceof byte[] bytes
+                ? new String(bytes, java.nio.charset.StandardCharsets.UTF_8) : (String) value;
     }
 
     private static RuntimeBrokerException registrationMismatch() {
@@ -206,7 +287,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         try {
             return json.writeValueAsString(value);
         } catch (JsonProcessingException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 
@@ -214,7 +295,7 @@ public final class ExternalStorageRegistrationStore implements ExternalStorageRe
         try {
             return json.readValue(value, type);
         } catch (JsonProcessingException | IllegalArgumentException error) {
-            throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
+            throw WorkspaceExecutionStore.unavailable();
         }
     }
 

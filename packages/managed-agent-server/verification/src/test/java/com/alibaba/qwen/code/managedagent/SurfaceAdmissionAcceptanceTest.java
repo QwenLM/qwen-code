@@ -6,18 +6,23 @@ import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Capability;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketController;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketStore;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSshWorkspaceStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationArtifactReader;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -100,7 +105,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "qwen.managed-agent.events.materialize-interval=10ms",
             "qwen.managed-agent.session-store.enabled=true",
             "qwen.managed-agent.session-store.binding-key=" + "0123456789abcdef0123456789abcdef",
+            "qwen.managed-agent.client-files.enabled=true",
             "qwen.managed-agent.runtime-broker.ssh.enabled=false",
+            "qwen.managed-agent.runtime-broker.web-terminal=true",
             "qwen.managed-agent.tool-publication.entry-concurrency=4",
             "qwen.managed-agent.artifacts.enabled=true",
             // The scheduled projector would race the publication-chain fixture
@@ -157,9 +164,9 @@ public class SurfaceAdmissionAcceptanceTest {
     private AgentStateStore store;
 
     @Autowired
-    private SshWorkspaceStore sshWorkspaces;
+    private JdbcSshWorkspaceStore sshWorkspaces;
 
-    private final String tenant = "acc-" + UUID.randomUUID();
+    private final String tenant = UUID.randomUUID().toString();
     private final AtomicInteger keys = new AtomicInteger();
     private String bound;
     private String legacy;
@@ -254,18 +261,18 @@ public class SurfaceAdmissionAcceptanceTest {
     @Test
     public void aRetainedCancelKeyNeverBypassesCurrentAccess() throws Exception {
         String session = createSession(tenant, OWNER, true);
-        String recordKey = "e".repeat(64);
+        String recordKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(session, "child_run", "run-retained");
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " VALUES (?, 'ws', ?, 'child_run',"
                         + " 'run-retained', ?, 1, 'resource-retained',"
                         + " 'child_agent', 'running', 'session', 'planned', 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
-                recordKey, tenant, session, "f".repeat(64));
+                tenant, session, "f".repeat(64));
         String key = nextKey();
         java.util.function.Supplier<MockHttpServletRequestBuilder> cancel =
                 () -> post("/v1/agents/sessions/{session}/tasks/{task}/cancel",
@@ -282,7 +289,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .isEqualTo(admitted);
         byte[] operator = OPERATOR.getBytes(StandardCharsets.UTF_8);
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant, operator);
         try {
             assertThat(mvc.perform(cancel.get())
@@ -292,7 +299,7 @@ public class SurfaceAdmissionAcceptanceTest {
         } finally {
             jdbc.update("UPDATE ma_workspace_access SET role ="
                     + " 'OPERATOR' WHERE tenant_id = ? AND workspace_id ="
-                    + " X'7773' AND actor_id = ?", tenant, operator);
+                    + " 'ws' AND actor_id = ?", tenant, operator);
         }
         jdbc.update("UPDATE ma_session SET status = 'DELETED'"
                 + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
@@ -304,41 +311,42 @@ public class SurfaceAdmissionAcceptanceTest {
     /** A settled child-agent task of the bound Session: the cancel probes
      * pass every admission rule and stop at the task's own state. */
     private String insertSettledTask(String tenant, String session) {
-        String recordKey = "a".repeat(64);
+        String recordKey = com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection
+                .recordKey(session, "child_run", "run-settled");
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
-                        + " operation_hash, revision, record_resource_id,"
+                        + " operation_id, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create, settled_at)"
-                        + " VALUES (?, ?, ?, 'ws', ?, 'child_run',"
+                        + " VALUES (?, 'ws', ?, 'child_run',"
                         + " 'run-settled', ?, 1, 'resource-settled',"
                         + " 'child_agent', 'completed', 'session',"
                         + " 'consumed', 1, 2)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
-                recordKey, tenant, session, "b".repeat(64));
+                tenant, session, "b".repeat(64));
         // The task view reads a child task's committed body for its child
         // Session link (#13746 F2), so the list probes need one.
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
         byte[] body = "{\"childSessionId\":null}".getBytes(
                 StandardCharsets.UTF_8);
-        jdbc.update("INSERT INTO ma_resource (resource_key,"
-                        + " session_scope_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
-                        + " publish_command_id, state, gmt_create) VALUES (?,"
-                        + " ?, ?, 'ws', ?, 'resource-settled',"
+                        + " publish_command_id, state, gmt_create) VALUES ("
+                        + " ?, 'ws', ?, 'resource-settled',"
                         + " 'managed-child_run', 1, ?, ?, 'MYSQL_INLINE', ?,"
                         + " 'command', 'REFERENCED', 1)",
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "resource-settled"),
-                scope, tenant, session, body.length,
+                tenant, session, body.length,
                 org.apache.commons.codec.digest.DigestUtils.sha256Hex(body),
                 body);
         return "task_" + recordKey;
     }
 
     public static Stream<SurfaceRegistry> everyRoute() {
-        return Stream.of(SurfaceRegistry.values());
+        // The client-files MCP leg carries no tenant context by design: the
+        // relay credential is its only admission (probed in the rule-class
+        // matrix), so a cross-tenant principal is not a meaningful probe.
+        return Stream.of(SurfaceRegistry.values())
+                .filter(entry -> entry != SurfaceRegistry.INTERNAL_CLIENT_FILES_MCP);
     }
 
     public static Stream<SurfaceRegistry> refusalProbedRoutes() {
@@ -366,6 +374,41 @@ public class SurfaceAdmissionAcceptanceTest {
             belowReadAndBelowFamilyProbesFollowTheRuleClass(SurfaceRegistry entry)
                     throws Exception {
         switch (entry.ruleClass()) {
+            case SIDE_QUERY_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "side_query_execution_forbidden");
+            }
+            case SIDE_QUERY_ACTOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                if (entry.capabilities().contains(Capability.SIDE_QUERY_LIST)
+                        || entry.capabilities().contains(Capability.SIDE_QUERY_CONTEXT)) {
+                    expect(entry, READER, 200, null);
+                } else {
+                    expect(entry, READER, 404, "side_query_not_found");
+                }
+            }
+            case INTERNAL_SIDE_QUERY -> expect(entry, null, 404, "side_query_not_found");
+            case CLIENT_FILES_OPERATOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                expect(entry, READER, 403, "client_files_execution_forbidden");
+            }
+            case CLIENT_FILES_ACTOR -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "session_not_found");
+                if (entry.capabilities().contains(Capability.CLIENT_FILES_STATUS)) {
+                    expect(entry, READER, 200, null);
+                } else {
+                    expect(entry, READER, 404, "client_files_not_found");
+                }
+            }
+            case INTERNAL_CLIENT_FILES -> expect(entry, null, 403, "client_files_credential_invalid");
+            case PERSONAL_MEMORY -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 503, "memory_disabled");
+            }
             case SESSION_WORKTREE -> {
                 expect(entry, null, 401, "actor_required");
                 if (entry.template().endsWith("/options")) {
@@ -460,6 +503,11 @@ public class SurfaceAdmissionAcceptanceTest {
                 expect(entry, null, 401, "actor_required");
                 expect(entry, STRANGER, 404, "session_not_found");
                 expect(entry, READER, 403, "artifact_content_forbidden");
+            }
+            case WORKSPACE_ARTIFACT -> {
+                expect(entry, null, 401, "actor_required");
+                expect(entry, STRANGER, 404, "workspace_not_found");
+                expect(entry, READER, 200, null);
             }
             case OPERATOR -> {
                 expect(entry, STRANGER, 404, "session_not_found");
@@ -569,7 +617,18 @@ public class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
-            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "operator_credential_required");
+            case INTERNAL_CHANNEL_ADAPTER -> {
+                // The tenant header admits the trusted adapter; the channel
+                // is the first domain gate. Registration is the one route
+                // that creates its own subject, so it answers admitted.
+                if (entry.capabilities().contains(
+                        Capability.CHANNEL_ADAPTER_REGISTER)) {
+                    expectAdmitted(entry, null);
+                } else {
+                    expect(entry, null, 404, "channel_not_found");
+                }
+            }
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(
@@ -605,7 +664,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // The state gate fires after the grants: a non-ACTIVE Workspace is
         // a domain refusal on the same family.
         jdbc.update("UPDATE ma_workspace SET state = 'DRAINING'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", nextKey())
@@ -616,7 +675,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'", tenant);
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'", tenant);
         // The legacy arm: no Workspace selection, no actor, admitted.
         mvc.perform(post("/v1/agents/sessions")
                         .header(TenantContextFilter.HEADER, tenant)
@@ -624,6 +683,149 @@ public class SurfaceAdmissionAcceptanceTest {
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
                 .andExpect(status().isAccepted());
+    }
+
+    // The walk's pr-watch probes name a missing channel, so a swapped
+    // (tenantId, channelId) argument pair still 404s there. These arms
+    // register their own channel and Session and pin the service's own
+    // domain answers, so each handler is reached with the arguments in
+    // order.
+    @Test
+    public void prWatchRoutesAnswerTheirOwnDomainOverARegisteredChannel()
+            throws Exception {
+        String channel = "channel-prwatch-admitted";
+        String session = createSession(tenant, OWNER, true);
+        registerPrWatchChannel(channel);
+        MvcResult created = mvc.perform(post(
+                        "/internal/managed-channels/v1/channels/" + channel
+                                + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.sessionId").value(session))
+                .andExpect(jsonPath("$.prNumber").value(42))
+                .andReturn();
+        String bindingId = JSON.readTree(created.getResponse()
+                .getContentAsString()).path("bindingId").asText();
+        assertThat(bindingId).isNotBlank();
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:list")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindings[0].bindingId")
+                        .value(bindingId));
+        // A transition the binding does not enable is the service's own
+        // domain refusal — reached only when the channel resolved under the
+        // caller's tenant, never a missing-channel 404.
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"transition\":\"merge_conflict\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("pr_watch_transition_not_enabled"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:retire")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindingId").value(bindingId));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:list")
+                        .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.bindings").isEmpty());
+    }
+
+    @Test
+    public void prWatchRoutesRefuseFractionalIntegerTokens() throws Exception {
+        // The TS contract refuses a fractional prNumber/episode; the MVC
+        // converter must refuse it too (ACCEPT_FLOAT_AS_INT disabled) with
+        // a 400, never truncate 1.5 into 1. The channel and binding exist,
+        // so a silently truncated token would answer admitted instead.
+        String channel = "channel-prwatch-fractional";
+        String session = createSession(tenant, OWNER, true);
+        registerPrWatchChannel(channel);
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isOk());
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\","
+                                + "\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5,"
+                                + "\"events\":[\"ci_failure\"]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                                + "\"transition\":\"ci_failure\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1.5,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:inject")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5,"
+                                + "\"transition\":\"ci_failure\","
+                                + "\"headSha\":\"" + digest() + "\","
+                                + "\"episode\":1,\"evidence\":\"\","
+                                + "\"text\":\"probe\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        mvc.perform(post("/internal/managed-channels/v1/channels/" + channel
+                        + "/pr-watch:retire")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"owner\":\"octocat\","
+                                + "\"repo\":\"hello-world\",\"prNumber\":1.5}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_request"));
+    }
+
+    private void registerPrWatchChannel(String channel) throws Exception {
+        mvc.perform(put("/internal/managed-channels/v1/channels/" + channel)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"platform\":\"github\","
+                                + "\"accountId\":\"bot-account\","
+                                + "\"accountGeneration\":1,"
+                                + "\"actorId\":\"" + OWNER + "\","
+                                + "\"workspaceId\":\"ws\","
+                                + "\"cwdRelative\":\".\","
+                                + "\"policy\":{\"adapter\":\"github\","
+                                + "\"senderPolicy\":\"allowlist\","
+                                + "\"allowedSenders\":[\"maintainer\"],"
+                                + "\"dispatchMode\":\"followup\"}}"))
+                .andExpect(status().isOk());
     }
 
     // The admitted list probes only prove "not refused": pin that a
@@ -744,7 +946,7 @@ public class SurfaceAdmissionAcceptanceTest {
         // reaches the files gate's domain 409 rather than the role
         // family's 403.
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/close")
@@ -755,7 +957,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("workspace_unavailable"));
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OWNER.getBytes(StandardCharsets.UTF_8));
         // Action respond by the recorded owner is admitted.
@@ -856,7 +1058,7 @@ public class SurfaceAdmissionAcceptanceTest {
         for (String caller : List.of(OPERATOR, OWNER)) {
             String action = insertAction(tenant, bound);
             jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -871,7 +1073,7 @@ public class SurfaceAdmissionAcceptanceTest {
                             .value("workspace_unavailable"));
             jdbc.update("UPDATE ma_workspace_access"
                     + " SET role = 'OPERATOR'"
-                    + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                    + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                     + " AND actor_id = ?", tenant,
                     OWNER.getBytes(StandardCharsets.UTF_8));
             mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -906,7 +1108,7 @@ public class SurfaceAdmissionAcceptanceTest {
         String operationId = JSON.readTree(first.getResponse()
                 .getContentAsString()).path("id").asText();
         jdbc.update("UPDATE ma_workspace_access SET role = 'READER'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
         mvc.perform(post("/v1/agents/sessions/" + bound + "/actions/"
@@ -929,7 +1131,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("action_forbidden"));
         jdbc.update("UPDATE ma_workspace_access SET role = 'OPERATOR'"
-                + " WHERE tenant_id = ? AND workspace_id = X'7773'"
+                + " WHERE tenant_id = ? AND workspace_id = 'ws'"
                 + " AND actor_id = ?", tenant,
                 OPERATOR.getBytes(StandardCharsets.UTF_8));
     }
@@ -1076,6 +1278,75 @@ public class SurfaceAdmissionAcceptanceTest {
                         .value("artifact_not_found"));
     }
 
+    // The workspace page filters rows by each Session's current visibility:
+    // owner-only hides a non-owner's rows, deleting statuses hide them, and
+    // archived Sessions keep theirs. The grant stays the outer gate.
+    @Test
+    public void workspaceArtifactListFiltersRowsBySessionVisibility() throws Exception {
+        java.util.function.Function<String, MockHttpServletRequestBuilder> query = actor ->
+                post("/api/agent/web-shell/v1/workspaces/artifacts/query")
+                        .header(TenantContextFilter.HEADER, ARTIFACT_TENANT)
+                        .principal(actor(ARTIFACT_TENANT, actor))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workspaceId\":\"" + ARTIFACT_WORKSPACE + "\"}");
+        var listed = mvc.perform(query.apply(READER))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.hasMore").value(false))
+                .andReturn();
+        assertThat(listed.getResponse().getContentAsString()).contains(artifactId);
+        assertThat(JSON.readTree(listed.getResponse().getContentAsString())
+                .path("data").get(0).path("artifact").path("session_id").asText())
+                .isEqualTo(ARTIFACT_SESSION);
+        var original = jdbc.queryForMap("SELECT owner_only, owner_actor_key, status"
+                + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                ARTIFACT_TENANT, ARTIFACT_SESSION);
+        try {
+            jdbc.update("UPDATE ma_session SET owner_only = 1, owner_actor_key = ?"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    new com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceActor(
+                            ARTIFACT_TENANT, OWNER).getActorId(),
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            mvc.perform(query.apply(READER))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data").isEmpty());
+            assertThat(mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getContentAsString())
+                    .contains(artifactId);
+            jdbc.update("UPDATE ma_session SET owner_only = 0, owner_actor_key = NULL,"
+                    + " status = 'DELETING' WHERE tenant_id = ? AND session_id = ?",
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data").isEmpty());
+            jdbc.update("UPDATE ma_session SET status = 'DELETED'"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data").isEmpty());
+            jdbc.update("UPDATE ma_session SET status = 'ARCHIVED'"
+                    + " WHERE tenant_id = ? AND session_id = ?",
+                    ARTIFACT_TENANT, ARTIFACT_SESSION);
+            assertThat(mvc.perform(query.apply(OWNER))
+                    .andExpect(status().isOk())
+                    .andReturn().getResponse().getContentAsString())
+                    .contains(artifactId);
+        } finally {
+            jdbc.update("UPDATE ma_session SET owner_only = ?, owner_actor_key = ?,"
+                    + " status = ? WHERE tenant_id = ? AND session_id = ?",
+                    original.get("owner_only"), original.get("owner_actor_key"),
+                    original.get("status"), ARTIFACT_TENANT, ARTIFACT_SESSION);
+        }
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/artifacts/query")
+                        .header(TenantContextFilter.HEADER, ARTIFACT_TENANT)
+                        .principal(actor(ARTIFACT_TENANT, READER))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"workspaceId\":\"workspace-missing\"}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code").value("workspace_not_found"));
+    }
+
     // The owner column, not the creator column, decides: with the two
     // deliberately different for once, lifecycle and respond both follow
     // owner_actor_key, and the original creator is refused.
@@ -1085,8 +1356,7 @@ public class SurfaceAdmissionAcceptanceTest {
         jdbc.update("UPDATE ma_session SET owner_actor_key = ?"
                 + " WHERE tenant_id = ? AND session_id = ?",
                 new com.alibaba.qwen.code.runtimebroker.managedworkspace
-                        .WorkspaceActor(tenant, OWNER_RANK).getActorId()
-                        .getBytes(StandardCharsets.UTF_8),
+                        .WorkspaceActor(tenant, OWNER_RANK).getActorId(),
                 tenant, scratch);
         assertThat(store.hasExecutionRegistryFacts(tenant, scratch)).isTrue();
         mvc.perform(post("/v1/agents/sessions/" + scratch + "/actions/"
@@ -1296,7 +1566,7 @@ public class SurfaceAdmissionAcceptanceTest {
         Object[] values = publicationColumns.stream().map(col ->
                         "publication_id".equals(col) ? "pub-open"
                                 : "state".equals(col) ? "OPEN"
-                                : "execution_key".equals(col)
+                                : "execution_call_id".equals(col)
                                         ? "b".repeat(64)
                                 : "capture_id".equals(col) ? "pub-open-cap"
                                                         : row.get(col))
@@ -1347,7 +1617,7 @@ public class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_MEMORY_QUERY, STORE_USER_MESSAGE_CLAIM, STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, STORE_SNAPSHOT_PUBLISH,
@@ -1434,6 +1704,7 @@ public class SurfaceAdmissionAcceptanceTest {
             int status, String code) throws Exception {
         String headerTenant = entry.ruleClass() == RuleClass.READER_ACTOR
                 || entry.ruleClass() == RuleClass.READER_ACTOR_POLICY
+                || entry.ruleClass() == RuleClass.WORKSPACE_ARTIFACT
                         ? ARTIFACT_TENANT : tenant;
         MockHttpServletRequestBuilder request = requestFor(entry, actor,
                 headerTenant);
@@ -1464,10 +1735,12 @@ public class SurfaceAdmissionAcceptanceTest {
     private MockHttpServletRequestBuilder requestFor(SurfaceRegistry entry,
             String actor, String headerTenant) {
         boolean artifactArm = entry.ruleClass() == RuleClass.READER_ACTOR
-                || entry.ruleClass() == RuleClass.READER_ACTOR_POLICY;
+                || entry.ruleClass() == RuleClass.READER_ACTOR_POLICY
+                || entry.ruleClass() == RuleClass.WORKSPACE_ARTIFACT;
         String session = artifactArm ? ARTIFACT_SESSION : bound;
         Map<String, String> variables = new LinkedHashMap<>();
         variables.put("sessionId", session);
+        variables.put("queryId", "11111111-1111-4111-8111-111111111111");
         variables.put("operationId", (entry.capabilities().contains(Capability.MCP_MANAGEMENT) || entry.capabilities().contains(Capability.EXTENSION_CONFIG_GET)
                 || entry.capabilities().contains(Capability.EXTENSION_CONFIG_APPLY))
                 ? "11111111-1111-4111-8111-111111111111" : "op_0000000000000000");
@@ -1487,14 +1760,19 @@ public class SurfaceAdmissionAcceptanceTest {
                         : entry.surface() == Surface.PUBLIC
                                 ? pendingActionPublic : pendingActionWeb
                 : pendingAction);
-        variables.put("workspaceId", "ws");
+        variables.put("workspaceId", entry.ruleClass() == RuleClass.WORKSPACE_ARTIFACT
+                ? ARTIFACT_WORKSPACE : "ws");
         variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
         variables.put("packageDigest", digest());
         variables.put("agentId", "agent-missing");
         variables.put("automationId", automation);
-        variables.put("channelId", "channel-missing");
+        // The register probe creates its subject: give it a channel id no
+        // other probe names, so the channel_not_found arms keep their gate.
+        variables.put("channelId",
+                entry.capabilities().contains(Capability.CHANNEL_ADAPTER_REGISTER)
+                        ? "channel-register-probe" : "channel-missing");
         variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
@@ -1513,6 +1791,9 @@ public class SurfaceAdmissionAcceptanceTest {
             }
         }
         List<String> query = new ArrayList<>();
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_ACTIVITY)) {
+            query.add("kind=tools");
+        }
         if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
             query.add("workspaceId=workspace");
             query.add("cwdRelative=.");
@@ -1520,21 +1801,31 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("expectedScopeRevision=" + digest());
             query.add("uploadId=11111111-1111-4111-8111-111111111111");
         }
-        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)) {
-            String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
-                    ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
-                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
-                            .getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            query.add("manifest=" + manifest);
-            if ("POST".equals(entry.method())) {
-                query.add("packageDigest=" + digest());
+        if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
+            if (entry.template().contains("/imports")) {
+                String metadata = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        ("{\"sourceKind\":\"skill\",\"sourceDigest\":\"" + digest() + "\",\"compilerVersion\":1,"
+                                + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}")
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                query.add("metadata=" + metadata);
+            } else {
+                String manifest = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(
+                        ("{\"schemaVersion\":1,\"compilerVersion\":1,\"name\":\"example\",\"version\":\"1\","
+                                + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"},\"components\":[]}")
+                                .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                query.add("manifest=" + manifest);
+                if ("POST".equals(entry.method())) {
+                    query.add("packageDigest=" + digest());
+                }
             }
             if (entry.surface() == Surface.WEBSHELL) {
                 query.add("workspaceId=ws");
             }
         } else if (entry.surface() == Surface.PUBLIC
                 && (entry.capabilities().contains(Capability.EXTENSION_GET)
-                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE))) {
+                || entry.capabilities().contains(Capability.EXTENSION_ARCHIVE)
+                || entry.capabilities().contains(Capability.EXTENSION_INSPECTION))) {
             query.add("packageDigest=" + digest());
         }
         if (path.startsWith("/internal/managed-tool-publications/")
@@ -1560,10 +1851,14 @@ public class SurfaceAdmissionAcceptanceTest {
             default -> post(path);
         };
         request.header(TenantContextFilter.HEADER, headerTenant);
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_LOOKUP) {
+            request.header("Idempotency-Key", nextKey());
+        }
         if ("POST".equals(entry.method()) || "PATCH".equals(entry.method()) || "PUT".equals(entry.method())) {
             boolean octets = entry.capabilities().contains(
                     Capability.PUB_SEGMENT) || entry.capabilities().contains(
-                    Capability.PUB_RESOURCE) || entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    Capability.PUB_RESOURCE) || (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
+                    && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT)
                     || entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD);
             request.contentType(octets ? MediaType.APPLICATION_OCTET_STREAM
                     : MediaType.APPLICATION_JSON);
@@ -1597,6 +1892,10 @@ public class SurfaceAdmissionAcceptanceTest {
 
     private String bodyFor(SurfaceRegistry entry, String tenant,
             String session) {
+        if (entry == SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
+            return "{\"reference\":{\"providerId\":\"test\",\"kind\":\"skill\",\"resourceId\":\"source\",\"revision\":\"1\"},"
+                    + "\"target\":{\"platform\":\"linux\",\"arch\":\"any\"}}";
+        }
         if (entry == SurfaceRegistry.INTERNAL_WRITER_QUIESCE_OWNERSHIP
                 || entry == SurfaceRegistry.INTERNAL_WRITER_RELEASE_OWNERSHIP) {
             String scope = "\"workspaceId\":\"ws\",\"writerId\":\"boot-probe\",\"writerGeneration\":1,"
@@ -1608,12 +1907,40 @@ public class SurfaceAdmissionAcceptanceTest {
         Capability capability = entry.capabilities().iterator().next();
         boolean publicSurface = entry.surface() == Surface.PUBLIC;
         return switch (capability) {
+            case SIDE_QUERY_CREATE -> publicSurface ? "{\"kind\":\"btw\",\"question\":\"probe\"}"
+                    : "{\"sessionId\":\"" + session + "\",\"kind\":\"btw\",\"question\":\"probe\",\"idempotencyKey\":\"" + nextKey() + "\"}";
+            case SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT -> "{\"sessionId\":\"" + session + "\"}";
+            case CLIENT_FILES_REGISTER ->
+                    "{\"sessionId\":\"" + session + "\",\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS ->
+                    "{\"sessionId\":\"" + session + "\"}";
+            case CLIENT_FILES_STREAM ->
+                    "{\"sessionId\":\"" + session + "\",\"generation\":1,\"connectionId\":\"conn-probe\"}";
+            case CLIENT_FILES_RESPOND -> "{\"sessionId\":\"" + session
+                    + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}";
+            case INTERNAL_CLIENT_FILES_MCP -> "{\"jsonrpc\":\"2.0\",\"id\":\"probe\",\"method\":\"tools/list\"}";
+            case SIDE_QUERY_GET, SIDE_QUERY_STREAM, SIDE_QUERY_CANCEL -> "{\"sessionId\":\"" + session
+                    + "\",\"queryId\":\"11111111-1111-4111-8111-111111111111\"}";
+            case STORE_SIDE_QUERY -> {
+                String claim = "\"claim\":{\"instanceId\":\"missing\",\"bootId\":\"missing\",\"generation\":1,\"token\":\"wrong\"}";
+                String path = entry.template();
+                yield "{" + claim + (path.endsWith("/resources/stage") ? ",\"resource\":{\"resourceId\":\"missing\",\"kind\":\"managed-side-query-input\",\"schemaVersion\":1,\"byteLength\":1,\"digest\":\"" + "a".repeat(64) + "\",\"bytesBase64\":\"eA==\"}"
+                        : path.endsWith("/input-ready") ? ",\"publication\":{\"resourceId\":\"missing\",\"digest\":\"" + "a".repeat(64) + "\",\"resourceIds\":[]}"
+                        : path.endsWith("/result") ? ",\"update\":{\"status\":\"failed\",\"outcome\":\"error\",\"text\":\"\",\"usage\":{},\"errorCode\":\"failed\"}"
+                        : path.endsWith("/transactions") ? ",\"afterRevision\":0,\"limit\":1"
+                        : path.endsWith("/resources/read") ? ",\"resourceId\":\"missing\"" : "") + "}";
+            }
+            case MEMORY_STORE_CREATE, MEMORY_STORE_LIST -> "{}";
+            case STORE_MEMORY_QUERY -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"operation\":\"binding\"}";
             case SESSION_WORKTREE -> "{\"workspaceId\":\"ws\",\"cwdRelative\":\".\",\"worktreeId\":\"worktree-probe\",\"idempotencyKey\":\"cleanup-probe\"}";
             case STORE_SNAPSHOT_PUBLISH -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\","
                     + "\"writerGeneration\":1,\"snapshotId\":\"snapshot-probe\",\"expectedJournalRevision\":1,"
                     + "\"expectedCommittedSequence\":0}";
             case STORE_USER_MESSAGE_CLAIM -> "{\"workspaceId\":\"ws\",\"writerId\":\"writer-probe\",\"writerGeneration\":1,\"promptId\":\"prompt-probe\",\"initialOnly\":false}";
-            case EXTENSION_CONFIG_GET -> "{\"sessionId\":\"" + session + "\"}";
+            case EXTENSION_CONFIG_GET -> entry.template().endsWith("/operations/lookup")
+                    ? (publicSurface ? "{" : "{\"sessionId\":\"" + session + "\",")
+                            + "\"idempotencyKey\":\"extensions-probe\"}"
+                    : "{\"sessionId\":\"" + session + "\"}";
             case EXTENSION_CONFIG_APPLY -> {
                 if (entry == SurfaceRegistry.PUBLIC_SESSION_EXTENSIONS_APPLY) {
                     yield "{\"expectedConfigRevision\":0,\"extensions\":[]}";
@@ -1624,11 +1951,16 @@ public class SurfaceAdmissionAcceptanceTest {
                 yield "{\"sessionId\":\"" + session + "\",\"operationId\":\"11111111-1111-4111-8111-111111111111\"}";
             }
             case EXTENSION_LIST -> "{\"workspaceId\":\"ws\"}";
-            case EXTENSION_GET -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case EXTENSION_GET, EXTENSION_INSPECTION -> "{\"workspaceId\":\"ws\",\"pin\":{\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"packageRevision\":1,\"packageDigest\":\"" + digest() + "\"}}";
+            case RUNTIME_SKILL_IMPORT -> publicSurface ? "{}" : "{\"sessionId\":\"" + session + "\""
+                    + (entry.template().endsWith("/imports") ? ",\"idempotencyKey\":\"skills-probe\"" : "") + "}";
             case EXTENSION_SETTINGS_GET -> "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\"}";
             case EXTENSION_SETTINGS_SET -> publicSurface ? "{\"expectedRevision\":0,\"values\":{}}"
                     : "{\"workspaceId\":\"ws\",\"extensionId\":\"ext_11111111-1111-4111-8111-111111111111\",\"idempotencyKey\":\"settings-probe\",\"expectedRevision\":0,\"values\":{}}";
-            case EXTENSION_OPERATION -> "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
+            case EXTENSION_OPERATION -> entry.template().endsWith("/lookup")
+                    ? (publicSurface ? "{" : "{\"workspaceId\":\"ws\",")
+                            + "\"kind\":\"publish\",\"idempotencyKey\":\"publish-probe\"}"
+                    : "{\"workspaceId\":\"ws\",\"operationId\":\"operation-probe\"}";
             case SESSION_CREATE -> publicSurface
                     ? "{\"agent_id\":\"qwen-code\",\"input\":[],"
                             + "\"workspace\":{\"workspace_id\":\"ws\"}}"
@@ -1645,6 +1977,8 @@ public class SurfaceAdmissionAcceptanceTest {
             case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
                     : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
                             + "\"idempotencyKey\":\"" + nextKey() + "\"}";
+            case SESSION_TERMINAL_TICKET -> "{\"sessionId\":\"" + session
+                    + "\",\"terminalId\":\"terminal-probe\"}";
             case SESSION_CONTEXT_COMPRESSION -> publicSurface
                     ? "{\"expected_compaction_revision\":0}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
@@ -1660,7 +1994,7 @@ public class SurfaceAdmissionAcceptanceTest {
             case SESSION_RECOVERY_RECHECK -> publicSurface
                     ? "{\"turnId\":\"turn_0000000000000000\"}"
                     : "{\"sessionId\":\"" + session + "\",\"turnId\":\"turn_0000000000000000\"}";
-            case TRANSCRIPT_QUERY, ITEM_LIST -> "{\"sessionId\":\"" + session + "\"}";
+            case TRANSCRIPT_QUERY, ITEM_LIST, SESSION_RESOURCES, SESSION_AGENT_TRACE -> "{\"sessionId\":\"" + session + "\"}";
             case TAIL_EVENTS -> "{\"sessionId\":\"" + session
                     + "\",\"afterSequence\":0}";
             case TASK_LIST -> "{\"sessionId\":\"" + session + "\"}";
@@ -1702,13 +2036,17 @@ public class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_GET -> "{\"sessionId\":\"" + session
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
+            case WORKSPACE_ARTIFACT_LIST -> "{\"workspaceId\":\"" + ARTIFACT_WORKSPACE + "\"}";
             case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
             case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";
             case WORKSPACE_DIRECTORIES -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\"}";
             case SESSION_OPTIONS -> "{\"agentId\":\"qwen-code\"}";
-            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP -> "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_APPROVAL, SESSION_MODELS, SESSION_SKILLS, SESSION_MCP,
+                    SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_ACTIVITY_STATS ->
+                    "{\"sessionId\":\"" + session + "\"}";
+            case SESSION_ACTIVITY -> "{\"sessionId\":\"" + session + "\",\"kind\":\"tools\"}";
             case MCP_MANAGEMENT -> {
                 if (entry == SurfaceRegistry.WEBSHELL_MCP_MANAGEMENT) {
                     yield "{\"sessionId\":\"" + session + "\"}";
@@ -1791,6 +2129,27 @@ public class SurfaceAdmissionAcceptanceTest {
                     + digest() + "\"}";
             case PUB_RANGE -> "{\"manifestRef\":{},\"expectedIdentity\":{},"
                     + "\"streamId\":\"stdout\",\"offset\":0,\"length\":1}";
+            case CHANNEL_ADAPTER_REGISTER -> "{\"platform\":\"email\","
+                    + "\"accountId\":\"probe@example.com\",\"accountGeneration\":1,"
+                    + "\"actorId\":\"owner\",\"workspaceId\":\"ws\","
+                    + "\"cwdRelative\":\".\",\"policy\":{\"adapter\":\"email\","
+                    + "\"senderPolicy\":\"allowlist\",\"allowedSenders\":"
+                    + "[\"alice@example.com\"],\"dispatchMode\":\"followup\"}}";
+            case CHANNEL_ADAPTER_INBOUND -> "{\"accountGeneration\":1,"
+                    + "\"platformEventId\":\"probe\",\"semanticRevision\":1,"
+                    + "\"scope\":{\"kind\":\"single\"},\"senderId\":\"alice\","
+                    + "\"text\":\"probe\"}";
+            case CHANNEL_ADAPTER_DELIVERY_RECEIPT -> "{\"outcome\":\"accepted\","
+                    + "\"ordinal\":0,\"providerMessageId\":\"probe\"}";
+            case PR_WATCH_BINDING_CREATE -> "{\"sessionId\":\"" + session
+                    + "\",\"owner\":\"octocat\",\"repo\":\"hello-world\","
+                    + "\"prNumber\":42,\"events\":[\"ci_failure\"]}";
+            case PR_WATCH_BINDING_RETIRE -> "{\"owner\":\"octocat\","
+                    + "\"repo\":\"hello-world\",\"prNumber\":42}";
+            case PR_WATCH_INJECT -> "{\"owner\":\"octocat\","
+                    + "\"repo\":\"hello-world\",\"prNumber\":42,"
+                    + "\"transition\":\"ci_failure\",\"headSha\":\"" + digest()
+                    + "\",\"episode\":1,\"evidence\":\"\",\"text\":\"probe\"}";
             default -> "{}";
         };
     }
@@ -1829,11 +2188,9 @@ public class SurfaceAdmissionAcceptanceTest {
             throws Exception {
         String action = "tool_approval_"
                 + UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, domain, record_id, revision, tenant_id,"
+        jdbc.update("INSERT INTO ma_session_record (record_kind, domain, record_id, revision, tenant_id,"
                 + " session_id, action_id, action_version, state, options_json, gmt_create)"
-                + " VALUES ('ACTION', ?, ?, 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
-                com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session, "action", action),
+                + " VALUES ('ACTION', 'action', ?, 1, ?, ?, ?, 1, 'requested', ?, 0)",
                 action, tenant, session, action, JSON.writeValueAsString(Map.of("expiresAt",
                         System.currentTimeMillis() + 3_600_000L,
                         "inputRevision", 1, "policyRevision", "policy",
@@ -1918,11 +2275,11 @@ public class SurfaceAdmissionAcceptanceTest {
         public com.alibaba.qwen.code.managedagent.persistence
                         .ManagedToolResultProjector
                 acceptanceProjector(
-                        ManagedToolResultStore store,
+                        JdbcManagedToolResultStore store,
                         @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                         org.springframework.beans.factory.ObjectProvider<ToolPublicationDataStore>
                                 publications,
-                        com.alibaba.qwen.code.managedagent.persistence.ManagedArtifactReader reader,
+                        ToolPublicationArtifactReader reader,
                         ManagedArtifactPolicy acceptancePolicy,
                         ManagedAgentProperties properties) {
             return new com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultProjector(store, jdbc, publications,
@@ -1941,7 +2298,7 @@ public class SurfaceAdmissionAcceptanceTest {
         public ToolPublicationStore acceptancePublicationGrants(
                 @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                 @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
-                ManagedSessionStore sessions) {
+                JdbcManagedSessionStore sessions) {
             return new ToolPublicationStore(jdbc, manager, sessions,
                     mock(ToolExecutionRepository.class),
                     mock(RuntimeBindingRepository.class),
@@ -1958,7 +2315,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
                 @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
-                ManagedSessionStore sessions,
+                JdbcManagedSessionStore sessions,
                 ToolPublicationObjectStore acceptanceObjects) {
             return new ToolPublicationDataStore(jdbc, manager,
                     acceptancePublicationGrants, sessions, acceptanceObjects,
@@ -1978,7 +2335,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 @Qualifier("managedAgentTransactionManager") PlatformTransactionManager manager,
                 ToolPublicationStore acceptancePublicationGrants,
                 ToolPublicationDataStore acceptancePublicationData,
-                ManagedSessionStore sessions,
+                JdbcManagedSessionStore sessions,
                 ManagedAgentProperties properties) {
             return new ToolPublicationController(
                     acceptancePublicationGrants, acceptancePublicationData,
@@ -1986,10 +2343,40 @@ public class SurfaceAdmissionAcceptanceTest {
                             acceptancePublicationData),
                     properties);
         }
+
+        // The channel adapter controller is conditional on
+        // qwen.managed-agent.channels.enabled, whose isolated-listener guard
+        // this boot does not provision; mount it over the real services so
+        // the admission probes reach the tenant-header admission and the
+        // channel's own domain gates.
+        @Bean
+        public com.alibaba.qwen.code.managedagent.api.ManagedChannelAdapterController
+                acceptanceChannelAdapter(
+                com.alibaba.qwen.code.managedagent.channel.ManagedChannelService channels,
+                com.alibaba.qwen.code.managedagent.channel.ManagedPrWatchService prWatch) {
+            return new com.alibaba.qwen.code.managedagent.api.ManagedChannelAdapterController(
+                    channels, prWatch);
+        }
+
+        // The terminal ticket route is broker-gated; mount it here so the
+        // admission probes reach a real handler instead of a 404. The relay
+        // runs the real Session admission (read/Shell/OPERATOR); only the
+        // binding lookup is mocked, which answers the admitted arm with the
+        // workspace_unavailable refusal the OPERATOR probes expect.
+        @Bean
+        public TerminalTicketController acceptanceTerminalTicket(
+                com.alibaba.qwen.code.managedagent.session.ManagedAgentService sessions,
+                com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
+            return new TerminalTicketController(
+                    new WorkspaceTerminalRelayService(sessions,
+                            mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
+                            settings),
+                    new TerminalTicketStore(java.time.Clock.systemUTC()));
+        }
     }
 
     public static java.util.Map<String, Object> reservedRegistration(
-            com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore.Intent intent, String tenant) {
+            SshWorkspaceStore.Intent intent, String tenant) {
         java.util.Map<String, Object> identity = java.util.Map.of("root", "/work/project",
                 "hostId", "host-" + tenant, "device", "1", "inode", "2", "birthTime", "3");
         var marker = new java.util.LinkedHashMap<String, Object>(identity);

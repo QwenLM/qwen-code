@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.automation;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.session.HarnessConflictCodes;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceRow;
@@ -691,15 +692,8 @@ public class AutomationScanner {
     }
 
     static String errorCode(HarnessHttpFailure error) {
-        String body = error.getResponseBody();
-        if (body == null) {
-            return null;
-        }
-        int at = body.indexOf("\"code\":\"");
-        if (at < 0) {
-            return null;
-        }
-        int end = body.indexOf('"', at + 8);
-        return end > at ? body.substring(at + 8, end) : null;
+        String code = error.getErrorCode();
+        return code != null ? code
+                : HarnessConflictCodes.bodyCode(error.getResponseBody());
     }
 }

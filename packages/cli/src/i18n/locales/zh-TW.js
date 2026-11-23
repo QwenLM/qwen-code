@@ -9,6 +9,51 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  user: '使用者',
+  assistant: '助手',
+  thinking: '思考',
+  task: '任務',
+  compaction: '壓縮',
+  info: '資訊',
+  warning: '警告',
+  retry: '重試',
+  'stop-hook': '停止掛鉤',
+  'away-recap': '離開摘要',
+  'user-shell': '使用者命令',
+  advisor: '顧問',
+  'arena-agent': '競技場代理',
+  'arena-session': '競技場工作階段',
+  goal: '目標',
+  'Protected input': '受保護的輸入',
+  'Focused input. Cursor: {{position}}': '輸入已聚焦。游標：{{position}}',
+  'Unfocused input.': '輸入未聚焦。',
+  'Focused Prompt: {{value}}': '已聚焦的提示輸入：{{value}}',
+  'Prompt: {{value}}': '提示輸入：{{value}}',
+  'Focused Input: {{value}}': '已聚焦的輸入：{{value}}',
+  'Input: {{value}}': '輸入：{{value}}',
+  'Placeholder: {{value}}': '預留提示：{{value}}',
+  'Cursor: {{position}}': '游標：{{position}}',
+  'Selected {{value}}': '已選取 {{value}}',
+  'Disabled {{value}}': '已停用 {{value}}',
+  'Focused Toggle on: {{value}}': '已聚焦，開關已開啟：{{value}}',
+  'Focused Toggle off: {{value}}': '已聚焦，開關已關閉：{{value}}',
+  'Toggle on: {{value}}': '開關已開啟：{{value}}',
+  'Toggle off: {{value}}': '開關已關閉：{{value}}',
+  'Conversation cleared.': '對話已清空。',
+  '{{role}}: {{value}}': '{{role}}：{{value}}',
+  'Revision {{value}}': '修訂 {{value}}',
+  Dialog: '對話框',
+  'Dialog closed. Focus: prompt.': '對話框已關閉。焦點：提示輸入。',
+  'Dialog closed.': '對話框已關閉。',
+  'Waiting for confirmation': '等待確認',
+  'Working. Escape to cancel.': '處理中。按 Escape 取消。',
+  'History items {{start}}-{{end}} of {{total}}':
+    '歷史記錄 {{start}}-{{end}}，共 {{total}} 筆。',
+  'Worktree: {{value}}': '工作樹：{{value}}',
+  'Workflow mode: on': '工作流模式：已開啟',
+  'Workflow mode: on (unavailable)': '工作流模式：已開啟（不可用）',
+  'Shift+Up/Down or PageUp/Down to read history; Ctrl+Home/End for first/latest.':
+    '按 Shift+上/下或 PageUp/PageDown 閱讀歷史；按 Ctrl+Home/End 跳至最早/最新。',
   "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
     '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
   "You've used up your weekly credits.{{reset}} Please try again after the reset.":
@@ -347,6 +392,7 @@ export default {
   Auth: '認證',
   Model: '模型',
   'Fast Model': '快速模型',
+  'Agent Loop': 'Agent 迴圈',
   Sandbox: '沙箱',
   'Session ID': '會話 ID',
   'Base URL': 'Base URL',
@@ -360,6 +406,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
   'Move this session to a new working directory': '將此會話移動到新的工作目錄',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '請等待背景智能體完成，或在 /tasks 中停止它們後再切換目錄。',
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能設定已儲存。',
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
@@ -737,8 +785,8 @@ export default {
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
   'Mods (Experimental)': 'Mods（實驗性）',
-  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
-    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
+  'Enable experimental Mods from enabled extensions in trusted local terminal, headless and ACP sessions. Restart required.':
+    '在受信任的本機互動終端、無介面工作階段和 ACP 工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -1275,6 +1323,26 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要刪除的記憶文本>',
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
+  'Bind a GitHub pull request to this session':
+    '將 GitHub 提取請求綁定到本會話',
+  'Usage: /pr <number | url>': '用法：/pr <編號 | url>',
+  'No PRs bound to this session.': '本會話尚未綁定 PR。',
+  'Bound PRs: {{list}}': '已綁定 PR：{{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無效的 PR 引用。用法：/pr <編號 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    '無法透過 gh 解析 PR #{{number}}。請改用完整 PR URL。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已將 PR #{{number}} 綁定到本會話：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已綁定到本會話：{{url}}',
+  'Failed to bind PR #{{number}}.': '綁定 PR #{{number}} 失敗。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    '綁定 PR #{{number}} 失敗：{{message}}',
+  'Could not read the PR bindings for this session.':
+    '無法讀取本會話的 PR 綁定。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) 不可用或逾時。請改用完整 PR URL 直接綁定。',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
   'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
@@ -1515,6 +1583,8 @@ export default {
     '由於壓縮摘要被截斷，無法壓縮聊天歷史。',
   'Could not compress chat history due to an API error.':
     '由於 API 錯誤，無法壓縮聊天歷史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天歷史過大，超出上下文窗口，無法壓縮。',
   'Configuration is not available.': '配置不可用。',
   'Please provide at least one path to add.': '請提供至少一個要添加的路徑。',
   'The /directory add command is not supported in restrictive sandbox profiles. Please use --include-directories when starting the session instead.':
@@ -1660,6 +1730,18 @@ export default {
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
+  'Set the vision bridge timeout in seconds (use with --vision)':
+    '設置視覺橋接逾時（秒，搭配 --vision 使用）',
+  '--timeout can only be used with --vision.':
+    '--timeout 只能與 --vision 一起使用。',
+  'Invalid --timeout value "{{value}}". Use a positive whole number of seconds, such as 60, 60s or 90000ms.':
+    '無效的 --timeout 值 "{{value}}"。請使用正整數秒數，例如 60、60s 或 90000ms。',
+  'Vision bridge timeout: {{timeout}}': '視覺橋接逾時：{{timeout}}',
+  'Saved vision bridge timeout {{timeout}}{{scope}}. A higher-priority setting keeps the effective timeout at {{effectiveTimeout}}.':
+    '已儲存視覺橋接逾時 {{timeout}}{{scope}}。較高優先順序的設定使實際逾時為 {{effectiveTimeout}}。',
+  'Vision bridge timeout: {{timeout}}\nUse "/model --vision --timeout <seconds>" to change it.':
+    '視覺橋接逾時：{{timeout}}\n使用 "/model --vision --timeout <seconds>" 修改。',
+  '{{timeout}} (default)': '{{timeout}}（預設）',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
   'Compaction model override cleared': '壓縮模型覆蓋已清除',
@@ -1845,6 +1927,7 @@ export default {
   'Model Usage': '模型使用情況',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
+  'Output (incl. Reasoning)': '輸出（含推理）',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',
@@ -2192,6 +2275,8 @@ export default {
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
     '沒有可供 /advisor 使用的對話上下文',
+  'No conversation context available for /btw':
+    '沒有可供 /btw 使用的對話上下文',
   'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一個操作正在進行中，請等待其完成後再執行 /advisor',
@@ -2599,10 +2684,10 @@ export default {
   'Signed in successfully · {{email}}': '登入成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型。',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    '常用指令：/usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型，/effort 修改思考強度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用指令：/usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
   'The network request failed or timed out.': '網路請求失敗或逾時。',
   'The service returned an invalid response.': '服務回傳的資料格式無效。',
@@ -2642,4 +2727,17 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已登出 Qwen，請使用 /auth 登入其他帳號。',
   'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+  'Copied to clipboard': '已複製到剪貼簿',
+  'Copy failed': '複製失敗',
+  '(API error: {{error}})': '（API 錯誤：{{error}}）',
+  'API error': 'API 錯誤',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒後重試 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 瀏覽先前的回答',
+  'c copy': 'c 複製',
+  'x clear history': 'x 清除歷史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
 };

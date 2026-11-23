@@ -327,15 +327,22 @@ describe('runHostedWorkflowTurn', () => {
     expect(initOrder).toBeLessThan(authOrder);
     expect(authOrder).toBeLessThan(runOrder);
     // R1-14: the per-turn config posture itself: safe-mode argv, a
-    // throw-on-conflict ninth argument, no ambient host policy; and the
-    // settings load is pinned untrusted.
+    // throw-on-conflict ninth argument and a host policy that refuses only
+    // LSP — never a tool-invocation guard refit — plus the pinned session
+    // model configuration when the host supplies one; and the settings load
+    // is pinned untrusted.
     const loadCalls = vi.mocked(loadCliConfig).mock.calls;
     expect(loadCalls).toHaveLength(1);
     expect(loadCalls[0]![1]).toMatchObject({
       sessionId: base.sessionId,
       sessionIdGenerated: true,
       chatRecording: false,
+      // The managed attribution fallback only fires for ACP-shaped argv
+      // without an explicit channel; a builder adding one would silently
+      // drop every Hosted turn out of the managed bucket.
+      acp: true,
     });
+    expect(loadCalls[0]![1]).not.toHaveProperty('channel');
     expect(loadCalls[0]).toHaveLength(10);
     expect((loadCalls[0]![1] as { safeMode?: boolean }).safeMode).toBe(true);
     // #13858: the agents' chats open without this Harness's cwd listing.
@@ -344,7 +351,7 @@ describe('runHostedWorkflowTurn', () => {
         ?.skipStartupContext,
     ).toBe(true);
     expect(loadCalls[0]![8]).toBe(true);
-    expect(loadCalls[0]![9]).toBeUndefined();
+    expect(loadCalls[0]![9]).toEqual({ lspDisabled: true });
     expect(vi.mocked(loadSettings).mock.calls[0]![1]).toMatchObject({
       workspaceTrusted: false,
     });

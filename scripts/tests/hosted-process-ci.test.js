@@ -21,8 +21,10 @@ const windowsRun = [
   `node -e "const r = require('./integration-tests/hosted-process-suite.json'); if (r.numTotalTests === 0 || r.numPassedTests !== r.numTotalTests) { console.error('::error::' + r.numPassedTests + ' of ' + r.numTotalTests + ' Hosted cases passed; Windows must run every case'); process.exit(1); }"`,
 ].join('\n');
 
-// One row per failover arm the Hosted failover job runs: step name, npm
-// script, and the runner flags that make the row a different arm.
+// One row per deterministic E2E arm the Hosted failover job runs: step name,
+// npm script, and the runner flags that make the row a different arm. The
+// failover arms plus the /loop skill model-turn and scheduled-fire arms,
+// which share the same packaged-stack prerequisites.
 const failoverArms = [
   [
     'Run in-flight owner failover E2E',
@@ -43,6 +45,16 @@ const failoverArms = [
     'Run long-answer persistence E2E',
     'test:e2e:managed-big-output',
     ['--big-output'],
+  ],
+  [
+    'Run /loop skill model-turn E2E',
+    'test:e2e:managed-loop-skill',
+    ['--loop-skill'],
+  ],
+  [
+    'Run /loop scheduled-fire E2E',
+    'test:e2e:managed-loop-fire',
+    ['--loop-fire'],
   ],
   [
     'Run Harness-restart session failover E2E',
@@ -142,6 +154,18 @@ const failoverArms = [
       'allow',
       '--g3-fault',
       'sibling-approval',
+    ],
+  ],
+  [
+    'Run rewritten-command Hook recovery E2E',
+    'test:e2e:managed-harness-restart-approval-command-rewrite',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'command-rewrite',
     ],
   ],
   [
@@ -658,6 +682,37 @@ describe('Hosted real-process gates', () => {
     expect(delegate.run).toContain('/sys/fs/cgroup/fg8/smoke/cgroup.procs');
   });
 
+  it('delegates and enters the rewritten-command arm cgroup before its real stack starts', () => {
+    const job = java.jobs['hosted-failover-e2e'];
+    const delegate = job.steps.find(
+      (step) =>
+        step.name ===
+        'Delegate a cgroup v2 root for rewritten-command recovery',
+    );
+    const arm = job.steps.find(
+      (step) => step.name === 'Run rewritten-command Hook recovery E2E',
+    );
+    expect(delegate, 'the rewritten-command cgroup delegation').toBeDefined();
+    expect(arm, 'the rewritten-command arm').toBeDefined();
+    expect(job.steps.indexOf(delegate)).toBeLessThan(job.steps.indexOf(arm));
+    expect(delegate.if).toBe(arm.if);
+    expect(arm.env.QWEN_E2E_EXTENSION_CGROUP_ROOT).toBe(
+      '/sys/fs/cgroup/a3-command-rewrite',
+    );
+    expect(delegate.run).toContain(
+      'mkdir -p /sys/fs/cgroup/a3-command-rewrite',
+    );
+    expect(delegate.run).toContain(
+      'test -f /sys/fs/cgroup/a3-command-rewrite/cgroup.kill',
+    );
+    expect(delegate.run).toContain(
+      '/sys/fs/cgroup/a3-command-rewrite/smoke/cgroup.procs',
+    );
+    expect(arm.run).toContain(
+      'echo $$ | sudo tee /sys/fs/cgroup/a3-command-rewrite/cgroup.procs',
+    );
+  });
+
   it('sweeps every Hook cgroup subtree a Hosted IT allocates', () => {
     const owners = hostedTestClasses().filter(({ file }) =>
       read(file).includes('QWEN_MANAGED_HOOK_CGROUP_ROOT'),
@@ -673,16 +728,17 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (205 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (209 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     // The MySQL job's ceiling carries 33 minutes of setup allowance, above
     // the 13-minute floor: a Verify that timed out used to skip admission,
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
-    ['hosted-harness-mysql', 295, 328, 33],
-    // Twenty-seven failover arms at 10 each; the allowance is ~13 minutes of
-    // setup plus 2.
-    ['hosted-failover-e2e', 270, 285, 15],
+    ['hosted-harness-mysql', 299, 332, 33],
+    // Thirty deterministic E2E arms at 10 each plus the capped
+    // rewritten-command cgroup delegation at 10 plus the PR-watch
+    // bound-session rig at 10; the allowance is ~13 minutes of setup plus 2.
+    ['hosted-failover-e2e', 320, 335, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling, allowance) => {
@@ -720,10 +776,16 @@ describe('Hosted real-process gates', () => {
     expect(job.services).toBeUndefined();
     expect(job['runs-on']).toBe('ubuntu-latest');
     expect(job.env.QWEN_E2E_REGISTER_STORAGE).toBe('1');
-    // Every arm the job runs has a row above, so none runs unpinned.
+    // Every arm the job runs has a row above, so none runs unpinned. The
+    // PR-watch bound-session rig is not one of the failover arm rows; it is
+    // pinned by its own case below.
     expect(
       job.steps
-        .filter((step) => /^Run .* E2E$/.test(step.name ?? ''))
+        .filter(
+          (step) =>
+            /^Run .* E2E$/.test(step.name ?? '') &&
+            step.name !== 'Run managed PR-watch bound-session E2E',
+        )
         .map((step) => step.name)
         .sort(),
     ).toEqual(failoverArms.map(([name]) => name).sort());
@@ -755,6 +817,40 @@ describe('Hosted real-process gates', () => {
     expect(new Set(commands).size).toBe(failoverArms.length);
     expect(new Set(failoverArms.map(([name]) => name)).size).toBe(
       failoverArms.length,
+    );
+  });
+
+  it('pins the PR-watch bound-session rig into the Hosted failover job', () => {
+    // A rename of the rig, the npm script, or the workflow step must turn
+    // this red, so the adapter<->control-plane witness cannot silently
+    // disappear from CI.
+    const script = 'test:e2e:managed-pr-watch';
+    expect(pkg.scripts[script]).toBe(
+      'node scripts/run-managed-pr-watch-e2e.mjs',
+    );
+    expect(
+      existsSync(
+        new URL('../../scripts/run-managed-pr-watch-e2e.mjs', import.meta.url),
+      ),
+    ).toBe(true);
+    const job = java.jobs['hosted-failover-e2e'];
+    const step = job.steps.find(
+      (s) => s.name === 'Run managed PR-watch bound-session E2E',
+    );
+    expect(step).toBeDefined();
+    expect(step.run).toContain(`npm run ${script}`);
+    expect(step['timeout-minutes']).toBe(10);
+    expect(step['continue-on-error']).toBeUndefined();
+    // It runs beside the other arms, after the failover prerequisites and
+    // under the same bound, so a rig flake cannot skip the remaining setup
+    // and arms, and a failed install does not run it against a missing dist.
+    const install = job.steps.findIndex(
+      (s) => s.name === 'Install MySQL binaries for the failover E2E',
+    );
+    expect(install).toBeGreaterThan(-1);
+    expect(job.steps.indexOf(step)).toBeGreaterThan(install);
+    expect(step.if).toBe(
+      "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}",
     );
   });
 
@@ -804,6 +900,8 @@ describe('Hosted real-process gates', () => {
         '--frozen-control-plane',
         '--g3-verify',
         '--big-output',
+        '--loop-skill',
+        '--loop-fire',
       ]) {
         if (!flags.some((entry) => entry.split(' ')[0] === flag)) {
           expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
@@ -945,12 +1043,14 @@ describe('Hosted real-process gates', () => {
       // minutes; the FG12d detach-unknown cell adds 55 s (2x its measured
       // 27.4 s), moving the fork to 11591 and the step to 204 minutes; the
       // FG12d stopped-worker close cell adds 67 s (2x its measured 33.1 s),
-      // moving the fork to 11658 and the step to 205 minutes until
+      // moving the fork to 11658 and the step to 205 minutes; the client-files
+      // relay joint fixture adds 204 s (2x its measured 101.6 s), moving the
+      // fork to 11862 and the step to 209 minutes until
       // CI measures it: the relational check above tolerates anything up to
       // step*60, so the value is pinned literally here — an unnoticed raise
       // has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11658);
+        expect(forkSeconds).toBe(11862);
       }
     },
   );
@@ -1252,12 +1352,15 @@ describe('Hosted real-process gates', () => {
   // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
   // provisionally reserves 180s (its 120s method ceiling plus 60s for
   // process/context cleanup), so it becomes 10844s until CI measures it. The
-  // largest
-  // ceiling (600s) plus
+  // side-query process fixture provisionally reserves 120s (its 60s method
+  // ceiling plus 60s for process/context cleanup), so it becomes 10964s until
+  // CI measures it. The client-files relay joint fixture adds 204s (2x its
+  // measured 101.6s for the registration-loop and turn cases), so it becomes
+  // 11168s until CI measures it. The largest ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10844;
+  const hostedForkHealthySeconds = 11168;
   const hostedForkSeconds = () =>
     Number(
       read('packages/managed-agent-server/verification/pom.xml')
@@ -1321,6 +1424,7 @@ describe('Hosted real-process gates', () => {
       'HostedChannelFaultGatesIT',
       'HostedChannelProcessCrashIT',
       'HostedCleanupRetentionMySqlIT',
+      'HostedClientFilesRelayIT',
       'HostedCommittedEventLineReplayIT',
       'HostedConcurrentTurnBurstMySqlIT',
       'HostedEventStreamLivenessIT',
@@ -1343,6 +1447,7 @@ describe('Hosted real-process gates', () => {
       'HostedPublicWorkspaceIT',
       'HostedSessionRelayFaultGatesIT',
       'HostedShellLifecycleRecoveryIT',
+      'HostedSideQueryProcessIT',
       'HostedTeamLeadMySqlIT',
       'HostedTeamMemberCommandMySqlIT',
       'HostedWorkflowFaultGatesIT',
