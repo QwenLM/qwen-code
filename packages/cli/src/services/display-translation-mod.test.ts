@@ -180,6 +180,25 @@ describe('translateDisplayText', () => {
     },
   );
 
+  it('keeps terminal code that is fenced inside a Markdown paragraph', async () => {
+    const original = 'Run this command:\n    ~~~sh\n    npm test\n    ~~~';
+    const translated = '运行以下命令：\n    ~~~sh\n    npm test\n    ~~~';
+    const changed = answer(translated.replace('npm test', 'npm run build'));
+    await expect(
+      translateDisplayText(original, 'zh-CN', changed, signal, 'terminal'),
+    ).resolves.toBeUndefined();
+    expect(changed).toHaveBeenCalledOnce();
+    await expect(
+      translateDisplayText(
+        original,
+        'zh-CN',
+        answer(translated),
+        signal,
+        'terminal',
+      ),
+    ).resolves.toBe(translated);
+  });
+
   it('keeps the original when the call is unanswered or throws', async () => {
     const unanswered: ModModelCompleteResult = {
       isAnswered: false,

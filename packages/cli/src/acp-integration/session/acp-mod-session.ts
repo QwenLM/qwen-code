@@ -217,12 +217,7 @@ export class AcpModSession {
     const isAuthorized = this.session.canTranslateRow(row.component)
       ? await this.translationRows?.authorize(row.component, row.props.text)
       : undefined;
-    return this.session.askRow(
-      row.component,
-      row.props,
-      signal,
-      isAuthorized?.() === true,
-    );
+    return this.session.askRow(row.component, row.props, signal, isAuthorized);
   }
 
   observeModelText(text: string, thought: boolean, attempt: object): void {
@@ -234,6 +229,10 @@ export class AcpModSession {
 
   settleModelText(attempt: object, completed: boolean): void {
     this.translationRows?.settleAttempt(attempt, completed);
+  }
+
+  observeRootToolCall(toolCallId: string, preparing: boolean): void {
+    this.translationRows?.observeRootToolCall(toolCallId, preparing);
   }
 
   rememberCompletedReply(text: string): void {

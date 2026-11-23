@@ -9,7 +9,10 @@ import type {
   ModModelCompleteInput,
   ModModelCompleteResult,
 } from '@qwen-code/qwen-code-core/mods/types.js';
-import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
+import type {
+  ModRenderSite,
+  ModRenderSurface,
+} from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { LoadedSettings } from '../config/settings.js';
 
@@ -84,6 +87,7 @@ export async function translateDisplayText(
     signal: AbortSignal,
   ) => Promise<ModModelCompleteResult>,
   signal: AbortSignal,
+  surface: ModRenderSurface = 'desktop',
 ): Promise<string | undefined> {
   if (signal.aborted) return undefined;
   try {
@@ -119,9 +123,20 @@ export async function translateDisplayText(
       );
       return undefined;
     }
-    // The Web Shell's code-block copy button reads the displayed code.
+    // The Web Shell copies the displayed code. Ink also draws fences that
+    // CommonMark treats as part of a paragraph.
     const translated = await inspectMarkdown(text);
-    if (!translated || !isDeepStrictEqual(source.code, translated.code)) {
+    const terminalFences =
+      surface === 'terminal'
+        ? (await import('../ui/utils/markdown-utilities.js'))
+            .getFencedCodeBlocks
+        : undefined;
+    if (
+      !translated ||
+      !isDeepStrictEqual(source.code, translated.code) ||
+      (terminalFences &&
+        !isDeepStrictEqual(terminalFences(original), terminalFences(text)))
+    ) {
       logger.debug('Left untranslated: code changed');
       return undefined;
     }

@@ -9,8 +9,10 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModRenderSite } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { MOD_MAX_BYTES } from '@qwen-code/qwen-code-core/mods/types.js';
 import type { ChatRecordingService } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import { splitInsightSegments } from '@qwen-code/qwen-code-core/utils/insight-segments.js';
 
-const liveRowLimit = 32;
+// Match the Web Shell's default live transcript window for non-recorded chats.
+const liveRowLimit = 50_000;
 const rowTextLimit = MOD_MAX_BYTES / 2;
 
 function rowKey(component: ModRenderSite, text: string): string {
@@ -20,8 +22,15 @@ function rowKey(component: ModRenderSite, text: string): string {
     .digest('hex');
 }
 
-function displayedRowKey(component: ModRenderSite, text: string): string {
-  return rowKey(component, component === 'Thinking' ? text.trimEnd() : text);
+function* displayedRows(
+  component: ModRenderSite,
+  text: string,
+): Iterable<string> {
+  yield component === 'Thinking' ? text.trimEnd() : text;
+  if (component === 'AssistantMessage') {
+    for (const segment of splitInsightSegments(text) ?? [])
+      if (segment.kind === 'text') yield segment.text;
+  }
 }
 
 /** Only session-owned output may be sent to the display translation model. */
@@ -37,6 +46,7 @@ export class AcpDisplayTranslationRows {
     oversized: boolean;
   };
   private readonly live = new Set<string>();
+  private readonly rootToolIds = new Set<string>();
   private persisted?: { cursor: string; rows: Promise<Set<string>> };
 
   constructor(private readonly config: Config) {}
@@ -56,6 +66,7 @@ export class AcpDisplayTranslationRows {
       this.generation++;
       this.pending = undefined;
       this.live.clear();
+      this.rootToolIds.clear();
       this.persisted = undefined;
     }
     return recorder;
@@ -93,12 +104,35 @@ export class AcpDisplayTranslationRows {
       this.rememberCompleted(pending.component, pending.text);
   }
 
+  observeRootToolCall(toolCallId: string, preparing: boolean): void {
+    this.currentRecorder();
+    const id = createHash('sha256').update(toolCallId, 'utf16le').digest('hex');
+    if (this.rootToolIds.has(id)) return;
+    this.rootToolIds.add(id);
+    if (this.rootToolIds.size > liveRowLimit)
+      this.rootToolIds.delete(this.rootToolIds.values().next().value!);
+    if (!preparing) return;
+
+    const attempt = this.pending?.attempt.deref();
+    if (attempt) this.settleAttempt(attempt, true);
+  }
+
   rememberCompleted(component: ModRenderSite, text: string): void {
     this.currentRecorder();
     if (!text.trim() || Buffer.byteLength(text) > rowTextLimit) return;
-    this.live.add(displayedRowKey(component, text));
-    if (this.live.size > liveRowLimit)
-      this.live.delete(this.live.values().next().value!);
+    for (const row of displayedRows(component, text)) {
+      this.live.add(rowKey(component, row));
+      if (this.live.size > liveRowLimit)
+        this.live.delete(this.live.values().next().value!);
+    }
+  }
+
+  private isPendingPrefix(component: ModRenderSite, text: string): boolean {
+    if (this.pending?.component !== component) return false;
+    for (const row of displayedRows(component, this.pending.text)) {
+      if (row.startsWith(text)) return true;
+    }
+    return false;
   }
 
   /** The returned check pins permission to the transcript seen before dispatch. */
@@ -118,9 +152,7 @@ export class AcpDisplayTranslationRows {
     if (this.live.has(key)) return stillCurrent;
     // MAX_TOKENS recovery can persist a prefix before its display row ends.
     const canReadPersisted = () =>
-      stillCurrent() &&
-      (this.pending?.component !== component ||
-        !this.pending.text.startsWith(text));
+      stillCurrent() && !this.isPendingPrefix(component, text);
     if (!canReadPersisted()) return undefined;
     const cursor = recorder?.getTranscriptCursor().recordId;
     if (!recorder || !cursor) return undefined;
@@ -174,12 +206,10 @@ export class AcpDisplayTranslationRows {
               block.sourceRecordIds?.length &&
               block.sourceRecordIds.every((id) => modelRecordIds.has(id))
             ) {
-              keys.add(
-                displayedRowKey(
-                  block.kind === 'thought' ? 'Thinking' : 'AssistantMessage',
-                  block.text,
-                ),
-              );
+              const component =
+                block.kind === 'thought' ? 'Thinking' : 'AssistantMessage';
+              for (const text of displayedRows(component, block.text))
+                keys.add(rowKey(component, text));
             }
           }
           return keys;

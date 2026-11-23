@@ -45,7 +45,7 @@ The target is read when a session starts and stays fixed for that session, so th
 
 The CLI translates rows after installed Mods render them. It shares the row requests, serial row scheduling, 30-second deadline, and session cache with Mod rendering. Translation has no Mod slot, and its model request runs outside the queue that handles prompts and tools.
 
-Translation runs where the host draws `AssistantMessage` or `Thinking` rows. For requests from the Web Shell, the owning session verifies that the row came from its completed reply or thinking output before calling the translation model. The cache answers a reload, a second tab or a re-opened thought.
+Translation runs where the host draws `AssistantMessage` or `Thinking` rows. The owning session verifies Web Shell rows against its completed reply or thinking output, including reply text before a visible tool preparation and prose split around Insight cards. It checks the active transcript again at dispatch and before returning the answer. The cache answers a reload, a second tab or a re-opened thought.
 
 The user guide's translation example now points to this setting for these two languages, and stays as an example of building such a Mod.
 
@@ -76,7 +76,7 @@ This compares characters with words because a Chinese sentence often carries Eng
 
 ### The model call
 
-Translation uses the Mod model service with the `haiku` alias, which selects the session's fast model or falls back to the session model. The call requests no thinking, has a 25-second timeout inside the row's 30-second deadline and has a limit of 8,192 output tokens. The prompt asks for a complete translation ending with a fixed line. If the answer is empty, lacks the end line, carries the host's truncation marker or changes the Markdown code, the row keeps its previous text.
+Translation uses the Mod model service with the `haiku` alias, which selects the session's fast model or falls back to the session model. The call requests no thinking, has a 25-second timeout inside the row's 30-second deadline and has a limit of 8,192 output tokens. The prompt asks for a complete translation ending with a fixed line. If the answer is empty, lacks the end line, carries the host's truncation marker or changes the displayed code, the row keeps its previous text.
 
 The call sends the text of each translated block to the fast model's endpoint. When the fast model uses another provider than the session model, that provider receives the text.
 

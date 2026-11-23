@@ -376,16 +376,48 @@ describe('Mod rows through the daemon', () => {
     const responseGate = new Promise<void>((resolve) => {
       releaseResponse = resolve;
     });
+    let releaseTool!: () => void;
+    const toolGate = new Promise<void>((resolve) => {
+      releaseTool = resolve;
+    });
+    const inspectedFile = path.join(workspace, 'report.txt');
+    writeFileSync(inspectedFile, 'Report contents.');
+    const insightProse = [
+      ['The report is ready.', '报告已就绪。'],
+      ['I will check the findings.', '我会检查调查结果。'],
+    ] as const;
     const fakeModel = await startFakeOpenAIServer(async ({ body }) => {
       const messages = JSON.stringify(body['messages'] ?? []);
       if (messages.includes('into Simplified Chinese')) {
-        const text = messages.includes('Plan the answer.')
-          ? '先规划答案。'
-          : '答案一';
+        const text =
+          insightProse.find(([source]) => messages.includes(source))?.[1] ??
+          (messages.includes('Plan the answer.') ? '先规划答案。' : '答案一');
         translations.push(text);
         return { content: `${text}\n[QWEN_DISPLAY_END]` };
       }
       if (body['stream'] !== true) return { content: '{}' };
+      if (messages.includes('Inspect the report')) {
+        if (messages.includes('"role":"tool"'))
+          return { content: '检查完成。' };
+        const insight = JSON.stringify({
+          insight_ready: { path: inspectedFile },
+        });
+        return {
+          content: `${insightProse[0][0]} ${insight} ${insightProse[1][0]}`,
+          toolCalls: [
+            {
+              id: 'inspect-report',
+              type: 'function',
+              function: {
+                name: 'read_file',
+                arguments: JSON.stringify({ file_path: inspectedFile }),
+              },
+            },
+          ],
+          holdAfterToolStart: true,
+          holdUntil: toolGate,
+        };
+      }
       if (messages.includes('Reply in Chinese'))
         return { content: '已经是中文的回答' };
       return {
@@ -544,6 +576,69 @@ describe('Mod rows through the daemon', () => {
       });
       expect(translations).toEqual(['先规划答案。', '答案一']);
 
+      const verifyInsightRows = async ({
+        sessionId,
+        clientId,
+      }: typeof session) => {
+        for (const [source, text] of insightProse) {
+          expect(
+            await client.askSessionModRow(
+              sessionId,
+              {
+                component: 'AssistantMessage',
+                props: { text: source, isFirstOfReply: true },
+              },
+              { clientId },
+            ),
+          ).toEqual({
+            status: 'answered',
+            props: { text, isFirstOfReply: true },
+          });
+        }
+      };
+      const preparing = (async () => {
+        for await (const event of client.subscribeEvents(session.sessionId, {
+          lastEventId: 0,
+          signal: AbortSignal.timeout(30_000),
+        })) {
+          if (
+            normalizeDaemonEvent(event).some(
+              (update) =>
+                update.type === 'tool.update' &&
+                update.toolCallId === 'inspect-report',
+            )
+          )
+            return;
+        }
+        throw new Error('Missing the preparing tool card');
+      })();
+      const toolPrompt = client.prompt(
+        session.sessionId,
+        { prompt: [{ type: 'text', text: 'Inspect the report' }] },
+        AbortSignal.timeout(60_000),
+        session.clientId,
+      );
+      try {
+        await preparing;
+        // The card closes the assistant block while the tool call is still
+        // streaming. Web Shell draws the two prose segments around the card.
+        await verifyInsightRows(session);
+        expect(
+          await client.askSessionModRow(
+            session.sessionId,
+            {
+              component: 'AssistantMessage',
+              props: { text: 'check the findings.', isFirstOfReply: true },
+            },
+            asked,
+          ),
+        ).toEqual({ status: 'unanswered' });
+      } finally {
+        releaseTool();
+        await toolPrompt.catch(() => {});
+      }
+      expect((await toolPrompt).stopReason).toBe('end_turn');
+
       // A new live owner can still verify rows from the persisted transcript.
       await client.closeSession(session.sessionId, second.clientId);
       const restored = await client.loadSession(session.sessionId, {
@@ -563,13 +658,20 @@ describe('Mod rows through the daemon', () => {
           clientId: restored.clientId,
         }),
       ).toEqual(translatedThought);
+      await verifyInsightRows(restored);
       expect(translations).toEqual([
         '先规划答案。',
         '答案一',
+        '报告已就绪。',
+        '我会检查调查结果。',
         '答案一',
         '先规划答案。',
+        '报告已就绪。',
+        '我会检查调查结果。',
       ]);
     } finally {
+      releaseResponse();
+      releaseTool();
       await daemon?.dispose();
       await fakeModel.close();
       rmSync(root, { recursive: true, force: true });

@@ -16,8 +16,10 @@ export type ModRowRender = (
   wanted: () => boolean,
 ) => Promise<ModRenderInput['props'] | undefined | null>;
 
-/** Authorization from the host, never part of the Mod render event. */
-export type ModRowInput = ModRenderInput & { translationAllowed?: boolean };
+/** Remote authorization from the host, never part of the Mod render event. */
+export type ModRowInput = ModRenderInput & {
+  translationAuthorization?: false | (() => boolean);
+};
 
 interface Row {
   input: ModRowInput;
@@ -36,10 +38,14 @@ interface Row {
 const KEPT_ROWS = 1_000;
 
 const rowId = (input: ModRowInput) =>
-  `${input.component}\0${input.requestId}\0${input.translationAllowed !== false}`;
+  `${input.component}\0${input.requestId}\0${input.translationAuthorization !== false}`;
 
-const rowKey = (input: ModRowInput) =>
-  stableJson({ ...input, viewport: undefined });
+const rowKey = ({ translationAuthorization, ...input }: ModRowInput) =>
+  stableJson({
+    ...input,
+    viewport: undefined,
+    translationAllowed: translationAuthorization !== false,
+  });
 
 /**
  * The transcript rows a terminal asks the Mods to draw. Each row renders once

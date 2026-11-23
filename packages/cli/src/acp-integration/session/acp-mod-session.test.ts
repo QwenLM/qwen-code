@@ -53,6 +53,47 @@ const settings = (mods: boolean) =>
   ({ merged: { experimental: { mods } } }) as unknown as LoadedSettings;
 const config = {} as Config;
 
+it('settles a row only when a preparing tool creates a card', async () => {
+  let sessionId = 'session-1';
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => sessionId,
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  const firstAttempt = {};
+  rows.observe('Before the tool.', 'AssistantMessage', firstAttempt);
+  rows.observeRootToolCall('read-report', true);
+  const completed = await rows.authorize(
+    'AssistantMessage',
+    'Before the tool.',
+  );
+  expect(completed?.()).toBe(true);
+
+  const nextAttempt = {};
+  rows.observe('During the next attempt.', 'AssistantMessage', nextAttempt);
+  rows.observeRootToolCall('read-report', true);
+  await expect(
+    rows.authorize('AssistantMessage', 'During the next attempt.'),
+  ).resolves.toBeUndefined();
+
+  sessionId = 'session-2';
+  rows.observe('A different session.', 'AssistantMessage', nextAttempt);
+  rows.observeRootToolCall('read-report', true);
+  const next = await rows.authorize('AssistantMessage', 'A different session.');
+  expect(next?.()).toBe(true);
+});
+
+it('keeps earlier live rows eligible in non-recorded sessions', async () => {
+  const rows = new AcpDisplayTranslationRows({
+    getSessionId: () => 'session',
+    getChatRecordingService: () => undefined,
+  } as unknown as Config);
+  for (let index = 0; index < 40; index++) {
+    rows.rememberCompleted('AssistantMessage', `Model reply ${index}.`);
+  }
+  const earliest = await rows.authorize('AssistantMessage', 'Model reply 0.');
+  expect(earliest?.()).toBe(true);
+});
+
 it('drops live translation rows when a session clears without a recorder', async () => {
   let sessionId = 'before-clear';
   const rows = new AcpDisplayTranslationRows({
@@ -212,7 +253,7 @@ describe('AcpModSession', () => {
       'AssistantMessage',
       props,
       expect.any(AbortSignal),
-      false,
+      undefined,
     );
     await expect(mods.askRow('Pane', {})).resolves.toEqual({
       status: 'unhooked',
@@ -222,7 +263,7 @@ describe('AcpModSession', () => {
       'Thinking',
       { text: 'Hm' },
       expect.any(AbortSignal),
-      false,
+      undefined,
     );
     for (const [component, bad] of [
       [7, props],

@@ -11318,6 +11318,16 @@ export class Session implements SessionContext {
       this.clearActiveTodoPlanRevision();
     }
     try {
+      if (
+        projectedUpdate.sessionUpdate === 'tool_call' &&
+        projectedUpdate._meta?.['parentToolCallId'] === undefined
+      ) {
+        // The visible root tool card closes the preceding reply or thought.
+        this.mods?.observeRootToolCall(
+          projectedUpdate.toolCallId,
+          projectedUpdate._meta?.['phase'] === 'preparing',
+        );
+      }
       await this.client.sessionUpdate(params);
     } catch (error) {
       if (

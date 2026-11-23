@@ -842,7 +842,7 @@ export class ModSession implements ICommandLoader {
     component: ModRenderSite,
     props: ModRenderInput['props'],
     signal: AbortSignal,
-    translationAllowed = false,
+    isTranslationAuthorized?: () => boolean,
   ): Promise<ModRowAnswer> {
     const surface = this.host?.surface;
     const hasHooks = this.runtime?.renderHooksFor(component).length;
@@ -854,8 +854,9 @@ export class ModSession implements ICommandLoader {
     )
       return { status: 'unhooked' };
     if (this.closing) return { status: 'unanswered' };
-    const translate = translationAllowed && target !== undefined;
-    if (!hasHooks && !translate) return { status: 'unanswered' };
+    const translationAuthorization =
+      target && isTranslationAuthorized?.() ? isTranslationAuthorized : false;
+    if (!hasHooks && !translationAuthorization) return { status: 'unanswered' };
     const input = {
       surface,
       component,
@@ -869,9 +870,11 @@ export class ModSession implements ICommandLoader {
     if (Buffer.byteLength(JSON.stringify(input)) > MOD_MAX_BYTES / 2)
       return { status: 'answered' };
     const answer = await this.rows.ask(
-      { ...input, translationAllowed: translate },
+      { ...input, translationAuthorization },
       signal,
     );
+    if (translationAuthorization && !translationAuthorization())
+      return { status: 'unanswered' };
     return !answer
       ? { status: 'unanswered' }
       : answer.props
@@ -904,7 +907,7 @@ export class ModSession implements ICommandLoader {
   }
 
   private async renderRow(
-    { translationAllowed = true, ...input }: ModRowInput,
+    { translationAuthorization, ...input }: ModRowInput,
     wanted: () => boolean,
   ): Promise<ModRenderInput['props'] | undefined | null> {
     const runtime = this.runtime;
@@ -949,19 +952,30 @@ export class ModSession implements ICommandLoader {
     }
     if (!canRender()) return null;
     const target =
-      translationAllowed && this.rowTranslationTarget(input.component);
+      translationAuthorization !== false &&
+      this.rowTranslationTarget(input.component);
     if (target && 'text' in props) {
-      if (!wanted()) return null;
+      const canTranslate = () =>
+        canRender() &&
+        (typeof translationAuthorization !== 'function' ||
+          translationAuthorization());
+      if (!wanted() || !canTranslate()) return null;
       const text = await translateDisplayText(
         props.text,
         target,
         (request, modelSignal) =>
           runOutsideAgentContext(() =>
-            completeModModel(this.config, request, modelSignal),
+            completeModModel(
+              this.config,
+              request,
+              canTranslate() ? modelSignal : AbortSignal.abort(),
+              canTranslate,
+            ),
           ),
         (signal ??= startRender()),
+        input.surface,
       );
-      if (!canRender()) return null;
+      if (!canTranslate()) return null;
       if (text !== undefined && !invalidRenderText(text))
         props = { ...props, text };
     }
