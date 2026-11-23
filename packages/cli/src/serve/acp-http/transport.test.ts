@@ -4090,10 +4090,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             sessionId: 'sess-1',
             ...model,
             persistDefault: false,
-            _meta: {
-              unrelated: 'retained',
-              'qwen.session.modelPersistDefault': false,
-            },
+            _meta: { unrelated: 'retained' },
           },
         });
         expect(await reader.next()).toMatchObject({

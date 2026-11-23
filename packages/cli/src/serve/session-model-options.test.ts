@@ -9,8 +9,14 @@ import { SESSION_MODEL_PERSIST_DEFAULT_META_KEY as KEY } from '@qwen-code/acp-br
 import { parseSessionModelMetadata } from './session-model-options.js';
 
 describe('parseSessionModelMetadata', () => {
-  it('leaves omitted options absent', () => {
+  it('treats omitted and null metadata alike', () => {
     expect(parseSessionModelMetadata({ modelId: 'model-a' })).toEqual({});
+    expect(parseSessionModelMetadata({ _meta: null })).toEqual({});
+    expect(
+      parseSessionModelMetadata({ _meta: null, persistDefault: false }),
+    ).toEqual({
+      metadata: { [KEY]: false },
+    });
   });
 
   it.each([false, true])('maps explicit persistence %s', (persistDefault) => {
@@ -43,7 +49,6 @@ describe('parseSessionModelMetadata', () => {
     { persistDefault: null },
     { persistDefault: 'false' },
     { persistDefault: 0 },
-    { _meta: null },
     { _meta: [] },
     { _meta: 'metadata' },
     { _meta: { [KEY]: 'false' } },

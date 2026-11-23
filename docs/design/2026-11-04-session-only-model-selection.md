@@ -29,13 +29,15 @@ schemas, or scheduled-task creation.
 ## Design
 
 Add `session_set_model_transient` independently of `session_set_model`. The SDK
-requires it before sending `persistDefault: false`; unsupported daemons fail
+options-object form requires it before sending `persistDefault: false`; unsupported daemons fail
 before receiving a model mutation. Omitted options and explicit `true` retain
 existing persistence behavior and do not require the new capability.
 
 `DaemonClient.setSessionModel` accepts the existing client-id string or an
 options object containing `clientId` and `persistDefault`. The session wrapper
 accepts `persistDefault` separately while retaining its own client identity.
+The legacy positional option sends the metadata marker without negotiation;
+older ACP dispatchers can drop it and persist the default.
 
 REST exposes `persistDefault` as a first-class boolean. A shared CLI parser maps
 it to the existing ACP metadata key and is used by the REST model route and both

@@ -63,6 +63,9 @@ Creation with `startupConfig: { modelServiceId, reasoningEffort? }` additionally
 | [`POST /session/:id/model`](./qwen-serve-protocol.md#post-sessionidmodel)         | `session_set_model` | `live-session-owner` | `DaemonClient.setSessionModel`       |
 | [`DELETE /session/:id`](./qwen-serve-protocol.md#delete-sessionid)                | `session_close`     | `live-session-owner` | `DaemonClient.closeSession`          |
 
+`POST /session/:id/model` also requires `session_set_model_transient` when the
+caller sends `persistDefault: false`.
+
 ## Prompts and events
 
 | Operation                                                                                   | Capability           | Scope                 | TypeScript SDK                          |

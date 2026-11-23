@@ -28545,6 +28545,22 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/model', () => {
+    it('accepts null model metadata without changing the default request', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/model')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ modelId: 'qwen3-coder', _meta: null });
+
+      expect(res.status).toBe(200);
+      expect(bridge.setModelCalls[0]?.req).toEqual({
+        sessionId: 'session-A',
+        modelId: 'qwen3-coder',
+        _meta: null,
+      });
+    });
+
     it.each([false, true])(
       'maps persistDefault %s before the model mutation',
       async (persistDefault) => {

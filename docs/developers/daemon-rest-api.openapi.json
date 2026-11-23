@@ -3566,6 +3566,10 @@
           "modelId": {
             "type": "string",
             "minLength": 1
+          },
+          "persistDefault": {
+            "type": "boolean",
+            "description": "Set false to switch this session only. Requires the session_set_model_transient capability. Omission or true retains the default persistence behavior."
           }
         },
         "additionalProperties": false

@@ -14,12 +14,10 @@ export function parseSessionModelMetadata(params: Record<string, unknown>): {
   if (persistDefault !== undefined && typeof persistDefault !== 'boolean') {
     return { error: '`persistDefault` must be a boolean when provided' };
   }
-  const rawMetadata = params['_meta'];
+  const rawMetadata = params['_meta'] ?? undefined;
   if (
     rawMetadata !== undefined &&
-    (rawMetadata === null ||
-      typeof rawMetadata !== 'object' ||
-      Array.isArray(rawMetadata))
+    (typeof rawMetadata !== 'object' || Array.isArray(rawMetadata))
   ) {
     return { error: '`_meta` must be an object when provided' };
   }

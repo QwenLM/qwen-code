@@ -7029,8 +7029,9 @@ export class DaemonClient {
    * Both call shapes are supported: the `{ clientId, persistDefault }` object
    * resolves the new `persistDefault` field, while the positional
    * `clientId, { persistDefault: false }` form keeps sending the pre-existing
-   * `_meta` metadata marker, which needs no negotiation — older daemons
-   * accept it, they merely drop it in the ACP dispatcher.
+   * `_meta` marker without checking capabilities. Older ACP dispatchers may
+   * drop that marker and persist the default. Use the object form to require
+   * session-only behavior.
    */
   async setSessionModel(
     sessionId: string,

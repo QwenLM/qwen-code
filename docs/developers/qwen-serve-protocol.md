@@ -4343,16 +4343,18 @@ With capability `session_set_model_transient`, callers may add the boolean
 `persistDefault: false` to keep user/workspace model and auth defaults unchanged.
 The selection still belongs to the session and remains eligible for cold
 restoration. Omission or `true` retains default-persisting behavior, subject to
-existing standalone-session rules. The SDK preflights the new capability only
-for `false`; it never falls back to a default-persisting switch on older daemons.
-Both ACP model setters accept the same field. Valid legacy
+existing standalone-session rules. The SDK options-object form checks the new
+capability for `false` and rejects an unsupported daemon before switching.
+Both ACP model setters accept the same field. Null metadata is treated as
+omitted. Valid legacy
 `_meta["qwen.session.modelPersistDefault"]` remains supported; conflicting public
 and legacy values or invalid types are rejected before mutation.
 
 SDK callers can use
 `client.setSessionModel(id, model, { clientId, persistDefault: false })` or
-`session.setModel(model, { persistDefault: false })`. Existing positional
-`clientId` calls remain supported.
+`session.setModel(model, { persistDefault: false })`. The legacy positional
+`clientId, { persistDefault: false }` form sends only the ACP metadata marker
+without negotiation. Older ACP dispatchers can drop it and persist the default.
 
 Response: the ACP agent's model-switch result, forwarded verbatim — the
 daemon does not reshape it, so the top level carries no `modelId`. Read the

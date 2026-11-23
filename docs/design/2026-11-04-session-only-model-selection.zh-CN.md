@@ -22,13 +22,14 @@ daemon SDK 只暴露会更新默认配置的模型选择。底层 ACP agent 已�
 
 ## 设计
 
-在 `session_set_model` 之外增加独立的 `session_set_model_transient`。SDK 在发送
+在 `session_set_model` 之外增加独立的 `session_set_model_transient`。SDK 的选项对象形式在发送
 `persistDefault: false` 前检查此能力；不支持的 daemon 在收到模型变更前即被拒绝。
 未提供选项或显式传入 `true` 保留现有持久化行为，不要求新能力。
 
 `DaemonClient.setSessionModel` 接受现有客户端 ID 字符串，或包含 `clientId` 和
 `persistDefault` 的选项对象。会话包装层单独接受 `persistDefault`，同时保留自身的
-客户端身份。
+客户端身份。旧的位置参数形式直接发送元数据标记，不做能力协商。旧 ACP 分发器
+可能丢弃该标记并写入默认配置。
 
 REST 将 `persistDefault` 暴露为一等布尔字段。共享 CLI 解析器将其映射到已有 ACP
 元数据键，并由 REST 模型路由和两条 ACP 模型设置入口共同使用。有效旧元数据继续
