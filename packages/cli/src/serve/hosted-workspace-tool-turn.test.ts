@@ -3581,7 +3581,7 @@ it('refuses an external Shell Turn without its publication', async () => {
     publication?: { owner: HttpToolPublicationOwner; captureBytes: number },
     extras?: {
       skills?: ReturnType<typeof publishedSkills>;
-      mcp?: unknown;
+      mcp?: import('./hosted-mcp-session.js').HostedMcpSession;
     },
   ) =>
     new HostedWorkspaceToolTurn(
@@ -3606,7 +3606,7 @@ it('refuses an external Shell Turn without its publication', async () => {
   expect(() =>
     build(
       { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
-      { mcp: {} },
+      { mcp: {} as unknown as import('./hosted-mcp-session.js').HostedMcpSession },
     ),
   ).toThrow(
     'External Shell profile requires a publication and no other lanes.',
