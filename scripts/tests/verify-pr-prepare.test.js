@@ -23,11 +23,14 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  FORCE_HARDWARE_ENV,
   GIT_HARDENING,
   REVIEW_STATE_QUERY,
   artifactDirName,
+  classifyPrTrust,
   detectCredentialSignals,
   detectIsolation,
+  detectMandatoryEscalations,
   gitStatusArgs,
   localFilterOverrides,
   parseArgs,
@@ -1733,5 +1736,251 @@ describe('repository coupling', () => {
     const gitignore = readFileSync(join(repoRoot, '.gitignore'), 'utf8');
     // CRLF-safe: a Windows checkout may carry \r\n line endings.
     expect(gitignore.split(/\r?\n/)).toContain('tmp/');
+  });
+});
+
+describe('trust classification and mandatory escalation (§4)', () => {
+  it('detects all mandatory escalation path classes and ignores ordinary source files', () => {
+    const hits = detectMandatoryEscalations([
+      'packages/core/src/utils/math.ts',
+      'README.md',
+      'packages/cli/package.json',
+      'pnpm-lock.yaml',
+      '.npmrc',
+      '.pnpmfile.mjs',
+      'packages/managed-agent-server/pom.xml',
+      '.github/workflows/qwen-triage.yml',
+      'scripts/verify-pr-check.mjs',
+      'Dockerfile',
+      '.qwen/skills/verify-pr/SKILL.md',
+      'tools/bootstrap.sh',
+      'native/binding.node',
+    ]);
+    const reasonsByPath = Object.fromEntries(
+      hits.map((h) => [h.path, h.reason]),
+    );
+    expect(reasonsByPath).toEqual({
+      'packages/cli/package.json': 'dependency-manifest',
+      'pnpm-lock.yaml': 'dependency-manifest',
+      '.npmrc': 'dependency-manifest',
+      '.pnpmfile.mjs': 'dependency-manifest',
+      'packages/managed-agent-server/pom.xml': 'maven-build',
+      '.github/workflows/qwen-triage.yml': 'ci-workflow',
+      'scripts/verify-pr-check.mjs': 'verify-or-sandbox-script',
+      Dockerfile: 'verify-or-sandbox-script',
+      '.qwen/skills/verify-pr/SKILL.md': 'agent-control-config',
+      'tools/bootstrap.sh': 'executable-or-binary',
+      'native/binding.node': 'executable-or-binary',
+    });
+  });
+
+  it('routes ordinary collaborator and local-owner work to trusted-shared-kernel, and escalates high-risk changes', () => {
+    expect(
+      classifyPrTrust({
+        permission: 'write',
+        changedPaths: ['packages/core/src/foo.ts'],
+      }),
+    ).toEqual({
+      prTrust: 'collaborator',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({
+        isLocalOwner: true,
+        changedPaths: ['packages/cli/src/ui/App.tsx'],
+      }),
+    ).toEqual({
+      prTrust: 'local-owner',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    const escalated = classifyPrTrust({
+      permission: 'admin',
+      changedPaths: ['packages/core/src/foo.ts', '.github/workflows/ci.yml'],
+    });
+    expect(escalated.prTrust).toBe('collaborator');
+    expect(escalated.executionClass).toBe('hardware-isolated');
+    expect(escalated.escalationReasons).toEqual([
+      'ci-workflow:.github/workflows/ci.yml',
+    ]);
+  });
+
+  it('keeps external, fork, sponsored external, unknown permission, missing diff, and global-switch runs on hardware-isolated', () => {
+    expect(
+      classifyPrTrust({
+        permission: 'read',
+        sponsored: true,
+        changedPaths: ['README.md'],
+      }),
+    ).toEqual({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: true,
+    });
+
+    expect(
+      classifyPrTrust({
+        permission: 'write',
+        isFork: true,
+        changedPaths: ['README.md'],
+      }),
+    ).toEqual({
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({ permission: null, changedPaths: ['README.md'] }),
+    ).toEqual({
+      prTrust: 'unknown',
+      executionClass: 'hardware-isolated',
+      escalationReasons: [],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({ permission: 'write', changedPaths: null }),
+    ).toEqual({
+      prTrust: 'collaborator',
+      executionClass: 'hardware-isolated',
+      escalationReasons: ['changed-files-unavailable'],
+      sponsored: false,
+    });
+
+    expect(
+      classifyPrTrust({
+        isLocalOwner: true,
+        changedPaths: ['README.md'],
+        forceHardware: true,
+      }),
+    ).toEqual({
+      prTrust: 'local-owner',
+      executionClass: 'hardware-isolated',
+      escalationReasons: ['global-hardware-only-switch'],
+      sponsored: false,
+    });
+  });
+
+  it('CLI writes trustClassification into the digest-bound host snapshot for collaborator, escalation, and emergency switch', () => {
+    const { dir, base, head } = makeRepo();
+
+    const snap = {
+      number: 99,
+      title: 'Collaborator change',
+      body: '',
+      author: { login: 'core-dev' },
+      baseRefName: 'main',
+      baseRefOid: base,
+      headRefOid: head,
+      commits: [],
+    };
+    const fakeDir = makeTmpDir();
+    const bin = join(fakeDir, 'bin');
+    mkdirSync(bin);
+    const snapPath = join(fakeDir, 'snap.json');
+    writeFileSync(snapPath, JSON.stringify(snap));
+    const gh = join(bin, 'gh');
+    writeFileSync(
+      gh,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = api ] && [ "$2" = graphql ]; then',
+        '  exit 1',
+        'fi',
+        'if [ "$1" = api ]; then',
+        '  printf \'{"permission":"write"}\\n\'',
+        '  exit 0',
+        'fi',
+        'cat "$FAKE_SNAP"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(gh, 0o755);
+
+    const hostOut1 = join(fakeDir, 'host-1.json');
+    const envBase = {
+      ...gitEnv,
+      PATH: `${bin}:${process.env.PATH ?? ''}`,
+      FAKE_SNAP: snapPath,
+    };
+    const r1 = runPrepare(
+      dir,
+      ['99', '--repo', REPO, '--context-out', hostOut1],
+      envBase,
+    );
+    expect(r1.status).toBe(0);
+    expect(r1.stdout).toContain(
+      'trust      collaborator -> trusted-shared-kernel',
+    );
+    const raw1 = readFileSync(hostOut1, 'utf8');
+    const parsed1 = JSON.parse(raw1);
+    expect(parsed1.trustClassification).toMatchObject({
+      prTrust: 'collaborator',
+      executionClass: 'trusted-shared-kernel',
+      escalationReasons: [],
+      headRefOid: head,
+      permission: 'write',
+    });
+    const sha1 = createHash('sha256').update(raw1, 'utf8').digest('hex');
+    expect(r1.stdout).toContain(`context-sha256  ${sha1}`);
+
+    // Same collaborator under global hardware switch -> forced hardware-isolated
+    const hostOut2 = join(fakeDir, 'host-2.json');
+    const r2 = runPrepare(
+      dir,
+      ['99', '--repo', REPO, '--context-out', hostOut2],
+      { ...envBase, [FORCE_HARDWARE_ENV]: '1' },
+    );
+    expect(r2.status).toBe(0);
+    expect(r2.stdout).toContain('trust      collaborator -> hardware-isolated');
+    const parsed2 = JSON.parse(readFileSync(hostOut2, 'utf8'));
+    expect(parsed2.trustClassification.executionClass).toBe(
+      'hardware-isolated',
+    );
+    expect(parsed2.trustClassification.escalationReasons).toContain(
+      'global-hardware-only-switch',
+    );
+
+    // Same collaborator adding a workflow file -> mandatory hardware-isolated escalation
+    mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(dir, '.github', 'workflows', 'ci.yml'), 'name: ci\n');
+    execFileSync('git', ['add', '.github/workflows/ci.yml'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    execFileSync('git', ['commit', '-qm', 'add workflow'], {
+      cwd: dir,
+      env: gitEnv,
+    });
+    const wfHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: dir,
+      env: gitEnv,
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(snapPath, JSON.stringify({ ...snap, headRefOid: wfHead }));
+    const hostOut3 = join(fakeDir, 'host-3.json');
+    const r3 = runPrepare(
+      dir,
+      ['99', '--repo', REPO, '--context-out', hostOut3],
+      envBase,
+    );
+    expect(r3.status).toBe(0);
+    const parsed3 = JSON.parse(readFileSync(hostOut3, 'utf8'));
+    expect(parsed3.trustClassification).toMatchObject({
+      prTrust: 'collaborator',
+      executionClass: 'hardware-isolated',
+      headRefOid: wfHead,
+    });
+    expect(parsed3.trustClassification.escalationReasons).toContain(
+      'ci-workflow:.github/workflows/ci.yml',
+    );
   });
 });

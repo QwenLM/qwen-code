@@ -26,6 +26,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkArtifacts,
   checkBoundary,
+  checkExecutionRecord,
   checkMutationCoverage,
   containerNonceErrors,
   isFilesystemRoot,
@@ -764,7 +765,7 @@ describe('checkBoundary', () => {
   it('refuses an unknown mode', () => {
     expect(
       checkBoundary(JSON.stringify({ mode: 'host' })).errors.join('\n'),
-    ).toMatch(/mode must be one of container \| vm \| waived/);
+    ).toMatch(/mode must be one of container \| microvm \| vm \| waived/);
   });
 
   it('refuses a container declaration without a detail', () => {
@@ -3156,5 +3157,344 @@ describe('isFilesystemRoot', () => {
     expect(isFilesystemRoot('C:\\Users')).toBe(false);
     expect(isFilesystemRoot('C:')).toBe(false);
     expect(isFilesystemRoot('')).toBe(false);
+  });
+});
+
+describe('checkExecutionRecord and microvm/provider-vm gate', () => {
+  const BASE_OID = 'a'.repeat(40);
+  const SHA = (ch) => ch.repeat(64);
+  const sha256 = (text) =>
+    createHash('sha256').update(text, 'utf8').digest('hex');
+
+  function makeExecRecord(overrides = {}) {
+    return {
+      schemaVersion: 'poc-exec-record-v1',
+      runId: 'fc-run-01',
+      repo: 'QwenLM/qwen-code',
+      pr: 17185,
+      baseRefOid: BASE_OID,
+      headRefOid: HEAD,
+      contextDigest: SHA('0'),
+      prTrust: 'external',
+      executionClass: 'hardware-isolated',
+      backend: 'firecracker',
+      backendVersion: 'v1.18.0',
+      platform: 'linux-aarch64',
+      kernelDigest: SHA('1'),
+      rootfsDigest: SHA('2'),
+      trustedInputDigest: SHA('3'),
+      launchPolicyDigest: SHA('4'),
+      startedAt: '2026-11-23T11:00:00Z',
+      endedAt: '2026-11-23T11:00:08Z',
+      destroyedAt: '2026-11-23T11:00:09Z',
+      supervisorPid: 20001,
+      workerPid: 20002,
+      workerExe: '/firecracker-v1.18.0-aarch64',
+      workerExitEvidence: 'absent',
+      teardownStatus: 'destroyed',
+      diskDestroyed: true,
+      tokenRevoked: true,
+      outputStatus: 'complete',
+      ...overrides,
+    };
+  }
+
+  function makeMicrovmBoundary(record, recordText, overrides = {}) {
+    return {
+      mode: record.backend === 'provider-vm' ? 'vm' : 'microvm',
+      backend: record.backend,
+      executionClass: record.executionClass,
+      prTrust: record.prTrust,
+      runId: record.runId,
+      headRefOid: record.headRefOid,
+      executionRecordSha256: sha256(recordText),
+      writtenAfterTeardown: true,
+      ...overrides,
+    };
+  }
+
+  it('accepts a valid firecracker execution record and matching microvm boundary', () => {
+    const rec = makeExecRecord();
+    const recText = JSON.stringify(rec);
+    const recSha = sha256(recText);
+    const result = checkArtifacts({
+      files: validFiles({
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Firecracker microVM (hardware-isolated).\n`,
+        boundary: JSON.stringify(makeMicrovmBoundary(rec, recText)),
+        boundaryGate: null,
+      }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      executionRecordText: recText,
+      executionRecordSha256: recSha,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('accepts a valid provider-vm execution record and mode vm boundary', () => {
+    const rec = makeExecRecord({
+      backend: 'provider-vm',
+      backendVersion: 'aliyun-ecs-2014-05-26',
+      platform: 'aliyun-cn-hangzhou',
+      providerLifecycle: {
+        allocationId: 'i-bp1test001',
+        freshDiskId: 'd-bp1test001',
+        boundRunId: 'fc-run-01',
+        boundHeadRefOid: HEAD,
+        terminationState: 'terminated',
+        diskDeleted: true,
+      },
+    });
+    const recText = JSON.stringify(rec);
+    const result = checkArtifacts({
+      files: validFiles({
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Disposable Aliyun provider-vm (hardware-isolated).\n`,
+        boundary: JSON.stringify(makeMicrovmBoundary(rec, recText)),
+        boundaryGate: null,
+      }),
+      evidence: ['01-ab-cells.png'],
+      expectedHead: HEAD,
+      executionRecordText: recText,
+      executionRecordSha256: sha256(recText),
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('refuses mode microvm or backend provider-vm without a host execution record', () => {
+    const rec = makeExecRecord();
+    const recText = JSON.stringify(rec);
+    expect(
+      checkBoundary(
+        JSON.stringify(makeMicrovmBoundary(rec, recText)),
+      ).errors.join('\n'),
+    ).toMatch(/requires a host-held --execution-record/);
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'vm', backend: 'provider-vm' }),
+      ).errors.join('\n'),
+    ).toMatch(/requires a host-held --execution-record/);
+  });
+
+  it('refuses incomplete outputStatus, undestroyed teardown, live worker, and missing disk/token cleanup', () => {
+    for (const [override, pattern] of [
+      [{ outputStatus: 'truncated' }, /outputStatus must be "complete"/],
+      [{ outputStatus: 'timeout' }, /outputStatus must be "complete"/],
+      [{ teardownStatus: 'running' }, /teardownStatus must be "destroyed"/],
+      [{ teardownStatus: 'failed' }, /teardownStatus must be "destroyed"/],
+      [{ workerExitEvidence: 'alive' }, /workerExitEvidence must be "absent"/],
+      [{ diskDestroyed: false }, /diskDestroyed must be true/],
+      [{ tokenRevoked: false }, /tokenRevoked must be true/],
+    ]) {
+      const checkRes = checkExecutionRecord(
+        JSON.stringify(makeExecRecord(override)),
+        { expectedHead: HEAD },
+      );
+      expect(checkRes.errors.join('\n')).toMatch(pattern);
+    }
+  });
+
+  it('refuses external/unknown PRs on trusted-shared-kernel and container backends claiming hardware-isolated', () => {
+    for (const prTrust of ['external', 'unknown']) {
+      const res = checkExecutionRecord(
+        JSON.stringify(
+          makeExecRecord({
+            prTrust,
+            executionClass: 'trusted-shared-kernel',
+            backend: 'container',
+          }),
+        ),
+        { expectedHead: HEAD },
+      );
+      expect(res.errors.join('\n')).toMatch(
+        /requires executionClass=hardware-isolated/,
+      );
+    }
+    const fakeHw = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          executionClass: 'hardware-isolated',
+          backend: 'docker',
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(fakeHw.errors.join('\n')).toMatch(
+      /executionClass=hardware-isolated requires backend in/,
+    );
+  });
+
+  it('refuses provider-vm records missing termination or disk deletion proof', () => {
+    const missing = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ backend: 'provider-vm' })),
+      { expectedHead: HEAD },
+    );
+    expect(missing.errors.join('\n')).toMatch(/providerLifecycle is required/);
+
+    const alive = checkExecutionRecord(
+      JSON.stringify(
+        makeExecRecord({
+          backend: 'provider-vm',
+          providerLifecycle: {
+            allocationId: 'i-1',
+            freshDiskId: 'd-1',
+            boundRunId: 'fc-run-01',
+            boundHeadRefOid: HEAD,
+            terminationState: 'running',
+            diskDeleted: false,
+          },
+        }),
+      ),
+      { expectedHead: HEAD },
+    );
+    expect(alive.errors.join('\n')).toMatch(
+      /terminationState must be "terminated"/,
+    );
+    expect(alive.errors.join('\n')).toMatch(/diskDeleted must be true/);
+  });
+
+  it('refuses headRefOid mismatch and coordinate mismatch', () => {
+    const moved = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ headRefOid: 'c'.repeat(40) })),
+      { expectedHead: HEAD },
+    );
+    expect(moved.errors.join('\n')).toMatch(/does not match expected head/);
+
+    const wrongPr = checkExecutionRecord(
+      JSON.stringify(makeExecRecord({ pr: 12345 })),
+      {
+        expectedHead: HEAD,
+        coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+      },
+    );
+    expect(wrongPr.errors.join('\n')).toMatch(
+      /not this round's QwenLM\/qwen-code#17185/,
+    );
+  });
+
+  it('CLI accepts a host-held --execution-record with matching --execution-record-sha256 and refuses tampered, linked, in-tree, or guest-planted records', () => {
+    const base = mkdtempSync(join(tmpdir(), 'verify-pr-exec-rec-'));
+    tmpDirs.push(base);
+    const clone = join(base, 'clone');
+    const dir = join(clone, 'tmp', 'pr17185-verify-20261123');
+    mkdirSync(dir, { recursive: true });
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'evidence', '01-ab.png'), 'png');
+
+    const rec = makeExecRecord();
+    const recText = JSON.stringify(rec, null, 2);
+    const recSha = sha256(recText);
+    const hostRec = join(base, 'host-execution-record.json');
+    writeFileSync(hostRec, recText);
+
+    const files = validFiles({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\n## Methodology\n\n**Boundary.** Firecracker microVM (hardware-isolated).\n`,
+      boundary: JSON.stringify(makeMicrovmBoundary(rec, recText)),
+      boundaryGate: undefined,
+    });
+    writeFileSync(join(dir, 'report.md'), files.report);
+    writeFileSync(join(dir, 'verdict.txt'), files.verdict);
+    writeFileSync(join(dir, 'assertions.json'), files.assertions);
+    writeFileSync(join(dir, 'boundary.json'), files.boundary);
+
+    const run = (args) =>
+      spawnSync(process.execPath, [SCRIPT, ...args], { encoding: 'utf8' });
+
+    // 1. Valid host-held record with digest binding exits 0
+    const ok = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      recSha,
+      dir,
+    ]);
+    expect(ok.status).toBe(0);
+    expect(ok.stdout).toMatch(/ok: verdict=merge-ready/);
+
+    // 2. Wrong sha256 fails closed
+    const badSha = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      SHA('f'),
+      dir,
+    ]);
+    expect(badSha.status).toBe(1);
+    expect(badSha.stderr).toMatch(/does not match --execution-record-sha256/);
+
+    // 3. --execution-record-sha256 without --execution-record is usage error 2
+    const orphanSha = run(['--execution-record-sha256', recSha, dir]);
+    expect(orphanSha.status).toBe(2);
+
+    // 4. Execution record placed inside PR-writable clone is refused
+    const inTreeRec = join(clone, 'in-tree-record.json');
+    writeFileSync(inTreeRec, recText);
+    const inTree = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      inTreeRec,
+      '--execution-record-sha256',
+      recSha,
+      dir,
+    ]);
+    expect(inTree.status).toBe(1);
+    expect(inTree.stderr).toMatch(
+      /must not point inside the PR-writable worktree/,
+    );
+
+    // 5. Symlink --execution-record is refused
+    const symRec = join(base, 'sym-record.json');
+    symlinkSync(hostRec, symRec);
+    const symRes = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      symRec,
+      '--execution-record-sha256',
+      recSha,
+      dir,
+    ]);
+    expect(symRes.status).toBe(1);
+    expect(symRes.stderr).toMatch(/missing or unreadable/);
+
+    // 6. Hardlink alias on --execution-record is refused
+    const linkedSource = join(base, 'linked-record.json');
+    const linkedAlias = join(base, 'linked-alias.json');
+    writeFileSync(linkedSource, recText);
+    linkSync(linkedSource, linkedAlias);
+    const linkRes = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      linkedAlias,
+      '--execution-record-sha256',
+      recSha,
+      dir,
+    ]);
+    expect(linkRes.status).toBe(1);
+    expect(linkRes.stderr).toMatch(/is a hard link/);
+
+    // 7. Guest-planted execution-record.json inside artifact dir is refused
+    writeFileSync(join(dir, 'execution-record.json'), recText);
+    const planted = run([
+      '--context-root',
+      clone,
+      '--execution-record',
+      hostRec,
+      '--execution-record-sha256',
+      recSha,
+      dir,
+    ]);
+    expect(planted.status).toBe(1);
+    expect(planted.stdout).toMatch(
+      /execution-record\.json must not reside inside the PR-writable artifact directory/,
+    );
   });
 });
