@@ -127,6 +127,21 @@
   );
 }
 
+@media (hover: none) and (pointer: coarse) {
+  .sidebar.mobileOpen {
+    width: clamp(
+      min(var(--web-shell-sidebar-min-width, 220px), 100%),
+      calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+      var(--web-shell-sidebar-max-width, 420px)
+    );
+    min-width: clamp(
+      min(var(--web-shell-sidebar-min-width, 220px), 100%),
+      calc(var(--web-shell-sidebar-container-width, 100vw) * 0.85),
+      var(--web-shell-sidebar-max-width, 420px)
+    );
+  }
+}
+
 .sidebar.mobileOpen .resizeHandle {
   display: none;
 }
@@ -1577,10 +1592,99 @@ button.livePendingSession:hover {
   .sessionActions {
     position: static;
     opacity: 1;
+    pointer-events: auto;
   }
 
   .sessionActionButton {
     pointer-events: auto;
+  }
+}
+
+/* Very narrow touch drawers prioritize the title and enabled actions over
+   branch/source decoration. PR state and goal markers stay visible. */
+@media (hover: none) and (pointer: coarse) {
+  .sidebar.mobileOpen[data-narrow] .sessionGitIcon {
+    display: none;
+  }
+
+  /* Keep markers in the flex layout; anchor only More outside their flow. */
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionActions
+    ) {
+    padding-right: 26px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow)
+    .sessionMetaSlotReserved:has(.sessionActions) {
+    display: contents;
+  }
+
+  /* Non-interactive source glyphs should not raise the title-row flex line. */
+  .sidebar.mobileOpen[data-narrow] .sessionSourceIcon {
+    height: 20px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    ) {
+    /* Keep More's 26px hit area above the next metadata line. */
+    row-gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionStatusSlot,
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionTreeToggle {
+    top: 12px;
+  }
+
+  .sidebar.mobileOpen[data-narrow] .sessionRow .sessionLoading {
+    margin-right: 4px;
+    margin-left: 4px;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
+    .sessionMetaSlot:not(.sessionMetaSlotReserved)
+    .sessionActions {
+    align-self: stretch;
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow
+    .sessionMetaSlotReserved
+    .sessionActions {
+    position: absolute;
+    inset: 2px 0 2px auto;
+    width: var(--session-actions-width, 26px);
+  }
+
+  .sidebar.mobileOpen[data-narrow]
+    .sessionRow:not(.archivedRow):has(
+      .sessionMetaSlotReserved .sessionAttention,
+      .sessionMetaSlotReserved .sessionContinuation,
+      .sessionMetaSlotReserved .sessionLoading
+    )
+    .sessionMetaSlotReserved
+    .sessionActions {
+    inset: 2px 0 auto auto;
+    max-height: calc(100% - 4px);
   }
 }
 

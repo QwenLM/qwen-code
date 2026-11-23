@@ -103,7 +103,8 @@ public enum ManagedSchemaProjection {
                     + "runtime_instance_id, runtime_endpoint, "
                     + "runtime_lease_id, runtime_epoch, runtime_credential_ciphertext, "
                     + "runtime_credential_key_id, attestation_generation, is_drain_requested, "
-                    + "operation_owner, operation_lease_until, operation_generation, record_version, "
+                    + "operation_owner, operation_lease_until, operation_generation, "
+                    + "observation_owner, observation_lease_until, observation_generation, record_version, "
                     + "last_health_at, last_reconciled_at, last_active_at, drain_receipt_json"),
     RUNTIME_SESSION(
             "scope_key, runtime_session_id, tenant_id, workspace_id, workspace_generation, "
@@ -149,7 +150,8 @@ public enum ManagedSchemaProjection {
                     + "activation_phase, activation_event_epoch, activation_expires_at, "
                     + "activation_head_revision, harness_session_id, head_kind, "
                     + "phase, operation_id, claim_generation, claim_lease_until, is_wake_pending, "
-                    + "wake_head_revision, wake_retry_at, wake_seal_revision, is_wake_scan_pending, cleanup_head_revision"),
+                    + "wake_head_revision, wake_retry_at, wake_seal_revision, wake_seal_background, wake_seal_parked_prompt_id, "
+                    + "wake_seal_parked_until, wake_seal_parked_approval_revision, is_wake_scan_pending, cleanup_head_revision"),
     SESSION_JOURNAL_TX(
             "tenant_id, workspace_id, session_id, journal_revision, command_key_hash, "
                     + "transaction_id, operation, command_id, content_digest, first_sequence, "
