@@ -3605,7 +3605,9 @@ it('refuses an external Shell Turn without its publication', async () => {
   expect(() =>
     build(
       { owner: {} as HttpToolPublicationOwner, captureBytes: 4096 },
-      { mcp: {} as unknown as import('./hosted-mcp-session.js').HostedMcpSession },
+      {
+        mcp: {} as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+      },
     ),
   ).toThrow(
     'External Shell profile requires a publication and no other lanes.',
