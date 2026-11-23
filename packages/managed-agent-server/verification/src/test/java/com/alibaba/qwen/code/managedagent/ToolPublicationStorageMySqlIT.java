@@ -10,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionSt
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -134,7 +133,7 @@ class ToolPublicationStorageMySqlIT {
             boolean blocked;
             try {
                 assertThat(journal.reserve().path("state").asText()).isEqualTo("OPEN");
-                mutation = executor.submit(() -> journal.jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_key = ?", PHYSICAL));
+                mutation = executor.submit(() -> journal.jdbc.update("UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE physical_id = ?", PHYSICAL));
                 blocked = waits(mutation);
             } finally {
                 journal.manager.commit(publication);
@@ -301,21 +300,27 @@ class ToolPublicationStorageMySqlIT {
         journal = sessionIsolated ? PublicationJournalFixture.createSessionIsolated(database.source())
                 : PublicationJournalFixture.create(database.source());
         schema = journal.jdbc.queryForObject("SELECT DATABASE()", String.class);
-        journal.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
+        journal.jdbc.update("INSERT INTO ma_storage (tenant_id, storage_id, physical_id,"
                         + " storage_kind, registration_state, registration_revision, registration_json)"
-                        + " VALUES (?, 'tenant-1', 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage"), PHYSICAL);
-        journal.jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id, mount_state)"
+                        + " VALUES ('tenant-1', 'storage', ?, 'LOCAL', 'REGISTERED', 1, '{}')",
+                PHYSICAL);
+        journal.jdbc.update("INSERT INTO ma_storage_owner (physical_id, storage_kind, tenant_id, storage_id, mount_state)"
                 + " VALUES (?, 'LOCAL', 'tenant-1', 'storage', 'READY')", PHYSICAL);
         journal.jdbc.update("UPDATE ma_session SET workspace_storage_id = 'storage' WHERE tenant_id = 'tenant-1'");
     }
 
     private void lock(Connection connection, String row) throws Exception {
-        String sql = "alias".equals(row) ? "SELECT alias_key FROM ma_storage WHERE alias_key = ? FOR UPDATE"
-                : "SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE";
+        boolean alias = "alias".equals(row);
+        String sql = alias
+                ? "SELECT tenant_id, storage_id FROM ma_storage WHERE tenant_id = ? AND storage_id = ? FOR UPDATE"
+                : "SELECT physical_id FROM ma_storage_owner WHERE physical_id = ? FOR UPDATE";
         try (var statement = connection.prepareStatement(sql)) {
-            statement.setString(1, "alias".equals(row)
-                    ? RuntimeAdmissionFences.storageAliasKey("tenant-1", "storage") : PHYSICAL);
+            if (alias) {
+                statement.setString(1, "tenant-1");
+                statement.setString(2, "storage");
+            } else {
+                statement.setString(1, PHYSICAL);
+            }
             try (var result = statement.executeQuery()) {
                 assertThat(result.next()).isTrue();
                 assertThat(result.next()).isFalse();
@@ -331,6 +336,6 @@ class ToolPublicationStorageMySqlIT {
     private static String mutationSql(String row) {
         return "alias".equals(row)
                 ? "UPDATE ma_storage SET registration_state = 'RETIRED' WHERE storage_id = 'storage'"
-                : "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = '" + PHYSICAL + "'";
+                : "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE physical_id = '" + PHYSICAL + "'";
     }
 }

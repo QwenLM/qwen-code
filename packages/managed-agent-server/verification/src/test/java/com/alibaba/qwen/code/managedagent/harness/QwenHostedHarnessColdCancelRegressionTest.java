@@ -79,7 +79,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     @Test
     @Transactional
     void coldCancellationRequiresPersistedIntentAndSurvivesMutableAuthorityChanges() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String boot = "11111111-1111-4111-8111-111111111111";
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
@@ -186,7 +186,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
                     "DELETE FROM ma_workspace_access WHERE tenant_id = ?",
                     "UPDATE ma_workspace SET state = 'DRAINING' WHERE tenant_id = ?",
                     "UPDATE ma_workspace SET workspace_generation = workspace_generation + 1 WHERE tenant_id = ?",
-                    "UPDATE ma_workspace SET storage_id = X'7265706c6163656d656e742d73746f72616765' WHERE tenant_id = ?")) {
+                    "UPDATE ma_workspace SET storage_id = 'replacement-storage' WHERE tenant_id = ?")) {
                 jdbc.update(change, tenant);
                 clearInvocations(client);
                 ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
@@ -213,7 +213,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     @Test
     @Transactional
     void aMessageStopAttachesWithoutACancellingTurnOrACurrentGrant() {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String boot = "11111111-1111-4111-8111-111111111111";
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
@@ -325,7 +325,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
             String turn = fixture.turn();
             String owner = fixture.owner();
             if ("tenant".equals(missing)) {
-                tenant = "another-" + tenant;
+                tenant = UUID.randomUUID().toString();
             } else if ("session".equals(missing)) {
                 session = fixture.store().insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                         .tenantId(tenant)
@@ -408,7 +408,7 @@ class QwenHostedHarnessColdCancelRegressionTest {
     }
 
     private RecoveryFixture recoveryFixture(boolean admitted, boolean attempted, String epoch, Duration lease) {
-        String tenant = "tenant-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         String boot = "11111111-1111-4111-8111-111111111111";
         jdbc.update("INSERT INTO ma_workspace (tenant_id, workspace_id,"
                         + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
