@@ -464,12 +464,14 @@ function performEffect(effect: UiEffect): void {
     const filename = effect.filename.toLowerCase().endsWith(extension)
       ? effect.filename
       : effect.filename + extension;
+    // Truncating a name can leave an unpaired surrogate that URI encoding rejects.
+    const wellFormedName = filename.replace(/[\uD800-\uDFFF]/gu, '\uFFFD');
     request = app.downloadFile({
       contents: [
         {
           type: 'resource',
           resource: {
-            uri: `file:///${encodeURIComponent(filename)}`,
+            uri: `file:///${encodeURIComponent(wellFormedName)}`,
             mimeType: effect.mimeType,
             text: effect.text,
           },

@@ -979,6 +979,24 @@ describe('copy and download from a click', () => {
     ).toEqual(['file:///run.bat.txt', 'file:///notes.MD']);
   });
 
+  it('encodes a download name containing an unpaired surrogate', () => {
+    bridge.getHostCapabilities.mockReturnValue({ downloadFile: {} });
+    ready();
+    presentation.onEffect!({ ...download, filename: '📈report\uD83D' });
+    expect(bridge.downloadFile).toHaveBeenCalledWith({
+      contents: [
+        {
+          type: 'resource',
+          resource: {
+            uri: `file:///${encodeURIComponent('📈report\uFFFD.csv')}`,
+            mimeType: download.mimeType,
+            text: download.text,
+          },
+        },
+      ],
+    });
+  });
+
   it('says so when the host cannot copy or download', () => {
     bridge.getHostCapabilities.mockReturnValue({ downloadFile: {} });
     ready();

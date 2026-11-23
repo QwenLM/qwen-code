@@ -41,12 +41,13 @@ export function copyRequestText(params: unknown): string | undefined {
 /** A safe name with the extension of its type; never a path. */
 export function sanitizeFilename(name: string, mimeType: string): string {
   const extension = EXTENSIONS[mimeType] ?? '.txt';
-  const base =
-    (name.split(/[\\/]/).pop() ?? '')
-      .replace(/[^\p{L}\p{N} ._-]+/gu, '-')
-      .replace(/^[\s.-]+|[\s.]+$/g, '')
-      .slice(0, MAX_FILENAME_LENGTH) || 'download';
-  return base.toLowerCase().endsWith(extension) ? base : base + extension;
+  const sanitized = (name.split(/[\\/]/).pop() ?? '')
+    .replace(/[^\p{L}\p{N} ._-]+/gu, '-')
+    .replace(/^[\s.-]+|[\s.]+$/g, '');
+  const hasExtension = sanitized.toLowerCase().endsWith(extension);
+  const stem = hasExtension ? sanitized.slice(0, -extension.length) : sanitized;
+  const suffix = hasExtension ? sanitized.slice(-extension.length) : extension;
+  return (stem.slice(0, MAX_FILENAME_LENGTH) || 'download') + suffix;
 }
 
 /**

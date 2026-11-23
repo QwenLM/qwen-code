@@ -1790,6 +1790,43 @@ describe('built-in Generated UI admission', () => {
       ).toBe(false);
     });
 
+    it('holds the effect slot during a host Copy retry', async () => {
+      const retry = Promise.withResolvers<void>();
+      writeText
+        .mockRejectedValueOnce(new DOMException('', 'NotAllowedError'))
+        .mockReturnValueOnce(retry.promise);
+      const container = host();
+      const copyButton = () =>
+        [...container.querySelectorAll('button')].find(
+          (candidate) =>
+            candidate.textContent === 'mcpApp.generatedUi.effect.copy',
+        )!;
+      await act(async () => {
+        await copy('Original text');
+      });
+      await act(async () => {
+        const button = copyButton();
+        button.click();
+        button.click();
+      });
+      expect(writeText).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        await expect(copy('New text')).rejects.toThrow();
+        await expect(download({})).resolves.toEqual({ isError: true });
+        retry.reject(new DOMException('', 'NotAllowedError'));
+      });
+      expect(outcome(container)).toMatchObject({ status: 'copy-pending' });
+      await act(async () => {
+        copyButton().click();
+      });
+      expect(writeText.mock.calls).toEqual([
+        ['Original text'],
+        ['Original text'],
+        ['Original text'],
+      ]);
+      expect(outcome(container)).toMatchObject({ status: 'copied' });
+    });
+
     it('refuses a second effect while a copy is still being written', async () => {
       const write = Promise.withResolvers<void>();
       writeText.mockReturnValueOnce(write.promise);

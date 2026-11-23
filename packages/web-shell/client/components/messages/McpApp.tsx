@@ -384,6 +384,7 @@ export function McpAppRuntime({
   const effectCountRef = useRef(0);
   // Text the browser refused to copy, kept for the bar's own Copy button.
   const pendingCopyRef = useRef<string | undefined>(undefined);
+  const retryCopyRef = useRef<(() => void) | undefined>(undefined);
   const reportEffect = (status: EffectStatus, filename?: string) =>
     setEffectOutcome({ status, count: ++effectCountRef.current, filename });
   const reportEffectRef = useRef(reportEffect);
@@ -558,26 +559,22 @@ export function McpAppRuntime({
     const report = (status: EffectStatus, filename?: string) => {
       if (active) reportEffectRef.current(status, filename);
     };
-    const copy = async (params: unknown): Promise<HostRequestResult> => {
-      const text = admitEffect() ? copyRequestText(params) : undefined;
-      if (!effectBusy) pendingCopyRef.current = undefined;
-      if (text === undefined) {
-        report('refused');
-        throw new Error('The copy was refused.');
-      }
+    const copy = async (text: string, retry = false) => {
       effectBusy = true;
       try {
-        if (await writeClipboard(text)) report('copied');
-        else if (active) {
-          pendingCopyRef.current = text;
-          report('copy-pending');
-        }
+        const copied = await writeClipboard(text);
+        if (!active || (retry && pendingCopyRef.current !== text)) return;
+        pendingCopyRef.current = copied ? undefined : text;
+        report(copied ? 'copied' : 'copy-pending');
       } finally {
         effectBusy = false;
       }
-      return {} as HostRequestResult;
     };
     if (effectsAllowed) {
+      retryCopyRef.current = () => {
+        const text = pendingCopyRef.current;
+        if (text !== undefined && admitEffect()) void copy(text, true);
+      };
       bridge.ondownloadfile = async (params) => {
         const file = admitEffect() ? downloadRequestFile(params) : undefined;
         if (!effectBusy) pendingCopyRef.current = undefined;
@@ -599,8 +596,18 @@ export function McpAppRuntime({
       // The App names no card: the host answers for the one it mounted.
       bridge.fallbackRequestHandler = async (request, extra) => {
         if (!active) throw new Error('The card was unmounted.');
-        if (effectsAllowed && request.method === COPY_WRITE)
-          return copy(request.params);
+        if (effectsAllowed && request.method === COPY_WRITE) {
+          const text = admitEffect()
+            ? copyRequestText(request.params)
+            : undefined;
+          if (!effectBusy) pendingCopyRef.current = undefined;
+          if (text === undefined) {
+            report('refused');
+            throw new Error('The copy was refused.');
+          }
+          await copy(text);
+          return {} as HostRequestResult;
+        }
         if (!viewState)
           throw new Error(`Unsupported request: ${request.method}`);
         if (request.method === VIEW_STATE_LOAD)
@@ -746,6 +753,7 @@ export function McpAppRuntime({
       bridge.onmessage = undefined;
       bridge.fallbackRequestHandler = undefined;
       bridge.ondownloadfile = undefined;
+      retryCopyRef.current = undefined;
       pendingCopyRef.current = undefined;
       appAbort.abort();
       bridgeRef.current = null;
@@ -839,16 +847,7 @@ export function McpAppRuntime({
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => {
-                  const text = pendingCopyRef.current;
-                  if (!text) return;
-                  // This click is the bar's own gesture.
-                  void writeClipboard(text).then((copied) => {
-                    if (!copied || pendingCopyRef.current !== text) return;
-                    pendingCopyRef.current = undefined;
-                    reportEffectRef.current('copied');
-                  });
-                }}
+                onClick={() => retryCopyRef.current?.()}
               >
                 {t('mcpApp.generatedUi.effect.copy')}
               </Button>
