@@ -31,6 +31,7 @@ import {
   isFunctionDeclaration,
   isFunctionExpression,
   isGetAccessorDeclaration,
+  isBlock,
   isElementAccessExpression,
   isIdentifier,
   isIfStatement,
@@ -40,6 +41,7 @@ import {
   isParenthesizedExpression,
   isPropertyAccessExpression,
   isPropertyAssignment,
+  isReturnStatement,
   isSatisfiesExpression,
   isSetAccessorDeclaration,
   isShorthandPropertyAssignment,
@@ -176,6 +178,50 @@ const classifierDelegation = (text) => {
   // `let toolCalls;` elsewhere still makes the name ambiguous, and an
   // acceptance must not guess which binding a lookup happened to find.
   const declarations = new Map();
+  // Names written anywhere in the file. A hoisted array is only enumerable at
+  // its declaration, so an answer built by writing to it afterwards must red
+  // even though the declaration itself looks like a literal array.
+  const writtenNames = new Set();
+  const rootName = (node) => {
+    let current = unwrap(node);
+    while (
+      current !== undefined &&
+      (isPropertyAccessExpression(current) ||
+        isElementAccessExpression(current))
+    ) {
+      current = unwrap(current.expression);
+    }
+    return current !== undefined && isIdentifier(current)
+      ? current.text
+      : undefined;
+  };
+  const collectWrite = (node) => {
+    if (
+      isBinaryExpression(node) &&
+      node.operatorToken.kind >= SyntaxKind.FirstAssignment &&
+      node.operatorToken.kind <= SyntaxKind.LastAssignment
+    ) {
+      const name = rootName(node.left);
+      if (name !== undefined) writtenNames.add(name);
+    }
+    if (
+      isCallExpression(node) &&
+      isPropertyAccessExpression(node.expression) &&
+      (MUTATORS.has(node.expression.name.text) ||
+        IN_PLACE.has(node.expression.name.text))
+    ) {
+      // Object/Reflect take the target as an argument; a mutator method has
+      // it as the receiver.
+      const ns = node.expression.expression;
+      const target =
+        isIdentifier(ns) && (ns.text === 'Object' || ns.text === 'Reflect')
+          ? node.arguments[0]
+          : ns;
+      const name = rootName(target);
+      if (name !== undefined) writtenNames.add(name);
+    }
+    forEachChild(node, collectWrite);
+  };
   const collectDeclarations = (node) => {
     // A named function declaration binds its name just as a const does, so a
     // fake passed by reference resolves whether it was written as an arrow or
@@ -210,7 +256,9 @@ const classifierDelegation = (text) => {
     return current;
   };
   // An arm flag is a boolean local tested directly or against a literal
-  // boolean. Nothing inside a larger expression is credited as a flag.
+  // boolean, and only in the polarity that RUNS the block: `X === false` and
+  // `X !== true` guard the arm off, so crediting them would call an arm that
+  // never runs wired. Nothing inside a larger expression is credited.
   const flagName = (test) => {
     const inner = unwrap(test);
     if (inner === undefined) return undefined;
@@ -220,6 +268,8 @@ const classifierDelegation = (text) => {
       (inner.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken ||
         inner.operatorToken.kind === SyntaxKind.ExclamationEqualsEqualsToken)
     ) {
+      const strict =
+        inner.operatorToken.kind === SyntaxKind.EqualsEqualsEqualsToken;
       for (const [a, b] of [
         [inner.left, inner.right],
         [inner.right, inner.left],
@@ -233,7 +283,8 @@ const classifierDelegation = (text) => {
           (lit.kind === SyntaxKind.TrueKeyword ||
             lit.kind === SyntaxKind.FalseKeyword)
         ) {
-          return id.text;
+          const positive = (lit.kind === SyntaxKind.TrueKeyword) === strict;
+          return positive ? id.text : undefined;
         }
       }
     }
@@ -345,6 +396,39 @@ const classifierDelegation = (text) => {
     if (node !== undefined) walk(node);
     return found;
   };
+  // `ids.map((id) => fakeToolCall('cron_list', {}, id))` builds one literal-named
+  // call per element, so it is as enumerable as an inline array of them.
+  const mappedElement = (node) => {
+    if (
+      node === undefined ||
+      !isCallExpression(node) ||
+      !isPropertyAccessExpression(node.expression) ||
+      node.expression.name.text !== 'map' ||
+      node.arguments.length !== 1
+    ) {
+      return undefined;
+    }
+    const cb = unwrap(node.arguments[0]);
+    if (
+      cb === undefined ||
+      (!isArrowFunction(cb) && !isFunctionExpression(cb))
+    ) {
+      return undefined;
+    }
+    let expr = cb.body;
+    if (!isArrowFunction(cb) || isBlock(cb.body)) {
+      const stmts = isBlock(cb.body) ? cb.body.statements : [];
+      if (stmts.length !== 1 || !isReturnStatement(stmts[0])) return undefined;
+      expr = stmts[0].expression;
+    }
+    const call = unwrap(expr);
+    return call !== undefined &&
+      isFakeToolCall(call) &&
+      literalText(call.arguments[0]) !== undefined
+      ? call
+      : undefined;
+  };
+  const isMappedFakeToolCalls = (node) => mappedElement(node) !== undefined;
   // An element-access key the inventory cannot read is as unattributable as a
   // computed property key, so both fail closed.
   const unreadableMemberKey = (node) => {
@@ -393,7 +477,12 @@ const classifierDelegation = (text) => {
           const own = fake === undefined ? undefined : fakeArm.get(fake);
           return near !== undefined && own !== undefined && near !== own;
         })(),
-        bodyNamed: isIdentifier(arg) && bodyNames(fake).has(arg.text),
+        bodyNamed: (() => {
+          const id = unwrap(arg);
+          return (
+            id !== undefined && isIdentifier(id) && bodyNames(fake).has(id.text)
+          );
+        })(),
       });
     }
     const fake = owningFake(node);
@@ -424,7 +513,14 @@ const classifierDelegation = (text) => {
         isPropertyAccessExpression(node.expression) &&
         IN_PLACE.has(node.expression.name.text) &&
         node.arguments.some(
-          (a) => literalText(a) === 'toolCalls' || mentionsToolCallsMember(a),
+          (a) =>
+            literalText(a) === 'toolCalls' ||
+            mentionsToolCallsMember(a) ||
+            // The key may arrive as a name rather than a literal, so it is
+            // resolved the same way an answer source is; an unreadable key
+            // fails closed here just as it does on an assignment.
+            literalText(resolve(a)) === 'toolCalls' ||
+            unreadableMemberKey(a),
         )
       ) {
         record('no-loop-hand-built', node, fake);
@@ -452,8 +548,25 @@ const classifierDelegation = (text) => {
             declared !== undefined && isIdentifier(declared)
               ? resolve(declared)
               : declared;
-          if (source === undefined || !isArrayLiteralExpression(source)) {
+          // A name written after its declaration no longer holds the array
+          // the declaration enumerates, so the resolution is not an answer.
+          const rewritten =
+            declared !== undefined &&
+            isIdentifier(declared) &&
+            writtenNames.has(declared.text);
+          if (
+            rewritten ||
+            source === undefined ||
+            !(isArrayLiteralExpression(source) || isMappedFakeToolCalls(source))
+          ) {
             record('no-loop-hand-built', node, fake);
+          } else if (isMappedFakeToolCalls(source)) {
+            // Every element is built by the same literal-named call, so the
+            // array is enumerable even though it is produced by a map.
+            const built = mappedElement(source);
+            if (literalText(built.arguments[0]) === 'respond_in_schema') {
+              record('no-loop-answer-site', built, fake);
+            }
           } else {
             for (const element of source.elements) {
               if (
@@ -475,6 +588,7 @@ const classifierDelegation = (text) => {
     forEachChild(node, visit);
   };
   collectDeclarations(file);
+  collectWrite(file);
   collectFakes(file);
   visit(file);
   // The arms are the flags of the fakes that actually delegate. Filtering by
@@ -4455,6 +4569,40 @@ describe('managed-agent-server e2e runner', () => {
             "\nconst forged = buildCalls();\nif (body['x']) return { toolCalls: forged };",
         ),
       ],
+      // A hoisted array written AFTER its declaration: the declaration still
+      // enumerates a cron call, but the emitted array carries a hand-built
+      // allow. The same write through the member is flagged, so only the
+      // spelling differed.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst calls = [fakeToolCall('cron_list', {}, 'loop-cron-list')];\ncalls.push(" +
+            HAND +
+            ");\nif (body['x']) return { toolCalls: calls };",
+        ),
+      ],
+      // An in-place writer whose key arrives as a name, not a literal.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst answer = { toolCalls: [] };\nconst KEY = 'toolCalls';\nReflect.set(answer, KEY, [" +
+            HAND +
+            "]);\nif (body['x']) return answer;",
+        ),
+      ],
+      // The arm flag tested in the polarity that never runs the block.
+      [
+        'arm-scoping',
+        [
+          decision,
+          'if (loopSkill === false) {\nfake = await startFakeOpenAIServer(({ body }) => {\n' +
+            SKILL +
+            '\n});\n}',
+          fire(FIRE),
+        ].join('\n'),
+      ],
       // A computed tool name is as unattributable as a hand-built element.
       [
         'no-loop-hand-built',
@@ -4544,6 +4692,15 @@ describe('managed-agent-server e2e runner', () => {
             "\nconst toolCalls = [fakeToolCall('cron_list', {}, 'c')];\n{ let toolCalls; toolCalls = [" +
             HAND +
             "];\nif (body['x']) return { toolCalls }; }",
+        ),
+      ],
+      // The same ambiguity with NO write anywhere: the name is declared twice
+      // and never assigned, so only the declaration count can reject it.
+      [
+        'no-loop-hand-built',
+        withSkill(
+          SKILL +
+            "\nconst toolCalls = [fakeToolCall('cron_list', {}, 'c')];\n{ let toolCalls; }\nif (body['x']) return { toolCalls };",
         ),
       ],
       // An indexed write through a computed key is as unattributable as a
@@ -4742,6 +4899,17 @@ describe('managed-agent-server e2e runner', () => {
           fire(FIRE),
         ].join('\n'),
       ],
+      // A mapped array of literal-named calls emits the same bytes as an
+      // inline array of them, so it is enumerable too.
+      [
+        'mapped cron answer',
+        withSkill(
+          SKILL +
+            "\nconst ids = ['loop-cron-list'];\nif (body['x']) return { toolCalls: ids.map((id) => fakeToolCall('cron_list', {}, id)) };",
+        ),
+      ],
+      // A non-null assertion on the request body is the same argument.
+      ['asserted body argument', withSkill(SKILL.replace('(body,', '(body!,'))],
       // The arm callback written as a named FUNCTION DECLARATION and passed by
       // reference: a declaration binds its name just as a const does.
       [
