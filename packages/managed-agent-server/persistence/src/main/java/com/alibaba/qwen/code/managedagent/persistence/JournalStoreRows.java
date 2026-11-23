@@ -8,9 +8,11 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.StoredTransaction;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -85,7 +87,7 @@ final class JournalStoreRows {
                 result.getString("encryption_key_id"),
                 result.getString("state"),
                 result.getString("capture_state"),
-                result.getString("deletion_operation_key"));
+                ManagedSchemaRows.identity(result, "deletion_operation_ref"));
     }
 
     static final int STORAGE_VERSION = 1;
@@ -127,8 +129,8 @@ final class JournalStoreRows {
         return jdbc.query("SELECT creator_actor_key FROM ma_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
                 (result, row) -> {
-                    byte[] actor = result.getBytes("creator_actor_key");
-                    return actor == null ? "" : new String(actor, StandardCharsets.UTF_8);
+                    String actor = result.getString("creator_actor_key");
+                    return actor == null ? "" : actor;
                 }, tenantId, sessionId).stream().findFirst().orElse("");
     }
 
@@ -222,10 +224,21 @@ final class JournalStoreRows {
     }
 
     /** A committed resource of this transaction's Session, verified. */
-    StoredResource storedResource(String scopeKey, String tenantId,
+    StoredResource storedResource(String tenantId,
             String workspaceId, String sessionId, String resourceId) {
-        ResourceRow resource = findResource(scopeKey, resourceId);
+        ResourceRow resource = findResource(tenantId, sessionId, resourceId);
         if (resource == null) {
+            // The identity hash used to find a row whose tenant column was later
+            // moved, and requireResourceScope refused it as a foreign Session.
+            // The raw key cannot find it; the same Session's resource id under a
+            // foreign tenant is still a scope violation, not a missing body.
+            Integer elsewhere = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM ma_resource WHERE resource_id = ?"
+                            + " AND session_id = ? AND tenant_id <> ?",
+                    Integer.class, resourceId, sessionId, tenantId);
+            if (elsewhere != null && elsewhere > 0) {
+                throw sessionNotFound();
+            }
             throw conflict(ManagedSessionStoreModels.ERROR_RESOURCE_MISSING,
                     "A referenced Managed Session resource is missing.");
         }
@@ -335,26 +348,27 @@ final class JournalStoreRows {
     }
 
     TransactionRow findTransactionByCommand(String tenantId,
-            String sessionId, String commandKeyHash) {
+            String sessionId, String commandRef) {
         List<TransactionRow> rows = jdbc.query(
                 "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx"
                         + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND command_key_hash = ?",
-                transactionMapper, tenantId, sessionId, commandKeyHash);
+                        + " AND command_ref = ?",
+                transactionMapper, tenantId, sessionId, ManagedSchemaKeys.identity(commandRef));
         return rows.isEmpty() ? null : rows.get(0);
     }
 
-    ResourceRow findResource(String scopeKey, String resourceId) {
-        return findResource(scopeKey, resourceId, true);
+    ResourceRow findResource(String tenantId, String sessionId, String resourceId) {
+        return findResource(tenantId, sessionId, resourceId, true);
     }
 
-    ResourceRow findResource(String scopeKey, String resourceId, boolean lock) {
+    ResourceRow findResource(String tenantId, String sessionId, String resourceId, boolean lock) {
         List<ResourceRow> rows =
                 jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE resource_key = ?"
-                        + " AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
+                        "SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource WHERE tenant_id = ?"
+                        + " AND session_id = ? AND resource_id = ?" + (lock ? " FOR UPDATE" : ""),
                         resourceMapper,
-                        ManagedSessionStore.resourceKey(scopeKey, resourceId),
+                        tenantId,
+                        sessionId,
                         resourceId);
         return rows.isEmpty() ? null : rows.get(0);
     }
@@ -430,6 +444,16 @@ final class JournalStoreRows {
         validateText(tenantId, "tenantId", 128);
         validateKeyComponent(workspaceId, "workspaceId");
         validateKeyComponent(sessionId, "sessionId");
+        // The JOURNAL owner reference percent-encodes (tenant, session), so a
+        // sessionId the byte validator admits can still overflow the column
+        // budget. Refuse it at admission rather than at the resource-ref INSERT
+        // every commit performs.
+        try {
+            ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, tenantId, sessionId);
+        } catch (IllegalArgumentException overflow) {
+            throw invalid("sessionId exceeds the " + ManagedIdentityRefs.OWNER_REF_BYTES
+                    + "-byte journal owner reference budget.");
+        }
     }
 
     static void validateKeyComponent(String value, String label) {
@@ -442,6 +466,23 @@ final class JournalStoreRows {
 
     static void validateStableId(String value, String label) {
         validateText(value, label, MAX_ID_BYTES);
+        // PAD SPACE collations fold trailing spaces, so two distinct stable ids
+        // would compare equal; the boundary refuses them rather than relying on
+        // the column to preserve exactness.
+        if (value.endsWith(" ")) {
+            throw invalid(label + " must not end with a space.");
+        }
+    }
+
+    /**
+     * A stable id bounded by its column's VARCHAR width. MySQL counts code
+     * points and H2 counts UTF-16 units, so the UTF-16 length bounds both.
+     */
+    static void validateStableId(String value, String label, int maxChars) {
+        validateStableId(value, label);
+        if (value.length() > maxChars) {
+            throw invalid(label + " exceeds " + maxChars + " characters.");
+        }
     }
 
     static void validateText(String value, String label,
@@ -507,11 +548,11 @@ final class JournalStoreRows {
             Long matching =
                     jdbc.queryForObject(
                             "SELECT COUNT(*) FROM ma_output_capture p JOIN ma_resource o ON"
-                                + " o.scope_key = p.scope_key AND o.publication_id ="
+                                + " o.scope_ref = p.scope_ref AND o.publication_id ="
                                 + " p.publication_id WHERE p.tenant_id = ? AND p.workspace_id = ?"
                                 + " AND p.session_id = ? AND p.admission_resource_id = ? AND"
                                 + " p.producer_phase IN ('FINISHED', 'REFERENCED') AND"
-                                + " p.is_quarantined = FALSE AND o.slot_key = X'61646d697373696f6e'"
+                                + " p.is_quarantined = FALSE AND o.slot_key = 'admission'"
                                 + " AND o.capture_state = 'VERIFIED' AND o.resource_id = ? AND"
                                 + " o.capture_object_key = ? AND o.sha256 = ? AND o.byte_length ="
                                 + " ?",
@@ -679,16 +720,22 @@ final class JournalStoreRows {
         long now = epochMillis(databaseNow());
         jdbc.update(
                 "INSERT IGNORE INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id,"
-                        + " gmt_modified) VALUES (?, ?, 'SESSION', X'', ?)",
+                        + " gmt_modified) VALUES (?, ?, 'SESSION', '', ?)",
                 tenantId,
                 sessionId,
                 now);
     }
 
+    // Kept name: JdbcManagedSessionStore.commandKeyHash delegates here; the value is now the
+    // canonical command reference, not a hash.
     static String commandKeyHash(String operation,
             String commandId) {
-        return sha256((operation + "\u0000" + commandId)
-                .getBytes(StandardCharsets.UTF_8));
+        try {
+            return ManagedIdentityRefs.commandRef(operation, commandId);
+        } catch (IllegalArgumentException overflow) {
+            throw invalid("operation/commandId exceeds the "
+                    + ManagedIdentityRefs.COMMAND_REF_BYTES + "-byte command reference budget.");
+        }
     }
 
     static String sha256(byte[] value) {

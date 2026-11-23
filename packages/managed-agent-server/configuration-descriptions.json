@@ -532,8 +532,8 @@
       "type": "duration"
     },
     "qwen.managed-agent.model-catalog": {
-      "en": "The models offered for Sessions of the built-in `qwen-code` agent, selectable at Session creation and changeable later by a Workspace operator. A list of objects with `model-id` (a model ID configured in the Harness; required, unique, at most 512 bytes) and `label` (display name, defaults to `model-id`, at most 512 characters); an invalid or duplicate entry is refused at startup. Set it in a YAML configuration file; there is no environment variable. Selection also needs `qwen.managed-agent.harness.workspace-files-enabled` and Harness support.",
-      "zh": "为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。",
+      "en": "The models offered for Sessions of the built-in `qwen-code` agent, selectable at Session creation and changeable later by a Workspace operator. A list of objects with `model-id` (a model ID configured in the Harness; required, unique, at most 128 characters) and `label` (display name, defaults to `model-id`, at most 512 characters); an invalid or duplicate entry is refused at startup. Set it in a YAML configuration file; there is no environment variable. Selection also needs `qwen.managed-agent.harness.workspace-files-enabled` and Harness support.",
+      "zh": "为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 128 个字符）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。",
       "default": ""
     },
     "qwen.managed-agent.model-config-base-urls": {
@@ -707,12 +707,12 @@
       "zh": "static Runtime worker 租约的 epoch；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。为负数时启动时拒绝。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
     },
     "qwen.managed-agent.runtime-broker.static-lease-id": {
-      "en": "The lease ID of the static Runtime worker; the Broker sends it with each request and the worker's attestation must report the same value. A non-empty string of at most 512 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
-      "zh": "static Runtime worker 租约的 ID；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+      "en": "The lease ID of the static Runtime worker; the Broker sends it with each request and the worker's attestation must report the same value. A non-empty string of at most 128 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约的 ID；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 128 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
     },
     "qwen.managed-agent.runtime-broker.static-runtime-instance-id": {
-      "en": "The Runtime instance ID of the static Runtime worker's lease; the worker's attestation must report the same value. A non-empty string of at most 512 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
-      "zh": "static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+      "en": "The Runtime instance ID of the static Runtime worker's lease; the worker's attestation must report the same value. A non-empty string of at most 128 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 128 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
     },
     "qwen.managed-agent.runtime-broker.static-token": {
       "en": "The bearer token the Broker presents to the static Runtime worker. A secret; saved bindings store it encrypted with the Runtime credential key (`qwen.managed-agent.runtime-broker.credential-key`). Required when `qwen.managed-agent.runtime-broker.provisioner` is `static`; at most 512 characters.",

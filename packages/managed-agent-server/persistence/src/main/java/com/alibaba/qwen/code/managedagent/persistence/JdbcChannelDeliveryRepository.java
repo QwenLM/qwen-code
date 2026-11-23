@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelStoreSupport;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.dao.DuplicateKeyException;
@@ -52,14 +51,13 @@ public final class JdbcChannelDeliveryRepository
         requireCandidate(candidate);
         try {
             long now = databaseNow();
-            jdbc.update("INSERT INTO ma_delivery (delivery_key, delivery_kind, source_scope_key,"
+            jdbc.update("INSERT INTO ma_delivery (delivery_kind, source_scope_id,"
                             + " tenant_id, channel_id, delivery_id, segment_id, segment_ordinal,"
                             + " segment_count, transport_state, reception_state, consumption_state,"
                             + " provider_receipt_json, payload_json, gmt_create, gmt_modified)"
-                            + " VALUES (?, 'CHANNEL', ?, ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
+                            + " VALUES ('CHANNEL', ?, ?, ?, ?, ?, ?, ?, ?, 'NOT_APPLICABLE',"
                             + " 'NOT_APPLICABLE', ?, '{\"schemaVersion\":1}', ?, ?)",
-                    deliveryKey(candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId()),
-                    channelScope(candidate.tenantId(), candidate.channelInstanceId()),
+                    candidate.channelInstanceId(),
                     candidate.tenantId(), candidate.channelInstanceId(), candidate.deliveryId(),
                     candidate.segmentId(), candidate.ordinal(), candidate.segmentCount(),
                     candidate.state(), receiptJson(candidate.providerReceipt()), now, now);
@@ -87,10 +85,10 @@ public final class JdbcChannelDeliveryRepository
         ChannelStoreSupport.requireId(deliveryId, "deliveryId");
         return jdbc.query("SELECT " + COLUMNS
                         + " FROM ma_delivery"
-                        + " WHERE delivery_kind = 'CHANNEL' AND source_scope_key = ?"
+                        + " WHERE delivery_kind = 'CHANNEL' AND source_scope_id = ?"
                         + " AND tenant_id = ? AND channel_id = ?"
                         + " AND delivery_id = ?",
-                MAPPER, channelScope(tenantId, channelInstanceId), tenantId, channelInstanceId, deliveryId).stream()
+                MAPPER, channelInstanceId, tenantId, channelInstanceId, deliveryId).stream()
                 .findFirst();
     }
 
@@ -108,9 +106,9 @@ public final class JdbcChannelDeliveryRepository
                     + expectedState + " -> " + state);
         }
         List<Long> generations = jdbc.queryForList("SELECT claim_generation FROM ma_delivery"
-                        + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
+                        + " WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
                         + " AND channel_id = ? AND delivery_id = ?",
-                Long.class, deliveryKey(tenantId, channelInstanceId, deliveryId), tenantId,
+                Long.class, channelInstanceId, tenantId,
                 channelInstanceId, deliveryId);
         if (generations.isEmpty()) {
             return null;
@@ -127,11 +125,11 @@ public final class JdbcChannelDeliveryRepository
         }
         int updated = jdbc.update("UPDATE ma_delivery SET transport_state = ?,"
                         + " provider_receipt_json = COALESCE(?, provider_receipt_json), gmt_modified = ?"
-                        + " WHERE delivery_key = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
+                        + " WHERE source_scope_id = ? AND delivery_kind = 'CHANNEL' AND tenant_id = ?"
                         + " AND channel_id = ? AND delivery_id = ? AND transport_state = ?"
                         + " AND claim_generation = ?",
                 state, receiptJson(providerReceipt), databaseNow(),
-                deliveryKey(tenantId, channelInstanceId, deliveryId), tenantId,
+                channelInstanceId, tenantId,
                 channelInstanceId, deliveryId, expectedState, claimGeneration);
         Optional<ChannelDelivery> current = find(tenantId, channelInstanceId,
                 deliveryId);
@@ -139,8 +137,9 @@ public final class JdbcChannelDeliveryRepository
             return current.orElseThrow(() -> new IllegalStateException(
                     "channel delivery transition left no row"));
         }
-        Long actualGeneration = jdbc.queryForObject("SELECT claim_generation FROM ma_delivery WHERE delivery_key = ?",
-                Long.class, deliveryKey(tenantId, channelInstanceId, deliveryId));
+        Long actualGeneration = jdbc.queryForObject("SELECT claim_generation FROM ma_delivery"
+                        + " WHERE delivery_kind = 'CHANNEL' AND tenant_id = ? AND source_scope_id = ? AND delivery_id = ?",
+                Long.class, tenantId, channelInstanceId, deliveryId);
         if (actualGeneration == null || actualGeneration != claimGeneration) {
             return null;
         }
@@ -158,7 +157,7 @@ public final class JdbcChannelDeliveryRepository
             throw new IllegalArgumentException("limit must be in [1, 100]");
         }
         List<Object> arguments = new ArrayList<>();
-        arguments.add(channelScope(tenantId, channelInstanceId));
+        arguments.add(channelInstanceId);
         arguments.add(tenantId);
         arguments.add(channelInstanceId);
         String cursor = "";
@@ -172,21 +171,13 @@ public final class JdbcChannelDeliveryRepository
         arguments.add(limit + 1);
         List<ChannelDelivery> rows = jdbc.query("SELECT " + COLUMNS
                         + " FROM ma_delivery"
-                        + " WHERE delivery_kind = 'CHANNEL' AND source_scope_key = ?"
+                        + " WHERE delivery_kind = 'CHANNEL' AND source_scope_id = ?"
                         + " AND tenant_id = ? AND channel_id = ?" + cursor
                         + " ORDER BY gmt_create DESC, delivery_id DESC LIMIT ?",
                 MAPPER, arguments.toArray());
         boolean hasMore = rows.size() > limit;
         return new DeliveryPage(hasMore ? rows.subList(0, limit) : rows,
                 hasMore);
-    }
-
-    static String channelScope(String tenantId, String channelId) {
-        return ManagedSchemaKeys.key(tenantId, channelId);
-    }
-
-    static String deliveryKey(String tenantId, String channelId, String deliveryId) {
-        return ManagedSchemaKeys.key("CHANNEL", channelScope(tenantId, channelId), deliveryId);
     }
 
     static String receiptJson(String receipt) {

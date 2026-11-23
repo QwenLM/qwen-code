@@ -44,7 +44,7 @@ class ManagedUserMessageMySqlIT extends ManagedUserMessageStoreTest {
 
     @Test
     void compensationRevisitsLockedRowsAfterFixedRoundDespiteInserts() throws Exception {
-        String tenant = "queue-mysql-" + UUID.randomUUID();
+        String tenant = UUID.randomUUID().toString();
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(mysqlJdbc.getDataSource()));
         transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
         transactions.setIsolationLevel(TransactionDefinition.ISOLATION_REPEATABLE_READ);

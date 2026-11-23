@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -52,7 +52,8 @@ class HostedCleanupDebtStoreTest {
             assertThat(debt.sessionId()).isEqualTo(session);
             assertThat(debt.promptId()).isEqualTo(prompt);
             assertThat(debt.ownerKey())
-                    .isEqualTo(ManagedSchemaKeys.key("hosted-cleanup", prompt));
+                    .isEqualTo(ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES,
+                            "hosted-cleanup", prompt));
         });
     }
 
@@ -181,20 +182,19 @@ class HostedCleanupDebtStoreTest {
             byte[] bytes, String storageKind, long gmtCreate) {
         byte[] body = bytes == null ? descriptor(tenant, workspace, session, prompt) : bytes;
         String resourceId = "cleanup-" + UUID.randomUUID();
-        String resourceKey = UUID.randomUUID().toString().replace("-", "");
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id,"
                         + " workspace_id, session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes, state, gmt_create)"
-                        + " VALUES (?, ?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
+                        + " VALUES (?, ?, ?, ?, 'hosted-turn-cleanup', 1, ?, ?,"
                         + " ?, ?, 'REFERENCED', ?)",
-                resourceKey, tenant,
+                tenant,
                 workspace, session, resourceId, body.length, "d", storageKind, body, gmtCreate);
-        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_key,"
-                        + " owner_revision, resource_key, tenant_id, workspace_id, session_id,"
-                        + " journal_revision, resource_id, gmt_create, runtime_binding_key)"
-                        + " VALUES ('HOSTED_CLEANUP', ?, 1, ?, ?, ?, ?, 1, ?, ?, ?)",
-                ManagedSchemaKeys.key("hosted-cleanup", prompt), resourceKey, tenant, workspace,
-                session, resourceId, gmtCreate, "binding-" + UUID.randomUUID());
+        jdbc.update("INSERT INTO ma_resource_ref (owner_kind, owner_ref,"
+                        + " owner_revision, tenant_id, workspace_id, session_id,"
+                        + " journal_revision, resource_id, gmt_create, runtime_binding_id)"
+                        + " VALUES ('HOSTED_CLEANUP', ?, 1, ?, ?, ?, 1, ?, ?, ?)",
+                ManagedIdentityRefs.ref(ManagedIdentityRefs.OWNER_REF_BYTES, "hosted-cleanup", prompt),
+                tenant, workspace, session, resourceId, gmtCreate, "binding-" + UUID.randomUUID());
     }
 
     private static byte[] descriptor(String tenant, String workspace, String session,

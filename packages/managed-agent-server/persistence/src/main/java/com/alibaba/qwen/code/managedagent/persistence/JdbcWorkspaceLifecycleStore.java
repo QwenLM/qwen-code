@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecords;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -468,10 +467,9 @@ public class JdbcWorkspaceLifecycleStore
 
     private String latestHookExecutionResource(OperationRecord operation, String occurrence) {
         return jdbc.queryForList("SELECT record_resource_id FROM ma_session_record"
-                + " WHERE tenant_id = ? AND session_id = ? AND record_key = ?"
+                + " WHERE tenant_id = ? AND session_id = ?"
                 + " AND domain = 'hook_execution' AND record_id = ? FOR UPDATE", String.class,
                 operation.tenantId(), operation.sessionId(),
-                ManagedExtensionProjection.recordKey(operation.sessionId(), "hook_execution", occurrence),
                 occurrence).stream().findFirst().orElse(null);
     }
 

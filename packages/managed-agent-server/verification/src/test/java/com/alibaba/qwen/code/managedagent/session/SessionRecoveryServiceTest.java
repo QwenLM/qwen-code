@@ -67,9 +67,10 @@ class SessionRecoveryServiceTest {
         // prefix every index on those tables leads with.
         jdbc.execute("CREATE TABLE ma_session_record (tenant_id VARCHAR, session_id VARCHAR,"
                 + " record_kind VARCHAR, runtime_state VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource_ref (resource_key VARCHAR,"
+        jdbc.execute("CREATE TABLE ma_resource_ref (resource_id VARCHAR,"
                 + " tenant_id VARCHAR, session_id VARCHAR, owner_kind VARCHAR)");
-        jdbc.execute("CREATE TABLE ma_resource (resource_key VARCHAR, state VARCHAR)");
+        jdbc.execute("CREATE TABLE ma_resource (tenant_id VARCHAR, session_id VARCHAR,"
+                + " resource_id VARCHAR, state VARCHAR)");
         jdbc.execute("CREATE TABLE ma_public_event (tenant_id VARCHAR, session_id VARCHAR,"
                 + " turn_id VARCHAR, stream_kind VARCHAR, is_terminal INT, source_key VARCHAR)");
         when(sessions.requireReadableSession("tenant", "actor", "session")).thenReturn(session);
@@ -202,7 +203,7 @@ class SessionRecoveryServiceTest {
             case "turn" -> jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
             case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', 'ready')");
             default -> {
-                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
                 jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
             }
         }
@@ -217,7 +218,7 @@ class SessionRecoveryServiceTest {
     // still unsettled. Without the certificate the same rows still block.
     private void oweBackgroundWork() {
         jdbc.update("INSERT INTO ma_session_record VALUES ('tenant', 'session', 'DOMAIN', 'ready')");
-        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
         jdbc.update("INSERT INTO ma_resource_ref VALUES ('debt', 'tenant', 'session', 'HOSTED_CLEANUP')");
     }
 
@@ -267,7 +268,7 @@ class SessionRecoveryServiceTest {
         // A terminal run projects a null runtime_state, and a confirmed debt
         // drops its REFERENCED ref: neither is owed work any more.
         jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', NULL)");
-        jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'RELEASED')");
+        jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'RELEASED')");
         jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
         var recovery = service.query("tenant", "actor", "session");
         assertThat(recovery.state()).isEqualTo("ready");
@@ -355,7 +356,7 @@ class SessionRecoveryServiceTest {
             case "turn" -> jdbc.update("INSERT INTO ma_turn (tenant_id, session_id, status) VALUES ('tenant', 'session', 'RUNNING')");
             case "runtime" -> jdbc.update("INSERT INTO ma_session_record VALUES (\'tenant\', \'session\', \'DOMAIN\', 'ready')");
             default -> {
-                jdbc.update("INSERT INTO ma_resource VALUES ('debt', 'REFERENCED')");
+                jdbc.update("INSERT INTO ma_resource VALUES ('tenant', 'session', 'debt', 'REFERENCED')");
                 jdbc.update("INSERT INTO ma_resource_ref VALUES (\'debt\', \'tenant\', \'session\', \'HOSTED_CLEANUP\')");
             }
         }
