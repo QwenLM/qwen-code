@@ -151,6 +151,9 @@ const onError = vi.fn();
 
 function renderSidebar(
   props: {
+    collapsed?: boolean;
+    layout?: 'rail';
+    activePage?: string;
     overloadPaused?: boolean;
     overloadDetail?: string;
     onOverloadRefused?: () => void;
@@ -469,5 +472,120 @@ describe('WebShellSidebar overload strip', () => {
       button!.click();
     });
     expect(standaloneNew).not.toHaveBeenCalled();
+  });
+
+  it('shows the warning in the collapsed rail outside the hidden home column', async () => {
+    renderSidebar({
+      collapsed: true,
+      layout: 'rail',
+      overloadPaused: true,
+      overloadDetail: 'Host load ratio 2.50, event-loop p99 20 ms (cpu_load).',
+    });
+    await flushSidebar();
+
+    const element = strip();
+    expect(element).not.toBeNull();
+    expect(element!.closest('[data-web-shell-navigation-rail]')).not.toBeNull();
+    expect(element!.closest('[hidden]')).toBeNull();
+    expect(element!.getAttribute('title')).toContain('Host load ratio 2.50');
+  });
+
+  it('shows the compact rail warning on a non-home page when expanded', async () => {
+    renderSidebar({
+      collapsed: false,
+      layout: 'rail',
+      activePage: 'scheduled-tasks',
+      overloadPaused: true,
+    });
+    await flushSidebar();
+
+    const element = strip();
+    expect(element).not.toBeNull();
+    expect(element!.closest('[data-web-shell-navigation-rail]')).not.toBeNull();
+    expect(element!.closest('[hidden]')).toBeNull();
+    expect(element!.textContent).toBe('');
+  });
+
+  it('keeps exactly one warning when the home preview opens', async () => {
+    renderSidebar({
+      collapsed: true,
+      layout: 'rail',
+      overloadPaused: true,
+    });
+    await flushSidebar();
+    const home = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-home-trigger]',
+    );
+    expect(home).not.toBeNull();
+    const pointer = new MouseEvent('pointerover', {
+      bubbles: true,
+      composed: true,
+    });
+    Object.defineProperty(pointer, 'pointerType', { value: 'mouse' });
+    act(() => {
+      home!.dispatchEvent(pointer);
+    });
+    await flushSidebar();
+
+    expect(
+      document.querySelectorAll('[data-web-shell-overload-strip]'),
+    ).toHaveLength(1);
+    expect(
+      document.querySelector(
+        '[data-web-shell-home-popover] [data-web-shell-overload-strip]',
+      ),
+    ).not.toBeNull();
+  });
+
+  it('keeps the rail warning when selection mode carries into a non-home page', async () => {
+    renderSidebar({
+      collapsed: false,
+      layout: 'rail',
+      overloadPaused: true,
+    });
+    await flushSidebar();
+    const select = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Select sessions"]',
+    );
+    expect(select).not.toBeNull();
+    act(() => {
+      select!.click();
+    });
+    expect(select!.getAttribute('aria-pressed')).toBe('true');
+    expect(strip()).toBeNull();
+
+    renderSidebar({
+      collapsed: false,
+      layout: 'rail',
+      activePage: 'scheduled-tasks',
+      overloadPaused: true,
+    });
+    await flushSidebar();
+
+    const element = strip();
+    expect(element).not.toBeNull();
+    expect(element!.closest('[data-web-shell-navigation-rail]')).not.toBeNull();
+    expect(element!.closest('[hidden]')).toBeNull();
+  });
+
+  it('keeps the rail warning when a channels section is collapsed', async () => {
+    connection.capabilities = {
+      features: ['session_source_metadata'],
+    } as typeof connection.capabilities;
+    renderSidebar({
+      collapsed: true,
+      layout: 'rail',
+      activePage: 'channels',
+      overloadPaused: true,
+    });
+    await flushSidebar();
+
+    expect(
+      container.querySelector('[data-web-shell-sidebar-section="channels"]'),
+    ).not.toBeNull();
+    const element = strip();
+    expect(element).not.toBeNull();
+    expect(element!.closest('[data-web-shell-navigation-rail]')).not.toBeNull();
+    expect(element!.closest('[hidden]')).toBeNull();
   });
 });

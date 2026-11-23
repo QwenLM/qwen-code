@@ -39,6 +39,8 @@
 `WebShellSidebar` 新增 `overloadPaused`、`overloadDetail` 与可选 `onOverloadRefused` prop。暂停期间：
 
 - 新建任务 nav 行内、按钮上方渲染警示条：警告图标加 `sidebar.overloadPaused`（"系统过载 · 暂停新建"），`title`/`aria-label` 携带 `overloadDetail`。
+- 在 rail 模式下，折叠 rail 或打开非 Home 页面会隐藏 Home surface，此时同样的警示以图标形式放在始终可见的 rail 中，保留详情 tooltip 与无障碍标签。打开 Home 预览时隐藏该图标，改在预览内显示完整警示条；同一个 pause 不会同时显示两条可见警示。
+- 完整面板的 `sectionView`、`selectionMode` 抑制规则只作用于完整面板；面板自身被隐藏时，不移除 rail 中的紧凑警示图标。
 - `newSessionDisabled` 变为 `creatingSession || overloadPaused`，禁用按钮；`handleNewSession` 与 worktree 变体在暂停期间提前 return，使侧栏所有入口受同一谓词守卫。
 - App 层 create handler 在暂停期间以警告 toast 拒绝，覆盖侧栏之外的入口（panel、空页），裁决相同。
 - 所有可能激活新 child 的 branch 流程，包括 record-point branch，都经过 `branchCurrentSession` 的同一预派发暂停守卫。`atRecordId` 只是历史引用，不能证明 UI 留在当前 runtime：返回的 session 可能在发布之后再通过 `startSessionSwitch` 进行 fresh load。先拒绝也避免在暂停激活期间留下额外的已发布历史点。slash handler 用显式 `false` 保留输入指令；`onBranchSession` 回调则继续保持既有 `void | Promise<void>` 契约。

@@ -3234,6 +3234,24 @@ export function WebShellSidebar({
     '--web-shell-sidebar-max-width': `${getSidebarMaxWidth()}px`,
   } as CSSProperties;
   const newSessionDisabled = creatingSession || overloadPaused;
+  const renderOverloadStrip = (compactRail = false) => (
+    <div
+      className={styles.overloadStrip}
+      data-web-shell-overload-strip
+      role="status"
+      title={overloadDetail}
+      aria-label={
+        overloadDetail
+          ? `${t('sidebar.overloadPaused')}: ${overloadDetail}`
+          : t('sidebar.overloadPaused')
+      }
+    >
+      <TriangleAlertIcon size={14} strokeWidth={1.5} />
+      {!compactRail && (!collapsed || homePreviewOpen) && (
+        <span>{t('sidebar.overloadPaused')}</span>
+      )}
+    </div>
+  );
 
   useEffect(() => {
     if (!currentSessionId) return;
@@ -8101,6 +8119,10 @@ export function WebShellSidebar({
               data-web-shell-navigation-rail
             >
               <div className={styles.railPrimary}>
+                {overloadPaused &&
+                  homeHidden &&
+                  !homePreviewOpen &&
+                  renderOverloadStrip(true)}
                 {activityEnabled && (collapsed || homeHidden) && (
                   <button
                     type="button"
@@ -8338,24 +8360,11 @@ export function WebShellSidebar({
               </div>
             </>
           )}
-          {!sectionView && !selectionMode && overloadPaused && (
-            <div
-              className={styles.overloadStrip}
-              data-web-shell-overload-strip
-              role="status"
-              title={overloadDetail}
-              aria-label={
-                overloadDetail
-                  ? `${t('sidebar.overloadPaused')}: ${overloadDetail}`
-                  : t('sidebar.overloadPaused')
-              }
-            >
-              <TriangleAlertIcon size={14} strokeWidth={1.5} />
-              {(!collapsed || homePreviewOpen) && (
-                <span>{t('sidebar.overloadPaused')}</span>
-              )}
-            </div>
-          )}
+          {!sectionView &&
+            !selectionMode &&
+            overloadPaused &&
+            (!homeHidden || homePreviewOpen) &&
+            renderOverloadStrip()}
           {!sectionView &&
             (selectionMode ||
               primaryNavItems.has('newTask') ||
