@@ -4368,7 +4368,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -4813,7 +4813,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -4883,7 +4883,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getId: vi.fn().mockReturnValue(sessionId),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -5852,7 +5852,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -5979,7 +5979,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
         }) as unknown as InstanceType<typeof Session>,
     );
@@ -6221,7 +6221,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -6435,7 +6435,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           noteExternalWorkflowDeletion: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           beginClose: vi.fn().mockReturnValue(vi.fn()),
           beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
@@ -17009,7 +17009,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -17090,7 +17090,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -17171,7 +17171,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -27375,7 +27375,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -29066,7 +29066,7 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           beginHistoryMutation: liveBeginHistoryMutation,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: vi.fn().mockReturnValue([]),
@@ -31083,7 +31083,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           candidateTokens: number;
           apiTimeMs: number;
         };
-        installRewriter: ReturnType<typeof vi.fn>;
+        installMods: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
         deferAutomaticWorkUntilCwdRestore: ReturnType<typeof vi.fn>;
@@ -31530,7 +31530,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           candidateTokens: 5,
           apiTimeMs: 11,
         },
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         installManagedConversationActivation: vi.fn(
           (activate: () => Promise<void>) => {
             lastManagedConversationActivation = activate;
@@ -33230,11 +33230,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     );
     expect(
       innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
-    ).toBeLessThan(
-      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
-    );
+    ).toBeLessThan(lastSessionMock!.installMods.mock.invocationCallOrder[0]!);
     expect(
-      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+      lastSessionMock!.installMods.mock.invocationCallOrder[0]!,
     ).toBeLessThan(
       lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
     );
@@ -33335,11 +33333,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     );
     expect(
       innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
-    ).toBeLessThan(
-      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
-    );
+    ).toBeLessThan(lastSessionMock!.installMods.mock.invocationCallOrder[0]!);
     expect(
-      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+      lastSessionMock!.installMods.mock.invocationCallOrder[0]!,
     ).toBeLessThan(
       lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
     );
@@ -34363,7 +34359,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       candidateTokens: 0,
       apiTimeMs: 0,
     });
-    expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
+    expect(lastSessionMock?.installMods).toHaveBeenCalledTimes(1);
     expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
@@ -34399,7 +34395,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     const failedSession = lastSessionMock;
     expect(failedSession?.dispose).toHaveBeenCalledTimes(1);
-    expect(failedSession?.installRewriter).not.toHaveBeenCalled();
+    expect(failedSession?.installMods).not.toHaveBeenCalled();
     expect(failedSession?.startCronScheduler).not.toHaveBeenCalled();
 
     await expect(
@@ -34872,7 +34868,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     ]);
     expect(firstSession.cumulativeUsage).toEqual(originalUsage);
     expect(firstSession.sendUpdate).not.toHaveBeenCalled();
-    expect(firstSession.installRewriter).toHaveBeenCalledTimes(1);
+    expect(firstSession.installMods).toHaveBeenCalledTimes(1);
     expect(firstSession.startCronScheduler).toHaveBeenCalledTimes(1);
     expect(firstSession.beginClose.mock.results[0]?.value).toHaveBeenCalled();
 
@@ -35327,11 +35323,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(innerConfig.getSessionService().loadSession).not.toHaveBeenCalled();
     expect(
       innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
-    ).toBeLessThan(
-      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
-    );
+    ).toBeLessThan(lastSessionMock!.installMods.mock.invocationCallOrder[0]!);
     expect(
-      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+      lastSessionMock!.installMods.mock.invocationCallOrder[0]!,
     ).toBeLessThan(
       lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
     );
@@ -36732,7 +36726,7 @@ describe('sessionLanguage multi-session propagation', () => {
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -36840,7 +36834,7 @@ describe('sessionLanguage multi-session propagation', () => {
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -36929,7 +36923,7 @@ describe('sessionLanguage multi-session propagation', () => {
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -37019,7 +37013,7 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: () => false,
           reloadModelProvidersFromDisk: reloadSession,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37121,7 +37115,7 @@ describe('sessionLanguage multi-session propagation', () => {
         isIdle: index === 0 ? isIdle1 : isIdle2,
         reloadModelProvidersFromDisk: index === 0 ? reload1 : reload2,
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -37317,7 +37311,7 @@ describe('sessionLanguage multi-session propagation', () => {
             ? reloadSubscription
             : reloadOther,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37430,7 +37424,7 @@ describe('sessionLanguage multi-session propagation', () => {
           reloadReasoningSelection,
           getSessionReasoningSelection,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37520,7 +37514,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37627,7 +37621,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37743,7 +37737,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37852,7 +37846,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust: vi.fn(),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -37953,7 +37947,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38069,7 +38063,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38186,7 +38180,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38308,7 +38302,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38424,7 +38418,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38518,7 +38512,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38614,7 +38608,7 @@ describe('sessionLanguage multi-session propagation', () => {
         clearActiveTodoPlanRevision,
         clearTodoStopGuardTrust,
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -38750,7 +38744,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38836,7 +38830,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -38919,7 +38913,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -39009,7 +39003,7 @@ describe('sessionLanguage multi-session propagation', () => {
           clearActiveTodoPlanRevision,
           clearTodoStopGuardTrust,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -39112,7 +39106,7 @@ describe('sessionLanguage multi-session propagation', () => {
           sendAvailableCommandsUpdate,
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -39281,7 +39275,7 @@ describe('sessionLanguage multi-session propagation', () => {
             reloadSkillSettings,
             refreshSkillsFromSettings,
             sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-            installRewriter: vi.fn(),
+            installMods: vi.fn(),
             startCronScheduler: vi.fn(),
             dispose: vi.fn(),
             takeQueuedPeerDeliveries: () => [],
@@ -39512,7 +39506,7 @@ describe('sessionLanguage multi-session propagation', () => {
             reloadSkillSettings: id === 'skill-1' ? reload1 : reload2,
             refreshSkillsFromSettings: id === 'skill-1' ? refresh1 : refresh2,
             sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-            installRewriter: vi.fn(),
+            installMods: vi.fn(),
             startCronScheduler: vi.fn(),
             dispose: vi.fn(),
             takeQueuedPeerDeliveries: () => [],
@@ -39679,7 +39673,7 @@ describe('sessionLanguage multi-session propagation', () => {
             shouldHintAskUserQuestionRestore: () => false,
             getConfig: () => sessionConfig,
             sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-            installRewriter: vi.fn(),
+            installMods: vi.fn(),
             startCronScheduler: vi.fn(),
             dispose: vi.fn(),
             takeQueuedPeerDeliveries: () => [],
@@ -39881,7 +39875,7 @@ describe('sessionLanguage multi-session propagation', () => {
         reloadSkillSettings: state.reloadSkillSettings,
         refreshSkillsFromSettings: state.refreshSkillsFromSettings,
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -39994,7 +39988,7 @@ describe('sessionLanguage multi-session propagation', () => {
           reloadSkillSettings: reloadSessionSettings,
           refreshSkillsFromSettings: publishSessionSkills,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -40123,7 +40117,7 @@ describe('sessionLanguage multi-session propagation', () => {
           sendAvailableCommandsUpdate,
           refreshSkillsFromSettings,
           reloadSkillSettings,
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -40242,7 +40236,7 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -40349,7 +40343,7 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -40429,7 +40423,7 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],
@@ -40594,7 +40588,7 @@ describe('sessionLanguage multi-session propagation', () => {
         shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-        installRewriter: vi.fn(),
+        installMods: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         takeQueuedPeerDeliveries: () => [],
@@ -40666,7 +40660,7 @@ describe('sessionLanguage multi-session propagation', () => {
           shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfgA),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
-          installRewriter: vi.fn(),
+          installMods: vi.fn(),
           startCronScheduler: vi.fn(),
           dispose: vi.fn(),
           takeQueuedPeerDeliveries: () => [],

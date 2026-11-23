@@ -1917,32 +1917,6 @@ describe('AcpBridge', () => {
     expect(textChunks).toEqual([]);
   });
 
-  it('ignores a rewritten background response to avoid duplicate delivery', () => {
-    const bridge = new AcpBridge({
-      cliEntryPath: '/tmp/qwen',
-      cwd: '/tmp',
-    }) as unknown as TestableAcpBridge;
-    const backgroundResponses: Array<[string, string]> = [];
-    bridge.on('backgroundResponse', (sessionId, text) => {
-      backgroundResponses.push([sessionId, text]);
-    });
-
-    bridge.handleSessionUpdate({
-      sessionId: 's-1',
-      update: {
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: 'Background final answer.' },
-        _meta: {
-          source: 'background_notification_response',
-          qwenDiscreteMessage: true,
-          rewritten: true,
-        },
-      },
-    });
-
-    expect(backgroundResponses).toEqual([]);
-  });
-
   it('returns only the final slash-command output', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
