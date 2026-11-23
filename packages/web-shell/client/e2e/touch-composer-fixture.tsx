@@ -16,10 +16,17 @@ const longCwd = `/tmp/${longWorkspaceName}`;
 
 function Fixture() {
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
-    scenario === 'wide-git' || scenario === 'interactive-git'
+    scenario === 'wide-git' ||
+      scenario === 'interactive-git' ||
+      scenario === 'managed-worktree'
       ? longCwd
       : primaryCwd,
   );
+  const [gitModeIntent, setGitModeIntent] = useState<
+    | { mode: 'current' }
+    | { mode: 'branch'; name: string }
+    | { mode: 'worktree' }
+  >({ mode: 'current' });
   const [managedOpen, setManagedOpen] = useState(false);
   const [managedWorktree, setManagedWorktree] = useState(false);
   if (scenario === 'managed-worktree') {
@@ -75,7 +82,7 @@ function Fixture() {
         gitBranch="feature/mobile-single-row"
         gitStatus={{
           v: 2,
-          workspaceCwd: primaryCwd,
+          workspaceCwd: longCwd,
           branch: 'feature/mobile-single-row',
           staged: 2,
           computedAt: Date.now(),
@@ -96,14 +103,18 @@ function Fixture() {
             trusted: true,
           },
         ]}
+        scratchWorkspaceSupported={scenario === 'interactive-git'}
+        existingFolderWorkspaceSupported={scenario === 'interactive-git'}
         selectedWorkspaceCwd={selectedWorkspaceCwd}
         onSelectWorkspace={(cwd) => setSelectedWorkspaceCwd(cwd ?? longCwd)}
-        gitModeIntent={{ mode: 'current' }}
-        onGitModeIntentChange={() => undefined}
+        gitModeIntent={gitModeIntent}
+        onGitModeIntentChange={setGitModeIntent}
       />
     );
   }
-  if (scenario === 'long-model') {
+  if (scenario === 'long-model' || scenario === 'long-mode') {
+    const longMode =
+      'An unnecessarily long approval mode label for narrow screen verification';
     return (
       <ChatEditor
         onSubmit={() => undefined}
@@ -111,15 +122,27 @@ function Fixture() {
         attachmentsEnabled={false}
         workspaceFeaturesEnabled
         shellModeEnabled
-        currentModel="deliberately-long-model"
-        availableModels={[
-          {
-            id: 'deliberately-long-model',
-            label:
-              'An unnecessarily long model label for narrow screen verification',
-          },
-        ]}
-        visibleToolbarActions={['model', 'approvalMode']}
+        currentMode={scenario === 'long-mode' ? longMode : 'default'}
+        availableModes={
+          scenario === 'long-mode' ? [longMode, 'default'] : ['default']
+        }
+        currentModel={
+          scenario === 'long-model' ? 'deliberately-long-model' : 'short'
+        }
+        availableModels={
+          scenario === 'long-model'
+            ? [
+                {
+                  id: 'deliberately-long-model',
+                  label:
+                    'An unnecessarily long model label for narrow screen verification',
+                },
+              ]
+            : [{ id: 'short', label: 'Short' }]
+        }
+        visibleToolbarActions={
+          scenario === 'long-mode' ? ['approvalMode'] : ['model']
+        }
       />
     );
   }

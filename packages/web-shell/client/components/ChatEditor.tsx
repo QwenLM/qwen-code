@@ -127,7 +127,10 @@ import {
   gitBranchAriaLabel,
 } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
-import { BranchPickerPopover } from './BranchPickerPopover';
+import {
+  BranchPickerPopover,
+  type BranchPickerPreservedState,
+} from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import {
   ArrowDownIcon,
@@ -2693,6 +2696,19 @@ export const ChatEditor = memo(
     const [activeContextMenu, setActiveContextMenu] = useState<
       'workspace' | 'git' | 'branch' | null
     >(null);
+    const [workspaceNewSubOpen, setWorkspaceNewSubOpen] = useState(false);
+    const branchPickerPreservedStateRef =
+      useRef<BranchPickerPreservedState | null>(null);
+    const setContextMenuOpen = useCallback(
+      (owner: 'workspace' | 'git' | 'branch', open: boolean) => {
+        if (open) {
+          setActiveContextMenu(owner);
+          return;
+        }
+        setActiveContextMenu((current) => (current === owner ? null : current));
+      },
+      [],
+    );
     const [gitModeDraft, setGitModeDraft] = useState({
       selectedMode: gitModeIntent?.mode ?? ('current' as const),
       branchName: gitModeIntent?.mode === 'branch' ? gitModeIntent.name : '',
@@ -3248,9 +3264,9 @@ export const ChatEditor = memo(
           onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
           onOpenExistingFolder={onOpenExistingWorkspace ?? (() => {})}
           open={activeContextMenu === 'workspace'}
-          onOpenChange={(open) =>
-            setActiveContextMenu(open ? 'workspace' : null)
-          }
+          onOpenChange={(open) => setContextMenuOpen('workspace', open)}
+          newWorkspaceOpen={workspaceNewSubOpen}
+          onNewWorkspaceOpenChange={setWorkspaceNewSubOpen}
         />
       ) : null;
     const renderGitBranchChip = (compact: boolean) =>
@@ -3263,16 +3279,15 @@ export const ChatEditor = memo(
             intent={gitModeIntent}
             onIntentChange={onGitModeIntentChange}
             open={activeContextMenu === 'git'}
-            onOpenChange={(open) => setActiveContextMenu(open ? 'git' : null)}
+            onOpenChange={(open) => setContextMenuOpen('git', open)}
             draft={gitModeDraft}
             onDraftChange={setGitModeDraft}
           />
         ) : (
           <BranchPickerPopover
             open={activeContextMenu === 'branch'}
-            onOpenChange={(open) =>
-              setActiveContextMenu(open ? 'branch' : null)
-            }
+            onOpenChange={(open) => setContextMenuOpen('branch', open)}
+            preservedStateRef={branchPickerPreservedStateRef}
             workspaceCwd={selectedWorkspace?.cwd ?? ''}
             gitCwd={gitCwd}
             gitSessionId={gitCwd ? sessionId : undefined}
@@ -3300,6 +3315,40 @@ export const ChatEditor = memo(
         )
       ) : null;
     const mobileVoiceActive = isMobile && voiceActive;
+    const workspaceContextAvailable =
+      !isSimple &&
+      !mobileVoiceActive &&
+      workspaceSelectVisible &&
+      contextChipPlacement !== 'header';
+    const gitModeContextAvailable =
+      !isSimple &&
+      !mobileVoiceActive &&
+      gitBranchVisible &&
+      Boolean(gitModeIntent && onGitModeIntentChange);
+    const branchPickerContextAvailable =
+      !isSimple &&
+      !mobileVoiceActive &&
+      gitBranchVisible &&
+      !(gitModeIntent && onGitModeIntentChange);
+
+    useEffect(() => {
+      if (activeContextMenu !== 'workspace') setWorkspaceNewSubOpen(false);
+      if (activeContextMenu !== 'branch') {
+        branchPickerPreservedStateRef.current = null;
+      }
+      if (
+        (activeContextMenu === 'workspace' && !workspaceContextAvailable) ||
+        (activeContextMenu === 'git' && !gitModeContextAvailable) ||
+        (activeContextMenu === 'branch' && !branchPickerContextAvailable)
+      ) {
+        setActiveContextMenu(null);
+      }
+    }, [
+      activeContextMenu,
+      workspaceContextAvailable,
+      gitModeContextAvailable,
+      branchPickerContextAvailable,
+    ]);
     const [mobileLayoutTier, setMobileLayoutTier] =
       useState<MobileComposerLayoutTier>(() =>
         typeof window !== 'undefined'

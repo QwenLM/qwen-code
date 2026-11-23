@@ -3231,10 +3231,13 @@
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeading {
+  min-width: 0;
   max-width: 100%;
   margin-left: 0;
 }
 
+.editorShell[data-web-shell-mobile-composer]
+  .dropdownWrapper:not(.dropdownWrapperCompact),
 .editorShell[data-web-shell-mobile-composer] .modelToolBtn:not(.toolBtnCompact),
 .editorShell[data-web-shell-mobile-composer] .modeToolBtn:not(.toolBtnCompact) {
   min-width: 0;
@@ -3255,6 +3258,8 @@
 
 .editorShell[data-web-shell-mobile-composer] .toolbarLeft {
   gap: 0;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .editorShell[data-web-shell-mobile-composer] .toolBtn {
@@ -3314,6 +3319,7 @@
 .mobileEditingActions[data-mobile-layout='medium']
   .mobileContextRow
   > [data-web-shell-git-branch] {
+  min-width: 44px;
   flex: 0 1 auto;
 }
 

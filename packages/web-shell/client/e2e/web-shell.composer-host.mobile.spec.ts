@@ -8,7 +8,8 @@ async function go(
     | 'wide-git'
     | 'interactive-git'
     | 'managed-worktree'
-    | 'long-model',
+    | 'long-model'
+    | 'long-mode',
 ) {
   await page.goto(`/e2e/touch-composer-fixture.html?scenario=${scenario}`);
   await expect(
@@ -73,19 +74,37 @@ test('context menus and unconfirmed Git input survive responsive placement @smok
     'true',
   );
   await expect(branchInput).toHaveCount(0);
-  await page.keyboard.press('Escape');
   const workspace = page.getByRole('button', {
     name: 'Workspace',
     exact: true,
   });
   await expect(workspace).toHaveAttribute('aria-expanded', 'false');
+  // Switching directly from Git to Workspace without Escape must close Git
+  // and open Workspace exclusively.
   await workspace.tap();
+  await expect(page.getByRole('radio')).toHaveCount(0);
   await expect(page.getByRole('menu')).toBeVisible();
   for (const width of [390, 528]) {
     await page.setViewportSize({ width, height: 844 });
     await expect(page.getByRole('menu')).toBeVisible();
     await expect(page.getByRole('menuitemradio')).toHaveCount(2);
   }
+  await page.getByRole('menuitem', { name: 'New workspace' }).tap();
+  const scratchItem = page.getByRole('menuitem', {
+    name: 'Start from scratch',
+  });
+  await expect(scratchItem).toBeVisible();
+  for (const width of [390, 528]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(scratchItem).toBeVisible();
+  }
+  // Explicitly closing Workspace resets the nested submenu on the next open.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await workspace.tap();
+  await expect(page.getByRole('menu')).toBeVisible();
+  await expect(scratchItem).toHaveCount(0);
 });
 
 test('narrow below-composer context buttons receive their first top-edge tap @smoke', async ({
@@ -132,6 +151,10 @@ test('medium host-managed worktree keeps its chevron inside and usable @smoke', 
   await go(page, 'managed-worktree');
   const actions = page.locator('[data-web-shell-mobile-editing-actions]');
   await expect(actions).toHaveAttribute('data-mobile-layout', 'medium');
+  const workspaceLabel = actions.locator(
+    '[aria-label="Workspace"] [data-slot="select-value"]',
+  );
+  await expect(workspaceLabel).toContainText('long-workspace-name-');
   const row = actions.locator('[class*="mobileContextRow"]');
   const chip = page.getByTestId('managed-worktree-chip');
   const chevron = chip.locator('span[class*="chevron"]');
@@ -143,13 +166,13 @@ test('medium host-managed worktree keeps its chevron inside and usable @smoke', 
   expect(
     await chevron.evaluate((element) => {
       const bounds = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        bounds.x + bounds.width / 2,
+        bounds.y + bounds.height / 2,
+      );
       return (
-        document
-          .elementFromPoint(
-            bounds.x + bounds.width / 2,
-            bounds.y + bounds.height / 2,
-          )
-          ?.closest('[data-testid="managed-worktree-chip"]') !== null
+        hit !== null &&
+        hit.closest('[data-testid="managed-worktree-chip"]') !== null
       );
     }),
   ).toBe(true);
@@ -215,6 +238,7 @@ test('without Add, running stop and send stay inside a 240px composer @smoke', a
     expect(box.x + box.width).toBeLessThanOrEqual(
       surfaceBox.x + surfaceBox.width + 1,
     );
+    expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);
   }
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
@@ -252,32 +276,81 @@ test('wide long-workspace Git control stays visible with real 44px targets @smok
   }
 });
 
-test('a long model label stays readable without escaping the composer @smoke', async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 768, height: 844 });
-  await go(page, 'long-model');
-  const button = page.locator('[data-web-shell-model-button]');
-  const label = button.locator('[class*="toolBtnText"]').first();
-  await expect(label).toBeVisible();
-  await expect(label).toContainText('An unnecessarily long');
-  const fullTextWidth = await label.evaluate((el) => {
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    return range.getBoundingClientRect().width;
+for (const entry of [
+  {
+    scenario: 'long-model' as const,
+    selector: '[data-web-shell-model-button]',
+    expectedText: 'An unnecessarily long model label',
+  },
+  {
+    scenario: 'long-mode' as const,
+    selector: '[data-web-shell-mode-button]',
+    expectedText: 'An unnecessarily long approval mode label',
+  },
+]) {
+  test(`${entry.scenario} label shrinks with ellipsis without overflowing or wrapping @smoke`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 768, height: 844 });
+    await go(page, entry.scenario);
+    const button = page.locator(entry.selector);
+    const label = button.locator('[class*="toolBtnText"]').first();
+    await expect(label).toBeVisible();
+    await expect(label).toContainText(entry.expectedText);
+    await expect(button).toHaveCSS('min-width', '0px');
+    await expect(button).toHaveCSS('flex-shrink', '1');
+    await expect(label).toHaveCSS('text-overflow', 'ellipsis');
+    const fullTextWidth = await label.evaluate((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      return range.getBoundingClientRect().width;
+    });
+    expect(fullTextWidth).toBeGreaterThan(300);
+
+    // Constrain the leading container inside the hysteresis window before the
+    // compact icon fallback takes over, forcing actual label truncation.
+    const truncated = await button.evaluate((el) => {
+      const leading = el.closest<HTMLElement>(
+        '[data-web-shell-toolbar-leading]',
+      )!;
+      const previous = leading.style.maxWidth;
+      leading.style.maxWidth = '180px';
+      const span = el.querySelector<HTMLElement>('[class*="toolBtnText"]')!;
+      const rect = el.getBoundingClientRect();
+      const leadingRect = leading.getBoundingClientRect();
+      const result = {
+        clientWidth: span.clientWidth,
+        scrollWidth: span.scrollWidth,
+        buttonRight: rect.right,
+        leadingRight: leadingRect.right,
+      };
+      leading.style.maxWidth = previous;
+      return result;
+    });
+    expect(truncated.scrollWidth).toBeGreaterThan(truncated.clientWidth);
+    expect(truncated.clientWidth).toBeGreaterThanOrEqual(40);
+    expect(truncated.buttonRight).toBeLessThanOrEqual(
+      truncated.leadingRight + 1,
+    );
+
+    const buttonBox = (await button.boundingBox())!;
+    const sendBox = (await page
+      .getByRole('button', { name: 'Send message', exact: true })
+      .boundingBox())!;
+    const surfaceBox = (await page
+      .locator('[data-web-shell-composer-surface]')
+      .boundingBox())!;
+    expect(buttonBox.x).toBeGreaterThanOrEqual(surfaceBox.x);
+    expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
+      surfaceBox.x + surfaceBox.width + 1,
+    );
+    expect(
+      Math.abs(
+        buttonBox.y + buttonBox.height / 2 - (sendBox.y + sendBox.height / 2),
+      ),
+    ).toBeLessThanOrEqual(2);
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBe(768);
   });
-  expect(fullTextWidth).toBeGreaterThan(300);
-  expect(await label.evaluate((el) => el.clientWidth)).toBeGreaterThan(0);
-  await expect(label).toHaveCSS('text-overflow', 'ellipsis');
-  const buttonBox = (await button.boundingBox())!;
-  const surfaceBox = (await page
-    .locator('[data-web-shell-composer-surface]')
-    .boundingBox())!;
-  expect(buttonBox.x).toBeGreaterThanOrEqual(surfaceBox.x);
-  expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(
-    surfaceBox.x + surfaceBox.width + 1,
-  );
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
-    768,
-  );
-});
+}

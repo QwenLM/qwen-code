@@ -477,7 +477,11 @@ interface ChatEditorRenderProps
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
     | 'workspaceSelectionDisabled'
+    | 'workspaces'
+    | 'onSelectWorkspace'
     | 'selectedWorkspaceCwd'
+    | 'gitModeIntent'
+    | 'onGitModeIntentChange'
     | 'contextUsageAlwaysVisible'
     | 'contextUsageControls'
     | 'onOpenContextUsage'
@@ -6945,13 +6949,25 @@ describe('ChatEditor mobile composer actions', () => {
         return { width: 0 } as DOMRect;
       });
     const workspaces = [
-      { id: 'w1', name: 'primary', cwd: '/tmp/primary' },
-      { id: 'w2', name: 'secondary', cwd: '/tmp/secondary' },
+      {
+        id: 'w1',
+        label: 'primary',
+        cwd: '/tmp/primary',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'w2',
+        label: 'secondary',
+        cwd: '/tmp/secondary',
+        primary: false,
+        trusted: true,
+      },
     ];
     try {
       const container = renderChatEditor({
         workspaces,
-        selectedWorkspaceId: 'w1',
+        selectedWorkspaceCwd: '/tmp/secondary',
         onSelectWorkspace: vi.fn(),
         gitBranch: 'feature/mobile-bar',
         contextChipPlacement: 'below',
@@ -6970,6 +6986,9 @@ describe('ChatEditor mobile composer actions', () => {
         actions().querySelector('[class*="mobileContextRow"]'),
       ).not.toBeNull();
       expect(
+        actions().querySelector('[aria-label="Workspace"]')?.textContent,
+      ).toContain('secondary');
+      expect(
         actions().querySelector('[data-web-shell-git-branch]')?.className,
       ).not.toContain('gitBranchChipCompact');
       expect(
@@ -6983,6 +7002,9 @@ describe('ChatEditor mobile composer actions', () => {
       expect(
         actions().querySelector('[class*="mobileContextRow"]'),
       ).not.toBeNull();
+      expect(
+        actions().querySelector('[aria-label="Workspace"]')?.textContent,
+      ).toContain('secondary');
       expect(
         actions().querySelector('[data-web-shell-git-branch]')?.className,
       ).toContain('gitBranchChipCompact');
@@ -7000,7 +7022,9 @@ describe('ChatEditor mobile composer actions', () => {
         '[data-web-shell-composer-context-row]',
       )!;
       expect(belowRow).not.toBeNull();
-      expect(belowRow.querySelector('[aria-label="Workspace"]')).not.toBeNull();
+      expect(
+        belowRow.querySelector('[aria-label="Workspace"]')?.textContent,
+      ).toContain('secondary');
       expect(
         belowRow.querySelector('[data-web-shell-git-branch]')?.textContent,
       ).toContain('feature/mobile-bar');
@@ -7019,7 +7043,7 @@ describe('ChatEditor mobile composer actions', () => {
       // and is not duplicated under the composer.
       rerenderChatEditor(container, {
         workspaces,
-        selectedWorkspaceId: 'w1',
+        selectedWorkspaceCwd: '/tmp/secondary',
         onSelectWorkspace: vi.fn(),
         gitBranch: 'feature/mobile-bar',
         contextChipPlacement: 'header',
@@ -7046,7 +7070,7 @@ describe('ChatEditor mobile composer actions', () => {
       // Without git either, existing sessions render zero rows below.
       rerenderChatEditor(container, {
         workspaces,
-        selectedWorkspaceId: 'w1',
+        selectedWorkspaceCwd: '/tmp/secondary',
         onSelectWorkspace: vi.fn(),
         contextChipPlacement: 'header',
       });
@@ -7138,6 +7162,47 @@ describe('ChatEditor mobile composer actions', () => {
       rectSpy.mockRestore();
       restore();
     }
+  });
+
+  it('clears stale Git menu ownership when Git capability disappears and recovers', () => {
+    mobileComposer('draft');
+    const onGitModeIntentChange = vi.fn();
+    const withGit = {
+      gitBranch: 'feature/mobile-bar',
+      gitModeIntent: { mode: 'current' as const },
+      onGitModeIntentChange,
+      visibleToolbarActions: ['gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    };
+    const container = renderChatEditor(withGit);
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="git-mode-chip"]',
+    )!;
+    expect(chip).not.toBeNull();
+
+    act(() => chip.click());
+    expect(
+      document.querySelector('[data-slot="popover-content"]'),
+    ).not.toBeNull();
+
+    // Simulate a failed Git poll removing gitBranch and gitModeIntent.
+    rerenderChatEditor(container, {
+      visibleToolbarActions: ['gitBranch'] as const,
+      contextChipPlacement: 'below' as const,
+    });
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+
+    // Restoring the same Git props must keep the popover closed until tapped again.
+    rerenderChatEditor(container, withGit);
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+
+    const restoredChip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="git-mode-chip"]',
+    )!;
+    act(() => restoredChip.click());
+    expect(
+      document.querySelector('[data-slot="popover-content"]'),
+    ).not.toBeNull();
   });
 
   function visibleFollowup() {

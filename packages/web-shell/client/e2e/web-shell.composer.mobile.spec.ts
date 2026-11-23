@@ -1684,6 +1684,52 @@ test('mobile context icon is centered in a compact toolbar target @smoke', async
     .toBe(true);
 });
 
+async function expectInlineEditingKeysUsable(
+  actions: Locator,
+  editingKeys: Locator,
+  viewportWidth: number,
+) {
+  const buttons = await editingKeys.locator('button').all();
+  expect(buttons).toHaveLength(6);
+  const actionsBox = (await actions.boundingBox())!;
+  const minKeyWidth = viewportWidth >= 360 ? 34 : 26;
+  const boxes = await Promise.all(
+    buttons.map((button) => button.boundingBox()),
+  );
+  const firstKeyY = boxes[0]!.y;
+  for (let index = 0; index < buttons.length; index++) {
+    const box = boxes[index]!;
+    expect(box).not.toBeNull();
+    expect(Math.abs(box.y - firstKeyY)).toBeLessThanOrEqual(1);
+    expect(box.width).toBeGreaterThanOrEqual(minKeyWidth);
+    expect(box.height).toBeGreaterThanOrEqual(34);
+    expect(box.x).toBeGreaterThanOrEqual(actionsBox.x - 1);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewportWidth);
+    if (index > 0) {
+      const previous = boxes[index - 1]!;
+      expect(box.x).toBeGreaterThanOrEqual(previous.x + previous.width - 0.5);
+    }
+    const visible = await buttons[index]!.evaluate(
+      (element) => getComputedStyle(element).visibility !== 'hidden',
+    );
+    if (!visible) continue;
+    const hitCheck = await buttons[index]!.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      const cx = rect.x + rect.width / 2;
+      const points = [
+        [cx, rect.y + rect.height / 2],
+        [cx, rect.y - 3.5],
+        [cx, rect.y + rect.height + 3.5],
+      ] as const;
+      return points.every(([x, y]) => {
+        const hit = document.elementFromPoint(x, y);
+        return hit !== null && (hit === element || element.contains(hit));
+      });
+    });
+    expect(hitCheck).toBe(true);
+  }
+}
+
 test('iPad touch composer shares the single editing row with workspace and git without wrapping @smoke', async ({
   page,
 }, testInfo) => {
@@ -1725,9 +1771,53 @@ test('iPad touch composer shares the single editing row with workspace and git w
   expect(Math.abs(workspaceCenterY - expandCenterY)).toBeLessThanOrEqual(1);
   expect(Math.abs(branchCenterY - expandCenterY)).toBeLessThanOrEqual(1);
   expect(branchBox.x + branchBox.width).toBeLessThanOrEqual(caretUpBox.x);
+  await expectInlineEditingKeysUsable(
+    actions,
+    actions.locator('[data-web-shell-mobile-editing-keys]'),
+    1024,
+  );
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
     1024,
   );
+});
+
+test('ordinary branch picker preserves an unconfirmed New Branch draft across mobile placement changes @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const workspaceCwd = `/tmp/${'long-workspace-name-'.repeat(4)}`;
+  const scenario = createGitWorkspaceScenario({
+    gitStatus: { v: 2, workspaceCwd, branch: 'main' },
+  });
+  scenario.capabilities.workspaces![0]!.cwd = workspaceCwd;
+  // An untrusted primary workspace disables GitModePopover and falls back to
+  // the ordinary BranchPickerPopover on the composer chip.
+  scenario.capabilities.workspaces![0]!.trusted = false;
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  const branchChip = page.locator('[data-web-shell-git-branch]');
+  await expect(branchChip).toBeVisible({ timeout: 10_000 });
+  await branchChip.tap();
+  const newBranchAction = page.getByRole('button', { name: 'New Branch…' });
+  await expect(newBranchAction).toBeVisible({ timeout: 10_000 });
+  await newBranchAction.tap();
+  const newBranchInput = page.getByPlaceholder('Branch name');
+  await expect(newBranchInput).toBeVisible();
+  await newBranchInput.fill('feature/preserved-across-tier');
+
+  for (const width of [528, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(newBranchInput).toBeVisible();
+    await expect(newBranchInput).toHaveValue('feature/preserved-across-tier');
+  }
+
+  // Explicitly closing and reopening the popover resets the form draft.
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  await expect(newBranchInput).toHaveCount(0);
+  await branchChip.tap();
+  await expect(page.getByRole('button', { name: 'New Branch…' })).toBeVisible();
+  await expect(newBranchInput).toHaveCount(0);
 });
 
 for (const width of [240, 310, 320, 345, 390, 480]) {
@@ -1846,17 +1936,7 @@ for (const width of [240, 310, 320, 345, 390, 480]) {
       Math.abs(focusedEditingHeight - idleEditingHeight),
     ).toBeLessThanOrEqual(1);
 
-    const keyBoxes = await Promise.all(
-      (await editingKeys.getByRole('button').all()).map((button) =>
-        button.boundingBox(),
-      ),
-    );
-    const firstKeyY = keyBoxes[0]!.y;
-    for (const box of keyBoxes) {
-      expect(box).not.toBeNull();
-      expect(Math.abs(box!.y - firstKeyY)).toBeLessThanOrEqual(1);
-      expect(box!.x + box!.width).toBeLessThanOrEqual(width);
-    }
+    await expectInlineEditingKeysUsable(actions, editingKeys, width);
 
     if (width >= 480) {
       const workspaceBox = (await workspace.boundingBox())!;
@@ -1985,9 +2065,10 @@ test('mobile attachments stay reachable above a soft keyboard @smoke', async ({
     .toBe(true);
 });
 
-// 412x360 is below the height at which the strip stays readable (see the
-// design doc), so the strip is a sliver either way; what the height-cap rule
-// must hold even there is that showing the workspace row never shrinks it.
+// 480x360 keeps the medium inline context row mounted while staying below the
+// height at which the strip stays readable (see the design doc), so the strip
+// is a sliver either way; what the height-cap rule must hold even there is
+// that showing the workspace row never shrinks it.
 test('mobile workspace row does not shrink the attachments strip @smoke', async ({
   page,
 }, testInfo) => {

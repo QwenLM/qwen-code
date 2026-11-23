@@ -69,6 +69,8 @@ interface WorkspaceSelectorProps {
   contentSide?: 'top' | 'bottom';
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  newWorkspaceOpen?: boolean;
+  onNewWorkspaceOpenChange?: (open: boolean) => void;
 }
 
 /** Radio-group value that stands for the projectless target. */
@@ -98,6 +100,8 @@ export function WorkspaceSelector({
   contentSide = 'top',
   open: openProp,
   onOpenChange,
+  newWorkspaceOpen: newWorkspaceOpenProp,
+  onNewWorkspaceOpenChange,
 }: WorkspaceSelectorProps) {
   const { t } = useI18n();
   const [internalMenuOpen, setInternalMenuOpen] = useState(false);
@@ -106,8 +110,17 @@ export function WorkspaceSelector({
     setInternalMenuOpen(value);
     onOpenChange?.(value);
   };
+  const [internalNewWorkspaceOpen, setInternalNewWorkspaceOpen] =
+    useState(false);
+  const newWorkspaceOpen = newWorkspaceOpenProp ?? internalNewWorkspaceOpen;
+  const setNewWorkspaceOpen = (value: boolean) => {
+    setInternalNewWorkspaceOpen(value);
+    onNewWorkspaceOpenChange?.(value);
+  };
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  const menuOpenRef = useRef(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuOpenRef = useRef(menuOpen);
+  menuOpenRef.current = menuOpen;
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
   const selected = workspaces.find((workspace) =>
@@ -155,6 +168,7 @@ export function WorkspaceSelector({
           if (open) pointerDismissedRef.current = false;
           menuOpenRef.current = open;
           setMenuOpen(open);
+          if (!open) setNewWorkspaceOpen(false);
           suppressTooltipRef.current = true;
           setTooltipOpen(false);
         }}
@@ -171,6 +185,7 @@ export function WorkspaceSelector({
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild disabled={disabled || busy}>
               <button
+                ref={triggerRef}
                 type="button"
                 className={className}
                 aria-label={t('sidebar.workspaceSelectLabel')}
@@ -308,12 +323,31 @@ export function WorkspaceSelector({
           {canCreate && (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuSub>
+              <DropdownMenuSub
+                open={newWorkspaceOpen}
+                onOpenChange={(next) => {
+                  if (!next && !triggerRef.current?.isConnected) return;
+                  setNewWorkspaceOpen(next);
+                }}
+              >
                 <DropdownMenuSubTrigger disabled={busy}>
                   <FolderPlusIcon />
                   {t('sidebar.newWorkspace')}
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent
+                  onFocusOutside={(event) => {
+                    // Remounting the open root menu auto-focuses its container;
+                    // ignore that focus so the open submenu stays open across
+                    // responsive tier switches while still closing on other
+                    // items or outside interactions.
+                    if (
+                      event.target instanceof Element &&
+                      event.target.getAttribute('data-slot') ===
+                        'dropdown-menu-content'
+                    ) {
+                      event.preventDefault();
+                    }
+                  }}
                   onPointerDownCapture={() => {
                     pointerDismissedRef.current = true;
                   }}

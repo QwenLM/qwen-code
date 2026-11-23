@@ -115,14 +115,20 @@ Hosts without Add retain Shell and history-search buttons in the bottom
 toolbar; this fallback does not enable file ingestion or references.
 
 The mobile context controls have a single mutually exclusive menu owner, while
-the Git mode's unconfirmed branch draft is owned above the inline/below
-placements. Crossing a container-width tier must retain the open menu and
-unconfirmed input; closing and reopening still initializes from the current
-intent. A header-owned workspace is excluded from both mobile context
-placements. Host-provided Git controls with their own rendering may shrink with text
-ellipsis in the medium tier rather than being clipped after intrinsic width. In the
-narrow below-composer row, top padding absorbs the negative margin so each
-44px control starts outside the composer surface; do not lift the row's opaque
+the Git mode's unconfirmed branch draft, the ordinary branch picker's transient
+form draft, and the workspace submenu open state are preserved above the
+inline/below placements. Crossing a container-width tier must retain the open
+menu, nested submenu, and unconfirmed input; closing and reopening still
+initializes from the current intent or clears transient branch forms. When an
+owning control or capability disappears (for example during a failed Git status
+poll), its menu ownership resets to closed so recovering the control never
+reopens the popover unprompted, and a controlled close still allows the
+workspace trigger tooltip to re-enable on subsequent hover. A header-owned
+workspace is excluded from both mobile context placements. Host-provided Git
+controls with their own rendering may shrink with text ellipsis in the medium
+tier rather than being clipped after intrinsic width. In the narrow
+below-composer row, top padding absorbs the negative margin so each 44px
+control starts outside the composer surface; do not lift the row's opaque
 background with z-index above the surface. The text-only Git tooltip does not
 receive pointer events, so its arrow cannot retarget a touch compatibility
 mouseup and suppress the component's click. The no-Add Shell/history fallback
