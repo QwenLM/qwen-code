@@ -93,6 +93,17 @@ describe('reachableEntries', () => {
     expect(peers[0]?.ipcPath).toBe('/tmp/new.sock');
   });
 
+  it('keeps the newest twin when the registry lists it before an older one', async () => {
+    const peers = await reachableEntries(
+      [
+        record({ ipcPath: '/tmp/new.sock', startedAt: 9 }),
+        record({ ipcPath: '/tmp/old.sock', startedAt: 1 }),
+      ],
+      async () => 'alive',
+    );
+    expect(peers.map((peer) => peer.ipcPath)).toEqual(['/tmp/new.sock']);
+  });
+
   it('keeps a surviving twin at the first twin position among unsorted records', async () => {
     const peers = await reachableEntries(
       [

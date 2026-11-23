@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.Test;
@@ -89,13 +88,12 @@ class ManagedSchemaRelayLoadMySqlIT {
     }
 
     private static Object[] row(String domain, String id, String state, long createdAt) {
-        return new Object[] {ManagedSessionStore.sessionScopeKey("tenant", "sender"),
-                ManagedSchemaKeys.key(domain, id), domain, id, state, createdAt};
+        return new Object[] {ManagedSchemaKeys.key(domain, id), domain, id, state, createdAt};
     }
 
-    private static final String INSERT = "INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id,"
+    private static final String INSERT = "INSERT INTO ma_session_record (record_key, tenant_id,"
             + " workspace_id, session_id, domain, record_id, revision, record_resource_id, delivery_state, gmt_create)"
-            + " VALUES (?, ?, 'tenant', 'workspace', 'sender', ?, ?, 1, 'resource', ?, ?)";
+            + " VALUES (?, 'tenant', 'workspace', 'sender', ?, ?, 1, 'resource', ?, ?)";
 
     private record Statement(String sql, Object[] arguments) {}
 
