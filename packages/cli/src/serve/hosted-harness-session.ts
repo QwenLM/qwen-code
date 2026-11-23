@@ -4846,6 +4846,7 @@ export function registerHostedHarnessSessionRoutes(
     mcpReadyMs: 0,
     parkRefusals: {} as Partial<Record<HostedActionParkRefusal, number>>,
   };
+  const countedParkRefusals = new WeakSet<HostedActionParkRegistration>();
   const releaseColdOpenSlot = (res: Response): void => {
     if (!res.locals['coldOpenSlot']) return;
     res.locals['coldOpenSlot'] = false;
@@ -5318,8 +5319,14 @@ export function registerHostedHarnessSessionRoutes(
         if (!marked) {
           const candidate = await actionParkCandidate(session);
           if (typeof candidate === 'string') {
-            suspensionStats.parkRefusals[candidate] =
-              (suspensionStats.parkRefusals[candidate] ?? 0) + 1;
+            // Each wait counts once, under the first reason that kept it
+            // resident, so a long wait does not outweigh a short one.
+            const registration = hostedActionParkRegistration(session.managed);
+            if (registration && !countedParkRefusals.has(registration)) {
+              countedParkRefusals.add(registration);
+              suspensionStats.parkRefusals[candidate] =
+                (suspensionStats.parkRefusals[candidate] ?? 0) + 1;
+            }
             actionPark = undefined;
           } else actionPark = candidate;
         } else if (actionPark) {

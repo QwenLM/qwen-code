@@ -48113,8 +48113,8 @@ describe('idle suspension', () => {
       expect(state.wakeStamps).toEqual([]);
       const stats = statsOf(server);
       expect(stats.cleanSuspensions).toBe(0);
-      expect(stats.parkRefusals.shell_profile).toBeGreaterThan(0);
-      expect(Object.keys(stats.parkRefusals)).toEqual(['shell_profile']);
+      // The wait idled through several suspension attempts but counts once.
+      expect(stats.parkRefusals).toEqual({ shell_profile: 1 });
       await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
