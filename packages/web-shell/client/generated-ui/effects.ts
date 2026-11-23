@@ -11,6 +11,8 @@ export const COPY_WRITE = 'qwen-code/generated-ui-copy/write';
 const MAX_COPY_BYTES = 16 * 1024;
 const MAX_DOWNLOAD_BYTES = 64 * 1024;
 const MAX_FILENAME_LENGTH = 100;
+// The card's name plus the extension the App adds, the longest being '.json'.
+const MAX_REQUEST_NAME_LENGTH = MAX_FILENAME_LENGTH + 5;
 const EXTENSIONS: Readonly<Record<string, string>> = {
   'text/csv': '.csv',
   'text/plain': '.txt',
@@ -78,7 +80,7 @@ export function downloadRequestFile(params: unknown): DownloadFile | undefined {
   } catch {
     return undefined;
   }
-  if (!name || name.length > MAX_FILENAME_LENGTH) return undefined;
+  if (!name || name.length > MAX_REQUEST_NAME_LENGTH) return undefined;
   return { filename: sanitizeFilename(name, mimeType), mimeType, text };
 }
 

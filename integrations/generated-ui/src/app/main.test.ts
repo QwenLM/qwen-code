@@ -950,7 +950,7 @@ describe('copy and download from a click', () => {
         {
           type: 'resource',
           resource: {
-            uri: 'file:///plans%202026',
+            uri: 'file:///plans%202026.csv',
             mimeType: 'text/csv',
             text: 'plan,payment',
           },
@@ -958,6 +958,25 @@ describe('copy and download from a click', () => {
       ],
     });
     expect(notice().hidden).toBe(true);
+  });
+
+  it('gives every downloaded name the extension of its type', () => {
+    bridge.getHostCapabilities.mockReturnValue({ downloadFile: {} });
+    ready();
+    for (const filename of ['run.bat', 'notes.MD'])
+      presentation.onEffect!({
+        kind: 'download',
+        filename,
+        mimeType: filename === 'run.bat' ? 'text/plain' : 'text/markdown',
+        text: 'a',
+      });
+    expect(
+      bridge.downloadFile.mock.calls.map(
+        ([params]) =>
+          (params as { contents: Array<{ resource: { uri: string } }> })
+            .contents[0].resource.uri,
+      ),
+    ).toEqual(['file:///run.bat.txt', 'file:///notes.MD']);
   });
 
   it('says so when the host cannot copy or download', () => {

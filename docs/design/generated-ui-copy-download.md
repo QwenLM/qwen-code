@@ -50,9 +50,10 @@ ui.download(filename, mimeType, text);
   64 KiB for `ui.download`.
 - `mimeType` is one of `text/csv`, `text/plain`, `application/json` and
   `text/markdown`.
-- `filename` is a non-empty string of at most 100 characters. The host
-  sanitizes it and sets the extension from the MIME type (`.csv`, `.txt`,
-  `.json`, `.md`).
+- `filename` is a non-empty string of at most 100 characters. The App adds
+  the extension of the MIME type (`.csv`, `.txt`, `.json`, `.md`) before it
+  sends the request, and Web Shell sanitizes the name and sets the extension
+  again.
 - Both return `undefined`. The host shows the outcome; the card cannot read
   it.
 
@@ -121,7 +122,8 @@ checks. It refuses a request when:
   as a `resource_link` or a `blob`;
 - a size or MIME rule above is broken.
 
-Unmounting aborts a pending request.
+Unmounting drops the outcome of a pending request; a clipboard write the
+browser has already started still completes.
 
 **Copy.** The host calls `navigator.clipboard.writeText` in the Web Shell
 page. The click in the view frame gives the page transient activation, which
@@ -203,10 +205,9 @@ Step 1:
 - A browser check on a real daemon in Chromium: a hand-written card copies
   its current value and downloads a CSV with the sanitized name, each outcome
   raises the count, and with the clipboard permission revoked the refused write
-  offers the bar's Copy button, which copies once the write is allowed. WebKit
-  is covered by the activation experiment above: in a WebKit page on the real
-  daemon, Playwright input reached neither the view nor the App, which is
-  unrelated to this change.
+  offers the bar's Copy button, which copies once the write is allowed. In a
+  WebKit page on the real daemon, Playwright input reached neither the view
+  nor the App, so WebKit is covered only by the activation experiment above.
 
 Step 2:
 

@@ -65,6 +65,15 @@ describe('generated UI download requests', () => {
         }),
       ),
     ).toMatchObject({ filename: 'Q4 report.md' });
+    // The longest name a card can give, with the extension the App adds.
+    expect(
+      downloadRequestFile(
+        resource({
+          uri: `file:///${'x'.repeat(100)}.json`,
+          mimeType: 'application/json',
+        }),
+      ),
+    ).toMatchObject({ filename: `${'x'.repeat(100)}.json` });
   });
 
   it.each([
@@ -80,7 +89,7 @@ describe('generated UI download requests', () => {
     ['more than 64 KiB', resource({ text: 'x'.repeat(64 * 1024 + 1) })],
     ['a remote URI', resource({ uri: 'https://example.com/plans.csv' })],
     ['a malformed name', resource({ uri: 'file:///%E0%A4%A' })],
-    ['a long name', resource({ uri: `file:///${'x'.repeat(101)}` })],
+    ['a long name', resource({ uri: `file:///${'x'.repeat(106)}` })],
   ])('refuses %s', (_name, params) => {
     expect(downloadRequestFile(params)).toBeUndefined();
   });

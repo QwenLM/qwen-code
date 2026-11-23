@@ -13,7 +13,7 @@ import { ViewController } from './controller.js';
 import type { CaptureResult, ViewState, ViewStateHost } from './controller.js';
 import { buildContinuationText } from './continuation.js';
 import { translator, type MessageKey } from './messages.js';
-import { MAX_STATE_BYTES } from './runtime-contract.js';
+import { DOWNLOAD_TYPES, MAX_STATE_BYTES } from './runtime-contract.js';
 import type { UiEffect } from './runtime-contract.js';
 import { ViewSurface, type HostStyle } from './surface.js';
 import './styles.css';
@@ -458,12 +458,18 @@ function performEffect(effect: UiEffect): void {
     if (capabilities?.experimental?.[COPY_CAPABILITY])
       request = hostRequest(COPY_WRITE, { text: effect.text }, z.object({}));
   } else if (capabilities?.downloadFile) {
+    // Any host may implement the standard request; the name always carries
+    // the extension of its text type.
+    const extension = DOWNLOAD_TYPES[effect.mimeType];
+    const filename = effect.filename.toLowerCase().endsWith(extension)
+      ? effect.filename
+      : effect.filename + extension;
     request = app.downloadFile({
       contents: [
         {
           type: 'resource',
           resource: {
-            uri: `file:///${encodeURIComponent(effect.filename)}`,
+            uri: `file:///${encodeURIComponent(filename)}`,
             mimeType: effect.mimeType,
             text: effect.text,
           },

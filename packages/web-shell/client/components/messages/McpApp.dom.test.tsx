@@ -1790,6 +1790,31 @@ describe('built-in Generated UI admission', () => {
       ).toBe(false);
     });
 
+    it('refuses a second effect while a copy is still being written', async () => {
+      const write = Promise.withResolvers<void>();
+      writeText.mockReturnValueOnce(write.promise);
+      const container = host();
+      let first!: Promise<unknown>;
+      await act(async () => {
+        first = copy('first');
+        await expect(copy('second')).rejects.toThrow();
+        await expect(download({})).resolves.toEqual({ isError: true });
+      });
+      expect(outcome(container)).toMatchObject({
+        status: 'refused',
+        count: '2',
+      });
+      await act(async () => {
+        write.resolve();
+        await first;
+      });
+      expect(writeText).toHaveBeenCalledExactlyOnceWith('first');
+      expect(outcome(container)).toMatchObject({
+        status: 'copied',
+        count: '3',
+      });
+    });
+
     it('refuses effects while a retained card is hidden', async () => {
       let visible = false;
       const retained = {
