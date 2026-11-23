@@ -690,7 +690,15 @@ Decisions:
   MySQL's `VARCHAR(36)`; the earlier UTF-16 check rejected valid supplementary-plane
   actors. The widest admitted actor encodes to a 549-byte actor scope ref, inside
   `ACTOR_SCOPE_REF_BYTES` (550).
+- A `CAST(column AS BINARY(n))` comparison against a parameter is a byte-exact
+  guard under PAD SPACE, not a type conversion, and stays. Each guarded column also
+  needs a plain equality so the index applies. The settled-child-run check in the
+  Runtime retention guard had lost its `record_key` lookup and kept `domain` and
+  `record_id` only inside the casts, scanning every record of the parent Session
+  (5k records: 3 ms, growing with the Session); with the plain equalities it is a
+  unique-key lookup.
 
 Acceptance: `IdentityJoinScaleMySqlIT` asserts the full resource key, a bounded
-artifact page and the `idx_ma_operation_target` probe on MySQL; schema gates and
-the affected H2 suites stay green.
+artifact page, the `idx_ma_operation_target` probe and the full record key of the
+settled-child-run check on MySQL; schema gates and the affected H2 suites stay
+green.

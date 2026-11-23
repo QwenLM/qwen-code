@@ -552,6 +552,12 @@ MySQL 比较 `VARCHAR` 与 `VARBINARY` 操作数时按二进制串比较。用�
 - actor 准入按 code point 计数，与 36 code point 预算及 MySQL 的 `VARCHAR(36)` 一致；
   此前的 UTF-16 检查会拒绝合法的补充平面 actor。最宽的可接受 actor 编码后的
   actor scope ref 为 549 字节，在 `ACTOR_SCOPE_REF_BYTES`（550）以内。
+- 列与参数之间的 `CAST(column AS BINARY(n))` 比较是 PAD SPACE 下的字节精确保护，
+  不是类型转换，予以保留。每个被保护的列还需要一个普通等值条件，索引才能生效。
+  Runtime retention guard 中的 settled child run 检查丢失了 `record_key` 查找，
+  `domain` 与 `record_id` 只出现在 cast 中，因而扫描父 Session 的全部记录
+  （5 千条记录：3 ms，并随 Session 增长）；补上普通等值条件后变为唯一键查找。
 
-验收：`IdentityJoinScaleMySqlIT` 在 MySQL 上断言完整资源键、有界的 artifact 分页与
-`idx_ma_operation_target` 探测；schema 门与受影响的 H2 测试保持通过。
+验收：`IdentityJoinScaleMySqlIT` 在 MySQL 上断言完整资源键、有界的 artifact 分页、
+`idx_ma_operation_target` 探测，以及 settled child run 检查使用完整记录键；schema 门
+与受影响的 H2 测试保持通过。

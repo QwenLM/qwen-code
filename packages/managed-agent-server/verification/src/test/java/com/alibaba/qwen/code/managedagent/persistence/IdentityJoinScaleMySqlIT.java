@@ -52,6 +52,29 @@ class IdentityJoinScaleMySqlIT {
     }
 
     @Test
+    void settledChildRunCheckUsesTheWholeRecordKey() {
+        try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
+            ManagedSchema.initialize(database.source());
+            var jdbc = new ManagedSchemaJdbcTemplate(database.source());
+            var records = new ArrayList<Object[]>();
+            String[] domains = {"child_run", "task", "mcp_configuration", "model_context"};
+            for (int index = 0; index < 2000; index++) {
+                records.add(new Object[] {domains[index % domains.length], "run-" + index, index});
+            }
+            jdbc.batchUpdate("INSERT INTO ma_session_record (tenant_id, workspace_id, session_id, domain, record_id, revision,"
+                    + " record_resource_id, gmt_create, settled_at) VALUES ('tenant', 'workspace', 'parent', ?, ?, 1,"
+                    + " 'resource', ?, 1)", records);
+            jdbc.execute("ANALYZE TABLE ma_session_record");
+
+            Object[] arguments = {"tenant", "parent", "run-1000", "run-1000"};
+            assertThat(jdbc.queryForList(ManagedRuntimeRetentionGuard.SETTLED_CHILD_RUN_SQL, Integer.class, arguments))
+                    .containsExactly(1);
+            JsonNode plan = jsonPlan(jdbc, new Query(ManagedRuntimeRetentionGuard.SETTLED_CHILD_RUN_SQL, arguments));
+            assertThat(usedKeyParts(plan, "ma_session_record")).as(plan.toString()).contains("domain", "record_id");
+        }
+    }
+
+    @Test
     void artifactPageDoesNotScanTheSessionToolResults() {
         try (var database = new IsolatedManagedSchemaMySqlTestDatabase()) {
             ManagedSchema.initialize(database.source());
