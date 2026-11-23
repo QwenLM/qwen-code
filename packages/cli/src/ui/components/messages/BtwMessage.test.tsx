@@ -481,4 +481,242 @@ describe('BtwMessage', () => {
     expect(output).toContain('gamma');
     expect(output).not.toContain('| alpha |');
   });
+
+  it('keeps prose above a header-only table instead of blanking the answer', () => {
+    const answer = [
+      'alpha',
+      'beta',
+      'gamma',
+      'delta',
+      '| Name | Value |',
+      '| --- | --- |',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // A table with no data row renders nothing, so it costs 0 rows and the
+    // four prose lines above it stay visible instead of being pushed out by
+    // a 6-row charge for a header box that never appears.
+    expect(output).toContain('alpha');
+    expect(output).toContain('delta');
+    expect(pendingAnswerRows(output)).toBe(5);
+  });
+
+  it('bounds a 30-data-row trailing table to the row budget', () => {
+    const answer = [
+      '| Name | Value |',
+      '| --- | --- |',
+      ...Array.from({ length: 30 }, (_, i) => `| row-${i} | ${i} |`),
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // No data row fits the 5-row budget (one row costs 7), so only the
+    // header + separator survive — they render nothing instead of 66 rows.
+    expect(output).not.toContain('row-29');
+    expect(output).not.toContain('row-0');
+    expect(pendingAnswerRows(output)).toBeLessThanOrEqual(6);
+  });
+
+  it('does not oscillate when a trailing line follows a tall table', () => {
+    const answer = [
+      '| Name | Value |',
+      '| --- | --- |',
+      ...Array.from({ length: 30 }, (_, i) => `| row-${i} | ${i} |`),
+      'Done.',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The table contributes nothing (no data row fits) and `Done.` stays:
+    // 2 rows, not 66 rows before the line arrives and 2 after it.
+    expect(output).toContain('Done.');
+    expect(output).not.toContain('row-29');
+    expect(pendingAnswerRows(output)).toBe(2);
+  });
+
+  it('charges a display-math block as one unit, not per source line', () => {
+    const answer = [
+      ...Array.from({ length: 12 }, (_, i) => `prose-${i}`),
+      '$$',
+      'x = 1',
+      'y = 2',
+      '$$',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={14}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The math block renders 2 rows (title + the joined content on one
+    // wrapped line), not 4 — so all twelve prose lines still fit the
+    // 14-row budget.
+    expect(output).toContain('prose-0');
+    expect(output).toContain('LaTeX');
+    expect(pendingAnswerRows(output)).toBeLessThanOrEqual(15);
+  });
+
+  it('charges a mermaid fence as its pending preview, not per source line', () => {
+    const answer = [
+      ...Array.from({ length: 12 }, (_, i) => `prose-${i}`),
+      '```mermaid',
+      ...Array.from({ length: 10 }, (_, i) => `node-${i} --> node-${i + 1}`),
+      '```',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={20}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The pending mermaid preview renders 7 rows (header + six preview
+    // lines), not 12 — so all twelve prose lines still fit the 20-row budget.
+    expect(output).toContain('prose-0');
+    expect(output).toContain('Mermaid diagram is being written...');
+    expect(pendingAnswerRows(output)).toBeLessThanOrEqual(21);
+  });
+
+  it('recognises a display-math block in CRLF text', () => {
+    const answer = [
+      'prose-0',
+      'prose-1',
+      'prose-2',
+      'prose-3',
+      '$$',
+      'x = 1',
+      '$$',
+      'Done.',
+    ].join('\r\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The $$ fences are recognised (no stray CR on the fence lines), so the
+    // math renders as a LaTeX block instead of raw $$ lines.
+    expect(output).toContain('prose-2');
+    expect(output).not.toContain('prose-1');
+    expect(output).not.toContain('$$');
+    expect(output).toContain('LaTeX');
+    expect(output).toContain('x = 1');
+    expect(output.indexOf('LaTeX')).toBeLessThan(output.indexOf('x = 1'));
+    expect(output.indexOf('x = 1')).toBeLessThan(output.indexOf('Done.'));
+  });
+
+  it('drops an over-budget display-math block whole instead of keeping it', () => {
+    const answer = [
+      'prose-0',
+      'prose-1',
+      'prose-2',
+      'prose-3',
+      '$$',
+      ...Array.from({ length: 10 }, () => 'x'.repeat(50)),
+      '$$',
+      'Done.',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // The math block renders 11 rows (title + 509 joined columns wrapped
+    // at 55), so it cannot fit after `Done.` and is dropped whole.
+    expect(output).toContain('Done.');
+    expect(output).not.toContain('LaTeX');
+    expect(pendingAnswerRows(output)).toBe(2);
+  });
+
+  it('keeps a display-math block whole when it fits the budget', () => {
+    const answer = [
+      'prose-0',
+      'prose-1',
+      'prose-2',
+      'prose-3',
+      '$$',
+      ...Array.from({ length: 10 }, () => 'x'.repeat(50)),
+      '$$',
+      'Done.',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={16}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('LaTeX');
+    expect(output).toContain('Done.');
+    expect(output).toContain('prose-0');
+  });
+
+  it('charges a run of blank lines as one spacer row', () => {
+    const answer = 'para one\n\n\npara two\n\n\npara three';
+    const { lastFrame } = renderWithProviders(
+      <Box width={60}>
+        <BtwMessage
+          btw={{ question: 'q', answer, isPending: true }}
+          containerWidth={60}
+          maxAnswerRows={5}
+        />
+      </Box>,
+    );
+
+    const output = lastFrame() ?? '';
+    // Two blank runs collapse to two spacer rows, so all three paragraphs
+    // fit the 5-row budget instead of only the last two.
+    expect(output).toContain('para one');
+    expect(output).toContain('para three');
+    expect(pendingAnswerRows(output)).toBe(6);
+  });
 });

@@ -181,6 +181,10 @@ export function estimateTableRows(
   let j = start + 2;
   while (j < lines.length && TABLE_ROW_RE.test(lines[j]!)) j++;
   const dataRows = j - (start + 2);
+  // A header + separator with no data row yet renders nothing: MarkdownDisplay
+  // only draws a table once `tableRows.length > 0`, so charge 0 instead of
+  // the header box that never appears.
+  if (dataRows === 0) return { rows: 0, endIndex: j };
   // TableRenderer renders EITHER the horizontal format (each row as tall as
   // its tallest wrapped cell, + chrome) OR the vertical key-value format
   // (colCount label:value lines per row + a separator between rows +
@@ -264,11 +268,8 @@ export function estimateTableRows(
   // overflow/lock. Deliberately NOT over-correcting here (e.g. shrinking every
   // width or bumping the trigger), which would over-charge and clip common
   // uniform tables early.
-  // With no data rows yet (a header+separator still streaming), TableRenderer
-  // keeps the horizontal header box — renderVerticalFormat iterates the data
-  // rows and would draw nothing — so only model vertical once a row exists.
-  // Otherwise a narrow terminal would charge the 2-row vertical stub instead
-  // of the taller horizontal header, under-charging the transient state.
+  // (A zero-data-row table returns 0 above: with no row the renderer draws
+  // nothing at all, so there is no horizontal header box to charge.)
   const usesVertical =
     dataRows > 0 &&
     (contentWidth < minHorizontalWidth || maxRowLines > TABLE_MAX_ROW_LINES);
