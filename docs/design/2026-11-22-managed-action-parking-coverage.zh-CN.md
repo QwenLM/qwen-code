@@ -45,8 +45,9 @@
 ## 3. 总体方案
 
 1. **P0：先合并资格函数。** 把冷恢复在恢复审批 continuation 之前要求的 Session 形态条件（无 Hooks、无 MCP、有工具 owner）抽成一个函数，供停靠资格和两个冷恢复入口（接管加载与常驻 redrive）共同调用。journal 状态条件，即 continuation 查找和原始 Prompt，本来就是共享的辅助函数。停靠比恢复更严的条件（lineage、wake 所有权、command-step、grant 能力位）保留为停靠专属条件，各自带一个原因；后续每个切片删掉其中一项，或者放宽共享条件。#18115 已把这次合并列为后续项。之后每个切片只改这个函数加上对应的生产者或恢复臂，不再出现两份"看起来等价"的条件。
-   - **拒绝原因。** 停靠资格对每个被拒的等待中 Turn 返回带类型的原因，Harness 在 `suspensionStats` 中、与第一阶段其他计数并列，按每次挂起尝试统计这些原因。现在 `actionParkCandidate` 拒绝时只返回 `undefined`，不说明原因。更糟的是，生产者没能捕获 continuation 的等待（Hooks、MCP、Shell profile、不支持的工具、超大计划）根本不会登记，资格判断连看都看不到。因此 P0 让每个持久化等待都登记：continuation 生产者返回拒绝原因而不是 `undefined`，永远不能停靠的等待带着这个原因登记，extension command-step 等待以 `command_step` 登记。这份计数用于 §6 的顺序调整，并回答开放问题 3。
-   - **暴露方式。** `suspensionStats` 目前只在进程内由测试读取。把它暴露给运维是第一阶段所有测量共有的前置工作，不属于 P0。
+   - **拒绝原因。** 停靠资格对每个被拒的等待中 Turn 返回带类型的原因，Harness 在 `suspensionStats` 中、与第一阶段其他计数并列统计这些原因，每个等待只计一次，记在最先让它保持常驻的原因下。现在 `actionParkCandidate` 拒绝时只返回 `undefined`，不说明原因。更糟的是，生产者没能捕获 continuation 的等待（Hooks、MCP、Shell profile、不支持的工具、超大计划）根本不会登记，资格判断连看都看不到。因此 P0 让每个持久化等待都登记：continuation 生产者返回拒绝原因而不是 `undefined`，永远不能停靠的等待带着这个原因登记，extension command-step 等待以 `command_step` 登记。这份计数用于 §6 的顺序调整，并回答开放问题 3。
+   - **暴露方式。** #18173 把 `suspensionStats`（包括这些计数）放到实例的内部 metrics 接口上。
+   - **没有 Workspace。** 没有 Workspace 的 Session 从不停靠，P0 用测试固定了原因。缓存未命中时，除非开启了 verified recovery，决定投递发给这类 Session 的是普通加载，而普通加载会拒绝未结算的 Turn。但 connector 不会给它发送 tool profile，而没有 tool profile 的 Session 不会得到审批策略（`hostedApprovalForTurn`）：它的工具调用从不请求审批，连 memory 写入也不会，提问也不被接受，所以永远不会有 Action 在等待，也就没有可登记停靠的等待。没有 Runtime 的 memory continuation 只出现在 Workspace Session 上，而它们的决定投递发出的是被动加载。如果将来审批扩展到没有 Workspace 的 Session，它的决定投递必须先改发被动加载。
 2. **按切片扩展**（§4），每个切片包含三部分：冷恢复的生产者或恢复臂改动、共享资格函数里的一项放宽、对应的故障与真实进程测试。
 3. **契约变化由能力位把关。** 改变 seal 证书形态的切片（S2、S4）由控制面在 writer grant 中多公告一个能力位，Harness 只在看到该位时发送新形态的证书。不新增配置项，能力位随 `qwen.managed-agent.action-parking.enabled` 一起公告。理由：冻结之后 seal 被拒是不可逆的 teardown 失败，虽然有界恢复能收敛，但不应依赖"不支持混跑"来兜底。
 
@@ -55,13 +56,14 @@
 ### 4.1 S1：纯图片 Prompt
 
 - **方案。** 放宽停靠资格与两条恢复臂共用的检查 `hostedOriginalPromptText`。user 记录带文字的 Prompt 不变。没有文字时，通过 `readHostedInput` 读回原始输入：带附件的 `hosted-harness` 输入从空文字重新开始，与它的在线 Turn 一致，因为 `executeHostedTurn` 自己会读回附件。其他来源仍要求有文字，因为它们只能依靠文字回退。恢复臂里所有检查 Prompt 文字的地方都用这个函数，包括原来各带一份副本的保存模型请求检查与 memory、skill 结果检查，所以纯图片 Turn 在这些阶段崩溃后也会恢复。
-- **已确认。** journal 恢复出的 user 记录带有 inline 图片，所以今天已允许停靠的"文字 + 图片"Prompt 不需要收紧。Harness 测试 "resumes a parked approval with the original image still in its history" 让一个"文字 + 图片"Prompt 停靠、冷加载后 Allow，恢复时交给 model 的历史里仍以 inline 数据保留着原图。该测试替换了 model 函数，因此没有执行内存中 `InMemoryImagePayloadStore`（`packages/core/src/services/image-payload-references.ts`）在发请求时的驱逐。已允许停靠的"文字 + 图片"Prompt 也有同样的缺口，所以本切片的测试检查的也是这份历史，而不是请求快照（§7）。
+- **已确认。** journal 恢复出的 user 记录带有 inline 图片，所以今天已允许停靠的"文字 + 图片"Prompt 不需要收紧。Harness 测试 "resumes a parked approval with the original image still in its history" 让一个"文字 + 图片"Prompt 停靠、冷加载后 Allow，恢复时交给 model 的历史里仍以 inline 数据保留着原图。该测试替换了 model 函数，因此不会构建请求。发请求时的驱逐不会改变这个结论：每次请求都会在同一轮里，把它从自身历史中驱逐的图片放进内存中的 `InMemoryImagePayloadStore`（`packages/core/src/services/image-payload-references.ts`），再重新附上最近的几张，所以冷加载后 store 为空不会丢图；该模块的 core 测试就是从全新的 store 开始的。因此恢复后的第一次请求对待恢复出的图片，和线上 Turn 在工具调用之后的请求完全一样，本切片的测试检查的是恢复出的历史（§7）。
 - **已确认（#18164）。** 运行选项 `prompt: text`（`hosted-harness-session.ts:4486`）的消费方接受空字符串：纯图片 Prompt 的线上 Turn 本来就以空文字运行；恢复时这个选项只用来开启 Turn 的预算，从中解析不出任何指令。S1 的停靠测试和崩溃测试都以空文字恢复。
 - **改动面。** 仅 Harness。
 
 ### 4.2 S2：后台任务 + 审批
 
-- **方案。** seal 同时携带 3b 的 background hold 与 `parkedTurn`，Store 只在新能力位公告时接受这种组合。父设计 §4.9 第 3 点已定义：后台终态被 Broker 暂存后，走既有的 staged-wake 路径并清除停靠字段。本切片补充一点：同一事务里对该 Session 的 `hosted_action_parked` 行执行解除停靠（复用父设计 §4.6 的 store 方法）。这样协调器立即重新分派该 Turn，而不是让被 wake 加载重建出来的常驻 Turn 无人消费事件流，一直等到 `retry_after`。
+- **方案。** seal 同时携带 3b 的 background hold 与 `parkedTurn`，Store 只在新能力位公告时接受这种组合。父设计 §4.9 第 3 点已定义：后台终态被 Broker 暂存后，走既有的 staged-wake 路径并清除停靠字段。本切片给暂存事务（`JdbcRuntimeStageStore.stageBatch`，现在只设置 wake-pending 与重试字段）补充两步：清除停靠列，并用父设计 §4.6 的 store 方法解除该 Session 的 `hosted_action_parked` 行停靠。这样协调器立即重新分派该 Turn，而不是让被 wake 加载重建出来的常驻 Turn 无人消费事件流，一直等到 `retry_after`。
+- **交错顺序。** S2 让暂存事务和停靠 CAS 都先锁 head 行，因此二者串行，只剩三种顺序。(1) 在 seal 之前暂存：seal 走 staged-wake 路径，不记录证书，CAS 找不到证书而失败。(2) 在 seal 与 CAS 之间暂存：暂存清除了停靠列，CAS 同样找不到当前证书而失败；此时暂存的解除停靠还找不到已停靠的行。(3) 在 CAS 之后暂存：暂存清除停靠列并解除该行停靠。在 (1)、(2) 中，协调器把被拒的 CAS 归类为"被唤醒的停靠"，立即重新分派，而不是走 `stream ended before terminal` 的重试。每种顺序都是 S2 的验收用例（§7）。
 - **加载路径。** wake 恢复加载带接管标志（已确认）：扫描的 `recoverForWake` 只带被动标志，wake 栅栏的 `activateForWake` 带 drive 标志，两者都由 `QwenHostedHarnessConnectorTest` 固定；Harness 测试表明带其中任一标志的加载都会接管停靠的审批 Turn。因此 `takeoverFlags` 为真，会进入审批恢复臂重建等待者。协调器的驱动加载随后按 #17521 的附着规则与之收敛，并从已消费水位重放。后台通知作为 wake 输入挂起，直到 Turn 结算后才由泵投递。在此期间存在其他待处理输入，所以 Session 不会再次停靠。这是有界的：每个后台终态最多导致一次重载。
 - **不变量。** 停靠 CAS 不读 background 字段。background hold 的证明仍由 3b 负责；`parkedTurn` 的证明仍是"唯一的活跃 Turn 处于可停靠等待"。两份证书互不推断。
 - **改动面。** Store 的 seal 校验、staged-wake 事务、grant 能力位；Harness 侧放宽资格中"无后台持有"这一项。
@@ -79,10 +81,10 @@
 这一切片最大，分两步：先做 monitor、loop、automation 和子结果通知；channel 与 `pr_event` 另有回复计划和渠道结算，放到 S4b。
 
 - **Harness 恢复臂。** 泵在处理"已尝试的 wake 输入"时，如果其检查点处于 `await_action`，并且共享资格函数认可 continuation，就走审批 continuation 驱动器恢复这次等待，不再调用 `settleCrashedWakeTurnAftermath`。这一步单独上线就有价值：修好等审批的 wake Turn 的崩溃恢复。已在 #18170 实现。它还修好了测试中发现的一个更严重的故障：收尾从不把检查点从 `await_action` 挪开，所以它排入的后续 continuation Turn 无法启动，泵随之失败。泵把 continuation 当作该 Turn 运行，并和正常运行后一样结算、消费输入。覆盖范围是 monitor、automation、loop 和 child 结果 Turn 的原生审批；期间被取消的来源以已中止的信号恢复。仍会走到收尾的路径（已经因别的原因 blocked 的 Session、恢复不覆盖的形态）由 #18172 单独修复：它让收尾以 cancelled 结束请求，并推进 `await_action` 检查点。
-- **证书。** 这类 Turn 没有 `ma_turn` 行，到期唤醒只能由 wake 恢复扫描承担。`parkedTurn` 增加 `owner: 'wake'`；`ma_session_head` 增加可空列 `wake_seal_parked_owner`，与其他停靠列在同一个 seal UPDATE 中写入，并在任何递增 generation 的 writer 获取时清除；既有的"无 writer 持有的已提交输入"wake 恢复路径，覆盖不了清除证书后又崩溃的 writer（已确认）。获取 writer 时会清除 seal 标记和停靠列，但保留 `is_wake_pending` 与 `wake_head_revision`；而停靠 seal 写入的是 `is_wake_pending = FALSE`、`wake_head_revision = journal_revision`，所以 head 不再处于待扫描状态，`WakeSealStampTest` 固定了这一点。用户 Turn 的停靠仍能通过它的 `ma_turn` 行恢复，wake 所有的停靠却没有这样的行，所以清除 wake 所有证书的那次获取，还要同时置 `is_wake_pending = TRUE`。之后崩溃的 writer 会把 head 留给既有扫描，扫描回放 journal 时会发现那条已尝试但未结算的 wake 输入。按本模块的规则直接修改 V1 基线，不加迁移。wake 恢复扫描额外选出 `wake_seal_parked_owner = 'wake'` 且 `wake_seal_parked_until <= now` 的 head。这里的 `wake.pending` 仍为 `false`：该输入已被尝试，不属于 3a 定义的"延迟、未尝试"wake 输入，不能复用它的含义。
-- **唤醒来源。** 决定：`ACTION_RESPONSE` 投递在缓存未命中时会加载 Session（`doResolveAction`），这次加载必须是被动接管加载。对 Workspace Session 确实如此（已确认，见 §4.7）。没有 Workspace 且未开启 verified recovery 的 Session 发出的是普通加载；本设计暂不考虑这种情况。取消不需要额外步骤（已确认）：公开 API 与 Web Shell 的 Turn 取消都要求存在 `ma_turn` 行，所以 wake Turn 只能经由其来源自己的 Harness 操作（automation 运行的 `cancel_run`、child 运行的停止）或 Session 关闭来取消，而这些操作都会先做一次自己的加载，正是这次加载唤醒了停靠；普通加载会接上这类 Session，由 Harness 测试 "attaches a Session whose wake Turn died in its approval wait through a plain load" 固定。审批模式变更：策略变更是一个只解除 `ma_turn` 行停靠、不加载任何东西的 SQL 事务（`AgentSessionPolicies`），所以它要在同一事务中把 head 的 `wake_seal_parked_until` 置为当前时间，由扫描在下一轮加载。到期：由扫描处理。
+- **证书。** 这类 Turn 没有 `ma_turn` 行，只能由 wake 恢复扫描唤醒，而扫描的 `findPending` 和 `claim` 只选取处于待扫描状态、且 `wake_retry_at` 已到期的 head（`JdbcWakeRecoveryStore.java:91-132`）。因此 wake 所有的停靠沿用 3a 的到期时间标记，而不是给扫描新增分支：seal 记录 `wake.pending`，`dueAt` 设为停靠的唤醒时间，于是既有的扫描及其索引会在停靠到期时选中这个 head。Store 只把 `wake.pending` 理解为"在 `dueAt` 加载这个 head"，这正是停靠需要的；扫描回放 journal 时，同样会把那条已尝试的 wake 输入算作待处理。获取 writer 时会清除证书，但保留 `is_wake_pending`，并把 `wake_retry_at` 限制到兜底节奏（`JournalWriterLifecycle.java:274`），所以清除证书后又崩溃的 writer 会把 head 留给既有扫描。没有这个标记就做不到：停靠 seal 写入的是 `is_wake_pending = FALSE`，获取 writer 后 head 不再处于待扫描状态（已确认，由 `WakeSealStampTest` 固定）。`parkedTurn` 增加 `owner: 'wake'`，记在可空列 `ma_session_head.wake_seal_parked_owner` 中，由同一个 seal UPDATE 写入、获取 writer 时清除；按本模块的规则直接修改 V1 基线，不加迁移。Store 现有的"停靠 Turn 不能与 wake-pending seal 共存"规则，只对这个 owner、且只在新的 grant 能力位下放行这种组合；停靠资格在第一轮和闸门下的复查中都要求这个能力位。
+- **唤醒来源。** 决定：`ACTION_RESPONSE` 投递在缓存未命中时会加载 Session（`doResolveAction`），这次加载必须是被动接管加载。对 Workspace Session 确实如此（已确认，见 §4.7）。没有 Workspace 的 Session 从不停靠，因为它没有审批策略（P0），所以决定投递发给它的普通加载永远不会遇到停靠。取消不需要额外步骤（已确认）：公开 API 与 Web Shell 的 Turn 取消都要求存在 `ma_turn` 行，所以 wake Turn 只能经由其来源自己的 Harness 操作（automation 运行的 `cancel_run`、child 运行的停止）或 Session 关闭来取消，而这些操作都会先做一次自己的加载，正是这次加载唤醒了停靠；普通加载会接上这类 Session，由 Harness 测试 "attaches a Session whose wake Turn died in its approval wait through a plain load" 固定。审批模式变更：策略变更是一个只解除 `ma_turn` 行停靠、不加载任何东西的 SQL 事务（`AgentSessionPolicies`），所以它要在同一事务中把 head 的 `wake_retry_at` 置为当前时间，由扫描在下一轮选中这个 head。该事务会先经过忙碌闸门，而闸门的豁免目前要求证书恰好对应一个活跃、一个已停靠的 `ma_turn` 行（`AgentActionParking.certificateMatches`）。wake 所有的证书改用"没有活跃的 `ma_turn` 行"来证明，并保留相同的 seal 修订、审批修订与"没有外来 requested Action"检查，以确保被停靠的等待是该 Session 唯一的活跃工作。到期：由标记的 `dueAt` 处理。
 - **与 3a 的关系。** 若同一 Session 还有延迟的未尝试 wake 输入，首个增量仍不停靠，因为"唯一待处理输入"这一条件不变。
-- **改动面。** Harness 泵、Store seal 与扫描、取消和审批模式变更的事务、grant 能力位。
+- **改动面。** Harness 泵与停靠资格、Store 的 seal 校验、审批模式变更事务及其忙碌闸门证明、grant 能力位。
 
 ### 4.5 S5：Hooks
 
@@ -92,6 +94,7 @@
   2. 恢复：`resumeSavedNativeBatch` 接受带 Hooks 的 Session。已完成的发生通过既有的 saved-output 路径读回；有记录但没有结果的发生视为不确定，恢复拒绝（G3 §4.2 第 5 步）。批准之后的 PostToolUse 是新的发生，执行前已证明未开始，正常运行。
   3. 接管：`takeover` 不再一律排除 `session.hooks`，改由共享资格函数判断。存在可恢复的原生 continuation 时，跳过 `answerResumedTurnCalls`：它会把被中断的调用回答为"从未运行"，和 command-step 的 R9-1 一样会永久破坏 continuation。
   4. 资格：被等待调用的 PreToolUse 与 PermissionRequest 都已完成，或者可以证明没有配置；第一阶段的"无进行中的 Hook 操作"条件不变。
+  5. 重放：continuation 本来就保存了每个调用经过 Hooks 之后的实际输入（`request.call`）。PreToolUse 与 PermissionRequest 的发生都已完成的恢复调用，跳过 `decideHookInputs`，直接使用这份输入；再判断一次会拿 Hook 修改过的输入去比对原始 Hook 计划，从而抛出 `HostedHookInputConflictError`（`hosted-workspace-tool-turn.ts:4033-4051`）。
 - **待验证。** 冷加载恢复停靠 Turn 时不重新触发 SessionStart 或 UserPromptSubmit（G3 要求"不重新应用启动 Hook"）。
 - **改动面。** 仅 Harness，但触及 G3 生产者与恢复臂，需要 G3 的 A3/A6 故障门禁覆盖 Hooks 变体。
 
@@ -99,6 +102,7 @@
 
 - **依赖。** 第二阶段的 `qwen.managed-agent.runtime-broker.mcp-parking.enabled`。只有连接与目录在挂起期间被保留、新 writer 按持久化 owner 身份重新获取时，冷加载看到的 MCP 工具定义才能保证与 continuation 中保存的定义深度相等。不满足时不停靠：停靠后才发现恢复失败，比保持常驻更糟。
 - **方案。** 生产者把 MCP 工具纳入白名单；continuation 记录 MCP 配置的持久化修订与目录 pin。资格要求 MCP 停靠已启用、当前 grant 能续接同一 owner，并且批次中排在前面的 MCP 调用都已提交结果。如果仍有进行中的调用，第一阶段的"Runtime 工作未结算"条件已会拒绝。被等待的 MCP 调用尚未派发，批准后恰好派发一次。
+- **continuation 与目录。** continuation 解析器的工具白名单（`hosted-approval-continuation.ts:55-63`），以及写死 `mcp: false` 的恢复请求（`hosted-workspace-tool-turn.ts:4433-4448`），都要支持 MCP 调用及其 MCP 请求身份。`ParkedMcpReclamationJob` 跳过 Session 持有审批停靠证书的 owner，这样 continuation 固定的目录仍是 Session 会续接的那个；owner 一旦被回收，每次 pin 检查都会变成拒绝。
 - **不变量。** MCP 调用没有原生文件那样的 prepare/receipt 协议，所以绝不重放已派发的调用；任何调用的派发状态不确定时都拒绝。
 - **改动面。** Harness 生产者与恢复臂，以及与 Broker MCP owner 续接的对齐。
 
@@ -106,13 +110,14 @@
 
 - **方案。** command-step 等待登记一个真正能冻结的 freeze。停靠资格按接管恢复臂对 command-step 计划要求的 Session 形态条件接受 `plan.commandStep`：extension 已启用，且 Session 有工具 owner。这些条件做成一个共享函数，由两边共同调用，与原生审批那个函数并列。Hooks 的放宽只限 command-step 计划，与 `extensionsCommandStepTakeover` 一致，不依赖 S5。MCP Session 上的 command step 在 S6 之前保持常驻，尽管恢复会接受它。停靠资格不需要配置修订号条件，见下文。
 - **已确认。** 对 Workspace Session，决定投递时的加载带有接管标志，并会接管停靠的 Turn。connector 测试 `resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments` 断言决定投递发出的冷加载带被动恢复标志；Harness 测试 "resumes a parked approval through the passive load decision delivery sends" 表明只带这个标志的加载会经接管恢复臂恢复停靠的审批。
-- **已确认。** 对停靠中的 command step 做裸加载，返回 409 `turn_unsettled`，journal 里什么都不写，R9-1 守卫成立。Turn 未结算期间 extension 配置无法修改：所有 extension 管理路由在 Turn 活跃时都会拒绝，而停靠的 Session 只能通过接管加载回来，接管会让 Turn 重新活跃。因此 `resumeSavedNativeBatch`（`hosted-workspace-tool-turn.ts:4328`）拒绝的修订不匹配在停靠期间不会出现；即使出现，它也会表现为可重试的 503，而不是带类型的拒绝。Harness 测试 "parks a command-step approval that a bare load leaves unanswered and the decision-delivery load resumes" 固定了这两点。
+- **已确认。** 对停靠中的 command step 做裸加载，返回 409 `turn_unsettled`，journal 里什么都不写，R9-1 守卫成立。Turn 未结算期间 extension 配置无法修改：所有会修改 extension 配置的路由在 Turn 活跃时都会拒绝，而停靠的 Session 只能通过接管加载回来，接管会让 Turn 重新活跃。因此 `resumeSavedNativeBatch`（`hosted-workspace-tool-turn.ts:4328`）拒绝的修订不匹配在停靠期间不会出现；即使出现，它也会表现为可重试的 503，而不是带类型的拒绝。#18166 中的 Harness 测试 "parks a command-step approval that a bare load leaves unanswered and the decision-delivery load resumes" 固定了这两点。
 - **改动面。** 仅 Harness。
 
 ### 4.8 S8：`uncaptured` 批次
 
 - **派发前的 Shell（S8a）。** 这是价值最高的一项：Shell profile 下的审批大多是 `run_shell_command`。G3 要求派发前的 Shell 建立自己的正面 continuation 与所有权证据。本切片需要先确认 Shell 执行是否和原生文件一样有 `dispatch = false` 的 prepare 和按精确 key 重放的语义（待验证）。如果有，continuation 就按原生文件的做法记录 `runtimeCallId`、prepare key 与参数摘要；如果没有，需要先在 Broker 侧补齐，本切片的工作量会明显变大。无论哪种情况，这都是对 G3 契约的扩展，实现前要单独写一份 G3 扩展设计；本文只列出这个切片。已派发的 Shell 继续拒绝。
 - **超过 64 KiB 的计划。** 暂不支持。P0 的拒绝计数会显示它的出现率；只有出现率可观时，才考虑把计划改存为非 inline 资源。
+- **仍然排除。** `todo` 批次、没有 Runtime 的批次、不支持的工具和未计算摘要的调用都保持拒绝；S8 只覆盖派发前的 Shell 和超大计划。
 - **v1/v2。** 不支持。它们只存在于升级前写入的等待，G3 已明确遗留重建需要单独验证，收益随时间归零。
 
 ## 5. 决策与理由
@@ -145,10 +150,12 @@
 
 - **口径一致。** 对同一 journal 状态，停靠资格与冷恢复臂给出相同回答。覆盖本切片放开的形态，以及仍被排除的相邻形态。
 - **崩溃等价。** 先对本切片的形态做"等待中 SIGKILL → 另一代 Harness 接管 → 决定"，确认冷恢复正确，再做"停靠 → 冷加载 → 决定"。两者的 journal 结果应一致。
+- **P0**：没有 Workspace 的 Session 不会打开任何 Action，连 memory 写入也不会，所以永远不会登记可停靠的等待。
 - **S1**：纯图片 Prompt 停靠、冷加载后 Allow，以及它的 Harness 在等待中死掉、由新的 Harness 接管后 Allow，两种情况下工具都只执行一次，恢复后的第一次模型调用都从空文字开始，历史里带着原图。
-- **S2**：停靠期间后台终态到达，解除停靠、Turn 恢复，通知在 Turn 结算后投递；工具与通知各恰好一次。
-- **S4**：monitor 发起的 Turn 停靠后，分别走决定、取消、模式变更、到期四条路径，不经协调器也能各自完成；泵不再按崩溃结算 `await_action` 的 wake 输入。
-- **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发。
+- **S2**：停靠期间后台终态到达，解除停靠、Turn 恢复，通知在 Turn 结算后投递；工具与通知各恰好一次。覆盖在 seal 之前、在 seal 与 CAS 之间、在 CAS 之后暂存这三种顺序。
+- **S3**：child Session 的停靠时长超过 relay 的消息 Turn 等待时间，父 Session 仍能收敛；单问题的 child 批次在冷恢复后交还挂载（`questionChild`）。
+- **S4**：由 monitor 通知、loop 触发、automation 运行和 child 结果启动的 Turn，各自停靠后分别走决定、模式变更、到期，以及来源支持时的取消，不经协调器都能完成；清除证书后又崩溃的 writer 会把 head 留给扫描；泵不再按崩溃结算 `await_action` 的 wake 输入。
+- **S5**：已完成的 PreToolUse/PermissionRequest 在恢复后不重新运行（用发生计数断言）；只有记录、没有结果的发生导致拒绝；SessionStart/UserPromptSubmit 不重新触发；另有单独用例覆盖 PreToolUse 的 `updatedInput`、PermissionRequest 的 `decision.updatedInput`，以及 Hooks 在第一个审批之前已为兄弟调用运行过的批次。
 - **S6**：在 MCP parking 开启和关闭两种配置下，开启时可停靠，关闭时不停靠；恢复后工具定义相等，已派发的 MCP 调用不重放。
 - **真实进程与 MySQL 8.4**：每个切片至少一个"停靠 → 换代 Harness → 决定"用例进入必跑 CI 层级；H2 结果不能替代。
 
@@ -163,7 +170,7 @@
 
 这些问题都不阻塞开发。问题 1–3 都先按下面的默认做法实现，测量后再回头调整，之后的调整都不需要改协议或数据库结构。问题 4 不在本设计范围内。
 
-1. **停靠中的 wake 启动 Turn，取消或改审批模式的延迟（S4）。** 这两条路径改为把 `wake_seal_parked_until` 置为当前时间之后，延迟上限是 wake 恢复扫描的间隔（默认 2s）。
+1. **停靠中的 wake 启动 Turn，改审批模式的延迟（S4）。** 这条路径把 `wake_retry_at` 置为当前时间之后，延迟上限是 wake 恢复扫描的间隔（默认 2s）；取消会自带一次加载。
    - 默认：只靠扫描。普通的停靠 Turn 本来就靠分派扫描（1s）重新分派，父设计也把"提交后立即触发一次加载"当作降低延迟的优化，而不是正确性要求（父设计 §4.6）。
    - 如果测得的延迟不可接受：在提交后直接触发一次加载，只是多一次调用。
 2. **组合停靠的最短停靠时长（S2）。** 后台终态频繁的 Session 可能因为反复停靠、重载而得不偿失。
