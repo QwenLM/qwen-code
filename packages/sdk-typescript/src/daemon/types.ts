@@ -1222,9 +1222,10 @@ export interface DaemonStatusReport {
     permissions: { pending: number; policy: string };
     /**
      * Load-based fresh-session admission state. Additive — older daemons
-     * omit this field, and `enabled: false` marks the operator opt-out.
-     * While `overloaded`, new child spawns are refused with 503
-     * `system_overloaded`; live sessions and the control plane stay open.
+     * omit this field, and `enabled: false` marks the operator opt-out or
+     * an injected bridge. While `overloaded`, new child spawns are refused
+     * with 503 `system_overloaded`; live sessions and the control plane stay
+     * open.
      * `reason` is widened to string per the SDK convention.
      */
     loadAdmission?: {
