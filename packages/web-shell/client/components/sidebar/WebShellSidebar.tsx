@@ -177,6 +177,7 @@ import {
 } from './workspaceExpansion';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionRenameEditor } from './SessionRenameEditor';
+import { SidebarHoverSuppressionContext } from './sidebar-hover-suppression';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import {
@@ -2232,9 +2233,11 @@ export function WebShellSidebar({
   }, []);
   const sessionMenuPointerDismissRef = useRef(false);
   const sessionMenuOpenRef = useRef(false);
+  const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const renameFocusSuppressRef = useRef(false);
   const handleSessionMenuOpenChange = useCallback((open: boolean) => {
     sessionMenuOpenRef.current = open;
+    setSessionMenuOpen(open);
     if (open) {
       // Pointer dismissal belongs to the menu that closed, not a later one.
       sessionMenuPointerDismissRef.current = false;
@@ -7639,7 +7642,7 @@ export function WebShellSidebar({
       </div>
     </div>
   );
-  return (
+  const sidebarTree = (
     <>
       {searchOpen && searchEnabled && (
         <SessionSearchDialog
@@ -9666,5 +9669,12 @@ export function WebShellSidebar({
       </aside>
       {archivedSection}
     </>
+  );
+  return (
+    <SidebarHoverSuppressionContext.Provider
+      value={sessionMenuOpen || groupMenu !== null}
+    >
+      {sidebarTree}
+    </SidebarHoverSuppressionContext.Provider>
   );
 }
