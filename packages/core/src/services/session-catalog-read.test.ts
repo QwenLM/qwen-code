@@ -187,9 +187,13 @@ describe('SessionService catalog transcript reads', () => {
     vi.spyOn(fs.promises, 'open').mockImplementationOnce(async (...args) => {
       const handle = await realOpen(...args);
       const realStat = handle.stat.bind(handle);
-      vi.spyOn(handle, 'stat').mockImplementationOnce(async () => {
-        const stats = await realStat();
-        fs.appendFileSync(transcript, title('appended', 'manual') + '\n');
+      let appended = false;
+      vi.spyOn(handle, 'stat').mockImplementation(async (options) => {
+        const stats = await realStat(options);
+        if (options === undefined && !appended) {
+          fs.appendFileSync(transcript, title('appended', 'manual') + '\n');
+          appended = true;
+        }
         return stats;
       });
       return handle;
