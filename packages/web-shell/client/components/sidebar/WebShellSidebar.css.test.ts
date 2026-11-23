@@ -130,6 +130,31 @@ describe('WebShellSidebar session row actions stylesheet', () => {
     );
   });
 
+  it('wraps auxiliary metadata rather than overlapping narrow-row actions', () => {
+    const wrappedNarrowRow = String.raw`\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionRow:not\(\.archivedRow\):has\(\s*\.sessionMetaSlotReserved \.sessionAttention,\s*\.sessionMetaSlotReserved \.sessionContinuation,\s*\.sessionMetaSlotReserved \.sessionLoading\s*\)`;
+    expect(touchMedia).toMatch(
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\{[^}]*row-gap:\\s*6px;[^}]*flex-wrap:\\s*wrap;`,
+      ),
+    );
+    expect(touchMedia).toMatch(
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\.sessionMetaSlotReserved\\s*\\.sessionActions\\s*\\{\\s*inset:\\s*2px 0 auto auto;[^}]*max-height:\\s*calc\\(100% - 4px\\);`,
+      ),
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\][^}]*\.sessionMetaSlot:not\(\.sessionMetaSlotReserved\)\s+\.sessionActions\s*\{[^}]*align-self:\s*stretch;/s,
+    );
+    expect(touchMedia).toMatch(
+      new RegExp(
+        `${wrappedNarrowRow}\\s*\\.sessionStatusSlot,\\s*${wrappedNarrowRow}\\s*\\.sessionTreeToggle\\s*\\{\\s*top:\\s*12px;`,
+      ),
+    );
+    expect(touchMedia).toMatch(
+      /\.sidebar\.mobileOpen\[data-narrow\]\s+\.sessionSourceIcon\s*\{\s*height:\s*20px;/,
+    );
+  });
+
   it('hides the busy marker when a background-only row reveals its actions', () => {
     // A background-only row is not .runningSession, so hovering anywhere on
     // the row reveals the overlay — not just hovering the meta slot. Without
