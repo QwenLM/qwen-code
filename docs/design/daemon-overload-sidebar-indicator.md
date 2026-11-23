@@ -45,6 +45,8 @@ Two independent sources, OR-combined at render time:
 - The App-level create handler refuses with a warning toast while paused, covering entry points outside the sidebar (panel, empty page) with the same verdict.
 - Every branch flow that can activate a restored child, including a record-point branch, uses the same pre-dispatch pause in `branchCurrentSession`. `atRecordId` is a history reference, not proof that the UI stays on the current runtime: the returned session can start a fresh `startSessionSwitch` load after publication. Refusing before mutation also avoids publishing a history point that cannot be activated during the pause. The slash handler propagates an explicit `false` to preserve its typed directive, while the `onBranchSession` callback keeps its existing `void | Promise<void>` contract.
 
+- **Current standalone archival releases its own attachment first.** The backend requires both no active prompt and zero attached clients before closing a standalone runtime. `SessionOverviewPanel` detaches only the selected session using its recorded session/client IDs, without cancelling work or allocating a replacement child. Other attached clients or active work still produce the existing busy failure instead of pretending archive succeeded.
+
 #### `fork` versus a fresh ACP child
 
 - `/fork` starts an `Agent` tool fork behind the current ACP `entry.connection` and its queue, not a `reserveFreshSession` operation. A fork subagent shares the parent's lifecycle and synthesized runtime configuration, so it belongs to existing work rather than to the new-ACP-child categories `spawn`, `load`, `resume`, and `branch`. New-task pause does not forbid this existing-session background path.

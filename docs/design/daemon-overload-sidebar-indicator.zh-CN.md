@@ -45,6 +45,8 @@
 - App 层 create handler 在暂停期间以警告 toast 拒绝，覆盖侧栏之外的入口（panel、空页），裁决相同。
 - 所有可能激活新 child 的 branch 流程，包括 record-point branch，都经过 `branchCurrentSession` 的同一预派发暂停守卫。`atRecordId` 只是历史引用，不能证明 UI 留在当前 runtime：返回的 session 可能在发布之后再通过 `startSessionSwitch` 进行 fresh load。先拒绝也避免在暂停激活期间留下额外的已发布历史点。slash handler 用显式 `false` 保留输入指令；`onBranchSession` 回调则继续保持既有 `void | Promise<void>` 契约。
 
+- **当前 standalone 会话归档前先解除自身附件。** 后端只有确认没有活跃 prompt 且客户端附着数为零，才会关闭 standalone runtime。`SessionOverviewPanel` 仅针对选中的会话，用记录的 session/client 身份先调用 detach，不取消工作，也不创建替代 child。其它客户端仍附着或工作仍活跃时，仍返回既有 busy 失败，不冒充成功归档。
+
 #### `fork` 与新 ACP child 的边界
 
 - `/fork` 通过现有 ACP 的 `entry.connection` 及其队列启动后台 `Agent` tool fork，不经过 `reserveFreshSession`。fork 子代理共享父生命周期和由父会话派生的运行时配置，属于现有工作，而不是 `spawn`、`load`、`resume`、`branch` 所表示的新 ACP child 分类。新建任务暂停不禁止这条现有会话的后台路径。

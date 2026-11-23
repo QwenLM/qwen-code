@@ -1001,6 +1001,19 @@ function SessionOverviewPanelInner({
         const ids = batch.map((card) => card.sessionId);
         try {
           if (mutation === 'archive') {
+            const selectedSessionId = connectionRef.current.sessionId;
+            const selectedClientId = connectionRef.current.clientId;
+            // Standalone archives require no active prompt or attached client.
+            if (
+              selectedSessionId &&
+              selectedClientId &&
+              batch.some((card) => card.sessionId === selectedSessionId)
+            ) {
+              await workspace.client.detachSession(
+                selectedSessionId,
+                selectedClientId,
+              );
+            }
             const result =
               await workspace.client.archiveStandaloneSessions(ids);
             for (const id of [
