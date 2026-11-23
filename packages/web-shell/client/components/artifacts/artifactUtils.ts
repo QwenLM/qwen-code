@@ -452,6 +452,54 @@ export function isSamePath(
   return Boolean(normalizedLeft) && normalizedLeft === normalizedRight;
 }
 
+export interface FileWorkspaceEntry {
+  cwd: string;
+}
+
+function isWindowsAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:\//.test(value);
+}
+
+function isAbsolutePath(value: string): boolean {
+  return value.startsWith('/') || isWindowsAbsolutePath(value);
+}
+
+/**
+ * Resolve which registered workspace owns a file path.
+ *
+ * Absolute paths name their workspace: the longest segment-aware cwd prefix
+ * among the registered workspaces wins, so a link opened from another
+ * session's message still lands in the workspace the file lives in instead of
+ * being stat'd inside the currently active session's workspace. Relative
+ * paths carry no workspace of their own and keep the caller's workspace.
+ */
+export function resolveWorkspaceCwdForPath(
+  path: string,
+  preferredCwd: string | undefined,
+  workspaces: readonly FileWorkspaceEntry[] | undefined,
+): string | undefined {
+  const normalized = normalizePath(path);
+  if (!isAbsolutePath(normalized)) return preferredCwd;
+  // Windows paths compare case-insensitively; POSIX paths do not.
+  const compare = isWindowsAbsolutePath(normalized)
+    ? (value: string) => value.toLowerCase()
+    : (value: string) => value;
+  const target = compare(normalized);
+  let best: string | undefined;
+  for (const entry of workspaces ?? []) {
+    const cwd = normalizePath(entry.cwd);
+    if (!cwd || !isAbsolutePath(cwd)) continue;
+    const candidate = compare(cwd);
+    if (
+      (target === candidate || target.startsWith(`${candidate}/`)) &&
+      (!best || candidate.length > best.length)
+    ) {
+      best = cwd;
+    }
+  }
+  return best ?? preferredCwd;
+}
+
 const ARTIFACT_PREVIEW_CSP =
   "default-src 'none'; base-uri 'none'; form-action 'none'; script-src 'unsafe-inline' data:; style-src 'unsafe-inline' data:; img-src data: blob:; font-src data:; media-src data:;";
 

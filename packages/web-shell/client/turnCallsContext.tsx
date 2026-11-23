@@ -3,12 +3,24 @@ import { createContext, useContext, type ReactNode } from 'react';
 /**
  * Opens the right-panel list of tool calls belonging to one turn. `turnId` is
  * the id of the turn's leading user message.
+ *
+ * `origin` names the session whose transcript the turn belongs to. Without it
+ * the tab falls back to the app-level current session, which is wrong when
+ * the turn was opened from another session's view (split view, or a stale
+ * current after switching workspaces): the panel would load the wrong
+ * session's turn and resolve its file links in the wrong workspace.
  */
+export interface TurnCallsOrigin {
+  sessionId?: string;
+  workspaceCwd?: string;
+}
+
 export type OpenTurnCalls = (
   turnId: string,
   recordId?: string,
   promptId?: string,
   promptLabel?: string,
+  origin?: TurnCallsOrigin,
 ) => void;
 
 const TurnCallsContext = createContext<OpenTurnCalls | undefined>(undefined);

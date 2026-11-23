@@ -21,6 +21,7 @@ const {
   navigation,
   navigationStore,
   prompt,
+  workspaceTargetCwds,
 } = vi.hoisted(() => ({
   transcript: { blocks: [] as unknown[] },
   connection: {
@@ -36,6 +37,7 @@ const {
   loadCalls: vi.fn(),
   fileActions: { stat: vi.fn() },
   prompt: { status: 'idle' },
+  workspaceTargetCwds: [] as (string | undefined)[],
   navigationStore: {
     refreshHead: vi.fn(),
     loadOrdinal: vi.fn(),
@@ -99,7 +101,10 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', async () => {
 });
 
 vi.mock('./useArtifactWorkspaceTarget', () => ({
-  useArtifactWorkspaceTarget: () => ({ actions: fileActions }),
+  useArtifactWorkspaceTarget: (cwd: string | undefined) => {
+    workspaceTargetCwds.push(cwd);
+    return { actions: fileActions };
+  },
 }));
 
 const { TurnCallsPanel, collectTurnCallRows } = await import(
@@ -118,6 +123,8 @@ beforeEach(() => {
   navigation.indexPages.clear();
   navigation.locations.clear();
   connection.workspaceCwd = '/workspace';
+  workspaceTargetCwds.length = 0;
+  fileActions.stat.mockReset();
   const loadIndex = async (start?: number) => {
     try {
       const page = await client.getSessionTurnIndexPage(connection.sessionId, {
@@ -1237,6 +1244,58 @@ it('opens read and write files independently of row expansion', async () => {
     }),
   );
   expect(container?.querySelector('[aria-expanded="true"]')).toBeNull();
+});
+
+it('resolves file links in the turn owner workspace, not the current session', async () => {
+  // Regression for #18198: the tab lists a turn from session A (workspace
+  // /workspace-a) but the app-level connection still reports the previous
+  // workspace (/workspace-b) after switching workspaces. File links in the
+  // turn must be stat'd and opened in /workspace-a; resolving them in
+  // /workspace-b fails with ENOENT.
+  connection.sessionId = 'session-a';
+  connection.workspaceCwd = '/workspace-b';
+  fileActions.stat.mockResolvedValue({ type: 'file' });
+  transcript.blocks = [
+    userBlock('u1', 1),
+    toolBlock({
+      id: 'read',
+      toolCallId: 'read',
+      toolName: 'read_file',
+      title: 'ReadFile: docs/runbooks/agent-briefs.md',
+      rawInput: {
+        file_path: 'docs/runbooks/agent-briefs.md',
+        description: 'Read the runbook',
+      },
+    }),
+  ];
+  const onOpenFile = vi.fn();
+  await act(async () => {
+    render(
+      <TurnCallsPanel
+        turnId="u1"
+        ownerSessionId="session-a"
+        workspaceCwd="/workspace-a"
+        onOpenFile={onOpenFile}
+      />,
+    );
+  });
+  await act(async () => {});
+  expect(client.workspaceByCwd).toHaveBeenCalledWith('/workspace-a');
+  expect(client.workspaceByCwd).not.toHaveBeenCalledWith('/workspace-b');
+  expect(workspaceTargetCwds).toContain('/workspace-a');
+  expect(workspaceTargetCwds).not.toContain('/workspace-b');
+  const buttons = [...(container?.querySelectorAll('button') ?? [])].filter(
+    (button) => button.getAttribute('aria-label') === 'View file',
+  );
+  expect(buttons).toHaveLength(1);
+  await act(async () => buttons[0]?.click());
+  expect(onOpenFile).toHaveBeenCalledWith(
+    expect.objectContaining({
+      kind: 'attachment',
+      workspaceCwd: '/workspace-a',
+      workspacePath: 'docs/runbooks/agent-briefs.md',
+    }),
+  );
 });
 
 it('opens agent details with the owning session and full tool result', () => {

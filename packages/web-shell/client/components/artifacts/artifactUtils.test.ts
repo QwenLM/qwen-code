@@ -19,6 +19,7 @@ import {
   isPdfArtifact,
   normalizePath,
   readWorkspaceFileAsBlob,
+  resolveWorkspaceCwdForPath,
 } from './artifactUtils';
 
 describe('artifactUtils', () => {
@@ -321,6 +322,71 @@ describe('artifactUtils', () => {
       '/workspace/app/src/main.ts',
     );
     expect(normalizePath('../outside/file.ts')).toBe('../outside/file.ts');
+  });
+
+  it('resolves an absolute path to its longest-prefix workspace', () => {
+    const workspaces = [
+      { cwd: '/home/user/work' },
+      { cwd: '/home/user/work/nested' },
+    ];
+    // The file lives in the nested workspace even though the caller (the
+    // currently active session) is in the outer one.
+    expect(
+      resolveWorkspaceCwdForPath(
+        '/home/user/work/nested/docs/runbooks/agent-briefs.md',
+        '/home/user/work',
+        workspaces,
+      ),
+    ).toBe('/home/user/work/nested');
+    expect(
+      resolveWorkspaceCwdForPath(
+        '/home/user/work/docs/runbooks/agent-briefs.md',
+        '/home/user/work/nested',
+        workspaces,
+      ),
+    ).toBe('/home/user/work');
+  });
+
+  it('keeps the caller workspace for relative paths and unmatched absolutes', () => {
+    const workspaces = [{ cwd: '/home/user/work' }];
+    expect(
+      resolveWorkspaceCwdForPath(
+        'docs/runbooks/agent-briefs.md',
+        '/home/user/work',
+        workspaces,
+      ),
+    ).toBe('/home/user/work');
+    expect(
+      resolveWorkspaceCwdForPath(
+        '/elsewhere/file.md',
+        '/home/user/work',
+        workspaces,
+      ),
+    ).toBe('/home/user/work');
+    expect(
+      resolveWorkspaceCwdForPath(
+        '/home/user/work/file.md',
+        undefined,
+        workspaces,
+      ),
+    ).toBe('/home/user/work');
+  });
+
+  it('matches absolute paths on segment boundaries only', () => {
+    const workspaces = [{ cwd: '/home/user/work' }];
+    // /home/user/workbench is not inside /home/user/work.
+    expect(
+      resolveWorkspaceCwdForPath(
+        '/home/user/workbench/file.md',
+        '/tmp',
+        workspaces,
+      ),
+    ).toBe('/tmp');
+    expect(
+      resolveWorkspaceCwdForPath('C:\\work\\docs\\file.md', 'C:\\other', [
+        { cwd: 'C:\\Work' },
+      ]),
+    ).toBe('C:/Work');
   });
 
   it('prefers the artifact type from metadata', () => {

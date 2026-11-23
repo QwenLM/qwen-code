@@ -6084,6 +6084,7 @@ export const MessageList = memo(
                   : undefined
               }
               workspaceCwd={workspaceCwd}
+              sourceSessionId={sourceSessionId}
               showRetryHint={showRetryHint}
               onRetryClick={onRetryClick}
               sendFailed={

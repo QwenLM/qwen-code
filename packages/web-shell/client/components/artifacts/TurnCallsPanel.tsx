@@ -185,7 +185,10 @@ export function TurnCallsPanel({
   const { client: daemonClient } = useWorkspace();
   const connection = useConnection();
   const { sessionId } = connection;
-  const cwd = connection.workspaceCwd ?? workspaceCwd;
+  // The turn belongs to the tab's session, not necessarily the app-level
+  // current session: prefer the workspace the tab was opened with so file
+  // links in another session's turn are stat'd in that session's workspace.
+  const cwd = workspaceCwd ?? connection.workspaceCwd;
   const client = useMemo(
     () => (cwd ? daemonClient.workspaceByCwd(cwd) : undefined),
     [daemonClient, cwd],
