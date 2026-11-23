@@ -2621,7 +2621,24 @@ jobs:
         env:
           # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
           TMPDIR: '${{ runner.temp }}'
-        run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
+          QWEN_TRANSCRIPT_HTTPS_PROXY: >-
+            ${{ runner.environment == 'self-hosted' && runner.os == 'Linux' &&
+            (startsWith(runner.name, 'ecs-qwen-hz7-') ||
+            startsWith(runner.name, 'ecs-qwen-hz8-') ||
+            startsWith(runner.name, 'ecs-qwen-hz9-') ||
+            startsWith(runner.name, 'ecs-qwen-hz10-') ||
+            startsWith(runner.name, 'ecs-qwen-hz11-')) &&
+            'http://127.0.0.1:7890' || '' }}
+        run: |-
+          if [ -n "${QWEN_TRANSCRIPT_HTTPS_PROXY}" ]; then
+            # Node fetch needs to opt in to the proxy for the pinned unpkg assets.
+            export NODE_USE_ENV_PROXY=1
+            export https_proxy="${QWEN_TRANSCRIPT_HTTPS_PROXY}" HTTPS_PROXY="${QWEN_TRANSCRIPT_HTTPS_PROXY}"
+            no_proxy="${no_proxy:-${NO_PROXY:-}}"
+            export no_proxy="${no_proxy:+${no_proxy},}localhost,127.0.0.1,[::1]"
+            export NO_PROXY="${no_proxy}"
+          fi
+          npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0
 
       - name: 'Run web-shell browser smoke'
         env:

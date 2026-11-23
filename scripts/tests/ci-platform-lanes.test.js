@@ -635,6 +635,62 @@ it('routes the browser smoke to ARM64 independently of the shared Linux test lan
   expect(hostedInstall['timeout-minutes']).toBe(30);
 });
 
+it.skipIf(process.platform === 'win32')(
+  'uses the local HTTPS proxy for transcript tests only on Hangzhou runners',
+  () => {
+    const transcript = ci.jobs.web_shell_e2e_smoke.steps.find(
+      (step) => step.name === 'Run transcript document browser gate',
+    );
+    const resolveProxy = new Function(
+      'runner',
+      'startsWith',
+      `return ${transcript.env.QWEN_TRANSCRIPT_HTTPS_PROXY.trim().slice(3, -2)};`,
+    );
+    const probe = (name, environment = 'self-hosted') => {
+      const proxy = resolveProxy(
+        { name, environment, os: 'Linux' },
+        (value, prefix) => value.startsWith(prefix),
+      );
+      return execFileSync(
+        'bash',
+        ['-ec', `npx() { env; }\n${transcript.run}`],
+        {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env.PATH,
+            QWEN_TRANSCRIPT_HTTPS_PROXY: proxy,
+            https_proxy: 'http://existing:8080',
+            HTTPS_PROXY: 'http://different:8080',
+            NO_PROXY: 'internal.example',
+          },
+        },
+      ).split('\n');
+    };
+    for (const host of [7, 8, 9, 10, 11]) {
+      const env = probe(`ecs-qwen-hz${host}-1`);
+      expect(env).toContain('NODE_USE_ENV_PROXY=1');
+      expect(env).toContain('https_proxy=http://127.0.0.1:7890');
+      expect(env).toContain('HTTPS_PROXY=http://127.0.0.1:7890');
+      expect(env).toContain(
+        'no_proxy=internal.example,localhost,127.0.0.1,[::1]',
+      );
+      expect(env).toContain(
+        'NO_PROXY=internal.example,localhost,127.0.0.1,[::1]',
+      );
+    }
+    for (const env of [
+      probe('ecs-qwen-hz70-1'),
+      probe('ecs-qwen-hk1-1'),
+      probe('ecs-qwen-hz7-1', 'github-hosted'),
+    ]) {
+      expect(env).not.toContain('NODE_USE_ENV_PROXY=1');
+      expect(env).toContain('https_proxy=http://existing:8080');
+      expect(env).toContain('HTTPS_PROXY=http://different:8080');
+      expect(env).toContain('NO_PROXY=internal.example');
+    }
+  },
+);
+
 // One helper for both "an <event> run reaches exactly these jobs" invariants.
 //
 // It decides by EVALUATING each gate for the event, not by looking for tokens
