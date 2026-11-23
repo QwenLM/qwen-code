@@ -66,15 +66,19 @@ actions, and Java command operations into `SessionChatController`:
   → `'idle'`, `failed` → `'failed'`, `cancelling` → `'cancelling'`, active
   runtime/tool phases → `'running'`), while combining with `operations` so any
   non-terminal `cancel` (including `unsettled` after `recovery_blocked`) lifts a
-  running session to `'cancelling'` and an in-flight `submit` lifts an
-  idle/failed session to `'submitting'`.
+  running session to `'cancelling'` and an unadmitted in-flight `submit` lifts
+  an idle/failed session to `'submitting'`.
 - **Admission ≠ establishment.** Each of `submit`, `cancel`, `respondApproval`,
   and `respondQuestion` dispatches through `deps.*` returning a
   `ManagedTransportAdmission`. A `'rejected'` admission is not tracked and omits
   `outcome` (matching `contract.ts` and the daemon adapter); an `'unknown'` or
   thrown transport removes the tracked row so `phase` never latches. An
-  `'accepted'` admission stays `'pending'` (`outcome: 'unsettled'`) until
-  authoritative settlement evidence arrives via `subscribeOperationSettlement`
+  `'accepted'` admission carries `outcome: 'unsettled'`: a still-`'pending'`
+  `submit` then transitions to `'running'`, matching the daemon adapter's
+  admitted-turn phase. Partial recovery (`'recovery_blocked'` → `'unsettled'`)
+  is not promoted back to running by a later transport admission, and
+  establishment still requires authoritative settlement evidence via
+  `subscribeOperationSettlement`
   (`completed` → `'established'`, `failed`/`cancelled` → `'failed'`,
   `recovery_blocked` → `'unsettled'`), `subscribeTurnSettlement` (projected per
   kind: a turn completing on its own fails a bound `cancel`), or
@@ -103,8 +107,13 @@ actions, and Java command operations into `SessionChatController`:
   cancel guard works identically for managed sessions.
 - **Pending permissions and questions.** Expired actions (`expiresAt <= now`,
   using optional `deps.now` defaulting to `Date.now`) are filtered out at both
-  projection getters and rejected by `respondApproval`/`respondQuestion`.
-  Permission actions (`kind !== 'question'`) reuse
+  projection getters and rejected by `respondApproval`/`respondQuestion`. Both
+  projection getters share a content-keyed snapshot of the action id, kind,
+  revisions, expiry, and complete render-ready request. Re-emitted pending
+  actions with identical content preserve array and `rawInput` identities so
+  parent renders do not reset the question card; genuine content changes
+  rebuild the relevant request, while expiry still filters every access, so
+  caching cannot retain an expired action. Permission actions (`kind !== 'question'`) reuse
   `toManagedPermissionRequest(action, messages)`. Question actions
   (`kind === 'question'`) project through `toManagedQuestionPermissionRequest`
   into the `PermissionRequest` shape consumed by `ChatSurface`'s shared
@@ -131,7 +140,10 @@ actions, and Java command operations into `SessionChatController`:
   (`hasLiveAction`, matching the daemon adapter's `hasLiveDecision` so an
   action cannot be decided twice while a terminal `failed` row permits retry).
 - **Snapshot stability and lifetime.** `operations` is memoized into a frozen
-  array rebuilt only when tracked state changes. All settlement subscriptions
+  array rebuilt only when tracked state changes. Rebuilds apply
+  `retainOperations` and filter the internal `tracked` log by those retained
+  ids, mirroring the daemon core: every non-terminal entry remains while
+  superseded terminal rows are removed instead of growing without bound. All settlement subscriptions
   are released when `deps.signal` aborts, and skipped synchronously if
   `deps.signal?.aborted` is already true at construction.
 
@@ -155,7 +167,8 @@ actions, and Java command operations into `SessionChatController`:
   including a selected `Dry run` id plus separately typed `Verbose`, while all
   pre-existing legacy three-argument submissions remain unchanged.
 - `components/managed/chat-controller.test.ts` covers exhaustive
-  phase/operation-status mappings, attempt-scoped settlement buffering
+  phase/operation-status mappings, accepted-submit running transitions,
+  attempt-scoped settlement buffering
   (including own-action settlement, rejected transport, and both approval and
   question retries), live one-hot pagination +
   `loadOlder({ force: true })`, permission/question projection, question answer
@@ -163,11 +176,14 @@ actions, and Java command operations into `SessionChatController`:
   admission vs settlement (including buffered early settlements,
   `recovery_blocked`, dispatch-time cancel `turnId` stamping, turn-completed
   cancel failure, concurrent duplicate refusal), snapshot identity stability,
-  and `AbortSignal` cleanup.
+  and `AbortSignal` cleanup. Content-identical fresh pending snapshots preserve
+  projection identity, real option changes invalidate it, and advancing the
+  clock still expires actions.
 - `components/managed/chat-controller.local-integration.test.tsx` mounts the
   actual `ChatSurface`, shared question card, and Managed controller. It drives
-  navigation, selection, and free-text input through the DOM and asserts the
-  exact transport payload; only the out-of-scope daemon transcript/editor hosts
+  navigation, selection, and free-text input through the DOM, forces a real
+  parent re-render while preserving the selected option, and asserts the exact
+  transport payload; only the out-of-scope daemon transcript/editor hosts
   are isolated. The Java provider binding remains slice 3b, so this is not a
   live Java service test.
 - `daemon/useDaemonChatController.test.tsx` adds the P3 race test pinning

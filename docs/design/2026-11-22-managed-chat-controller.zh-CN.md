@@ -64,12 +64,14 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   `failed` → `'failed'`，`cancelling` → `'cancelling'`，活跃运行/工具态 →
   `'running'`），并与 `operations` 组合：任一非终态 `cancel`（包括
   `recovery_blocked` 带来的 `unsettled`）均将运行中会话提升为 `'cancelling'`，
-  在飞 `submit` 将空闲/失败会话提升为 `'submitting'`。
+  尚未准入的在飞 `submit` 将空闲/失败会话提升为 `'submitting'`。
 - **准入 ≠ 建立。** `submit`、`cancel`、`respondApproval` 与 `respondQuestion` 各自
   通过返回 `ManagedTransportAdmission` 的 `deps.*` 派发。`'rejected'` 不入账且省略
   `outcome`（与 `contract.ts` 和 daemon 适配器对齐）；`'unknown'` 或抛错移除追踪
-  行，避免 `phase` 永久卡死。`'accepted'` 保持 `'pending'`（`outcome: 'unsettled'`），
-  仅在权威结算证据到达时推进：`subscribeOperationSettlement`（`completed` →
+  行，避免 `phase` 永久卡死。`'accepted'` 的结果仍为 `'unsettled'`，仍处于
+  `'pending'` 的 `submit` 在准入后转为 `'running'`（与 daemon 适配器一致），但
+  准入本身不建立结果；`recovery_blocked` 带来的 `'unsettled'` 不被后续准入推回
+  `'running'`。仅在权威结算证据到达时推进：`subscribeOperationSettlement`（`completed` →
   `'established'`，`failed`/`cancelled` → `'failed'`，`recovery_blocked` →
   `'unsettled'`）、`subscribeTurnSettlement`（按操作类型投影：回合自行完成使绑定
   的 `cancel` 转为 `'failed'`）或 `subscribeActionSettlement`（`resolved` →
@@ -92,7 +94,10 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   生效。
 - **待审批与待提问投影。** 已过期动作（`expiresAt <= now`，使用可选 `deps.now`，默
   认 `Date.now`）在两处投影 getter 中过滤并在 `respondApproval`/`respondQuestion`
-  入口拒绝。权限动作（`kind !== 'question'`）复用既有
+  入口拒绝。两处投影 getter 共享按内容键控的快照，签名包括动作 id、kind、修订号、
+  过期时间与完整渲染请求。重复发出而内容相同的待处理动作保留数组与 `rawInput`
+  的身份，避免父级重渲染清空提问卡片；真实内容变化会重建对应请求，过期仍在每次
+  读取时过滤，缓存不会留下失效动作。权限动作（`kind !== 'question'`）复用既有
   `toManagedPermissionRequest(action, messages)`；提问动作（`kind === 'question'`）
   经 `toManagedQuestionPermissionRequest` 投影为共享 `AskUserQuestion` 卡片所需的
   `PermissionRequest`，携带问题和选项 `id` 且仅投影 `allow_once` `'submit'` 选项
@@ -113,6 +118,8 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
   器的 `hasLiveDecision` 对齐，既防止同一动作被决策两次又允许终态 `failed` 行重
   试）fail-closed 返回 `rejected`。
 - **快照稳定与生命周期。** `operations` 记忆化为冻结数组，仅在追踪状态变化时重建。
+  重建先应用 `retainOperations`，再按保留 id 过滤内部 `tracked` 台账（与 daemon
+  核心一致）：保留全部非终态行，裁掉已被取代的终态行，不让台账只增不减。
   `deps.signal` 触发 abort 时释放全部结算订阅；构造时若 `deps.signal?.aborted` 已为
   `true` 则同步跳过订阅。
 
@@ -133,15 +140,17 @@ Managed 适配器核心，复用切片 1 已落地的 `components/managed/chat-c
 - `ChatSurface.test.tsx`、`AskUserQuestion.test.tsx` 与
   `components/managed/chat-controller.test.ts` 钉住结构化交接，包括选择
   `Dry run` 的 id 加独立输入的 `Verbose`，且全部既有旧三参数提交保持不变。
-- `components/managed/chat-controller.test.ts` 覆盖穷举相态与操作状态映射、按尝试
-  归属的结算缓冲（含 action 在飞结算、被拒传输及 approval/question 两条重试路径）、实时
+- `components/managed/chat-controller.test.ts` 覆盖穷举相态与操作状态映射、已准入
+  submit 的 running 相态、按尝试归属的结算缓冲（含 action 在飞结算、被拒传输及 approval/question 两条重试路径）、实时
   one-hot 分页透传与 `loadOlder({ force: true })`、权限/提问拆分与投影、提问答案
   归一化与 fail-closed 拒绝、四个意图的准入/结算分离（含提前到达缓冲、
   `recovery_blocked`、派发期 cancel `turnId` 盖章、回合自行完成令 cancel 失败、并发
-  重复拦截）、快照引用稳定性与 `AbortSignal` 清理。
+  重复拦截）、快照引用稳定性与 `AbortSignal` 清理；同内容的新快照保持投影
+  身份、真实选项变化使其失效，时钟推进后到期动作仍会消失。
 - `components/managed/chat-controller.local-integration.test.tsx` 挂载真实的
-  `ChatSurface`、共享提问卡片与 Managed 控制器，通过 DOM 驱动翻页、选择及
-  自由文本输入并断言精确传输载荷；仅隔离本切片范围外的 daemon 转录与编辑器宿主。
+  `ChatSurface`、共享提问卡片与 Managed 控制器，通过 DOM 驱动翻页、选择、实际
+  父级重渲染后仍保持所选按钮的开启状态及自由文本输入，并断言精确传输载荷；
+  仅隔离本切片范围外的 daemon 转录与编辑器宿主。
   Java provider 绑定仍属切片 3b，因此这不是连接真实 Java 服务的测试。
 - `daemon/useDaemonChatController.test.tsx` 补齐钉住
   `!settledDuringSubmit.has(accepted.promptId)` 的 P3 竞态用例。

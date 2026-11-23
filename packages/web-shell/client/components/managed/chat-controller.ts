@@ -449,12 +449,22 @@ function isActionExpired(
   return action.expiresAt <= nowMs;
 }
 
+interface ManagedPendingProjectionSnapshot {
+  readonly signature: string;
+  readonly requests: ReadonlyMap<
+    string,
+    { readonly signature: string; readonly request: PermissionRequest }
+  >;
+  readonly approvals: readonly PendingApproval[];
+  readonly questions: readonly PendingQuestion[];
+}
+
 export function createManagedChatController(
   deps: ManagedChatControllerDeps,
 ): SessionChatController {
   let seq = 0;
   let inFlightDispatches = 0;
-  const tracked: TrackedOperation[] = [];
+  let tracked: TrackedOperation[] = [];
   const inFlightActionIds = new Set<string>();
   const bufferedOperationSettlement = new Map<
     string,
@@ -511,7 +521,11 @@ export function createManagedChatController(
         state: entry.state,
       }),
     );
-    cachedOperations = Object.freeze(retainOperations(projected));
+    const retained = retainOperations(projected);
+    // Keep the internal log under the same retention policy as the surface.
+    const keptIds = new Set(retained.map((operation) => operation.id));
+    tracked = tracked.filter((entry) => keptIds.has(entry.id));
+    cachedOperations = Object.freeze(retained);
     dirty = false;
     return cachedOperations;
   };
@@ -677,6 +691,11 @@ export function createManagedChatController(
       }
     }
     bindExtra?.(entry, response);
+    // Transport admission starts a pending submit; settlement alone establishes
+    // it, and recovery_blocked/unsettled must not be promoted back to running.
+    if (kind === 'submit' && entry.state === 'pending') {
+      applyState(entry, 'running');
+    }
     pruneBuffers();
 
     return {
@@ -687,6 +706,61 @@ export function createManagedChatController(
           : 'unsettled',
       target: opTarget,
     };
+  };
+
+  let pendingProjection: ManagedPendingProjectionSnapshot | undefined;
+  const projectPendingRequests = (): ManagedPendingProjectionSnapshot => {
+    const nowMs = getNow();
+    const messages = deps.messages;
+    const requests = new Map<
+      string,
+      { readonly signature: string; readonly request: PermissionRequest }
+    >();
+    const approvals: PendingApproval[] = [];
+    const questions: PendingQuestion[] = [];
+    const signatures: string[] = [];
+    for (const action of deps.pendingActions) {
+      if (isActionExpired(action, nowMs)) continue;
+      const request =
+        action.kind === 'question'
+          ? toManagedQuestionPermissionRequest(action)
+          : toManagedPermissionRequest(action, messages);
+      const signature = JSON.stringify([
+        action.actionId,
+        action.kind,
+        action.inputRevision,
+        action.policyRevision,
+        action.expiresAt,
+        request,
+      ]);
+      const previous = pendingProjection?.requests.get(action.actionId);
+      const stableRequest =
+        previous?.signature === signature ? previous.request : request;
+      requests.set(
+        action.actionId,
+        previous?.signature === signature
+          ? previous
+          : { signature, request: stableRequest },
+      );
+      signatures.push(signature);
+      if (action.kind === 'question') {
+        questions.push({ id: action.actionId, request: stableRequest });
+      } else {
+        approvals.push({
+          id: action.actionId,
+          status: 'pending',
+          request: stableRequest,
+        });
+      }
+    }
+    const signature = JSON.stringify(signatures);
+    // Pending actions can be rebuilt around every session delta. Content-keyed
+    // reuse keeps in-progress answers alive; expiry still filters every read.
+    if (pendingProjection?.signature === signature) {
+      return { ...pendingProjection, requests };
+    }
+    pendingProjection = { signature, requests, approvals, questions };
+    return pendingProjection;
   };
 
   return {
@@ -785,30 +859,10 @@ export function createManagedChatController(
       return { ...out, target: { ...out.target, turnId: cancelTarget } };
     },
     get pendingApprovals(): readonly PendingApproval[] {
-      const messages = deps.messages;
-      const nowMs = getNow();
-      return deps.pendingActions
-        .filter(
-          (action) =>
-            action.kind !== 'question' && !isActionExpired(action, nowMs),
-        )
-        .map((action) => ({
-          id: action.actionId,
-          status: 'pending' as const,
-          request: toManagedPermissionRequest(action, messages),
-        }));
+      return projectPendingRequests().approvals;
     },
     get pendingQuestions(): readonly PendingQuestion[] {
-      const nowMs = getNow();
-      return deps.pendingActions
-        .filter(
-          (action): action is ManagedAgentPendingQuestionAction =>
-            action.kind === 'question' && !isActionExpired(action, nowMs),
-        )
-        .map((action) => ({
-          id: action.actionId,
-          request: toManagedQuestionPermissionRequest(action),
-        }));
+      return projectPendingRequests().questions;
     },
     async respondApproval(
       requestId: string,

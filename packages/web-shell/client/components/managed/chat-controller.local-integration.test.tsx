@@ -12,7 +12,7 @@ vi.mock('../ChatEditor.js', () => ({
   ChatEditor: () => null,
 }));
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { I18nProvider } from '../../i18n';
 import { regionsToCapabilities } from '../../chat-core/capabilities';
 import { ChatSurface } from '../../chat-core/ChatSurface';
@@ -81,11 +81,19 @@ it('submits exact managed option ids and separately typed text through the real 
     submitApproval: vi.fn(async () => ({ admission: 'rejected' as const })),
     submitQuestion,
   });
-  const container = mountReact(
-    <I18nProvider language="en">
-      <ChatSurface controller={controller} onError={onError} />
-    </I18nProvider>,
-  );
+  let parentRenders = 0;
+  let rerenderParent!: () => void;
+  function Host() {
+    parentRenders += 1;
+    const [, setGeneration] = useState(0);
+    rerenderParent = () => setGeneration((generation) => generation + 1);
+    return (
+      <I18nProvider language="en">
+        <ChatSurface controller={controller} onError={onError} />
+      </I18nProvider>
+    );
+  }
+  const container = mountReact(<Host />);
   const question = container.querySelector('[data-testid="question-overlay"]');
   expect(question).not.toBeNull();
   const next = Array.from(question!.querySelectorAll('button')).at(-2)!;
@@ -94,6 +102,11 @@ it('submits exact managed option ids and separately typed text through the real 
     '[data-web-shell-ask-option]',
   );
   act(() => options[0]!.click());
+  expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
+  const previousRenderCount = parentRenders;
+  act(() => rerenderParent());
+  expect(parentRenders).toBeGreaterThan(previousRenderCount);
+  expect(options[0]!.getAttribute('aria-pressed')).toBe('true');
   act(() => options[2]!.click());
   const input = question!.querySelector('input')!;
   act(() => {

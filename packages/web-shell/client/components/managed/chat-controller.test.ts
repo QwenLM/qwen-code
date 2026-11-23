@@ -833,6 +833,50 @@ describe('createManagedChatController', () => {
     );
   });
 
+  it('preserves pending projection identity without hiding content changes or time expiry', () => {
+    let now = 10_000;
+    const h = createHarness({ now: () => now });
+    const liveActions = () => [
+      permissionAction({ expiresAt: 100_001 }),
+      questionAction({ expiresAt: 10_001 }),
+    ];
+    h.setPendingActions(liveActions());
+    const initialApprovals = h.controller.pendingApprovals;
+    const initialQuestions = h.controller.pendingQuestions;
+
+    h.setPendingActions(liveActions());
+    const refreshedApprovals = h.controller.pendingApprovals;
+    const refreshedQuestions = h.controller.pendingQuestions;
+    expect(refreshedApprovals).toBe(initialApprovals);
+    expect(refreshedQuestions).toBe(initialQuestions);
+
+    const changedQuestion = questionAction({
+      expiresAt: 10_001,
+      questions: questionAction().questions.map((question) => ({
+        ...question,
+        options: question.options.map((option) =>
+          option.id === 'dev' ? { ...option, label: 'Staging' } : option,
+        ),
+      })),
+    });
+    h.setPendingActions([liveActions()[0]!, changedQuestion]);
+    const changedApprovals = h.controller.pendingApprovals;
+    const changedQuestions = h.controller.pendingQuestions;
+    expect(changedApprovals).not.toBe(refreshedApprovals);
+    expect(changedQuestions).not.toBe(refreshedQuestions);
+    expect(changedApprovals[0]?.request).toBe(refreshedApprovals[0]?.request);
+    expect(changedQuestions[0]?.request.rawInput).toEqual(
+      toManagedQuestionPermissionRequest(changedQuestion).rawInput,
+    );
+
+    now = 10_001;
+    expect(h.controller.pendingQuestions).toHaveLength(0);
+    expect(h.controller.pendingApprovals).toHaveLength(1);
+    expect(h.controller.pendingApprovals[0]?.request).toBe(
+      changedApprovals[0]?.request,
+    );
+  });
+
   it('separates submit admission from establishment and settles on authoritative evidence', async () => {
     const h = createHarness();
     const d = deferred<ManagedTransportAdmission>();
@@ -854,7 +898,8 @@ describe('createManagedChatController', () => {
       outcome: 'unsettled',
       target: { sessionId: 's1' },
     });
-    expect(h.controller.operations[0]?.state).toBe('pending');
+    expect(h.controller.operations[0]?.state).toBe('running');
+    expect(h.controller.phase).toBe('running');
 
     // recovery_blocked moves operation to 'unsettled', not 'established'.
     h.emitOperation({ operationId: 'op-1', status: 'recovery_blocked' });
@@ -864,6 +909,22 @@ describe('createManagedChatController', () => {
     h.emitTurn({ turnId: 't1', outcome: 'completed' });
     expect(h.controller.operations[0]?.state).toBe('established');
     expect(h.controller.phase).toBe('idle');
+
+    const recovery = createHarness();
+    recovery.submitPrompt.mockImplementationOnce(async () => {
+      recovery.emitOperation({
+        operationId: 'op-recovery-early',
+        status: 'recovery_blocked',
+      });
+      return {
+        admission: 'accepted',
+        operationId: 'op-recovery-early',
+        turnId: 't-recovery-early',
+      };
+    });
+    const recovered = await recovery.controller.submit({ text: 'recovering' });
+    expect(recovered.outcome).toBe('unsettled');
+    expect(recovery.controller.operations[0]?.state).toBe('unsettled');
   });
 
   it('applies buffered early settlements for operation, submit turn, cancel turn, approval, and question (R1-6)', async () => {
@@ -1259,9 +1320,9 @@ describe('createManagedChatController', () => {
     expect(afterCatchDrain.outcome).toBe('unsettled');
   });
 
-  it('settles an in-flight cancel even when the shared submit row is still pending, and establishes submit on cancelled turn (G1 / B1 / R2-3)', async () => {
+  it('settles an in-flight cancel while the shared submit turn is running, and establishes submit on cancelled turn (G1 / B1 / R2-3)', async () => {
     const h = createHarness();
-    // G1 / cell B1: submit is admitted and still PENDING (not terminal yet);
+    // G1 / cell B1: submit is admitted and running (not terminal yet);
     // cancel(t1) is in flight when turn t1 settles 'completed' and sessionPhase
     // becomes 'completed' -> cancel must fail and phase must return to 'idle'.
     h.setPhase('agent_running');
@@ -1269,7 +1330,7 @@ describe('createManagedChatController', () => {
     await h.controller.submit({ text: 'running turn' });
     expect(
       h.controller.operations.find((op) => op.kind === 'submit')?.state,
-    ).toBe('pending');
+    ).toBe('running');
 
     const dCan = deferred<ManagedTransportAdmission>();
     h.cancelTurn.mockReturnValueOnce(dCan.promise);
