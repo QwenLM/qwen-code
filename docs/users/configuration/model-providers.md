@@ -518,6 +518,38 @@ Things to know about this endpoint:
 - **Nothing to set for `openai/gpt-5-4-nano`.** Its last segment, `gpt-5-4-nano`, is in the lookup, which gives it image input and a window no larger than the 400,000 tokens the catalog reports.
 - **Set `contextWindowSize` and `modalities` for `claude/sonnet-5`.** Its last segment, `sonnet-5`, is not a name the lookup knows (the lookup has `claude-sonnet-5`), so without them the entry gets the generic 200K window and is treated as text-only. The example sets the 1,000,000-token `context_length` and the image input the catalog reports. The default output request stays below the output limit of both models.
 
+### Straitly
+
+[Straitly](https://straitly.ai) is an AI gateway with one OpenAI-compatible API key for 150+ models, including Claude, GPT, Gemini, Grok and DeepSeek. It serves an OpenAI-compatible endpoint at `https://api.straitly.ai/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key on the [API keys page](https://straitly.ai/app/keys); the [quickstart](https://straitly.ai/docs/quickstart) covers account setup. Model ids are lowercase `owner/model`. The catalog at `GET https://api.straitly.ai/v1/models` needs no key and returns the current ids with each model's `context_length`, `top_provider.max_completion_tokens` and input modalities.
+
+```json
+{
+  "env": {
+    "STRAITLY_API_KEY": "<your Straitly API key>"
+  },
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "deepseek/deepseek-v4-1-flash",
+        "name": "DeepSeek V4.1 Flash (Straitly)",
+        "envKey": "STRAITLY_API_KEY",
+        "baseUrl": "https://api.straitly.ai/v1",
+        "generationConfig": {
+          "modalities": { "image": true }
+        }
+      }
+    ]
+  },
+  "security": { "auth": { "selectedType": "openai" } },
+  "model": { "name": "deepseek/deepseek-v4-1-flash" }
+}
+```
+
+Things to know about this endpoint:
+
+- **The built-in model lookup sees only the segment after the last `/`.** `deepseek/deepseek-v4-1-flash` resolves as `deepseek-v4-1-flash`. For any other id, compare what the lookup gives with the catalog and set the fields that differ.
+- **Set `modalities` for `deepseek/deepseek-v4-1-flash`.** The lookup gives it the 1,048,576-token window the catalog reports, and the default output request stays below the 1,048,576-token output limit the catalog lists, but the lookup treats it as text-only while the catalog lists text and image input. The example turns image input on.
+
 ### OpenAI Responses API (`openai-responses`)
 
 Use `openai` with `wireApi: "responses"` to target OpenAI's `/v1/responses` endpoint. When the endpoint returns encrypted reasoning with visible thought text, it replays prior-turn reasoning across turns and `--resume` via `reasoning.encrypted_content`. Compatible endpoints that stream `response.reasoning_text.delta` also display their reasoning, but endpoints without `encrypted_content` cannot replay the opaque reasoning state. Use `reasoning.effort` (not `extra_body.enable_thinking`, which the Chat Completions wires use) to control reasoning intensity.
