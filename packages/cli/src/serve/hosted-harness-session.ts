@@ -9113,7 +9113,9 @@ export function registerHostedHarnessSessionRoutes(
         (hasUnsettledInput(session, unsettledThrough) &&
           !resume &&
           !settlePromptId &&
-          !session.hooks &&
+          // A Hooks Session otherwise recovers through this load, but only a
+          // takeover may resume a parked command step (R9-1).
+          (!session.hooks || commandStepPark) &&
           !recovery &&
           !inapplicableAnswer)
       ) {

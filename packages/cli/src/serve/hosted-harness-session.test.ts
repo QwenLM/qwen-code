@@ -47376,10 +47376,13 @@ describe('idle suspension', () => {
   }
 
   // An extension command whose one step runs a Shell command, which asks in
-  // the default approval mode. Returns the Broker's command executions and the
-  // initial extension selection that installs the command.
-  async function mockCommandStepTurn(): Promise<{
+  // the default approval mode. Returns the Broker's command executions, the
+  // Hook catalog reads, and the initial extension selection that installs the
+  // command. With `hooks`, the extension brings a Hook catalog, as production
+  // staging derives one from a package's hooks.
+  async function mockCommandStepTurn(hooks = false): Promise<{
     commands: unknown[];
+    catalogReads: unknown[];
     selection: Record<string, unknown>;
   }> {
     const source = path.join(state.root, 'command-extension');
@@ -47419,7 +47422,40 @@ describe('idle suspension', () => {
         (await compileManagedExtensionPackage(root, { target })).contributions,
       drain: async () => undefined,
       install: async () => undefined,
+      ...(hooks
+        ? { stage: async () => ({ mcpServers: [], hookCatalog: hookPin }) }
+        : {}),
     });
+    const catalogReads: unknown[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl').mockImplementation(
+      async (operation) => {
+        if (operation.kind !== 'hook-catalog')
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            result: { success: true, outcome: 'success', duration: 0 },
+          };
+        catalogReads.push(operation.pin);
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          catalog: {
+            ...operation.pin,
+            hooks: [
+              {
+                hookId: HookEventName.Notification,
+                eventName: HookEventName.Notification,
+                sequential: false,
+                async: false,
+                failClosed: true,
+                onceKey: null,
+                config: { type: 'command' as const },
+              },
+            ],
+          },
+        };
+      },
+    );
     await runtime.cache.upload(
       prepared.packageDigest,
       createReadStream(prepared.archivePath),
@@ -47502,6 +47538,7 @@ describe('idle suspension', () => {
     );
     return {
       commands,
+      catalogReads,
       selection: {
         operationId: randomUUID(),
         actorKey: 'a'.repeat(64),
@@ -47519,143 +47556,153 @@ describe('idle suspension', () => {
 
   // A bare load must never answer the parked command step: answering writes
   // the plan's own skill call a result and destroys the continuation (R9-1).
+  // Nor may it attach a Hooks Session, which no later load could then resume.
   // The extension configuration the plan pins cannot change meanwhile either.
-  it('parks a command-step approval that a bare load leaves unanswered and the decision-delivery load resumes', async () => {
-    state.wakeDispatch = true;
-    state.actionParking = true;
-    state.wakeStamps.length = 0;
-    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
-    const fixture = await mockCommandStepTurn();
-    const definition = {
-      managedSessionStore: store(),
-      toolProfile: 'hosted-workspace-shell/1',
-      initialSelection: fixture.selection,
-    };
-    try {
-      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
-      const created = await headers(supertest(server).post('/session'))
-        .send({
-          ...definition,
-          sessionId: SESSION_ID,
-          sessionScope: 'thread',
-          approvalMode: 'default',
-          approvalTimeoutMs: 60_000,
-        })
-        .expect(200);
-      const clientId = created.body.clientId as string;
-      const prompt = [{ type: 'text', text: 'run the step' }];
-      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
-        .set('X-Qwen-Client-Id', clientId)
-        .send({
-          prompt,
-          promptId: PROMPT_ID,
-          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
-        })
-        .expect(202);
-      await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
-        timeout: 5000,
+  it.each([false, true])(
+    'parks a command-step approval that a bare load leaves unanswered and the decision-delivery load resumes (hooks=%s)',
+    async (hooks) => {
+      state.wakeDispatch = true;
+      state.actionParking = true;
+      state.wakeStamps.length = 0;
+      state.approvalSelections.set(SESSION_ID, {
+        mode: 'default',
+        revision: 0,
       });
-      expect(statsOf(server).parkRefusals).toEqual({});
-      await vi.waitFor(
-        async () => {
-          expect((await statusOf(server, clientId)).status).toBe(404);
-        },
-        { timeout: 5000 },
-      );
-      const read = () =>
-        LocalJsonlManagedSessionJournalStore.read({
-          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
-          runtimeBaseDir: state.root,
-          sessionKey: {
-            tenantId: 'tenant',
-            workspaceId: 'workspace',
+      const fixture = await mockCommandStepTurn(hooks);
+      const definition = {
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        initialSelection: fixture.selection,
+      };
+      try {
+        const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+        const created = await headers(supertest(server).post('/session'))
+          .send({
+            ...definition,
             sessionId: SESSION_ID,
-          },
+            sessionScope: 'thread',
+            approvalMode: 'default',
+            approvalTimeoutMs: 60_000,
+          })
+          .expect(200);
+        const clientId = created.body.clientId as string;
+        const prompt = [{ type: 'text', text: 'run the step' }];
+        await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+          .set('X-Qwen-Client-Id', clientId)
+          .send({
+            prompt,
+            promptId: PROMPT_ID,
+            payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          })
+          .expect(202);
+        await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+          timeout: 5000,
         });
-      const parked = await read();
-      const bare = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/load`),
-      )
-        .send(definition)
-        .expect(409);
-      expect(bare.body).toMatchObject({
-        code: 'hosted_turn_recovery_required',
-        reason: 'turn_unsettled',
-      });
-      const afterBare = await read();
-      expect(
-        afterBare.events
-          .slice(parked.events.length)
-          .filter((event) =>
-            ['message.committed', 'action.changed', 'turn.settled'].includes(
-              event.kind,
-            ),
-          ),
-      ).toEqual([]);
-      const requestId = afterBare.events.findLast(
-        (event) =>
-          event.kind === 'action.changed' &&
-          event.payload['state'] === 'requested',
-      )!.payload['requestId'] as string;
-      expect(requestId).toMatch(/^command_approval_/);
-      expect(fixture.commands).toEqual([]);
-      const loaded = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/load`),
-      )
-        .send({ ...definition, passiveManagedRuntimeRecovery: true })
-        .expect(200);
-      const resumedClient = loaded.body.clientId as string;
-      const apply = await headers(
-        supertest(server).post(`/session/${SESSION_ID}/extensions/management`),
-      )
-        .set('X-Qwen-Client-Id', resumedClient)
-        .send({
-          command: {
-            ...fixture.selection,
-            operationId: randomUUID(),
-            expectedRevision: 1,
-            extensions: [],
+        expect(statsOf(server).parkRefusals).toEqual({});
+        expect(fixture.catalogReads.length > 0).toBe(hooks);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, clientId)).status).toBe(404);
           },
-        })
-        .expect(409);
-      expect(apply.body.code).toBe('hosted_turn_active');
-      await headers(
-        supertest(server).post(
-          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
-        ),
-      )
-        .set('X-Qwen-Client-Id', resumedClient)
-        .send({
-          optionId: 'allow',
-          inputRevision: 1,
-          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
-        })
-        .expect(200);
-      await vi.waitFor(
-        async () => {
-          expect((await statusOf(server, resumedClient)).body).toMatchObject({
-            hasActivePrompt: false,
-            recoveryBlocked: false,
+          { timeout: 5000 },
+        );
+        const read = () =>
+          LocalJsonlManagedSessionJournalStore.read({
+            transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+            runtimeBaseDir: state.root,
+            sessionKey: {
+              tenantId: 'tenant',
+              workspaceId: 'workspace',
+              sessionId: SESSION_ID,
+            },
           });
-        },
-        { timeout: 5000 },
-      );
-      expect(fixture.commands).toEqual(['printf parked']);
-      expect(state.model).toHaveBeenLastCalledWith(
-        expect.objectContaining({ resumeFromToolResults: expect.any(Array) }),
-      );
-      await vi.waitFor(
-        async () => {
-          expect((await statusOf(server, resumedClient)).status).toBe(404);
-        },
-        { timeout: 5000 },
-      );
-    } finally {
-      state.wakeDispatch = false;
-      state.actionParking = false;
-      state.approvalSelections.clear();
-    }
-  });
+        const parked = await read();
+        const bare = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send(definition)
+          .expect(409);
+        expect(bare.body).toMatchObject({
+          code: 'hosted_turn_recovery_required',
+          reason: 'turn_unsettled',
+        });
+        const afterBare = await read();
+        expect(
+          afterBare.events
+            .slice(parked.events.length)
+            .filter((event) =>
+              ['message.committed', 'action.changed', 'turn.settled'].includes(
+                event.kind,
+              ),
+            ),
+        ).toEqual([]);
+        const requestId = afterBare.events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['state'] === 'requested',
+        )!.payload['requestId'] as string;
+        expect(requestId).toMatch(/^command_approval_/);
+        expect(fixture.commands).toEqual([]);
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({ ...definition, passiveManagedRuntimeRecovery: true })
+          .expect(200);
+        const resumedClient = loaded.body.clientId as string;
+        const apply = await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/extensions/management`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', resumedClient)
+          .send({
+            command: {
+              ...fixture.selection,
+              operationId: randomUUID(),
+              expectedRevision: 1,
+              extensions: [],
+            },
+          })
+          .expect(409);
+        expect(apply.body.code).toBe('hosted_turn_active');
+        await headers(
+          supertest(server).post(
+            `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+          ),
+        )
+          .set('X-Qwen-Client-Id', resumedClient)
+          .send({
+            optionId: 'allow',
+            inputRevision: 1,
+            policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+          })
+          .expect(200);
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).body).toMatchObject({
+              hasActivePrompt: false,
+              recoveryBlocked: false,
+            });
+          },
+          { timeout: 5000 },
+        );
+        expect(fixture.commands).toEqual(['printf parked']);
+        expect(state.model).toHaveBeenLastCalledWith(
+          expect.objectContaining({ resumeFromToolResults: expect.any(Array) }),
+        );
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, resumedClient)).status).toBe(404);
+          },
+          { timeout: 5000 },
+        );
+      } finally {
+        state.wakeDispatch = false;
+        state.actionParking = false;
+        state.approvalSelections.clear();
+      }
+    },
+  );
 
   it('parks a recoverable approval and resumes it through cold recovery', async () => {
     state.wakeDispatch = true;
