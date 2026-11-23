@@ -1,4 +1,4 @@
-import { Fragment, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   CircleDashedIcon,
@@ -119,6 +119,18 @@ export function WorkspaceSelector({
   };
   const [tooltipOpen, setTooltipOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const subMountSettledRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    subMountSettledRef.current = false;
+    queueMicrotask(() => {
+      if (active) subMountSettledRef.current = true;
+    });
+    return () => {
+      active = false;
+      subMountSettledRef.current = false;
+    };
+  }, []);
   const menuOpenRef = useRef(menuOpen);
   menuOpenRef.current = menuOpen;
   const suppressTooltipRef = useRef(false);
@@ -326,7 +338,17 @@ export function WorkspaceSelector({
               <DropdownMenuSub
                 open={newWorkspaceOpen}
                 onOpenChange={(next) => {
-                  if (!next && !triggerRef.current?.isConnected) return;
+                  // Radix MenuSub fires onOpenChange(false) from its passive
+                  // cleanup on both responsive unmount and StrictMode's
+                  // synchronous mount check; ignore teardown while preserving
+                  // all interactive closes once mounted.
+                  if (
+                    !next &&
+                    (!triggerRef.current?.isConnected ||
+                      !subMountSettledRef.current)
+                  ) {
+                    return;
+                  }
                   setNewWorkspaceOpen(next);
                 }}
               >

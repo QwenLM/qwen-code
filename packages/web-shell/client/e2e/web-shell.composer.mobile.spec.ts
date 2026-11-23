@@ -2103,7 +2103,7 @@ test('mobile workspace row does not shrink the attachments strip @smoke', async 
       ),
       inlineContextCount: await target
         .locator('[data-web-shell-mobile-editing-actions]')
-        .locator('[data-web-shell-git-branch]')
+        .locator('[class*="mobileContextRow"]')
         .count(),
       inlineContextHeight: await target.evaluate(() =>
         getComputedStyle(
@@ -2123,6 +2123,7 @@ test('mobile workspace row does not shrink the attachments strip @smoke', async 
     expect(withRow.inlineContextCount).toBe(1);
     expect(withRow.inlineContextHeight).toBe('44px');
     expect(withoutRow.inlineContextCount).toBe(0);
+    expect(withoutRow.inlineContextHeight).toBe('');
     expect(withRow.height).toBeGreaterThanOrEqual(withoutRow.height);
   } finally {
     await secondPage.close();

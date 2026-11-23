@@ -176,7 +176,7 @@ createRoot(document.getElementById('root')!).render(
         <main
           data-web-shell-root
           data-web-shell-shadcn
-          className="theme-dark"
+          className="dark"
           style={{ minHeight: '100vh', padding: 24 }}
         >
           <WebShellCustomizationProvider value={{ composerGlowEnabled: false }}>

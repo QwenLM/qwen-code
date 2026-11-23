@@ -56,6 +56,16 @@ test('context menus and unconfirmed Git input survive responsive placement @smok
   await go(page, 'interactive-git');
   const actions = page.locator('[data-web-shell-mobile-editing-actions]');
   await expect(actions).toHaveAttribute('data-mobile-layout', 'medium');
+  await expect(
+    actions.locator('[data-web-shell-git-branch-label]'),
+  ).toBeHidden();
+  expect(
+    await page
+      .locator('[data-web-shell-root]')
+      .evaluate((el) =>
+        getComputedStyle(el).getPropertyValue('--popover').trim(),
+      ),
+  ).toBe('oklch(0.205 0 0)');
   const chip = page.getByTestId('git-mode-chip');
   await chip.tap();
   await page.getByRole('radio').nth(1).tap();
@@ -63,6 +73,10 @@ test('context menus and unconfirmed Git input survive responsive placement @smok
   await branchInput.fill('feature/unconfirmed');
   for (const width of [390, 528]) {
     await page.setViewportSize({ width, height: 844 });
+    await expect(actions).toHaveAttribute(
+      'data-mobile-layout',
+      width === 390 ? 'narrow' : 'medium',
+    );
     await expect(branchInput).toBeVisible();
     await expect(branchInput).toHaveValue('feature/unconfirmed');
   }
@@ -86,6 +100,10 @@ test('context menus and unconfirmed Git input survive responsive placement @smok
   await expect(page.getByRole('menu')).toBeVisible();
   for (const width of [390, 528]) {
     await page.setViewportSize({ width, height: 844 });
+    await expect(actions).toHaveAttribute(
+      'data-mobile-layout',
+      width === 390 ? 'narrow' : 'medium',
+    );
     await expect(page.getByRole('menu')).toBeVisible();
     await expect(page.getByRole('menuitemradio')).toHaveCount(2);
   }
@@ -96,6 +114,10 @@ test('context menus and unconfirmed Git input survive responsive placement @smok
   await expect(scratchItem).toBeVisible();
   for (const width of [390, 528]) {
     await page.setViewportSize({ width, height: 844 });
+    await expect(actions).toHaveAttribute(
+      'data-mobile-layout',
+      width === 390 ? 'narrow' : 'medium',
+    );
     await expect(scratchItem).toBeVisible();
   }
   // Explicitly closing Workspace resets the nested submenu on the next open.
