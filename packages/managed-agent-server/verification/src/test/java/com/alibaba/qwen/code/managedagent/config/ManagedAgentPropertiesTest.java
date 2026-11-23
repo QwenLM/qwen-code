@@ -36,6 +36,20 @@ public class ManagedAgentPropertiesTest {
             "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery";
 
     @Test
+    void actionParkingRequiresWakeDispatchAtStartup() {
+        var environment = new org.springframework.mock.env.MockEnvironment()
+                .withProperty("qwen.managed-agent.action-parking.enabled", "true");
+        var properties = new ManagedAgentProperties();
+        properties.setEnvironment(environment);
+        assertThatThrownBy(properties::validateWorkspaceFiles)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("wake-dispatch.enabled");
+
+        environment.setProperty("qwen.managed-agent.wake-dispatch.enabled", "true");
+        assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+    }
+
+    @Test
     void generatedAccessorsKeepNestedBindingAndInternalStatePrivate() {
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
@@ -1033,6 +1047,32 @@ public class ManagedAgentPropertiesTest {
         assertThat(properties.admitsPublicChildAgents()).isFalse();
         properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
         properties.getRuntimeBroker().setProvisioner("static");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+    }
+
+    @Test
+    public void publicChildrenAdmitAnSshBrokerWithNodesAndSessionIsolation() {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getRuntimeBroker().setProvisioner("ssh-process");
+        // D5′: the SSH arm mirrors the sshFiles capability expression — a
+        // configured node and session isolation on both classes.
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().getSsh().setNodes(List.of(new SshRuntimeSettings.Node(
+                "remote", "Remote", "remote-host", "/node", "/cli.js", "/state",
+                List.of("/work"), 41270, "0.25.1", List.of())));
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        assertThat(properties.admitsPublicChildAgents()).isFalse();
+        properties.getRuntimeBroker().setBoundSessionIsolationClass("session");
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        // durable-local-process belongs to the local arm only.
+        properties.getRuntimeBroker().setDurableLocalProcess(false);
+        assertThat(properties.admitsPublicChildAgents()).isTrue();
+        properties.getRuntimeBroker().setProvisioner("external-scratch");
         assertThat(properties.admitsPublicChildAgents()).isFalse();
     }
 

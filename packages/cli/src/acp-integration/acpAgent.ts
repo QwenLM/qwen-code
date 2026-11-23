@@ -259,6 +259,11 @@ import { readBackgroundShellOutputTail } from '@qwen-code/qwen-code-core/service
 import { sampleProcessTreeRssBytes } from '@qwen-code/qwen-code-core/utils/process-resources.js';
 import { expandHomeDir } from '@qwen-code/qwen-code-core/utils/paths.js';
 import { getBtwSession } from '@qwen-code/qwen-code-core/agents/btw-session.js';
+import { logUserFeedback } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import {
+  UserFeedbackEvent,
+  UserFeedbackRating,
+} from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { formatBtwToolCallNotice } from '../ui/utils/btw-view.js';
 import type { Stats } from 'node:fs';
 import { realpathSync } from 'node:fs';
@@ -7346,7 +7351,7 @@ class QwenAgent implements Agent {
             if (
               !confirmed ||
               (tierSelected &&
-                getGptReasoningOverrideState(generation, modelReasoning)
+                getGptReasoningOverrideState(generation, modelReasoning, config)
                   ?.blocksTierChange)
             ) {
               throw RequestError.invalidParams(
@@ -12661,7 +12666,11 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
         const sessionId = params['sessionId'];
-        const displayName = params['displayName'];
+        const initial =
+          params['displayName'] === undefined &&
+          params['initialDisplayName'] !== undefined;
+        const displayName =
+          params[initial ? 'initialDisplayName' : 'displayName'];
         const titleSource = params['titleSource'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
@@ -12683,11 +12692,15 @@ class QwenAgent implements Agent {
         }
         const session = this.sessionOrThrow(sessionId);
         const source =
-          titleSource === 'auto' ? ('auto' as const) : ('manual' as const);
+          initial || titleSource === 'auto'
+            ? ('auto' as const)
+            : ('manual' as const);
         const recording = session.getConfig().getChatRecordingService();
         let ok = false;
         if (recording) {
-          ok = await recording.recordCustomTitle(displayName, source);
+          ok = initial
+            ? await recording.recordInitialTitle(displayName)
+            : await recording.recordCustomTitle(displayName, source);
         }
         return { sessionId, displayName, titleSource: source, persisted: ok };
       }
@@ -14737,6 +14750,51 @@ class QwenAgent implements Agent {
           cwd,
           readSettledTurnResult,
         );
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionFeedback: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const promptId = params['promptId'];
+        if (typeof promptId !== 'string' || promptId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing promptId',
+          );
+        }
+        const rating = params['rating'];
+        if (rating !== 'up' && rating !== 'down') {
+          throw RequestError.invalidParams(
+            undefined,
+            "`rating` must be 'up' or 'down'",
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const config = session.getConfig();
+        const settings = loadSettingsCached(this.sessionWorkspaceRoot(config));
+        if (settings.merged.ui?.enableUserFeedback === false) {
+          return { recorded: false };
+        }
+        // Explicit enum mapping: the TUI dialog casts its option ordinals
+        // (GOOD:1, BAD:2, FINE:3) straight into this BAD=1/FINE=2/GOOD=3
+        // enum, rotating every rating. Never reuse that cast here.
+        const mappedRating =
+          rating === 'up' ? UserFeedbackRating.GOOD : UserFeedbackRating.BAD;
+        logUserFeedback(
+          config,
+          new UserFeedbackEvent(
+            config.getSessionId(),
+            mappedRating,
+            config.getModel(),
+            config.getApprovalMode(),
+            promptId,
+          ),
+        );
+        return { recorded: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionContinue: {
         const sessionId = params['sessionId'];
@@ -18489,6 +18547,7 @@ class QwenAgent implements Agent {
     const gptOverride = getGptReasoningOverrideState(
       generation,
       modelReasoning,
+      config,
     );
     if (
       modelReasoning?.profile &&
@@ -18502,6 +18561,7 @@ class QwenAgent implements Agent {
         ? getGptReasoningOverrideState(
             { ...generation, reasoning: undefined },
             modelReasoning,
+            config,
           )
         : gptOverride;
     const mandatoryUsesDefaultEffort =

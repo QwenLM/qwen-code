@@ -424,15 +424,15 @@ class SessionLifecycleCoordinatorTest {
 
     /** A workspace-bound parent with one child Session, close admitted. */
     private static World closingWorld(String suffix) {
-        return closingWorldOp(suffix, false);
+        return closingWorldOp(suffix, 0);
     }
 
-    /** The same world, but closing under the lifecycle protocol (P1). */
+    /** The same world, but deleting under lifecycle v2 (ordinary files). */
     private static World closingWorldLifecycle(String suffix) {
-        return closingWorldOp(suffix, true);
+        return closingWorldOp(suffix, 2);
     }
 
-    private static World closingWorldOp(String suffix, boolean protocolOne) {
+    private static World closingWorldOp(String suffix, int lifecycleProtocol) {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-cascade-" + suffix + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -476,10 +476,13 @@ class SessionLifecycleCoordinatorTest {
                         new StoreModels.SessionLineage(session, session,
                                 "run-1", 1))
                 .sessionId());
-        String operation = transactions.execute(ignored -> protocolOne
+        // D3: ordinary files closes on lifecycle v2. The cascade claim
+        // tagging is protocol-independent (any active lifecycle claim
+        // tags the child updates).
+        String operation = transactions.execute(ignored -> lifecycleProtocol != 0
                 ? store.beginWorkspaceLifecycle("tenant", session,
                         OperationKind.DELETE, "owner", "a".repeat(64),
-                        "delete", "digest", true, 1)
+                        "delete", "digest", true, lifecycleProtocol)
                         .operation().operationId()
                 : store.beginWorkspaceClose("tenant", session, "owner",
                         "a".repeat(64), "close", "digest", true)
@@ -556,29 +559,27 @@ class SessionLifecycleCoordinatorTest {
     private static void jdbcLiveScope(JdbcTemplate jdbc, String session,
             String resourceBody, String taskKind) {
         jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant',"
+                        + " VALUES (?, 'tenant',"
                         + " 'workspace', ?, 'child_run', 'run-1', 'h', 1,"
                         + " 'res-run-1', '" + taskKind + "', 'running', 'session',"
                         + " 'planned', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", session),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(session, "child_run", "run-1"), session);
         byte[] bytes = resourceBody.getBytes(StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource"
-                        + " (resource_key, session_scope_key, tenant_id, workspace_id,"
+                        + " (resource_key, tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version,"
                         + " byte_length, sha256, storage_kind, inline_bytes,"
                         + " publish_command_id, state, gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, 'tenant', 'workspace', ?,"
                         + " 'res-run-1', 'managed-input', 1, ?,"
                         + " '" + "b".repeat(64) + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 ManagedSessionStore.resourceKey(
-                        ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"),
-                ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, bytes);
+                        ManagedSessionStore.sessionScopeKey("tenant", session), "res-run-1"), session, bytes.length, bytes);
     }
 
     private String childCloseOperation(World world) {
@@ -827,14 +828,13 @@ class SessionLifecycleCoordinatorTest {
         World world = closingWorld("team-");
         liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, ?, 'tenant',"
+                        + " VALUES (?, 'tenant',"
                         + " 'workspace', ?, 'team_state', 'team-1', 'h', 2,"
                         + " 'res-team-1', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", world.session),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.session, "team_state", "team-1"), world.session);
         var harness = new CascadingHarness(true, false);
         try (var executor = Executors.newSingleThreadExecutor()) {
@@ -1347,9 +1347,11 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
-    // P1: the cascade's child updates ride the parent's own lifecycle
-    // claim — the fence's matching key. An ordinary parent's updates
-    // stay exactly plain.
+    // The cascade's child updates ride the parent's own lifecycle claim
+    // — the fence's matching key — under lifecycle v2 (ordinary files);
+    // a protocol-0 parent's updates stay exactly plain. External-files
+    // (v1) parents cannot admit children, so v2 is the only reachable
+    // claimed shape.
     @Test
     void lifecycleProtocolClaimTagsEveryCascadeOperation() {
         World plainWorld = closingWorld("claim-plain-");
@@ -1377,6 +1379,8 @@ class SessionLifecycleCoordinatorTest {
                 var lifecycleRecord = lifecycleWorld.store.findOperation(
                         "tenant", lifecycleWorld.session,
                         lifecycleWorld.operation).orElseThrow();
+                assertThat(lifecycleRecord.lifecycleProtocolVersion())
+                        .isEqualTo(2);
                 coordinator.runLifecycleChildOperation(lifecycleRecord,
                         tagged);
                 assertThat(tagged).containsEntry("authority", Map.of(
@@ -1853,14 +1857,13 @@ class SessionLifecycleCoordinatorTest {
      * (journalTurns), for the cascade's message-stop tests (#13875). */
     private static void pendingSessionMessage(World world) {
         world.jdbc.update("INSERT INTO ma_session_record"
-                        + " (session_scope_key, record_key, tenant_id,"
+                        + " (record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " gmt_create)"
-                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, 'tenant', 'workspace', ?,"
                         + " 'session_message', 'msg_1:message', 'h', 1,"
                         + " 'res-msg-1', 1)",
-                ManagedSessionStore.sessionScopeKey("tenant", world.child),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(world.child, "session_message", "msg_1:message"),
                 world.child);
         byte[] journal = ("{\"subtype\":\"managed_session_event_v1\","
