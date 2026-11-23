@@ -812,6 +812,15 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
         openSpy.mock.calls.filter(([openedPath]) => openedPath === filePath),
       ).toHaveLength(1);
       expect(directorySpy).not.toHaveBeenCalledWith(projectsDir);
+      // A different caller root does not disqualify durable metadata paths.
+      const mismatch = await loadUsageHistory(undefined, {
+        projectRoot: path.join(project, 'another-workspace'),
+      });
+      expect(totalTokensOf(aggregateUsage(mismatch, 'all'))).toBe(1200);
+      expect(
+        openSpy.mock.calls.filter(([openedPath]) => openedPath === filePath),
+      ).toHaveLength(1);
+      expect(directorySpy).not.toHaveBeenCalledWith(projectsDir);
     } finally {
       directorySpy.mockRestore();
       openSpy.mockRestore();
@@ -880,6 +889,81 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       openSpy.mockRestore();
     }
     expect(usageLines()).toHaveLength(2);
+  });
+
+  it('discovers an unmapped session beside a verified project path', async () => {
+    const start = Date.parse('2026-06-12T00:00:00Z');
+    const resolvedProject = '/resolved/project';
+    const unmappedProject = '/unmapped/project';
+    const resolvedId = 'resolved-session';
+    const unmappedId = 'unmapped-session';
+    const resolvedFile = new SessionService(resolvedProject, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(resolvedId);
+    const unmappedFile = new SessionService(unmappedProject, {
+      runtimeBaseDir: process.env['QWEN_HOME']!,
+    }).getSessionTranscriptPath(unmappedId);
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(resolvedFile))),
+      resolvedId,
+      {
+        cwd: resolvedProject,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 600,
+        assistant: true,
+      },
+    );
+    writeTranscript(
+      path.basename(path.dirname(path.dirname(unmappedFile))),
+      unmappedId,
+      {
+        cwd: unmappedProject,
+        day: '2026-06-11',
+        durationMs: 1200,
+        tokens: 900,
+        assistant: true,
+      },
+    );
+    writeTranscript('unlisted-project', 'unlisted-session', {
+      cwd: '/unlisted/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens: 700,
+    });
+    seedPersisted([
+      {
+        ...runRec(resolvedId, 600, start, start + 60_000),
+        project: resolvedProject,
+      },
+    ]);
+    const projectsDir = path.join(process.env['QWEN_HOME']!, 'projects');
+    const directorySpy = vi.spyOn(fs, 'readdirSync');
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    const selectedPaths = new Set([resolvedFile, unmappedFile]);
+    try {
+      for (let i = 0; i < 2; i++) {
+        const records = await loadUsageHistory(unmappedId);
+        expect(records.map(({ sessionId }) => sessionId).sort()).toEqual([
+          'resolved-session',
+          'resolved-session',
+          'unmapped-session',
+        ]);
+        expect(totalTokensOf(aggregateUsage(records, 'all'))).toBe(2100);
+      }
+      expect(openSpy).toHaveBeenCalledWith(resolvedFile, expect.anything());
+      expect(openSpy).toHaveBeenCalledWith(unmappedFile, expect.anything());
+      expect(
+        openSpy.mock.calls.filter(([openedPath]) =>
+          selectedPaths.has(String(openedPath)),
+        ),
+      ).toHaveLength(2);
+      expect(directorySpy).toHaveBeenCalledWith(projectsDir);
+    } finally {
+      directorySpy.mockRestore();
+      openSpy.mockRestore();
+    }
+    expect(usageLines()).toHaveLength(1);
   });
 
   it('retains discovery and directory priority when a session has ambiguous roots', async () => {

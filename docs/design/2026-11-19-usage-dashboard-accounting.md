@@ -326,10 +326,12 @@ matching persisted project metadata or the caller's explicitly supplied active
 workspace. These verified paths may span different project directories. When
 the caller supplies that workspace, an absent transcript for another known run
 is skipped in place rather than triggering a full directory scan. A session id
-with multiple candidate roots, unknown or caller-mismatched identities, or a
-stale file retains full directory discovery rather than guessing. Empty
-boundary maps also do not prove that a current transcript has no real
-activity: a non-persisted session beside legacy cumulative history
+with multiple candidate roots, no resolved transcript mapping, or a stale file
+retains full directory discovery rather than guessing. A mismatch between the
+caller workspace and persisted project metadata does not itself force root
+enumeration; it requires the mapped transcript to exist. Empty boundary maps
+also do not prove that a current transcript has no real activity: a
+non-persisted session beside legacy cumulative history
 still needs reconstruction. Eliminating the fallback by skipping such a
 session would lose genuine usage; a safe alternative needs a validated
 session-to-directory index, not a guessed absence of work. Discovering new,
