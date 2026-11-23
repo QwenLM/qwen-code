@@ -5,6 +5,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { once } from 'node:events';
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
@@ -18,7 +19,10 @@ import {
   normalizeBasePath,
   parseArgs,
 } from '../../scripts/verify-pr-model-proxy.mjs';
-import { checkArtifacts } from '../../scripts/verify-pr-check.mjs';
+import {
+  checkArtifacts,
+  checkBoundary,
+} from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-model-proxy.mjs', import.meta.url),
@@ -2819,15 +2823,15 @@ describe('local container recipe pins', () => {
       ],
       [
         'watch-state start',
-        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo>',
+        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <H> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"',
       ],
       [
         'watch-state complete',
-        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>',
+        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <H> --round <r> --registration-nonce <nonce> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo> --state-root "<trusted-dir>"',
       ],
       [
         'watch-state release',
-        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>',
+        'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"',
       ],
       [
         'watch-gate probe',
@@ -2951,9 +2955,9 @@ describe('local container recipe pins', () => {
       ),
     ).toBe(false);
     const prepareFailureRelease =
-      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo>';
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>] --registration-nonce <nonce> --repo <owner>/<repo> --state-root "<trusted-dir>"';
     const repeatedStart =
-      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo>';
+      'node <clone>/scripts/verify-pr-watch-state.mjs <n> --start --head <headSha> --round <r> --repo <owner>/<repo> --state-root "<trusted-dir>"';
     expect(skill).toContain(prepareFailureRelease);
     expect(skill).toContain(repeatedStart);
     expect(
@@ -4087,10 +4091,71 @@ describe('local container recipe pins', () => {
       ],
     ]) {
       let previous = -1;
-      for (const title of titles) {
-        const position = document.indexOf(title);
-        expect(position, title).toBeGreaterThan(previous);
-        previous = position;
+      const positions = titles.map((title) => document.indexOf(title));
+      for (const [index, title] of titles.entries()) {
+        expect(positions[index], title).toBeGreaterThan(previous);
+        previous = positions[index];
+      }
+      const image = document.slice(0, positions[2]).replace(/\s+/g, ' ');
+      const approval = document
+        .slice(positions[2], positions[3])
+        .replace(/\s+/g, ' ');
+      const seed = document
+        .slice(positions[3], positions[4])
+        .replace(/\s+/g, ' ');
+      const expectations =
+        document === english
+          ? {
+              image: [
+                '**before** any seed, model turn or battery executes PR code',
+                'A gate-container attestation is not a substitute for the battery',
+              ],
+              approval: [
+                'Before step 4 runs any PR-authored plugin, extension or seed',
+                'verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r> --reason <text> --context-out <host snapshot> (--trust-pr-head | --approval <url> --state-root "<trusted-dir>")',
+                'Local trust uses `--trust-pr-head` without a state root.',
+                "maintainer comment whose marker carries that current registration's nonce",
+                'prepare revalidates that registration under the watch-state lock',
+                '`--approval` and `--state-root` therefore travel together',
+                "trusted root and repeats that exact start's nonce as `--registration-nonce <nonce>`",
+                'If approval fails, no PR plugin, seed or battery may run.',
+              ],
+              seed: [
+                "No host step runs a Maven goal against the PR's poms",
+                '`mvn install` walks the whole default lifecycle',
+              ],
+            }
+          : {
+              image: [
+                '必须在任何预置、模型 turn 或电池执行 PR 代码之前完成 step 3 的宿主批准',
+                '门禁容器的佐证不能替代电池记录在案的边界',
+              ],
+              approval: [
+                '在 step 4 执行任何 PR 编写的插件、扩展或预置之前',
+                'verify-pr-prepare.mjs <n> --repo <owner>/<repo> --execution host --round <r> --reason <text> --context-out <host snapshot> (--trust-pr-head | --approval <url> --state-root "<trusted-dir>")',
+                'local-trust 用 `--trust-pr-head` 且不带 state root',
+                'current registration 的 nonce',
+                'prepare 在 watch-state 锁内复核',
+                '`--approval` 与 `--state-root` 必须一起给出',
+                '同一可信 root',
+                '同一 start 的 nonce',
+                '批准失败时不得运行任何 PR 插件、预置或电池',
+              ],
+              seed: [
+                '宿主侧不对 PR 的 pom 跑任何 Maven goal',
+                '`mvn install` 会走完整默认生命周期',
+              ],
+            };
+      for (const [section, required] of Object.entries({
+        image,
+        approval,
+        seed,
+      })) {
+        for (const text of expectations[section]) {
+          expect(required, `${titles[2]} → ${section}: ${text}`).toContain(
+            text,
+          );
+        }
       }
     }
     expect(english).toContain(
@@ -4167,6 +4232,69 @@ describe('local container recipe pins', () => {
       expect(result.errors).toEqual([]);
       expect(result.warnings).toEqual([]);
     }
+    const vmBoundary = {
+      ...boundary,
+      mode: 'vm',
+      attestation: 'nothing mounted, no host credentials',
+    };
+    const vmResult = checkArtifacts({
+      files: {
+        report: `merge-ready · 1 passed · 0 failed · 1 total · ${head}\n\n## Methodology\n\n**Boundary.** attested VM, no host mounts or credentials; approval recorded by prepare.\n`,
+        verdict: 'merge-ready\n',
+        assertions: JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+        boundary: JSON.stringify(vmBoundary),
+      },
+      evidence: ['01-ab.png'],
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 42 },
+    });
+    expect(vmResult.errors).toEqual([]);
+    expect(vmResult.warnings).toEqual([]);
+
+    // These are artifact-level acceptance controls, not a claim that the
+    // future live Java battery has run. Exercise the real checker with a
+    // complete gate record, then bind one seed's parsed record to the output of
+    // that same invocation rather than a sibling arm's hash.
+    const nonce = 'independent-java-seed-acceptance-nonce';
+    const gate = {
+      gate: 'require-isolation',
+      passed: true,
+      at: '2026-11-23T09:00:00.000Z',
+      signals: ['container=java-seed-acceptance', '/.dockerenv'],
+      observed: ['/.dockerenv'],
+      credentialFree: true,
+      nonceSha256: createHash('sha256').update(nonce).digest('hex'),
+    };
+    const gateText = JSON.stringify(gate);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'container',
+          detail:
+            'maven:3.9.11-eclipse-temurin-21, mirror-only seed egress, credential-free',
+        }),
+        gateText,
+      ).errors,
+    ).toEqual([]);
+    const seed = { credentialFree: true, gate: JSON.parse(gateText) };
+    expect(seed.gate).toEqual(gate);
+    expect(seed.gate).not.toEqual({
+      ...gate,
+      nonceSha256: createHash('sha256').update('sibling-arm').digest('hex'),
+    });
+    const gatedResult = checkArtifacts({
+      files: {
+        report: `merge-ready · 1 passed · 0 failed · 1 total · ${head}\n\n## Methodology\n\n${examples[0][1]}\n${examples[0][2]}\n`,
+        verdict: 'merge-ready\n',
+        assertions: JSON.stringify({ pass: 1, fail: 0, total: 1 }),
+        boundary: JSON.stringify(boundary),
+        boundaryGate: gateText,
+      },
+      evidence: ['01-ab.png'],
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 42 },
+    });
+    expect(gatedResult.errors).toEqual([]);
+    expect(gatedResult.warnings).toEqual([]);
+
     const flatEnglish = english.replace(/\s+/g, ' ');
     expect(flatEnglish).toContain(
       'For a deliberately gate-less seed, acceptance admits only concrete, credential-free observations supported by the operator or measured launcher.',

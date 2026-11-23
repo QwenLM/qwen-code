@@ -66,7 +66,23 @@ and the resting-view guard are unchanged.
 
 ### Skill contract (`.qwen/skills/verify-pr/SKILL.md`)
 
-The watch prompt and the manual re-verification step both change to:
+**Current contract / migration note (later preflight):** the numbered commands
+below preserve the original proposal and its then-current CLI progression. When
+registration uses an explicit external/trusted `--state-root`, current recovery
+repeats that identical root on every later start, completion/replay, release and
+restart. Genuine older default trusted-clone/container invocations keep the same
+omission instead of acquiring a new required option. A nonce-bearing stored
+entry requires the exact matching `--registration-nonce`; an old bare prompt
+must recover the exact start output or read only the matching live/verified
+entry in that root and pass it explicitly, never infer it from current state.
+Only a genuinely legacy entry with no `registrationNonce` may omit the option
+for that same head/round/root. Comment approval still requires a legacy
+in-flight entry to be released/restarted for a new nonce and fresh marker.
+Successful withheld/no-publish rounds complete with no comment ID and retain
+`commentId: null` rather than being released.
+
+The watch prompt and the manual re-verification step both change to (historical
+proposal):
 
 1. **Register first**: `verify-pr-watch-state.mjs <n> --start --head <H> --round
 <r> --repo <owner>/<repo>` (no `--artifact-dir` — prepare has not run yet).
@@ -77,6 +93,14 @@ The watch prompt and the manual re-verification step both change to:
 <r> --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo
 <owner>/<repo>` — the directory is recorded here (optional: a replayed
    completion omits it to inherit the recorded directory).
+
+**Current-contract correction to the historical “never reads” clause below:**
+container-only prepare retains that original no-registration-read behavior, and
+local-trust does not take a registration lock. Coordinated comment-approved
+preparation now does perform a read-only live-registration check: after the
+final network responses it takes the state lock, rechecks the same explicit
+root's head/round/nonce, and refuses stale identity before any authority write.
+A transient retry therefore preserves, rather than bypasses, that registration.
 
 New responsibility: because the marker now exists before prepare, a **prepare
 failure after `--start`** is recovered according to the round's state. A

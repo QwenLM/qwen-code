@@ -54,7 +54,19 @@ prior?.artifactDir ?? null`——标记优先，再先前判定，再无），�
 
 ### Skill 契约（`.qwen/skills/verify-pr/SKILL.md`）
 
-watch prompt 与手动复验步骤均改为：
+**当前契约／迁移说明（后来加入的 preflight）：** 下列编号命令保留原始提案
+及当时的 CLI 演进，不应按字面替代现行规则。注册若使用显式外部／受信
+`--state-root`，之后的每次 start、完成／replay、release 与 restart 都必须
+使用完全相同的 root。真正旧的默认可信 clone/container 调用继续保持原来的
+省略形式，不因此新增必填项。带 nonce 的状态条目必须给出精确匹配的
+`--registration-nonce`；旧的裸 prompt 必须找回那一次 start 的输出，或只读
+同一 root 中匹配的 live／verified 条目并显式传值，不能从当前状态推断。
+只有确实没有 `registrationNonce` 的 legacy 条目，才可对同一
+head/round/root 省略该参数。评论批准仍要求 legacy 在飞条目先 release 并
+restart，取得新 nonce 与新标记。成功的 withheld/no-publish 轮次以不带
+comment ID 的 complete 完成并保留 `commentId: null`，而不是 release。
+
+watch prompt 与手动复验步骤均改为（历史提案）：
 
 1. **先注册**：`verify-pr-watch-state.mjs <n> --start --head <H> --round <r>
 --repo <owner>/<repo>`（不带 `--artifact-dir`——prepare 尚未运行）。
@@ -63,6 +75,12 @@ watch prompt 与手动复验步骤均改为：
 4. **完成**：`verify-pr-watch-state.mjs <n> --complete --head <H> --round <r>
 --verdict <word> [--artifact-dir <dir>] [--comment-id <id>] --repo <owner>/<repo>`
    ——目录在此记录（可选：重放完成省略它以继承已记录的目录）。
+
+**对下文历史「从不读取」表述的现行修正：** container-only prepare 保留原提案
+不读注册状态的行为，local-trust 也不取注册锁；但协调后的 comment 批准 prepare
+现在会只读检查 live registration——在最后一次网络应答后取得状态锁，复核同一
+显式 root 的 head/round/nonce，并在任何 authority 写入前拒绝陈旧身份。因此瞬时
+重试保留并再次校验该注册，而不是绕过它。
 
 新职责：因标记现在先于 prepare 存在，**`--start` 后 prepare 失败**按轮次状态恢复。
 *瞬时*失败（轮次仍在运行）时标记完好——prepare 从不读 watch 状态——故直接对完好
