@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
+import {
+  directoryCommand,
+  getDirPathCompletions,
+  getSingleDirPathCompletions,
+} from './directoryCommand.js';
 import {
   expandHomeDir,
   loadServerHierarchicalMemory,
@@ -627,6 +631,84 @@ describe('getDirPathCompletions', () => {
         const basename = path.basename(suggestion.value.slice(0, -1));
         expect(basename).toBe('deep');
       });
+    });
+
+    it('matches directory prefixes case-insensitively on win32 while preserving on-disk casing', () => {
+      fs.mkdirSync(path.join(tempTestDir, 'Documents'), { recursive: true });
+      fs.mkdirSync(path.join(tempTestDir, 'Packages'), { recursive: true });
+      fs.mkdirSync(path.join(tempTestDir, '.HiddenDocs'), { recursive: true });
+
+      const singleLower = getSingleDirPathCompletions(
+        `${tempTestDir}/doc`,
+        'win32',
+      );
+      expect(singleLower).toEqual([
+        {
+          value: path.join(tempTestDir, 'Documents') + path.sep,
+          isDirectory: true,
+        },
+      ]);
+
+      const singleUpper = getSingleDirPathCompletions(
+        `${tempTestDir}/DOC`,
+        'win32',
+      );
+      expect(singleUpper).toEqual([
+        {
+          value: path.join(tempTestDir, 'Documents') + path.sep,
+          isDirectory: true,
+        },
+      ]);
+
+      const dirComma = getDirPathCompletions(
+        `${tempTestDir}, ${tempTestDir}/pack`,
+        'win32',
+      );
+      expect(dirComma).toEqual([
+        {
+          value: `${tempTestDir},${path.join(tempTestDir, 'Packages')}${path.sep}`,
+          isDirectory: true,
+        },
+      ]);
+
+      // Hidden dot-directories remain excluded on win32 too.
+      expect(
+        getSingleDirPathCompletions(`${tempTestDir}/.hid`, 'win32'),
+      ).toEqual([]);
+    });
+
+    it('keeps directory prefix matching case-sensitive on POSIX platforms', () => {
+      fs.mkdirSync(path.join(tempTestDir, 'Documents'), { recursive: true });
+
+      expect(
+        getSingleDirPathCompletions(`${tempTestDir}/doc`, 'linux'),
+      ).toEqual([]);
+      expect(
+        getSingleDirPathCompletions(`${tempTestDir}/Doc`, 'linux'),
+      ).toEqual([
+        {
+          value: path.join(tempTestDir, 'Documents') + path.sep,
+          isDirectory: true,
+        },
+      ]);
+      expect(getDirPathCompletions(`${tempTestDir}/doc`, 'darwin')).toEqual([]);
+
+      // Default platform argument follows process.platform.
+      const expectedDefault =
+        process.platform === 'win32'
+          ? [
+              {
+                value: path.join(tempTestDir, 'Documents') + path.sep,
+                isDirectory: true,
+              },
+            ]
+          : [];
+      expect(getSingleDirPathCompletions(`${tempTestDir}/doc`)).toEqual(
+        expectedDefault,
+      );
+      expect(getDirPathCompletions(`${tempTestDir}/doc`)).toEqual(
+        expectedDefault,
+      );
     });
   });
 });
