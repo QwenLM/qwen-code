@@ -479,6 +479,47 @@ describe('ui.render through the real QuickJS worker', () => {
       });
     });
 
+    it('rewrites a row a desktop host raises, handing out the desktop table', async () => {
+      const runtime = await ModRuntime.createGroup(
+        [
+          {
+            id: 'mod-0',
+            name: 'mod-0',
+            source: {
+              root: '/fixture',
+              entry: '/fixture/mod.js',
+              source:
+                mod(`on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => {
+                let refused = '';
+                try { $.ui.resolve({ ...e, surface: 'mobile' }); } catch (error) { refused = String(error); }
+                return next({ ...e, props: { ...e.props, text: e.surface + ' '
+                  + Object.keys($.ui.resolve(e)).join(',') + ' ' + refused } });
+              });`),
+            },
+            options: {},
+          },
+        ],
+        '/workspace',
+        (log, plugin) => logs.push({ ...log, plugin }),
+        signal(),
+        undefined,
+        'desktop',
+        '1.0.0',
+        undefined,
+        undefined,
+        { sites: ['AssistantMessage'], invalidate: () => {} },
+      );
+      runtimes.push(runtime);
+      const drawn = await runtime.render(
+        { ...row(), surface: 'desktop' },
+        signal(),
+      );
+      expect(drawn.props).toEqual({
+        text: 'desktop Box,Text,Button,Input,Select,Svg,Link,Code,Markdown,Client TypeError: $.ui.resolve takes a ui.render event drawn on a surface this host draws',
+        isFirstOfReply: true,
+      });
+    });
+
     it('takes multi-line markdown, and an original text left as it is whatever it holds', async () => {
       const runtime = await create(
         [

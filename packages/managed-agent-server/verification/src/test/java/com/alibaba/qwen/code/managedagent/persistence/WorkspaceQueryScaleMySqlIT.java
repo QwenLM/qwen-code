@@ -110,23 +110,23 @@ class WorkspaceQueryScaleMySqlIT {
                     String id = "closed-" + index;
                     String sessionKey = ManagedSchemaKeys.key(id);
                     sessions.add(new Object[] {id, tenantKey, sessionKey, ManagedSessionStore.sessionScopeKey("other-tenant", id)});
-                    heads.add(new Object[] {tenantKey, sessionKey, id, id});
+                    heads.add(new Object[] {id, id});
                     bindings.add(new Object[] {id, ManagedSchemaKeys.key(id), ManagedSchemaKeys.key("scope", id), alias});
                     operations.add(new Object[] {ManagedSchemaKeys.key("operation", id), ManagedSchemaKeys.key("other-tenant"), id,
                             ManagedSchemaKeys.key(id), alias});
                     children.add(new Object[] {ManagedSchemaKeys.key("child-operation", id), ManagedSchemaKeys.key("other-tenant"), "child-" + id,
                             ManagedSchemaKeys.key("child", id), alias, index % 2 == 0 ? JdbcChildWorkspaceStore.MERGED : JdbcChildWorkspaceStore.DISCARDED});
-                    owners.add(new Object[] {ManagedSchemaKeys.key("old-physical", id), ManagedSchemaKeys.key("old-physical", id)});
+                    owners.add(new Object[] {ManagedSchemaKeys.key("old-physical", id)});
                 }
                 jdbc.batchUpdate("INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, workspace_storage_id,"
                         + " is_resource_gc_completed, retirement_generation, retired_at, gmt_create, gmt_modified) VALUES ('other-tenant', ?, 'CONTROL', ?, ?, ?, 'other-storage', TRUE, 1, 1, 1, 1)", sessions);
-                jdbc.batchUpdate("INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, workspace_id, storage_version, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES (?, ?, 'other-tenant', ?, ?, 'MANAGED_SESSION', 'other-workspace', 1, 'DELETED', 1, 0, 0, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", heads);
+                jdbc.batchUpdate("INSERT INTO ma_session_head (tenant_id, session_id, harness_session_id, head_kind, workspace_id, state, writer_generation, journal_revision, committed_sequence, activation_epoch, compacted_through_revision, recovery_status, gmt_create, gmt_modified) VALUES ('other-tenant', ?, ?, 'MANAGED_SESSION', 'other-workspace', 'DELETED', 1, 0, 0, 0, 0, 'READY', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")", heads);
                 jdbc.batchUpdate("INSERT INTO ma_runtime_binding (binding_id, request_key, scope_key, tenant_id, workspace_id, workspace_generation, canonical_cwd, capability_digest, isolation_class, provisioner_kind, storage_id, storage_alias_key, runtime_generation, binding_state, attestation_generation, is_drain_requested, operation_generation, record_version, last_active_at) VALUES (?, ?, ?, 'other-tenant', 'other-workspace', '1', '/scale', 'digest', 'workspace', 'local-process', 'other-storage', ?, 1, 'FAILED', 0, FALSE, 0, 0, " + ManagedSchemaTime.SQL_NOW + ")", bindings);
                 jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, target_kind, target_key, storage_key, state, phase, request_digest, request_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'STORAGE_MIGRATION', ?, 'other-tenant', 'STORAGE', ?, ?, 'COMPLETED', 'COMPLETED', 'digest', '{}', 1, 1)", operations);
                 jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_kind, operation_id, tenant_id, target_kind, target_key, storage_key, state, phase, request_digest, request_json, gmt_create, gmt_modified)"
                         + " VALUES (?, ?, 'CHILD_WORKSPACE', ?, 'other-tenant', 'STORAGE', ?, ?, ?, 'SETTLED', 'digest', '{}', 1, 1)", children);
-                jdbc.batchUpdate("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind) VALUES (?, ?, 'LOCAL')", owners);
+                jdbc.batchUpdate("INSERT INTO ma_storage_owner (storage_key, storage_kind) VALUES (?, 'LOCAL')", owners);
                 jdbc.execute("ANALYZE TABLE ma_session, ma_session_head, ma_workspace, ma_runtime_binding, ma_operation, ma_storage_owner");
                 var session = new Query(LocalStorageOwners.SESSION_AUTHORITY_SQL, new Object[] {"other-tenant", "other-storage"});
                 assertThat(jdbc.queryForList(session.sql(), Integer.class, session.arguments())).isEmpty();
@@ -150,7 +150,7 @@ class WorkspaceQueryScaleMySqlIT {
                 jdbc.update("UPDATE ma_workspace SET child_state = ? WHERE tenant_id = ? AND workspace_id = ?", JdbcChildWorkspaceStore.MERGED,
                         "other-tenant", child.childWorkspaceId());
                 jdbc.update("UPDATE ma_operation SET state = 'RETIRING' WHERE operation_key = ?", migrationKey);
-                var head = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", tenantKey, "other-tenant", "other-storage"});
+                var head = new Query(LocalStorageOwners.HEAD_AUTHORITY_SQL, new Object[] {"other-tenant", "other-tenant", "other-storage"});
                 assertThat(jdbc.queryForList(head.sql(), Integer.class, head.arguments())).isEmpty();
                 assertBounded(jdbc, head, "idx_ma_session_storage_scope", 5);
             }
@@ -165,27 +165,27 @@ class WorkspaceQueryScaleMySqlIT {
         for (int index = from; index < to; index++) {
             String child = "historical-child-" + index;
             String rawRun = "historical-run-" + index;
-            operations.add(new Object[] {ManagedSchemaKeys.key("child", child), scope, scope, child.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            operations.add(new Object[] {ManagedSchemaKeys.key("child", child), scope, child.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     session.getBytes(java.nio.charset.StandardCharsets.UTF_8), "CHILD_WORKSPACE", ManagedSchemaKeys.key(child), "merged", "IDLE"});
-            operations.add(new Object[] {ManagedSchemaKeys.key("close", child), scope, scope, ("close-" + child).getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            operations.add(new Object[] {ManagedSchemaKeys.key("close", child), scope, ("close-" + child).getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     session.getBytes(java.nio.charset.StandardCharsets.UTF_8), "CLOSE", ManagedSchemaKeys.key(session), "COMPLETED", "CONFIRMED"});
             workspaces.add(new Object[] {child.getBytes(java.nio.charset.StandardCharsets.UTF_8), child.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     session.getBytes(java.nio.charset.StandardCharsets.UTF_8), rawRun.getBytes(java.nio.charset.StandardCharsets.UTF_8)});
             String resourceId = "history-resource-" + index;
             String resourceKey = ManagedSessionStore.resourceKey(scope, resourceId);
-            resources.add(new Object[] {resourceKey, scope, session.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            resources.add(new Object[] {resourceKey, session.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                     resourceId.getBytes(java.nio.charset.StandardCharsets.UTF_8), com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceRecoveryProtocol.hash("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))});
-            references.add(new Object[] {scope, ManagedSchemaKeys.key(resourceId), resourceKey,
+            references.add(new Object[] {ManagedSchemaKeys.key(resourceId), resourceKey,
                     session.getBytes(java.nio.charset.StandardCharsets.UTF_8), resourceId.getBytes(java.nio.charset.StandardCharsets.UTF_8)});
         }
-        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, operation_id, tenant_id, session_id,"
+        jdbc.batchUpdate("INSERT INTO ma_operation (operation_key, scope_key, operation_id, tenant_id, session_id,"
                 + " operation_kind, target_kind, target_key, state, phase, delivery_state, request_digest, request_json, available_at, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, ?, 'tenant', ?, ?, 'SESSION', ?, ?, 'SETTLED', ?, 'digest', '{}', 0, 1, 1)", operations);
+                + " VALUES (?, ?, ?, 'tenant', ?, ?, 'SESSION', ?, ?, 'SETTLED', ?, 'digest', '{}', 0, 1, 1)", operations);
         jdbc.batchUpdate("INSERT INTO ma_workspace (tenant_id, workspace_id, workspace_generation, storage_id, display_name, config_ref, policy_ref,"
                 + " state, workspace_kind, child_state, child_workspace_id, parent_workspace_id, parent_session_id, child_run_id, parent_cwd_relative)"
                 + " VALUES ('tenant', ?, 1, 'storage', 'Child', 'config', 'policy', 'ACTIVE', 'CHILD_GIT', 'merged', ?, 'root', ?, ?, '.')", workspaces);
-        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, ?, 'tenant', 'root', ?, ?, 'managed-definition', 1, 2, ?, 'MYSQL_INLINE', X'7b7d', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
-        jdbc.batchUpdate("INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) VALUES (?, 'JOURNAL', ?, 1, ?, 'tenant', 'root', ?, ?, 1, " + ManagedSchemaTime.SQL_NOW + ")", references);
+        jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, gmt_create) VALUES (?, 'tenant', 'root', ?, ?, 'managed-definition', 1, 2, ?, 'MYSQL_INLINE', X'7b7d', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
+        jdbc.batchUpdate("INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, journal_revision, gmt_create) VALUES ('JOURNAL', ?, 1, ?, 'tenant', 'root', ?, ?, 1, " + ManagedSchemaTime.SQL_NOW + ")", references);
     }
 
     private static void assertBounded(CapturingJdbc jdbc, Query query, String index, int limit) {
@@ -223,7 +223,7 @@ class WorkspaceQueryScaleMySqlIT {
 
         @Override
         public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
-            if (sql.startsWith("SELECT COUNT(*) FROM ma_operation WHERE session_scope_key")) {
+            if (sql.startsWith("SELECT COUNT(*) FROM ma_operation WHERE tenant_id = ? AND session_id = ?")) {
                 blocker = new Query(sql, args.clone());
             }
             return super.queryForObject(sql, requiredType, args);

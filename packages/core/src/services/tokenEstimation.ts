@@ -25,37 +25,6 @@ import {
  */
 export const CHARS_PER_TOKEN = TOKEN_TO_CHAR_RATIO;
 
-const WEIGHTED_TOKENS_PER_CODE_UNIT = 1.5;
-const CJK_CHAR_PATTERN =
-  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
-
-function estimateWeightedTextTokens(
-  length: number,
-  weightedChars: number,
-): number {
-  return (
-    Math.ceil((length - weightedChars) / CHARS_PER_TOKEN) +
-    Math.ceil(weightedChars * WEIGHTED_TOKENS_PER_CODE_UNIT)
-  );
-}
-
-/** Estimate raw summary output for the existing truncation and usage fallback. */
-export function estimateCjkTextTokens(text: string): number {
-  return estimateWeightedTextTokens(
-    text.length,
-    text.match(CJK_CHAR_PATTERN)?.length ?? 0,
-  );
-}
-
-/** Budget non-ASCII text conservatively across scripts and model tokenizers. */
-export function estimateRestorationTextTokens(text: string): number {
-  let nonAsciiChars = 0;
-  for (let index = 0; index < text.length; index++) {
-    if (text.charCodeAt(index) >= 128) nonAsciiChars++;
-  }
-  return estimateWeightedTextTokens(text.length, nonAsciiChars);
-}
-
 /**
  * Estimate text tokens for context-usage reporting. This intentionally keeps
  * the CJK-aware `/context` heuristic separate from the conservative

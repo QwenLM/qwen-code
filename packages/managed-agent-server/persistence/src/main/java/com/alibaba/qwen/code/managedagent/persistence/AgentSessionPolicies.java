@@ -4,7 +4,6 @@ import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExten
 import com.alibaba.qwen.code.managedagent.contracts.persistence.AgentDefinitionCompiler;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
-import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
@@ -197,21 +196,6 @@ final class AgentSessionPolicies {
                 AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
-    // Pre-admission capability read for default Skill discovery: resolves the
-    // same pin admission will use, without locking the Workspace. External
-    // storage never admits extension pins, so it answers null.
-    String creationToolProfile(String tenantId, String actorId,
-            String agentId, String requestedRevision, String workspaceId) {
-        AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision, true);
-        if (!WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
-                && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile())) {
-            return pin.toolProfile();
-        }
-        ManagedWorkspaceRegistry.ResolvedBinding workspace = workspaces.resolveForCreation(
-                tenantId, actorId, new WorkspaceSelection(workspaceId, "."));
-        return workspaces.isExternal(workspace.binding()) ? null : pin.toolProfile();
-    }
-
     boolean hasMcpServers(SessionRecord session) {
         if (WorkspaceToolProfiles.READ.equals(session.toolProfile())) {
             return false;
@@ -222,7 +206,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireMcpManagement(String tenantId, String actorId, String sessionId, String operationId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -256,7 +240,7 @@ final class AgentSessionPolicies {
     }
 
     void requireMcpSettingsCommit(String tenantId, String workspaceId, String sessionId) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())
                 || !WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(session.toolProfile())
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null) {
@@ -267,7 +251,7 @@ final class AgentSessionPolicies {
     }
 
     SessionRecord requireExtensionManagement(String tenantId, String actorId, String sessionId, String operationId, boolean mutation) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null || "DELETED".equals(session.status())) {
@@ -310,7 +294,7 @@ final class AgentSessionPolicies {
     }
 
     void requireConfigurationCommit(String tenantId, String workspaceId, String sessionId, JsonNode body) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() == null || !workspaceId.equals(session.workspace().getWorkspaceId())) {
             throw new ManagedAgentException(409, "unsupported_feature", "Extension management is unavailable.");
         }
@@ -397,15 +381,14 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
         }
         if (!jdbc.queryForList("SELECT record_id FROM ma_session_record WHERE record_kind='DOMAIN'"
-                + " AND session_scope_key=? AND tenant_id=? AND session_id=? AND domain='child_run'"
-                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
-                tenantId, sessionId).isEmpty()) {
+                + " AND tenant_id=? AND session_id=? AND domain='child_run'"
+                + " AND settled_at IS NULL LIMIT 1 FOR UPDATE", tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session has an unsettled child run.");
         }
         long now = storeRows.lifecycleDatabaseTime();
-        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE session_scope_key=?"
-                + " AND record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
-                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId)) {
+        for (String options : jdbc.queryForList("SELECT options_json FROM ma_session_record WHERE"
+                + " record_kind='ACTION' AND state='requested' AND tenant_id=? AND session_id=? FOR UPDATE",
+                String.class, tenantId, sessionId)) {
             Object expiresAt = storeRows.readMap(options).get("expiresAt");
             if (expiresAt instanceof Number expiration && now < expiration.longValue()) {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval.");
@@ -521,7 +504,7 @@ final class AgentSessionPolicies {
     WebShellModelChangeResult changeSessionModel(String tenantId, String actorId,
             String sessionId, String key, String digest, String modelId, long expectedRevision,
             boolean supported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -594,7 +577,7 @@ final class AgentSessionPolicies {
             String sessionId, String key, String digest, String mode, long expectedRevision,
             boolean supported, boolean agentDefinitionSupported, Boolean requestedPlanMode, boolean planModeSupported,
             boolean liveSupported, Map<String, List<String>> requestedRules, boolean rulesSupported, boolean autoSupported) {
-        SessionRecord session = storeRows.requireLegacySessionForUpdate(tenantId, sessionId);
+        SessionRecord session = storeRows.requireSessionForUpdate(tenantId, sessionId);
         ManagedWorkspaceRegistry.requireSessionVisibility(
                 session, actorId, workspaces);
         if (session.workspace() == null) {
@@ -662,15 +645,16 @@ final class AgentSessionPolicies {
         if (planMode && (!planModeSupported || !supportsPlanMode(session))) {
             throw new ManagedAgentException(409, "unsupported_feature", "Plan mode is unavailable");
         }
+        boolean actionParked = AgentActionParking.certificateMatches(jdbc, tenantId, sessionId);
         if (requestedRules != null && requestedPlanMode == null) {
-            if (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session)) {
+            if (!actionParked && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
                 throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval");
             }
             if (hasOpenOperation(tenantId, sessionId)) {
                 throw new ManagedAgentException(409, "session_context_busy", "The Session requires settlement");
             }
         }
-        requirePolicyChange(session, requestedPlanMode == null && (liveSupported || requestedRules != null));
+        requirePolicyChange(session, requestedPlanMode == null && (liveSupported || requestedRules != null), actionParked);
         long current = ((Number) currentPolicy.get("approval_revision")).longValue();
         if (current != expectedRevision || current >= 9_007_199_254_740_991L
                 || planMode && current >= 9_007_199_254_740_990L) {
@@ -683,6 +667,7 @@ final class AgentSessionPolicies {
         if (changed != 1) {
             throw new ManagedAgentException(409, "approval_selection_conflict", "The approval revision changed");
         }
+        AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
         ManagedModelDiagnosticProjection.invalidateModelContext(jdbc, tenantId, sessionId);
         Map<String, Object> result = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision, "planMode", planMode));
         if (rules != null) {
@@ -720,13 +705,17 @@ final class AgentSessionPolicies {
     }
 
     void requirePolicyChange(SessionRecord session, boolean live) {
+        requirePolicyChange(session, live, false);
+    }
+
+    void requirePolicyChange(SessionRecord session, boolean live, boolean actionParked) {
         requirePublicChildImmutable(session);
         String tenantId = session.tenantId();
         String sessionId = session.sessionId();
         WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ACTIVE");
         requireCwdChangeRegistryFacts(session);
-        if (!live && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
+        if (!live && !actionParked && (hasActiveTurn(tenantId, sessionId) || hasDecidableAction(session))) {
             throw new ManagedAgentException(409, "turn_active", "The Session has an active Turn or approval");
         }
         if ((live ? hasOpenExecutionOperation(tenantId, sessionId) : hasOpenOperation(tenantId, sessionId))
@@ -738,7 +727,9 @@ final class AgentSessionPolicies {
                         AgentStateStore.HARNESS_RECOVERY_BLOCKED).isEmpty()
                 || !jdbc.queryForList("SELECT 1 FROM ma_session_head WHERE tenant_id = ?"
                         + " AND session_id = ? AND head_kind = 'MANAGED_SESSION' AND"
-                        + " (state <> 'ACTIVE' OR recovery_status <> 'READY')", tenantId, sessionId).isEmpty()) {
+                        + (actionParked ? " recovery_status <> 'READY'"
+                                : " (state <> 'ACTIVE' OR recovery_status <> 'READY')"),
+                        tenantId, sessionId).isEmpty()) {
             throw new ManagedAgentException(409, "session_context_busy", "The Session requires settlement");
         }
     }
@@ -754,10 +745,9 @@ final class AgentSessionPolicies {
     boolean hasDecidableAction(SessionRecord session) {
         long now = storeRows.lifecycleDatabaseTime();
         for (String options : jdbc.queryForList(
-                        "SELECT options_json FROM ma_session_record WHERE session_scope_key = ? AND"
+                        "SELECT options_json FROM ma_session_record WHERE"
                             + " record_kind = 'ACTION' AND state = 'requested' AND tenant_id = ?"
                             + " AND session_id = ?", String.class,
-                ManagedSessionStore.sessionScopeKey(session.tenantId(), session.sessionId()),
                 session.tenantId(), session.sessionId())) {
             try {
                 if (now < objectMapper.readTree(options).path("expiresAt").asLong()) {

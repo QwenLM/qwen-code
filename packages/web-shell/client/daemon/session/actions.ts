@@ -3328,6 +3328,19 @@ export function createDaemonSessionActions({
       }
     },
 
+    async rateAssistantTurn(promptId, rating) {
+      const session = sessionRef.current;
+      if (!session) return;
+      try {
+        await withActionTimeout(
+          session.rateSessionTurn(promptId, rating),
+          'Assistant feedback telemetry timed out',
+        );
+      } catch (error) {
+        console.warn('[web-shell] assistant feedback telemetry failed:', error);
+      }
+    },
+
     async *generateSessionContent(
       prompt: string,
       opts?: { signal?: AbortSignal },

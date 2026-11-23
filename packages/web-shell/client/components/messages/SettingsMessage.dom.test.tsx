@@ -621,6 +621,37 @@ describe('SettingsMessage UI language scope', () => {
 });
 
 describe('SettingsMessage user-scope editing', () => {
+  it('shows the timeout only on the User tab for a standalone session', () => {
+    const container = renderPanel(
+      makeState(
+        [
+          {
+            key: 'visionBridgeTimeoutMs',
+            type: 'integer',
+            label: 'Vision Bridge Timeout (ms)',
+            category: 'Model',
+            requiresRestart: true,
+            default: undefined,
+            values: { user: 45_000, effective: 45_000 },
+          },
+        ],
+        vi.fn(),
+      ),
+      { initialCategory: 'Model', workspaceSettingsWritable: false },
+    );
+    const setting = () =>
+      container.querySelector('input[name="visionBridgeTimeoutMs"]');
+    expect(setting()).not.toBeNull();
+
+    const workspaceTab =
+      container.querySelector<HTMLButtonElement>('[role="tab"]');
+    act(() => {
+      workspaceTab?.focus();
+      workspaceTab?.click();
+    });
+    expect(setting()).toBeNull();
+  });
+
   it('keeps a workspace theme change settings-owned', async () => {
     const setValue = vi.fn(() =>
       Promise.resolve({ requiresRestart: false } as DaemonSettingUpdateResult),

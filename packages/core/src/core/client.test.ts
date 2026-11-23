@@ -33,6 +33,7 @@ import {
   LlmClient,
   SendMessageType,
   MAX_STOP_HOOK_CHAIN_PROMPT_IDS,
+  MAX_BACKGROUND_INTERACTION_PROMPT_IDS,
   recordUserTurn,
   type SendMessageOptions,
   type SteerInput,
@@ -72,8 +73,12 @@ import {
 import { HookSystem } from '../hooks/hookSystem.js';
 import { AsyncHookRegistry } from '../hooks/asyncHookRegistry.js';
 import {
+  ASYNC_HOOK_CONTEXT_CLOSE,
   ASYNC_HOOK_CONTEXT_OPEN,
+  drainAsyncHookContextPart,
   isAsyncHookContextPartText,
+  MAX_ASYNC_HOOK_CONTEXT_LENGTH,
+  wrapAsyncHookContext,
 } from '../hooks/async-hook-context.js';
 import { isUserPromptSubmitContextPartText } from '../utils/transcript-records.js';
 import {
@@ -1468,7 +1473,17 @@ describe('Gemini Client (client.ts)', () => {
 
   describe('async hook output delivery (L11)', () => {
     beforeEach(() => {
-      mockTurnRunFn.mockImplementation(() => textTurn('ok'));
+      // Simulate the chat's successful history push so the async-block
+      // settlement (which keys off the push snapshot) sees the block delivered
+      // and does not retain it for the next send.
+      let pushes = 0;
+      vi.spyOn(client.getChat(), 'getUserContentPushCount').mockImplementation(
+        () => pushes,
+      );
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, pushes++);
+        return textTurn('ok');
+      });
     });
 
     /** Complete a background hook whose additionalContext is pending. */
@@ -1490,6 +1505,28 @@ describe('Gemini Client (client.ts)', () => {
       vi.mocked(mockConfig.getHookSystem).mockReturnValue({
         getPendingAsyncOutput: () => registry.getPendingOutput(),
       } as unknown as ReturnType<Config['getHookSystem']>);
+      return registry;
+    };
+
+    /** A stamped async part (as the drain builds it), for seeding a stripped entry. */
+    const stampedAsyncPart = (context: string) => {
+      const reg = new AsyncHookRegistry();
+      reg.register({
+        hookId: 'stamp-1',
+        hookName: 'Background Hook',
+        hookEvent: HookEventName.PostToolUse,
+        sessionId: 'session-1',
+        startTime: Date.now(),
+        timeout: 60000,
+        stdout: JSON.stringify({
+          hookSpecificOutput: { additionalContext: context },
+        }),
+        stderr: '',
+      });
+      reg.complete('stamp-1');
+      return drainAsyncHookContextPart({
+        getPendingAsyncOutput: () => reg.getPendingOutput(),
+      })!;
     };
 
     // Identify the async envelope with the same exact matcher the code under
@@ -1768,6 +1805,336 @@ describe('Gemini Client (client.ts)', () => {
       expect((parts.find(isAsyncHookPart) as Part).text).toContain(
         'owned hook output',
       );
+    });
+
+    it('a loop-detection exit before the drain leaves the block for the next send', async () => {
+      // The result-aware loop detection returns the turn before the drain site,
+      // so the get-and-clear block must not be consumed by the halted turn.
+      const registry = installAsyncOutput('survives loop detection');
+      const detector = (
+        client as unknown as {
+          loopDetector: {
+            recordToolResultByCallId: (...a: never[]) => boolean;
+          };
+        }
+      ).loopDetector;
+      const recordSpy = vi
+        .spyOn(detector, 'recordToolResultByCallId')
+        .mockReturnValue(true);
+      const events = await run(
+        [fnResponse('read_file', { ok: true }, 'call-loop')],
+        'prompt-loop',
+        { type: SendMessageType.ToolResult },
+      );
+      expect(events.some((e) => e.type === LlmEventType.LoopDetected)).toBe(
+        true,
+      );
+      // The block must still be pending in the registry — never consumed by the
+      // halted turn. This separates "never drained" (drain after loop detection)
+      // from "drained then re-retained" (a drain folded back above the guards),
+      // which the next-send delivery assertion alone cannot distinguish.
+      expect(registry.hasPendingOutput()).toBe(true);
+      recordSpy.mockReturnValue(false);
+      await run([{ text: 'next' }], 'prompt-loop-next', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('survives loop detection');
+    });
+
+    it('retains the block when the send exits before the push; the next send delivers it', async () => {
+      // A chat-side pre-push exit consumes the block at the drain but never
+      // pushes it; the push-snapshot settlement must retain it, not lose it.
+      installAsyncOutput('survives a pre-push exit');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-prepush', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      await run([{ text: 'second' }], 'prompt-after-prepush', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('survives a pre-push exit');
+    });
+
+    it('a retained block is not consumed by a side send', async () => {
+      installAsyncOutput('retained owned block');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-retain', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      // The side send is gated; it must not re-attach/consume the retained block.
+      await run([{ text: '/btw question' }], 'prompt-retain-side', {
+        type: SendMessageType.UserQuery,
+        isConcurrentSideQuery: true,
+      });
+      expect(getLastTurnRequestText()).not.toContain('retained owned block');
+      // The owning turn's next send still delivers it.
+      await run([{ text: 'owner next' }], 'prompt-retain', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('retained owned block');
+    });
+
+    it('a Retry re-attaches the block recovered from the stripped orphaned entry exactly once', async () => {
+      // The failed attempt drained the block and pushed it into history; the
+      // provider then failed. Retry strips that orphaned entry (which carries
+      // the block) and rebuilds from the caller's parts (which do not), so the
+      // recovery must re-attach the block — not lose it from both history and
+      // the wire, and not double it via the restore path.
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('retry recovered block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('retry response');
+      });
+      await run([{ text: 'retry me' }], 'prompt-retry-async', {
+        type: SendMessageType.Retry,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      // Rebuilt from the caller's parts, with the recovered block attached once.
+      expect(parts).toContainEqual({ text: 'retry me' });
+      const asyncParts = parts.filter(isAsyncHookPart);
+      expect(asyncParts).toHaveLength(1);
+      expect((asyncParts[0] as Part).text).toContain('retry recovered block');
+      // The block was removed from the stripped entry, so the restore path
+      // cannot re-add a second copy.
+      expect(orphan.parts?.some(isAsyncHookPart)).toBe(false);
+    });
+
+    it('a continue Retry whose payload already carries the block delivers it exactly once', async () => {
+      // The continue-interrupted caller clones the pushed trailing entry into
+      // the Retry payload, envelope included; the recovery must not re-attach a
+      // second copy on top of the one the payload already carries.
+      const envelope = wrapAsyncHookContext('continue carried block');
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('continue carried block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('retry response');
+      });
+      await run(
+        [{ text: 'original prompt' }, { text: envelope }],
+        'prompt-continue-retry',
+        { type: SendMessageType.Retry },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(1);
+    });
+
+    it('a retained block is delivered once and then dropped (splice, not a peek)', async () => {
+      installAsyncOutput('deliver once then drop');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-once', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('chat pre-push failure');
+      await run([{ text: 'second' }], 'prompt-once-2', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).toContain('deliver once then drop');
+      // A third send must not re-deliver it: the retention was spliced away on
+      // the successful send, not peeked and left to re-attach forever.
+      await run([{ text: 'third' }], 'prompt-once-3', {
+        type: SendMessageType.UserQuery,
+      });
+      expect(getLastTurnRequestText()).not.toContain('deliver once then drop');
+    });
+
+    it('repeated pre-push exits keep the combined async payload within the cap', async () => {
+      const big = (tag: string) => tag + 'x'.repeat(6000);
+      installAsyncOutput(big('block-one '));
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 1');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-bound-1', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 1');
+      installAsyncOutput(big('block-two '));
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 2');
+      });
+      await expect(
+        run([{ text: 'second' }], 'prompt-bound-2', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 2');
+      await run([{ text: 'third' }], 'prompt-bound-3', {
+        type: SendMessageType.UserQuery,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const asyncParts = parts.filter(isAsyncHookPart);
+      // The two retained blocks merge into a single bounded envelope rather
+      // than riding as two separate (individually capped) parts.
+      expect(asyncParts).toHaveLength(1);
+      const envelopeOverhead =
+        ASYNC_HOOK_CONTEXT_OPEN.length + ASYNC_HOOK_CONTEXT_CLOSE.length + 2;
+      expect((asyncParts[0] as Part).text?.length ?? 0).toBeLessThanOrEqual(
+        MAX_ASYNC_HOOK_CONTEXT_LENGTH + envelopeOverhead,
+      );
+    });
+
+    it('a continue Retry that exits before the push still delivers the carried block once', async () => {
+      // The dedup drops the retained copy because the payload already carries
+      // it, but must register it for settlement: a pre-push exit restores the
+      // stripped entry WITHOUT the envelope, so only the retention can save it.
+      const envelope = wrapAsyncHookContext('carried then pre-push exit');
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('carried then pre-push exit'),
+      );
+      let pushes = 0;
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn(() => pushes),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('chat pre-push failure');
+      });
+      await expect(
+        run(
+          [{ text: 'original prompt' }, { text: envelope }],
+          'prompt-continue-prepush',
+          { type: SendMessageType.Retry },
+        ),
+      ).rejects.toThrow('chat pre-push failure');
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, pushes++);
+        return textTurn('ok');
+      });
+      // The next send (block-free payload) must still deliver the block once.
+      await run([{ text: 'next' }], 'prompt-continue-prepush-next', {
+        type: SendMessageType.UserQuery,
+      });
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      const asyncParts = parts.filter(isAsyncHookPart);
+      expect(asyncParts).toHaveLength(1);
+      expect((asyncParts[0] as Part).text).toContain(
+        'carried then pre-push exit',
+      );
+    });
+
+    it('a byte-identical fresh drain of a retained block is deduped', async () => {
+      // A standing hook rule produces the same output each turn; the retained
+      // copy and the identical fresh drain must merge to one, not two.
+      installAsyncOutput('stable standing rule');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 1');
+      });
+      await expect(
+        run([{ text: 'first' }], 'prompt-seen-1', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 1');
+      installAsyncOutput('stable standing rule');
+      mockTurnRunFn.mockImplementationOnce(() => {
+        throw new Error('pre-push 2');
+      });
+      await expect(
+        run([{ text: 'second' }], 'prompt-seen-2', {
+          type: SendMessageType.UserQuery,
+        }),
+      ).rejects.toThrow('pre-push 2');
+      await run([{ text: 'third' }], 'prompt-seen-3', {
+        type: SendMessageType.UserQuery,
+      });
+      // Count occurrences: toContain would pass with a duplicated block too.
+      expect(
+        getLastTurnRequestText().split('stable standing rule').length - 1,
+      ).toBe(1);
+    });
+
+    it('a Retry leaves a caller-authored envelope-shaped part in the entry (provenance)', async () => {
+      // Shape alone cannot prove hook provenance: a caller-authored part that
+      // happens to match the envelope must stay in the entry as text, not be
+      // recovered and re-attached as an injected block.
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        { text: wrapAsyncHookContext('not from a hook') },
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('ok');
+      });
+      await run([{ text: 'retry me' }], 'prompt-caller-envelope', {
+        type: SendMessageType.Retry,
+      });
+      // Not recovered: the caller's part stays in the entry...
+      expect(orphan.parts?.some(isAsyncHookPart)).toBe(true);
+      // ...and no async block is attached to the request.
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(0);
+    });
+
+    it('a continue Retry dedups a carried envelope differing only by whitespace', async () => {
+      const orphan = content(
+        'user',
+        { text: 'original prompt' },
+        stampedAsyncPart('padded dedup block'),
+      );
+      installChat({
+        stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([orphan]),
+        getUserContentPushCount: vi.fn().mockReturnValue(1),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+        setHistory: vi.fn(),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      });
+      mockTurnRunFn.mockImplementation((_model, request) => {
+        publishPushSnapshot(request, 0);
+        return textTurn('ok');
+      });
+      // The payload re-serialised the envelope with a trailing newline.
+      const padded = wrapAsyncHookContext('padded dedup block') + '\n';
+      await run(
+        [{ text: 'original prompt' }, { text: padded }],
+        'prompt-padded-dedup',
+        { type: SendMessageType.Retry },
+      );
+      const parts = mockTurnRunFn.mock.lastCall?.[1] as Array<string | Part>;
+      expect(parts.filter(isAsyncHookPart)).toHaveLength(1);
     });
   });
 
@@ -10545,6 +10912,38 @@ Other open files:
       expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
     });
 
+    it('carries ledgerTurnKey through a stop-policy continuation (R17)', async () => {
+      mockTurnRunFn.mockReturnValue(textTurn('Done'));
+      installChat({
+        getHistory: vi
+          .fn()
+          .mockReturnValue([userText('A comment.'), modelText('Done')]),
+      });
+      const policy = {
+        continueAt: vi
+          .fn()
+          .mockResolvedValueOnce([{ text: 'Finish the todos.' }])
+          .mockResolvedValue(undefined),
+        onStopHookCap: vi.fn(),
+      };
+      const send = vi.spyOn(client, 'sendMessageStream');
+
+      await run([{ text: 'A comment.' }], 'prompt-id-ledger-key', {
+        type: SendMessageType.UserQuery,
+        ledgerTurnKey: 'prompt-id-ledger-key/goal/goal-runtime:t1',
+        stopPolicies: [policy],
+      });
+
+      expect(send).toHaveBeenCalledTimes(2);
+      // The continuation keeps the turn's base ledger key rather than reading
+      // its suffixed prompt id as a new turn; without the hostContinuationOptions
+      // forwarding this assertion fails and the consumed marks would reset.
+      expect(send.mock.calls[1][3]).toMatchObject({
+        type: SendMessageType.Hook,
+        ledgerTurnKey: 'prompt-id-ledger-key/goal/goal-runtime:t1',
+      });
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -11929,6 +12328,33 @@ Other open files:
         undefined,
         undefined,
         true,
+        false,
+      );
+    });
+
+    it('stamps a Teammate turn entry with teammateTurn for the resume seed (R17-1)', async () => {
+      const recordNotification = vi.fn();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+        recordNotification,
+        recordAttributionSnapshot: vi.fn(),
+        recordFileHistorySnapshot: vi.fn(),
+      } as unknown as ReturnType<Config['getChatRecordingService']>);
+      mockTurnRunFn.mockReturnValue(textTurn('Hello'));
+      installChat();
+
+      await run([{ text: 'teammate finished' }], 'prompt-id-teammate', {
+        type: SendMessageType.Teammate,
+      });
+
+      // A Teammate turn records like a notification but carries teammateTurn so
+      // the resume Prompts seed counts it (the live counter advances for it).
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: 'teammate finished' }],
+        undefined,
+        undefined,
+        undefined,
+        true,
+        true,
       );
     });
 
@@ -13186,6 +13612,262 @@ Other open files:
             expectedIdentity,
           );
         }
+      });
+
+      it('passes the explicit-Retry turn-boundary flag only for a Retry', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        for (const [type, expectedRetryFlag] of [
+          [SendMessageType.UserQuery, false],
+          [SendMessageType.Retry, true],
+          [SendMessageType.ToolResult, false],
+          [SendMessageType.Hook, false],
+          [SendMessageType.Cron, false],
+          [SendMessageType.Steer, false],
+        ] as const) {
+          await run([{ text: 'my prompt' }], 'session########5', { type });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[9]).toBe(
+            expectedRetryFlag,
+          );
+        }
+      });
+
+      it('marks ledger membership only for the live turn’s own sends', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+        // A Goal send admits through the goal runtime; an empty snapshot keeps
+        // admission permit-free so the membership slot is what the case pins.
+        mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+          getSnapshot: () => emptyGoalSnapshot(),
+          permitForTurn: vi.fn(() => ({
+            goalId: 'membership-goal',
+            revision: 1,
+            turnId: 'membership-turn',
+          })),
+          beginTurn: vi.fn(() => undefined),
+          finishTurn: vi.fn().mockResolvedValue(undefined),
+          subscribe: vi.fn(() => vi.fn()),
+        } as unknown as GoalRuntime);
+
+        for (const [type, expectedMembership, extraOptions] of [
+          [SendMessageType.UserQuery, true, {}],
+          [SendMessageType.Retry, true, {}],
+          [SendMessageType.ToolResult, true, {}],
+          [SendMessageType.Cron, true, {}],
+          [
+            SendMessageType.Goal,
+            true,
+            {
+              goalPermit: {
+                goalId: 'membership-goal',
+                revision: 1,
+                turnId: 'membership-turn',
+              },
+            },
+          ],
+          [SendMessageType.Hook, true, {}],
+          [SendMessageType.Steer, true, {}],
+          [SendMessageType.Notification, false, {}],
+          [SendMessageType.Teammate, false, {}],
+        ] as const) {
+          await run([{ text: 'my prompt' }], 'session########6', {
+            type,
+            ...extraOptions,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(
+            expectedMembership,
+          );
+        }
+      });
+
+      it('passes ledgerTurnKey through to the Turn constructor (R16)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+        // The client-to-Turn hop of the ledger-key chain: the sender's
+        // ledgerTurnKey must reach the Turn constructor's ledgerTurnKey slot.
+        await run([{ text: 'goal run' }], 'session########7', {
+          type: SendMessageType.UserQuery,
+          ledgerTurnKey: 'session########7/goal/goal-runtime:t1',
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[11]).toBe(
+          'session########7/goal/goal-runtime:t1',
+        );
+      });
+
+      it('excludes a concurrent side query and its unflagged continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // The flagged first send claims the side interaction's prompt id.
+        await run([{ text: 'side' }], 'session########7', {
+          type: SendMessageType.UserQuery,
+          isConcurrentSideQuery: true,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The tool-result continuation is resubmitted without the flag under
+        // the same prompt id; the registry must still exclude it, or it would
+        // rotate the live turn's ledger key.
+        await run([{ text: 'tool result' }], 'session########7', {
+          type: SendMessageType.ToolResult,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
+      it('excludes a Notification and its continuation, not the next user turn', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Notification first send is excluded by messageType and registered.
+        await run([{ text: 'notify' }], 'session########8', {
+          type: SendMessageType.Notification,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // Its unflagged Hook continuation reuses the Notification's id and must
+        // stay excluded by the registry, or it would rotate the live turn's key.
+        await run([{ text: 'continue' }], 'session########8', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The next user turn mints a NEW id because the CLI advanced the prompt
+        // counter for the Notification (R6-1/R7-1 root fix); it must remain a
+        // ledger member, not be dropped by the Notification registration.
+        await run([{ text: 'user' }], 'session########9', {
+          type: SendMessageType.UserQuery,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+      });
+
+      it('excludes a Teammate interaction’s unflagged continuation', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Teammate first send is excluded by messageType and registered.
+        await run([{ text: 'teammate' }], 'session########10', {
+          type: SendMessageType.Teammate,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // Its unflagged Hook continuation reuses the Teammate's id and must stay
+        // excluded by the registry (the Teammate arm of the allowlist).
+        await run([{ text: 'continue' }], 'session########10', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+      });
+
+      it('excludes Notification/Teammate by messageType even when the registry does not (R10-6)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // The messageType arms are sender-decided defense-in-depth: a
+        // background first send must stay excluded even if the prompt-id
+        // registry fails to exclude it (a future registration regression or
+        // bounded eviction). Force the registry to report "not registered" so
+        // only the messageType arm can exclude the send.
+        const registry = (
+          client as unknown as {
+            backgroundInteractionPromptIds: Set<string>;
+          }
+        ).backgroundInteractionPromptIds;
+        const hasSpy = vi.spyOn(registry, 'has').mockReturnValue(false);
+        try {
+          for (const type of [
+            SendMessageType.Notification,
+            SendMessageType.Teammate,
+          ]) {
+            await run([{ text: 'background' }], `membership-arm-${type}`, {
+              type,
+            });
+            expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+          }
+          // A foreground UserQuery is still a member when the registry reports
+          // the id absent.
+          await run([{ text: 'user' }], 'membership-arm-user', {
+            type: SendMessageType.UserQuery,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+        } finally {
+          hasSpy.mockRestore();
+        }
+      });
+
+      it('clearBackgroundInteractionPromptIds lets a reused id be a member again (P2)', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // A Notification first send registers its id and is excluded.
+        await run([{ text: 'notify' }], 'session########clear', {
+          type: SendMessageType.Notification,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        // Its unflagged continuation is excluded by the registry.
+        await run([{ text: 'continue' }], 'session########clear', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The session-boundary clear drops the registration, so a foreground
+        // turn reusing the id is a ledger member again rather than excluded.
+        client.clearBackgroundInteractionPromptIds();
+        await run([{ text: 'user' }], 'session########clear', {
+          type: SendMessageType.UserQuery,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
+      });
+
+      it('bounds the background-interaction registry FIFO (R8-F11)', async () => {
+        // Pin the bound value itself: raising it must not silently pass (S2).
+        expect(MAX_BACKGROUND_INTERACTION_PROMPT_IDS).toBe(32);
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        // Register one more background id than the bound retains. The oldest
+        // id is evicted FIFO, mirroring stopHookChains; its continuations have
+        // long drained by the time MAX newer interactions have registered.
+        for (let i = 0; i <= MAX_BACKGROUND_INTERACTION_PROMPT_IDS; i++) {
+          await run([{ text: 'notify' }], `session########bg-${i}`, {
+            type: SendMessageType.Notification,
+          });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+        }
+
+        // The newest registered id still excludes its unflagged continuation.
+        await run(
+          [{ text: 'continue' }],
+          `session########bg-${MAX_BACKGROUND_INTERACTION_PROMPT_IDS}`,
+          {
+            type: SendMessageType.Hook,
+          },
+        );
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(false);
+
+        // The evicted oldest id no longer excludes a continuation under it.
+        await run([{ text: 'continue' }], 'session########bg-0', {
+          type: SendMessageType.Hook,
+        });
+        expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(true);
       });
 
       it('restores stripped retry entries when only a concurrent send pushes', async () => {

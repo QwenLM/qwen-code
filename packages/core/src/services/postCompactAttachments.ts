@@ -21,7 +21,7 @@ import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep as pathSep } from 'node:path';
 import {
   CHARS_PER_TOKEN,
-  estimateRestorationTextTokens,
+  estimateContextTextTokens,
 } from './tokenEstimation.js';
 import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
@@ -392,7 +392,7 @@ export async function buildFileRestorationBlocks(
   filePaths: string[],
   signal?: AbortSignal,
   tokenBudget = POST_COMPACT_TOKEN_BUDGET,
-  onEmbeddedFiles?: (count: number) => void,
+  onEmbed?: () => void,
 ): Promise<Content[]> {
   const references: string[] = [];
   const embeds: Array<{ path: string; content: string }> = [];
@@ -412,7 +412,7 @@ export async function buildFileRestorationBlocks(
       continue;
     }
     // embed — check global budget; downgrade to reference if over.
-    const fileTokens = estimateRestorationTextTokens(result.content);
+    const fileTokens = estimateContextTextTokens(result.content);
     if (usedTokens + fileTokens > tokenBudget) {
       references.push(filePath);
       continue;
@@ -459,7 +459,7 @@ export async function buildFileRestorationBlocks(
     });
   }
 
-  onEmbeddedFiles?.(embeds.length);
+  if (embeds.length) onEmbed?.();
   return blocks;
 }
 
@@ -621,8 +621,8 @@ export interface ComposePostCompactOptions {
   fileTokenBudget?: number;
   /** Per-image cost shared with compression token accounting. */
   imageTokenEstimate?: number;
-  /** Reports all restoration blocks and the subset containing file bodies or images. */
-  onRestoredBlocks?: (count: number, embeddedCount: number) => void;
+  /** Supplies a reminder-only fallback when file bodies or images were embedded. */
+  onEmbeddedAttachments?: (withoutAttachments: Content[]) => void;
   /**
    * Max recent images to restore. Defaults to
    * `POST_COMPACT_MAX_IMAGES_TO_RESTORE`. Configurable via
@@ -833,13 +833,13 @@ export async function composePostCompactHistory(
     isInsideWorkspace(p, workspaceRoot),
   );
   const images = extractRecentImages(history, maxImages);
-  let embeddedFileCount = 0;
+  let hasEmbeddedFiles = false;
   const fileBlocks = await buildFileRestorationBlocks(
     filePaths,
     signal,
     Math.max(0, fileTokenBudget - images.length * imageTokenEstimate),
-    (count) => {
-      embeddedFileCount = count;
+    () => {
+      hasEmbeddedFiles = true;
     },
   );
 
@@ -859,9 +859,11 @@ export async function composePostCompactHistory(
   // Reminder text comes first so a token-conservative model that skims the
   // attachment still sees the plan-mode constraint and task pointers before
   // it gets to file bodies.
-  const postAckParts: Part[] = [
-    ...buildStateReminderParts({ planModeActive, runningSubagents }),
-  ];
+  const reminders = buildStateReminderParts({
+    planModeActive,
+    runningSubagents,
+  });
+  const postAckParts = [...reminders];
   for (const block of fileBlocks) {
     for (const part of block.parts ?? []) postAckParts.push(part);
   }
@@ -869,6 +871,21 @@ export async function composePostCompactHistory(
     for (const part of imageBlock.parts ?? []) postAckParts.push(part);
   }
 
+  const summaryText = postProcessSummary(summary);
+  const trailingFc = trailingFunctionCallContent(history);
+  if (hasEmbeddedFiles || imageBlock) {
+    options.onEmbeddedAttachments?.(
+      composeHistoryParts(summaryText, trailingFc, reminders),
+    );
+  }
+  return composeHistoryParts(summaryText, trailingFc, postAckParts);
+}
+
+function composeHistoryParts(
+  summaryText: string,
+  trailingFc: Content | undefined,
+  postAckParts: Part[],
+): Content[] {
   // Preserve trailing model+functionCall so a pending functionResponse
   // has a matching call (Finding 3). Place it AFTER any merged
   // attachments so role alternation holds:
@@ -877,14 +894,11 @@ export async function composePostCompactHistory(
   //                       the ack's own model Content to avoid the
   //                       model→model adjacency that would otherwise
   //                       arise from a separate appended entry.
-  const trailingFc = trailingFunctionCallContent(history);
   const ackParts: Part[] = [
     { text: 'Got it. Thanks for the additional context!' },
   ];
 
-  const out: Content[] = [
-    { role: 'user', parts: [{ text: postProcessSummary(summary) }] },
-  ];
+  const out: Content[] = [{ role: 'user', parts: [{ text: summaryText }] }];
 
   if (postAckParts.length > 0) {
     out.push({ role: 'model', parts: ackParts });
@@ -903,9 +917,5 @@ export async function composePostCompactHistory(
     out.push({ role: 'model', parts: ackParts });
   }
 
-  options.onRestoredBlocks?.(
-    fileBlocks.length + (imageBlock ? 1 : 0),
-    embeddedFileCount + (imageBlock ? 1 : 0),
-  );
   return out;
 }

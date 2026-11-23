@@ -527,6 +527,14 @@ export interface ChatRecord {
    * Pinned by the cap-refusal case in `client.test.ts`.
    */
   deliveredTurn?: boolean;
+  /**
+   * Marks a `subtype: 'notification'` record that is really a Teammate turn
+   * (the leader receiving a teammate message). Teammate envelopes record like
+   * notifications for UI restoration, but the live Prompts statistic counts
+   * them (UserQuery/Cron/Teammate), so the resume seed must count them while
+   * excluding cold background notifications (R17-1).
+   */
+  teammateTurn?: boolean;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -2965,6 +2973,7 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
     deliveredTurn?: boolean,
+    teammateTurn?: boolean,
   ): void {
     this.recordNotificationLike(
       message,
@@ -2973,6 +2982,7 @@ export class ChatRecordingService {
       backgroundTask,
       goalContext,
       deliveredTurn,
+      teammateTurn,
     );
   }
 
@@ -3140,6 +3150,7 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
     deliveredTurn?: boolean,
+    teammateTurn?: boolean,
   ): void {
     try {
       const record = this.createNotificationRecord(
@@ -3149,6 +3160,7 @@ export class ChatRecordingService {
         backgroundTask,
         goalContext,
         deliveredTurn,
+        teammateTurn,
       );
       this.appendRecord(record);
     } catch (error) {
@@ -3163,6 +3175,7 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
     goalContext?: GoalTurnPermit,
     deliveredTurn?: boolean,
+    teammateTurn?: boolean,
   ): ChatRecord {
     return {
       ...this.createBaseRecord('user'),
@@ -3170,6 +3183,7 @@ export class ChatRecordingService {
       provenance: 'system',
       ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
       ...(deliveredTurn ? { deliveredTurn: true } : {}),
+      ...(teammateTurn ? { teammateTurn: true } : {}),
       message: createUserContent(message),
       systemPayload: displayText
         ? {
@@ -4150,10 +4164,28 @@ export class ChatRecordingService {
     customTitle: string,
     titleSource: TitleSource = 'manual',
   ): Promise<boolean> {
+    return this.persistExplicitTitle(customTitle, titleSource);
+  }
+
+  async recordInitialTitle(customTitle: string): Promise<boolean> {
+    if (this.currentCustomTitle || this.pendingTitleWrites > 0) return false;
+    const onDisk = this.config
+      .getSessionService()
+      .getSessionTitleInfo(this.getSessionId());
+    if (onDisk.title) return false;
+    // The daemon publishes after checking for a concurrent manual rename.
+    return this.persistExplicitTitle(customTitle, 'auto', false);
+  }
+
+  private async persistExplicitTitle(
+    customTitle: string,
+    titleSource: TitleSource,
+    notify = true,
+  ): Promise<boolean> {
     this.pendingExplicitTitleWrites++;
     this.autoTitleController?.abort();
     try {
-      return await this.persistCustomTitle(customTitle, titleSource);
+      return await this.persistCustomTitle(customTitle, titleSource, notify);
     } finally {
       this.pendingExplicitTitleWrites--;
     }
@@ -4162,6 +4194,7 @@ export class ChatRecordingService {
   private async persistCustomTitle(
     customTitle: string,
     titleSource: TitleSource,
+    notify = true,
   ): Promise<boolean> {
     this.pendingTitleWrites++;
     let persisted = false;
@@ -4182,14 +4215,16 @@ export class ChatRecordingService {
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       this.persistListTitle(customTitle, titleSource);
-      try {
-        this.titleRecordedCallback?.(
-          customTitle,
-          titleSource,
-          record.sessionId,
-        );
-      } catch {
-        // Observer errors must never break title recording.
+      if (notify) {
+        try {
+          this.titleRecordedCallback?.(
+            customTitle,
+            titleSource,
+            record.sessionId,
+          );
+        } catch {
+          // Observer errors must never break title recording.
+        }
       }
       persisted = true;
       return true;

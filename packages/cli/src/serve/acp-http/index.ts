@@ -532,6 +532,16 @@ export interface MountAcpHttpOptions {
    * upgrade listener's security checks. Matched paths skip the ACP init flow.
    */
   extraWsRoutes?: readonly ExtraWsRoute[];
+  /** Java's one-time terminal ticket replaces daemon bearer verification. */
+  managedTerminalUpgrade?: {
+    matches: (rawPath: string) => boolean;
+    forward: (
+      req: IncomingMessage,
+      socket: Duplex,
+      head: Buffer,
+      tracked: Set<Duplex>,
+    ) => void;
+  };
   workspaceVoiceConnection?: (
     runtime: WorkspaceRuntime,
     ws: WebSocket,
@@ -1600,6 +1610,7 @@ export function mountAcpHttp(
   // its own `'upgrade'` registration. The `ExtraWsRoute` invariant is
   // unchanged — still exactly ONE listener per server, and still this one.
   const upgradeServers = new Set<import('node:http').Server>();
+  const managedTerminalSockets = new Set<Duplex>();
   const upgradeCredentials =
     opts.credentials ?? singleTokenCredentials(opts.token);
 
@@ -1664,6 +1675,11 @@ export function mountAcpHttp(
         opts.cdpTunnelOverWs === true &&
         opts.cdpTunnelRegistry !== undefined &&
         rawPath === CDP_PATH;
+      const managedTerminalUpgrade = opts.managedTerminalUpgrade?.matches(
+        rawPath,
+      )
+        ? opts.managedTerminalUpgrade
+        : undefined;
       const extraRoute = opts.extraWsRoutes?.find(
         (route) => route.path === rawPath,
       );
@@ -1678,6 +1694,7 @@ export function mountAcpHttp(
       if (
         rawPath !== path &&
         !isCdpPath &&
+        !managedTerminalUpgrade &&
         !extraRoute &&
         !isPluralAcpShape &&
         !isPluralVoiceShape
@@ -1716,7 +1733,12 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
-      } else if (fromLoopback && !authenticatedRemoteBind) {
+      } else if (
+        // Java terminal tickets must not inherit an authenticated bind's
+        // relaxed Host check.
+        fromLoopback &&
+        (managedTerminalUpgrade !== undefined || !authenticatedRemoteBind)
+      ) {
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -1794,6 +1816,22 @@ export function mountAcpHttp(
           socket.destroy();
           return;
         }
+      }
+
+      if (managedTerminalUpgrade) {
+        if (upgradeListenerIdentity.kind !== 'primary' || !fromLoopback) {
+          logReject('managed-terminal-primary-loopback-required');
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        managedTerminalUpgrade.forward(
+          req,
+          socket,
+          head,
+          managedTerminalSockets,
+        );
+        return;
       }
 
       // Auth: WS bypasses Express middleware. Same posture as REST:
@@ -2664,6 +2702,8 @@ export function mountAcpHttp(
         mount.registry.dispose();
       }
       drainingWorkspaceIds.clear();
+      for (const socket of managedTerminalSockets) socket.destroy();
+      managedTerminalSockets.clear();
       if (wss) {
         for (const client of wss.clients) {
           client.close(1012, 'Server shutting down');

@@ -33,6 +33,7 @@ import {
 const abortHarness = vi.hoisted(() => ({
   controller: undefined as AbortController | undefined,
   reads: 0,
+  beforeRead: undefined as (() => Promise<void>) | undefined,
 }));
 
 vi.mock(
@@ -50,6 +51,7 @@ vi.mock(
       ) => {
         abortHarness.reads += 1;
         if (abortHarness.reads === 2) abortHarness.controller?.abort();
+        await abortHarness.beforeRead?.();
         return mod.readSessionArtifactSummarySidecarAsync(filePath, options);
       },
     };
@@ -71,6 +73,7 @@ describe('merged session catalog pagination', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     abortHarness.controller = undefined;
+    abortHarness.beforeRead = undefined;
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -119,6 +122,75 @@ describe('merged session catalog pagination', () => {
       bridge: { listWorkspaceSessions: list } as unknown as AcpSessionBridge,
     };
   }
+
+  it.each([undefined, 'organized'] as const)(
+    'reads sidecars only for the selected page (%s)',
+    async (view) => {
+      const first = summary(2);
+      const second = summary(1);
+      const live = summary(0);
+      await persist(first);
+      await persist(second);
+      const { bridge } = bridgeFor([live]);
+      const options = { size: 1, ...(view ? { view } : {}) };
+      const readOptions = { runtimeBaseDir, paginateMerged: true };
+      const worktree = vi.spyOn(
+        SessionService.prototype,
+        'getWorktreeSessionPathForArchiveState',
+      );
+      const pr = vi.spyOn(
+        SessionService.prototype,
+        'getPrSessionPathForArchiveState',
+      );
+      const artifact = vi.spyOn(
+        SessionService.prototype,
+        'getArtifactSummaryPathForArchiveState',
+      );
+
+      const firstPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        options,
+        readOptions,
+      );
+      expect(firstPage.sessions.map((row) => row.sessionId)).toEqual([
+        first.sessionId,
+      ]);
+      for (const reader of [worktree, pr, artifact]) {
+        expect(reader.mock.calls).toEqual([[first.sessionId, 'active']]);
+      }
+
+      const secondPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: firstPage.nextCursor },
+        readOptions,
+      );
+      const lastPage = await listWorkspaceSessionsForResponse(
+        bridge,
+        workspaceCwd,
+        { ...options, cursor: secondPage.nextCursor },
+        readOptions,
+      );
+      expect(secondPage.sessions.map((row) => row.sessionId)).toEqual([
+        second.sessionId,
+      ]);
+      expect(lastPage.sessions.map((row) => row.sessionId)).toEqual([
+        live.sessionId,
+      ]);
+      expect(lastPage.nextCursor).toBeUndefined();
+      const persistedReads = [
+        [first.sessionId, 'active'],
+        [second.sessionId, 'active'],
+      ];
+      expect(worktree.mock.calls).toEqual(persistedReads);
+      expect(artifact.mock.calls).toEqual(persistedReads);
+      expect(pr.mock.calls).toEqual([
+        ...persistedReads,
+        [live.sessionId, 'active'],
+      ]);
+    },
+  );
 
   it.each([undefined, 'organized'] as const)(
     'sorts the complete set by question time before paging (%s)',
@@ -870,6 +942,189 @@ describe('merged session catalog pagination', () => {
         updatedAt: '2026-11-17T00:00:00.000Z',
       });
 
+    it.each([undefined, 'organized'] as const)(
+      'preserves sidecar values and live precedence across deferred pages (%s)',
+      async (view) => {
+        const sessions = [summary(2), summary(1)];
+        for (const session of sessions) {
+          await persist(session);
+          await writeArtifactSummarySidecar(session, sidecarBody(99));
+        }
+        const { bridge } = bridgeFor(
+          sessions.map((session) => ({ ...session, artifactCount: 3 })),
+        );
+        const options = { size: 1, ...(view ? { view } : {}) };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
+        const first = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          readOptions,
+        );
+        expect(first.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: sessions[0]!.sessionId,
+            artifactCount: 3,
+          }),
+        ]);
+        expect(first.nextCursor).toEqual(expect.any(String));
+        const second = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { ...options, cursor: first.nextCursor },
+          readOptions,
+        );
+        expect(second.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: sessions[1]!.sessionId,
+            artifactCount: 3,
+          }),
+        ]);
+        expect(second.nextCursor).toBeUndefined();
+      },
+    );
+
+    it.each([undefined, 'organized'] as const)(
+      'reads all deferred sidecar values from the archive directory (%s)',
+      async (view) => {
+        const archived = summary(0);
+        await persist(archived, archived.createdAt, true);
+        await writeArtifactSummarySidecar(archived, sidecarBody(5), true);
+        const chats = path.join(
+          new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+          'chats',
+          'archive',
+        );
+        const worktreePath = path.join(directory, 'archived-worktree');
+        await fs.mkdir(worktreePath);
+        await createWorktreeSessionMarkerExclusive(
+          worktreePath,
+          archived.sessionId,
+        );
+        await writeWorktreeSession(
+          path.join(chats, `${archived.sessionId}.worktree.json`),
+          {
+            slug: 'archived-worktree',
+            worktreePath,
+            worktreeBranch: 'topic',
+            originalCwd: workspaceCwd,
+            workspaceCwd,
+            originalBranch: 'main',
+            originalHeadCommit: 'source-sha',
+            worktreeBase: 'base-sha',
+          },
+        );
+        const pr = {
+          number: 17738,
+          url: 'https://github.com/QwenLM/qwen-code/pull/17738',
+          createdAt: archived.createdAt,
+          state: 'merged',
+        };
+        await fs.writeFile(
+          path.join(chats, `${archived.sessionId}.pr.json`),
+          JSON.stringify({ prs: [pr] }),
+        );
+        const { bridge } = bridgeFor([]);
+        const result = await listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          { archiveState: 'archived', ...(view ? { view } : {}) },
+          { runtimeBaseDir, paginateMerged: true },
+        );
+        expect(result.sessions).toEqual([
+          expect.objectContaining({
+            sessionId: archived.sessionId,
+            artifactCount: 5,
+            worktree: {
+              slug: 'archived-worktree',
+              path: worktreePath,
+              branch: 'topic',
+              baseCommit: 'base-sha',
+              baseBranch: 'main',
+            },
+            prs: [
+              expect.objectContaining({
+                number: pr.number,
+                url: pr.url,
+                state: 'merged',
+              }),
+            ],
+          }),
+        ]);
+      },
+    );
+
+    it.each([undefined, 'organized'] as const)(
+      'isolates cancellation while sharing a deferred sidecar read (%s)',
+      async (view) => {
+        const session = summary(0);
+        await persist(session);
+        await writeArtifactSummarySidecar(session, sidecarBody(7));
+        const { bridge, list } = bridgeFor([]);
+        function deferred() {
+          let resolve!: () => void;
+          const promise = new Promise<void>((done) => {
+            resolve = done;
+          });
+          return { promise, resolve };
+        }
+        const started = deferred();
+        const release = deferred();
+        const joined = deferred();
+        const controller = new AbortController();
+        const healthyController = new AbortController();
+        const addListener = healthyController.signal.addEventListener.bind(
+          healthyController.signal,
+        );
+        vi.spyOn(
+          healthyController.signal,
+          'addEventListener',
+        ).mockImplementation((...args) => {
+          addListener(...args);
+          // The first request is already blocked in enrichment. After the
+          // second live overlay, its next abort listener belongs to the
+          // shared sidecar wait, rather than the earlier catalog scan.
+          if (args[0] === 'abort' && list.mock.calls.length === 2)
+            joined.resolve();
+        });
+        abortHarness.reads = 0;
+        abortHarness.beforeRead = async () => {
+          started.resolve();
+          await release.promise;
+        };
+        const options = { size: 1, ...(view ? { view } : {}) };
+        const readOptions = { runtimeBaseDir, paginateMerged: true };
+        const cancelled = listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          { ...readOptions, signal: controller.signal },
+        );
+        const cancelledOutcome = cancelled.then(
+          () => {
+            throw new Error('Expected the cancelled request to reject');
+          },
+          (error: unknown) => error,
+        );
+        await started.promise;
+        const healthy = listWorkspaceSessionsForResponse(
+          bridge,
+          workspaceCwd,
+          options,
+          { ...readOptions, signal: healthyController.signal },
+        );
+        try {
+          await joined.promise;
+          controller.abort();
+          expect(await cancelledOutcome).toMatchObject({ name: 'AbortError' });
+        } finally {
+          release.resolve();
+        }
+        expect((await healthy).sessions[0]?.artifactCount).toBe(7);
+        expect(abortHarness.reads).toBe(1);
+      },
+    );
+
     it('enriches a cold session with the restorable count from the sidecar', async () => {
       const cold = summary(0);
       await persist(cold);
@@ -1043,7 +1298,7 @@ describe('merged session catalog pagination', () => {
       expect(hit?.session.artifactCount).toBe(3);
     });
 
-    it('rejects when the signal aborts mid-scan, after the first sidecar read', async () => {
+    it('rejects when the signal aborts during page enrichment', async () => {
       const first = summary(0);
       const second = summary(1);
       const third = summary(2);
@@ -1065,23 +1320,18 @@ describe('merged session catalog pagination', () => {
           { runtimeBaseDir, signal: abortHarness.controller.signal },
         ),
       ).rejects.toMatchObject({ name: 'AbortError' });
-      // The third session discriminates the per-iteration abort checks
-      // from the post-enrichment one: without the loop-top/catch checks
-      // the swallowed abort lets the scan read a third sidecar before
-      // the later check rejects.
+      // The request stops at the interrupted row.
       expect(abortHarness.reads).toBe(2);
 
-      // A scan interrupted mid-way must not cache a snapshot: the next
-      // request re-scans (three more sidecar reads). A synchronous scan
-      // never calls the async reader, so it never observes the abort,
-      // completes the page, and serves the retry from the cache.
+      // The first row's sidecars completed before cancellation. Keep that
+      // result and read the interrupted and unvisited rows on retry.
       const retry = await listWorkspaceSessionsForResponse(
         bridge,
         workspaceCwd,
         { view: 'organized' },
         { runtimeBaseDir },
       );
-      expect(abortHarness.reads).toBe(5);
+      expect(abortHarness.reads).toBe(4);
       expect(
         retry.sessions.map((session) => session.artifactCount).sort(),
       ).toEqual([3, 4, 5]);
@@ -1245,6 +1495,168 @@ describe('merged session catalog pagination', () => {
         objective: 'ship it',
         updatedAt: new Date(1_700_000_000_000).toISOString(),
       });
+    });
+  });
+  describe('prompt-ledger continuation enrichment', () => {
+    const inFlight = { v: 1, promptId: 'p1', state: 'in_flight', at: 1 };
+    const terminal = (
+      value: string,
+      extra: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      v: 1,
+      promptId: 'p1',
+      terminal: value,
+      at: 2,
+      ...extra,
+    });
+
+    async function writeLedger(
+      session: BridgeSessionSummary,
+      records: Array<Record<string, unknown>>,
+      archived = false,
+    ): Promise<void> {
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+        ...(archived ? ['archive'] : []),
+      );
+      await fs.mkdir(chats, { recursive: true });
+      await fs.writeFile(
+        path.join(chats, `${session.sessionId}.ledger.jsonl`),
+        records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+      );
+    }
+
+    async function listSessions(
+      live: BridgeSessionSummary[] = [],
+      options: Parameters<typeof listWorkspaceSessionsForResponse>[2] = {},
+    ) {
+      const { bridge } = bridgeFor(live);
+      return listWorkspaceSessionsForResponse(bridge, workspaceCwd, options, {
+        runtimeBaseDir,
+      });
+    }
+
+    it.each([
+      ['dangling admission', [inFlight]],
+      ['reconciled interruption', [inFlight, terminal('interrupted')]],
+      [
+        'daemon shutdown flush',
+        [inFlight, terminal('error', { code: 'daemon_shutdown' })],
+      ],
+      [
+        'channel exit flush',
+        [inFlight, terminal('error', { code: 'channel_closed' })],
+      ],
+      [
+        'session close flush',
+        [inFlight, terminal('error', { code: 'session_closed' })],
+      ],
+      [
+        'session kill flush',
+        [inFlight, terminal('error', { code: 'session_killed' })],
+      ],
+    ] as const)('flags a cut-off last record: %s', async (_label, records) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [...records]);
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+
+    it.each([
+      ['completed', [inFlight, terminal('completed')]],
+      ['cancelled', [inFlight, terminal('cancelled')]],
+      ['model error', [inFlight, terminal('error', { code: 'model_error' })]],
+      [
+        'deadline exceeded',
+        [inFlight, terminal('error', { code: 'prompt_deadline_exceeded' })],
+      ],
+      [
+        'superseded interruption',
+        [
+          inFlight,
+          terminal('interrupted'),
+          { v: 1, promptId: 'p2', state: 'in_flight', at: 3 },
+          { v: 1, promptId: 'p2', terminal: 'completed', at: 4 },
+        ],
+      ],
+    ] as const)('leaves the field absent: %s', async (_label, records) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [...records]);
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it('leaves the field absent for an unreadable ledger', async () => {
+      const session = summary(0);
+      await persist(session);
+      const chats = path.join(
+        new Storage(workspaceCwd, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      // A directory at the ledger path makes the read throw (EISDIR).
+      await fs.mkdir(path.join(chats, `${session.sessionId}.ledger.jsonl`));
+      const result = await listSessions();
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it('does not enrich archived listings', async () => {
+      const session = summary(0);
+      await persist(session, session.createdAt, true);
+      await writeLedger(session, [inFlight], true);
+      const result = await listSessions([], { archiveState: 'archived' });
+      expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+    });
+
+    it.each([
+      ['active prompt', { hasActivePrompt: true }],
+      ['active work', { activeWorkState: 'active' as const }],
+      ['running background tasks', { hasRunningBackgroundTasks: true }],
+      [
+        'background turn',
+        {
+          backgroundTurn: {
+            turnId: 't1',
+            taskId: 'task1',
+            kind: 'shell' as const,
+            startedAt: 1,
+          },
+        },
+      ],
+    ] as const)(
+      'drops the persisted flag when live state shows %s',
+      async (_label, liveExtra) => {
+        const session = summary(0);
+        await persist(session);
+        await writeLedger(session, [inFlight]);
+        const result = await listSessions([
+          { ...session, clientCount: 1, ...liveExtra },
+        ]);
+        expect(result.sessions[0]?.needsContinuation).toBeUndefined();
+      },
+    );
+
+    it('keeps the flag when the live session is idle', async () => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [inFlight]);
+      const result = await listSessions([
+        { ...session, clientCount: 1, hasActivePrompt: false },
+      ]);
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
+    });
+
+    it.each([
+      ['organized', { view: 'organized' as const }],
+      ['metadata-filtered', { sourceType: 'default' }],
+    ] as const)('enriches the %s list path', async (_label, options) => {
+      const session = summary(0);
+      await persist(session);
+      await writeLedger(session, [inFlight]);
+      const result = await listSessions([], options);
+      expect(result.sessions[0]?.needsContinuation).toBe(true);
     });
   });
 });
