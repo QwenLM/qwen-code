@@ -3743,6 +3743,25 @@ function isVisionBridgeSetting(
   return key === 'visionModel' || key === 'visionBridgeTimeoutMs';
 }
 
+function SecondaryWorkspaceSettingsBridge({
+  workspaceCwd,
+  reloadRef,
+  render,
+}: {
+  workspaceCwd: string;
+  reloadRef: { current: (() => Promise<void>) | undefined };
+  render: (state: ReturnType<typeof useSettings>) => ReactNode;
+}) {
+  const state = useSettings({ workspaceCwd, autoLoad: true, enabled: true });
+  useEffect(() => {
+    reloadRef.current = state.reload;
+    return () => {
+      reloadRef.current = undefined;
+    };
+  }, [reloadRef, state.reload]);
+  return <>{render(state)}</>;
+}
+
 export function App({
   onRefreshModels,
   askUserFreeTextLabel,
@@ -15529,19 +15548,9 @@ export function App({
     )
       ? settingsWorkspaceCwd
       : undefined;
-  const secondaryWorkspaceSettingsState = useSettings({
-    workspaceCwd: secondarySettingsWorkspaceCwd,
-    autoLoad:
-      projectFeaturesAvailable &&
-      activePanel === 'settings' &&
-      Boolean(secondarySettingsWorkspaceCwd),
-    enabled:
-      projectFeaturesAvailable &&
-      activePanel === 'settings' &&
-      Boolean(secondarySettingsWorkspaceCwd),
-  });
-  const reloadSecondaryWorkspaceSettings =
-    secondaryWorkspaceSettingsState.reload;
+  const secondarySettingsReloadRef = useRef<(() => Promise<void>) | undefined>(
+    undefined,
+  );
   useEffect(() => {
     const isKnownTrustedWorkspace = (cwd: string) =>
       ordinaryWorkspaces.length > 0
@@ -16342,14 +16351,13 @@ export function App({
         targetWorkspaceCwd !== uiLanguageWorkspaceCwd;
       const refreshSettings = async () => {
         if (!owner.current.isCurrent()) return;
+        const reloadSecondary = secondarySettingsReloadRef.current;
         await Promise.all([
           ...(connectionRef.current.sessionId
             ? [sessionActions.refreshCommands()]
             : []),
           reloadWorkspaceSettings(),
-          ...(secondarySettingsWorkspaceCwd
-            ? [reloadSecondaryWorkspaceSettings()]
-            : []),
+          ...(reloadSecondary ? [reloadSecondary()] : []),
         ]);
       };
       if (
@@ -16414,11 +16422,9 @@ export function App({
     [
       blockCommand,
       handleLanguageChange,
-      reloadSecondaryWorkspaceSettings,
       reloadWorkspaceSettings,
       reportError,
       providedLanguage,
-      secondarySettingsWorkspaceCwd,
       sessionWriteBlocked,
       workspaceActions,
       uiLanguageWorkspaceCwd,
@@ -16460,11 +16466,10 @@ export function App({
       }
       if (!owner.current.isCurrent()) return true;
       try {
+        const reloadSecondary = secondarySettingsReloadRef.current;
         await Promise.all([
           reloadWorkspaceSettings(),
-          ...(secondarySettingsWorkspaceCwd
-            ? [reloadSecondaryWorkspaceSettings()]
-            : []),
+          ...(reloadSecondary ? [reloadSecondary()] : []),
         ]);
       } catch (error) {
         if (owner.current.isCurrent()) {
@@ -16478,10 +16483,8 @@ export function App({
     },
     [
       blockCommand,
-      reloadSecondaryWorkspaceSettings,
       reloadWorkspaceSettings,
       reportError,
-      secondarySettingsWorkspaceCwd,
       sessionWriteBlocked,
       sendPrompt,
       sessionOwnerGuard,
@@ -25911,142 +25914,171 @@ export function App({
                       }
                     >
                       {activePanel === 'settings' ? (
-                      <SettingsMessage
-                        settingsState={
-                          secondarySettingsWorkspaceCwd
-                            ? secondaryWorkspaceSettingsState
-                            : targetedWorkspaceSettingsState
-                        }
-                        presentation={settingsPresentation}
-                        embedded
-                        initialCategory={settingsInitialCategory}
-                        onLanguageChange={(nextLanguage, scope) =>
-                          handleSettingsLanguageChange(
-                            nextLanguage,
-                            scope,
-                            secondarySettingsWorkspaceCwd ??
-                              primaryRegisteredWorkspaceCwd,
-                          )
-                        }
-                        onOutputLanguageChange={
-                          handleSettingsOutputLanguageChange
-                        }
-                        workspaceSettingsWritable={!sessionIsStandalone}
-                        onThemeChange={handleThemeChange}
-                        chatWidthMode={chatWidthMode}
-                        onChatWidthModeChange={handleChatWidthModeChange}
-                        connections={
-                          standalone ? <DaemonConnectionsSettings /> : undefined
-                        }
-                        archivedSessions={
-                          archiveManagementAvailable ? (
-                            <div ref={setArchivedSessionsTarget} data-web-shell-archived-sessions />
-                          ) : undefined
-                        }
-                        workspaceControl={
-                          !sessionIsStandalone && ordinaryWorkspaces.length > 1 ? (
-                            <Select
-                              value={
-                                secondarySettingsWorkspaceCwd ??
-                                primaryRegisteredWorkspaceCwd
-                              }
-                              onValueChange={(cwd) =>
-                                setSettingsWorkspaceCwd(cwd)
-                              }
-                            >
-                              <SelectTrigger
-                                className="h-8 w-48"
-                                aria-label={t('sidebar.workspaceSelectLabel')}
-                              >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {ordinaryWorkspaces.map((entry) => (
-                                  <SelectItem
-                                    key={entry.id}
-                                    value={entry.cwd}
-                                    disabled={!entry.trusted}
-                                  >
-                                    {workspaceLabel(entry)}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          ) : undefined
-                        }
-                        workspaceDirectoriesSection={
-                          workspaceDirectoriesSupported ? (
-                            <WorkspaceDirectoriesSection
-                              workspaceCwd={
-                                secondarySettingsWorkspaceCwd ??
-                                primaryRegisteredWorkspaceCwd
-                              }
-                            />
-                          ) : undefined
-                        }
-                        modelManagementSectionProps={projectFeaturesAvailable ? {
-                          ...modelManagementPolicy,
-                          providers: providersState.providers,
-                          configurations: modelConfigurations.models,
-                          onUpdateContextWindow: handleModelContextWindowUpdate,
-                          currentModelId:
-                            (connection.sessionId
-                              ? connection.currentModel
-                              : currentModel || connection.currentModel) ??
-                            undefined,
-                          loading:
-                            providersState.loading ||
-                            modelConfigurations.loading,
-                          error:
-                            providersState.error ?? modelConfigurations.error,
-                          busy: modelActionBusy,
-                          onSelectModel: handleModelSelect,
-                          onDeleteModel: handleDeleteModel,
-                          onAddModel: () => {
-                            if (!modelManagementRef.current.allowAdd) return;
-                            if (
-                              !isItemVisible(
-                                'builtin:model-management',
-                                settingsPresentation,
+                      (() => {
+                        const renderSettingsPanel = (
+                          panelSettingsState: ReturnType<typeof useSettings>,
+                        ) => (
+                          <SettingsMessage
+                            settingsState={panelSettingsState}
+                            presentation={settingsPresentation}
+                            embedded
+                            initialCategory={settingsInitialCategory}
+                            onLanguageChange={(nextLanguage, scope) =>
+                              handleSettingsLanguageChange(
+                                nextLanguage,
+                                scope,
+                                secondarySettingsWorkspaceCwd,
                               )
-                            )
-                              return;
-                            settingsDialogKeyRef.current =
-                              'builtin:model-management';
-                            setShowAuthDialog(true);
-                          },
-                        } : undefined}
-                        onSubDialog={(key, scope) => {
-                          if (!isSettingVisible(key, settingsPresentation)) return;
-                          settingsDialogKeyRef.current = key;
-                          // Record the persist scope only for model settings —
-                          // the reset effect is gated on the dialog/fallback/auth
-                          // flags, so it never runs for the approvalMode dialog
-                          // and would leave a stale scope behind.
-                          if (key === 'advisorModel' || key === 'imageModel') {
-                            void reloadModelConfigurations();
-                            if (key === 'advisorModel') void reloadProviders();
-                            setModelSettingScope(scope);
-                            setModelDialogMode(
-                              key === 'advisorModel' ? 'advisor' : 'image',
-                            );
-                          } else if (key === 'fastModel') {
-                            setModelSettingScope(scope);
-                            setModelDialogMode('fast');
-                          } else if (key === 'visionModel') {
-                            setModelSettingScope(scope);
-                            setModelDialogMode('vision');
-                          } else if (key === 'voiceModel') {
-                            void openVoiceModelPicker(scope, 'settings');
-                          } else if (key === 'modelFallbacks') {
-                            setModelSettingScope(scope);
-                            setShowFallbacksDialog(true);
-                          } else if (key === 'tools.approvalMode') {
-                            // Not a model setting — leave modelSettingScope alone.
-                            setShowApprovalModeDialog(true);
-                          }
-                        }}
-                      />
+                            }
+                            onOutputLanguageChange={
+                              handleSettingsOutputLanguageChange
+                            }
+                            workspaceSettingsWritable={!sessionIsStandalone}
+                            onThemeChange={handleThemeChange}
+                            chatWidthMode={chatWidthMode}
+                            onChatWidthModeChange={handleChatWidthModeChange}
+                            connections={
+                              standalone ? (
+                                <DaemonConnectionsSettings />
+                              ) : undefined
+                            }
+                            archivedSessions={
+                              archiveManagementAvailable ? (
+                                <div
+                                  ref={setArchivedSessionsTarget}
+                                  data-web-shell-archived-sessions
+                                />
+                              ) : undefined
+                            }
+                            workspaceControl={
+                              !sessionIsStandalone &&
+                              ordinaryWorkspaces.length > 1 ? (
+                                <Select
+                                  value={
+                                    secondarySettingsWorkspaceCwd ??
+                                    primaryRegisteredWorkspaceCwd
+                                  }
+                                  onValueChange={(cwd) =>
+                                    setSettingsWorkspaceCwd(cwd)
+                                  }
+                                >
+                                  <SelectTrigger
+                                    className="h-8 w-48"
+                                    aria-label={t(
+                                      'sidebar.workspaceSelectLabel',
+                                    )}
+                                  >
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {ordinaryWorkspaces.map((entry) => (
+                                      <SelectItem
+                                        key={entry.id}
+                                        value={entry.cwd}
+                                        disabled={!entry.trusted}
+                                      >
+                                        {workspaceLabel(entry)}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              ) : undefined
+                            }
+                            workspaceDirectoriesSection={
+                              workspaceDirectoriesSupported ? (
+                                <WorkspaceDirectoriesSection
+                                  workspaceCwd={secondarySettingsWorkspaceCwd}
+                                />
+                              ) : undefined
+                            }
+                            modelManagementSectionProps={
+                              projectFeaturesAvailable
+                                ? {
+                                    ...modelManagementPolicy,
+                                    providers: providersState.providers,
+                                    configurations: modelConfigurations.models,
+                                    onUpdateContextWindow:
+                                      handleModelContextWindowUpdate,
+                                    currentModelId:
+                                      (connection.sessionId
+                                        ? connection.currentModel
+                                        : currentModel ||
+                                          connection.currentModel) ?? undefined,
+                                    loading:
+                                      providersState.loading ||
+                                      modelConfigurations.loading,
+                                    error:
+                                      providersState.error ??
+                                      modelConfigurations.error,
+                                    busy: modelActionBusy,
+                                    onSelectModel: handleModelSelect,
+                                    onDeleteModel: handleDeleteModel,
+                                    onAddModel: () => {
+                                      if (!modelManagementRef.current.allowAdd)
+                                        return;
+                                      if (
+                                        !isItemVisible(
+                                          'builtin:model-management',
+                                          settingsPresentation,
+                                        )
+                                      )
+                                        return;
+                                      settingsDialogKeyRef.current =
+                                        'builtin:model-management';
+                                      setShowAuthDialog(true);
+                                    },
+                                  }
+                                : undefined
+                            }
+                            onSubDialog={(key, scope) => {
+                              if (!isSettingVisible(key, settingsPresentation))
+                                return;
+                              settingsDialogKeyRef.current = key;
+                              // Record the persist scope only for model settings —
+                              // the reset effect is gated on the dialog/fallback/auth
+                              // flags, so it never runs for the approvalMode dialog
+                              // and would leave a stale scope behind.
+                              if (
+                                key === 'advisorModel' ||
+                                key === 'imageModel'
+                              ) {
+                                void reloadModelConfigurations();
+                                if (key === 'advisorModel')
+                                  void reloadProviders();
+                                setModelSettingScope(scope);
+                                setModelDialogMode(
+                                  key === 'advisorModel' ? 'advisor' : 'image',
+                                );
+                              } else if (key === 'fastModel') {
+                                setModelSettingScope(scope);
+                                setModelDialogMode('fast');
+                              } else if (key === 'visionModel') {
+                                setModelSettingScope(scope);
+                                setModelDialogMode('vision');
+                              } else if (key === 'voiceModel') {
+                                void openVoiceModelPicker(scope, 'settings');
+                              } else if (key === 'modelFallbacks') {
+                                setModelSettingScope(scope);
+                                setShowFallbacksDialog(true);
+                              } else if (key === 'tools.approvalMode') {
+                                // Not a model setting — leave modelSettingScope alone.
+                                setShowApprovalModeDialog(true);
+                              }
+                            }}
+                          />
+                        );
+                        return secondarySettingsWorkspaceCwd &&
+                          projectFeaturesAvailable ? (
+                          <SecondaryWorkspaceSettingsBridge
+                            key={secondarySettingsWorkspaceCwd}
+                            workspaceCwd={secondarySettingsWorkspaceCwd}
+                            reloadRef={secondarySettingsReloadRef}
+                            render={renderSettingsPanel}
+                          />
+                        ) : (
+                          renderSettingsPanel(targetedWorkspaceSettingsState)
+                        );
+                      })()
                     ) : activePanel === 'status' ? (
                       <DaemonStatusDialog />
                     ) : activePanel === 'extensions' ? (
