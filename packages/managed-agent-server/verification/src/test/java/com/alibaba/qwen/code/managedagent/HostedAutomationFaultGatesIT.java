@@ -1323,7 +1323,7 @@ class HostedAutomationFaultGatesIT {
     private List<String> sessionLedger(String session) {
         return jdbc.queryForList("SELECT CONCAT(sequence_id, ' ', CAST(event_id AS CHAR), ' ', event_type) FROM"
                 + " ma_public_event WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND"
-                + " stream_id = X'' ORDER BY sequence_id", String.class, tenant, session);
+                + " stream_id = '' ORDER BY sequence_id", String.class, tenant, session);
     }
 
     // The ledger once every Runtime warm a Turn started has reported: the

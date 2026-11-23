@@ -7,9 +7,8 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
-import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
@@ -144,7 +143,9 @@ class ManagedPublishedAgentConfigurationTest {
                 "byte_length = " + (ManagedSessionStoreModels.MAX_AGENT_SKILLS_BYTES + 1L),
                 "byte_length = 0",
                 "schema_version = 2",
-                "deletion_operation_key = '" + "e".repeat(64) + "'",
+                "deletion_operation_ref = '"
+                        + ManagedIdentityRefs.tenantOperationRef("SESSION_RESOURCE_GC", TENANT, "gc")
+                        + "'",
                 "state = 'COLLECTED'")) {
             jdbc.update("UPDATE ma_resource SET " + update + " WHERE tenant_id = ? AND session_id = ?"
                     + " AND resource_id = ?", TENANT, sessionId, publishedSkills.resourceId());
@@ -236,29 +237,28 @@ class ManagedPublishedAgentConfigurationTest {
     /** One inline PUBLISHED row exactly as JournalResourceWrites.publishAgentResource writes it. */
     private void insertPublished(String sessionId, String resourceId, String kind,
             int schemaVersion, byte[] bytes) {
-        String scopeKey = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
                         + " inline_bytes, publish_command_id, state, gmt_create, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
-                ManagedSessionStore.resourceKey(scopeKey, resourceId), TENANT, WORKSPACE, sessionId,
+                        + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'MYSQL_INLINE', ?, ?, 'PUBLISHED', ?, ?)",
+                TENANT, WORKSPACE, sessionId,
                 resourceId, kind, schemaVersion, bytes.length, ExtensionRecordJournal.sha256(bytes), bytes,
                 resourceId, 1_000L, 1_000L);
     }
 
     /** One admitted receipt row as ToolPublicationAdmissionStore.referenceCapturedResource leaves it. */
     private void insertCapturedReceipt(String sessionId, String resourceId, byte[] bytes) {
-        String scopeKey = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         // ck_ma_resource_capture ties capture_state to the capture identity tuple: those four columns
         // are NULL together or NOT NULL together, and uk_ma_capture_slot keeps the tuple unique.
-        jdbc.update("INSERT INTO ma_resource (resource_key, tenant_id, workspace_id,"
+        jdbc.update("INSERT INTO ma_resource (tenant_id, workspace_id,"
                         + " session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind,"
-                        + " inline_bytes, publish_command_id, state, scope_key, publication_id, slot_key,"
+                        + " inline_bytes, publish_command_id, state, scope_ref, publication_id, slot_key,"
                         + " capture_state, gmt_create, last_verified_at)"
-                        + " VALUES (?, ?, ?, ?, ?, 'managed-tool-outcome', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
+                        + " VALUES (?, ?, ?, ?, 'managed-tool-outcome', 1, ?, ?, 'MYSQL_INLINE', ?, ?,"
                         + " 'REFERENCED', ?, ?, X'61646d697373696f6e', 'VERIFIED', ?, ?)",
-                ManagedSessionStore.resourceKey(scopeKey, resourceId), TENANT, WORKSPACE, sessionId,
+                TENANT, WORKSPACE, sessionId,
                 resourceId, bytes.length, ExtensionRecordJournal.sha256(bytes), bytes, resourceId,
-                ManagedSchemaKeys.key("capture", resourceId), "publication-" + resourceId, 1_000L, 1_000L);
+                ManagedIdentityRefs.publicationScopeRef(TENANT, WORKSPACE, sessionId),
+                "publication-" + resourceId, 1_000L, 1_000L);
     }
 }
