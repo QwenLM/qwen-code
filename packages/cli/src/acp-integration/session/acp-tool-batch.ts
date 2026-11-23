@@ -158,9 +158,18 @@ export async function runAcpToolBatch(
     signal: AbortSignal;
     duplicates: AgentLoopDuplicateState;
     onFullTurnModel?: (model: string) => boolean;
+    onShellMovable?: (
+      callId: string,
+      promote: AbortController | undefined,
+    ) => void;
+    onCallSettled?: (
+      callId: string,
+      status: AgentLoopToolResult['status'],
+    ) => void;
   },
 ): Promise<AcpToolBatchResult> {
   const { config } = host.ctx;
+  const batchCallIds = new Set(options.requests.map(({ callId }) => callId));
   const { signal } = options;
   const managed = config.getSessionExecutionEngine?.() === 'managed';
   // Tools run under their own signal, so a cancelled permission request can
@@ -434,6 +443,9 @@ export async function runAcpToolBatch(
     const state = stateOf(request);
     if (state.settled) return;
     state.settled = true;
+    if (batchCallIds.has(request.callId)) {
+      options.onCallSettled?.(request.callId, status);
+    }
     state.settleRelatedAgent?.(status === 'success');
     state.cleanupTracker?.();
     const isTodoWrite =
@@ -521,8 +533,20 @@ export async function runAcpToolBatch(
       switch (call.status) {
         case 'validating':
         case 'scheduled':
+          trackAgent(call, state);
+          break;
         case 'executing':
           trackAgent(call, state);
+          if (
+            batchCallIds.has(call.request.callId) &&
+            !state.settled &&
+            canonicalToolName(call.request.name) === ToolNames.SHELL
+          ) {
+            options.onShellMovable?.(
+              call.request.callId,
+              call.promoteAbortController,
+            );
+          }
           break;
         case 'awaiting_approval':
           trackAgent(call, state);
@@ -639,6 +663,7 @@ export async function runAcpToolBatch(
       onToolResult: (result) => {
         results.set(result.request, result);
         if (result.origin === 'replayed' || result.origin === 'duplicate') {
+          options.onCallSettled?.(result.request.callId, result.status);
           emitDuplicate(host, result, (task, what) => emit(task, what, true));
         }
       },

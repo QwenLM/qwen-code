@@ -66,7 +66,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
                 jdbc.update("INSERT INTO ma_client_files_binding ("
                                 + BINDING_COLUMNS + ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         ManagedSchemaKeys.identity(tenantId),
-                        ManagedSchemaKeys.identity(sessionId), ManagedSchemaKeys.identity(actorId),
+                        ManagedSchemaKeys.identity(sessionId), actorId,
                         1L, ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, connectionId,
                         expiresAt, now, now);
                 return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, 1L,
@@ -81,7 +81,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
                         + " WHERE tenant_id=? AND session_id=?",
-                ManagedSchemaKeys.identity(actorId), generation, ClientFilesModels.STATE_ACTIVE,
+                actorId, generation, ClientFilesModels.STATE_ACTIVE,
                 serverId, tokenHash, connectionId, expiresAt, now, tenantId, sessionId);
         return new RegisterOutcome(new Binding(tenantId, sessionId, actorId, generation,
                 ClientFilesModels.STATE_ACTIVE, serverId, tokenHash, expiresAt, previous.createdAt(),
@@ -108,7 +108,7 @@ public class ClientFilesRelayStore implements ClientFilesRelay {
         jdbc.update("UPDATE ma_client_files_binding SET actor_id=?,generation=?,state=?,"
                         + "server_id=?,token_hash=?,connection_id=?,expires_at=?,gmt_modified=?"
                         + " WHERE tenant_id=? AND session_id=?",
-                ManagedSchemaKeys.identity(previous.actorId()), previous.generation(),
+                previous.actorId(), previous.generation(),
                 ClientFilesModels.STATE_ACTIVE, previous.serverId(), previous.tokenHash(),
                 previous.connectionId(), previous.expiresAt(), now, tenantId, sessionId);
         return true;

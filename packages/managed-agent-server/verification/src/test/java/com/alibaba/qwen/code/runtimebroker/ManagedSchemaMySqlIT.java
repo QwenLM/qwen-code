@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.persistence.IsolatedManagedSchemaMySql
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.schema.ManagedIdentityRefs;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.Test;
@@ -83,8 +84,8 @@ class ManagedSchemaMySqlIT {
                     statement.execute("SET SESSION sql_mode = '" + mode + "'");
                     ManagedSchema.initialize(source);
                     statement.execute("INSERT INTO ma_read_lease"
-                            + " (lease_id, tenant_key, session_key, retirement_generation, expires_at)"
-                            + " VALUES ('" + mode + "', REPEAT('a',64), REPEAT('b',64), 7, 1)");
+                            + " (lease_id, tenant_id, session_id, retirement_generation, expires_at)"
+                            + " VALUES ('" + mode + "', REPEAT('a',36), REPEAT('b',64), 7, 1)");
                     var rangeError = assertThrows(SQLException.class, () -> statement.execute(
                             "UPDATE ma_read_lease SET retirement_generation = -1 WHERE lease_id = '" + mode + "'"));
                     assertEquals(1264, rangeError.getErrorCode());
@@ -121,6 +122,7 @@ class ManagedSchemaMySqlIT {
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
         String prefix = "schema-it-" + java.util.UUID.randomUUID();
+        String tenant = prefix.substring(0, 36);
         try (var connection = source.getConnection();
                 var statement = connection.createStatement()) {
             boolean mariaDb = connection.getMetaData().getDatabaseProductVersion()
@@ -173,10 +175,10 @@ class ManagedSchemaMySqlIT {
             }
             assertThrows(SQLException.class, () -> statement.execute(
                     "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                            + " VALUES ('" + prefix + "negative','session','agent',-1,0)"));
+                            + " VALUES ('" + tenant + "','session','agent',-1,0)"));
             try (var row =
                     statement.executeQuery(
-                            "SELECT CURRENT_TIMESTAMP(6) AS observed_at, CAST('tenant ' AS BINARY) AS tenant_id, X'0102' AS inline_bytes, X'0304' AS actor_key")) {
+                            "SELECT CURRENT_TIMESTAMP(6) AS observed_at, CAST('tenant ' AS BINARY) AS tenant_id, X'0102' AS inline_bytes, X'0304' AS record_bytes")) {
                 assertTrue(row.next());
                 var values = ManagedSchemaRows.read(row);
                 assertTrue(values.get("observed_at") instanceof java.sql.Timestamp);
@@ -184,7 +186,7 @@ class ManagedSchemaMySqlIT {
                 org.junit.jupiter.api.Assertions.assertArrayEquals(
                         new byte[] {1, 2}, (byte[]) values.get("inline_bytes"));
                 org.junit.jupiter.api.Assertions.assertArrayEquals(
-                        new byte[] {3, 4}, (byte[]) values.get("actor_key"));
+                        new byte[] {3, 4}, (byte[]) values.get("record_bytes"));
             }
             try (var row = statement.executeQuery("SELECT VERSION()")) {
                 assertTrue(row.next());
@@ -193,8 +195,8 @@ class ManagedSchemaMySqlIT {
             statement.execute(
                     "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                             + " VALUES ('"
-                            + prefix
-                            + "tenant','"
+                            + tenant
+                            + "','"
                             + prefix
                             + "session','agent',0,0)");
             assertThrows(SQLException.class,
@@ -205,57 +207,59 @@ class ManagedSchemaMySqlIT {
                 assertTrue(rows.next());
                 assertTrue(rows.getLong(1) > 0);
             }
-            statement.execute(
-                    "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
-                            + " VALUES ('"
-                            + prefix
-                            + "tenant','"
-                            + prefix
-                            + "session ','agent',0,0)");
+            // utf8mb4_bin is PAD SPACE, so a trailing-space variant of an
+            // existing session_id is the same primary key: the insert folds
+            // to a duplicate-key error rather than storing a second row.
+            assertThrows(SQLException.class,
+                    () -> statement.execute(
+                            "INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
+                                    + " VALUES ('"
+                                    + tenant
+                                    + "','"
+                                    + prefix
+                                    + "session ','agent',0,0)"));
             assertThrows(
                     SQLException.class,
                     () ->
                             statement.execute(
                                     "INSERT INTO ma_operation"
-                                        + " (operation_key,scope_key,operation_id,operation_kind,tenant_id,target_kind,target_key,request_digest,request_json,state,phase,gmt_create,gmt_modified)"
-                                        + " VALUES ('invalid','scope','invalid','CLOSE"
+                                        + " (operation_ref,scope_kind,scope_id,operation_id,operation_kind,tenant_id,target_kind,target_id,request_digest,request_json,state,phase,gmt_create,gmt_modified)"
+                                        + " VALUES ('invalid','SESSION','scope','invalid','CLOSE"
                                         + " ','tenant','SESSION','target','digest','{}','PENDING','ADMITTED',0,0)"));
             statement.execute(
                     "INSERT INTO ma_resource_ref"
-                        + " (owner_kind,owner_key,owner_revision,resource_key,tenant_id,session_id,gmt_create)"
+                        + " (owner_kind,owner_ref,owner_revision,resource_id,tenant_id,session_id,gmt_create)"
                         + " VALUES"
                         + " ('JOURNAL','scope',1,'missing','tenant','session'," + ManagedSchemaTime.SQL_NOW + ")");
             byte[] largeBody = new byte[17 * 1024 * 1024];
             largeBody[0] = 1;
             largeBody[largeBody.length - 1] = 2;
-            String resourceKey =
-                    com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                            prefix, "large-message");
             try (var insert =
                     connection.prepareStatement(
-                            "INSERT INTO ma_resource (resource_key,"
+                            "INSERT INTO ma_resource ("
                                 + "tenant_id,session_id,resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
                                 + " VALUES"
-                                + " (?,?,?,?,'message-body/1',1,?,?,'MYSQL_INLINE',?,'PUBLISHED'," + ManagedSchemaTime.SQL_NOW + ")")) {
-                insert.setString(1, resourceKey);
-                insert.setString(2, prefix + "tenant");
-                insert.setString(3, prefix + "session");
-                insert.setString(4, "large-message");
-                insert.setLong(5, largeBody.length);
+                                + " (?,?,?,'message-body/1',1,?,?,'MYSQL_INLINE',?,'PUBLISHED'," + ManagedSchemaTime.SQL_NOW + ")")) {
+                insert.setString(1, tenant);
+                insert.setString(2, prefix + "session");
+                insert.setString(3, "large-message");
+                insert.setLong(4, largeBody.length);
                 insert.setString(
-                        6,
+                        5,
                         java.util.HexFormat.of()
                                 .formatHex(
                                         java.security.MessageDigest.getInstance("SHA-256")
                                                 .digest(largeBody)));
-                insert.setBytes(7, largeBody);
+                insert.setBytes(6, largeBody);
                 insert.executeUpdate();
             }
             try (var read =
                     connection.prepareStatement(
                             "SELECT byte_length,OCTET_LENGTH(inline_bytes) FROM ma_resource WHERE"
-                                    + " resource_key=?")) {
-                read.setString(1, resourceKey);
+                                    + " tenant_id=? AND session_id=? AND resource_id=?")) {
+                read.setString(1, tenant);
+                read.setString(2, prefix + "session");
+                read.setString(3, "large-message");
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
                     assertEquals(largeBody.length, row.getLong(1));
@@ -263,8 +267,11 @@ class ManagedSchemaMySqlIT {
                 }
             }
             try (var remove =
-                    connection.prepareStatement("DELETE FROM ma_resource WHERE resource_key=?")) {
-                remove.setString(1, resourceKey);
+                    connection.prepareStatement(
+                            "DELETE FROM ma_resource WHERE tenant_id=? AND session_id=? AND resource_id=?")) {
+                remove.setString(1, tenant);
+                remove.setString(2, prefix + "session");
+                remove.setString(3, "large-message");
                 remove.executeUpdate();
             }
             statement.execute("CREATE TABLE managed_schema_foreign_witness (value INT NOT NULL)");
@@ -395,14 +402,15 @@ class ManagedSchemaMySqlIT {
                             + " AND column_name = 'tenant_id'")) {
                 org.junit.jupiter.api.Assertions.assertTrue(rs.next());
                 org.junit.jupiter.api.Assertions.assertEquals(96L, rs.getLong(1));
-                org.junit.jupiter.api.Assertions.assertEquals("utf8mb4_0900_bin", rs.getString(2));
+                org.junit.jupiter.api.Assertions.assertEquals("utf8mb4_bin", rs.getString(2));
             }
         }
     }
 
     private static void verifyCaptureTimestampDefaults(java.sql.Connection connection, String prefix)
             throws SQLException {
-        String scope = ManagedSchemaKeys.key(prefix, "capture-time");
+        String tenant = prefix.substring(0, 36);
+        String scope = ManagedIdentityRefs.publicationScopeRef(tenant, "workspace", "session");
         try (var statement = connection.createStatement()) {
             long before;
             try (var row = statement.executeQuery("SELECT " + ManagedSchemaTime.SQL_NOW)) {
@@ -410,16 +418,22 @@ class ManagedSchemaMySqlIT {
                 before = row.getLong(1);
             }
             try (var insert = connection.prepareStatement(
-                    "INSERT INTO ma_output_capture (scope_key,tenant_id,workspace_id,session_id,"
-                            + "publication_id,execution_key,capture_id,binding_json,binding_digest,token_hash,state,"
+                    "INSERT INTO ma_output_capture (scope_ref,tenant_id,workspace_id,session_id,"
+                            + "publication_id,execution_call_id,capture_id,binding_json,binding_digest,token_hash,state,"
                             + "capture_bytes,producer_bytes,admission_bytes) VALUES (?,?,?,?,?,?,?,'{}',?,?,'OPEN',1,1,1)")) {
-                for (int index = 1; index <= 9; index++) {
-                    insert.setString(index, scope);
-                }
+                insert.setString(1, scope);
+                insert.setString(2, tenant);
+                insert.setString(3, "workspace");
+                insert.setString(4, "session");
+                insert.setString(5, "publication");
+                insert.setString(6, "execution");
+                insert.setString(7, "capture");
+                insert.setString(8, ManagedSchemaKeys.key(prefix, "binding"));
+                insert.setString(9, ManagedSchemaKeys.key(prefix, "token"));
                 assertEquals(1, insert.executeUpdate());
             }
             try (var query = connection.prepareStatement("SELECT gmt_create,gmt_modified,"
-                    + ManagedSchemaTime.SQL_NOW + " AS db_now FROM ma_output_capture WHERE scope_key=?")) {
+                    + ManagedSchemaTime.SQL_NOW + " AS db_now FROM ma_output_capture WHERE scope_ref=?")) {
                 query.setString(1, scope);
                 try (var row = query.executeQuery()) {
                     assertTrue(row.next());
@@ -429,7 +443,7 @@ class ManagedSchemaMySqlIT {
                     assertEquals(created, ManagedSchemaTime.timestamp(row, "gmt_create").getTime());
                 }
             } finally {
-                try (var remove = connection.prepareStatement("DELETE FROM ma_output_capture WHERE scope_key=?")) {
+                try (var remove = connection.prepareStatement("DELETE FROM ma_output_capture WHERE scope_ref=?")) {
                     remove.setString(1, scope);
                     remove.executeUpdate();
                 }
@@ -439,24 +453,26 @@ class ManagedSchemaMySqlIT {
 
     private static void verifyMaximumStorageScopeKeys(java.sql.Connection connection, String prefix)
             throws Exception {
-        byte[] tenant =
-                (prefix + "t".repeat(512 - prefix.length())).getBytes(StandardCharsets.UTF_8);
-        byte[] session =
-                (prefix + "s".repeat(512 - prefix.length())).getBytes(StandardCharsets.UTF_8);
-        byte[] storage = "v".repeat(1024).getBytes(StandardCharsets.UTF_8);
-        byte[] workspace =
-                (prefix + "w".repeat(512 - prefix.length())).getBytes(StandardCharsets.UTF_8);
+        // Opaque identities padded to each column's budget: the probe exercises
+        // indexed access at maximum width, not reference shape.
+        String tenant = prefix.substring(0, 36);
+        String session = prefix + "s".repeat(64 - prefix.length());
+        String storage = "v".repeat(256);
+        String bindingStorage = "v".repeat(256);
+        String workspace = prefix + "w".repeat(512 - prefix.length());
         byte[] binding =
-                (prefix + "b".repeat(2048 - prefix.length())).getBytes(StandardCharsets.UTF_8);
-        String alias = ManagedSchemaKeys.key(prefix, "storage-alias");
+                (prefix + "b".repeat(128 - prefix.length())).getBytes(StandardCharsets.UTF_8);
+        String request = "r".repeat(3000);
+        String scope = "c".repeat(2048);
+        String physical = "p".repeat(512);
         try (var insert =
                 connection.prepareStatement(
                         "INSERT INTO"
                             + " ma_session(tenant_id,session_id,session_kind,workspace_storage_id,gmt_create,gmt_modified)"
                             + " VALUES(?,?,'CONTROL',?,0,0)")) {
-            insert.setBytes(1, tenant);
-            insert.setBytes(2, session);
-            insert.setBytes(3, storage);
+            insert.setString(1, tenant);
+            insert.setString(2, session);
+            insert.setString(3, storage);
             insert.executeUpdate();
         }
         try {
@@ -464,8 +480,8 @@ class ManagedSchemaMySqlIT {
                     connection.prepareStatement(
                             "UPDATE ma_session SET is_resource_gc_completed=2 WHERE tenant_id=? AND"
                                     + " session_id=?")) {
-                invalid.setBytes(1, tenant);
-                invalid.setBytes(2, session);
+                invalid.setString(1, tenant);
+                invalid.setString(2, session);
                 assertThrows(SQLException.class, invalid::executeUpdate);
             }
             try (var insert =
@@ -476,49 +492,61 @@ class ManagedSchemaMySqlIT {
                                 + "writer_generation,journal_revision,committed_sequence,activation_epoch,gmt_create,gmt_modified)"
                                 + " VALUES(?,?,?,?,'MANAGED_SESSION','OPEN',"
                                 + "0,0,0,0," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")")) {
-                insert.setBytes(1, tenant);
-                insert.setBytes(2, session);
-                insert.setBytes(3, workspace);
-                insert.setBytes(4, session);
+                insert.setString(1, tenant);
+                insert.setString(2, session);
+                insert.setString(3, workspace);
+                insert.setString(4, session);
                 insert.executeUpdate();
             }
             try (var insert =
                     connection.prepareStatement(
                             "INSERT INTO"
-                                + " ma_runtime_binding(binding_id,request_key,scope_key,tenant_id,"
+                                + " ma_runtime_binding(binding_id,request_id,scope_id,tenant_id,"
                                 + "workspace_id,workspace_generation,canonical_cwd,capability_digest,"
-                                + "isolation_class,provisioner_kind,storage_id,storage_alias_key,runtime_generation,"
+                                + "isolation_class,provisioner_kind,storage_id,runtime_generation,"
                                 + "binding_state,attestation_generation,is_drain_requested,operation_generation,record_version,last_active_at)"
                                 + " VALUES(?,?,?,?,?,?,'cwd',?,'WORKSPACE',"
-                                + "'schema-test',?,?,1,'ACTIVE',0,FALSE,0,0," + ManagedSchemaTime.SQL_NOW + ")")) {
+                                + "'schema-test',?,1,'ACTIVE',0,FALSE,0,0," + ManagedSchemaTime.SQL_NOW + ")")) {
                 insert.setBytes(1, binding);
-                insert.setString(2, ManagedSchemaKeys.key(prefix, "request"));
-                insert.setString(3, ManagedSchemaKeys.key(prefix, "scope"));
-                insert.setBytes(4, tenant);
-                insert.setBytes(5, session);
+                insert.setString(2, request);
+                insert.setString(3, scope);
+                insert.setString(4, tenant);
+                insert.setString(5, session);
                 insert.setBytes(6, new byte[] {'1'});
                 insert.setBytes(7, new byte[] {'c'});
-                insert.setBytes(8, storage);
-                insert.setString(9, alias);
+                insert.setString(8, bindingStorage);
                 insert.executeUpdate();
             }
             try (var insert =
                     connection.prepareStatement(
-                            "INSERT INTO ma_storage_owner(storage_key,binding_id,runtime_generation)"
+                            "INSERT INTO ma_storage_owner(physical_id,binding_id,runtime_generation)"
                                     + " VALUES(?,?,1)")) {
-                insert.setString(1, alias);
+                insert.setString(1, physical);
                 insert.setBytes(2, binding);
                 insert.executeUpdate();
             }
+            // binding_id is VARCHAR(128): a 129-byte value must be refused,
+            // pinning 128 as the ceiling rather than the old 2048-byte budget.
+            // A distinct physical_id keeps the unconditional unique key out of
+            // the way, so the refusal can only come from the column width.
+            try (var overflow =
+                    connection.prepareStatement(
+                            "INSERT INTO ma_storage_owner(physical_id,binding_id,runtime_generation)"
+                                    + " VALUES(?,?,1)")) {
+                overflow.setString(1, physical + "-overflow");
+                overflow.setBytes(2,
+                        (prefix + "b".repeat(129 - prefix.length())).getBytes(StandardCharsets.UTF_8));
+                assertThrows(SQLException.class, overflow::executeUpdate);
+            }
             try (var read =
                     connection.prepareStatement(
-                            "SELECT storage_key FROM ma_storage_owner FORCE"
+                            "SELECT physical_id FROM ma_storage_owner FORCE"
                                     + " INDEX(idx_ma_storage_owner_binding) WHERE binding_id=? AND"
                                     + " runtime_generation=1")) {
                 read.setBytes(1, binding);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
-                    assertEquals(alias, row.getString(1));
+                    assertEquals(physical, row.getString(1));
                     assertFalse(row.next());
                 }
             }
@@ -527,11 +555,11 @@ class ManagedSchemaMySqlIT {
                             "SELECT session_id FROM ma_session_head FORCE"
                                     + " INDEX(idx_ma_head_workspace) WHERE tenant_id=? AND"
                                     + " workspace_id=?")) {
-                read.setBytes(1, tenant);
-                read.setBytes(2, workspace);
+                read.setString(1, tenant);
+                read.setString(2, workspace);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
-                    org.junit.jupiter.api.Assertions.assertArrayEquals(session, row.getBytes(1));
+                    assertEquals(session, row.getString(1));
                     assertFalse(row.next());
                 }
             }
@@ -540,11 +568,11 @@ class ManagedSchemaMySqlIT {
                             "SELECT session_id FROM ma_session FORCE"
                                     + " INDEX(idx_ma_session_storage_scope) WHERE tenant_id=? AND"
                                     + " workspace_storage_id=? AND is_resource_gc_completed=0")) {
-                read.setBytes(1, tenant);
-                read.setBytes(2, storage);
+                read.setString(1, tenant);
+                read.setString(2, storage);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
-                    org.junit.jupiter.api.Assertions.assertArrayEquals(session, row.getBytes(1));
+                    assertEquals(session, row.getString(1));
                     assertFalse(row.next());
                 }
             }
@@ -552,9 +580,10 @@ class ManagedSchemaMySqlIT {
                     connection.prepareStatement(
                             "SELECT binding_id FROM ma_runtime_binding FORCE"
                                     + " INDEX(idx_ma_runtime_storage_alias_state) WHERE"
-                                    + " storage_alias_key=? AND binding_state='ACTIVE' AND"
+                                    + " tenant_id=? AND storage_id=? AND binding_state='ACTIVE' AND"
                                     + " is_provision_seeded=FALSE")) {
-                read.setString(1, alias);
+                read.setString(1, tenant);
+                read.setString(2, bindingStorage);
                 try (var row = read.executeQuery()) {
                     assertTrue(row.next());
                     org.junit.jupiter.api.Assertions.assertArrayEquals(binding, row.getBytes(1));
@@ -566,8 +595,8 @@ class ManagedSchemaMySqlIT {
                             "SELECT runtime_session_id FROM ma_runtime_session FORCE"
                                     + " INDEX(idx_ma_runtime_session_harness) WHERE"
                                     + " harness_session_id=? AND tenant_id=?")) {
-                read.setBytes(1, session);
-                read.setBytes(2, tenant);
+                read.setString(1, session);
+                read.setString(2, tenant);
                 try (var row = read.executeQuery()) {
                     assertFalse(row.next());
                 }
@@ -575,8 +604,8 @@ class ManagedSchemaMySqlIT {
         } finally {
             try (var remove =
                     connection.prepareStatement(
-                            "DELETE FROM ma_storage_owner WHERE storage_key=?")) {
-                remove.setString(1, alias);
+                            "DELETE FROM ma_storage_owner WHERE physical_id=?")) {
+                remove.setString(1, physical);
                 remove.executeUpdate();
             }
             try (var remove =
@@ -588,15 +617,15 @@ class ManagedSchemaMySqlIT {
             try (var remove =
                     connection.prepareStatement(
                             "DELETE FROM ma_session_head WHERE tenant_id=? AND harness_session_id=?")) {
-                remove.setBytes(1, tenant);
-                remove.setBytes(2, session);
+                remove.setString(1, tenant);
+                remove.setString(2, session);
                 remove.executeUpdate();
             }
             try (var remove =
                     connection.prepareStatement(
                             "DELETE FROM ma_session WHERE tenant_id=? AND session_id=?")) {
-                remove.setBytes(1, tenant);
-                remove.setBytes(2, session);
+                remove.setString(1, tenant);
+                remove.setString(2, session);
                 remove.executeUpdate();
             }
         }

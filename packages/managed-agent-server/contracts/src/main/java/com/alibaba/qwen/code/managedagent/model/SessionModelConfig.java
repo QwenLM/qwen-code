@@ -44,7 +44,13 @@ public final class SessionModelConfig {
         }
         var result = new LinkedHashMap<String, Object>();
         result.put("protocol", protocol);
-        result.put("model", text(node, "model", 512));
+        // The model id lands in ma_session.model_id VARCHAR(128), counted in
+        // characters; the shared text rule still bans blank/control content.
+        String model = text(node, "model", 512);
+        if (model.length() > 128) {
+            throw invalid();
+        }
+        result.put("model", model);
         String baseUrl = text(node, "base_url", 2048);
         try {
             URI uri = URI.create(baseUrl);

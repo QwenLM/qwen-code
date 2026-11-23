@@ -47310,13 +47310,14 @@ describe('idle suspension', () => {
     server: Server,
     prompt: unknown[] = [{ type: 'text', text: 'write notes' }],
     deadlineMs?: number,
+    toolProfile = 'hosted-workspace-files/1',
   ): Promise<string> {
     const created = await headers(supertest(server).post('/session'))
       .send({
         sessionId: SESSION_ID,
         sessionScope: 'thread',
         managedSessionStore: store(),
-        toolProfile: 'hosted-workspace-files/1',
+        toolProfile,
         approvalMode: 'default',
         approvalTimeoutMs: 60_000,
       })
@@ -47339,11 +47340,17 @@ describe('idle suspension', () => {
   async function promptAndIdleInApproval(
     server: Server,
     prompt?: unknown[],
+    toolProfile?: string,
   ): Promise<string> {
     const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
     waiting.mockClear();
     try {
-      const clientId = await promptApproval(server, prompt);
+      const clientId = await promptApproval(
+        server,
+        prompt,
+        undefined,
+        toolProfile,
+      );
       await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
         timeout: 5000,
       });
@@ -48080,9 +48087,126 @@ describe('idle suspension', () => {
       const clientId = await promptAndIdleInApproval(server);
       expect(state.wakeStamps).toEqual([]);
       expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(
+        statsOf(server).parkRefusals.capability_not_advertised,
+      ).toBeGreaterThan(0);
       await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  // P0 (#18149): decision delivery sends a Session with no Workspace a plain
+  // load, which refuses an unsettled Turn. Such a Session never parks because
+  // it has no approval policy: its tool calls never ask, so no Action waits.
+  it('opens no Action on a Session with no Workspace, even for a memory write', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    state.memory.mockImplementation(async (query: { operation: string }) =>
+      query.operation === 'binding'
+        ? { enabled: true, memoryStoreId: 'memstore_personal' }
+        : { status: 'stored', memoryId: 'entry' },
+    );
+    state.model.mockImplementation(async (input) => {
+      await input.toolTurn!.declarations(input.signal);
+      const call = {
+        name: 'context_remember',
+        callId: 'call-remember',
+        args: { content: 'remember this' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await input.toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        input.signal,
+      );
+      return { text: 'remembered', model: 'test-model' };
+    });
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          memoryStoreId: 'memstore_personal',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const prompt = [{ type: 'text', text: 'remember my preference' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(statsOf(server).cleanSuspensions).toBe(1), {
+        timeout: 5000,
+      });
+      const journal = await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      });
+      expect(
+        journal.events.find((event) => event.kind === 'turn.settled')?.payload[
+          'outcome'
+        ],
+      ).toBe('completed');
+      expect(
+        journal.events.filter((event) => event.kind === 'action.changed'),
+      ).toEqual([]);
+      expect(waiting).not.toHaveBeenCalled();
+      expect(state.wakeStamps).not.toContainEqual(
+        expect.objectContaining({ parkedTurn: expect.anything() }),
+      );
+    } finally {
+      waiting.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.approvalSelections.clear();
+    }
+  });
+
+  it('counts why a Shell-profile approval cannot park', async () => {
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    mockApprovalTurn();
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const clientId = await promptAndIdleInApproval(
+        server,
+        undefined,
+        'hosted-workspace-shell/1',
+      );
+      expect(state.wakeStamps).toEqual([]);
+      const stats = statsOf(server);
+      expect(stats.cleanSuspensions).toBe(0);
+      // The wait idled through several suspension attempts but counts once.
+      expect(stats.parkRefusals).toEqual({ shell_profile: 1 });
+      await endResidentApproval(server, clientId);
+    } finally {
+      state.wakeDispatch = false;
+      state.actionParking = false;
       state.approvalSelections.clear();
     }
   });
@@ -48106,6 +48230,9 @@ describe('idle suspension', () => {
       ]);
       expect(state.wakeStamps).toEqual([]);
       expect(statsOf(server).cleanSuspensions).toBe(0);
+      expect(statsOf(server).parkRefusals.prompt_text_missing).toBeGreaterThan(
+        0,
+      );
       await endResidentApproval(server, clientId);
     } finally {
       state.wakeDispatch = false;
@@ -48833,5 +48960,161 @@ describe('idle suspension', () => {
     expect(busy.status).toBe(409);
     expect(busy.body.code).toBe('hosted_ownership_release_busy');
     release();
+  });
+
+  // The crash aftermath must leave a checkpoint the next turn can start
+  // from: a wait left at await_action failed every later wake turn.
+  it('settles a monitor wake that died in its approval wait so its continuation can run', async () => {
+    domainEnablement.monitorRun = true;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const turnId = 'monitor-1:notify:1';
+    mockApprovalTurn();
+    state.model.mockImplementation(async ({ toolTurn, promptId, signal }) => {
+      if (promptId !== turnId)
+        return { text: 'continued', model: 'test-model' };
+      const call = {
+        name: 'write_file',
+        callId: 'aftermath-original-call',
+        args: { file_path: 'notes.txt', content: 'hello' },
+        isClientInitiated: false,
+        prompt_id: turnId,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      throw new Error('The waiting Turn unexpectedly continued.');
+    });
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const read = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    const settledOf = async (id: string) =>
+      (await read()).events.find(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === id,
+      )?.payload;
+    try {
+      const original = await app(true);
+      await headers(supertest(original).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const live = (
+        wakeDeps.last as {
+          session: {
+            managed: ManagedSession;
+            monitorWake?: { kick(): void; close(): void };
+          };
+        }
+      ).session;
+      const monitors = new HostedMonitorSession(
+        {
+          authority: live.managed.authority,
+          resources: live.managed.resources,
+        },
+        key,
+      );
+      const binding = { runtimeBindingId: 'binding-1', generation: '1' };
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: key.sessionId,
+        executionCallId: 'call-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await monitors.dispatchStarted('monitor-1', binding);
+      await monitors.attach('monitor-1', binding, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: turnId,
+            turnId,
+            source: 'monitor',
+            contentRef: await live.managed.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            admissionRef: await live.managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        },
+      );
+      live.monitorWake?.kick();
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      // The generation dies at the wait point: its pump stops and nothing
+      // after it reaches the journal, exactly as after a SIGKILL.
+      live.monitorWake?.close();
+      await live.managed.close();
+      const requestId = (await read()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      const replacement = await app(true);
+      const loaded = await headers(
+        supertest(replacement).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          passiveManagedRuntimeRecovery: true,
+        })
+        .expect(200);
+      const continuation = hostedWakeContinuationId(turnId);
+      await vi.waitFor(
+        async () => {
+          expect(await settledOf(continuation)).toMatchObject({
+            outcome: 'completed',
+          });
+        },
+        { timeout: 5000 },
+      );
+      expect(await settledOf(turnId)).toMatchObject({ outcome: 'error' });
+      expect(
+        (await read()).events.findLast(
+          (event) =>
+            event.kind === 'action.changed' &&
+            event.payload['requestId'] === requestId,
+        )?.payload['state'],
+      ).toBe('cancelled');
+      expect(HostedWorkspaceBroker.prototype.execute).not.toHaveBeenCalled();
+      await headers(supertest(replacement).delete(`/session/${SESSION_ID}`))
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .expect(204);
+    } finally {
+      waiting.mockRestore();
+      state.approvalSelections.clear();
+    }
   });
 });
