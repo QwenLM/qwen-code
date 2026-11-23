@@ -18,6 +18,7 @@ export const HOSTED_HARNESS_CAPABILITY_DIGEST_ENV =
 export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
   'QWEN_HOSTED_LIFECYCLE_V2_PROFILES';
 const LIFECYCLE_V2_PROFILES = [
+  'hosted-workspace-files/1',
   'hosted-workspace-shell/1',
   'hosted-workspace-shell/3',
   'hosted-workspace-shell/4',
@@ -42,7 +43,8 @@ export function createHostedHarnessContract(
   capabilityDigest: string,
   bootId: string = randomUUID(),
   lifecycleV2Profiles: readonly string[] = (
-    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ?? 'hosted-workspace-shell/1'
+    process.env[HOSTED_LIFECYCLE_V2_PROFILES_ENV] ??
+    'hosted-workspace-files/1,hosted-workspace-shell/1'
   )
     .split(',')
     .filter(Boolean),

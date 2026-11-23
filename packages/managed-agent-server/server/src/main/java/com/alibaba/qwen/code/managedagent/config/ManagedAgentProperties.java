@@ -118,10 +118,19 @@ public class ManagedAgentProperties
     }
 
     public boolean admitsPublicChildAgents() {
+        // D5′: public children ride the parent's Workspace on a session-scoped
+        // worker, so the durable local-process arm and the SSH arm (the same
+        // capability expression sshFiles uses) both admit them. CSI resident
+        // stays excluded structurally: these provisioner arms never match a
+        // resident Workspace, and isPublicShell refuses its files-only
+        // profile — there is no resident admission gate.
         return harness.isWorkspaceChildAgentsEnabled() && harness.isWorkspaceShellEnabled()
-                && runtimeBroker.isDurableLocalProcess()
-                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
-                && "session".equals(runtimeBroker.getBoundSessionIsolationClass());
+                && "session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                && (runtimeBroker.isDurableLocalProcess()
+                        && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(runtimeBroker.getProvisioner())
+                        && !runtimeBroker.getSsh().getNodes().isEmpty()
+                        && "session".equals(runtimeBroker.getIsolationClass()));
     }
 
     public void setModelCatalog(List<ModelOption> modelCatalog) {
@@ -371,6 +380,12 @@ public class ManagedAgentProperties
         applySessionStoreDefaults();
         applyClientFilesDefaults();
         applyHarnessCredentialsFile();
+        if (environment != null
+                && environment.getProperty("qwen.managed-agent.action-parking.enabled", Boolean.class, false)
+                && !environment.getProperty("qwen.managed-agent.wake-dispatch.enabled", Boolean.class, false)) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.action-parking.enabled requires qwen.managed-agent.wake-dispatch.enabled");
+        }
         // The sweep runs first, so a bare milliseconds-style override
         // warns with the unit hint before the range check below fails the
         // boot, and the refusal message itself names the convention.

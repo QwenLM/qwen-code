@@ -134,14 +134,12 @@ class JdbcRuntimeRetentionTest {
         fixture.execution(binding, "session", "settled", "SETTLED", OLD);
         fixture.execution(binding, "session", "abandoned", "ABANDONED", OLD);
         fixture.execute("INSERT INTO ma_session_head"
-                + " (tenant_key, harness_key, tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
-                + " VALUES (?, ?, ?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
+                + " (tenant_id, session_id, harness_session_id, head_kind, gmt_create, gmt_modified)"
+                + " VALUES (?, ?, ?, 'HARNESS', " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ")",
                 "other-tenant", "other-harness", "other-harness");
-        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id)"
-                + " VALUES (?, ?, ?, ?, ?, ?)",
+        fixture.execute("INSERT INTO ma_storage (alias_key, tenant_id, storage_id, fence_operation_id)"
+                + " VALUES (?, ?, ?, ?)",
                 RuntimeAdmissionFences.storageAliasKey("other-tenant", "other-storage"),
-                JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-storage"),
                 "other-tenant", "other-storage", UUID.randomUUID().toString());
 
         var total = fixture.complete(1, NO_REFERENCES);

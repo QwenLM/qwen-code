@@ -222,10 +222,10 @@ public class JdbcManagedActionStore
                     "createdAt",
                     "expiresAt",
                     question ? "questions" : "options"));
-            if (question || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 && options.has("inputRef")) {
+            if (options.has("inputRef")) {
                 optionFields.add("inputRef");
             }
-            if (question || options.path("v").asLong() == 3) {
+            if (options.has("continuationRef")) {
                 optionFields.add("continuationRef");
             }
             if (options.has("requiresHumanDecision")) {
@@ -235,8 +235,8 @@ public class JdbcManagedActionStore
             closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
-                            && (options.path("v").asLong() == 1
-                                    || options.path("v").asLong() == 2 || options.path("v").asLong() == 3 || question)
+                            && (options.path("v").asLong() == 3 || question)
+                            && (!question || options.has("inputRef") && options.has("continuationRef"))
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
@@ -280,7 +280,7 @@ public class JdbcManagedActionStore
                             && options.path("functionCallId").equals(continuation.path("calls").get(ordinal).path("call").path("callId")));
                 }
             }
-            if (question || options.path("v").asLong() == 3) {
+            if (options.has("continuationRef")) {
                 ManagedHostedRecoveryRecords.reference(options.path("continuationRef"), "hosted-approval-continuation", tenantId, workspaceId, sessionId, resources, hostedReferences);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);
@@ -311,7 +311,8 @@ public class JdbcManagedActionStore
                                 + ManagedExtensionProjection.recordKey(
                                         sessionId, "action_decision", id + ":" + decided.digest());
                 digest = decided.digest();
-                if ("allow".equals(body.path("optionId").asText()) && publicPlanExit(tenantId, sessionId, options)) {
+                if ("allow".equals(body.path("optionId").asText()) && options.has("continuationRef")
+                        && publicPlanExit(tenantId, sessionId, options)) {
                     JsonNode input = read(new String(resource(options.path("inputRef"), "managed-tool-input", resources).bytes(),
                             StandardCharsets.UTF_8));
                     JsonNode request = read(input.path("payloadJson").asText());
@@ -340,15 +341,14 @@ public class JdbcManagedActionStore
             String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
             String recordKey = ManagedSchemaKeys.key(scope, "ACTION", id);
             if (previous == null) {
-                jdbc.update("INSERT INTO ma_session_record (session_scope_key, record_key, tenant_id, workspace_id, session_id, record_kind, domain, record_id, action_id, revision, action_version, state, options_json, gmt_create, first_sequence) VALUES (?, ?, ?, ?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, ?, ?, ?)",
-                        scope, recordKey, tenantId, workspaceId, sessionId, id, id,
-                        event.path("sequence").asLong(), options.path("inputRevision").asLong(),
-                        state, options.toString(), options.path("createdAt").asLong(), event.path("sequence").asLong());
+                jdbc.update("INSERT INTO ma_session_record (record_key, tenant_id, workspace_id, session_id, record_kind, domain, record_id, action_id, revision, action_version, state, options_json, prompt_id, gmt_create, first_sequence) VALUES (?, ?, ?, ?, 'ACTION', 'action', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        recordKey, tenantId, workspaceId, sessionId, id, id, event.path("sequence").asLong(), options.path("inputRevision").asLong(),
+                        state, options.toString(), options.path("turnId").asText(), options.path("createdAt").asLong(), event.path("sequence").asLong());
             } else {
                 jdbc.update("UPDATE ma_session_record SET state = ?, decision_receipt_id = ?,"
-                                + " decision_digest = ?, revision = ? WHERE session_scope_key = ?"
+                                + " decision_digest = ?, revision = ? WHERE tenant_id = ? AND session_id = ?"
                                 + " AND record_kind = 'ACTION' AND action_id = ?",
-                        state, receipt, digest, event.path("sequence").asLong(), scope, id);
+                        state, receipt, digest, event.path("sequence").asLong(), tenantId, sessionId, id);
             }
             replaceActionReferences(tenantId, workspaceId, sessionId, recordKey,
                     event.path("sequence").asLong(), ref, options, decision);
@@ -385,14 +385,14 @@ public class JdbcManagedActionStore
             refs.add(decisionRef);
         }
         jdbc.update(
-                "DELETE FROM ma_resource_ref WHERE session_scope_key = ? AND owner_kind ="
+                "DELETE FROM ma_resource_ref WHERE tenant_id = ? AND session_id = ? AND owner_kind ="
                         + " 'SESSION_RECORD' AND owner_key = ?",
-                scope, recordKey);
+                tenantId, sessionId, recordKey);
         for (JsonNode ref : refs) {
             String resourceId = ref.path("resourceId").asText();
             jdbc.update(
-                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES (?, 'SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                    scope, recordKey, revision, ManagedSchemaKeys.key(scope, resourceId), tenantId, workspaceId, sessionId, resourceId);
+                    "INSERT INTO ma_resource_ref (owner_kind, owner_key, owner_revision, resource_key, tenant_id, workspace_id, session_id, resource_id, gmt_create) VALUES ('SESSION_RECORD', ?, ?, ?, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                    recordKey, revision, ManagedSchemaKeys.key(scope, resourceId), tenantId, workspaceId, sessionId, resourceId);
         }
     }
 
@@ -410,7 +410,7 @@ public class JdbcManagedActionStore
         }
         return jdbc
                 .query(
-                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE session_scope_key = ? AND record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND action_id = ?",
+                        "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND action_id = ?",
                         (r, row) ->
                                 new Action(
                                         r.getString("action_id"),
@@ -418,7 +418,7 @@ public class JdbcManagedActionStore
                                         read(r.getString("options_json")),
                                         r.getString("decision_receipt_id"),
                                         r.getString("decision_digest")),
-                        ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId, id)
+                        tenantId, sessionId, id)
                 .stream()
                 .findFirst();
     }
@@ -435,7 +435,7 @@ public class JdbcManagedActionStore
         args.add(limit);
         return jdbc.query("SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns("r")
                         + " FROM ma_session_record r JOIN ma_session s ON s.tenant_id=r.tenant_id"
-                        + " AND s.session_id=r.session_id AND s.session_scope_key=r.session_scope_key"
+                        + " AND s.session_id=r.session_id AND s.session_scope_key IS NOT NULL"
                         + " WHERE r.tenant_id=? AND r.record_kind='ACTION'"
                         + " AND r.state='requested' AND s.deleted_at IS NULL AND (s.session_id=?"
                         + " OR s.parent_session_id=? AND s.public_child_agents_version=1)" + cursor
@@ -448,7 +448,7 @@ public class JdbcManagedActionStore
 
     public List<Action> list(
             String tenantId, String sessionId, Long before, String beforeId, int limit) {
-        List<Object> args = new ArrayList<>(List.of(ManagedSessionStore.sessionScopeKey(tenantId, sessionId), tenantId, sessionId));
+        List<Object> args = new ArrayList<>(List.of(tenantId, sessionId));
         String cursor = "";
         if (before != null) {
             cursor = " AND (gmt_create < ? OR gmt_create = ? AND action_id < ?)";
@@ -458,7 +458,7 @@ public class JdbcManagedActionStore
         }
         args.add(limit);
         return jdbc.query(
-                "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE session_scope_key = ? AND record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND state = 'requested'"
+                "SELECT " + ManagedSchemaProjection.SESSION_RECORD.columns() + " FROM ma_session_record WHERE record_kind = 'ACTION' AND tenant_id = ? AND session_id = ? AND state = 'requested'"
                         + cursor
                         + " ORDER BY gmt_create DESC, action_id DESC LIMIT ?",
                 (r, row) ->
@@ -602,6 +602,7 @@ public class JdbcManagedActionStore
                                     + " operation_id = ?",
                             now, now, tenantId, sessionId,
                             existing.operationId());
+                    AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
                     return new OperationAdmission(
                             sessions.findOperation(tenantId, sessionId,
                                     existing.operationId()).orElseThrow(),
@@ -644,6 +645,7 @@ public class JdbcManagedActionStore
                             action.get().decisionReceiptId(),
                             now, now, tenantId, sessionId,
                             existing.operationId());
+                    AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
                     return new OperationAdmission(
                             sessions.findOperation(tenantId, sessionId,
                                     existing.operationId()).orElseThrow(),
@@ -714,7 +716,7 @@ public class JdbcManagedActionStore
         List<String[]> reserved = jdbc.query(
                         "SELECT request_digest, result_operation_key FROM ma_request_receipt WHERE"
                                 + " namespace = 'ACTION_DECISION' AND tenant_key = ? AND"
-                                + " decision_scope_key = ?",
+                                + " scope_key = ?",
                 (r, row) -> new String[]{r.getString(1), r.getString(2)}, ManagedSchemaKeys.key(tenantId), actionScope);
         if (!reserved.isEmpty()) {
             if (!decision.equals(reserved.getFirst()[0])) {
@@ -735,6 +737,7 @@ public class JdbcManagedActionStore
                 ManagedSchemaKeys.receiptKey(ReceiptNamespace.ACTION_DECISION, tenantId, ReceiptScope.SESSION, actionScope, actionId),
                 ManagedSchemaKeys.key(tenantId), tenantId, actionScope, actionScope, actionId, ManagedSchemaKeys.key(actionId), decision,
                 sessionId, actionId, o.path("inputRevision").asLong(), operationKey, now, now);
+        AgentActionParking.unparkActionTurns(jdbc, tenantId, sessionId, now);
 
         return new OperationAdmission(
                 sessions.findOperation(tenantId, sessionId, op).orElseThrow(), false);
@@ -783,7 +786,7 @@ public class JdbcManagedActionStore
                         "SELECT o.tenant_id, o.session_id, o.operation_id, o.request_json,"
                             + " a.state, a.decision_digest, a.decision_receipt_id FROM ma_operation o JOIN"
                             + " ma_session_record a ON a.record_kind = 'ACTION' AND"
-                            + " a.session_scope_key = o.scope_key AND a.tenant_id = o.tenant_id AND"
+                            + " a.tenant_id = o.tenant_id AND"
                             + " a.session_id = o.session_id AND a.action_id = o.action_id WHERE"
                             + " o.operation_kind = 'ACTION_RESPONSE' AND o.delivery_state IN"
                             + " ('PENDING', 'LEASED') AND a.state <> 'requested' LIMIT 50",

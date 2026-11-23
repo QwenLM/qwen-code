@@ -405,7 +405,7 @@ class Issue13181QueryBudgetTest {
         // Page + latest turns + environment events + lifecycle summary; unbound rows read no model metadata.
         assertThat(fixture.ledger.total()).isEqualTo(4);
         assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
-                "where o.tenant_id = ? and o.session_id in (", "and o.session_scope_key in (",
+                "where o.tenant_id = ? and o.session_id in (",
                 "!session_scope_key is null")).isEqualTo(1);
         // The latest-turn batch read projects only the summary columns.
         assertThat(fixture.ledger.count("turn_record.*")).isZero();
@@ -474,14 +474,14 @@ class Issue13181QueryBudgetTest {
         String closeSession = boundIds.get(5);
         String closeId = "op_" + UUID.randomUUID();
         String closeScope = ManagedSessionStore.sessionScopeKey(bound, closeSession);
-        fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind,"
+        fixture.jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, target_kind,"
                 + " target_key, request_json, phase, tenant_id, session_id, operation_id, operation_kind, actor_digest,"
                 + " idempotency_key, request_digest, state, admission_stage, delivery_state, session_status_before,"
                 + " receipt_id, available_at, gmt_create, gmt_modified, completed_at)"
-                + " VALUES (?, ?, ?, 'SESSION', ?, '{}', 'COMPLETED', ?, ?, ?, 'CLOSE', '', 'close-key',"
+                + " VALUES (?, ?, 'SESSION', ?, '{}', 'COMPLETED', ?, ?, ?, 'CLOSE', '', 'close-key',"
                 + " 'digest', 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED', 'CLOSED', 'rcpt', 0, 0, 0, 0)",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(closeScope, "CLOSE", closeId),
-                closeScope, closeScope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(closeSession),
+                closeScope, com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(closeSession),
                 bound, closeSession, closeId);
         fixture.ledger.reset();
         var boundPublic = fixture.service.listPublicSessions(bound, "actor",
@@ -633,7 +633,7 @@ class Issue13181QueryBudgetTest {
         // constant, not per row.
         assertThat(fixture.ledger.total()).isEqualTo(13);
         assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
-                "where o.tenant_id = ? and o.session_id in (", "and o.session_scope_key in (",
+                "where o.tenant_id = ? and o.session_id in (",
                 "!session_scope_key is null")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
         assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);
@@ -685,7 +685,7 @@ class Issue13181QueryBudgetTest {
             assertThat(fixture.ledger.count("head_kind = 'managed_session'")).isEqualTo(1);
             assertThat(fixture.ledger.count("operation_kind = 'context_compression'")).isEqualTo(1);
             assertThat(fixture.ledger.count("row_number() over (partition by o.session_id",
-                    "where o.tenant_id = ? and o.session_id in (", "and o.session_scope_key in (",
+                    "where o.tenant_id = ? and o.session_id in (",
                     "!session_scope_key is null")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(selected_approval_mode, approval_mode)")).isEqualTo(1);
             assertThat(fixture.ledger.count("coalesce(owner_actor_key, creator_actor_key)")).isEqualTo(1);

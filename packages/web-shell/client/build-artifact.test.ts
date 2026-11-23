@@ -104,6 +104,37 @@ describe('build artifact — package boundary', () => {
   });
 
   it.each(['.', 'assets'])(
+    'ships the xterm runtime and stylesheet in a lazy chunk in dist/%s',
+    (directory) => {
+      const dir = resolve(DIST_DIR, directory);
+      const files = readdirSync(dir).filter((name) => /\.(js|css)$/.test(name));
+      const runtime = files.find((name) =>
+        /^terminal-runtime-.*\.js$/.test(name),
+      );
+      expect(runtime).toBeDefined();
+      const code = readFileSync(resolve(dir, runtime!), 'utf8');
+      expect(code).toContain('"xterm-helper-textarea"');
+      expect(code).toContain('.xterm-helper-textarea{');
+      if (directory === '.') {
+        expect(code).toMatch(/\)\.xterm \.xterm-helper-textarea\{/);
+      } else {
+        expect(
+          readFileSync(resolve(DIST_DIR, 'index.html'), 'utf8'),
+        ).not.toContain(runtime);
+      }
+      const otherChunks = files
+        .filter((name) => name !== runtime)
+        .map((name) => readFileSync(resolve(dir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks).toContain(`import("./${runtime}")`);
+      expect(otherChunks).not.toMatch(
+        /(?:from|import)\s*["']\.\/terminal-runtime-[^"']+\.js["']/,
+      );
+      expect(otherChunks.includes('xterm-helper-textarea')).toBe(false);
+    },
+  );
+
+  it.each(['.', 'assets'])(
     'ships the spreadsheet worker in a lazy chunk in dist/%s',
     (directory) => {
       const chunkDir = resolve(DIST_DIR, directory);
@@ -574,6 +605,7 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]managed\.artifactLibrary\./);
+    expect(js).not.toMatch(/["'`]workspaceArtifactLibrary\./);
     expect(js).not.toContain(
       'No artifacts have been produced in this workspace yet.',
     );
@@ -581,6 +613,7 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('В этом Workspace ещё нет артефактов.');
     const interactive = readPackageJavascript();
     expect(interactive).toContain('managed.artifactLibrary.title');
+    expect(interactive).toContain('workspaceArtifactLibrary.title');
     expect(interactive).toContain('Artifact library');
     expect(interactive).toContain('产物库');
     expect(interactive).toContain('Библиотека артефактов');

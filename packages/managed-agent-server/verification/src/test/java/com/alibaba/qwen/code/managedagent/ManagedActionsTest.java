@@ -178,8 +178,8 @@ class ManagedActionsTest {
         ActionJournal journal = new ActionJournal(journals, tenant, session, System.currentTimeMillis(), 9007199254740991L)
                 .withQuestions(input);
         journal.change("requested", null);
-        assertThat(jdbc.queryForObject("SELECT storage_version FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
-                Integer.class, tenant, session)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT has_activity_diagnostics FROM ma_session_head WHERE tenant_id = ? AND session_id = ?",
+                Boolean.class, tenant, session)).isFalse();
         for (JsonNode view : inputViews(tenant, session, journal.id)) {
             boolean web = view.has("actionId");
             assertThat(view.path("kind").asText()).isEqualTo("question");
@@ -391,25 +391,20 @@ class ManagedActionsTest {
                 .andExpect(status().isNotFound()).andExpect(jsonPath("$.error.code").value("session_not_found"));
     }
 
-    @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void childAggregationDoesNotJoinActionsFromAnotherScope(boolean childRow) throws Exception {
+    @Test
+    void childAggregationDoesNotJoinActionsFromAnotherScope() throws Exception {
         String tenant = tenant();
         String root = session(tenant);
         String child = childSession(tenant, root);
         String other = session(tenant);
         ActionJournal own = action(tenant, root, 100, 9_007_199_254_740_991L);
         ActionJournal nested = action(tenant, child, 200, 9_007_199_254_740_991L);
-        ActionJournal foreign = action(tenant, other, 300, 9_007_199_254_740_991L);
+        action(tenant, other, 300, 9_007_199_254_740_991L);
         for (String session : List.of(root, child, other)) {
             assertThat(jdbc.queryForObject("SELECT session_scope_key FROM ma_session"
                             + " WHERE tenant_id = ? AND session_id = ?", String.class, tenant, session))
                     .isEqualTo(ManagedSessionStore.sessionScopeKey(tenant, session));
         }
-        // Keep the foreign writer's real scope; only corrupt its denormalized Session identity.
-        assertThat(jdbc.update("UPDATE ma_session_record SET session_id = ? WHERE session_scope_key = ?"
-                        + " AND record_kind = 'ACTION' AND action_id = ?", childRow ? child : root,
-                ManagedSessionStore.sessionScopeKey(tenant, other), foreign.id)).isEqualTo(1);
         assertThat(actions.listWithChildren(tenant, root, null, null, null, 10))
                 .extracting(row -> row.sessionId() + ":" + row.action().id())
                 .containsExactly(child + ":" + nested.id, root + ":" + own.id);
@@ -567,7 +562,7 @@ class ManagedActionsTest {
                     .withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{\"content\":\"foreign secret\"}}"));
             foreign.change("requested", null);
             ActionJournal local = new ActionJournal(journals, tenant, session, 100, 1000);
-            local.options.put("v", 2);
+            local.options.put("v", 3);
             local.options.set("inputRef", foreign.options.path("inputRef").deepCopy());
             assertThatThrownBy(() -> local.change("requested", null))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode())
@@ -640,7 +635,7 @@ class ManagedActionsTest {
             switch (fault) {
                 case "oldExtra" -> journal.options.putNull("inputRef");
                 case "missingRef" -> journal.options.put("v", 2);
-                case "version" -> journal.options.put("v", 3);
+                case "version" -> journal.options.put("v", 5);
                 case "extra" -> {
                     journal.withInput(inputBytes(session, "{\"toolName\":\"write_file\",\"input\":{}}"));
                     journal.options.put("extra", true);

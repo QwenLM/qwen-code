@@ -325,6 +325,13 @@ describe('AoneChannel', () => {
       expect(
         stderr.mock.calls.some((c) => String(c[0]).includes('any commenter')),
       ).toBe(false);
+      // Nor may it emit the MIXED dead-repo wording — the all-dead and mixed
+      // diagnostics are exclusive (else-if), pinned here (verify-r4 M17).
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('no groups entry for'),
+        ),
+      ).toBe(false);
       ch.disconnect();
       stderr.mockRestore();
     });
@@ -447,6 +454,129 @@ describe('AoneChannel', () => {
       ch.disconnect();
       stderr.mockRestore();
     });
+
+    it('mixed allowlist names EVERY dead repo, not just the first (verify-r4 M21)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'allowlist',
+          repos: ['test/a', 'test/b', 'test/c'],
+          groups: {
+            'test/a': { senders: 'allowlist', allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const mixed = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('no groups entry for'));
+      expect(mixed).toBeDefined();
+      expect(mixed).toContain('test/b');
+      expect(mixed).toContain('test/c');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('senders allowlist with no allowedUsers anywhere warns sender-dead (R4-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'open',
+          groups: { 'test/repo': { senders: 'allowlist' } },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const lines = stderr.mock.calls.map((c) => String(c[0]));
+      const senderDead = lines.find((l) => l.includes('group_sender_denied'));
+      expect(senderDead).toBeDefined();
+      expect(senderDead).toContain('test/repo');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('senders allowlist whose list lives on "*" is NOT sender-dead (R4-2 fallback)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'open',
+          groups: {
+            'test/repo': { senders: 'allowlist' },
+            '*': { allowedUsers: ['alice'] },
+          },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      // resolvedAllowedUsers falls back repo -> "*": the list on "*" admits
+      // alice, so the repo is restricted, not dead. Reading only the repo
+      // entry would falsely warn.
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('group_sender_denied'),
+        ),
+      ).toBe(false);
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('pairing with open senders warns the post-approval posture (R4-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'pairing',
+          groups: { 'test/repo': { senders: 'open' } },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      const pairing = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('once a group is approved'));
+      expect(pairing).toBeDefined();
+      expect(pairing).toContain('test/repo');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
+
+    it('pairing with senders allowlist and no allowedUsers warns sender-dead post-approval (R1-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({
+          groupPolicy: 'pairing',
+          groups: { 'test/repo': { senders: 'allowlist' } },
+        }),
+        makeBridge(),
+      );
+      await ch.connect();
+      // groupReachable is false under pairing, so the reachable-only
+      // sender-dead filter misses this; the pairing arm must still diagnose
+      // the empty allowlist (post-approval framing).
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('group_sender_denied'));
+      expect(line).toBeDefined();
+      expect(line).toContain('test/repo');
+      expect(line).toContain('once a group is approved');
+      ch.disconnect();
+      stderr.mockRestore();
+    });
   });
 
   describe('baseline', () => {
@@ -480,6 +610,77 @@ describe('AoneChannel', () => {
       await channel.testPollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
       channel.disconnect();
+    });
+
+    it('an empty-window baseline (cursor 0) does not over-report aging (R4-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      let events: unknown[] = [];
+      installFakeA1({ events: () => events });
+      await channel.connect();
+      await channel.testPollOnce(); // empty window → cursor 0
+      expect(channel.cursor.repos['test/repo']).toBe(0);
+      // The window fills with post-creation events. cursor 0 can never be
+      // "reached" (no id <= 0), but the whole window was fetched — nothing
+      // aged out; these events dispatch normally, not via an aging jump.
+      events = [makeEvent({ id: 10 }), makeEvent({ id: 20 })];
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.cursor.repos['test/repo']).toBe(20);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      stderr.mockRestore();
+    });
+
+    it('a stale cursor-0 repo (last poll before the window) reports genuine aging (R1-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 0;
+      // The empty baseline was polled long before the 3-day window start, so
+      // post-creation events between then and the window aged out — unlike
+      // the recent-empty-baseline case above, this IS genuine loss.
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 10 }), makeEvent({ id: 20 })]),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const aged = records.find(
+        (r) => r.outcome === 'cursor_aged_out' && r.repository === 'test/repo',
+      );
+      expect(aged).toBeDefined();
+      expect(aged.detail.cursor).toBe(0);
+      expect(aged.detail.resumedFrom).toBe(10);
+      stderr.mockRestore();
     });
 
     it('a repo added to the config later baselines without backlog dispatch', async () => {
@@ -862,6 +1063,29 @@ describe('AoneChannel', () => {
       stderr.mockRestore();
     });
 
+    it('the unparseable-createdAt stderr is sanitized (R2-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const forged = 'x\n[Channel:test-aone] forged\n' + 'y'.repeat(500);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1001
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1002, createdAt: forged })]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('unparseable createdAt on event 1002'));
+      expect(line).toBeDefined();
+      // The offending value stays visible but cannot forge a column-0 line.
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      expect(line!.length).toBeLessThanOrEqual(300);
+      stderr.mockRestore();
+    });
+
     it('an authorless event is skipped fail-closed but logged (R2-8)', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -1222,6 +1446,106 @@ describe('AoneChannel', () => {
       expect(String(failure.error)).not.toContain('\n');
       expect(String(failure.error)).toContain('FORBIDDEN');
     });
+
+    it('the poll-failure stderr is sanitized: no forged line, bounded (R4-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cause = 'FORBIDDEN\n[Channel:test-aone] forged\n' + 'x'.repeat(500);
+      installFakeA1({
+        events: (repo) =>
+          repo === 'good/repo' ? [makeEvent({ id: 2001 })] : [],
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['good/repo', 'bad/repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline both
+      installFakeA1({
+        events: (repo) => {
+          if (repo === 'bad/repo') {
+            throw {
+              code: 1,
+              stdout: JSON.stringify({
+                schemaVersion: 'a1.error/v1',
+                message: cause,
+              }),
+              stderr: '',
+            };
+          }
+          return [makeEvent({ id: 2002 })];
+        },
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('poll failed for bad/repo'));
+      expect(line).toBeDefined();
+      // The a1-derived cause carries newlines; sanitized, they render as
+      // visible escapes, so no forged log line starts at column 0. This is
+      // the adapter-only guard (the journal write path does not cover stderr).
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      // Bounded: the raw 537-char cause would overshoot; sanitize caps it.
+      expect(line!.length).toBeLessThanOrEqual(300);
+      expect(line).toContain('FORBIDDEN');
+      stderr.mockRestore();
+    });
+
+    it('the per-event dispatch stderr is sanitized (R1-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cause = 'FORBIDDEN\n[Channel:test-aone] forged\n' + 'x'.repeat(500);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1001
+      channel.handleInboundError = new Error(cause);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1002 })]) });
+      await channel.testPollOnce();
+      channel.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('error processing event 1002'));
+      expect(line).toBeDefined();
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      expect(line!.length).toBeLessThanOrEqual(300);
+      expect(line).toContain('FORBIDDEN');
+      stderr.mockRestore();
+    });
+
+    it('the fetchView stderr is sanitized (R1-4)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const cause = 'FORBIDDEN\n[Channel:test-aone] forged\n' + 'x'.repeat(500);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1001 })]) });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ promptTemplate: 'url=%url%' }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce(); // baseline at 1001
+      // A structured a1.error/v1 message passes through runA1Json unchanged
+      // (newlines intact), so fetchView's stderr must sanitize it.
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1002 })]),
+        view: () => ({ schemaVersion: 'a1.error/v1', message: cause }),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      const line = stderr.mock.calls
+        .map((c) => String(c[0]))
+        .find((l) => l.includes('fetchView failed'));
+      expect(line).toBeDefined();
+      expect(/\n\[Channel:/.test(line!)).toBe(false);
+      expect(line!.length).toBeLessThanOrEqual(300);
+      expect(line).toContain('FORBIDDEN');
+      stderr.mockRestore();
+    });
   });
 
   describe('pagination', () => {
@@ -1281,6 +1605,38 @@ describe('AoneChannel', () => {
       expect(pages).toEqual([1, 2]);
       // ids 1000..901 are newer than the cursor at 900 — 100 events.
       expect(ch2.inboundEnvelopes).toHaveLength(100);
+    });
+
+    it('a poll that meets the cursor reports no aging loss (R1-3)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1000
+      // The next poll serves the cursor event itself plus a newer one: the
+      // walk meets the cursor (reachedCursor), so nothing aged out. Deleting
+      // the !reachedCursor clause would fire aging on this healthy poll.
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 1001 }), makeEvent({ id: 1000 })]),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const content = journal
+        ? readFileSync(join(tempDir, 'channels', String(journal)), 'utf8')
+        : '';
+      expect(content).not.toContain('cursor_aged_out');
+      stderr.mockRestore();
     });
 
     it('dispatches each boundary event once when offset pagination repeats it', async () => {
@@ -1428,6 +1784,11 @@ describe('AoneChannel', () => {
       ).toBe(false);
       expect(channel.cursor.repos['test/repo']).toBe(1000);
       stderr.mockClear();
+      // Simulate an outage: the last SUCCESSFUL poll was long before the
+      // window start, so events since then aged out. (A continuously-polled
+      // quiet repo has a fresh lastPoll and reports no aging — see the
+      // quiet-repo test below.)
+      channel.cursor.lastPoll['test/repo'] = '2020-01-01T00:00:00.000Z';
       // Resume: the cursor event aged out; all window events are newer.
       installFakeA1({
         events: pagedEvents(
@@ -1443,7 +1804,353 @@ describe('AoneChannel', () => {
       ).toBe(true);
       expect(channel.inboundEnvelopes).toHaveLength(50);
       expect(channel.cursor.repos['test/repo']).toBe(2050);
+      // The permanent loss leaves a durable journal record (R4-1), not just
+      // a stderr line — the poll itself resolves ok, so the status page must
+      // still see the aging jump.
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const aged = records.find(
+        (r) => r.outcome === 'cursor_aged_out' && r.repository === 'test/repo',
+      );
+      expect(aged).toBeDefined();
+      expect(aged.type).toBe('poll');
+      expect(aged.detail.cursor).toBe(1000);
+      expect(aged.detail.resumedFrom).toBe(2001);
       stderr.mockRestore();
+    });
+
+    it('a failed poll does not refresh lastPoll, so recovery reports aging (R1-2)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 0;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      // An a1 outage: the failing poll must NOT count as an observation, so
+      // lastPoll stays stale (writing it before the fetch would refresh it on
+      // every failed attempt and silence the diagnostic on recovery).
+      installFakeA1({
+        events: () => {
+          throw {
+            code: 1,
+            stdout: JSON.stringify({
+              schemaVersion: 'a1.error/v1',
+              message: 'SYSTEM_FORBIDDEN_ERROR',
+            }),
+            stderr: '',
+          };
+        },
+      });
+      await expect(ch.testPollOnce()).rejects.toThrow();
+      expect(ch.cursor.lastPoll['test/repo']).toBe('2020-01-01T00:00:00.000Z');
+      // Recovery: events created during the outage aged out — report it.
+      installFakeA1({
+        events: pagedEvents([makeEvent({ id: 10 }), makeEvent({ id: 20 })]),
+      });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      stderr.mockRestore();
+    });
+
+    it('a continuously-polled quiet repo reports no aging loss (R2-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 1000 })]) });
+      await channel.connect();
+      await channel.testPollOnce(); // baseline at 1000
+      // A quiet gap > 3 days: the cursor event aged out of the window, but the
+      // channel kept polling (fresh lastPoll) and no comments existed in the
+      // gap — nothing was lost, so no aging line / durable record.
+      channel.cursor.lastPoll['test/repo'] = new Date(
+        Date.now() - 60_000,
+      ).toISOString();
+      installFakeA1({
+        events: pagedEvents(
+          Array.from({ length: 50 }, (_, i) => makeEvent({ id: 2050 - i })),
+        ),
+      });
+      await channel.testPollOnce();
+      channel.disconnect();
+      expect(channel.inboundEnvelopes).toHaveLength(50);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const content = journal
+        ? readFileSync(join(tempDir, 'channels', String(journal)), 'utf8')
+        : '';
+      expect(content).not.toContain('cursor_aged_out');
+      stderr.mockRestore();
+    });
+
+    it('a repo added to a mature channel baselines fresh, no false aging (R2-3)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      // Mature channel (old baselineAt) but the repo is added now: it
+      // baselines fresh. Keying aging on baselineMs instead of the last poll
+      // would false-positive here (baselineMs predates the window).
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      let events: unknown[] = [];
+      installFakeA1({ events: () => events });
+      await ch.connect();
+      await ch.testPollOnce(); // empty window → cursor 0, fresh lastPoll
+      expect(ch.cursor.repos['test/repo']).toBe(0);
+      events = [makeEvent({ id: 10 }), makeEvent({ id: 20 })];
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(ch.inboundEnvelopes).toHaveLength(2);
+      expect(
+        stderr.mock.calls.some((c) => String(c[0]).includes('aged out')),
+      ).toBe(false);
+      stderr.mockRestore();
+    });
+
+    it('a drain slower than arrival reports aging, journaled once (R2-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1;
+      // The last FULL drain was long before the window; the repo is now
+      // chronically backlogged (every poll capped at DISPATCH_BUDGET).
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      let currentAll: unknown[] = [];
+      const setWindow = (start: number) => {
+        currentAll = Array.from({ length: 150 }, (_, i) =>
+          makeEvent({
+            id: start + i,
+            note: {
+              id: start + i,
+              note: 'qwen: x',
+              noteable_type: 'MergeRequest',
+            },
+          }),
+        );
+      };
+      installFakeA1({
+        events: (repo, page) => pagedEvents(currentAll)(repo, page),
+      });
+      setWindow(200);
+      await ch.testPollOnce(); // poll 1: capped, aging fires, lastPoll kept stale
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      // A capped poll is not a complete observation: lastPoll must NOT advance.
+      expect(ch.cursor.lastPoll['test/repo']).toBe('2020-01-01T00:00:00.000Z');
+      stderr.mockClear();
+      setWindow(400);
+      await ch.testPollOnce(); // poll 2: still capped + stale → aging fires again
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      // The journal record is deduped per stale instant: one across two polls.
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(
+        records.filter((r) => r.outcome === 'cursor_aged_out'),
+      ).toHaveLength(1);
+      stderr.mockRestore();
+    });
+
+    it('a successful empty-window poll advances lastPoll (R3-1)', async () => {
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 5000;
+      // A FRESH (within-window) instant: this is a quiet repo's dormant poll,
+      // not an outage recovery, so agedOut is false and the stamp must fire.
+      const seeded = new Date(Date.now() - 60_000).toISOString();
+      ch.cursor.lastPoll = { 'test/repo': seeded };
+      await ch.connect();
+      installFakeA1({ events: () => [] }); // dormant: empty window
+      await ch.testPollOnce();
+      ch.disconnect();
+      // A quiet dormant poll (empty + not agedOut) is a complete observation
+      // and stamps lastPoll forward; deleting the trailing stamp freezes it.
+      expect(Date.parse(ch.cursor.lastPoll['test/repo'])).toBeGreaterThan(
+        Date.parse(seeded),
+      );
+    });
+
+    it('an empty-window outage recovery keeps lastPoll stale, loss diagnosed (R4-1)', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1000;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      // Recovery poll after a long outage: the window is empty (the cursor
+      // event and everything created during the outage already aged out).
+      installFakeA1({ events: () => [] });
+      await ch.testPollOnce();
+      // Empty + agedOut observed nothing of the gap: must NOT launder the
+      // instant to now, or the next poll would swallow the permanent loss.
+      expect(ch.cursor.lastPoll['test/repo']).toBe('2020-01-01T00:00:00.000Z');
+      // Traffic resumes: events newer than the cursor → the loss is diagnosed.
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 2000 })]) });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(
+        stderr.mock.calls.some((c) =>
+          String(c[0]).includes('cursor for test/repo aged out'),
+        ),
+      ).toBe(true);
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(records.some((r) => r.outcome === 'cursor_aged_out')).toBe(true);
+      stderr.mockRestore();
+    });
+
+    it('a drained poll with events advances lastPoll (R4-1 positive stamp)', async () => {
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1000;
+      const seeded = '2020-01-01T00:00:00.000Z';
+      ch.cursor.lastPoll = { 'test/repo': seeded };
+      await ch.connect();
+      // One event, fully drained (fresh 1 <= slice 1): a complete observation
+      // that must stamp. Narrowing the stamp to empty windows only reds this.
+      installFakeA1({ events: pagedEvents([makeEvent({ id: 2000 })]) });
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(Date.parse(ch.cursor.lastPoll['test/repo'])).toBeGreaterThan(
+        Date.parse(seeded),
+      );
+    });
+
+    it('distinct aging episodes journal distinct records (R4-2)', async () => {
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig(),
+        makeBridge(),
+      );
+      ch.cursor.baselineAt = '2020-01-01T00:00:00.000Z';
+      ch.cursor.repos['test/repo'] = 1;
+      ch.cursor.lastPoll = { 'test/repo': '2020-01-01T00:00:00.000Z' };
+      await ch.connect();
+      let currentAll: unknown[] = [];
+      const setWindow = (start: number) => {
+        currentAll = Array.from({ length: 150 }, (_, i) =>
+          makeEvent({
+            id: start + i,
+            note: {
+              id: start + i,
+              note: 'qwen: x',
+              noteable_type: 'MergeRequest',
+            },
+          }),
+        );
+      };
+      installFakeA1({
+        events: (repo, page) => pagedEvents(currentAll)(repo, page),
+      });
+      // Episode 1: stale 2020, capped poll → record {cursor:1,...}.
+      setWindow(200);
+      await ch.testPollOnce();
+      // A new outage episode: a different stale instant (2021).
+      ch.cursor.lastPoll['test/repo'] = '2021-01-01T00:00:00.000Z';
+      setWindow(400);
+      await ch.testPollOnce(); // episode 2021 → a second, distinct record
+      ch.disconnect();
+      const files = readdirSync(join(tempDir, 'channels'), {
+        recursive: true,
+      }) as string[];
+      const journal = files.find((f) =>
+        String(f).endsWith('-channel-events.jsonl'),
+      );
+      const records = readFileSync(
+        join(tempDir, 'channels', String(journal)),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l))
+        .filter((r) => r.outcome === 'cursor_aged_out');
+      // Two distinct episodes → two records (a repo-lifetime `has(repo)`
+      // dedupe would collapse them to one).
+      expect(records).toHaveLength(2);
+      expect(records[0].detail.cursor).toBe(1);
+      expect(records[1].detail.cursor).toBe(299);
     });
 
     it('the dispatch budget is monotonic: a 500-event backlog caps at 100', async () => {

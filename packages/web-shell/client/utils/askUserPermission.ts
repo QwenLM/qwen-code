@@ -14,7 +14,7 @@ import { isAskUserQuestionToolName } from '../constants/toolNames.js';
  * the split-view ChatPane so the two never drift.
  */
 export function isAskUserPermission(
-  request: PermissionRequest | null,
+  request: Pick<PermissionRequest, 'rawInput' | 'toolName'> | null,
 ): boolean {
   if (
     !request?.rawInput?.questions ||

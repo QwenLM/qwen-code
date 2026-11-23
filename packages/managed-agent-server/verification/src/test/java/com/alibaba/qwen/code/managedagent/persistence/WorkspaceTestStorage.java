@@ -25,12 +25,11 @@ public final class WorkspaceTestStorage {
 
     public static String register(JdbcTemplate jdbc, String tenant, String storage) {
         String physical = key(tenant, storage);
-        jdbc.update("INSERT IGNORE INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
-                + " storage_kind, registration_state, registration_revision, registration_json) VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                RuntimeAdmissionFences.storageAliasKey(tenant, storage), RuntimeAdmissionFences.storageFenceKey(tenant),
-                RuntimeAdmissionFences.storageFenceKey(storage), tenant, storage, physical);
-        jdbc.update("INSERT IGNORE INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state, mount_revision)"
-                + " VALUES (?, ?, 'LOCAL', ?, ?, 'READY', 1)", physical, physical, tenant, storage);
+        jdbc.update("INSERT IGNORE INTO ma_storage (alias_key, tenant_id, storage_id, physical_key,"
+                + " storage_kind, registration_state, registration_revision, registration_json) VALUES (?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1, '{}')",
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage), tenant, storage, physical);
+        jdbc.update("INSERT IGNORE INTO ma_storage_owner (storage_key, storage_kind, tenant_id, storage_id, mount_state, mount_revision)"
+                + " VALUES (?, 'LOCAL', ?, ?, 'READY', 1)", physical, tenant, storage);
         return physical;
     }
 }
