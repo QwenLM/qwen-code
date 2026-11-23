@@ -2162,7 +2162,9 @@ describe('standalone-update', () => {
       // extracted; the archive has no lib/cli.js, so nothing is executed.
       await expect(
         performStandaloneUpdate(standaloneDir, '1.2.3'),
-      ).rejects.toThrow(/Smoke test failed: (?:CLI entry not found at|cli\.js not found)/);
+      ).rejects.toThrow(
+        /Smoke test failed: (?:CLI entry not found at|cli\.js not found)/,
+      );
       expect(spawnedCommands).not.toContain('powershell.exe');
     });
 
