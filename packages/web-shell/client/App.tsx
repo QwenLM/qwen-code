@@ -18599,6 +18599,7 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
       artifactCountHint?: number,
+      restoredSession?: DaemonSessionClient,
     ) => {
       // Suppress the generation bump for the jump's own load so a rejection
       // from `loadSidebarSession` stays current in `runArtifactLibrarySessionJump`'s
@@ -18658,6 +18659,7 @@ export function App({
                 : workspaceCwd,
           sessionContext: targetContext,
           artifactCountHint,
+          ...(restoredSession ? { restoredSession } : {}),
         });
         if (
           sessionOpenInvocationRef.current === invocation &&
@@ -19003,6 +19005,7 @@ export function App({
       sessionId: string,
       workspaceCwd?: string,
       explicitContext?: DaemonProductSessionContext,
+      restoredSession?: DaemonSessionClient,
     ) => {
       splitClassificationGenerationRef.current += 1;
       // Explicit navigation cancels any pending shrink-fold split restore.
@@ -19015,6 +19018,7 @@ export function App({
       const current = connectionRef.current;
       if (
         explicitContext &&
+        !restoredSession &&
         !pendingSessionContextRef.current &&
         current.status === 'connected' &&
         !current.loadingTranscript &&
@@ -19043,6 +19047,8 @@ export function App({
         sessionId,
         workspaceCwd,
         explicitContext ?? inheritedContext,
+        undefined,
+        restoredSession,
       ).catch((error: unknown) => {
         reportError(error, 'Failed to open session');
       });

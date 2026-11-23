@@ -273,11 +273,12 @@ const READ_IDENTITY_CHANGED = Symbol('read-identity-changed');
  *
  * Throws only on unexpected I/O errors (permission, EIO, etc.) so the
  * caller can log them; benign ENOENT / parse failures are silenced into
- * a null return.
+ * a null return. `onInvalid` distinguishes an unusable present record from
+ * ENOENT without exposing parse traces or weakening the lenient link policy.
  */
 export async function readWorktreeSession(
   filePath: string,
-  options: { signal?: AbortSignal } = {},
+  options: { signal?: AbortSignal; onInvalid?: () => void } = {},
 ): Promise<WorktreeSession | null> {
   for (let attempt = 0; attempt < 2; attempt++) {
     const outcome = await readWorktreeSessionOnce(filePath, options);
@@ -288,8 +289,12 @@ export async function readWorktreeSession(
 
 async function readWorktreeSessionOnce(
   filePath: string,
-  options: { signal?: AbortSignal },
+  options: { signal?: AbortSignal; onInvalid?: () => void },
 ): Promise<WorktreeSession | null | typeof READ_IDENTITY_CHANGED> {
+  const invalid = (): null => {
+    options.onInvalid?.();
+    return null;
+  };
   let raw: string;
   let handle: fs.FileHandle | undefined;
   try {
@@ -299,13 +304,13 @@ async function readWorktreeSessionOnce(
     // createWorktreeSession's link-then-unlink publish leaves a complete,
     // fsync'd sidecar at nlink === 2 inside its window and after a crash,
     // and restoreWorktreeContext deletes whatever this read rejects.
-    if (!pathStat.isFile()) return null;
+    if (!pathStat.isFile()) return invalid();
     handle = await fs.open(
       filePath,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
     );
     const openedStat = await handle.stat();
-    if (openedStat.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES) return null;
+    if (openedStat.size > WORKTREE_SESSION_SIDECAR_MAX_BYTES) return invalid();
     if (
       !openedStat.isFile() ||
       openedStat.dev !== pathStat.dev ||
@@ -328,7 +333,7 @@ async function readWorktreeSessionOnce(
       if (chunk.bytesRead === 0) break;
       bytesRead += chunk.bytesRead;
     }
-    if (bytesRead > WORKTREE_SESSION_SIDECAR_MAX_BYTES) return null;
+    if (bytesRead > WORKTREE_SESSION_SIDECAR_MAX_BYTES) return invalid();
     options.signal?.throwIfAborted();
     const finalStat = await fs.lstat(filePath);
     if (
@@ -351,10 +356,10 @@ async function readWorktreeSessionOnce(
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return null;
+    return invalid();
   }
   options.signal?.throwIfAborted();
-  if (!isValidWorktreeSession(parsed)) return null;
+  if (!isValidWorktreeSession(parsed)) return invalid();
   return parsed;
 }
 
@@ -539,11 +544,52 @@ export async function createWorktreeSession(
 }
 
 export async function clearWorktreeSession(filePath: string): Promise<void> {
+  let stagingDirectory: string | undefined;
+  let moved = false;
   try {
-    await fs.unlink(filePath);
+    const pathType = await fs.lstat(filePath);
+    if (pathType.isDirectory()) {
+      // Preserve the original EISDIR behavior without moving a directory.
+      await fs.unlink(filePath);
+      return;
+    }
+    stagingDirectory = await fs.mkdtemp(`${filePath}.clear-`);
+    const stagedPath = path.join(stagingDirectory, path.basename(filePath));
+    await fs.rename(filePath, stagedPath);
+    moved = true;
+    const latest = await readWorktreeSession(stagedPath);
+    if (latest?.worktreeRemoved !== undefined) {
+      // link() never overwrites a newer record published while this handoff
+      // was in progress. A failed restore leaves the staging copy intact.
+      await fs.link(stagedPath, filePath);
+      await fs.unlink(stagedPath);
+      throw new WorktreeRestoreRefusedError(
+        'This worktree has a retained-removal binding. ' +
+          'Ordinary clearing is refused; restore it through the snapshot restore flow.',
+      );
+    }
+    // A binding published at filePath after the rename is not this stale
+    // staging entry. Only the record that this operation moved may be unlinked.
+    await fs.unlink(stagedPath);
   } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') return;
+    if (!moved && isNodeError(error) && error.code === 'ENOENT') {
+      return;
+    }
+    const stagedPath = stagingDirectory
+      ? path.join(stagingDirectory, path.basename(filePath))
+      : undefined;
+    if (stagedPath) {
+      // Best-effort recovery must not overwrite a replacement published by
+      // another writer. Preserve both records if that link cannot be created.
+      await fs.link(stagedPath, filePath).catch(() => undefined);
+    }
     throw error;
+  } finally {
+    if (stagingDirectory) {
+      // Only remove the private directory when it is empty; never discard a
+      // retained record merely to clean up its staging namespace.
+      await fs.rmdir(stagingDirectory).catch(() => undefined);
+    }
   }
 }
 
@@ -958,6 +1004,12 @@ export async function restoreWorktreeContext(
   if (session.worktreeRemoved !== undefined) {
     // A present directory does not complete a retained removal. Only the
     // owned snapshot-restore operation may decide whether it can bind again.
+    onWarn?.(
+      new WorktreeRestoreRefusedError(
+        'This worktree has a retained-removal binding. ' +
+          'Restore its snapshot before resuming work; the sidecar was preserved.',
+      ),
+    );
     return { contextMessage: null, session: null };
   }
 

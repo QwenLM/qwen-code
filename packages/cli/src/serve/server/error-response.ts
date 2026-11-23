@@ -89,6 +89,7 @@ import {
   WorktreeResetUnsupportedError,
   WorktreeSessionSupersededError,
 } from './worktree-reset-errors.js';
+import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -749,6 +750,14 @@ export function sendBridgeError(
       code: 'worktree_session_superseded',
       sessionId: err.sessionId,
       replacementSessionId: err.replacementSessionId,
+    });
+    return;
+  }
+  if (err instanceof WorktreeRestoreUnavailableError) {
+    res.status(409).json({
+      error: err.message,
+      code: err.code,
+      ...(ctx?.sessionId === undefined ? {} : { sessionId: ctx.sessionId }),
     });
     return;
   }

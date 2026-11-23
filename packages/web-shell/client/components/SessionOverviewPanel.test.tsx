@@ -11,6 +11,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonCapabilities,
+  DaemonSessionClient,
   DaemonSessionSummary,
   DaemonStandaloneSessionSummary,
   DaemonStatusReportSession,
@@ -95,6 +96,7 @@ let workspaceActions: {
   renameSession: ReturnType<typeof vi.fn>;
   bindSessionPr: ReturnType<typeof vi.fn>;
   exportSession: ReturnType<typeof vi.fn>;
+  restoreWorktreeSession: ReturnType<typeof vi.fn>;
 };
 
 const sessionsReload = vi.fn(async () => sessionsState.sessions);
@@ -257,6 +259,7 @@ beforeEach(() => {
       mimeType: 'text/html',
       format: 'html',
     })),
+    restoreWorktreeSession: vi.fn(),
   };
   workspaceClient = {
     listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
@@ -5210,15 +5213,131 @@ describe('worktree snapshot restore in the session overview', () => {
     return button!;
   }
 
+  function restoredClient() {
+    return {
+      sessionId: 'removed-session',
+      workspaceCwd: cwd,
+      clientId: 'restore-client',
+      state: { mode: 'replay-ready' },
+      lastEventId: 27,
+      eventEpoch: 'epoch-restore',
+      replaySnapshot: {
+        compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
+        liveJournal: [{ id: 27, v: 1, type: 'session_update', data: {} }],
+      },
+      replaySnapshotComplete: true,
+      historyHasMore: true,
+      historyAnchorRecordId: 'anchor-restore-1',
+      replayProjectionWatermark: 17,
+      replayDegraded: true,
+      restoredArtifacts: [],
+      detach: vi.fn(async () => undefined),
+    } as unknown as DaemonSessionClient & {
+      detach: ReturnType<typeof vi.fn>;
+    };
+  }
+
+  it.each(['row', 'title'] as const)(
+    'hands a hydrated restore to an ordinary %s open after catalog reload',
+    async (surface) => {
+      let finishReload = () => {};
+      sessionsReload.mockReturnValueOnce(
+        new Promise((resolve) => {
+          finishReload = () => resolve(sessionsState.sessions);
+        }),
+      );
+      const restored = restoredClient();
+      const restore =
+        workspaceActions.restoreWorktreeSession.mockResolvedValueOnce(restored);
+      present();
+      const target =
+        surface === 'title'
+          ? titleTrigger(rows()[0]!)
+          : rows()[0]!.querySelectorAll('td')[2]!;
+      await act(async () => {
+        click(target);
+      });
+      expect(restore).toHaveBeenCalledExactlyOnceWith('removed-session', {
+        workspaceCwd: cwd,
+      });
+      expect(sessionsReload).toHaveBeenCalledOnce();
+      expect(onOpenSession).not.toHaveBeenCalled();
+      await act(async () => {
+        finishReload();
+      });
+      await vi.waitFor(() =>
+        expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+          'removed-session',
+          cwd,
+          undefined,
+          restored,
+        ),
+      );
+      expect(restored.detach).not.toHaveBeenCalled();
+    },
+  );
+
+  it('detaches its restored client when the catalog reload fails', async () => {
+    sessionsReload.mockRejectedValueOnce(new Error('catalog unavailable'));
+    const restored = restoredClient();
+    workspaceActions.restoreWorktreeSession.mockResolvedValueOnce(restored);
+    present();
+
+    await act(async () => {
+      click(rows()[0]!.querySelectorAll('td')[2]!);
+    });
+
+    await vi.waitFor(() =>
+      expect(container!.textContent).toContain(
+        'Snapshot restore failed: catalog unavailable',
+      ),
+    );
+    expect(restored.detach).toHaveBeenCalledOnce();
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it('detaches a restored client instead of opening after the panel unmounts', async () => {
+    let finishReload = () => {};
+    sessionsReload.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishReload = () => resolve(sessionsState.sessions);
+      }),
+    );
+    const restored = restoredClient();
+    workspaceActions.restoreWorktreeSession.mockResolvedValueOnce(restored);
+    present();
+
+    await act(async () => {
+      click(rows()[0]!.querySelectorAll('td')[2]!);
+    });
+    expect(sessionsReload).toHaveBeenCalledOnce();
+    act(() => root?.unmount());
+    root = null;
+    await act(async () => finishReload());
+
+    await vi.waitFor(() => expect(restored.detach).toHaveBeenCalledOnce());
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
+  it('does not ordinary-open a removed session whose snapshot is unavailable', () => {
+    workspaceClient.workspaceByCwd.mockClear();
+    present(false);
+    act(() => click(rows()[0]!.querySelectorAll('td')[2]!));
+    expect(container!.querySelector('[role="alert"]')?.textContent).toBe(
+      'Snapshot is unavailable for this workspace',
+    );
+    expect(workspaceClient.workspaceByCwd).not.toHaveBeenCalled();
+    expect(onOpenSession).not.toHaveBeenCalled();
+  });
+
   it('disables duplicate clicks while pending and opens the owning session after reload', async () => {
+    const restored = restoredClient();
     let finish: () => void = () => {};
-    const pending = new Promise<void>((resolve) => {
-      finish = resolve;
+    const pending = new Promise<DaemonSessionClient>((resolve) => {
+      finish = () => resolve(restored);
     });
-    const restore = vi.fn(() => pending);
-    workspaceClient.workspaceByCwd.mockReturnValue({
-      restoreWorktreeSession: restore,
-    });
+    const restore =
+      workspaceActions.restoreWorktreeSession.mockReturnValueOnce(pending);
     present();
     const button = restoreButton();
     expect(button.disabled).toBe(false);
@@ -5239,7 +5358,6 @@ describe('worktree snapshot restore in the session overview', () => {
     expect(restore).toHaveBeenCalledWith('removed-session', {
       workspaceCwd: cwd,
     });
-    expect(workspaceClient.workspaceByCwd).toHaveBeenCalledWith(cwd);
     expect(onOpenSession).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -5251,8 +5369,10 @@ describe('worktree snapshot restore in the session overview', () => {
         'removed-session',
         cwd,
         undefined,
+        restored,
       ),
     );
+    expect(restored.detach).not.toHaveBeenCalled();
     expect(sessionsReload).toHaveBeenCalled();
     expect(restoreButton().disabled).toBe(false);
   });
@@ -5306,10 +5426,9 @@ describe('worktree snapshot restore in the session overview', () => {
   });
 
   it('shows failure without claiming the session opened, and releases busy state', async () => {
-    const restore = vi.fn().mockRejectedValue(new Error('damaged snapshot'));
-    workspaceClient.workspaceByCwd.mockReturnValue({
-      restoreWorktreeSession: restore,
-    });
+    workspaceActions.restoreWorktreeSession.mockRejectedValueOnce(
+      new Error('damaged snapshot'),
+    );
     present();
     const button = restoreButton();
     await act(async () => {

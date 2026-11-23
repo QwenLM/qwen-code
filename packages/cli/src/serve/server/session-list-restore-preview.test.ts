@@ -13,6 +13,7 @@ import {
   captureWorktreeSnapshot,
   writeWorktreeSession,
   readWorktreeSession,
+  GitWorktreeService,
   WorktreeSessionReadInconclusiveError,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -58,6 +59,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -73,9 +75,12 @@ function summaries(target: RetentionTestRuntime, sessionId: string) {
   ]);
 }
 
-async function removedRecord(target: RetentionTestRuntime) {
+async function removedRecord(
+  target: RetentionTestRuntime,
+  options: { slug?: string } = {},
+) {
   const session = await makeRetainedSession(target, {
-    slug: 'preview-removed',
+    slug: options.slug ?? 'preview-removed',
     dirty: true,
   });
   const plan = await preclassifyWorktreeCleanup(
@@ -152,8 +157,16 @@ describe('worktree restoration preview metadata', () => {
       worktreeRemoved: { archiveKey: record.archiveKey },
     });
     const map = summaries(target, record.id);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     await enrichWorktreeSidecars(map, target.service, 'active');
     expect(map.get(record.id)!.worktree?.canRestore).toBe(false);
+    expect(
+      stderr.mock.calls.filter((call) =>
+        String(call[0]).includes('action=delete'),
+      ),
+    ).toEqual([]);
   });
 
   it('refuses availability when the checkout belongs to a replacement session', async () => {
@@ -165,8 +178,16 @@ describe('worktree restoration preview metadata', () => {
       worktreeRemoved: { archiveKey: record.archiveKey },
     });
     const map = summaries(target, record.id);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     await enrichWorktreeSidecars(map, target.service, 'active');
     expect(map.get(record.id)!.worktree?.canRestore).toBe(false);
+    expect(
+      stderr.mock.calls.filter((call) =>
+        String(call[0]).includes('action=delete'),
+      ),
+    ).toEqual([]);
   });
 
   it('preserves a normal marker-owned worktree without adopting an orphan archive', async () => {
@@ -278,6 +299,54 @@ describe('worktree restoration preview metadata', () => {
       record.archiveKey,
     );
     expect(retained.worktree?.canRestore).toBe(false);
+  });
+
+  it('preserves an invalid removed binding but clears it for genuine absence', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const record = await removedRecord(target);
+    const bridge = {
+      listWorkspaceSessions: () => [],
+    } as unknown as AcpSessionBridge;
+    const load = async () => {
+      const result = await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+        listWorkspaceSessionsForResponse(
+          bridge,
+          target.repo,
+          { size: 100, view: 'organized' },
+          { runtimeBaseDir: target.runtime.sessionRuntimeBaseDir },
+        ),
+      );
+      return result.sessions.find((row) => row.sessionId === record.id)!;
+    };
+
+    expect((await load()).worktree?.canRestore).toBe(true);
+    fs.writeFileSync(record.sidecarPath, '{truncated');
+    const invalid = await load();
+    expect(invalid.worktree?.worktreeRemoved).toEqual({
+      archiveKey: record.archiveKey,
+    });
+    expect(invalid.worktree?.canRestore).toBe(false);
+
+    fs.rmSync(record.sidecarPath);
+    expect((await load()).worktree?.worktreeRemoved).toBeUndefined();
+  });
+
+  it('attests the selected runtime root once for multiple preview records', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const first = await removedRecord(target);
+    const second = await removedRecord(target, { slug: 'preview-removed-2' });
+    const map = summaries(target, first.id);
+    map.set(second.id, summaries(target, second.id).get(second.id)!);
+    const rootLookup = vi.spyOn(
+      GitWorktreeService.prototype,
+      'getRepoTopLevel',
+    );
+
+    await enrichWorktreeSidecars(map, target.service, 'active');
+
+    expect(rootLookup).toHaveBeenCalledTimes(1);
+    expect(map.get(first.id)!.worktree?.canRestore).toBe(true);
+    expect(map.get(second.id)!.worktree?.canRestore).toBe(true);
   });
 
   it('removes a cached projection when its current marker has a new owner', async () => {

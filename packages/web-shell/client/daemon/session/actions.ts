@@ -231,6 +231,28 @@ function clearPendingLoadTimeout(load: PendingSessionLoad): void {
   if (load.timeout !== undefined) clearTimeout(load.timeout);
 }
 
+export function takePendingRestoredSession(
+  load: PendingSessionLoad | undefined,
+): DaemonSessionClient | undefined {
+  if (!load) return undefined;
+  const restored = load.restoredSession;
+  load.restoredSession = undefined;
+  return restored;
+}
+
+export function detachPendingRestoredSession(
+  load: PendingSessionLoad | undefined,
+): void {
+  const restored = takePendingRestoredSession(load);
+  if (!restored) return;
+  void restored.detach().catch((error: unknown) => {
+    console.warn(
+      '[DaemonSessionActions] detach of an unconsumed worktree restore failed:',
+      error,
+    );
+  });
+}
+
 export interface CreateDaemonSessionActionsArgs {
   store: DaemonTranscriptStore;
   sessionRef: RefBox<DaemonSessionClient | undefined>;
@@ -277,6 +299,10 @@ export interface CreateDaemonSessionActionsArgs {
   ) => Promise<DaemonSessionClient>;
   createDetachedStandaloneSession: (
     overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'modelServiceId'>,
+  ) => Promise<DaemonSessionClient>;
+  restoreDetachedWorktreeSession: (
+    sessionId: string,
+    workspaceCwd: string,
   ) => Promise<DaemonSessionClient>;
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
@@ -489,6 +515,7 @@ export function createDaemonSessionActions({
   getCreateSessionRequest,
   createDetachedSession,
   createDetachedStandaloneSession,
+  restoreDetachedWorktreeSession,
   getDefaultSessionContext,
   getClient,
   getConnection,
@@ -936,6 +963,7 @@ export function createDaemonSessionActions({
         skipNextCleanupDetachSessionRef.current = undefined;
       }
       clearPendingLoadTimeout(pendingSessionLoadRef.current);
+      detachPendingRestoredSession(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException('Session cleared', 'AbortError'),
       );
@@ -952,11 +980,13 @@ export function createDaemonSessionActions({
     sessionContext?: DaemonProductSessionContext,
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
+    restoredSession?: DaemonSessionClient,
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
     if (pendingSessionLoadRef.current) {
       clearPendingLoadTimeout(pendingSessionLoadRef.current);
+      detachPendingRestoredSession(pendingSessionLoadRef.current);
       pendingSessionLoadRef.current.reject(
         new DOMException(
           `Session ${mode} superseded by a newer request`,
@@ -977,6 +1007,7 @@ export function createDaemonSessionActions({
           ? undefined
           : setTimeout(() => {
               if (pendingSessionLoadRef.current?.id === loadId) {
+                detachPendingRestoredSession(pendingSessionLoadRef.current);
                 pendingSessionLoadRef.current = undefined;
                 if (sessionRef.current?.sessionId !== sessionId) {
                   manualSessionClearRef.current = true;
@@ -1019,6 +1050,7 @@ export function createDaemonSessionActions({
         reject,
         ...(signal ? { signal } : {}),
         ...(replaySource ? { replaySource } : {}),
+        ...(restoredSession ? { restoredSession } : {}),
       };
     });
     return loadPromise;
@@ -1032,6 +1064,7 @@ export function createDaemonSessionActions({
       sessionContext?: DaemonProductSessionContext;
       reconcilePromptActivity?: boolean;
       artifactCountHint?: number;
+      restoredSession?: DaemonSessionClient;
     },
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
@@ -1071,6 +1104,7 @@ export function createDaemonSessionActions({
       targetSessionContext,
       signal,
       replaySource,
+      options?.restoredSession,
     );
     const pendingLoad = pendingSessionLoadRef.current;
     if (pendingLoad && options?.reconcilePromptActivity) {
@@ -2662,6 +2696,10 @@ export function createDaemonSessionActions({
 
     async loadSession(sessionId, options) {
       return startSessionSwitch(sessionId, 'load', options);
+    },
+
+    async restoreWorktreeSession(sessionId, options) {
+      return restoreDetachedWorktreeSession(sessionId, options.workspaceCwd);
     },
 
     async reloadSession(signal, options) {

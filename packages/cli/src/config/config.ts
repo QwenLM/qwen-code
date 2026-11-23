@@ -3104,7 +3104,6 @@ export async function loadCliConfig(
     worktree: settings.worktree
       ? {
           symlinkDirectories: settings.worktree.symlinkDirectories,
-          maxRetained: settings.worktree.maxRetained,
         }
       : undefined,
     settingsWatcher,

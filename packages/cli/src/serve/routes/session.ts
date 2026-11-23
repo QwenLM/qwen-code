@@ -198,7 +198,10 @@ import {
   type SessionPromptAdmission,
 } from './session-prompt-admission.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
-import { restoreSessionCore } from '../server/session-restore.js';
+import {
+  restoreSessionCore,
+  type WorktreeRestoreHandoff,
+} from '../server/session-restore.js';
 import {
   restoreWorktreeFromSessionSnapshot,
   WorktreeRestoreUnavailableError,
@@ -4213,7 +4216,11 @@ export function registerSessionRoutes(
   });
 
   const restoreSessionHandler =
-    (action: 'load' | 'resume', parsedFields?: ParsedSessionRestoreFields) =>
+    (
+      action: 'load' | 'resume',
+      parsedFields?: ParsedSessionRestoreFields,
+      worktreeRestoreHandoff?: WorktreeRestoreHandoff,
+    ) =>
     async (req: Request, res: Response) => {
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
@@ -4404,6 +4411,7 @@ export function registerSessionRoutes(
           runtime,
           workspaceCwd,
           sessionId,
+          ...(worktreeRestoreHandoff ? { worktreeRestoreHandoff } : {}),
           archiveCoordinator,
           requestedSessionIdAdmission,
           assertRuntimeGenerationOpen,
@@ -5176,6 +5184,7 @@ export function registerSessionRoutes(
       return;
     }
     const body = safeBody(req);
+    let worktreeRestoreHandoff: WorktreeRestoreHandoff | undefined;
     try {
       const resolved = await resolveRuntimeForSessionRestore(
         body,
@@ -5249,10 +5258,17 @@ export function registerSessionRoutes(
           sessionId: storedSessionId,
           archiveCoordinator,
           assertRuntimeGenerationOpen,
+          handoffWorktreeOwnership: (handoff) => {
+            worktreeRestoreHandoff = handoff;
+          },
           explicitWorkspaceCwd: Object.hasOwn(body, 'cwd'),
         });
       });
-      await restoreSessionHandler('load', fields)(req, res);
+      await restoreSessionHandler(
+        'load',
+        fields,
+        worktreeRestoreHandoff,
+      )(req, res);
     } catch (err) {
       if (res.headersSent) return;
       if (err instanceof WorktreeRestoreUnavailableError) {
@@ -5264,6 +5280,8 @@ export function registerSessionRoutes(
         return;
       }
       sendBridgeError(res, err, { route, sessionId });
+    } finally {
+      worktreeRestoreHandoff?.release();
     }
   };
   app.post('/session/:id/worktree-restore', mutate(), worktreeRestoreHandler);

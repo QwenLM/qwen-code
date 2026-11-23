@@ -29,10 +29,13 @@ import {
   acquireWorktreeCleanupLock,
   canonicalPathForTesting,
   preclassifyWorktreeCleanup,
-  worktreeAllowedRoots,
   type WorktreeCleanupPlan,
 } from './worktree-orphan-cleanup.js';
-import type { SessionArchiveCoordinator } from './session-archive.js';
+import {
+  sessionLiveOnBridge,
+  type SessionArchiveCoordinator,
+} from './session-archive.js';
+import type { WorktreeRestoreHandoff } from './session-restore.js';
 
 async function stateAt(directory: string): Promise<string | null> {
   try {
@@ -70,21 +73,6 @@ async function assertRestoreCoordinates(
       'Snapshot restore path does not match the managed slug',
     );
   }
-  const managedRoot = canonicalPathForTesting(source.getUserWorktreesDir());
-  const allowed = await worktreeAllowedRoots(
-    plan.sidecar.workspaceCwd,
-    plan.sidecar.originalCwd,
-  );
-  if (
-    !allowed.some(
-      (root) =>
-        canonicalPathForTesting(root) === canonicalPathForTesting(managedRoot),
-    )
-  ) {
-    throw new WorktreeRestoreUnavailableError(
-      'Snapshot restore is outside the workspace managed roots',
-    );
-  }
   if (GitWorktreeService.validateUserWorktreeSlug(plan.sidecar.slug)) {
     throw new WorktreeRestoreUnavailableError(
       'Snapshot restore slug is invalid',
@@ -98,6 +86,58 @@ async function preservedMarkerMatches(
 ): Promise<boolean> {
   const marker = await readWorktreeSessionMarkerStrict(directory);
   return marker.state === 'valid' && marker.sessionId === sessionId;
+}
+
+async function assertNoConflictingWorktreeOwners(
+  service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+  runtime: WorkspaceRuntime,
+  sessionId: string,
+  sidecarPath: string,
+  expected: string,
+): Promise<void> {
+  const olderTombstones: string[] = [];
+  for (const state of ['active', 'archived'] as const) {
+    const directory = path.dirname(
+      service.getWorktreeSessionPathForArchiveState('', state),
+    );
+    let entries: string[];
+    try {
+      entries = await fs.readdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    for (const entry of entries.sort()) {
+      if (!entry.endsWith('.worktree.json')) continue;
+      const filePath = path.join(directory, entry);
+      if (filePath === sidecarPath) continue;
+      const other = await readWorktreeSessionStrict(filePath);
+      if (other.state === 'missing') continue;
+      if (other.state !== 'valid') {
+        throw new WorktreeRestoreUnavailableError(
+          'Other worktree records have become unavailable',
+        );
+      }
+      if (canonicalPathForTesting(other.session.worktreePath) !== expected) {
+        continue;
+      }
+      if (other.session.supersededBy === sessionId) continue;
+      if (other.session.supersededBy !== undefined) {
+        olderTombstones.push(entry.slice(0, -'.worktree.json'.length));
+        continue;
+      }
+      throw new WorktreeRestoreUnavailableError(
+        'The restore target is claimed by another session',
+      );
+    }
+  }
+  for (const otherId of olderTombstones) {
+    if (sessionLiveOnBridge(runtime.bridge, otherId)) {
+      throw new WorktreeRestoreUnavailableError(
+        'An older session still claims the restore target',
+      );
+    }
+  }
 }
 
 async function namedRefAtHead(
@@ -115,10 +155,8 @@ async function namedRefAtHead(
   return resolved.trim() === head;
 }
 
-export class WorktreeRestoreUnavailableError extends Error {
-  readonly code = 'worktree_restore_unavailable';
-  override readonly name = 'WorktreeRestoreUnavailableError';
-}
+import { WorktreeRestoreUnavailableError } from './worktree-restore-errors.js';
+export { WorktreeRestoreUnavailableError };
 
 export interface RestoredWorktreeBinding {
   session: WorktreeSession;
@@ -131,6 +169,8 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
   sessionId: string;
   archiveCoordinator: SessionArchiveCoordinator;
   assertRuntimeGenerationOpen?: () => void;
+  /** Server-local transfer into the ordinary load that follows this restore. */
+  handoffWorktreeOwnership?: (handoff: WorktreeRestoreHandoff) => void;
   /** True only for an explicit registered owner supplied by the caller. */
   explicitWorkspaceCwd?: boolean;
 }): Promise<RestoredWorktreeBinding> {
@@ -157,8 +197,16 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
   );
   // A missing checkout intentionally uses the raw managed-path lock key.
   const release = await acquireWorktreeCleanupLock(initial);
+  let handedOff = false;
   try {
-    return await archiveCoordinator.runExclusiveMany([sessionId], async () => {
+    const task = archiveCoordinator.runExclusiveMany([sessionId], async () => {
+      if (
+        (await service.getMaintainableSessionLocation(sessionId)) === 'archived'
+      ) {
+        throw new WorktreeRestoreUnavailableError(
+          'Unarchive this session before restoring its worktree',
+        );
+      }
       const latest = await preclassifyWorktreeCleanup(
         service,
         sessionId,
@@ -169,6 +217,13 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
           'Snapshot restoration state changed',
         );
       await assertRestoreCoordinates(latest);
+      await assertNoConflictingWorktreeOwners(
+        service,
+        runtime,
+        sessionId,
+        latest.sidecarPath,
+        expected,
+      );
       if (
         latest.sidecar.slug !== initial.sidecar.slug ||
         latest.sidecar.originalCwd !== initial.sidecar.originalCwd ||
@@ -249,55 +304,74 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
         }
         // The ref is attached only at the unchanged captured commit. It is
         // never reset, and a moved/inaccessible ref leaves a detached HEAD.
-        if (
-          attach &&
-          (await namedRefAtHead(
-            latest.sidecar.originalCwd,
-            selected.meta.branch,
-            selected.meta.headCommit,
-          ))
-        ) {
-          await source
-            .checkoutBranchInCheckout(expected, selected.meta.branch, {
-              noOverwriteIgnore: true,
-            })
-            .catch(() => undefined);
-        }
+        const canDiscardCreatedCheckout =
+          !existing &&
+          canonicalPathForTesting(created.worktree.path) === expected;
+        let hasOwnershipMarker = false;
         try {
+          if (
+            attach &&
+            (await namedRefAtHead(
+              latest.sidecar.originalCwd,
+              selected.meta.branch,
+              selected.meta.headCommit,
+            ))
+          ) {
+            await source
+              .checkoutBranchInCheckout(expected, selected.meta.branch, {
+                noOverwriteIgnore: true,
+              })
+              .catch(() => undefined);
+          }
           await restoreWorktreeSnapshot(
             selected.snapshotPath,
             expected,
             selected.meta,
           );
+          options.assertRuntimeGenerationOpen?.();
+          if (!(await preservedMarkerMatches(sessionId, expected))) {
+            if (existing) {
+              throw new WorktreeRestoreUnavailableError(
+                'The retained target changed during restoration',
+              );
+            }
+            await createWorktreeSessionMarkerExclusive(expected, sessionId);
+          }
+          hasOwnershipMarker = true;
         } catch (error) {
-          // `expected` did not exist before this attempt created it. A failed
-          // extraction must not leave a marker-less directory that blocks all
-          // subsequent retries; this cleanup is not valid for a pre-existing
-          // checkout.
-          try {
-            await fs.rm(expected, { recursive: true, force: true });
-            await runGit(latest.sidecar.originalCwd, [
-              ...NO_EXEC_CONFIG,
-              'worktree',
-              'prune',
-            ]).catch(() => undefined);
-          } catch (cleanupError) {
-            throw new AggregateError(
-              [error, cleanupError],
-              'Could not clean up the newly created restore target',
-            );
+          // Only an exactly identified new target may be rolled back. Once
+          // ownership is established, the existing partial-restore verifier
+          // must decide whether it can recover; this is not a general delete.
+          if (canDiscardCreatedCheckout && !hasOwnershipMarker) {
+            let markerMissing = false;
+            try {
+              markerMissing =
+                (await readWorktreeSessionMarkerStrict(expected)).state ===
+                'missing';
+            } catch (markerError) {
+              throw new AggregateError(
+                [error, markerError],
+                'Could not verify ownership before cleaning up the restore target',
+              );
+            }
+            if (markerMissing) {
+              try {
+                await fs.rm(expected, { recursive: true, force: true });
+                await runGit(latest.sidecar.originalCwd, [
+                  ...NO_EXEC_CONFIG,
+                  'worktree',
+                  'prune',
+                ]).catch(() => undefined);
+              } catch (cleanupError) {
+                throw new AggregateError(
+                  [error, cleanupError],
+                  'Could not clean up the newly created restore target',
+                );
+              }
+            }
           }
           throw error;
         }
-      }
-      options.assertRuntimeGenerationOpen?.();
-      if (!(await preservedMarkerMatches(sessionId, expected))) {
-        if (existing) {
-          throw new WorktreeRestoreUnavailableError(
-            'The retained target changed during restoration',
-          );
-        }
-        await createWorktreeSessionMarkerExclusive(expected, sessionId);
       }
       let actual = await headAndBranch(expected);
       const matching = async () =>
@@ -316,6 +390,12 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
       if (!(await matching())) {
         throw new WorktreeRestoreUnavailableError(
           'Restored content changed before binding',
+        );
+      }
+      options.assertRuntimeGenerationOpen?.();
+      if (!(await preservedMarkerMatches(sessionId, expected))) {
+        throw new WorktreeRestoreUnavailableError(
+          'The restore target does not have the exclusive session marker',
         );
       }
       const session = {
@@ -337,8 +417,17 @@ export async function restoreWorktreeFromSessionSnapshot(options: {
       }
       return { session, branch: actual.branch, reconstructed: !existing };
     });
+    const binding = await task;
+    if (options.handoffWorktreeOwnership) {
+      options.handoffWorktreeOwnership({
+        worktreeKey: initial.lockKey,
+        release,
+      });
+      handedOff = true;
+    }
+    return binding;
   } finally {
-    release();
+    if (!handedOff) release();
   }
 }
 

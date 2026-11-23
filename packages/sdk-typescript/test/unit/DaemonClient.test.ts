@@ -18,6 +18,7 @@ import {
 } from '../../src/daemon/DaemonClient.js';
 import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import type { DaemonSessionAgentsStatus } from '../../src/daemon/index.js';
+import type { RestoreWorktreeSessionRequest } from '../../src/index.js';
 import { negotiateTransport } from '../../src/daemon/negotiateTransport.js';
 import { AcpHttpTransport } from '../../src/daemon/AcpHttpTransport.js';
 import {
@@ -169,7 +170,7 @@ describe('worktree snapshot restore', () => {
         approvalMode: 'yolo',
         sourceType: 'fixture',
         sourceId: 'fixture-1',
-      },
+      } satisfies RestoreWorktreeSessionRequest,
       'local-client',
     );
 

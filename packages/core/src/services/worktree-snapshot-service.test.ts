@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { gzipSync } from 'node:zlib';
 import * as tar from 'tar';
 import {
   captureWorktreeSnapshot,
@@ -133,7 +134,7 @@ function git(cwd: string, ...args: string[]): string {
 
 function rawTarMember(
   name: string,
-  type: '0' | '1' | '2' = '0',
+  type: '0' | '1' | '2' | '5' = '0',
   linkpath = '',
   contents?: Buffer,
 ): Buffer[] {
@@ -296,6 +297,121 @@ describe('worktreeSnapshotService (P6 U1)', () => {
       ).toBe(capturedMode);
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'verifies force-added ignored bytes without adopting ignored extra files',
+    async () => {
+      await fs.writeFile(
+        path.join(worktree, '.gitignore'),
+        'dist/\ncoverage/\n',
+      );
+      await fs.mkdir(path.join(worktree, 'dist'));
+      await fs.writeFile(
+        path.join(worktree, 'dist', 'forced.txt'),
+        'captured ignored bytes\n',
+      );
+      git(worktree, 'add', '-f', 'dist/forced.txt');
+      await fs.mkdir(path.join(worktree, 'coverage'));
+      await fs.writeFile(
+        path.join(worktree, 'coverage', 'extra.txt'),
+        'not captured\n',
+      );
+
+      const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotDir,
+        meta: meta(),
+      });
+      const restored = await restoreOverHead(
+        snapshotPath,
+        metaPath,
+        'restored-ignored',
+      );
+      const verificationMeta = {
+        ...(await readWorktreeSnapshotMeta(metaPath)),
+        branch: git(restored, 'branch', '--show-current'),
+      };
+      await expect(
+        fs.readFile(path.join(restored, 'dist', 'forced.txt'), 'utf8'),
+      ).resolves.toBe('captured ignored bytes\n');
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).resolves.toBe(true);
+
+      execFileSync('mkfifo', [path.join(restored, 'dist', 'late-pipe')]);
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).rejects.toThrow('non-regular filesystem entry');
+      await fs.rm(path.join(restored, 'dist', 'late-pipe'));
+
+      await fs.rm(path.join(restored, 'coverage'), {
+        recursive: true,
+        force: true,
+      });
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).resolves.toBe(true);
+      await fs.writeFile(
+        path.join(restored, 'dist', 'forced.txt'),
+        'late change\n',
+      );
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: restored,
+          snapshotPath,
+          meta: verificationMeta,
+        }),
+      ).resolves.toBe(false);
+    },
+  );
+
+  it('verifies missing and newly added empty directories', async () => {
+    await fs.mkdir(path.join(worktree, 'empty', 'nested'), {
+      recursive: true,
+    });
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: meta(),
+    });
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-empty-dirs',
+    );
+    const verificationMeta = {
+      ...(await readWorktreeSnapshotMeta(metaPath)),
+      branch: git(restored, 'branch', '--show-current'),
+    };
+    const verify = () =>
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: verificationMeta,
+      });
+
+    await expect(verify()).resolves.toBe(true);
+    await fs.rmdir(path.join(restored, 'empty', 'nested'));
+    await expect(verify()).resolves.toBe(false);
+    await fs.mkdir(path.join(restored, 'empty', 'nested'));
+    await expect(verify()).resolves.toBe(true);
+    await fs.mkdir(path.join(restored, 'late-empty'));
+    await expect(verify()).resolves.toBe(false);
+    await fs.rmdir(path.join(restored, 'late-empty'));
+    await expect(verify()).resolves.toBe(true);
+  });
 
   it('selects the newest pair by header time, mtime, then full path', async () => {
     const writePair = async (
@@ -464,13 +580,29 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     );
     header.slug = 'another-slug';
     await fs.writeFile(`${wrongSlug}.json`, JSON.stringify(header));
+    const otherOwnedPair = files.find((file) => file !== first)!;
+    await fs.rm(path.join(snapshotDir, otherOwnedPair));
+    await fs.rm(
+      path.join(snapshotDir, otherOwnedPair.replace(/\.tar\.gz$/, '.json')),
+    );
+    const key = path.basename(`${wrongSlug}.tar.gz`);
+    await expect(
+      selectWorktreeSnapshot({
+        directory: snapshotDir,
+        sessionId: 'session-snap',
+        slug: 'snap',
+        archiveKey: key,
+      }),
+    ).rejects.toThrow(/identity mismatch/);
     await expect(
       selectWorktreeSnapshot({
         directory: snapshotDir,
         sessionId: 'session-snap',
         slug: 'snap',
       }),
-    ).rejects.toThrow(/identity mismatch/);
+    ).resolves.toMatchObject({
+      snapshotPath: path.join(snapshotDir, first),
+    });
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -652,6 +784,117 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     expect(await fs.readlink(alias)).toBe('alternate.txt');
     expect(changed.checkoutMatchesCapture).toBe(false);
   });
+
+  it.each(['1', '2'] as const)(
+    'does not treat a type-%s link with a directory suffix as a directory',
+    async (type) => {
+      await fs.mkdir(path.join(worktree, 'ghost'));
+      await fs.mkdir(snapshotDir, { recursive: true });
+      const archive = path.join(snapshotDir, 'link-geometry.tar.gz');
+      await fs.writeFile(
+        archive,
+        gzipSync(
+          Buffer.concat([
+            ...rawTarMember('committed.txt', '0', '', Buffer.from('base\n')),
+            ...rawTarMember('ghost/', type, 'committed.txt'),
+            Buffer.alloc(1024),
+          ]),
+        ),
+      );
+
+      await expect(
+        verifyRestoredWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotPath: archive,
+          meta: meta(),
+        }),
+      ).resolves.toBe(false);
+    },
+  );
+
+  it('does not let a directory alias hide a link with the same logical path', async () => {
+    await fs.mkdir(path.join(worktree, 'ghost'));
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const archive = path.join(snapshotDir, 'link-directory-alias.tar.gz');
+    const base = rawTarMember('committed.txt', '0', '', Buffer.from('base\n'));
+    await fs.writeFile(
+      archive,
+      gzipSync(
+        Buffer.concat([
+          ...base,
+          ...rawTarMember('ghost/', '2', 'committed.txt'),
+          ...rawTarMember('ghost', '5'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath: archive,
+        meta: meta(),
+      }),
+    ).resolves.toBe(false);
+
+    await fs.writeFile(
+      archive,
+      gzipSync(
+        Buffer.concat([
+          ...base,
+          ...rawTarMember('ghost/', '5'),
+          Buffer.alloc(1024),
+        ]),
+      ),
+    );
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: worktree,
+        snapshotPath: archive,
+        meta: meta(),
+      }),
+    ).resolves.toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a non-UTF-8 symlink target before archiving',
+    async () => {
+      const alias = path.join(worktree, 'alias.txt');
+      const rawTarget = Buffer.from('outside-\u00FF', 'latin1');
+      await fs.symlink(rawTarget, alias);
+
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow('symlink target cannot be preserved byte-for-byte');
+      await expect(fs.readlink(alias, { encoding: 'buffer' })).resolves.toEqual(
+        rawTarget,
+      );
+      await expect(fs.readdir(snapshotDir)).rejects.toThrow();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a non-UTF-8 symlink target introduced after capture',
+    async () => {
+      const alias = path.join(worktree, 'late-alias.txt');
+      captureTiming.afterCreate = async () => {
+        await fs.symlink(Buffer.from('outside-\u00FF', 'latin1'), alias);
+      };
+
+      await expect(
+        captureWorktreeSnapshot({
+          worktreePath: worktree,
+          snapshotDir,
+          meta: meta(),
+        }),
+      ).rejects.toThrow('symlink target cannot be preserved byte-for-byte');
+      await expect(fs.readlink(alias)).resolves.toBe('outside-\uFFFD');
+      await expect(fs.readdir(snapshotDir)).resolves.toEqual([]);
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'does not certify a changed owner-exec bit',
@@ -1216,6 +1459,62 @@ describe('worktreeSnapshotService (P6 U1)', () => {
     await expect(
       fs.readFile(path.join(restored, 'keep.txt'), 'utf8'),
     ).resolves.toBe('kept\n');
+  });
+
+  it('removes only empty, unarchived ancestors of tracked deletions on restore', async () => {
+    await fs.mkdir(path.join(worktree, 'deletion-dir', 'nested'), {
+      recursive: true,
+    });
+    await fs.mkdir(path.join(worktree, 'preserved-empty'));
+    await fs.mkdir(path.join(worktree, 'keep-dir'));
+    await fs.writeFile(
+      path.join(worktree, 'deletion-dir', 'nested', 'to-delete.txt'),
+      'deleted\n',
+    );
+    await fs.writeFile(path.join(worktree, 'keep-dir', 'keep.txt'), 'keep\n');
+    git(worktree, 'add', '.');
+    git(worktree, 'commit', '-qm', 'deleted parent fixture', '--no-verify');
+    await fs.rm(path.join(worktree, 'deletion-dir'), {
+      recursive: true,
+      force: true,
+    });
+    const m = await buildWorktreeSnapshotMeta(worktree, {
+      sessionId: 'session-delete-parent',
+      slug: 'delete-parent',
+      baseCommit: git(worktree, 'rev-parse', 'HEAD'),
+    });
+    expect(m.dirty.deleted).toEqual(['deletion-dir/nested/to-delete.txt']);
+    const { snapshotPath, metaPath } = await captureWorktreeSnapshot({
+      worktreePath: worktree,
+      snapshotDir,
+      meta: m,
+    });
+
+    const restored = await restoreOverHead(
+      snapshotPath,
+      metaPath,
+      'restored-delete-parent',
+    );
+
+    await expect(
+      fs.access(path.join(restored, 'deletion-dir')),
+    ).rejects.toThrow();
+    await expect(
+      fs.access(path.join(restored, 'preserved-empty')),
+    ).resolves.toBe(undefined);
+    await expect(
+      fs.readFile(path.join(restored, 'keep-dir', 'keep.txt'), 'utf8'),
+    ).resolves.toBe('keep\n');
+    await expect(
+      verifyRestoredWorktreeSnapshot({
+        worktreePath: restored,
+        snapshotPath,
+        meta: {
+          ...(await readWorktreeSnapshotMeta(metaPath)),
+          branch: git(restored, 'branch', '--show-current'),
+        },
+      }),
+    ).resolves.toBe(true);
   });
 
   it('records a staged tracked deletion on restore', async () => {

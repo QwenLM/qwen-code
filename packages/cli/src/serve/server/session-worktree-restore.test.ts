@@ -20,6 +20,8 @@ import {
   configureRetention,
   type RetentionTestRuntime,
 } from '../../test-utils/worktree-session-retention-fixtures.js';
+import { WorktreeMarkerCommittedError } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
+import * as snapshotVerification from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   preclassifyWorktreeCleanup,
   executeWorktreeCleanup,
@@ -30,6 +32,44 @@ import {
 } from './session-worktree-restore.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
+
+const markerFaults = vi.hoisted(() => ({
+  postCommit: false,
+  otherOwner: undefined as string | undefined,
+}));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/services/gitWorktreeService.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/gitWorktreeService.js')
+      >();
+    return {
+      ...actual,
+      createWorktreeSessionMarkerExclusive: vi.fn(
+        async (worktreePath: string, sessionId: string) => {
+          if (
+            markerFaults.otherOwner !== undefined &&
+            markerFaults.otherOwner !== sessionId
+          ) {
+            await actual.createWorktreeSessionMarkerExclusive(
+              worktreePath,
+              markerFaults.otherOwner,
+            );
+          }
+          await actual.createWorktreeSessionMarkerExclusive(
+            worktreePath,
+            sessionId,
+          );
+          if (markerFaults.postCommit) {
+            throw new actual.WorktreeMarkerCommittedError(sessionId);
+          }
+        },
+      ),
+    };
+  },
+);
 
 const coreMocks = vi.hoisted(() => ({
   realWrite: undefined as
@@ -55,6 +95,8 @@ let root: string;
 
 beforeEach(() => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worktree-restore-'));
+  markerFaults.postCommit = false;
+  markerFaults.otherOwner = undefined;
   coreMocks.write.mockImplementation(coreMocks.realWrite!);
 });
 
@@ -107,6 +149,7 @@ async function restore(
   target: RetentionTestRuntime,
   sessionId: string,
   explicitWorkspaceCwd = true,
+  assertRuntimeGenerationOpen?: () => void,
 ) {
   return runWithWorkspaceRuntimeStorage(target.runtime, () =>
     restoreWorktreeFromSessionSnapshot({
@@ -114,12 +157,248 @@ async function restore(
       sessionId,
       archiveCoordinator: new SessionArchiveCoordinator(),
       explicitWorkspaceCwd,
+      assertRuntimeGenerationOpen,
     }),
   );
 }
 
 describe('session worktree snapshot restore', () => {
   vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
+  it('preserves a committed marker and completes it on retry', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'committed-marker',
+        dirty: true,
+      }),
+    );
+    markerFaults.postCommit = true;
+
+    await expect(restore(target, state.id)).rejects.toBeInstanceOf(
+      WorktreeMarkerCommittedError,
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(state.id);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-committed-marker\n');
+    const preserved = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+
+    const retried = await restore(target, state.id);
+    expect(retried.reconstructed).toBe(false);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(state.id);
+    const completed = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(completed.state).toBe('valid');
+    if (completed.state === 'valid') {
+      expect(completed.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
+  it('rechecks marker ownership before discarding the recovery binding', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'marker-after-verification',
+        dirty: true,
+      }),
+    );
+    const archivePath = path.join(
+      path.dirname(state.sidecarPath),
+      state.archiveKey,
+    );
+    const archiveBytes = fs.readFileSync(archivePath);
+    const verify = snapshotVerification.verifyRestoredWorktreeSnapshot;
+    let comparisons = 0;
+    vi.spyOn(
+      snapshotVerification,
+      'verifyRestoredWorktreeSnapshot',
+    ).mockImplementation(async (options) => {
+      const matches = await verify(options);
+      comparisons += 1;
+      if (comparisons === 2) {
+        expect(matches).toBe(true);
+        fs.renameSync(
+          path.join(state.worktreePath, '.qwen-session'),
+          path.join(root, `moved-marker-${state.id}`),
+        );
+      }
+      return matches;
+    });
+
+    await expect(restore(target, state.id)).rejects.toMatchObject({
+      name: 'WorktreeRestoreUnavailableError',
+      message: expect.stringContaining('exclusive session marker'),
+    });
+    expect(comparisons).toBe(2);
+    expect(fs.existsSync(state.worktreePath)).toBe(true);
+    expect(fs.existsSync(path.join(state.worktreePath, '.qwen-session'))).toBe(
+      false,
+    );
+    expect(
+      fs.readFileSync(path.join(root, `moved-marker-${state.id}`), 'utf8'),
+    ).toBe(state.id);
+    expect(fs.readFileSync(archivePath)).toEqual(archiveBytes);
+    const preserved = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+  });
+
+  it('preserves a concurrent foreign marker and its checkout', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'concurrent-marker',
+        dirty: true,
+      }),
+    );
+    const foreign = '22222222-2222-4222-8222-222222222222';
+    markerFaults.otherOwner = foreign;
+
+    await expect(restore(target, state.id)).rejects.toMatchObject({
+      code: 'EEXIST',
+    });
+    expect(fs.existsSync(state.worktreePath)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(foreign);
+    await expect(restore(target, state.id)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(foreign);
+    const preserved = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+  });
+
+  it('refuses a second owner but accepts a direct reset tombstone', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'owner-conflict',
+        dirty: true,
+      }),
+    );
+    const other = await makeRetainedSession(target, {
+      slug: 'other-owner-tombstone',
+    });
+    const otherRecord = {
+      ...other.sidecar,
+      worktreePath: state.worktreePath,
+      slug: state.sidecar.slug,
+    };
+    await writeWorktreeSession(other.sidecarPath, otherRecord);
+
+    await expect(restore(target, state.id)).rejects.toBeInstanceOf(
+      WorktreeRestoreUnavailableError,
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    const preserved = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+
+    await writeWorktreeSession(other.sidecarPath, {
+      ...otherRecord,
+      supersededBy: state.id,
+    });
+    const restored = await restore(target, state.id);
+    expect(restored.reconstructed).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(state.id);
+  });
+
+  it('defers archived restoration until the records are active again', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'archived-restore',
+        dirty: true,
+      }),
+    );
+    const snapshotPath = path.join(
+      path.dirname(state.sidecarPath),
+      state.archiveKey,
+    );
+    const moved = [
+      state.transcriptPath,
+      state.sidecarPath,
+      snapshotPath,
+      snapshotPath.replace(/\.tar\.gz$/, '.json'),
+    ];
+    const archiveDirectory = path.dirname(
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      ),
+    );
+    fs.mkdirSync(archiveDirectory, { recursive: true });
+    for (const file of moved) {
+      fs.renameSync(file, path.join(archiveDirectory, path.basename(file)));
+    }
+
+    await expect(restore(target, state.id)).rejects.toMatchObject({
+      name: 'WorktreeRestoreUnavailableError',
+      message: 'Unarchive this session before restoring its worktree',
+    });
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    const archivedPath = path.join(
+      archiveDirectory,
+      path.basename(state.sidecarPath),
+    );
+    const archived = await readWorktreeSessionStrict(archivedPath);
+    expect(archived.state).toBe('valid');
+    if (archived.state === 'valid') {
+      expect(archived.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+    for (const file of moved) {
+      expect(
+        fs.existsSync(path.join(archiveDirectory, path.basename(file))),
+      ).toBe(true);
+    }
+
+    for (const file of moved) {
+      fs.renameSync(path.join(archiveDirectory, path.basename(file)), file);
+    }
+    const restored = await restore(target, state.id);
+    expect(restored.reconstructed).toBe(true);
+  });
 
   it('reconstructs a detached checkout and verifies content, marker, and binding', async () => {
     const target = makeRetentionRepo(root, 'primary');
@@ -214,7 +493,7 @@ describe('session worktree snapshot restore', () => {
     );
   });
 
-  it('refuses bad metadata or an unavailable full head object before creating a checkout', async () => {
+  it('refuses malformed or unavailable full commits before creating a checkout', async () => {
     const target = makeRetentionRepo(root, 'primary');
     configureRetention(target, 0);
     const state = await snapshotAndRemove(
@@ -228,18 +507,47 @@ describe('session worktree snapshot restore', () => {
       path.dirname(state.sidecarPath),
       state.archiveKey.replace(/\.tar\.gz$/, '.json'),
     );
-    const parsed = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
-    parsed.headCommit = '0'.repeat(40);
-    fs.writeFileSync(metaPath, JSON.stringify(parsed));
-    await expect(restore(target, state.id)).rejects.toThrow();
-    expect(fs.existsSync(state.worktreePath)).toBe(false);
-    const unchanged = await readWorktreeSessionStrict(state.sidecarPath);
-    expect(unchanged.state).toBe('valid');
-    if (unchanged.state === 'valid') {
-      expect(unchanged.session.worktreeRemoved).toEqual({
-        archiveKey: state.archiveKey,
-      });
+    const originalHeader = fs.readFileSync(metaPath, 'utf8');
+    const parsed = JSON.parse(originalHeader) as Record<string, unknown>;
+    const originalHead = parsed['headCommit'];
+    if (typeof originalHead !== 'string') {
+      throw new Error('Fixture does not contain a full head commit');
     }
+    const invalidIds = [
+      { field: 'headCommit', value: 'HEAD' },
+      { field: 'headCommit', value: originalHead.slice(0, 39) },
+      { field: 'headCommit', value: 'g'.repeat(40) },
+      { field: 'baseCommit', value: 'HEAD' },
+    ] as const;
+    for (const { field, value } of invalidIds) {
+      fs.writeFileSync(metaPath, JSON.stringify({ ...parsed, [field]: value }));
+      await expect(restore(target, state.id)).rejects.toThrow(
+        'invalid commit ids',
+      );
+      expect(fs.existsSync(state.worktreePath)).toBe(false);
+      const unchanged = await readWorktreeSessionStrict(state.sidecarPath);
+      expect(unchanged.state).toBe('valid');
+      if (unchanged.state === 'valid') {
+        expect(unchanged.session.worktreeRemoved).toEqual({
+          archiveKey: state.archiveKey,
+        });
+      }
+    }
+
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({ ...parsed, headCommit: '0'.repeat(40) }),
+    );
+    await expect(restore(target, state.id)).rejects.not.toThrow(
+      'invalid commit ids',
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+
+    fs.writeFileSync(metaPath, originalHeader);
+    expect((await restore(target, state.id)).reconstructed).toBe(true);
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-missing-commit\n');
   });
 
   it('cleans its newly created target after an extraction failure and permits a later repair and retry', async () => {
@@ -349,6 +657,54 @@ describe('session worktree snapshot restore', () => {
         archiveKey: state.archiveKey,
       });
     }
+  });
+
+  it('discards only its new markerless checkout after generation closes', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 0);
+    const state = await snapshotAndRemove(
+      target,
+      await makeRetainedSession(target, {
+        slug: 'generation-close',
+        dirty: true,
+      }),
+    );
+    const assertion = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('runtime generation closed');
+      })
+      .mockImplementation(() => {});
+
+    await expect(restore(target, state.id, true, assertion)).rejects.toThrow(
+      'runtime generation closed',
+    );
+    expect(fs.existsSync(state.worktreePath)).toBe(false);
+    expect(fs.existsSync(path.join(state.worktreePath, '.qwen-session'))).toBe(
+      false,
+    );
+    const preserved = await readWorktreeSessionStrict(state.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toEqual({
+        archiveKey: state.archiveKey,
+      });
+    }
+
+    const retried = await restore(target, state.id, true, assertion);
+    expect(retried.reconstructed).toBe(true);
+    // The closed attempt calls once. The successful retry checks snapshot
+    // creation and both comparisons, then again before binding.
+    expect(assertion).toHaveBeenCalledTimes(4);
+    expect(git(target, state.worktreePath, 'rev-parse', 'HEAD')).toBe(
+      target.head,
+    );
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-generation-close\n');
+    expect(
+      fs.readFileSync(path.join(state.worktreePath, '.qwen-session'), 'utf8'),
+    ).toBe(state.id);
   });
 
   it('requires explicit owner evidence for a secondary restore', async () => {

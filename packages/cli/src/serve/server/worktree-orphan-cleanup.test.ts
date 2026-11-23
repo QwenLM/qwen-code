@@ -45,6 +45,15 @@ const carriedSourceVerification = vi.hoisted(() => ({
   active: undefined as { source: string; afterCheck: () => void } | undefined,
 }));
 const captureInconsistent = vi.hoisted(() => ({ active: false }));
+const archiveVerificationGate = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        worktreePath: string;
+        started: () => void;
+        resume: Promise<void>;
+      }
+    | undefined,
+}));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/git-branches.js',
   async (importOriginal) => {
@@ -126,6 +135,30 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+vi.mock(
+  '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
+      >();
+    return {
+      ...actual,
+      verifyRestoredWorktreeSnapshot: async (
+        ...args: Parameters<typeof actual.verifyRestoredWorktreeSnapshot>
+      ) => {
+        const result = await actual.verifyRestoredWorktreeSnapshot(...args);
+        const gate = archiveVerificationGate.active;
+        if (result && gate && args[0].worktreePath === gate.worktreePath) {
+          gate.started();
+          await gate.resume;
+        }
+        return result;
+      },
+    };
+  },
+);
+
 function git(cwd: string, ...args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'pipe' });
 }
@@ -194,6 +227,7 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     digestReadFailure.afterCapture = undefined;
     carriedSourceVerification.active = undefined;
     captureInconsistent.active = false;
+    archiveVerificationGate.active = undefined;
     fs.rmSync(repoParent, { recursive: true, force: true });
   });
 
@@ -210,7 +244,10 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       worktreeBranch: result.worktree!.branch,
       originalCwd: repoRoot,
       originalBranch: 'main',
-      originalHeadCommit: '',
+      originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
     };
     return {
       sessionId,
@@ -393,7 +430,10 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
       worktreeBranch: '',
       originalCwd: repoRoot,
       originalBranch: 'main',
-      originalHeadCommit: '',
+      originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim(),
       ...(recordOverlay ? { carriedEntries } : {}),
     };
     return {
@@ -477,6 +517,74 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
     expect(
       fs.readFileSync(path.join(plan.lockKey, 'late-callback.txt'), 'utf8'),
     ).toBe('saved-after-ack\n');
+  });
+
+  it('revalidates physical and byte guards after the binding callback', async () => {
+    const plan = await planFor('binding-callback-late-file');
+    let physicalChecks = 0;
+    const outcome = await executeWorktreeCleanup(plan, {
+      requireSnapshot: true,
+      beforePhysicalRemoval: async () => {
+        physicalChecks += 1;
+        return true;
+      },
+      beforeRemoval: async () => {
+        expect(physicalChecks).toBe(1);
+        fs.writeFileSync(
+          path.join(plan.lockKey, 'late-after-binding.txt'),
+          'saved-after-binding\n',
+        );
+        return true;
+      },
+    });
+
+    expect(physicalChecks).toBe(2);
+    expect(outcome.removed).toBe(false);
+    expect(archives(plan.sessionId)).toHaveLength(1);
+    expect(
+      fs.readFileSync(
+        path.join(plan.lockKey, 'late-after-binding.txt'),
+        'utf8',
+      ),
+    ).toBe('saved-after-binding\n');
+  });
+
+  it('preserves a Git operation started after archive verification', async () => {
+    const plan = await planFor('late-bisect-after-verification');
+    let notifyStarted!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    archiveVerificationGate.active = {
+      worktreePath: plan.lockKey,
+      started: notifyStarted,
+      resume,
+    };
+    const cleanup = executeWorktreeCleanup(plan, { requireSnapshot: true });
+    try {
+      await started;
+      git(plan.lockKey, 'bisect', 'start');
+    } finally {
+      release();
+      archiveVerificationGate.active = undefined;
+    }
+
+    const outcome = await cleanup;
+
+    expect(outcome.removed).toBe(false);
+    expect(outcome.snapshot).toBeDefined();
+    expect(fs.existsSync(plan.lockKey)).toBe(true);
+    const gitDir = execFileSync('git', ['rev-parse', '--git-dir'], {
+      cwd: plan.lockKey,
+      encoding: 'utf8',
+    }).trim();
+    expect(
+      fs.existsSync(path.resolve(plan.lockKey, gitDir, 'BISECT_START')),
+    ).toBe(true);
   });
 
   it('preserves a hidden edit before a bare carried-only deletion', async () => {
@@ -847,7 +955,10 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
         worktreeBranch: '',
         originalCwd: repoRoot,
         originalBranch: 'main',
-        originalHeadCommit: '',
+        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: repoRoot,
+          encoding: 'utf8',
+        }).trim(),
         carriedFrom: sibling,
         carriedEntries: result.carriedEntries!,
       },
@@ -1684,7 +1795,10 @@ describe('executeWorktreeCleanup — has-work gate (#12758)', () => {
         worktreeBranch: '',
         originalCwd: repoRoot,
         originalBranch: 'main',
-        originalHeadCommit: '',
+        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: repoRoot,
+          encoding: 'utf8',
+        }).trim(),
         carriedFrom: checkout,
         carriedEntries: result.carriedEntries!,
       },

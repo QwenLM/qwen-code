@@ -22,6 +22,8 @@ import {
   writeWorktreeSession,
 } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
+import { readCronTasks } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
+import { collectBoundSessionIds } from '../scheduled-task-keepalive.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { readSettingsSnapshot } from '../../config/settings.js';
 import type {
@@ -52,6 +54,8 @@ export interface RetentionScope {
   runtime: WorkspaceRuntime;
   root: string | undefined;
   limit: number;
+  /** An attested root with unreadable settings blocks only that root. */
+  settingsError?: string;
 }
 
 export interface WorktreeRetentionReport {
@@ -71,8 +75,9 @@ function retentionLimit(runtime: WorkspaceRuntime): number {
     environment: runtime.env.effectiveEnv,
     workspaceTrusted: runtime.trusted,
   });
+  const configuredLimit = settings.merged.worktree?.maxRetained;
   const value =
-    settings.merged.worktree?.maxRetained ?? DEFAULT_RETENTION_COUNT;
+    configuredLimit === undefined ? DEFAULT_RETENTION_COUNT : configuredLimit;
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new Error(
       'worktree.maxRetained must be a nonnegative safe integer; retention is paused',
@@ -86,7 +91,22 @@ async function retentionRoot(
 ): Promise<string | undefined> {
   const service = new GitWorktreeService(runtime.workspaceCwd);
   const repoTop = await service.getRepoTopLevel();
-  if (repoTop === null) return undefined;
+  if (repoTop === null) {
+    let directory = path.resolve(runtime.workspaceCwd);
+    for (;;) {
+      try {
+        await fs.lstat(path.join(directory, '.git'));
+        throw new Error(
+          `Git metadata exists but the repository root is unavailable: ${runtime.workspaceCwd}`,
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      const parent = path.dirname(directory);
+      if (parent === directory) return undefined;
+      directory = parent;
+    }
+  }
   const managedRootService = new GitWorktreeService(
     canonicalPathForTesting(repoTop),
   );
@@ -124,10 +144,22 @@ async function loadScopes(
   for (const candidate of registry.list()) {
     // Root discovery also covers maxRetained=0: conflicts still block all
     // automatic reclamation shared by more than one runtime.
+    const root = await retentionRoot(candidate);
+    if (root === undefined) continue;
+    // Untrusted scopes are never swept, but their roots still count in the
+    // collision proof; their separately managed records must not be ignored.
+    let limit = 0;
+    let settingsError: string | undefined;
+    try {
+      limit = retentionLimit(candidate);
+    } catch (error) {
+      settingsError = error instanceof Error ? error.message : String(error);
+    }
     scopes.push({
       runtime: candidate,
-      root: await retentionRoot(candidate),
-      limit: retentionLimit(candidate),
+      root,
+      limit,
+      ...(settingsError === undefined ? {} : { settingsError }),
     });
   }
   writeStderrLine(
@@ -175,17 +207,27 @@ async function candidateActivityNs(
   }
 }
 
+async function boundRetentionSessionIds(
+  runtime: WorkspaceRuntime,
+): Promise<ReadonlySet<string>> {
+  return new Set(
+    collectBoundSessionIds(await readCronTasks(runtime.workspaceCwd)),
+  );
+}
+
 async function collectEligible(
   scope: RetentionScope,
   service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
   coordinator: SessionArchiveCoordinator,
+  report: WorktreeRetentionReport,
 ): Promise<WorktreeCleanupPlan[]> {
+  const boundSessions = await boundRetentionSessionIds(scope.runtime);
   const candidates: Array<WorktreeCleanupPlan & { activityNs: bigint }> = [];
   const seen = new Set<string>();
-  for (const directory of new Set([
-    path.dirname(service.getWorktreeSessionPathForArchiveState('', 'active')),
-    path.dirname(service.getWorktreeSessionPathForArchiveState('', 'archived')),
-  ])) {
+  for (const archiveState of ['active', 'archived'] as const) {
+    const directory = path.dirname(
+      service.getWorktreeSessionPathForArchiveState('', archiveState),
+    );
     let entries;
     try {
       entries = await fs.readdir(directory);
@@ -198,20 +240,37 @@ async function collectEligible(
       const sessionId = entry.slice(0, -'.worktree.json'.length);
       if (seen.has(sessionId)) continue;
       seen.add(sessionId);
+      const location = await service.getMaintainableSessionLocation(sessionId);
+      const otherState = archiveState === 'active' ? 'archived' : 'active';
+      const otherSidecar = await fs
+        .lstat(
+          service.getWorktreeSessionPathForArchiveState(sessionId, otherState),
+        )
+        .catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+          throw error;
+        });
+      if (location !== archiveState || otherSidecar !== null) {
+        report.skipped.push(
+          `session archive location is not unique: ${sessionId}`,
+        );
+        continue;
+      }
       const plan = await preclassifyWorktreeCleanup(
         service,
         sessionId,
         scope.runtime.workspaceCwd,
       );
       if (!plan || plan.sidecar.worktreeRemoved !== undefined) continue;
-      const planRoot = await retentionRoot(scope.runtime);
+      const planRoot = canonicalPathForTesting(
+        new GitWorktreeService(plan.sidecar.originalCwd).getUserWorktreesDir(),
+      );
       if (planRoot !== scope.root) {
         throw new Error('management root is not attested to this runtime');
       }
       const organization = new SessionOrganizationService(
         scope.runtime.workspaceCwd,
       );
-      if (await organization.isSessionPinnedStrict(sessionId)) continue;
       if (
         sessionLiveOnBridge(
           scope.runtime.bridge as Partial<
@@ -222,6 +281,7 @@ async function collectEligible(
       ) {
         continue;
       }
+      if (await organization.isSessionPinnedStrict(sessionId)) continue;
       const release = await acquireWorktreeCleanupLock(plan);
       try {
         const eligible = await coordinator.runExclusiveMany(
@@ -232,8 +292,8 @@ async function collectEligible(
             );
             return (
               ownership.ok &&
-              !(await organization.isSessionPinnedStrict(sessionId)) &&
-              !sessionLiveOnBridge(scope.runtime.bridge, sessionId)
+              !sessionLiveOnBridge(scope.runtime.bridge, sessionId) &&
+              !boundSessions.has(sessionId)
             );
           },
         );
@@ -319,14 +379,8 @@ async function discardPreservedAttemptSnapshot(
   ) {
     return;
   }
-  if (
-    (await new SessionOrganizationService(
-      runtime.workspaceCwd,
-    ).isSessionPinnedStrict(plan.sessionId)) ||
-    sessionLiveOnBridge(runtime.bridge, plan.sessionId)
-  ) {
-    return;
-  }
+  // Pin/liveness vetoes checkout removal. It does not require keeping an
+  // already redundant pair once ownership and the intact checkout are proven.
   if (
     !(await assertCurrentRuntime(registry, runtime, canContinue)) ||
     !(
@@ -358,6 +412,15 @@ async function persistRetainedAttemptBinding(
     selected.metaPath !== snapshot.metaPath
   ) {
     throw new Error('The retained snapshot pair is incomplete');
+  }
+  if (
+    !(await verifyRestoredWorktreeSnapshot({
+      worktreePath: plan.lockKey,
+      snapshotPath: selected.snapshotPath,
+      meta: selected.meta,
+    }))
+  ) {
+    throw new Error('The checkout no longer matches the retained snapshot');
   }
   const current = await readWorktreeSessionStrict(plan.sidecarPath);
   // This binding must be durable before the destructive operation. A failed
@@ -437,6 +500,7 @@ async function removeRetainedCheckout(
   registry: WorkspaceRegistry,
   coordinator: SessionArchiveCoordinator,
   plan: WorktreeCleanupPlan,
+  expectedRoot: RetentionScope['root'],
   canContinue: () => boolean,
 ): Promise<boolean> {
   const release = await acquireWorktreeCleanupLock(plan);
@@ -461,11 +525,73 @@ async function removeRetainedCheckout(
             return false;
           }
           if (sessionLiveOnBridge(runtime.bridge, plan.sessionId)) return false;
+          if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
+            return false;
+          }
           if (snapshot) {
             await persistRetainedAttemptBinding(plan, snapshot);
             attemptSnapshot = snapshot;
           }
           return true;
+        },
+        beforePhysicalRemoval: async () => {
+          if (
+            !runtime.trusted ||
+            expectedRoot === undefined ||
+            !assertCurrentRuntime(registry, runtime, canContinue)
+          ) {
+            return false;
+          }
+          const scopes = await loadScopes(runtime, registry);
+          if (!scopes) return false;
+          const current = scopes.find(
+            (candidate) => candidate.runtime === runtime,
+          );
+          if (current?.root !== expectedRoot) return false;
+          const evaluated = new Set(
+            scopes.map((candidate) => candidate.runtime),
+          );
+          for (const candidate of registry.list()) {
+            if (evaluated.has(candidate)) continue;
+            const root = await retentionRoot(candidate);
+            if (root === expectedRoot) return false;
+            // Plain non-Git workspaces are excluded only after the full ancestor
+            // probe proves that absence, never when Git discovery is unreadable.
+            evaluated.add(candidate);
+          }
+          const latest = registry.list();
+          if (latest.some((candidate) => !evaluated.has(candidate))) {
+            return false;
+          }
+          if (
+            !latest.includes(runtime) ||
+            !assertCurrentRuntime(registry, runtime, canContinue)
+          ) {
+            return false;
+          }
+          const holders = scopes.filter(
+            (candidate) => candidate.root === expectedRoot,
+          );
+          if (
+            holders.length !== 1 ||
+            holders[0]?.runtime !== runtime ||
+            holders.some((candidate) => candidate.settingsError !== undefined)
+          ) {
+            return false;
+          }
+          // These reads intentionally follow the current scope discovery, rather
+          // than repeating the stale state seen before binding persistence.
+          const organization = new SessionOrganizationService(
+            runtime.workspaceCwd,
+          );
+          if (await organization.isSessionPinnedStrict(plan.sessionId)) {
+            return false;
+          }
+          if (sessionLiveOnBridge(runtime.bridge, plan.sessionId)) return false;
+          if ((await boundRetentionSessionIds(runtime)).has(plan.sessionId)) {
+            return false;
+          }
+          return runtime.trusted && canContinue();
         },
       });
       if (outcome.removed) return outcome.snapshot !== undefined;
@@ -510,6 +636,10 @@ export async function sweepWorktreeRetentionOnce(
     skipped: [],
     issues: [],
   };
+  if (!runtime.trusted) {
+    report.skipped.push('runtime is not trusted');
+    return report;
+  }
   if (!assertCurrentRuntime(registry, runtime, canContinue)) {
     const entry = registry.getManagedEntryByWorkspaceId(runtime.workspaceId);
     writeStderrLine(
@@ -526,6 +656,10 @@ export async function sweepWorktreeRetentionOnce(
     return report;
   }
   const holders = scopes.filter((candidate) => candidate.root === scope.root);
+  if (holders.some((candidate) => candidate.settingsError !== undefined)) {
+    report.skipped.push('retention settings cannot be read for this root');
+    return report;
+  }
   if (holders.length !== 1 || holders[0]?.runtime !== runtime) {
     report.skipped.push('management root is shared');
     return report;
@@ -533,7 +667,7 @@ export async function sweepWorktreeRetentionOnce(
   const service = createWorkspaceRuntimeSessionService(runtime);
   let candidates: WorktreeCleanupPlan[];
   try {
-    candidates = await collectEligible(scope, service, coordinator);
+    candidates = await collectEligible(scope, service, coordinator, report);
   } catch (error) {
     report.issues.push(error instanceof Error ? error.message : String(error));
     return report;
@@ -552,6 +686,7 @@ export async function sweepWorktreeRetentionOnce(
         registry,
         coordinator,
         plan,
+        scope.root,
         canContinue,
       );
       if (removed) report.removed.push(plan.sessionId);

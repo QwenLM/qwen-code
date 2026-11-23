@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -14,9 +15,14 @@ import {
   readWorktreeSnapshotMeta,
   readWorktreeSessionStrict,
   WORKTREE_SESSION_FILE,
+  writeWorktreeSession,
   writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import { SessionOrganizationService } from '@qwen-code/qwen-code-core/services/session-organization-service.js';
+import {
+  getCronFilePath,
+  type DurableCronTask,
+} from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 import { worktreeHasPopulatedGitlink } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import {
   selectWorktreeSnapshot,
@@ -37,9 +43,19 @@ function git(cwd: string, home: string, ...args: string[]): string {
   }).trim();
 }
 import { createWorkspaceRegistry } from '../workspace-registry.js';
-import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
+import {
+  createWorkspaceRuntimeSessionService,
+  runWithWorkspaceRuntimeStorage,
+} from '../workspace-runtime-storage.js';
 import { SessionArchiveCoordinator } from './session-archive.js';
-import { sweepWorktreeRetentionOnce } from './worktree-retention.js';
+import {
+  preclassifyWorktreeCleanup,
+  verifyWorktreeCleanupOwnership,
+} from './worktree-orphan-cleanup.js';
+import {
+  startWorktreeRetention,
+  sweepWorktreeRetentionOnce,
+} from './worktree-retention.js';
 import {
   configureRetention,
   makeRetainedSession,
@@ -49,6 +65,11 @@ import {
 
 const failedJsonWrite = vi.hoisted(() => ({
   filePath: undefined as string | undefined,
+}));
+const captureGate = vi.hoisted(() => ({
+  barrier: undefined as
+    | { captured: () => void; release: Promise<void> }
+    | undefined,
 }));
 vi.mock(
   '@qwen-code/qwen-code-core/utils/atomicFileWrite.js',
@@ -80,6 +101,8 @@ const captureInit = vi.hoisted(() => ({
   home: undefined as string | undefined,
   sourceRepo: undefined as string | undefined,
   objectStore: undefined as string | undefined,
+  sidecarPath: undefined as string | undefined,
+  initializeAfterBinding: false,
   initialized: false,
 }));
 vi.mock(
@@ -89,13 +112,38 @@ vi.mock(
       await importOriginal<
         typeof import('@qwen-code/qwen-code-core/services/worktree-snapshot-service.js')
       >();
+    const capture = actual.captureWorktreeSnapshot;
     return {
       ...actual,
+      captureWorktreeSnapshot: vi.fn(
+        async (
+          options: Parameters<typeof actual.captureWorktreeSnapshot>[0],
+        ) => {
+          const result = await capture(options);
+          if (captureGate.barrier) {
+            captureGate.barrier.captured();
+            await captureGate.barrier.release;
+          }
+          return result;
+        },
+      ),
       verifyRestoredWorktreeSnapshot: vi.fn(
         async (
           options: Parameters<typeof actual.verifyRestoredWorktreeSnapshot>[0],
         ) => {
           const matches = await actual.verifyRestoredWorktreeSnapshot(options);
+          if (matches && captureInit.initializeAfterBinding) {
+            expect(captureInit.sidecarPath).toBeDefined();
+            const record = await readWorktreeSessionStrict(
+              captureInit.sidecarPath!,
+            );
+            if (
+              record.state !== 'valid' ||
+              record.session.worktreeRemoved === undefined
+            ) {
+              return matches;
+            }
+          }
           if (
             matches &&
             captureInit.worktreePath !== undefined &&
@@ -127,10 +175,13 @@ let root: string;
 let coordinator: SessionArchiveCoordinator;
 
 beforeEach(() => {
+  captureGate.barrier = undefined;
   captureInit.worktreePath = undefined;
   captureInit.home = undefined;
   captureInit.sourceRepo = undefined;
   captureInit.objectStore = undefined;
+  captureInit.sidecarPath = undefined;
+  captureInit.initializeAfterBinding = false;
   captureInit.initialized = false;
   failedJsonWrite.filePath = undefined;
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worktree-retention-'));
@@ -160,6 +211,38 @@ async function sweep(
   return runWithWorkspaceRuntimeStorage(runtime.runtime, () =>
     sweepWorktreeRetentionOnce(runtime.runtime, registry, coordinator),
   );
+}
+
+async function writeScheduledTaskFile(
+  target: RetentionTestRuntime,
+  contents: readonly DurableCronTask[] | string,
+): Promise<string> {
+  return runWithWorkspaceRuntimeStorage(target.runtime, () => {
+    const filePath = getCronFilePath(target.repo);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      typeof contents === 'string' ? contents : JSON.stringify(contents),
+    );
+    return filePath;
+  });
+}
+
+function persistentTask(
+  sessionId: string | undefined,
+  enabled = true,
+): DurableCronTask {
+  return {
+    id: `retention-${sessionId ?? 'unbound'}`,
+    cron: '0 0 * * *',
+    prompt: 'retention fixture; do not execute',
+    recurring: true,
+    createdAt: 0,
+    lastFiredAt: null,
+    enabled,
+    sessionMode: 'persistent',
+    ...(sessionId === undefined ? {} : { sessionId }),
+  };
 }
 
 async function expectRetainedSnapshot(
@@ -578,6 +661,8 @@ describe('worktree retention with real repositories', () => {
     captureInit.home = target.home;
     captureInit.sourceRepo = emptyChild;
     captureInit.objectStore = objectStore;
+    captureInit.sidecarPath = old.sidecarPath;
+    captureInit.initializeAfterBinding = true;
     const refusal = vi
       .spyOn(GitWorktreeService.prototype, 'removeUserWorktree')
       .mockResolvedValue({ success: false, error: 'injected refusal' });
@@ -712,6 +797,880 @@ describe('worktree retention with real repositories', () => {
       ).toBe(false);
     },
   );
+
+  it('keeps untrusted shared roots in the ownership collision proof', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const oldest = await makeRetainedSession(target, {
+      slug: 'trusted-target',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'trusted-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const sibling = makeRetentionRepo(root, 'untrusted-sibling');
+    const nested = path.join(target.repo, 'untrusted-nested');
+    fs.mkdirSync(nested);
+    const untrusted = {
+      ...sibling.runtime,
+      workspaceCwd: nested,
+      workspaceId: 'untrusted-shared-root',
+      trusted: false,
+    };
+    const otherId = '00000000-0000-4000-8000-0000000000b1';
+    const otherSidecar =
+      createWorkspaceRuntimeSessionService(untrusted).getWorktreeSessionPath(
+        otherId,
+      );
+    const current = await readWorktreeSessionStrict(oldest.sidecarPath);
+    expect(current.state).toBe('valid');
+    if (current.state !== 'valid') {
+      throw new Error('The ownership fixture must have a valid sidecar');
+    }
+    await writeWorktreeSession(otherSidecar, {
+      ...current.session,
+      workspaceCwd: nested,
+    });
+
+    const shared = await sweep(
+      target,
+      createWorkspaceRegistry([target.runtime, untrusted]),
+    );
+    expect(shared.removed).toEqual([]);
+    expect(shared.skipped).toContain('management root is shared');
+    expect(fs.existsSync(oldest.worktreePath)).toBe(true);
+    expect(snapshotFiles(path.dirname(oldest.sidecarPath), oldest.id)).toEqual(
+      [],
+    );
+
+    const independent = await sweep(
+      target,
+      createWorkspaceRegistry([
+        target.runtime,
+        { ...untrusted, workspaceCwd: sibling.repo },
+      ]),
+    );
+    expect(independent.removed).toEqual([oldest.id]);
+    await expectRetainedSnapshot(target, oldest);
+    expect(fs.existsSync(otherSidecar)).toBe(true);
+  });
+
+  it.each([-1, 1.5, '15', null])(
+    'pauses for invalid maxRetained %j instead of coercing the quota',
+    async (value) => {
+      const target = makeRetentionRepo(root, 'primary');
+      configureRetention(target, value);
+      const session = await makeRetainedSession(target, {
+        slug: 'invalid-limit',
+        dirty: true,
+      });
+
+      await expect(sweep(target)).rejects.toThrow(
+        'worktree.maxRetained must be a nonnegative safe integer; retention is paused',
+      );
+      expect(fs.existsSync(session.worktreePath)).toBe(true);
+      expect(fs.existsSync(session.transcriptPath)).toBe(true);
+      expect(
+        snapshotFiles(path.dirname(session.sidecarPath), session.id),
+      ).toEqual([]);
+    },
+  );
+
+  it('vetoes a real pin made during capture without accumulating attempt pairs', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'pin-during-capture',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'pin-capture-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    let resumeCapture = () => {};
+    let markCaptured = () => {};
+    const captured = new Promise<void>((resolve) => {
+      markCaptured = resolve;
+    });
+    captureGate.barrier = {
+      captured: markCaptured,
+      release: new Promise<void>((resolve) => {
+        resumeCapture = resolve;
+      }),
+    };
+
+    const sweeping = sweep(target);
+    try {
+      await captured;
+      await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+        new SessionOrganizationService(target.repo).updateSessionOrganization(
+          session.id,
+          { isPinned: true },
+        ),
+      );
+    } finally {
+      resumeCapture();
+    }
+
+    expect((await sweeping).removed).toEqual([]);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      fs.readFileSync(path.join(session.worktreePath, 'tracked.txt'), 'utf8'),
+    ).toBe('dirty-pin-during-capture\n');
+    const attempts = snapshotFiles(
+      path.dirname(session.sidecarPath),
+      session.id,
+    );
+    expect(attempts).toEqual([]);
+    const binding = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(binding.state).toBe('valid');
+    if (binding.state === 'valid') {
+      expect(binding.session.worktreeRemoved).toBeUndefined();
+    }
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual(attempts);
+  });
+
+  it('preserves an empty directory created after capture', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'late-empty-directory',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'empty-directory-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    let resumeCapture = () => {};
+    let markCaptured = () => {};
+    const captured = new Promise<void>((resolve) => {
+      markCaptured = resolve;
+    });
+    captureGate.barrier = {
+      captured: markCaptured,
+      release: new Promise<void>((resolve) => {
+        resumeCapture = resolve;
+      }),
+    };
+    const lateEmpty = path.join(session.worktreePath, 'late-empty');
+
+    const sweeping = sweep(target);
+    try {
+      await captured;
+      await fs.promises.mkdir(lateEmpty);
+    } finally {
+      resumeCapture();
+    }
+
+    expect((await sweeping).removed).toEqual([]);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(fs.existsSync(lateEmpty)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toHaveLength(2);
+    const preserved = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toBeUndefined();
+    }
+
+    await fs.promises.rmdir(lateEmpty);
+    expect((await sweep(target)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it('rejects a same-root runtime registered during capture and allows a later control sweep', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'late-shared-root',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'late-root-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const sibling = makeRetentionRepo(root, 'late-sibling');
+    const nested = path.join(target.repo, 'late-nested');
+    fs.mkdirSync(nested);
+    const lateRuntime = {
+      ...sibling.runtime,
+      workspaceId: 'late-shared-root',
+      workspaceCwd: nested,
+      trusted: false,
+    };
+    const registry = createWorkspaceRegistry([target.runtime]);
+    let resumeCapture = () => {};
+    let markCaptured = () => {};
+    const captured = new Promise<void>((resolve) => {
+      markCaptured = resolve;
+    });
+    captureGate.barrier = {
+      captured: markCaptured,
+      release: new Promise<void>((resolve) => {
+        resumeCapture = resolve;
+      }),
+    };
+
+    const sweeping = sweep(target, registry);
+    try {
+      await captured;
+      registry.add(lateRuntime);
+    } finally {
+      resumeCapture();
+    }
+
+    const rejected = await sweeping;
+    expect(rejected.removed).toEqual([]);
+    expect(rejected.skipped).toContain(session.id);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+    const preserved = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(preserved.state).toBe('valid');
+    if (preserved.state === 'valid') {
+      expect(preserved.session.worktreeRemoved).toBeUndefined();
+    }
+
+    expect(
+      (await sweep(target, createWorkspaceRegistry([target.runtime]))).removed,
+    ).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it('contains malformed sibling settings without weakening shared-root refusal', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'healthy-with-invalid-sibling',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newest-with-invalid-sibling',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const sibling = makeRetentionRepo(root, 'sibling');
+    configureRetention(sibling, 'raw');
+    const registry = createWorkspaceRegistry([target.runtime, sibling.runtime]);
+    expect((await sweep(target, registry)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+
+    const sharedCandidate = await makeRetainedSession(target, {
+      slug: 'protected-by-invalid-shared-settings',
+      activity: '2026-01-03T00:00:00.000Z',
+    });
+    const shared = makeRetentionRepo(root, 'shared');
+    const nested = path.join(target.repo, 'nested');
+    fs.mkdirSync(nested);
+    configureRetention({ ...shared, repo: nested }, 'raw');
+    const sharedRegistry = createWorkspaceRegistry([
+      target.runtime,
+      { ...shared.runtime, workspaceCwd: nested },
+    ]);
+    expect((await sweep(target, sharedRegistry)).skipped).toContain(
+      'retention settings cannot be read for this root',
+    );
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+    expect(fs.existsSync(sharedCandidate.worktreePath)).toBe(true);
+    expect(snapshotFiles(path.dirname(newest.sidecarPath), newest.id)).toEqual(
+      [],
+    );
+  });
+
+  it('drains real retention filesystem work before stop resolves', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'stop-drain',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'stop-drain-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    let resumeCapture = () => {};
+    let markCaptured = () => {};
+    const captured = new Promise<void>((resolve) => {
+      markCaptured = resolve;
+    });
+    captureGate.barrier = {
+      captured: markCaptured,
+      release: new Promise<void>((resolve) => {
+        resumeCapture = resolve;
+      }),
+    };
+    const registry = createWorkspaceRegistry([target.runtime]);
+    const controller = startWorktreeRetention(
+      target.runtime,
+      registry,
+      coordinator,
+    );
+    await captured;
+    let stopped = false;
+    const stopping = controller.stop().then(() => {
+      stopped = true;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    expect(controller.activeWork).toBe(true);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+
+    resumeCapture();
+    await stopping;
+
+    expect(controller.activeWork).toBe(false);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toHaveLength(2);
+    const binding = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(binding.state).toBe('valid');
+    if (binding.state === 'valid') {
+      expect(binding.session.worktreeRemoved).toBeUndefined();
+    }
+  });
+
+  it('waits out a stop initiated during the last scope validation', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'stop-after-binding',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'stop-after-binding-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const registry = createWorkspaceRegistry([target.runtime]);
+    const getRepoTopLevel = GitWorktreeService.prototype.getRepoTopLevel;
+    let gateReached = false;
+    let scopeStopped: Promise<void> | undefined;
+    let notifyGate!: () => void;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      notifyGate = resolve;
+    });
+    const resume = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const controller = startWorktreeRetention(
+      target.runtime,
+      registry,
+      coordinator,
+    );
+    vi.spyOn(
+      GitWorktreeService.prototype,
+      'getRepoTopLevel',
+    ).mockImplementation(async function (this: GitWorktreeService) {
+      const root = await getRepoTopLevel.call(this);
+      if (!gateReached) {
+        const state = await readWorktreeSessionStrict(session.sidecarPath);
+        if (
+          state.state === 'valid' &&
+          state.session.worktreeRemoved !== undefined
+        ) {
+          gateReached = true;
+          scopeStopped = controller.stop();
+          notifyGate();
+          await resume;
+        }
+      }
+      return root;
+    });
+
+    await gate;
+    let stopped = false;
+    const stopping = scopeStopped!.then(() => {
+      stopped = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(stopped).toBe(false);
+      expect(controller.activeWork).toBe(true);
+      expect(fs.existsSync(session.worktreePath)).toBe(true);
+    } finally {
+      release();
+      await stopping;
+    }
+
+    expect(gateReached).toBe(true);
+    expect(controller.activeWork).toBe(false);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toHaveLength(2);
+    const binding = await readWorktreeSessionStrict(session.sidecarPath);
+    expect(binding.state).toBe('valid');
+    if (binding.state === 'valid') {
+      expect(binding.session.worktreeRemoved).toBeUndefined();
+    }
+    expect((await sweep(target, registry)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it.each([
+    ['enabled', true, true, false],
+    ['disabled', false, true, true],
+    ['unbound', true, false, true],
+  ] as const)(
+    'handles scheduled-task binding %s without globally disabling retention',
+    async (_name, enabled, bound, shouldRemove) => {
+      const target = makeRetentionRepo(root, 'primary');
+      configureRetention(target, 1);
+      const session = await makeRetainedSession(target, {
+        slug: 'scheduled-binding',
+        dirty: true,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(target, {
+        slug: 'scheduled-newer-control',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+      await writeScheduledTaskFile(target, [
+        persistentTask(bound ? session.id : undefined, enabled),
+      ]);
+
+      const result = await sweep(target);
+
+      expect(result.removed).toEqual(shouldRemove ? [session.id] : []);
+      expect(fs.existsSync(session.worktreePath)).toBe(!shouldRemove);
+      if (shouldRemove) {
+        await expectRetainedSnapshot(target, session);
+      } else {
+        expect(
+          snapshotFiles(path.dirname(session.sidecarPath), session.id),
+        ).toEqual([]);
+      }
+    },
+  );
+
+  it('pauses for an unreadable task store and treats confirmed deletion as empty', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'unreadable-task-store',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'newer-readable-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const taskFile = await writeScheduledTaskFile(target, '{bad-json');
+
+    const paused = await sweep(target);
+    expect(paused.removed).toEqual([]);
+    expect(paused.issues.join('\n')).toContain('Malformed JSON');
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+
+    fs.unlinkSync(taskFile);
+    expect((await sweep(target)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it('vetoes a task enabled during capture and removes the redundant pair', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'task-enabled-during-capture',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'task-enabled-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    let resumeCapture = () => {};
+    let markCaptured = () => {};
+    const captured = new Promise<void>((resolve) => {
+      markCaptured = resolve;
+    });
+    captureGate.barrier = {
+      captured: markCaptured,
+      release: new Promise<void>((resolve) => {
+        resumeCapture = resolve;
+      }),
+    };
+
+    const sweeping = sweep(target);
+    try {
+      await captured;
+      await writeScheduledTaskFile(target, [persistentTask(session.id)]);
+    } finally {
+      resumeCapture();
+    }
+
+    expect((await sweeping).removed).toEqual([]);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+  });
+
+  it('vetoes a pin made after the removal binding is persisted', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'late-pin-after-binding',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'late-pin-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const isPinned = SessionOrganizationService.prototype.isSessionPinnedStrict;
+    let becamePinned = false;
+    vi.spyOn(
+      SessionOrganizationService.prototype,
+      'isSessionPinnedStrict',
+    ).mockImplementation(async function (
+      this: SessionOrganizationService,
+      sessionId: string,
+    ) {
+      const current = await isPinned.call(this, sessionId);
+      if (!becamePinned && sessionId === session.id) {
+        const state = await readWorktreeSessionStrict(session.sidecarPath);
+        if (
+          state.state === 'valid' &&
+          state.session.worktreeRemoved !== undefined
+        ) {
+          becamePinned = true;
+          await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+            new SessionOrganizationService(
+              target.repo,
+            ).updateSessionOrganization(session.id, { isPinned: true }),
+          );
+          return isPinned.call(this, sessionId);
+        }
+      }
+      return current;
+    });
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(becamePinned).toBe(true);
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+
+    await runWithWorkspaceRuntimeStorage(target.runtime, () =>
+      new SessionOrganizationService(target.repo).updateSessionOrganization(
+        session.id,
+        { isPinned: false },
+      ),
+    );
+    expect((await sweep(target)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it('vetoes a task enabled after the removal binding is persisted', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'late-task-after-binding',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'late-task-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const cronTasks = await import(
+      '@qwen-code/qwen-code-core/services/cronTasksFile.js'
+    );
+    const readTasks = cronTasks.readCronTasks;
+    let enabledLate = false;
+    const reader = vi
+      .spyOn(cronTasks, 'readCronTasks')
+      .mockImplementation(async (workspaceCwd: string) => {
+        const before = await readTasks(workspaceCwd);
+        if (!enabledLate) {
+          const state = await readWorktreeSessionStrict(session.sidecarPath);
+          if (
+            state.state === 'valid' &&
+            state.session.worktreeRemoved !== undefined
+          ) {
+            enabledLate = true;
+            await writeScheduledTaskFile(target, [persistentTask(session.id)]);
+            return readTasks(workspaceCwd);
+          }
+        }
+        return before;
+      });
+
+    expect((await sweep(target)).removed).toEqual([]);
+    expect(enabledLate).toBe(true);
+    expect(reader).toHaveBeenCalled();
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+
+    await writeScheduledTaskFile(target, []);
+    expect((await sweep(target)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it('reads scheduled-task protection only from the selected runtime storage', async () => {
+    const primary = makeRetentionRepo(root, 'primary');
+    const secondary = makeRetentionRepo(root, 'secondary');
+    configureRetention(primary, 1);
+    configureRetention(secondary, 1);
+    const sessionId = randomUUID();
+    const primarySession = await makeRetainedSession(primary, {
+      sessionId,
+      slug: 'primary-scheduled-binding',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(primary, {
+      slug: 'primary-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const secondarySession = await makeRetainedSession(secondary, {
+      sessionId,
+      slug: 'secondary-same-session-id',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(secondary, {
+      slug: 'secondary-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    await writeScheduledTaskFile(primary, [persistentTask(sessionId)]);
+    const registry = createWorkspaceRegistry([
+      primary.runtime,
+      secondary.runtime,
+    ]);
+
+    expect((await sweep(primary, registry)).removed).toEqual([]);
+    expect(fs.existsSync(primarySession.worktreePath)).toBe(true);
+    expect((await sweep(secondary, registry)).removed).toEqual([sessionId]);
+    await expectRetainedSnapshot(secondary, secondarySession);
+  });
+
+  it.each([
+    {
+      currentState: 'active',
+      otherState: 'archived',
+      malformed: false,
+    },
+    {
+      currentState: 'archived',
+      otherState: 'active',
+      malformed: false,
+    },
+    {
+      currentState: 'active',
+      otherState: 'archived',
+      malformed: true,
+    },
+    {
+      currentState: 'archived',
+      otherState: 'active',
+      malformed: true,
+    },
+  ] as const)(
+    'refuses a $otherState competing or unreadable owner for a $currentState removal',
+    async ({ currentState, otherState, malformed }) => {
+      const target = makeRetentionRepo(root, 'primary');
+      configureRetention(target, 1);
+      const session = await makeRetainedSession(target, {
+        slug: 'cross-archive-owner',
+        dirty: true,
+        archiveState: currentState,
+        activity: '2026-01-01T00:00:00.000Z',
+      });
+      await makeRetainedSession(target, {
+        slug: 'cross-archive-newer-control',
+        activity: '2026-01-02T00:00:00.000Z',
+      });
+      const otherId = randomUUID();
+      const otherSidecar = target.service.getWorktreeSessionPathForArchiveState(
+        otherId,
+        otherState,
+      );
+      if (malformed) {
+        fs.mkdirSync(path.dirname(otherSidecar), { recursive: true });
+        fs.writeFileSync(otherSidecar, '{truncated');
+      } else {
+        await writeWorktreeSession(otherSidecar, { ...session.sidecar });
+      }
+
+      const plan = await preclassifyWorktreeCleanup(
+        target.service,
+        session.id,
+        target.repo,
+      );
+      expect(plan).toBeDefined();
+      const ownership = await verifyWorktreeCleanupOwnership(
+        plan!,
+        () => false,
+      );
+      expect(ownership).toEqual({
+        ok: false,
+        reason: malformed
+          ? `unreadable sibling sidecar ${path.relative(
+              path.dirname(path.dirname(session.sidecarPath)),
+              otherSidecar,
+            )}`
+          : `checkout shared with ${otherId}.worktree.json`,
+      });
+      expect((await sweep(target)).removed).toEqual([]);
+      expect(fs.existsSync(session.worktreePath)).toBe(true);
+      expect(
+        fs.readFileSync(path.join(session.worktreePath, 'untracked.bin')),
+      ).toEqual(Buffer.from([0, 1, 2, 255]));
+      const binding = await readWorktreeSessionStrict(session.sidecarPath);
+      expect(binding.state).toBe('valid');
+      if (binding.state === 'valid') {
+        expect(binding.session.worktreeRemoved).toBeUndefined();
+      }
+      expect(
+        snapshotFiles(path.dirname(session.sidecarPath), session.id),
+      ).toEqual([]);
+    },
+  );
+
+  it('allows a direct reset tombstone in the other archive state', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'cross-archive-reset',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    await makeRetainedSession(target, {
+      slug: 'cross-archive-reset-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const tombstone = target.service.getWorktreeSessionPathForArchiveState(
+      randomUUID(),
+      'archived',
+    );
+    await writeWorktreeSession(tombstone, {
+      ...session.sidecar,
+      supersededBy: session.id,
+    });
+
+    expect((await sweep(target)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+  });
+
+  it('preserves duplicate active/archived session state instead of choosing a copy', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'ambiguous-locations',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'unique-newer-location',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const service = createWorkspaceRuntimeSessionService(target.runtime);
+    const archivedSidecar = service.getWorktreeSessionPathForArchiveState(
+      session.id,
+      'archived',
+    );
+    const archivedTranscript = path.join(
+      path.dirname(archivedSidecar),
+      `${session.id}.jsonl`,
+    );
+    fs.mkdirSync(path.dirname(archivedTranscript), { recursive: true });
+    fs.copyFileSync(session.transcriptPath, archivedTranscript);
+    fs.copyFileSync(session.sidecarPath, archivedSidecar);
+
+    expect((await sweep(target)).skipped).toContain(
+      `session archive location is not unique: ${session.id}`,
+    );
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+
+    fs.unlinkSync(archivedTranscript);
+    expect((await sweep(target)).skipped).toContain(
+      `session archive location is not unique: ${session.id}`,
+    );
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+  });
+
+  it('does not let a plain non-Git workspace block an independent runtime', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'independent-plain-workspace',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newest = await makeRetainedSession(target, {
+      slug: 'newer-plain-workspace-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const secondary = makeRetentionRepo(root, 'secondary');
+    const plain = path.join(root, 'plain-workspace');
+    fs.mkdirSync(plain);
+    const registry = createWorkspaceRegistry([
+      target.runtime,
+      {
+        ...secondary.runtime,
+        workspaceId: 'plain',
+        workspaceCwd: plain,
+      },
+    ]);
+
+    expect((await sweep(target, registry)).removed).toEqual([session.id]);
+    await expectRetainedSnapshot(target, session);
+    expect(fs.existsSync(newest.worktreePath)).toBe(true);
+  });
+
+  it('preserves other roots when a candidate Git root is unreadable', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const session = await makeRetainedSession(target, {
+      slug: 'unreadable-secondary-root',
+      dirty: true,
+    });
+    const secondary = makeRetentionRepo(root, 'secondary');
+    fs.rmSync(path.join(secondary.repo, '.git'), {
+      recursive: true,
+      force: true,
+    });
+    fs.mkdirSync(path.join(secondary.repo, '.git'));
+    const registry = createWorkspaceRegistry([
+      target.runtime,
+      secondary.runtime,
+    ]);
+
+    await expect(sweep(target, registry)).rejects.toThrow(
+      'Git metadata exists but the repository root is unavailable',
+    );
+    expect(fs.existsSync(session.worktreePath)).toBe(true);
+    expect(
+      snapshotFiles(path.dirname(session.sidecarPath), session.id),
+    ).toEqual([]);
+  });
 
   it('disables zero before any Git root discovery', async () => {
     const target = makeRetentionRepo(root, 'primary');

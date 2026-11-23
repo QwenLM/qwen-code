@@ -5,6 +5,7 @@
  */
 
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   realpathSync,
@@ -23,6 +24,7 @@ import {
   SessionService,
   createWorktreeSessionMarkerExclusive,
   writeWorktreeSession,
+  readWorktreeSessionStrict,
   type ChatRecord,
   type WorktreeSession,
 } from '@qwen-code/qwen-code-core';
@@ -36,6 +38,31 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  configureRetention,
+  makeRetainedSession,
+  makeRetentionRepo,
+} from '../../test-utils/worktree-session-retention-fixtures.js';
+import { sweepWorktreeRetentionOnce } from '../server/worktree-retention.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
+
+const ownershipMocks = vi.hoisted(() => ({
+  real: undefined as
+    | typeof import('../server/worktree-ownership-op.js').acquireWorktreeOwnershipOp
+    | undefined,
+  acquire: vi.fn(),
+}));
+
+vi.mock('../server/worktree-ownership-op.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../server/worktree-ownership-op.js')>();
+  ownershipMocks.real = actual.acquireWorktreeOwnershipOp;
+  ownershipMocks.acquire.mockImplementation(actual.acquireWorktreeOwnershipOp);
+  return {
+    ...actual,
+    acquireWorktreeOwnershipOp: ownershipMocks.acquire,
+  };
+});
 
 const restoreMocks = vi.hoisted(() => ({
   real: undefined as
@@ -65,6 +92,8 @@ let root: string;
 
 beforeEach(() => {
   root = mkdtempSync(path.join(tmpdir(), 'worktree-restore-route-'));
+  ownershipMocks.acquire.mockClear();
+  ownershipMocks.acquire.mockImplementation(ownershipMocks.real!);
   restoreMocks.restore.mockClear();
   restoreMocks.restore.mockImplementation(restoreMocks.real!);
 });
@@ -219,6 +248,14 @@ function mkdirTemp(): string {
   return mkdtempSync(path.join(root, 'workspace-'));
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 const invalidRestoreRequests = [
   {
     name: 'historyPageSize',
@@ -266,6 +303,41 @@ const invalidRestoreRequests = [
 ] as const;
 
 describe('POST /session/:id/worktree-restore', () => {
+  it.each(['load', 'resume'] as const)(
+    'requires snapshot restoration before ordinary %s without bridge effects',
+    async (action) => {
+      const fixture = makeFixture();
+      const id = randomUUID();
+      await fixture.seed(id);
+
+      const response = await request(fixture.app)
+        .post(`/session/${id}/${action}`)
+        .send({});
+
+      expect(response.status).toBe(409);
+      expect(response.body).toEqual({
+        error:
+          'This session has a retained worktree. Use /session/:id/worktree-restore before ordinary load or resume.',
+        code: 'worktree_restore_unavailable',
+        sessionId: id,
+      });
+      expect(fixture.loadSession).not.toHaveBeenCalled();
+      expect(fixture.changeSessionCwd).not.toHaveBeenCalled();
+      expect(fixture.setSessionWorktree).not.toHaveBeenCalled();
+      expect(restoreMocks.restore).not.toHaveBeenCalled();
+      expect(existsSync(fixture.worktreeDir)).toBe(false);
+      const preserved = await readWorktreeSessionStrict(
+        fixture.service.getWorktreeSessionPath(id),
+      );
+      expect(preserved.state).toBe('valid');
+      if (preserved.state === 'valid') {
+        expect(preserved.session.worktreeRemoved?.archiveKey).toBe(
+          `${id}.1.1.worktree-snapshot.tar.gz`,
+        );
+      }
+    },
+  );
+
   it.each(invalidRestoreRequests)(
     'rejects invalid $name before either worktree restoration or ordinary load',
     async ({ body, response: expectedBody }) => {
@@ -350,6 +422,165 @@ describe('POST /session/:id/worktree-restore', () => {
     });
     expect(response.status).toBe(409);
   });
+
+  it('holds a restored checkout until ordinary load registers against queued retention', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    configureRetention(target, 1);
+    const state = await makeRetainedSession(target, {
+      slug: 'restore-register-race',
+      dirty: true,
+      activity: '2026-01-01T00:00:00.000Z',
+    });
+    const newer = await makeRetainedSession(target, {
+      slug: 'restore-register-newer-control',
+      activity: '2026-01-02T00:00:00.000Z',
+    });
+    const liveSessions = new Set<string>();
+    const loadSession = vi.fn(
+      async (req: { sessionId: string; workspaceCwd: string }) => {
+        liveSessions.add(req.sessionId);
+        return {
+          sessionId: req.sessionId,
+          clientId: 'restore-client',
+          workspaceCwd: req.workspaceCwd,
+          currentCwd: req.workspaceCwd,
+          attached: true,
+          hasActivePrompt: false,
+          compactedReplay: [],
+          liveJournal: [],
+        };
+      },
+    );
+    const bridge = {
+      getSessionSummary: vi.fn((sessionId: string) => {
+        if (!liveSessions.has(sessionId)) {
+          throw new SessionNotFoundError(sessionId);
+        }
+        return { hasActivePrompt: false, pendingInteractionCount: 0 };
+      }),
+      loadSession,
+      changeSessionCwd: vi.fn(
+        async (sessionId: string, req: { path: string }) => ({
+          sessionId,
+          previousCwd: '',
+          newCwd: realpathSync(req.path),
+          warnings: [],
+        }),
+      ),
+      setSessionWorktree: vi.fn(),
+      detachClient: vi.fn(async (sessionId: string) => {
+        liveSessions.delete(sessionId);
+      }),
+      killSession: vi.fn(async (sessionId: string) => {
+        liveSessions.delete(sessionId);
+        return true;
+      }),
+    } as unknown as AcpSessionBridge;
+    Object.assign(target.runtime, {
+      bridge,
+      routeFileSystemFactory: {},
+    });
+    const coordinator = new SessionArchiveCoordinator();
+    const registry = createWorkspaceRegistry([target.runtime]);
+    const sweep = () =>
+      runWithWorkspaceRuntimeStorage(target.runtime, () =>
+        sweepWorktreeRetentionOnce(target.runtime, registry, coordinator),
+      );
+    expect(await sweep()).toMatchObject({ removed: [state.id] });
+    expect(existsSync(state.worktreePath)).toBe(false);
+    expect(existsSync(newer.worktreePath)).toBe(true);
+
+    const app = express();
+    app.use(express.json());
+    registerSessionRoutes(app, {
+      boundWorkspace: target.repo,
+      bridge,
+      workspaceRegistry: registry,
+      archiveCoordinator: coordinator,
+      mutate: () => (_req, _res, next) => next(),
+      sendBridgeError,
+      sessionShellCommandEnabled: true,
+      languageCodes: ['en'],
+    });
+    const restored = deferred();
+    const finishRestore = deferred();
+    restoreMocks.restore.mockImplementation(async (options) => {
+      const result = await restoreMocks.real!(options);
+      restored.resolve();
+      await finishRestore.promise;
+      return result;
+    });
+    const restoring = request(app)
+      .post(`/session/${state.id}/worktree-restore`)
+      .send({})
+      .then((response) => response);
+
+    let queuedRetention: ReturnType<typeof sweep> | undefined;
+    try {
+      await restored.promise;
+      expect(existsSync(state.worktreePath)).toBe(true);
+      // The restore has taken its ownership lock; ordinary load is still
+      // barriered, so the next same-path acquisition is the queued sweep.
+      const retentionAtOwnershipGate = deferred();
+      ownershipMocks.acquire.mockImplementation(async (worktreeKey) => {
+        if (worktreeKey === state.worktreePath) {
+          retentionAtOwnershipGate.resolve();
+        }
+        return ownershipMocks.real!(worktreeKey);
+      });
+      let queuedSettled = false;
+      queuedRetention = sweep().then((report) => {
+        queuedSettled = true;
+        return report;
+      });
+      await retentionAtOwnershipGate.promise;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(queuedSettled).toBe(false);
+      expect(bridge.loadSession).not.toHaveBeenCalled();
+      expect(existsSync(state.worktreePath)).toBe(true);
+      const heldBinding = await readWorktreeSessionStrict(state.sidecarPath);
+      expect(heldBinding.state).toBe('valid');
+      if (heldBinding.state === 'valid') {
+        expect(heldBinding.session.worktreeRemoved).toBeUndefined();
+      }
+      await coordinator.runExclusiveMany([newer.id], async () => undefined);
+
+      finishRestore.resolve();
+      const response = await restoring;
+      expect(response.status).toBe(200);
+      expect(response.body.sessionId).toBe(state.id);
+      expect(bridge.loadSession).toHaveBeenCalledTimes(1);
+      expect(liveSessions.has(state.id)).toBe(true);
+      expect(bridge.setSessionWorktree).toHaveBeenCalledWith(
+        state.id,
+        expect.objectContaining({ path: state.worktreePath }),
+      );
+
+      expect((await queuedRetention).removed).toEqual([]);
+      expect(existsSync(state.worktreePath)).toBe(true);
+      await bridge.detachClient(state.id, 'restore-client');
+      expect((await sweep()).removed).toEqual([state.id]);
+      expect(existsSync(state.worktreePath)).toBe(false);
+      expect(existsSync(newer.worktreePath)).toBe(true);
+
+      loadSession.mockImplementationOnce(async () => {
+        throw new Error('load failed after snapshot restoration');
+      });
+      const failedLoad = await request(app)
+        .post(`/session/${state.id}/worktree-restore`)
+        .send({});
+      expect(failedLoad.status).toBe(500);
+      expect(liveSessions.has(state.id)).toBe(false);
+      expect(existsSync(state.worktreePath)).toBe(true);
+      expect((await sweep()).removed).toEqual([state.id]);
+      expect(existsSync(state.worktreePath)).toBe(false);
+    } finally {
+      finishRestore.resolve();
+      await restoring;
+      await queuedRetention;
+    }
+  }, 30_000);
 
   it.each([true, false])(
     'passes explicit owner evidence to restore and returns load for primary=%s',

@@ -95,6 +95,10 @@ function normalizeRel(p: string): string {
   return n;
 }
 
+function canonicalArchiveMemberName(p: string): string {
+  return normalizeRel(p).replace(/\/+$/, '');
+}
+
 /**
  * Whether a normalized repo-relative path names a protected target the
  * restore must never remove: the worktree's `.git` or the session marker.
@@ -172,7 +176,12 @@ async function assertNoProtectedCaseVariantPaths(
     if (isExcludedFromSnapshot(rel, matcher)) continue;
     if (entry.isDirectory()) {
       await assertNoProtectedCaseVariantPaths(worktreePath, matcher, rel);
-    } else if (!entry.isFile() && !entry.isSymbolicLink()) {
+    } else if (entry.isSymbolicLink()) {
+      assertSnapshotSymlinkTargetBytes(
+        await fs.readlink(path.join(directory, entry.name)),
+        rel,
+      );
+    } else if (!entry.isFile()) {
       // node-tar silently emits no entry for FIFOs, sockets and devices.
       throw new Error(
         `Worktree snapshot: non-regular filesystem entry cannot be archived faithfully: ${rel}`,
@@ -390,25 +399,82 @@ export async function buildWorktreeSnapshotMeta(
 // Before/after digests alone miss an A/B/A write: tar can hold the intermediate
 // bytes. Compare actual archive contents with the final checkout instead of
 // discarding a completed snapshot whose earlier bytes may still be useful.
+interface SnapshotPathKinds {
+  files: Set<string>;
+  directories: Set<string>;
+}
+
+async function readSnapshotPathKinds(
+  snapshotPath: string,
+): Promise<SnapshotPathKinds> {
+  const files = new Set<string>();
+  const directories = new Set<string>();
+  const includeParents = (relativePath: string) => {
+    let parent = '';
+    for (const part of relativePath.split('/').filter(Boolean).slice(0, -1)) {
+      parent = `${parent}${part}/`;
+      directories.add(parent);
+    }
+  };
+  await tar.t({
+    file: snapshotPath,
+    strict: true,
+    onReadEntry: (entry) => {
+      const raw = normalizeRel(entry.path);
+      if (!raw || raw === '.') return;
+      const rel = canonicalArchiveMemberName(entry.path);
+      if (!rel) {
+        throw new Error(
+          'Worktree snapshot: archive member has an empty or root path',
+        );
+      }
+      if (entry.type === 'Directory') {
+        directories.add(`${rel}/`);
+      } else {
+        files.add(rel);
+      }
+      includeParents(rel);
+    },
+  });
+  return { files, directories };
+}
+
 async function checkoutMatchesCapture(
   worktreePath: string,
   snapshotPath: string,
   matcher: DisposableIgnoredMatcher,
   meta: CaptureWorktreeSnapshotOptions['meta'],
+  knownPaths?: SnapshotPathKinds,
 ): Promise<boolean> {
+  const known = knownPaths ?? (await readSnapshotPathKinds(snapshotPath));
   const regularFiles: string[] = [];
   const symlinks = new Map<string, string>();
+  const directories = new Set<string>();
+  const current = new Map<string, string>();
   const collect = async (prefix = ''): Promise<void> => {
     const entries = await fs.readdir(path.join(worktreePath, prefix), {
       withFileTypes: true,
     });
     for (const entry of entries) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      if (isExcludedFromSnapshot(rel, matcher)) continue;
+      // A restored index is allowed to ignore a force-tracked archived file.
+      // Archive membership, not that new index, decides what is restorable.
+      if (
+        isExcludedFromSnapshot(rel, matcher) &&
+        !known.files.has(rel) &&
+        (entry.isFile() ||
+          entry.isSymbolicLink() ||
+          (entry.isDirectory() && !known.directories.has(`${rel}/`)))
+      ) {
+        continue;
+      }
       if (entry.isDirectory()) {
+        directories.add(`${rel}/`);
         await collect(rel);
       } else if (entry.isSymbolicLink()) {
-        symlinks.set(rel, await fs.readlink(path.join(worktreePath, rel)));
+        const target = await fs.readlink(path.join(worktreePath, rel));
+        assertSnapshotSymlinkTargetBytes(target, rel);
+        symlinks.set(rel, target);
       } else if (entry.isFile()) {
         regularFiles.push(rel);
       } else {
@@ -420,7 +486,6 @@ async function checkoutMatchesCapture(
   };
   await collect();
 
-  const current = new Map<string, string>();
   for (const entry of await computeCarriedIdentities(
     worktreePath,
     regularFiles,
@@ -456,11 +521,22 @@ async function checkoutMatchesCapture(
   const captured = new Map<string, string>();
   const hardlinks = new Map<string, string>();
   let archiveValid = true;
+  const captureEntry = (relativePath: string, content: string): void => {
+    if (captured.has(relativePath)) {
+      archiveValid = false;
+      return;
+    }
+    captured.set(relativePath, content);
+  };
   await tar.t({
     file: snapshotPath,
     strict: true,
     onReadEntry: (entry) => {
-      const rel = normalizeRel(entry.path);
+      const rel = canonicalArchiveMemberName(entry.path);
+      if (!rel && entry.type !== 'Directory') {
+        archiveValid = false;
+        return;
+      }
       if (!rel || rel === '.') return;
       if (isProtectedRel(rel)) {
         archiveValid = false;
@@ -471,7 +547,7 @@ async function checkoutMatchesCapture(
         hash.update(`blob ${entry.size}\0`);
         entry.on('data', (chunk: Buffer) => hash.update(chunk));
         entry.on('end', () => {
-          captured.set(
+          captureEntry(
             rel,
             `file:${hash.digest('hex')}:${
               (entry.mode ?? 0) & 0o100 ? '1' : '0'
@@ -479,25 +555,33 @@ async function checkoutMatchesCapture(
           );
         });
       } else if (entry.type === 'SymbolicLink') {
-        captured.set(rel, `symlink:${JSON.stringify(entry.linkpath ?? '')}`);
+        captureEntry(rel, `symlink:${JSON.stringify(entry.linkpath ?? '')}`);
       } else if (entry.type === 'Link') {
-        hardlinks.set(rel, normalizeRel(entry.linkpath ?? ''));
-      } else if (entry.type !== 'Directory') {
+        hardlinks.set(rel, canonicalArchiveMemberName(entry.linkpath ?? ''));
+      } else if (entry.type === 'Directory') {
+        captureEntry(`${rel}/`, 'directory');
+      } else {
         archiveValid = false;
       }
     },
   });
   for (const [rel, target] of hardlinks) {
     const content = captured.get(target);
-    if (content === undefined) {
+    if (content === undefined || content === 'directory') {
       archiveValid = false;
     } else {
-      captured.set(rel, content);
+      captureEntry(rel, content);
     }
   }
-  const mismatch = [...new Set([...current.keys(), ...captured.keys()])]
+  const mismatch = [
+    ...new Set([...current.keys(), ...directories, ...captured.keys()]),
+  ]
     .sort()
-    .find((rel) => current.get(rel) !== captured.get(rel));
+    .find((rel) =>
+      rel.endsWith('/')
+        ? directories.has(rel) !== known.directories.has(rel)
+        : current.get(rel) !== captured.get(rel),
+    );
   await fs.access(path.join(worktreePath, '.git'));
   const [headCommit, branch] = await Promise.all([
     runGit(worktreePath, [
@@ -607,12 +691,27 @@ export async function verifyRestoredWorktreeSnapshot(options: {
   meta: CaptureWorktreeSnapshotOptions['meta'];
 }): Promise<boolean> {
   const matcher = await readSnapshotExclusions(options.worktreePath);
+  const knownPaths = await readSnapshotPathKinds(options.snapshotPath);
   return checkoutMatchesCapture(
     options.worktreePath,
     options.snapshotPath,
     matcher,
     options.meta,
+    knownPaths,
   );
+}
+
+function assertSnapshotSymlinkTargetBytes(
+  target: string,
+  relativePath: string,
+): void {
+  // The fs/tar string bridge cannot distinguish a literal U+FFFD from a
+  // decoded non-UTF-8 target. Refuse either rather than silently rewrite it.
+  if (target.includes('\uFFFD')) {
+    throw new Error(
+      `Snapshot symlink target cannot be preserved byte-for-byte: ${relativePath}`,
+    );
+  }
 }
 
 export async function captureWorktreeSnapshot(
@@ -829,8 +928,14 @@ export async function selectWorktreeSnapshot(options: {
     ) {
       throw new Error(`Snapshot pair has invalid commit ids: ${metaPath}`);
     }
-    if (meta.sessionId !== options.sessionId || meta.slug !== options.slug) {
+    if (meta.sessionId !== options.sessionId) {
       throw new Error(`Snapshot pair identity mismatch: ${metaPath}`);
+    }
+    if (meta.slug !== options.slug) {
+      if (archiveKey !== undefined) {
+        throw new Error(`Snapshot pair identity mismatch: ${metaPath}`);
+      }
+      continue;
     }
     const mtimeNs = (await fs.lstat(snapshotPath, { bigint: true })).mtimeNs;
     selected.push({ snapshotPath, metaPath, meta, mtimeNs });
@@ -897,7 +1002,9 @@ export async function restoreWorktreeSnapshot(
         hardlinks.push([norm, entry.linkpath ?? '']);
       }
       if (entry.type === 'SymbolicLink') {
-        archivedSymlinks.set(norm, entry.linkpath ?? '');
+        const target = entry.linkpath ?? '';
+        assertSnapshotSymlinkTargetBytes(target, norm);
+        archivedSymlinks.set(norm, target);
       }
     },
   });
@@ -1053,5 +1160,32 @@ export async function restoreWorktreeSnapshot(
     }
     if (stat !== null) await fs.unlink(target);
     await fs.symlink(linkTarget, target);
+  }
+
+  // Git does not track directories. A recreated checkout can therefore
+  // retain parent directories that were absent at capture. Prune only empty,
+  // unarchived ones along deleted paths, deepest first, so captured empty
+  // directories and every non-empty parent survive unchanged.
+  const parents = new Set<string>();
+  for (const rel of meta.dirty.deleted) {
+    let parent = path.posix.dirname(normalizeRel(rel).replace(/\/+$/, ''));
+    while (parent !== '.' && parent !== '..') {
+      parents.add(parent);
+      parent = path.posix.dirname(parent);
+    }
+  }
+  for (const rel of [...parents].sort(
+    (left, right) => right.split('/').length - left.split('/').length,
+  )) {
+    if (archived.has(rel)) continue;
+    const target = confine(rel);
+    const stat = await fs.lstat(target).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!stat?.isDirectory()) continue;
+    await assertRealContained(target, rel);
+    const entries = await fs.readdir(target);
+    if (entries.length === 0) await fs.rmdir(target);
   }
 }

@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { GitWorktreeService } from '@qwen-code/qwen-code-core/services/gitWorktreeService.js';
 import { selectWorktreeSnapshot } from '@qwen-code/qwen-code-core/services/worktree-snapshot-service.js';
 import {
   addDaemonRequestAttribute,
@@ -497,6 +498,7 @@ export async function enrichWorktreeSidecars(
   archiveState: SessionArchiveState = 'active',
   signal?: AbortSignal,
 ): Promise<void> {
+  let runtimeRoots: readonly string[] | undefined;
   for (const [sessionId, summary] of bySessionId) {
     signal?.throwIfAborted();
     const sidecarPath = sessionService.getWorktreeSessionPathForArchiveState(
@@ -506,9 +508,12 @@ export async function enrichWorktreeSidecars(
     let sidecar: Awaited<ReturnType<typeof readWorktreeSession>>;
     let readFailed = false;
     try {
-      sidecar = signal
-        ? await readWorktreeSession(sidecarPath, { signal })
-        : await readWorktreeSession(sidecarPath);
+      sidecar = await readWorktreeSession(sidecarPath, {
+        signal,
+        onInvalid: () => {
+          readFailed = true;
+        },
+      });
     } catch {
       signal?.throwIfAborted();
       sidecar = null;
@@ -547,10 +552,24 @@ export async function enrichWorktreeSidecars(
     let canRestore = false;
     if (removed) {
       try {
+        if (runtimeRoots === undefined) {
+          const roots = new Set([sessionService.getProjectRoot()]);
+          try {
+            const repoTop = await new GitWorktreeService(
+              sessionService.getProjectRoot(),
+            ).getRepoTopLevel();
+            if (repoTop) roots.add(repoTop);
+          } catch {
+            // The runtime root still bounds a plain workspace. Ownership
+            // calibration and the actual restore use a fresh Git read.
+          }
+          runtimeRoots = [...roots];
+        }
         const candidate = await preclassifyWorktreeCleanup(
           sessionService,
           sessionId,
           sessionService.getProjectRoot(),
+          { quiet: true, runtimeRoots },
         );
         canRestore =
           candidate !== undefined &&

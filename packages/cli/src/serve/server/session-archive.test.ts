@@ -2230,7 +2230,10 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         originalCwd: workspaceDir,
         workspaceCwd: workspaceDir,
         originalBranch: 'main',
-        originalHeadCommit: 'abc123',
+        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: workspaceDir,
+          encoding: 'utf8',
+        }).trim(),
         ...options.sidecarOverrides,
       }),
     );
@@ -2887,7 +2890,10 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         originalCwd: workspaceDir,
         workspaceCwd: workspaceDir,
         originalBranch: 'main',
-        originalHeadCommit: 'abc123',
+        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: workspaceDir,
+          encoding: 'utf8',
+        }).trim(),
       };
       const archived = (id: string) =>
         service.getWorktreeSessionPathForArchiveState(id, 'archived');
@@ -2932,7 +2938,7 @@ describe('deleteDaemonSessions worktree cleanup', () => {
       expect(fs.existsSync(worktreePath)).toBe(live);
       if (live) {
         expect(warnings()).toContain(
-          `session ${activeId} naming the checkout is still live`,
+          `superseded session ${activeId} is still live`,
         );
       }
     },
@@ -3152,7 +3158,10 @@ describe('deleteDaemonSessions worktree cleanup', () => {
         originalCwd: workspaceDir,
         workspaceCwd: workspaceDir,
         originalBranch: 'main',
-        originalHeadCommit: 'abc123',
+        originalHeadCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: workspaceDir,
+          encoding: 'utf8',
+        }).trim(),
       }),
     );
     writeWorktreeMarker(worktreePath, sessionId);
@@ -3892,6 +3901,63 @@ describe('retained snapshot archive lifecycle', () => {
     await expectOwnedPair(state, 'archived');
   });
 
+  it('rolls back a post-link identity probe failure and retries', async () => {
+    const target = makeRetentionRepo(root, 'primary');
+    const state = await removedBinding(target);
+    const sourcePair = await expectOwnedPair(state, 'active');
+    const archivedSidecar =
+      target.service.getWorktreeSessionPathForArchiveState(
+        state.id,
+        'archived',
+      );
+    const destinationSnapshot = path.join(
+      path.dirname(archivedSidecar),
+      path.basename(sourcePair.snapshotPath),
+    );
+    const record = await readWorktreeSessionStrict(state.sidecarPath);
+    if (record.state !== 'valid') throw new Error('Missing owner record');
+    await writeWorktreeSession(archivedSidecar, record.session);
+    const failure = Object.assign(new Error('injected post-link lstat'), {
+      code: 'EIO',
+    });
+    const link = fs.promises.link.bind(fs.promises);
+    let linked = false;
+    vi.spyOn(fs.promises, 'link').mockImplementation(
+      async (source, destination) => {
+        await link(source, destination);
+        if (String(destination) === destinationSnapshot) linked = true;
+      },
+    );
+    const lstat = fs.promises.lstat.bind(fs.promises);
+    let injected = false;
+    vi.spyOn(fs.promises, 'lstat').mockImplementation(
+      async (candidate, options) => {
+        if (linked && !injected && String(candidate) === destinationSnapshot) {
+          injected = true;
+          throw failure;
+        }
+        return lstat(candidate, options);
+      },
+    );
+
+    await expect(
+      moveWorktreeSnapshotsWithSession(target.service, state.id, 'archived'),
+    ).rejects.toMatchObject({ message: 'injected post-link lstat' });
+    expect(injected).toBe(true);
+    expect(fs.statSync(sourcePair.snapshotPath, { bigint: true }).nlink).toBe(
+      1n,
+    );
+    expect(fs.existsSync(destinationSnapshot)).toBe(false);
+    await expectOwnedPair(state, 'active');
+    await expect(selectOwnedPair(state, 'archived')).resolves.toBeUndefined();
+
+    await expect(
+      moveWorktreeSnapshotsWithSession(target.service, state.id, 'archived'),
+    ).resolves.toBeUndefined();
+    await expectOwnedPair(state, 'archived');
+    await expect(selectOwnedPair(state, 'active')).resolves.toBeUndefined();
+  });
+
   it('fails when the freshly moved pair is no longer complete', async () => {
     const target = makeRetentionRepo(root, 'primary');
     const state = await removedBinding(target);
@@ -3983,10 +4049,17 @@ describe('retained snapshot archive lifecycle', () => {
     expect(result.errors).toHaveLength(1);
     const maintenanceError = result.errors[0]!.error;
     expect(maintenanceError).toBeInstanceOf(AggregateError);
-    const failures = (maintenanceError as AggregateError).errors as unknown[];
+    if (!(maintenanceError instanceof AggregateError)) {
+      throw new Error('Expected both follow-up failures to be aggregated');
+    }
+    const failures = maintenanceError.errors as unknown[];
     expect(failures).toHaveLength(2);
     expect(failures[0]).toBe(failure);
     expect(failures[1]).toBeInstanceOf(Error);
+    expect(maintenanceError.message).toContain(failure.message);
+    const taskFailureMessage = (failures[1] as Error).message;
+    expect(taskFailureMessage).not.toBe('');
+    expect(maintenanceError.message).toContain(taskFailureMessage);
     expect(injected).toBe(true);
     expect(fs.readFileSync(sourcePair.snapshotPath)).toEqual(originalBytes);
     await expectOwnedPair(state, 'active');

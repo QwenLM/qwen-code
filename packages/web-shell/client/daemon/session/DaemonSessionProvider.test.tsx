@@ -113,6 +113,7 @@ interface MockSession {
   hasActivePrompt?: boolean;
   historyHasMore?: boolean;
   historyAnchorRecordId?: string;
+  replayProjectionWatermark?: number;
   replayDegraded?: boolean;
   replaySnapshotComplete?: boolean;
   replayPartial?: boolean;
@@ -385,6 +386,14 @@ const sdkMocks = vi.hoisted(() => {
         _clientId?: string,
       ): Promise<MockSession> => takeSession(client),
     );
+    static restoreWorktree = vi.fn(
+      async (
+        client: unknown,
+        _sessionId: string,
+        _opts?: unknown,
+        _clientId?: string,
+      ): Promise<MockSession> => takeSession(client),
+    );
     static createStandalone = vi.fn(
       async (client: unknown, _opts?: unknown): Promise<MockSession> =>
         takeSession(client),
@@ -602,6 +611,11 @@ const sdkMocks = vi.hoisted(() => {
       );
       MockDaemonSessionClient.resume.mockReset();
       MockDaemonSessionClient.resume.mockImplementation(
+        async (client: unknown, _sessionId: string): Promise<MockSession> =>
+          takeSession(client),
+      );
+      MockDaemonSessionClient.restoreWorktree.mockReset();
+      MockDaemonSessionClient.restoreWorktree.mockImplementation(
         async (client: unknown, _sessionId: string): Promise<MockSession> =>
           takeSession(client),
       );
@@ -15589,6 +15603,170 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('consumes a hydrated worktree restore without another load or registration', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    let registrations = 0;
+    const restored = createMockSession({
+      sessionId: 'session-b',
+      workspaceCwd: '/secondary',
+      clientId: 'legacy-host',
+      state: { displayName: 'Restored worktree', mode: 'replay-ready' },
+      lastEventId: 27,
+      eventEpoch: 'epoch-restore',
+      replaySnapshot: createTextReplaySnapshot('restored replay'),
+      replayDegraded: true,
+      replayPartial: true,
+      historyHasMore: true,
+      historyAnchorRecordId: 'anchor-restore-1',
+      replayProjectionWatermark: 17,
+      restoredArtifacts: [
+        {
+          id: 'a1',
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Restored artifact',
+          url: 'https://example.com/restored',
+          retention: 'restorable',
+          clientRetained: true,
+          createdAt: '2026-09-07T00:00:00.000Z',
+          updatedAt: '2026-09-07T00:00:00.000Z',
+        },
+      ],
+      detach: vi.fn(async () => {
+        registrations -= 1;
+      }),
+    });
+    sdkMocks.MockDaemonSessionClient.restoreWorktree.mockImplementationOnce(
+      async (client: unknown) => {
+        registrations += 1;
+        restored.client = client as MockClient;
+        return restored;
+      },
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let trajectory: ReturnType<typeof useTrajectoryLiveSnapshot> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let artifactHintSeen = false;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      history = useDaemonTranscriptHistory();
+      trajectory = useTrajectoryLiveSnapshot();
+      blocks = useDaemonTranscriptBlocks();
+      artifactHintSeen ||=
+        connection.artifactCountHint === 6 &&
+        connection.artifactCountHintSessionId === 'session-b';
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      clientId: 'legacy-host',
+      sessionSourceType: 'fixture-source',
+      historyPageSize: 50,
+      subagentTranscriptMode: 'summary',
+    });
+
+    await act(async () => {
+      const restoredSession = await requireActions(
+        actions,
+      ).restoreWorktreeSession('session-b', { workspaceCwd: '/secondary' });
+      expect(registrations).toBe(1);
+      await requireActions(actions).loadSession('session-b', {
+        workspaceCwd: '/secondary',
+        sessionContext: { kind: 'workspace', cwd: '/secondary' },
+        artifactCountHint: 6,
+        restoredSession,
+      });
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.restoreWorktree,
+    ).toHaveBeenCalledExactlyOnceWith(
+      expect.anything(),
+      'session-b',
+      {
+        workspaceCwd: '/secondary',
+        timeoutMs: 70_000,
+        sourceType: 'fixture-source',
+        liveReplayMode: 'summary',
+        compactedReplayMode: 'summary',
+        historyPageSize: 50,
+      },
+      'legacy-host',
+    );
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+    expect(registrations).toBe(1);
+    expect(restored.detach).not.toHaveBeenCalled();
+    expect(artifactHintSeen).toBe(true);
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'restored replay' },
+    ]);
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      clientId: 'legacy-host',
+      workspaceCwd: '/secondary',
+      displayName: 'Restored worktree',
+      restoredArtifacts: restored.restoredArtifacts,
+      restoredArtifactsSessionId: 'session-b',
+    });
+    expect(connection?.artifactCountHint).toBeUndefined();
+    expect(history?.hasMore).toBe(true);
+    expect(trajectory).toMatchObject({
+      epoch: 'epoch-restore',
+      lastEventId: 27,
+      incomplete: true,
+    });
+    expect(restored.historyAnchorRecordId).toBe('anchor-restore-1');
+    expect(restored.replayProjectionWatermark).toBe(17);
+
+    await act(async () => requireActions(actions).clearSession());
+    expect(restored.detach).toHaveBeenCalledOnce();
+    expect(registrations).toBe(0);
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+  });
+
+  it('releases a restored client when the provider unmounts before accepting it', async () => {
+    const restored = createMockSession({ sessionId: 'session-b' });
+    sdkMocks.MockDaemonSessionClient.restoreWorktree.mockResolvedValueOnce(
+      restored,
+    );
+    let actions: DaemonSessionActions | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: false });
+
+    let loading!: Promise<void>;
+    await act(async () => {
+      const restoredSession = await requireActions(
+        actions,
+      ).restoreWorktreeSession('session-b', {
+        workspaceCwd: '/mock-workspace',
+      });
+      loading = requireActions(actions).loadSession('session-b', {
+        workspaceCwd: '/mock-workspace',
+        sessionContext: { kind: 'workspace', cwd: '/mock-workspace' },
+        restoredSession,
+      });
+      root?.unmount();
+      await expect(loading).rejects.toMatchObject({ name: 'AbortError' });
+    });
+    root = null;
+
+    expect(restored.detach).toHaveBeenCalledOnce();
+    expect(sdkMocks.MockDaemonSessionClient.load).not.toHaveBeenCalled();
+  });
+
   it('uses session-scoped client IDs when switching between loaded sessions', async () => {
     const firstSession = createMockSession({
       sessionId: 'session-a',
@@ -28415,6 +28593,7 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     restoredArtifacts: opts.restoredArtifacts,
     historyHasMore: opts.historyHasMore ?? false,
     historyAnchorRecordId: opts.historyAnchorRecordId,
+    replayProjectionWatermark: opts.replayProjectionWatermark,
     replayDegraded: opts.replayDegraded ?? false,
     replaySnapshotComplete: opts.replaySnapshotComplete ?? true,
     replayPartial: opts.replayPartial ?? false,

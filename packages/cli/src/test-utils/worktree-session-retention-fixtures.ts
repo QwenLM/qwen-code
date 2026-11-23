@@ -175,7 +175,9 @@ export async function makeRetainedSession(
       content: `fixture prompt for ${slug}`,
     }) + '\n',
   );
-  await service.setLastUserPromptAt(sessionId, activity);
+  if (archiveState === 'active') {
+    await service.setLastUserPromptAt(sessionId, activity);
+  }
   fs.utimesSync(transcriptPath, new Date(activity), new Date(activity));
   fs.utimesSync(sidecarPath, new Date(activity), new Date(activity));
   return { id: sessionId, worktreePath, sidecarPath, transcriptPath, sidecar };

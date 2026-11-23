@@ -131,14 +131,20 @@ export async function moveWorktreeSnapshotsWithSession(
     for (const source of [selected.snapshotPath, selected.metaPath]) {
       const target = path.join(destinationDirectory, path.basename(source));
       // link() cannot overwrite a destination created after the preflight.
+      const sourceIdentity = await fs.lstat(source, { bigint: true });
       await fs.link(source, target);
-      const linked = await fs.lstat(target, { bigint: true });
-      links.push({
+      const link = {
         source,
         target,
-        dev: linked.dev,
-        ino: linked.ino,
-      });
+        dev: sourceIdentity.dev,
+        ino: sourceIdentity.ino,
+      };
+      // Register a successful attempt before a later identity probe can fail.
+      links.push(link);
+      const targetIdentity = await fs.lstat(target, { bigint: true });
+      if (targetIdentity.dev !== link.dev || targetIdentity.ino !== link.ino) {
+        throw new Error(`Snapshot source changed during move: ${source}`);
+      }
       await fs.unlink(source);
     }
     const moved = await selectWorktreeSnapshot({

@@ -437,7 +437,9 @@ async function reconcileSessionArchiveState(params: {
   if (errors.length > 1) {
     throw new AggregateError(
       errors,
-      `Session ${action} follow-up maintenance failed`,
+      `Session ${action} follow-up maintenance failed: ${errors
+        .map(errorMessage)
+        .join('; ')}`,
     );
   }
 }

@@ -35,6 +35,36 @@ import { readWorktreeSessionMarker } from './gitWorktreeService.js';
 import { Storage } from '../config/storage.js';
 import { writeRuntimeStatus } from '../utils/runtimeStatus.js';
 
+const unlinkGate = vi.hoisted(() => ({
+  active: undefined as
+    | {
+        filePath: string;
+        reached: () => void;
+        release: Promise<void>;
+      }
+    | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const wrapped = {
+    ...actual,
+    unlink: async (...args: Parameters<typeof actual.unlink>) => {
+      const gate = unlinkGate.active;
+      if (
+        gate &&
+        (String(args[0]) === gate.filePath ||
+          String(args[0]).startsWith(`${gate.filePath}.clear-`))
+      ) {
+        unlinkGate.active = undefined;
+        gate.reached();
+        await gate.release;
+      }
+      return actual.unlink(...args);
+    },
+  };
+  return { ...wrapped, default: wrapped };
+});
+
 const sample: WorktreeSession = {
   slug: 'my-feature',
   worktreePath: '/repo/.qwen/worktrees/my-feature',
@@ -92,6 +122,28 @@ describe('readWorktreeSession', () => {
     // A throwing read would block --resume on every subsequent attempt.
     await writeRaw('not valid json {');
     expect(await readWorktreeSession(filePath)).toBeNull();
+  });
+
+  it('can distinguish malformed records from genuine absence', async () => {
+    const onInvalid = vi.fn();
+    await writeRaw('not valid json {');
+    await expect(
+      readWorktreeSession(filePath, { onInvalid }),
+    ).resolves.toBeNull();
+    expect(onInvalid).toHaveBeenCalledTimes(1);
+
+    await fs.rm(filePath);
+    await expect(
+      readWorktreeSession(filePath, { onInvalid }),
+    ).resolves.toBeNull();
+    expect(onInvalid).toHaveBeenCalledTimes(1);
+
+    onInvalid.mockClear();
+    await writeJson(sample);
+    await expect(readWorktreeSession(filePath, { onInvalid })).resolves.toEqual(
+      sample,
+    );
+    expect(onInvalid).not.toHaveBeenCalled();
   });
 
   it('returns null when sidecar is missing required fields', async () => {
@@ -640,6 +692,62 @@ describe('clearWorktreeSession', () => {
   it('is a no-op when file does not exist', async () => {
     await expect(clearWorktreeSession(filePath)).resolves.not.toThrow();
   });
+
+  it('refuses ordinary clearing of a retained-removal binding', async () => {
+    await writeWorktreeSession(filePath, {
+      ...sample,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+
+    await expect(clearWorktreeSession(filePath)).rejects.toBeInstanceOf(
+      WorktreeRestoreRefusedError,
+    );
+    await expect(readWorktreeSession(filePath)).resolves.toMatchObject({
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+  });
+
+  it('preserves a binding published during ordinary clearing', async () => {
+    await writeWorktreeSession(filePath, sample);
+    let reachedUnlink!: () => void;
+    let allowUnlink!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      reachedUnlink = resolve;
+    });
+    const continueRemoval = new Promise<void>((resolve) => {
+      allowUnlink = resolve;
+    });
+    unlinkGate.active = {
+      filePath,
+      reached: reachedUnlink,
+      release: continueRemoval,
+    };
+    try {
+      const clearing = clearWorktreeSession(filePath);
+      await waiting;
+      await writeWorktreeSession(filePath, {
+        ...sample,
+        worktreeRemoved: {
+          archiveKey: 'session.race.1.worktree-snapshot.tar.gz',
+        },
+      });
+      allowUnlink();
+
+      await clearing;
+      await expect(readWorktreeSession(filePath)).resolves.toMatchObject({
+        worktreeRemoved: {
+          archiveKey: 'session.race.1.worktree-snapshot.tar.gz',
+        },
+      });
+    } finally {
+      allowUnlink();
+      unlinkGate.active = undefined;
+    }
+  });
 });
 
 describe('clearWorktreeSessionDurable', () => {
@@ -652,6 +760,24 @@ describe('clearWorktreeSessionDurable', () => {
 
   it('is idempotent when the parent directory is absent', async () => {
     await expect(clearWorktreeSessionDurable(filePath)).resolves.not.toThrow();
+  });
+
+  it('preserves a retained-removal binding instead of clearing it durably', async () => {
+    await createWorktreeSession(filePath, {
+      ...sample,
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
+
+    await expect(clearWorktreeSessionDurable(filePath)).rejects.toBeInstanceOf(
+      WorktreeRestoreRefusedError,
+    );
+    await expect(readWorktreeSession(filePath)).resolves.toMatchObject({
+      worktreeRemoved: {
+        archiveKey: 'session.1.1.worktree-snapshot.tar.gz',
+      },
+    });
   });
 });
 
@@ -1412,12 +1538,17 @@ describe('restoreWorktreeContext', () => {
       };
       await writeWorktreeSession(filePath, session);
 
+      const warnings: unknown[] = [];
       const result = await restoreWorktreeContext(
         filePath,
-        undefined,
+        (error) => warnings.push(error),
         'session-1',
       );
       expect(result).toEqual({ contextMessage: null, session: null });
+      expect(warnings[0]).toBeInstanceOf(WorktreeRestoreRefusedError);
+      expect((warnings[0] as Error).message).toContain(
+        'retained-removal binding',
+      );
       await expect(strictRead()).resolves.toEqual({
         state: 'valid',
         session,

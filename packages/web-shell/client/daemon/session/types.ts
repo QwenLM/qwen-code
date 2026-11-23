@@ -662,8 +662,22 @@ export interface DaemonSessionActions {
       /** Artifact count from the clicked session's list summary, shown in
        * the header entry before the load response lands. Omit when unknown. */
       artifactCountHint?: number;
+      /**
+       * Hydrated client returned by restoreWorktreeSession. Ownership moves
+       * to this load; the provider consumes its replay instead of loading again.
+       */
+      restoredSession?: DaemonSessionClient;
     },
   ): Promise<void>;
+  /**
+   * Restore a retained worktree into a hydrated client without binding it to
+   * this provider. Pass the result to loadSession, or detach it if navigation
+   * never takes ownership.
+   */
+  restoreWorktreeSession(
+    sessionId: string,
+    options: { workspaceCwd: string },
+  ): Promise<DaemonSessionClient>;
   /** `memory` replay is reserved for the provider's live-journal repair. */
   reloadSession(
     signal: AbortSignal,
@@ -973,5 +987,7 @@ export interface PendingSessionLoad {
   reject: (error: unknown) => void;
   signal?: AbortSignal;
   replaySource?: 'configured' | 'memory';
+  /** Present until the provider takes ownership of this restored client. */
+  restoredSession?: DaemonSessionClient;
   reconcilePromptActivity?: boolean;
 }
