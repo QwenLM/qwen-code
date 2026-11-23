@@ -5302,7 +5302,7 @@ describe('Session', () => {
 
     /** Holds a shared batch of `calls` open; the test settles its calls. */
     function useHeldSharedBatch(calls: FunctionCall[]) {
-      useSharedRounds(
+      const send = useSharedRounds(
         [...calls.map(toolCall), finished()],
         [text('Answered.'), finished()],
       );
@@ -5334,7 +5334,7 @@ describe('Session', () => {
       );
       const requestCancel = vi.fn();
       Object.assign(mockBackgroundShellRegistry, { requestCancel });
-      return { held, requestCancel };
+      return { held, requestCancel, send };
     }
     const shellCall = (id: string) => ({
       id,
@@ -5406,7 +5406,16 @@ describe('Session', () => {
     });
 
     it('answers in the same turn when only moved shells were left', async () => {
-      const { held, requestCancel } = useHeldSharedBatch([shellCall('only')]);
+      const { held, requestCancel, send } = useHeldSharedBatch([
+        shellCall('only'),
+      ]);
+      let queued = ['also check tests'];
+      mockClient.extMethod = vi.fn(async (method: string) => {
+        if (method !== 'craft/drainMidTurnQueue') return {};
+        const messages = queued;
+        queued = [];
+        return { messages };
+      });
       const done = prompt();
       await vi.waitFor(() => expect(held.options).toBeDefined());
       const options = held.options!;
@@ -5418,6 +5427,8 @@ describe('Session', () => {
       await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
       expect(options.signal.aborted).toBe(false);
       expect(requestCancel).not.toHaveBeenCalled();
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(send.mock.calls[1])).toContain('also check tests');
     });
 
     it('answers in the same turn when Send now repeats after the moved shells settled', async () => {
@@ -34949,6 +34960,25 @@ describe('Session', () => {
             expect(next).toContainEqual({
               text: '\n[User message received during tool execution]: also check tests',
             });
+          });
+
+          it('interrupts once a moved shell settles when drains are off', async () => {
+            (
+              session as unknown as { midTurnDrainUnavailable: boolean }
+            ).midTurnDrainUnavailable = true;
+            const { state, running, requestCancel } = useShell();
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createStreamWithChunks([shellCall()]))
+              .mockResolvedValue(createEmptyStream());
+
+            const done = startPrompt();
+            await running;
+            session.sendMidTurnInputNow();
+
+            await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+            expect(state.reason?.kind).toBe('background');
+            expect(requestCancel).not.toHaveBeenCalled();
           });
 
           it('leaves the shell of a channel turn in the foreground', async () => {

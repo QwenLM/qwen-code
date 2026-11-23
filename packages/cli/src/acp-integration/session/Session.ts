@@ -4108,7 +4108,9 @@ export class Session implements SessionContext {
    * Host request to deliver the queued mid-turn input now. A model response
    * open to interruption takes it at once. A response that started a tool
    * call, or the tools it called, could only take it at the tool boundary, so
-   * the turn ends instead and the host sends the input as the next prompt.
+   * the turn ends instead and the host sends the input as the next prompt,
+   * unless only shells moved to the background were left: their batch ends
+   * and its tool boundary brings the input into this turn.
    * Ignored between turns, where the host promotes the queue itself.
    */
   sendMidTurnInputNow(): void {
@@ -4141,6 +4143,10 @@ export class Session implements SessionContext {
       this.openToolCalls?.turn === pending.signal
         ? this.openToolCalls
         : undefined;
+    // With no call left, the batch ends and its tool boundary brings the
+    // input in, unless drains are off and the boundary takes nothing.
+    const boundaryTakesInput = () =>
+      !this.midTurnDrainUnavailable && batch?.count() === 0;
     const waiting = this.midTurnShellWait;
     const previous =
       waiting?.turn === pending.signal && waiting.batch === batch
@@ -4148,9 +4154,9 @@ export class Session implements SessionContext {
         : undefined;
     if (!previous && !shouldInterrupt()) return;
     if (!previous && moving.length === 0) {
-      // With every call of the batch settled, the tool boundary is next and
-      // brings the input into this turn.
-      if (batch?.count() !== 0) pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+      if (!boundaryTakesInput()) {
+        pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+      }
       return;
     }
     // A later Send now can move a shell that just started. It supersedes
@@ -4158,15 +4164,14 @@ export class Session implements SessionContext {
     const shells = new Set([...(previous?.shells ?? []), ...moving]);
     const wait = { turn: pending.signal, batch, shells };
     this.midTurnShellWait = wait;
-    // Once the shells' calls settle, a batch with no call left ends and
-    // brings the input in at the tool boundary; other calls still running
-    // would hold it, so the turn is interrupted instead.
+    // Once the shells' calls settle, other calls still running would hold
+    // the input, so the turn is interrupted instead.
     void Promise.all(Array.from(shells, (shell) => shell.settled)).then(() => {
       if (this.midTurnShellWait !== wait) return;
       this.midTurnShellWait = undefined;
       if (
         this.openToolCalls === batch &&
-        (batch?.count() ?? Infinity) > 0 &&
+        !boundaryTakesInput() &&
         shouldInterrupt()
       ) {
         pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
