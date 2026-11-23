@@ -62,11 +62,11 @@
 
 ### 4.2 S2：后台任务 + 审批
 
-- **方案。** seal 同时携带 3b 的 background hold 与 `parkedTurn`，Store 只在新能力位公告时接受这种组合。父设计 §4.9 第 3 点已定义：后台终态被 Broker 暂存后，走既有的 staged-wake 路径并清除停靠字段。本切片给暂存事务（`JdbcRuntimeStageStore.stageBatch`，现在只设置 wake-pending 与重试字段）补充两步：清除停靠列，并用父设计 §4.6 的 store 方法解除该 Session 的 `hosted_action_parked` 行停靠。这样协调器立即重新分派该 Turn，而不是让被 wake 加载重建出来的常驻 Turn 无人消费事件流，一直等到 `retry_after`。
-- **交错顺序。** S2 让暂存事务和停靠 CAS 都先锁 head 行，因此二者串行，只剩三种顺序。(1) 在 seal 之前暂存：seal 走 staged-wake 路径，不记录证书，CAS 找不到证书而失败。(2) 在 seal 与 CAS 之间暂存：暂存清除了停靠列，CAS 同样找不到当前证书而失败；此时暂存的解除停靠还找不到已停靠的行。(3) 在 CAS 之后暂存：暂存清除停靠列并解除该行停靠。在 (1)、(2) 中，协调器把被拒的 CAS 归类为"被唤醒的停靠"，立即重新分派，而不是走 `stream ended before terminal` 的重试。每种顺序都是 S2 的验收用例（§7）。
+- **方案。** seal 同时携带 3b 的 background hold 与 `parkedTurn`。Harness 只在 writer grant 公告新的 `backgroundActionParking` 能力位时才发送这种组合，控制面与 `actionParking` 一起公告该位；Store 接受这种组合时不读该位，因为旧控制面从不公告它，也就不会收到这种组合。Broker 暂存的后台终态不再结束停靠，而是让停靠立即到期：停靠证书留在 head 上，唤醒时间改为暂存时间。遇到暂存工作的两条服务端路径都这样处理。seal 的 staged-wake 路径过去会清空停靠字段（父设计 §4.9 第 3 点），现在按这个唤醒时间记录证书。暂存事务（`JdbcRuntimeStageStore.stageBatch`，现在只设置 wake-pending 与重试字段）把唤醒时间提前，并用父设计 §4.6 的 store 方法解除该 Session 的 `hosted_action_parked` 行停靠。这样协调器立即重新分派该 Turn，而不是让被 wake 加载重建出来的常驻 Turn 无人消费事件流，一直等到 `retry_after`。
+- **交错顺序。** 暂存事务和停靠 CAS 都先锁 Session 行与 head 行，因此二者串行，只剩三种顺序。(1) 在 seal 之前暂存：seal 记录的证书已经到期，CAS 以 `retry_after` = 当前时间停靠该 Turn。(2) 在 seal 与 CAS 之间暂存：暂存把证书的唤醒时间改为当前时间，此时还找不到已停靠的行；CAS 以 `retry_after` = 当前时间停靠。(3) 在 CAS 之后暂存：暂存提前唤醒时间并解除该行停靠。每种顺序下，分派扫描都会在下一轮取到该 Turn，也都不会走计入预算的 `stream ended before terminal` 重试，所以后台终态不会消耗 Turn 的重试预算。每种顺序都是 S2 的验收用例（§7）。如果 wake 恢复加载在 CAS 之前取得 writer，它会像任何取得 writer 的操作一样清除证书（父设计 §8），这次 CAS 退回一次普通重试。
 - **加载路径。** wake 恢复加载带接管标志（已确认）：扫描的 `recoverForWake` 只带被动标志，wake 栅栏的 `activateForWake` 带 drive 标志，两者都由 `QwenHostedHarnessConnectorTest` 固定；Harness 测试表明带其中任一标志的加载都会接管停靠的审批 Turn。因此 `takeoverFlags` 为真，会进入审批恢复臂重建等待者。协调器的驱动加载随后按 #17521 的附着规则与之收敛，并从已消费水位重放。后台通知作为 wake 输入挂起，直到 Turn 结算后才由泵投递。在此期间存在其他待处理输入，所以 Session 不会再次停靠。这是有界的：每个后台终态最多导致一次重载。
 - **不变量。** 停靠 CAS 不读 background 字段。background hold 的证明仍由 3b 负责；`parkedTurn` 的证明仍是"唯一的活跃 Turn 处于可停靠等待"。两份证书互不推断。
-- **改动面。** Store 的 seal 校验、staged-wake 事务、grant 能力位；Harness 侧放宽资格中"无后台持有"这一项。
+- **改动面。** Store 的 seal 校验、seal 的 staged-wake 路径、暂存事务、grant 能力位；Harness 侧放宽资格中"无后台持有"这一项，并在 `parkedTurn` 旁发送 `backgroundHeld`。
 
 ### 4.3 S3：子 Session
 
