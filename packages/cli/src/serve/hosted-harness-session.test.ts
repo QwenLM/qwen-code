@@ -306,6 +306,7 @@ const state = vi.hoisted(() => ({
   actionParking: false,
   runtimeObservation: false,
   backgroundActionParking: false,
+  wakeActionParking: false,
   wakeStamps: [] as unknown[],
   assertWritable: vi.fn(async () => undefined),
   toolResults: null as DurableToolResultResourceStore | null,
@@ -505,6 +506,7 @@ vi.mock(
         supportsActionParking: () => state.actionParking,
         supportsRuntimeObservation: () => state.runtimeObservation,
         supportsBackgroundActionParking: () => state.backgroundActionParking,
+        supportsWakeActionParking: () => state.wakeActionParking,
         journalStore,
         resourceStore,
         toolResultResources: state.toolResults ?? resourceStore,
@@ -47603,6 +47605,211 @@ describe('idle suspension', () => {
       state.approvalSelections.clear();
     }
   }
+
+  // S4 (#18149): a wake-started Turn's approval wait parks behind a
+  // certificate that claims its own wake, and the passive load decision
+  // delivery sends resumes it through the pump. Without the control plane's
+  // bit the wait stays resident.
+  async function parkMonitorWakeApproval(advertised: boolean) {
+    domainEnablement.monitorRun = true;
+    state.wakeDispatch = true;
+    state.actionParking = true;
+    state.wakeActionParking = advertised;
+    state.wakeStamps.length = 0;
+    state.approvalSelections.set(SESSION_ID, { mode: 'default', revision: 0 });
+    const turnId = 'monitor-1:notify:1';
+    mockApprovalTurn(turnId);
+    const waiting = vi.spyOn(HostedApprovalWaiters.prototype, 'wait');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const read = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    try {
+      const server = await app(true, undefined, true, { idleSuspendMs: 150 });
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+          approvalMode: 'default',
+          approvalTimeoutMs: 60_000,
+        })
+        .expect(200);
+      const live = (
+        wakeDeps.last as {
+          session: {
+            managed: ManagedSession;
+            monitorWake?: { kick(): void; close(): void };
+          };
+        }
+      ).session;
+      const monitors = new HostedMonitorSession(
+        {
+          authority: live.managed.authority,
+          resources: live.managed.resources,
+        },
+        key,
+      );
+      const binding = { runtimeBindingId: 'binding-1', generation: '1' };
+      await monitors.admit({
+        monitorId: 'monitor-1',
+        ownerScopeId: key.sessionId,
+        executionCallId: 'call-1',
+        args: { command: 'tail -f build.log' },
+        maxEvents: 100,
+        idleTimeoutMs: 60_000,
+        debounceMs: 1_000,
+      });
+      await monitors.dispatchStarted('monitor-1', binding);
+      await monitors.attach('monitor-1', binding, { watch: 'started' });
+      await monitors.observe(
+        'monitor-1',
+        { lines: ['one'] },
+        {
+          input: {
+            inputId: turnId,
+            turnId,
+            source: 'monitor',
+            contentRef: await live.managed.resources.publish(
+              'managed-input',
+              Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+            ),
+            admissionRef: await live.managed.resources.publish(
+              'managed-admission',
+              Buffer.from('{}', 'utf8'),
+            ),
+            deadline: null,
+            wakeReason: 'input',
+          },
+        },
+      );
+      live.monitorWake?.kick();
+      await vi.waitFor(() => expect(waiting).toHaveBeenCalled(), {
+        timeout: 5000,
+      });
+      // The monitor exits after its last notification, so the wait is the
+      // Session's only live work.
+      await monitors.settleQuiet('monitor-1', 'exited');
+      const requestId = (await read()).events.findLast(
+        (event) =>
+          event.kind === 'action.changed' &&
+          event.payload['state'] === 'requested',
+      )!.payload['requestId'] as string;
+      let clientId = created.body.clientId as string;
+      if (!advertised) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        expect(state.wakeStamps).toEqual([]);
+        expect(statsOf(server).cleanSuspensions).toBe(0);
+        expect(statsOf(server).parkRefusals.wake_owned).toBeGreaterThan(0);
+      } else {
+        await vi.waitFor(() => expect(state.wakeStamps).toHaveLength(1), {
+          timeout: 5000,
+        });
+        const stamp = state.wakeStamps[0] as {
+          dueAt: number;
+          parkedTurn: { wakeAt: number };
+        };
+        expect(stamp).toEqual({
+          pending: true,
+          dueAt: stamp.parkedTurn.wakeAt,
+          parkedTurn: expect.objectContaining({
+            promptId: turnId,
+            owner: 'wake',
+          }),
+        });
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, clientId)).status).toBe(404);
+          },
+          { timeout: 5000 },
+        );
+        const loaded = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/load`),
+        )
+          .send({
+            managedSessionStore: store(),
+            toolProfile: 'hosted-workspace-files/1',
+            passiveManagedRuntimeRecovery: true,
+          })
+          .expect(200);
+        clientId = loaded.body.clientId as string;
+        await vi.waitFor(
+          async () => {
+            expect((await statusOf(server, clientId)).body).toMatchObject({
+              hasActivePrompt: true,
+            });
+          },
+          { timeout: 5000 },
+        );
+      }
+      await headers(
+        supertest(server).post(
+          `/session/${SESSION_ID}/actions/${requestId}/resolve`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          optionId: 'allow',
+          inputRevision: 1,
+          policyRevision: HOSTED_TOOL_APPROVAL_POLICY,
+        })
+        .expect(200);
+      // The resident wait's test model refuses to continue live, so only the
+      // resumed one completes; either way the Turn settles.
+      await vi.waitFor(
+        async () => {
+          expect(
+            (await read()).events.find(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['turnId'] === turnId,
+            )?.payload,
+          ).toMatchObject(advertised ? { outcome: 'completed' } : {});
+        },
+        { timeout: 5000 },
+      );
+      if (advertised) {
+        expect(HostedWorkspaceBroker.prototype.execute).toHaveBeenCalledTimes(
+          1,
+        );
+        expect(
+          (await read()).events.some(
+            (event) =>
+              event.kind === 'input.accepted' &&
+              isHostedWakeContinuationId(String(event.payload['turnId'])),
+          ),
+        ).toBe(false);
+      }
+      // The resident Session suspends on its own once the Turn settles; let
+      // it go before the next test reads the shared wake stamps.
+      await vi.waitFor(
+        async () => {
+          expect((await statusOf(server, clientId)).status).toBe(404);
+        },
+        { timeout: 5000 },
+      );
+    } finally {
+      waiting.mockRestore();
+      state.wakeDispatch = false;
+      state.actionParking = false;
+      state.wakeActionParking = false;
+      state.approvalSelections.clear();
+    }
+  }
+
+  it('parks a monitor wake approval and resumes it through the passive load', () =>
+    parkMonitorWakeApproval(true));
+
+  it('keeps a monitor wake approval resident without the wake parking bit', () =>
+    parkMonitorWakeApproval(false));
 
   it('resumes a monitor wake approval after its Harness dies in the wait', () =>
     resumeMonitorWakeAfterDeath(false));

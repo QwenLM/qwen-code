@@ -36,15 +36,20 @@ class WorkspaceActorTest {
 
     @Test
     void acceptsAnActorIdOfUpTo36Utf16Units() {
-        String bmp = "\u754c".repeat(36);
-        String supplementary = "\uD834\uDD1E".repeat(18);
-        assertEquals(bmp, new WorkspaceActor("tenant-a", bmp).getActorId());
-        assertEquals(supplementary,
-                new WorkspaceActor("tenant-a", supplementary).getActorId());
+        // BMP (CJK) characters are one code point and one UTF-16 unit, so
+        // 36 of them exercise the budget on both MySQL and H2.
+        String han = "漢";
+        assertEquals(36, new WorkspaceActor("tenant-a", han.repeat(36))
+                .getActorId().length());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", bmp + "x"));
+                () -> new WorkspaceActor("tenant-a", han.repeat(37)));
+        // Supplementary-plane characters cost two UTF-16 units each, so
+        // the VARCHAR(36) cap bites at 18 of them, not 36.
+        String clef = "\uD834\uDD1E";
+        assertEquals(36, new WorkspaceActor("tenant-a", clef.repeat(18))
+                .getActorId().length());
         assertThrows(IllegalArgumentException.class,
-                () -> new WorkspaceActor("tenant-a", supplementary + "x"));
+                () -> new WorkspaceActor("tenant-a", clef.repeat(19)));
         // Interior spaces count and are kept; trailing spaces are refused
         // so a PAD SPACE collation cannot fold two actors together.
         assertEquals("a b", new WorkspaceActor("tenant-a", "a b").getActorId());
