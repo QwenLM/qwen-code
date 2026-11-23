@@ -3462,6 +3462,69 @@ describe('SessionTranscriptReader', () => {
     });
 
     it.each([
+      {
+        name: 'visible text before the cut',
+        prefixText: 'visible answer',
+        windowText: '',
+        shadowed: false,
+      },
+      {
+        name: 'visible text after the cut',
+        prefixText: '',
+        windowText: 'visible answer',
+        shadowed: false,
+      },
+      {
+        name: 'shadowed checkpoint',
+        prefixText: 'visible answer',
+        windowText: 'more text',
+        shadowed: true,
+      },
+    ])(
+      'keeps branch checkpoint parity for $name',
+      async ({ prefixText, windowText, shadowed }) => {
+        const checkpoint = branchCheckpoint('checkpoint');
+        const expected = shadowed ? undefined : { a1: checkpoint.uuid };
+        const prefix = chain('prompt', prefixText);
+        if (shadowed) {
+          prefix.push({
+            ...checkpoint,
+            subtype: undefined,
+            systemPayload: undefined,
+          });
+        }
+        const window = [
+          {
+            ...record('a1', 'u1', ''),
+            message: windowText ? modelText(windowText) : content('model'),
+          },
+          checkpoint,
+          record('u2', 'checkpoint', 'next prompt'),
+        ];
+        await writeRecords([...prefix, ...window]);
+        const full = await readPage();
+        expect(full.branchPointsByAssistantUuid).toEqual(expected);
+
+        clearSessionTranscriptIndexCacheEntriesForTest();
+        setSessionTranscriptMaxIndexBytesForTest(
+          jsonBytes(...window) + window.length,
+        );
+        const windowed = await readPage();
+        expect(windowed.gaps).toEqual([
+          {
+            childUuid: 'a1',
+            missingParentUuid: 'u1',
+            reason: 'transcript_window',
+          },
+        ]);
+        expect(
+          windowed.records.find(({ uuid }) => uuid === 'a1')?.message,
+        ).toEqual(full.records.find(({ uuid }) => uuid === 'a1')?.message);
+        expect(windowed.branchPointsByAssistantUuid).toEqual(expected);
+      },
+    );
+
+    it.each([
       { name: 'text', tail: userText('last part') },
       { name: 'empty', tail: content('user') },
       {

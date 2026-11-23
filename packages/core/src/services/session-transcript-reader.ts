@@ -2705,6 +2705,8 @@ async function scanTranscriptPrefix(params: {
   missingParentUuid: string | undefined;
   /** The window's records; a prefix line of one of them is its earlier part. */
   windowEntries: ReadonlyMap<string, UuidIndexEntry>;
+  /** The window projection, rebuilt for records split across the cut. */
+  branchPointRecords: Map<string, BranchPointRecord>;
 }): Promise<{
   window: TranscriptWindow;
   firstRecord: ChatRecord | undefined;
@@ -2715,7 +2717,13 @@ async function scanTranscriptPrefix(params: {
   /** Earlier fragments and their authoritative first-fragment identity. */
   splitRecords: Map<string, PrefixSplitRecord>;
 }> {
-  const { filePath, windowStart, sessionId, executionEngine } = params;
+  const {
+    filePath,
+    windowStart,
+    sessionId,
+    executionEngine,
+    branchPointRecords,
+  } = params;
   const splitRecords = new Map<string, PrefixSplitRecord>();
   let prefixBytes = 0;
   const reserve = (bytes: number): void => {
@@ -2808,9 +2816,14 @@ async function scanTranscriptPrefix(params: {
               bytes,
             };
             splitRecords.set(record.uuid, split);
+            // Start the branch projection at the first physical fragment.
+            branchPointRecords.delete(record.uuid);
           } else {
             split.bytes = bytes;
             appendIndexFragment(split.entry, record, sessionId, segment);
+          }
+          if (isTranscriptConversationRecord(record)) {
+            appendBranchPointRecord(branchPointRecords, record);
           }
         }
         const retained = fragments.get(record.uuid);
@@ -3049,6 +3062,7 @@ async function buildIndex(params: {
         executionEngine,
         missingParentUuid,
         windowEntries: byUuid,
+        branchPointRecords,
       });
     } catch (error) {
       if (isFileMissingError(error)) {
@@ -3074,6 +3088,9 @@ async function buildIndex(params: {
               context.lineCache,
             )) {
               appendIndexFragment(split.entry, record, sessionId, segment);
+              if (isTranscriptConversationRecord(record)) {
+                appendBranchPointRecord(branchPointRecords, record);
+              }
             }
             await context.scheduler.afterUnit(segment.length);
           }
