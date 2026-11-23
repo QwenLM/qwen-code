@@ -156,24 +156,21 @@ then interrupts the other tools.
    whose process has exited, calls nested in `exec`, simulated `sed` edits,
    and Managed runtime calls follow the PR 1 interrupt path.
 2. When a Send now request arrives, each handle gets
-   `abort({ kind: 'background', forUserMessage: true, onRegistered, onRefused })`.
-   If the process has exited and the service refuses the move, core calls
-   `onRefused` before post-processing. The session interrupts the turn as in
-   PR 1 once any accepted moves' results are recorded. For accepted moves, core
-   assigns a `bg_` ID and returns it to the session through `onRegistered`
-   once the task is in the registry. The batch counts pending top-level
-   executable calls, including scheduled calls awaiting execution. Nested
-   calls and replays are excluded. If only shells being moved remain and every
-   move is accepted, the batch ends, the tool boundary drains, and the same
-   turn answers. If other
-   tools remain, the PR 1 interrupt waits for the moved shells' tool calls to
-   settle. An earlier interrupt would replace their results with the
-   interrupt text. The model would lose the background ID and might run the
-   command again. The drain and
-   late-message checks of PR 1 apply to that interrupt only, and are checked
-   again when it fires. A later Send now request can move shells that have
-   since started. It updates the same batch's wait to include those shells
-   and counts the work still pending at that request.
+   `abort({ kind: 'background', forUserMessage: true, onRegistered })`.
+   For accepted moves, core assigns a `bg_` ID and returns it to the session
+   through `onRegistered` once the task is in the registry. If the process
+   has exited and the service refuses the move, the call finishes with the
+   command's own result. The session waits for every moved shell's tool call
+   to settle, then counts the batch's pending top-level executable calls,
+   including scheduled calls awaiting execution. Nested calls and replays are
+   excluded. If none remain, the batch ends, the tool boundary drains, and the
+   same turn answers. If other tools remain, the turn is interrupted as in
+   PR 1. An earlier interrupt would replace the moved shells' results with the
+   interrupt text. The model would lose the background ID or the finished
+   output and might run the command again. The drain and late-message checks
+   of PR 1 apply to that interrupt only, and are checked when it fires. A
+   later Send now request can move shells that have since started. It updates
+   the same batch's wait to include those shells.
 3. The tool result gives the background ID, output location and status. It
    tells the model that the command kept running in the background to make
    room for the user's message. If `PostToolUse` rejects the tool result,
@@ -186,7 +183,9 @@ then interrupts the other tools.
    immediately for registered tasks and at registration for moves still in
    progress. This also applies if Send now has already interrupted the turn
    and it is still settling. The next turn treats those tasks as ordinary
-   background jobs.
+   background jobs. A cancel the agent starts itself, such as for a
+   tightening workspace change or a subscription sign-out, is not Stop and
+   leaves them running.
 
 ### Web Shell
 

@@ -5700,13 +5700,11 @@ describe('ShellTool', () => {
         const onRegistered = vi.fn((shellId: string) =>
           expect(shellId).toBe(registeredEntry().shellId),
         );
-        const onRefused = vi.fn();
         await vi.waitFor(() => expect(setPromoteAc).toHaveBeenCalledTimes(1));
         (setPromoteAc.mock.calls[0][0] as AbortController).abort({
           kind: 'background',
           forUserMessage: true,
           onRegistered,
-          onRefused,
         });
         resolveShellExecution({
           output: '',
@@ -5720,9 +5718,8 @@ describe('ShellTool', () => {
 
         const { shellId, outputPath } = registeredEntry();
         expect(onRegistered).toHaveBeenCalledExactlyOnceWith(shellId);
-        expect(onRefused).not.toHaveBeenCalled();
         expectText(result.llmContent, [
-          `Foreground command "npm test" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you. The user's message follows.`,
+          `Foreground command "npm test" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you.`,
           `Output snapshot at promote time saved to: ${outputPath}`,
           `task_stop({ task_id: '${shellId}' })`,
         ]);
@@ -5840,8 +5837,7 @@ describe('ShellTool', () => {
           | AbortController
           | undefined;
         expect(promoteAc).toBeInstanceOf(AbortController);
-        const onRefused = vi.fn();
-        promoteAc!.abort({ kind: 'background', onRefused });
+        promoteAc!.abort({ kind: 'background', shellId: 'bg_late' });
         resolveShellExecution({
           output: 'oops too late\n',
           exitCode: null,
@@ -5850,7 +5846,6 @@ describe('ShellTool', () => {
           pid: 33333,
         });
         const result = await promise;
-        expect(onRefused).toHaveBeenCalledExactlyOnceWith();
 
         // Not "timed out": the benign race is explained so the agent doesn't
         // retry it as a cancellation/timeout, and the output is preserved.

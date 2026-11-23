@@ -4069,12 +4069,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cancelHeartbeat();
       combinedSignal.removeEventListener('abort', onAbort);
       if (exposePromotion) setPromoteAbortControllerCallback?.(undefined);
-      if (!result?.promoted && promoteAbortController.signal.aborted) {
-        const promoteReason = promoteAbortController.signal.reason as Partial<
-          Extract<ShellAbortReason, { kind: 'background' }>
-        >;
-        promoteReason?.onRefused?.();
-      }
     }
 
     // Background-promote path: the user pressed Ctrl+B (PR-3 wires the
@@ -5391,7 +5385,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       : `To stop the now-background process: \`task_stop({ task_id: '${shellId}' })\`.`;
     const llmContent = [
       promoteReason?.forUserMessage === true
-        ? `Foreground command "${commandToExecute}" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you. The user's message follows.`
+        ? `Foreground command "${commandToExecute}" was moved to the background as ${shellId}, without being interrupted, so that a message from the user could reach you.`
         : `Foreground command "${commandToExecute}" promoted to background as ${shellId}.`,
       statusLine,
       `Output snapshot at promote time saved to: ${outputPath}`,

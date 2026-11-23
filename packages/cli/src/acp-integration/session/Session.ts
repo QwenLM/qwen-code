@@ -635,9 +635,9 @@ interface MovableShell {
   /** The turn whose tool batch runs the shell. */
   turn: AbortSignal;
   promote?: AbortController;
-  /** Resolves when promotion is refused or the moved tool call settles. */
-  settled: Promise<boolean>;
-  settle(moved: boolean): void;
+  /** Resolves when the shell's tool call settles. */
+  settled: Promise<void>;
+  settle(): void;
   move?: { shellId?: string; stopRequested?: true };
 }
 /** The failure a Goal turn stopped by loop protection pauses with. */
@@ -2847,12 +2847,12 @@ export class Session implements SessionContext {
   // Running foreground shells of the turn's tool batch, by call id: a
   // send-now request moves them to the background instead of ending them.
   private readonly movableShells = new Map<string, MovableShell>();
-  // How many calls of the running tool batch have not settled.
-  private openToolCalls: (() => number) | undefined;
+  // How many calls of the turn's running tool batch have not settled.
+  private openToolCalls: { turn: AbortSignal; count(): number } | undefined;
   private midTurnShellWait:
     | {
         turn: AbortSignal;
-        batch: (() => number) | undefined;
+        batch: { turn: AbortSignal; count(): number } | undefined;
         shells: ReadonlySet<MovableShell>;
       }
     | undefined;
@@ -4132,7 +4132,10 @@ export class Session implements SessionContext {
       this.midTurnRecoveredMessages.length === 0 &&
       (this.midTurnToolPhaseFor === pending.signal ||
         this.openResponseHasToolCall?.(pending.signal) === true);
-    const batch = this.openToolCalls;
+    const batch =
+      this.openToolCalls?.turn === pending.signal
+        ? this.openToolCalls
+        : undefined;
     const waiting = this.midTurnShellWait;
     const previous =
       waiting?.turn === pending.signal && waiting.batch === batch
@@ -4143,25 +4146,25 @@ export class Session implements SessionContext {
       pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
       return;
     }
-    const hasOtherCalls = (batch?.() ?? Infinity) > moving.length;
     // A later Send now can move a shell that just started. It supersedes
-    // the previous wait and carries forward the earlier promotion outcomes.
+    // the previous wait and keeps waiting for the shells moved earlier.
     const shells = new Set([...(previous?.shells ?? []), ...moving]);
     const wait = { turn: pending.signal, batch, shells };
     this.midTurnShellWait = wait;
-    void Promise.all(Array.from(shells, (shell) => shell.settled)).then(
-      (moved) => {
-        if (this.midTurnShellWait !== wait) return;
-        this.midTurnShellWait = undefined;
-        if (
-          this.openToolCalls === batch &&
-          (hasOtherCalls || moved.includes(false)) &&
-          shouldInterrupt()
-        ) {
-          pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
-        }
-      },
-    );
+    // Once the shells' calls settle, a batch with no call left ends and
+    // brings the input in at the tool boundary; other calls still running
+    // would hold it, so the turn is interrupted instead.
+    void Promise.all(Array.from(shells, (shell) => shell.settled)).then(() => {
+      if (this.midTurnShellWait !== wait) return;
+      this.midTurnShellWait = undefined;
+      if (
+        this.openToolCalls === batch &&
+        (batch?.count() ?? Infinity) > 0 &&
+        shouldInterrupt()
+      ) {
+        pending.abort(MID_TURN_SEND_NOW_ABORT_REASON);
+      }
+    });
   }
 
   #trackMovableShell(
@@ -4178,8 +4181,8 @@ export class Session implements SessionContext {
       return;
     }
     if (shell?.promote === promote) return;
-    let settle!: (moved: boolean) => void;
-    const settled = new Promise<boolean>((resolve) => (settle = resolve));
+    let settle!: () => void;
+    const settled = new Promise<void>((resolve) => (settle = resolve));
     this.movableShells.set(callId, { turn, promote, settled, settle });
   }
 
@@ -4187,7 +4190,7 @@ export class Session implements SessionContext {
     const shell = this.movableShells.get(callId);
     if (!shell) return;
     this.movableShells.delete(callId);
-    shell.settle(shell.move?.shellId !== undefined);
+    shell.settle();
   }
 
   /** A settled tool batch leaves no shell of its turn movable. */
@@ -4220,7 +4223,6 @@ export class Session implements SessionContext {
               this.config.getBackgroundShellRegistry().requestCancel(shellId);
             }
           },
-          onRefused: () => shell.settle(false),
         } satisfies ShellAbortReason);
       }
       if (shell.move) moving.push(shell);
@@ -6223,8 +6225,11 @@ export class Session implements SessionContext {
     return false;
   }
 
+  /** `userStop` marks the user's Stop, which also stops the shells Send now
+   * moved to the background. */
   async cancelPendingPrompt(
     requestedAbortReason: string = USER_CANCEL_ABORT_REASON,
+    userStop = false,
   ): Promise<void> {
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
@@ -6257,7 +6262,7 @@ export class Session implements SessionContext {
     }
 
     if (this.pendingPrompt) {
-      if (abortReason === USER_CANCEL_ABORT_REASON) {
+      if (userStop && abortReason === USER_CANCEL_ABORT_REASON) {
         this.#stopShellsMovedFor(this.pendingPrompt.signal);
       }
       this.pendingPrompt.abort(abortReason);
@@ -16584,7 +16589,7 @@ export class Session implements SessionContext {
       if (this.midTurnToolPhaseFor === args[0]) {
         this.midTurnToolPhaseFor = undefined;
       }
-      this.openToolCalls = undefined;
+      if (this.openToolCalls?.turn === args[0]) this.openToolCalls = undefined;
       this.#settleMovableShells(args[0]);
     }
   }
@@ -16605,7 +16610,7 @@ export class Session implements SessionContext {
       this.config.getActiveTodoWorkChainOwner(promptId),
     );
     const openCalls = new Set(requests.map(({ callId }) => callId));
-    this.openToolCalls = () => openCalls.size;
+    this.openToolCalls = { turn: abortSignal, count: () => openCalls.size };
     const batch = await runAcpToolBatch(this.#toolBatchHost(), {
       requests,
       loop,
@@ -16795,7 +16800,7 @@ export class Session implements SessionContext {
       if (this.midTurnToolPhaseFor === args[0]) {
         this.midTurnToolPhaseFor = undefined;
       }
-      this.openToolCalls = undefined;
+      if (this.openToolCalls?.turn === args[0]) this.openToolCalls = undefined;
       this.#settleMovableShells(args[0]);
     }
   }
@@ -17319,8 +17324,11 @@ export class Session implements SessionContext {
     const runnableCalls = planModeEntryBoundary
       ? [planModeEntryBoundary]
       : executableCalls;
-    let runningCall = 0;
-    this.openToolCalls = () => runnableCalls.length - runningCall;
+    let settledCalls = 0;
+    this.openToolCalls = {
+      turn: abortSignal,
+      count: () => runnableCalls.length - settledCalls,
+    };
     const memoryWriteCandidates: MemoryWriteCandidate[] = [];
     const collectMemoryWriteCandidates = (result: RunToolResult): void => {
       if (result.memoryWriteCandidates) {
@@ -17552,7 +17560,6 @@ export class Session implements SessionContext {
           }
         } else {
           for (const fc of batch.calls) {
-            runningCall = runnableCalls.indexOf(fc);
             const r = await this.runTool(
               abortSignal,
               promptId,
@@ -17565,9 +17572,10 @@ export class Session implements SessionContext {
               onFullTurnModel,
               undefined,
               finalizeNestedToolResult,
-            ).finally(() =>
-              this.#settleMovableShell(executionCallIds.get(fc)!),
-            );
+            ).finally(() => {
+              settledCalls = runnableCalls.indexOf(fc) + 1;
+              this.#settleMovableShell(executionCallIds.get(fc)!);
+            });
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
             batchTerminatesTurn ||= r.terminateTurn === true;

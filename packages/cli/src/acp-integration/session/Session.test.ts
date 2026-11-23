@@ -5385,6 +5385,26 @@ describe('Session', () => {
       expect(abortedAfterSecondSettled).toBe(true);
     });
 
+    it('answers in the same turn when the other tools settle before the moved shell', async () => {
+      const { held } = useHeldSharedBatch([
+        shellCall('sh'),
+        { id: 'read', name: 'read_file', args: {} },
+      ]);
+      const done = prompt();
+      await vi.waitFor(() => expect(held.options).toBeDefined());
+      const options = held.options!;
+
+      moveShell(options, 0, 'bg_0123abcd');
+      options.onCallSettled?.(options.requests[1].callId, 'success');
+      options.onCallSettled?.(options.requests[0].callId, 'success');
+      await nextTick();
+      const aborted = options.signal.aborted;
+      held.release!();
+
+      await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(aborted).toBe(false);
+    });
+
     it('answers in the same turn when only moved shells were left', async () => {
       const { held, requestCancel } = useHeldSharedBatch([shellCall('only')]);
       const done = prompt();
@@ -5431,7 +5451,7 @@ describe('Session', () => {
       const options = held.options!;
 
       moveShell(options, 0, 'bg_0123abcd');
-      const stopping = session.cancelPendingPrompt();
+      const stopping = session.cancelPendingPrompt(undefined, true);
       const stoppedAtOnce = requestCancel.mock.calls.slice();
       options.onCallSettled?.(options.requests[0].callId, 'cancelled');
       held.release!();
@@ -5440,6 +5460,22 @@ describe('Session', () => {
       await expect(done).resolves.toMatchObject({ stopReason: 'cancelled' });
       expect(stoppedAtOnce).toEqual([['bg_0123abcd']]);
       expect(requestCancel).toHaveBeenCalledOnce();
+    });
+
+    it('keeps a moved shell running when the agent cancels the turn itself', async () => {
+      const { held, requestCancel } = useHeldSharedBatch([shellCall('only')]);
+      const done = prompt();
+      await vi.waitFor(() => expect(held.options).toBeDefined());
+      const options = held.options!;
+
+      moveShell(options, 0, 'bg_0123abcd');
+      const cancelling = session.cancelPendingPrompt();
+      options.onCallSettled?.(options.requests[0].callId, 'cancelled');
+      held.release!();
+
+      await cancelling;
+      await expect(done).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(requestCancel).not.toHaveBeenCalled();
     });
 
     it('sends a fresh prompt as a UserQuery whose user turn it recorded', async () => {
@@ -34752,7 +34788,6 @@ describe('Session', () => {
             kind: string;
             forUserMessage: boolean;
             onRegistered: (shellId: string) => void;
-            onRefused: () => void;
           };
 
           /** A shell that runs until it is moved to the background or
@@ -34784,7 +34819,6 @@ describe('Session', () => {
                       setPromote(undefined);
                       void moved.then((accepted) => {
                         if (accepted === false) {
-                          state.reason!.onRefused();
                           resolve({
                             llmContent: 'process exited',
                             returnDisplay: '',
@@ -34884,7 +34918,6 @@ describe('Session', () => {
               kind: 'background',
               forUserMessage: true,
               onRegistered: expect.any(Function),
-              onRefused: expect.any(Function),
             });
             expect(state.signal?.aborted).toBe(false);
             const next = sentMessage(1);
@@ -35008,7 +35041,7 @@ describe('Session', () => {
             const done = startPrompt();
             await running;
             session.sendMidTurnInputNow();
-            const stopping = session.cancelPendingPrompt();
+            const stopping = session.cancelPendingPrompt(undefined, true);
             await nextTick();
             // The shell has moved but is not registered yet.
             expect(requestCancel).not.toHaveBeenCalled();
@@ -35177,9 +35210,18 @@ describe('Session', () => {
             expect(promote.signal.aborted).toBe(false);
           });
 
-          it('interrupts the turn when promotion is refused before PostToolUse', async () => {
+          it('keeps the output of a shell whose move was refused and answers in the same turn', async () => {
             const { running, requestCancel } = useShell(Promise.resolve(false));
-            usePostToolHook(new Promise(() => {}));
+            let finishHook!: (output: { decision: 'allow' }) => void;
+            usePostToolHook(
+              new Promise((resolve) => {
+                finishHook = resolve;
+              }),
+            );
+            mockClient.extMethod = vi
+              .fn()
+              .mockResolvedValueOnce({ messages: ['also check tests'] })
+              .mockResolvedValue({ messages: [] });
             mockChat.sendMessageStream = vi
               .fn()
               .mockResolvedValueOnce(createStreamWithChunks([shellCall()]))
@@ -35188,8 +35230,49 @@ describe('Session', () => {
             const done = startPrompt();
             await running;
             session.sendMidTurnInputNow();
+            await nextTick();
+            finishHook({ decision: 'allow' });
 
-            await expect(done).resolves.toEqual({ stopReason: 'cancelled' });
+            await expect(done).resolves.toEqual({ stopReason: 'end_turn' });
+            const next = sentMessage(1);
+            expect(next).toContainEqual(
+              expect.objectContaining({
+                functionResponse: expect.objectContaining({
+                  id: 'sh',
+                  response: { output: 'process exited' },
+                }),
+              }),
+            );
+            expect(next).toContainEqual({
+              text: '\n[User message received during tool execution]: also check tests',
+            });
+            expect(requestCancel).not.toHaveBeenCalled();
+          });
+
+          it('keeps a moved shell running when the agent cancels the turn itself', async () => {
+            const { running, requestCancel } = useShell();
+            let finishHook!: (output: { decision: 'allow' }) => void;
+            const hookStarted = usePostToolHook(
+              new Promise((resolve) => {
+                finishHook = resolve;
+              }),
+            );
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(createStreamWithChunks([shellCall()]))
+              .mockResolvedValue(createEmptyStream());
+
+            const done = startPrompt();
+            await running;
+            session.sendMidTurnInputNow();
+            await hookStarted;
+            const cancelling = session.cancelPendingPrompt();
+            finishHook({ decision: 'allow' });
+
+            await cancelling;
+            await expect(done).resolves.toMatchObject({
+              stopReason: 'cancelled',
+            });
             expect(requestCancel).not.toHaveBeenCalled();
           });
 
@@ -35210,7 +35293,7 @@ describe('Session', () => {
             await running;
             session.sendMidTurnInputNow();
             await hookStarted;
-            const stopping = session.cancelPendingPrompt();
+            const stopping = session.cancelPendingPrompt(undefined, true);
             const cancelledBeforeHookFinished =
               requestCancel.mock.calls.slice();
             finishHook({ decision: 'allow' });
