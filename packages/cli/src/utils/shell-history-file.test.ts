@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   appendShellHistoryFile,
   readShellHistoryFile,
+  SHELL_HISTORY_MAX_ENTRIES,
 } from './shell-history-file.js';
 
 const execFileAsync = promisify(execFile);
@@ -162,5 +163,24 @@ describe('shell-history-file', () => {
       'first',
     ]);
     expect(await fs.readFile(historyPath, 'utf8')).toContain('"last"');
+  });
+
+  it('caps real file appends at the shared history limit', async () => {
+    await fs.writeFile(
+      historyPath,
+      JSON.stringify(
+        Array.from(
+          { length: SHELL_HISTORY_MAX_ENTRIES + 20 },
+          (_, index) => `command-${index}`,
+        ),
+      ),
+    );
+    const bounded = await appendShellHistoryFile(historyPath, 'latest');
+    expect(bounded).toHaveLength(SHELL_HISTORY_MAX_ENTRIES);
+    expect(bounded[0]).toBe('command-21');
+    expect(bounded.at(-1)).toBe('latest');
+    expect(await fs.readFile(historyPath, 'utf8')).toBe(
+      JSON.stringify(bounded, null, 2),
+    );
   });
 });
