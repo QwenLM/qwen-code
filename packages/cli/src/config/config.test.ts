@@ -1389,6 +1389,35 @@ describe('parseArguments', () => {
     }
   });
 
+  it('should accept managed as a channel identifier', async () => {
+    process.argv = ['node', 'script.js', '--channel', 'managed'];
+    const argv = await parseArguments();
+    expect(argv.channel).toBe('managed');
+  });
+
+  it('reports the managed channel for Hosted Harness ACP children', async () => {
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('managed');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps an explicit --channel over the managed marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    try {
+      process.argv = ['node', 'script.js', '--acp', '--channel', 'SDK'];
+      const argv = await parseArguments();
+      expect(argv.channel).toBe('SDK');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('should reject invalid --approval-mode values', async () => {
     process.argv = ['node', 'script.js', '--approval-mode', 'invalid'];
 
@@ -1615,6 +1644,48 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams.mock.lastCall?.[0].folderTrust).toBe(
       true,
     );
+  });
+
+  it('resolves the launcher-marker channel for synthesized ACP argv', async () => {
+    // The Hosted Harness per-turn configs never pass through parseArguments.
+    const argv = {
+      acp: true,
+      sessionId: 'channel-fallback-test',
+      sessionIdGenerated: true,
+    } as CliArgs;
+    vi.stubEnv('QWEN_CODE_SERVE', '1');
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '');
+    await loadCliConfig({}, argv);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'daemon',
+    );
+    await loadCliConfig({}, { ...argv, channel: 'SDK' });
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe('SDK');
+  });
+
+  it('resolves the launcher-marker channel for the deprecated experimentalAcp alias', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {
+      experimentalAcp: true,
+      sessionId: 'channel-fallback-alias-test',
+      sessionIdGenerated: true,
+    } as CliArgs);
+    expect(mockConfigConstructorParams.mock.lastCall?.[0].channel).toBe(
+      'managed',
+    );
+  });
+
+  it('leaves the channel unset for non-ACP argv even under a marker', async () => {
+    vi.stubEnv('QWEN_CODE_MANAGED_RUNTIME', '1');
+    await loadCliConfig({}, {} as CliArgs);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0].channel,
+    ).toBeUndefined();
   });
 
   it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(

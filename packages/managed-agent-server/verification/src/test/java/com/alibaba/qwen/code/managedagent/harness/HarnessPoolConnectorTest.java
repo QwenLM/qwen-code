@@ -715,6 +715,16 @@ class HarnessPoolConnectorTest {
         return client;
     }
 
+    @Test
+    void refusesNonStaticPoolDiscovery() {
+        var properties = settings();
+        properties.getHarness().getPool().setDiscovery("kubernetes");
+        assertThatThrownBy(() -> new HarnessPoolConnector(properties, mock(JdbcHarnessPlacementStore.class),
+                () -> new HarnessDiscovery.Snapshot(List.of(), true), ignored -> leaf(), null))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("Harness pool discovery must be static");
+    }
+
     private static ManagedAgentProperties settings() {
         var properties = new ManagedAgentProperties();
         properties.getHarness().setToken("test-token");

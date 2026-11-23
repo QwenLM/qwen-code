@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
-import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
@@ -771,8 +770,8 @@ class HostedProcessCrashIT {
             // Led by the indexed session scope key, as in HostedGateTestSupport:
             // the raw tenant+session form scans the lane's accumulated ma_resource rows.
             byte[] checkpoint = jdbc.queryForObject("SELECT inline_bytes FROM ma_resource"
-                    + " WHERE session_scope_key = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
-                    byte[].class, ManagedSessionStore.sessionScopeKey(tenant, session), checkpointId, tenant, session);
+                    + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ? AND tenant_id = ? AND session_id = ?",
+                    byte[].class, tenant, session, checkpointId, tenant, session);
             JsonNode saved = JSON.readTree(checkpoint);
             assertThat(saved.path("continuation").path("phase").asText()).isEqualTo(prepared ? "before_model" : "await_runtime");
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("input.accepted")
@@ -781,9 +780,9 @@ class HostedProcessCrashIT {
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("turn.settled"))).isEmpty();
             assertThat(events.stream().filter(event -> event.path("kind").asText().equals("message.committed")
                     && event.path("payload").path("role").asText().equals("tool_result"))).isEmpty();
-            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE session_scope_key = ?"
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ? AND session_id = ?"
                     + " AND kind = 'managed-tool-outcome' AND tenant_id = ? AND session_id = ?",
-                    Integer.class, ManagedSessionStore.sessionScopeKey(tenant, session), tenant, session))
+                    Integer.class, tenant, session, tenant, session))
                     .isZero();
             JsonNode target = report.path("target");
             if (fault.equals("harness-result")) {

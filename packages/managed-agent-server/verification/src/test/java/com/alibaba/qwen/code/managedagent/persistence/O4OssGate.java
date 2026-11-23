@@ -151,7 +151,7 @@ public class O4OssGate extends O4MySqlGate {
             String prefix = ownedPrefix();
             collectCapacity(objects, bytes, prefix);
             List<String> keys = jdbc.queryForList("SELECT object_key FROM ma_resource"
-                    + " WHERE session_scope_key = ? AND object_key IS NOT NULL", String.class, scope);
+                    + " WHERE tenant_id = ? AND session_id = ? AND object_key IS NOT NULL", String.class, tenant, session);
             for (String objectKey : keys) {
                 assertThat(objects.client.doesObjectExist(bucket(), objectKey)).isFalse();
             }

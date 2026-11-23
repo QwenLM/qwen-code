@@ -86,6 +86,7 @@ function fixture() {
   const waiters = new HostedApprovalWaiters();
   const abort = new AbortController();
   const released = vi.fn();
+  let freeze: (() => boolean) | undefined;
   const wait = (expiresAt = Date.now() + 60000) =>
     waitForHostedQuestion({
       session,
@@ -96,6 +97,9 @@ function fixture() {
       expiresAt,
       signal: abort.signal,
       released,
+      registerFreeze: (callback) => {
+        freeze = callback;
+      },
     });
   const answer = () => {
     action.state = 'decided';
@@ -112,6 +116,7 @@ function fixture() {
     answer,
     abort,
     released,
+    park: () => freeze?.(),
   };
 }
 
@@ -130,6 +135,36 @@ describe('question wait ownership', () => {
       generation: '7',
     });
     expect(f.brokerOptions.mountHandbacks.size).toBe(0);
+  });
+
+  it('freezes a completed handback without resolving the question', async () => {
+    const f = fixture();
+    let settled = false;
+    void f.wait().then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(f.released).toHaveBeenCalledOnce());
+
+    expect(f.park()).toBe(true);
+    expect(f.brokerOptions.mountHandbacks.size).toBe(0);
+    expect(f.release).toHaveBeenCalledOnce();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(f.action.state).toBe('requested');
+  });
+
+  it('refuses to freeze while the handback is still running', async () => {
+    const f = fixture();
+    let complete!: () => void;
+    f.release.mockReturnValue(
+      new Promise<void>((resolve) => (complete = resolve)),
+    );
+    const waiting = f.wait();
+    expect(f.park()).toBe(false);
+    expect(f.brokerOptions.mountHandbacks.size).toBe(1);
+    f.answer();
+    await waiting;
+    complete();
   });
 
   it.each([

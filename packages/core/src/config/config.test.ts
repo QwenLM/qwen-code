@@ -9231,7 +9231,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     const policy = config.getAutoMemoryPrompt();
-    expect(policy).toContain('## Types and where they go');
+    expect(policy).toContain('Check the current catalog for duplicates first.');
     expect(policy).not.toContain('<types>');
     expect(policy).not.toContain('load the `auto-memory` skill');
     const subagent = deriveConfig(config);
@@ -10730,7 +10730,7 @@ describe('Server Config (config.ts)', () => {
         'MEMORY.md is currently empty',
       );
       expect(config.getAutoMemoryContext()).toContain(
-        'MEMORY.md is currently empty',
+        'The auto-memory catalog is empty.',
       );
     }
   });
