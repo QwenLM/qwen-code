@@ -2299,6 +2299,27 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
+    it('keeps subscription wire budget mapping for advertised effort levels', async () => {
+      const wire = await executeWithCapability(
+        {
+          thinking: true,
+          efforts: ['high', 'low'],
+          defaultEffort: 'high',
+          disableField: 'enable_thinking',
+        },
+        {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          reasoning: { effort: 'medium' },
+        },
+        'qwen3.8-max',
+      );
+      expectFields(wire, {
+        enable_thinking: true,
+        thinking_budget: 32768,
+        reasoning_effort: undefined,
+      });
+    });
+
     it('keeps the qwen3.8 subscription budget table for qwen3.8-max', async () => {
       const wire = await executeWithCapability(
         {

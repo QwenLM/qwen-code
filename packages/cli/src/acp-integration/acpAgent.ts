@@ -363,6 +363,8 @@ import {
   buildModelReasoningRoutePreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getThinkingStrengthForConfig,
+  getReasoningEffortForDisplay,
   getDefaultReasoningConfig,
   getGptReasoningOverrideState,
   getModelConfiguration,
@@ -8966,6 +8968,7 @@ class QwenAgent implements Agent {
               resolveReasoningForModel(undefined, generation),
               settings.merged.model?.reasoningEffort,
               modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+              model.thinkingStrength,
             );
         const providerModel: ServeWorkspaceProviderModel = {
           modelId,
@@ -18527,7 +18530,7 @@ class QwenAgent implements Agent {
     if (!generation) {
       return baseOptions;
     }
-    const currentModelEffort = config.getReasoningEffort?.();
+    const currentModelEffort = getReasoningEffortForDisplay(config);
     const reasoningOverride = config.getReasoningEffortOverride?.();
     const reasoningOverrideValue = reasoningOverride
       ? generation[reasoningOverride.source]?.[reasoningOverride.field]
@@ -18619,6 +18622,7 @@ class QwenAgent implements Agent {
             thinkingMandatory,
           },
           modelReasoning,
+          getThinkingStrengthForConfig(config),
         )
       : undefined) ?? {
       id: 'reasoning_effort',

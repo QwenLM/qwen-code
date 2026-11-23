@@ -35,6 +35,8 @@ import {
   getModelConfiguration,
   getGptReasoningOverrideState,
   getReasoningEffortsForConfig,
+  getThinkingStrengthForConfig,
+  getReasoningEffortForDisplay,
   type ModelReasoningConfiguration,
   isReasoningSelectionSupported,
   resolvePersistedReasoningConfigState,
@@ -1302,6 +1304,96 @@ describe('GPT raw reasoning reporting', () => {
 // `/effort` and a workflow agent's per-call effort share one tier rule (core's
 // reasoningEffortsForCapability); these pin it at the `/effort` read site.
 describe('getReasoningEffortsForConfig', () => {
+  it.each([
+    [AuthType.QWEN_SUBSCRIPTION, { effort: 'medium' as const }, 'xhigh'],
+    [AuthType.QWEN_SUBSCRIPTION, false as const, undefined],
+    [AuthType.USE_OPENAI, { effort: 'medium' as const }, 'medium'],
+  ])(
+    'displays the effective effort only for the account route (%s, %j)',
+    (authType, reasoning, expected) => {
+      const capability = {
+        thinking: true as const,
+        efforts: ['xhigh', 'low'] as const,
+        defaultEffort: 'xhigh' as const,
+        disableField: 'enable_thinking' as const,
+      };
+      const generation: ContentGeneratorConfig = {
+        model: 'server-model',
+        authType,
+        reasoning,
+      };
+      const config = {
+        getModel: () => generation.model,
+        getAuthType: () => authType,
+        getContentGeneratorConfig: () => generation,
+        getReasoningEffort: () => (reasoning ? reasoning.effort : undefined),
+        getResolvedModelConfig: () => ({
+          capabilities: { reasoning: capability },
+        }),
+      } as unknown as Config;
+      expect(getReasoningEffortForDisplay(config)).toBe(expected);
+      if (authType === AuthType.QWEN_SUBSCRIPTION) {
+        expect(
+          buildModelReasoningRoutePreview(
+            generation,
+            capability,
+            undefined,
+          )?.[0].currentValue,
+        ).toBe(reasoning === false ? 'none' : expected);
+      }
+      expect(generation.reasoning).toEqual(reasoning);
+    },
+  );
+  it('uses the account declaration and exposes budget descriptions in protocol previews', () => {
+    const thinkingStrength = [
+      { level: 'xhigh' as const, budget_tokens: 32768 },
+      { level: 'low' as const, budget_tokens: 4096 },
+    ];
+    const reasoning = {
+      thinking: true as const,
+      efforts: ['xhigh', 'low'] as const,
+      defaultEffort: 'xhigh' as const,
+      disableField: 'enable_thinking' as const,
+    };
+    const generation: ContentGeneratorConfig = {
+      model: 'server-model',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+    };
+    const config = {
+      getModel: () => generation.model,
+      getAuthType: () => generation.authType,
+      getContentGeneratorConfig: () => generation,
+      getResolvedModelConfig: () => ({
+        capabilities: { reasoning },
+        thinkingStrength,
+      }),
+    } as unknown as Config;
+    expect(getReasoningEffortsForConfig(config)).toEqual(['xhigh', 'low']);
+    expect(getThinkingStrengthForConfig(config)).toEqual(thinkingStrength);
+    const option = buildModelReasoningConfigOption(
+      generation.model,
+      {},
+      reasoning,
+      thinkingStrength,
+    );
+    const preview = buildModelReasoningRoutePreview(
+      generation,
+      reasoning,
+      undefined,
+      false,
+      thinkingStrength,
+    );
+    expect(option?.options).toEqual([
+      expect.objectContaining({ value: 'none' }),
+      expect.objectContaining({ value: 'xhigh', description: '32,768 tokens' }),
+      expect.objectContaining({ value: 'low', description: '4,096 tokens' }),
+    ]);
+    expect(preview?.[0].options).toEqual(option?.options);
+    expect(generation).toEqual({
+      model: 'server-model',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+    });
+  });
   const configWith = (
     reasoning: unknown,
     modelId = 'custom-model',

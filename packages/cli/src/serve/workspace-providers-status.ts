@@ -202,6 +202,7 @@ function buildWorkspaceProvidersStatus(
         resolveReasoningForModel(undefined, generation),
         settings.model?.reasoningEffort,
         modelId.startsWith(ACP_ROUTE_ID_PREFIX),
+        model.thinkingStrength,
       );
       const configurationKey = getModelConfigurationKey(
         loaded,

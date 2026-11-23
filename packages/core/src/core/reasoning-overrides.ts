@@ -489,7 +489,9 @@ export function getEffectiveReasoning(
     ? {
         ...selected,
         effort:
-          (resolved.profile || knownDeepSeek) &&
+          (resolved.profile ||
+            knownDeepSeek ||
+            generation.authType === 'qwen-subscription') &&
           REASONING_EFFORT_TIERS.includes(effort)
             ? clampReasoningEffort(effort, resolved.efforts)
             : effort,

@@ -1633,6 +1633,7 @@ describe('OpenTuiEffortDialog', () => {
   function renderEffortDialog(
     reasoningEffort: string | undefined,
     availableTerminalHeight?: number,
+    subscription = false,
   ) {
     const setValue = vi.fn();
     const notify = vi.fn();
@@ -1642,11 +1643,19 @@ describe('OpenTuiEffortDialog', () => {
     });
     const config = {
       getModel: () => 'deepseek-v4-pro',
-      getAuthType: () => 'openai',
+      getAuthType: () => (subscription ? 'qwen-subscription' : 'openai'),
       getReasoningEffort: () => applied,
       setReasoningEffort,
       getResolvedModelConfig: () => ({
         capabilities: { reasoning: capability },
+        ...(subscription
+          ? {
+              thinkingStrength: [
+                { level: 'high', budget_tokens: 16384 },
+                { level: 'max', budget_tokens: 32768 },
+              ],
+            }
+          : {}),
       }),
     } as unknown as Config;
     const settings = {
@@ -1684,6 +1693,14 @@ describe('OpenTuiEffortDialog', () => {
         'No effort configured — using the model/provider default.',
       ),
     ).not.toBeNull();
+  });
+
+  it('displays account budgets without applying them as request configuration', () => {
+    const harness = renderEffortDialog(undefined, undefined, true);
+    expect(queryRow('high — ')).toContain('16,384 tokens');
+    expect(queryRow('max — ')).toContain('32,768 tokens');
+    expect(harness.setReasoningEffort).not.toHaveBeenCalled();
+    expect(harness.setValue).not.toHaveBeenCalled();
   });
 
   it('reports a configured tier the resolved model does not expose', () => {

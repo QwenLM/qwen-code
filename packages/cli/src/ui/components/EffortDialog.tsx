@@ -13,6 +13,8 @@ import type { ReasoningEffort } from '@qwen-code/qwen-code-core/core/reasoning-e
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
+import type { SubscriptionThinkingStrength } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { formatReasoningEffortBudget } from '../../utils/reasoning-display.js';
 
 interface EffortDialogProps {
   /** Callback when a tier is chosen; `undefined` means the dialog was cancelled. */
@@ -21,6 +23,7 @@ interface EffortDialogProps {
   /** The currently active effort, used to pre-select the list. */
   currentEffort?: ReasoningEffort;
   efforts?: readonly ReasoningEffort[];
+  thinkingStrength?: SubscriptionThinkingStrength;
 }
 
 export const EFFORT_DESCRIPTIONS: Record<ReasoningEffort, string> = {
@@ -35,12 +38,16 @@ export function EffortDialog({
   onSelect,
   currentEffort,
   efforts = REASONING_EFFORT_TIERS,
+  thinkingStrength,
 }: EffortDialogProps): React.JSX.Element {
-  const items = efforts.map((tier) => ({
-    label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
-    value: tier,
-    key: tier,
-  }));
+  const items = efforts.map((tier) => {
+    const budget = formatReasoningEffortBudget(tier, thinkingStrength);
+    return {
+      label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}${budget ? ` (${budget})` : ''}`,
+      value: tier,
+      key: tier,
+    };
+  });
 
   // Pre-select only a tier this model actually exposes. An unset effort starts
   // at the top rather than highlighting 'high', and so does a tier the global

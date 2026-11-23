@@ -66,7 +66,12 @@ import {
   type DialogListItem,
 } from './dialogs-core.js';
 import { C } from './theme.js';
-import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
+import {
+  getReasoningEffortsForConfig,
+  getThinkingStrengthForConfig,
+  getReasoningEffortForDisplay,
+} from '../../acp-integration/model-configuration.js';
+import { formatReasoningEffortBudget } from '../../utils/reasoning-display.js';
 
 interface LabeledItem<T> extends DialogListItem<T> {
   label: string;
@@ -614,13 +619,21 @@ export function OpenTuiEffortDialog(props: {
     : (REASONING_EFFORT_TIERS as ReasoningEffort[]);
   // Pre-select the live tier only when this model exposes it; an unset or
   // out-of-range effort starts at the top (ink EffortDialog parity).
-  const currentEffort = config?.getReasoningEffort?.();
+  const currentEffort = config
+    ? getReasoningEffortForDisplay(config)
+    : undefined;
+  const thinkingStrength = config
+    ? getThinkingStrengthForConfig(config)
+    : undefined;
   const configuredIndex = currentEffort ? tiers.indexOf(currentEffort) : -1;
-  const items: Array<LabeledItem<ReasoningEffort>> = tiers.map((tier) => ({
-    key: tier,
-    value: tier,
-    label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
-  }));
+  const items: Array<LabeledItem<ReasoningEffort>> = tiers.map((tier) => {
+    const budget = formatReasoningEffortBudget(tier, thinkingStrength);
+    return {
+      key: tier,
+      value: tier,
+      label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}${budget ? ` (${budget})` : ''}`,
+    };
+  });
   // The frame (4) and the margin rows under the title, the note and the
   // footer hint are the rows no run can wrap into; the title — measured
   // through the two-run dialogTitleRows measurement, since the subtitle

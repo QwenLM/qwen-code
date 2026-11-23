@@ -75,6 +75,30 @@ function snapshotConfig(
 }
 
 describe('reasoning declarations', () => {
+  it('clamps a saved subscription effort to the advertised levels and preserves thinking off', () => {
+    const generation: ContentGeneratorConfig = {
+      model: 'server-model',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+      reasoning: { effort: 'medium' },
+    };
+    const resolved = resolveReasoningCapabilities(generation, {
+      thinking: true,
+      efforts: ['high', 'low'],
+      defaultEffort: 'high',
+      disableField: 'enable_thinking',
+    });
+    expect(resolved?.toggleOnly).not.toBe(true);
+    expect(getEffectiveReasoning(generation, resolved)).toEqual({
+      effort: 'high',
+    });
+    expect(
+      getEffectiveReasoning({ ...generation, reasoning: undefined }, resolved),
+    ).toEqual({ effort: 'high' });
+    expect(
+      getEffectiveReasoning({ ...generation, reasoning: false }, resolved),
+    ).toBe(false);
+  });
+
   it.each(['samplingParams', 'extra_body'] as const)(
     'resolves DeepSeek capabilities and aliases against %s.model',
     (source) => {

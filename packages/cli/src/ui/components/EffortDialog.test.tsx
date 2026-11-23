@@ -17,6 +17,23 @@ vi.mock('../hooks/useKeypress.js', () => ({
 const mockedUseKeypress = vi.mocked(useKeypress);
 
 describe('EffortDialog', () => {
+  it('displays server budgets in server tier order', () => {
+    const { lastFrame } = renderWithProviders(
+      <EffortDialog
+        onSelect={vi.fn()}
+        efforts={['medium', 'low']}
+        thinkingStrength={[
+          { level: 'medium', budget_tokens: 16384 },
+          { level: 'low', budget_tokens: 4096 },
+        ]}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('16,384 tokens');
+    expect(frame).toContain('4,096 tokens');
+    expect(frame.indexOf('medium —')).toBeLessThan(frame.indexOf('low —'));
+    expect(frame).not.toContain('xhigh —');
+  });
   beforeEach(() => {
     mockedUseKeypress.mockClear();
   });

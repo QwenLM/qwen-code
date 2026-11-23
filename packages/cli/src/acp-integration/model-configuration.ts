@@ -31,6 +31,8 @@ import {
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import type { SubscriptionThinkingStrength } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { formatReasoningEffortBudget } from '../utils/reasoning-display.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -419,6 +421,31 @@ export function getReasoningEffortsForConfig(
   );
 }
 
+export function getThinkingStrengthForConfig(
+  config: Config,
+): SubscriptionThinkingStrength | undefined {
+  if (config.getActiveRuntimeModelSnapshot?.()) return undefined;
+  const generation = config.getContentGeneratorConfig?.();
+  const authType = generation?.authType ?? config.getAuthType?.();
+  const model = getRequestModel(generation ?? {}, config.getModel?.());
+  if (authType !== AuthType.QWEN_SUBSCRIPTION || !model) return undefined;
+  return config.getResolvedModelConfig?.(
+    authType,
+    model,
+    config.getCurrentModelRegistryBaseUrl?.() ?? generation?.baseUrl,
+  )?.thinkingStrength;
+}
+
+export function getReasoningEffortForDisplay(
+  config: Config,
+): ReasoningEffort | undefined {
+  const generation = config.getContentGeneratorConfig?.();
+  if (generation?.authType !== AuthType.QWEN_SUBSCRIPTION)
+    return config.getReasoningEffort?.();
+  const reasoning = getReasoningForDisplay(config, generation);
+  return reasoning ? reasoning.effort : undefined;
+}
+
 export function parseReasoningSelection(
   value: unknown,
 ): ReasoningSelection | undefined {
@@ -562,6 +589,7 @@ export function buildModelReasoningConfigOption(
   modelId: string | undefined,
   state: ModelReasoningConfigState = {},
   configuredReasoning?: ModelReasoningConfiguration,
+  thinkingStrength?: SubscriptionThinkingStrength,
 ): SessionConfigOption | undefined {
   const reasoning = getModelConfiguration(
     modelId,
@@ -630,7 +658,9 @@ export function buildModelReasoningConfigOption(
             ...reasoning.efforts.map((effort) => ({
               value: effort,
               name: REASONING_EFFORT_NAMES[effort],
-              description: 'Apply this effort to the next request',
+              description:
+                formatReasoningEffortBudget(effort, thinkingStrength) ??
+                'Apply this effort to the next request',
             })),
           ]),
     ],
@@ -658,6 +688,7 @@ export function buildModelReasoningConfigPreview(
   state: ModelReasoningConfigState = {},
   configuredReasoning?: ModelReasoningConfiguration,
   generation?: ContentGeneratorConfig,
+  thinkingStrength?: SubscriptionThinkingStrength,
 ): SessionConfigOption[] | undefined {
   const reasoning = getModelConfiguration(
     modelId,
@@ -692,10 +723,21 @@ export function buildModelReasoningConfigPreview(
       { ...generation, reasoning: undefined },
       configuredReasoning,
     );
+  const requestedEffort =
+    state.effort ??
+    (effectiveReasoning ? effectiveReasoning.effort : undefined);
+  const subscriptionEffort =
+    generation?.authType === AuthType.QWEN_SUBSCRIPTION &&
+    !reasoning.toggleOnly &&
+    effectiveReasoning !== false &&
+    requestedEffort
+      ? clampReasoningEffort(requestedEffort, reasoning.efforts)
+      : undefined;
   const option = buildModelReasoningConfigOption(
     modelId,
     {
       ...state,
+      ...(subscriptionEffort ? { effort: subscriptionEffort } : {}),
       ...(override
         ? {
             enabled: override.enabled,
@@ -712,6 +754,7 @@ export function buildModelReasoningConfigPreview(
         : {}),
     },
     configuredReasoning,
+    thinkingStrength,
   );
   return option ? [option] : undefined;
 }
@@ -721,6 +764,7 @@ export function buildModelReasoningRoutePreview(
   reasoning: ResolvedReasoning | undefined,
   selection: unknown,
   opaqueRoute = false,
+  thinkingStrength?: SubscriptionThinkingStrength,
 ): SessionConfigOption[] | undefined {
   const model = getRequestModel(generation);
   const thinkingMandatory =
@@ -781,6 +825,7 @@ export function buildModelReasoningRoutePreview(
     },
     routeReasoning,
     generation,
+    thinkingStrength,
   );
 }
 

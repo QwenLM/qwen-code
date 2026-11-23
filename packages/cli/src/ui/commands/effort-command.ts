@@ -19,7 +19,10 @@ import {
   REASONING_EFFORT_TIERS,
 } from '@qwen-code/qwen-code-core';
 import { formatEffortChangeMessage } from './effort-utils.js';
-import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
+import {
+  getReasoningEffortsForConfig,
+  getReasoningEffortForDisplay,
+} from '../../acp-integration/model-configuration.js';
 
 const TIER_LIST = REASONING_EFFORT_TIERS.join(', ');
 
@@ -73,7 +76,7 @@ export const effortCommand: SlashCommand = {
       if (context.executionMode === 'interactive') {
         return { type: 'dialog', dialog: 'effort' };
       }
-      const current = config.getReasoningEffort();
+      const current = getReasoningEffortForDisplay(config);
       return {
         type: 'message',
         messageType: 'info',
