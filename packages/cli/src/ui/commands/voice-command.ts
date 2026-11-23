@@ -5,6 +5,7 @@
  */
 
 import { t } from '../../i18n/index.js';
+import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import { CommandKind, type SlashCommand } from './types.js';
 import { getVoiceUnavailableReason } from '../voice/voice-availability.js';
 import {
@@ -32,7 +33,9 @@ export const voiceCommand: SlashCommand = {
       const voiceModel = readVoiceModel(settings);
       const status = isVoiceEnabled(settings) ? 'enabled' : 'disabled';
       const modelText = voiceModel
-        ? t('model: {{voiceModel}}', { voiceModel })
+        ? t('model: {{voiceModel}}', {
+            voiceModel: formatAuxModelSelectorForDisplay(voiceModel),
+          })
         : t('no voice model selected');
       return {
         type: 'message',
@@ -118,11 +121,11 @@ export const voiceCommand: SlashCommand = {
         mode === 'tap'
           ? t(
               'Voice dictation enabled (tap mode). Tap Space at an empty prompt to start, tap again or pause to stop and submit, using {{voiceModel}}.',
-              { voiceModel },
+              { voiceModel: formatAuxModelSelectorForDisplay(voiceModel) },
             )
           : t(
               'Voice dictation enabled (hold mode). Hold Space at an empty prompt to dictate with {{voiceModel}}.',
-              { voiceModel },
+              { voiceModel: formatAuxModelSelectorForDisplay(voiceModel) },
             ),
     };
   },

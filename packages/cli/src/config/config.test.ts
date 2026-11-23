@@ -34,6 +34,8 @@ import {
 } from './config.js';
 import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
+import * as SubscriptionModels from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
   getTrustFileDecisionBelowIdeRoot,
   isWorkspaceTrusted,
@@ -1578,6 +1580,32 @@ describe('loadCliConfig', () => {
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
+
+  it.each(['imageModel', 'voiceModel'] as const)(
+    'does not fetch subscription catalogs at startup for a saved %s without cache',
+    async (key) => {
+      vi.spyOn(QwenSubscriptionSession.prototype, 'isSignedIn').mockReturnValue(
+        true,
+      );
+      vi.spyOn(
+        SubscriptionModels,
+        'readCachedSubscriptionCatalog',
+      ).mockReturnValue({ models: [] });
+      const scenes = vi
+        .spyOn(ServerConfig.Config.prototype, 'refreshSubscriptionScenes')
+        .mockResolvedValue({ scenes: {}, cached: false });
+      const models = vi
+        .spyOn(ServerConfig.Config.prototype, 'refreshSubscriptionModels')
+        .mockResolvedValue({ models: ['chat'], cached: false });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+
+      await loadCliConfig({ [key]: 'qwen-subscription:saved-model' }, argv);
+
+      expect(scenes).not.toHaveBeenCalled();
+      expect(models).not.toHaveBeenCalled();
+    },
+  );
 
   it('H03 forwards only an explicitly supplied workflow ancestor provider', async () => {
     process.argv = ['node', 'script.js'];

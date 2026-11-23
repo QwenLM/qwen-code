@@ -6432,9 +6432,14 @@ export class DaemonClient {
     );
   }
 
-  async workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
+  async workspaceVoice(
+    clientId?: string,
+    options?: { refreshModels?: boolean },
+  ): Promise<DaemonWorkspaceVoiceStatus> {
     return await this.jsonRequest<DaemonWorkspaceVoiceStatus>(
-      '/workspace/voice',
+      options?.refreshModels
+        ? '/workspace/voice?refreshModels=true'
+        : '/workspace/voice',
       'GET /workspace/voice',
       { clientId },
     );
@@ -9023,10 +9028,13 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceVoice(clientId?: string): Promise<DaemonWorkspaceVoiceStatus> {
+  workspaceVoice(
+    clientId?: string,
+    options?: { refreshModels?: boolean },
+  ): Promise<DaemonWorkspaceVoiceStatus> {
     return this.client.workspaceJsonRequest<DaemonWorkspaceVoiceStatus>(
       this.workspaceSelector,
-      '/voice',
+      options?.refreshModels ? '/voice?refreshModels=true' : '/voice',
       'GET /workspaces/:workspace/voice',
       { clientId, mode: 'rest' },
     );

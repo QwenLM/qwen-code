@@ -14,10 +14,11 @@ import {
 } from './aux-model-selector.js';
 
 describe('AUX_MODEL_SELECTOR_SETTING_KEYS', () => {
-  it('covers the five aux-model selector settings', () => {
+  it('covers the aux-model selector settings', () => {
     for (const key of [
       'visionModel',
       'imageModel',
+      'voiceModel',
       'advisorModel',
       'fastModel',
       'compactionModel',
@@ -28,7 +29,7 @@ describe('AUX_MODEL_SELECTOR_SETTING_KEYS', () => {
   });
 
   it('does not match unrelated or nested keys', () => {
-    for (const key of ['model.name', 'voiceModel', 'mcpServers', 'model']) {
+    for (const key of ['model.name', 'mcpServers', 'model']) {
       expect(isAuxModelSelectorSettingKey(key)).toBe(false);
     }
   });

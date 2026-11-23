@@ -27,7 +27,9 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
+import { refreshSubscriptionCatalog } from '../../utils/refresh-subscription-catalog.js';
 import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import { AppEvent } from '../../utils/events.js';
@@ -103,6 +105,12 @@ vi.mock('@opentui/react', () => ({
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+vi.mock('../hooks/use-subscription-command-visibility.js', () => ({
+  useSubscriptionSignedIn: vi.fn(() => false),
+}));
+vi.mock('../../utils/refresh-subscription-catalog.js', () => ({
+  refreshSubscriptionCatalog: vi.fn(async () => undefined),
+}));
 
 // The real theme/key-map/help-content/dialog-data modules pull the native FFI
 // and heavier transitive deps; stub the surface the mount touches.
@@ -333,7 +341,41 @@ describe('OpenTuiDialogMount routing', () => {
     mocks.state.helpLineCount = 0;
     vi.clearAllMocks();
     mockGetHookSystem.mockReset();
+    vi.mocked(useSubscriptionSignedIn).mockReturnValue(false);
+    vi.mocked(refreshSubscriptionCatalog)
+      .mockReset()
+      .mockResolvedValue(undefined);
   });
+
+  it.each(['primary', 'image', 'voice'] as const)(
+    'refreshes every %s picker opening and blocks selection while loading',
+    async (mode) => {
+      vi.mocked(useSubscriptionSignedIn).mockReturnValue(true);
+      for (let count = 1; count <= 2; count++) {
+        let finish!: (value: undefined) => void;
+        vi.mocked(refreshSubscriptionCatalog).mockReturnValueOnce(
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+        );
+        const ui = mount({ dialog: 'model', mode });
+        expect(mocks.state.dialogProps['model']['loading']).toBe(true);
+        dialogProp('model', 'onSelect')('qwen-subscription:model');
+        expect(applyModelSelection).not.toHaveBeenCalled();
+        expect(refreshSubscriptionCatalog).toHaveBeenCalledTimes(count);
+        expect(refreshSubscriptionCatalog).toHaveBeenLastCalledWith(
+          CONFIG,
+          mode !== 'primary',
+          expect.any(AbortSignal),
+        );
+        await act(async () => finish(undefined));
+        await waitFor(() =>
+          expect(mocks.state.dialogProps['model']['loading']).toBe(false),
+        );
+        ui.unmount();
+      }
+    },
+  );
 
   it.each([
     'update-available',

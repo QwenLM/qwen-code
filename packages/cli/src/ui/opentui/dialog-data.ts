@@ -25,6 +25,7 @@
 import { buildModelIdContext } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import { readCachedSubscriptionCatalog } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
@@ -81,6 +82,7 @@ import { getActiveOpenTuiTheme } from './theme-parity.js';
 import {
   isSelectableVoiceModel,
   formatUnsupportedVoiceModelMessage,
+  getVoiceModelSelector,
 } from '../voice/voice-model.js';
 import {
   ADVISOR_OFF_OPTION,
@@ -129,6 +131,7 @@ export function buildModelEntries(
 ): OpenTuiModelEntry[] {
   const allModels = config?.getAllConfiguredModels?.() ?? [];
   const authType = config?.getAuthType?.();
+  const scene = mode === 'primary' || mode === 'advisor' ? undefined : mode;
   const entries: OpenTuiModelEntry[] =
     mode === 'advisor'
       ? [
@@ -143,6 +146,13 @@ export function buildModelEntries(
         ]
       : [];
   for (const model of allModels) {
+    if (
+      model.authType === AuthType.QWEN_SUBSCRIPTION &&
+      (scene
+        ? !model.subscriptionScenes?.includes(scene)
+        : model.subscriptionChatModel === false)
+    )
+      continue;
     if (
       mode === 'advisor' &&
       (!isAdvisorModelEligible(model, true) ||
@@ -192,7 +202,10 @@ export function buildModelEntries(
     // ink folds the runtime / discontinued markers into the row description as
     // well as its title, so a runtime model with no description of its own still
     // gets an explanatory line under the title.
-    let description = model.description ?? '';
+    let description =
+      model.authType === AuthType.QWEN_SUBSCRIPTION
+        ? ''
+        : (model.description ?? '');
     if (isRuntime) {
       description = description ? `${description} (Runtime)` : 'Runtime model';
     }
@@ -221,6 +234,21 @@ export function buildModelEntries(
     entries,
     subscriptionSignedIn,
   );
+  const sceneIds = scene
+    ? readCachedSubscriptionCatalog().scenes?.[scene]?.map((model) => model.id)
+    : undefined;
+  if (sceneIds) {
+    const sortedSubscription = visibleEntries
+      .filter((entry) => entry.authType === AuthType.QWEN_SUBSCRIPTION)
+      .sort(
+        (a, b) => sceneIds.indexOf(a.modelId) - sceneIds.indexOf(b.modelId),
+      );
+    let index = 0;
+    for (let i = 0; i < visibleEntries.length; i++) {
+      if (visibleEntries[i].authType === AuthType.QWEN_SUBSCRIPTION)
+        visibleEntries[i] = sortedSubscription[index++];
+    }
+  }
   return mode === 'primary'
     ? sortModelEntriesForDisplay(visibleEntries)
     : visibleEntries;
@@ -359,13 +387,17 @@ export function computeModelDialogInitialKey(params: {
   const selectorAuth = resolved.authType
     ? String(resolved.authType)
     : undefined;
-  const match = entries.find((entry) => {
+  const matches = entries.filter((entry) => {
     if (entry.modelId !== selectorModelId) return false;
     if (selectorAuth && entry.authType !== selectorAuth) return false;
     if (parsed.baseUrl && entry.baseUrl !== parsed.baseUrl) return false;
     return true;
   });
-  return match?.key ?? entries.find((e) => e.modelId === selectorModelId)?.key;
+  if (mode === 'voice')
+    return matches.length === 1 ? matches[0].key : undefined;
+  return (
+    matches[0]?.key ?? entries.find((e) => e.modelId === selectorModelId)?.key
+  );
 }
 
 function persistScopeSuffix(persistScope?: 'workspace' | 'user'): string {
@@ -457,30 +489,19 @@ export async function applyModelSelection(
     if (!selectedEntry?.model) {
       return { ok: false, error: t('Selected voice model is unavailable.') };
     }
-    const voiceModel = selectedEntry.model.id;
+    const voiceModel = getVoiceModelSelector(selectedEntry.model);
     if (!isSelectableVoiceModel(selectedEntry.model)) {
       return {
         ok: false,
         error: formatUnsupportedVoiceModelMessage(voiceModel),
       };
     }
-    const matchingEntries = entries.filter(
-      (entry) => entry.model?.id === voiceModel,
-    );
-    if (matchingEntries.length > 1) {
-      return {
-        ok: false,
-        error: t(
-          "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
-          { model: voiceModel },
-        ),
-      };
-    }
     const scope = resolveModelPersistScope(settings, persistScope);
-    settings.setValue(scope, 'voiceModel', voiceModel);
+    const persisted = shareableAuxSelector(voiceModel, scope);
+    settings.setValue(scope, 'voiceModel', persisted);
     return {
       ok: true,
-      message: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
+      message: `${t('Voice Model')}: ${persisted.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(voiceModel, persisted)}`,
     };
   }
 
@@ -564,7 +585,10 @@ export async function applyModelSelection(
     if (!selectedEntry || !config) {
       return { ok: false, error: t('Selected image model is unavailable.') };
     }
-    const imageModel = encodeVisionModelSelector(selectionKey);
+    const imageModel =
+      selectedEntry.authType === AuthType.QWEN_SUBSCRIPTION
+        ? `${AuthType.QWEN_SUBSCRIPTION}:${selectedEntry.modelId}`
+        : encodeVisionModelSelector(selectionKey);
     const imageModelDisplay =
       parseVisionModelSetting(imageModel)?.selector ?? imageModel;
     if (!config.resolveImageGenerationModel?.(imageModel)) {

@@ -9,6 +9,13 @@ import express, {
   type Request,
   type Response,
 } from 'express';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import {
   loadSettings,
   SettingScope,
@@ -117,6 +124,16 @@ export interface WorkspaceQualifiedVoiceRouteDeps {
 }
 
 function sendVoiceError(res: Response, err: unknown): boolean {
+  if (err instanceof SubscriptionOAuthError) {
+    if (err.retryAfterMs !== undefined) {
+      res.set('Retry-After', String(Math.ceil(err.retryAfterMs / 1000)));
+    }
+    res.status(err.status ?? 502).json({
+      error: subscriptionErrorMessage(err),
+      code: err.code,
+    });
+    return true;
+  }
   if (err instanceof WorkspaceVoiceError) {
     res.status(err.status).json({ error: err.message, code: err.code });
     return true;
@@ -434,27 +451,75 @@ function sendUnsupportedVoiceContentType(res: Response): void {
   });
 }
 
-function handleVoiceStatus(
+async function handleVoiceStatus(
+  req: Request,
   res: Response,
   deps: WorkspaceVoiceRouteDeps,
   route: string,
-): void {
+): Promise<void> {
   try {
-    deps.captureGenerationAssertion?.()?.();
-    res
-      .status(200)
-      .json(
-        buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
-      );
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    assertGenerationOpen?.();
+    const refreshModels = req.query['refreshModels'];
+    if (
+      refreshModels !== undefined &&
+      refreshModels !== 'true' &&
+      refreshModels !== 'false'
+    ) {
+      res.status(400).json({
+        error: '`refreshModels` must be true or false',
+        code: 'invalid_refresh_models',
+      });
+      return;
+    }
+    let modelCatalogWarning: string | undefined;
+    if (refreshModels === 'true') {
+      const session = new QwenSubscriptionSession();
+      const identity = session.getIdentity();
+      if (identity) {
+        const signal = requestAbortSignal(req, res);
+        const assertRefreshOwner = () => {
+          assertGenerationOpen?.();
+          if (session.getIdentity() !== identity)
+            throw new SubscriptionOAuthError('session_changed', 401);
+        };
+        try {
+          const result = await session.getScenes(signal);
+          if (result.cached) modelCatalogWarning = SUBSCRIPTION_MODELS_CACHED;
+        } catch (error) {
+          signal.throwIfAborted();
+          assertRefreshOwner();
+          if (
+            error instanceof SubscriptionOAuthError &&
+            (error.stage || !error.status || error.status < 500)
+          )
+            throw error;
+          modelCatalogWarning = SUBSCRIPTION_MODELS_UNAVAILABLE;
+        }
+        assertRefreshOwner();
+      }
+    }
+    assertGenerationOpen?.();
+    res.status(200).json({
+      ...buildWorkspaceVoiceStatus(
+        deps.boundWorkspace,
+        loadVoiceSettings(deps),
+      ),
+      ...(modelCatalogWarning ? { modelCatalogWarning } : {}),
+    });
   } catch (err) {
     if (sendGenerationClosedError(res, err)) return;
+    if (sendVoiceError(res, err)) return;
     writeStderrLine(
       `qwen serve: ${route} error: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
     res.status(500).json({
-      error: 'Failed to load voice settings',
+      error:
+        req.query['refreshModels'] === 'true'
+          ? SUBSCRIPTION_MODELS_UNAVAILABLE
+          : 'Failed to load voice settings',
       code: 'internal_error',
     });
   }
@@ -692,8 +757,8 @@ export function registerWorkspaceVoiceRoutes(
   app: Application,
   deps: WorkspaceVoiceRouteDeps,
 ): void {
-  app.get('/workspace/voice', (_req: Request, res: Response) =>
-    handleVoiceStatus(res, deps, 'GET /workspace/voice'),
+  app.get('/workspace/voice', (req: Request, res: Response) =>
+    handleVoiceStatus(req, res, deps, 'GET /workspace/voice'),
   );
 
   app.post(
@@ -779,11 +844,19 @@ export function registerWorkspaceQualifiedVoiceRoutes(
   app: Application,
   deps: WorkspaceQualifiedVoiceRouteDeps,
 ): void {
-  app.get('/workspaces/:workspace/voice', (req: Request, res: Response) => {
-    const target = resolveQualifiedVoiceTarget(req, res, deps);
-    if (!target) return;
-    handleVoiceStatus(res, target, 'GET /workspaces/:workspace/voice');
-  });
+  app.get(
+    '/workspaces/:workspace/voice',
+    async (req: Request, res: Response) => {
+      const target = resolveQualifiedVoiceTarget(req, res, deps);
+      if (!target) return;
+      await handleVoiceStatus(
+        req,
+        res,
+        target,
+        'GET /workspaces/:workspace/voice',
+      );
+    },
+  );
 
   app.post(
     '/workspaces/:workspace/voice',

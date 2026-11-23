@@ -8,23 +8,32 @@ import type React from 'react';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import process from 'node:process';
-import { useCallback, useContext, useMemo, useRef, useState } from 'react';
-import { Box, Text } from 'ink';
 import {
-  AuthType,
-  buildModelIdContext,
-  ModelSlashCommandEvent,
-  logModelSlashCommand,
-  MAINLINE_CODER_MODEL,
-  isImageCapable,
-  isImageGenerationCapable,
-  parseVisionModelSetting,
-  resolveModelId,
-  type AvailableModel as CoreAvailableModel,
-  type Config,
-  type ContentGeneratorConfig,
-  type InputModalities,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { Box, Text } from 'ink';
+import type {
+  AvailableModel as CoreAvailableModel,
+  Config,
+  ContentGeneratorConfig,
+  InputModalities,
 } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+} from '@qwen-code/qwen-code-core/utils/modelId.js';
+import { ModelSlashCommandEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import { logModelSlashCommand } from '@qwen-code/qwen-code-core/telemetry/loggers.js';
+import { MAINLINE_CODER_MODEL } from '@qwen-code/qwen-code-core/config/models.js';
+import { isImageCapable } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import { isImageGenerationCapable } from '@qwen-code/qwen-code-core/models/image-generation-capability.js';
+import { parseVisionModelSetting } from '@qwen-code/qwen-code-core/config/config.js';
 import { SettingScope } from '../../config/settings.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
@@ -41,9 +50,14 @@ import {
   sortModelEntriesForDisplay,
 } from '../../utils/model-display-order.js';
 import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
+import { refreshSubscriptionCatalog } from '../../utils/refresh-subscription-catalog.js';
+import { readCachedSubscriptionCatalog } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
+  findVoiceModels,
+  getVoiceModelSelector,
 } from '../voice/voice-model.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import {
@@ -352,10 +366,48 @@ export function ModelDialog({
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [highlightedValue, setHighlightedValue] = useState<string | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(subscriptionSignedIn);
+  const [catalogRevision, setCatalogRevision] = useState(0);
+  const scene = isImageModelMode
+    ? 'image'
+    : isVoiceModelMode
+      ? 'voice'
+      : isFastModelMode
+        ? 'fast'
+        : isVisionModelMode
+          ? 'vision'
+          : isCompactionModelMode
+            ? 'compaction'
+            : undefined;
+  useEffect(() => {
+    if (!config || !subscriptionSignedIn) {
+      setCatalogLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setCatalogLoading(true);
+    void refreshSubscriptionCatalog(
+      config,
+      scene !== undefined,
+      controller.signal,
+    )
+      .then((warning) => {
+        if (controller.signal.aborted) return;
+        if (warning) setErrorMessage(warning);
+        setCatalogRevision((value) => value + 1);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!controller.signal.aborted) setCatalogLoading(false);
+      });
+    return () => controller.abort();
+  }, [config, subscriptionSignedIn, scene]);
 
   const authType = config?.getAuthType();
 
   const availableModelEntries = useMemo(() => {
+    // The Config identity stays stable when its catalog changes.
+    void catalogRevision;
     const allModels = config ? config.getAllConfiguredModels() : [];
     const advisorModel = config?.getAdvisorModel?.();
     const advisorContext = config ? buildModelIdContext(config) : {};
@@ -386,6 +438,15 @@ export function ModelDialog({
               isAdvisorModelEligible(m, allowAdvisorFastOnly)),
         );
     const registryModels = allModels.filter((m) => {
+      if (m.authType === AuthType.QWEN_SUBSCRIPTION) {
+        if (
+          scene
+            ? !m.subscriptionScenes?.includes(scene)
+            : m.subscriptionChatModel === false
+        ) {
+          return false;
+        }
+      }
       const imageModelSelector = encodeAuxModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
@@ -416,6 +477,18 @@ export function ModelDialog({
     });
 
     // Group registry models by authType
+    const sceneIds = scene
+      ? readCachedSubscriptionCatalog().scenes?.[scene]?.map(
+          (model) => model.id,
+        )
+      : undefined;
+    if (sceneIds)
+      registryModels.sort((left, right) =>
+        left.authType === AuthType.QWEN_SUBSCRIPTION &&
+        right.authType === AuthType.QWEN_SUBSCRIPTION
+          ? sceneIds.indexOf(left.id) - sceneIds.indexOf(right.id)
+          : 0,
+      );
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
     for (const model of registryModels) {
       const authType = model.authType;
@@ -481,6 +554,8 @@ export function ModelDialog({
       : sortModelEntriesForDisplay(visibleEntries);
   }, [
     authType,
+    scene,
+    catalogRevision,
     subscriptionSignedIn,
     config,
     isFastModelMode,
@@ -534,7 +609,8 @@ export function ModelDialog({
         );
 
         // Include runtime / discontinued indicator in description
-        let description = model.description || '';
+        let description =
+          t2 === AuthType.QWEN_SUBSCRIPTION ? '' : model.description || '';
         if (isRuntime) {
           description = description
             ? `${description} (Runtime)`
@@ -723,11 +799,16 @@ export function ModelDialog({
                 (model.registryBaseUrl ?? null) === advisorRegistryBaseUrl)),
         )
       : undefined;
-  const preferredVoiceModelEntry =
+  const matchingVoiceModelEntries =
     isVoiceModelMode && voiceModelSetting
-      ? availableModelEntries.find(
-          ({ model }) => model.id === voiceModelSetting,
+      ? availableModelEntries.filter(
+          ({ model }) =>
+            findVoiceModels([model], voiceModelSetting).length === 1,
         )
+      : [];
+  const preferredVoiceModelEntry =
+    matchingVoiceModelEntries.length === 1
+      ? matchingVoiceModelEntries[0]
       : undefined;
   // Like fast mode, the vision/image settings may persist as a bare id
   // (cross-provider) or an `authType:modelId\0baseUrl` selector — highlight
@@ -979,27 +1060,15 @@ export function ModelDialog({
           return;
         }
 
-        const voiceModel = selectedEntry.model.id;
+        const voiceModel = getVoiceModelSelector(selectedEntry.model);
         if (!isSelectableVoiceModel(selectedEntry.model)) {
           setErrorMessage(formatUnsupportedVoiceModelMessage(voiceModel));
           return;
         }
 
-        const matchingEntries = availableModelEntries.filter(
-          ({ model }) => model.id === voiceModel,
-        );
-        if (matchingEntries.length > 1) {
-          setErrorMessage(
-            t(
-              "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
-              { model: voiceModel },
-            ),
-          );
-          return;
-        }
-
         const scope = resolvePersistScope(settings, persistScope);
-        settings.setValue(scope, 'voiceModel', voiceModel);
+        const persistedVoiceModel = shareableAuxSelector(voiceModel, scope);
+        settings.setValue(scope, 'voiceModel', persistedVoiceModel);
         const scopeSuffix =
           persistScope === 'workspace'
             ? t(' (this project)')
@@ -1008,7 +1077,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Voice Model')}: ${voiceModel}${scopeSuffix}`,
+          text: `${t('Voice Model')}: ${formatAuxModelSelectorForDisplay(persistedVoiceModel)}${scopeSuffix}${endpointNotSavedNote(voiceModel, persistedVoiceModel)}`,
         });
         onClose();
         return;
@@ -1120,7 +1189,10 @@ export function ModelDialog({
           setErrorMessage(t('Selected image model is unavailable.'));
           return;
         }
-        const imageModel = encodeAuxModelSelector(selected);
+        const imageModel =
+          selectedEntry.authType === AuthType.QWEN_SUBSCRIPTION
+            ? `${AuthType.QWEN_SUBSCRIPTION}:${selectedEntry.model.id}`
+            : encodeAuxModelSelector(selected);
         const imageModelDisplay =
           parseVisionModelSetting(imageModel)?.selector ?? imageModel;
         if (!config.resolveImageGenerationModel(imageModel)) {
@@ -1337,6 +1409,7 @@ export function ModelDialog({
               : '')}
       </Text>
 
+      {catalogLoading && <Text>{t('Loading models from provider…')}</Text>}
       {!hasModels ? (
         <Box marginTop={1} flexDirection="column">
           <Text color={theme.status.warning}>
@@ -1358,6 +1431,7 @@ export function ModelDialog({
       ) : (
         <Box marginTop={1}>
           <DescriptiveRadioButtonSelect
+            isFocused={!catalogLoading}
             items={MODEL_OPTIONS}
             onSelect={handleSelect}
             onHighlight={handleHighlight}
@@ -1396,18 +1470,19 @@ export function ModelDialog({
               highlightedEntry.model.contextWindowSize,
             )}
           />
-          {highlightedEntry.authType !== AuthType.QWEN_OAUTH && (
-            <>
-              <DetailRow
-                label="Base URL"
-                value={highlightedEntry.model.baseUrl ?? t('(default)')}
-              />
-              <DetailRow
-                label="API Key"
-                value={highlightedEntry.model.envKey ?? t('(not set)')}
-              />
-            </>
-          )}
+          {highlightedEntry.authType !== AuthType.QWEN_OAUTH &&
+            highlightedEntry.authType !== AuthType.QWEN_SUBSCRIPTION && (
+              <>
+                <DetailRow
+                  label="Base URL"
+                  value={highlightedEntry.model.baseUrl ?? t('(default)')}
+                />
+                <DetailRow
+                  label="API Key"
+                  value={highlightedEntry.model.envKey ?? t('(not set)')}
+                />
+              </>
+            )}
         </Box>
       )}
 

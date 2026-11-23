@@ -21,23 +21,27 @@ import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscript
 import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import type { AvailableModel, Config } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import {
-  AuthType,
-  type AvailableModel,
-  type Config,
   isImageCapable,
-  isImageGenerationCapable,
-  resolveModelId,
-} from '@qwen-code/qwen-code-core';
+  VISION_BRIDGE_TIMEOUT_MS,
+} from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
+import { isImageGenerationCapable } from '@qwen-code/qwen-code-core/models/image-generation-capability.js';
+import { resolveModelId } from '@qwen-code/qwen-code-core/utils/modelId.js';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import {
   ACP_ROUTE_ID_PREFIX,
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
+  publicProviderBaseUrl,
   resolveAcpFastModelSelector,
 } from '../../utils/acpModelUtils.js';
-import { VISION_BRIDGE_TIMEOUT_MS } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { formatAuxModelSelectorForDisplay } from '../../utils/aux-model-selector.js';
+import {
+  refreshSubscriptionCatalog,
+  isSubscriptionSceneModel,
+} from '../../utils/refresh-subscription-catalog.js';
 import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   modelAuthPolicyError,
@@ -46,6 +50,8 @@ import {
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
+  findVoiceModels,
+  getVoiceModelSelector,
 } from '../voice/voice-model.js';
 
 const MAIN_MODEL_CONFIGURATION_HINT =
@@ -445,10 +451,12 @@ function getAvailableModelIds(
     return [];
   }
   const models =
-    mode === 'image'
-      ? config.getAllConfiguredModels()
-      : config.getAvailableModels();
+    mode === 'main'
+      ? config.getAvailableModels()
+      : config.getAllConfiguredModels();
   const availableModels = models.filter((m) => {
+    if (!isSubscriptionSceneModel(m, mode === 'main' ? undefined : mode))
+      return false;
     if (mode === 'image')
       return isImageGenerationCapable(m) && !m.fastOnly && !m.voiceOnly;
     if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
@@ -627,6 +635,18 @@ export const modelCommand: SlashCommand = {
         : scopeOverride === SettingScope.User
           ? t(' (global)')
           : '';
+    if (!isPickerOnlyModelInvocation(args) && auxiliarySelection) {
+      const warning = await refreshSubscriptionCatalog(
+        config,
+        true,
+        context.abortSignal,
+      );
+      if (warning)
+        context.ui.addItem(
+          { type: MessageType.WARNING, text: warning },
+          Date.now(),
+        );
+    }
     // Selector flags never take an inline prompt, so a leftover --timeout is a
     // misplaced flag rather than prompt text.
     if (args.startsWith('--') && VISION_TIMEOUT_FLAG_PATTERN.test(args)) {
@@ -650,7 +670,7 @@ export const modelCommand: SlashCommand = {
             messageType: 'info',
             content: t(
               'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
-              { voiceModel },
+              { voiceModel: formatAuxModelSelectorForDisplay(voiceModel) },
             ),
           };
         }
@@ -672,7 +692,7 @@ export const modelCommand: SlashCommand = {
       const availableModels = config
         .getAllConfiguredModels()
         .filter((m) => !m.fastOnly && !m.imageOnly && !m.visionOnly);
-      const matches = availableModels.filter((model) => model.id === modelName);
+      const matches = findVoiceModels(availableModels, modelName);
       if (matches.length === 0) {
         return {
           type: 'message',
@@ -701,11 +721,27 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'voiceModel', modelName, scopeOverride);
+      const voiceSelector = getVoiceModelSelector(matches[0]!);
+      const scope = resolveScope(settings, scopeOverride);
+      const endpoint = matches[0]!.baseUrl;
+      const persistedSelector =
+        scope === SettingScope.Workspace &&
+        endpoint &&
+        publicProviderBaseUrl(endpoint) !== endpoint
+          ? voiceSelector.split('\0')[0]!
+          : voiceSelector;
+      settings.setValue(scope, 'voiceModel', persistedSelector);
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Voice Model') + ': ' + modelName + scopeSuffix,
+        content:
+          t('Voice Model') +
+          ': ' +
+          formatAuxModelSelectorForDisplay(persistedSelector) +
+          scopeSuffix +
+          (persistedSelector === voiceSelector
+            ? ''
+            : t(' (endpoint not saved: project settings are shared)')),
       };
     }
 
@@ -784,7 +820,13 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.voiceOnly && !m.imageOnly && !m.visionOnly);
+      ).filter(
+        (m) =>
+          isSubscriptionSceneModel(m, 'fast') &&
+          !m.voiceOnly &&
+          !m.imageOnly &&
+          !m.visionOnly,
+      );
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
           type: 'message',
@@ -941,7 +983,13 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly);
+      ).filter(
+        (m) =>
+          isSubscriptionSceneModel(m, 'vision') &&
+          !m.fastOnly &&
+          !m.voiceOnly &&
+          !m.imageOnly,
+      );
       const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
       );
@@ -1087,7 +1135,12 @@ export const modelCommand: SlashCommand = {
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
       ).filter(
-        (m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly && !m.visionOnly,
+        (m) =>
+          isSubscriptionSceneModel(m, 'compaction') &&
+          !m.fastOnly &&
+          !m.voiceOnly &&
+          !m.imageOnly &&
+          !m.visionOnly,
       );
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
@@ -1183,6 +1236,7 @@ export const modelCommand: SlashCommand = {
           : config.getAllConfiguredModels()
       ).filter(
         (model) =>
+          isSubscriptionSceneModel(model, 'image') &&
           isImageGenerationCapable(model) &&
           !model.fastOnly &&
           !model.voiceOnly,
@@ -1219,9 +1273,10 @@ export const modelCommand: SlashCommand = {
       const qualifiedModelName = `${
         selector.authType ?? matched.authType
       }:${selector.modelId}`;
-      const imageModel = matched.baseUrl
-        ? `${qualifiedModelName}\0${matched.baseUrl}`
-        : qualifiedModelName;
+      const imageModel =
+        matched.authType !== AuthType.QWEN_SUBSCRIPTION && matched.baseUrl
+          ? `${qualifiedModelName}\0${matched.baseUrl}`
+          : qualifiedModelName;
       if (!config.resolveImageGenerationModel(imageModel)) {
         return {
           type: 'message',
@@ -1296,6 +1351,17 @@ export const modelCommand: SlashCommand = {
               : SUBSCRIPTION_MODELS_UNAVAILABLE,
         };
       }
+    } else if (modelName) {
+      const warning = await refreshSubscriptionCatalog(
+        config,
+        false,
+        context.abortSignal,
+      );
+      if (warning)
+        context.ui.addItem(
+          { type: MessageType.WARNING, text: warning },
+          Date.now(),
+        );
     }
     if (
       !contentGeneratorConfig &&
@@ -1321,7 +1387,13 @@ export const modelCommand: SlashCommand = {
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
         .getAvailableModelsForAuthType(targetAuthType)
-        .filter((m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly);
+        .filter(
+          (m) =>
+            isSubscriptionSceneModel(m) &&
+            !m.fastOnly &&
+            !m.voiceOnly &&
+            !m.imageOnly,
+        );
       if (!availableModels.some((model) => model.id === parsed.modelId)) {
         return {
           type: 'message',

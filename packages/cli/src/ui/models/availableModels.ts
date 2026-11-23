@@ -99,7 +99,12 @@ export function getAvailableModelsForAuthType(
     try {
       const models = config
         .getAvailableModelsForAuthType(authType)
-        .filter((model) => !model.imageOnly);
+        .filter(
+          (model) =>
+            !model.imageOnly &&
+            !model.voiceOnly &&
+            model.subscriptionChatModel !== false,
+        );
       if (models.length > 0) {
         return models.map(convertCoreModelToCliModel);
       }

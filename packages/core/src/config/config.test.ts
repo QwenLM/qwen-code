@@ -145,6 +145,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
@@ -1410,6 +1411,91 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each(['models', 'scenes'] as const)(
+      'updates live reasoning capabilities when the %s catalog refreshes',
+      async (catalog) => {
+        const config = await subscriptionConfig();
+        const generation = config.getContentGeneratorConfig()!;
+        const originalSnapshot = config.getReasoningSnapshot();
+        expect(
+          config.stageReasoningOverrides({
+            openai: [
+              {
+                id: 'other-model',
+                capabilities: {
+                  reasoning: {
+                    thinking: true,
+                    disableField: 'enable_thinking',
+                    efforts: ['low', 'high'],
+                    defaultEffort: 'high',
+                  },
+                },
+              },
+            ],
+          }),
+        ).toBeUndefined();
+        const thinkingStrength = [
+          { level: 'high' as const, budget_tokens: 12345 },
+          { level: 'low' as const, budget_tokens: 2345 },
+        ];
+        const sceneSpy = vi
+          .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+          .mockResolvedValue({
+            scenes: {
+              fast: [
+                { id: 'qwen3.8-max', thinking_strength: thinkingStrength },
+              ],
+            },
+            cached: false,
+          });
+        vi.mocked(
+          QwenSubscriptionSession.prototype.getModels,
+        ).mockResolvedValue({
+          models: ['qwen3.8-max'],
+          modelMetadata: [{ id: 'qwen3.8-max', thinkingStrength }],
+          cached: false,
+        });
+        try {
+          if (catalog === 'models') await config.refreshSubscriptionModels();
+          else await config.refreshSubscriptionScenes();
+          expect(config.getContentGeneratorConfig()).toBe(generation);
+          expect(
+            generation.reasoningSnapshot?.find(
+              (row) =>
+                row.id === 'qwen3.8-max' &&
+                row.authType === AuthType.QWEN_SUBSCRIPTION,
+            )?.reasoning,
+          ).toMatchObject({
+            efforts: ['high', 'low'],
+            defaultEffort: 'high',
+          });
+          expect(config.getReasoningSnapshot()).toBe(
+            generation.reasoningSnapshot,
+          );
+          expect(
+            config
+              .getReasoningSnapshot()
+              .find((row) => row.id === 'other-model')?.reasoning,
+          ).toBeUndefined();
+          expect(
+            originalSnapshot.find(
+              (row) =>
+                row.id === 'qwen3.8-max' &&
+                row.authType === AuthType.QWEN_SUBSCRIPTION,
+            )?.reasoning,
+          ).toBeUndefined();
+          expect(config.applyReasoningOverrides()).toBe(true);
+          expect(
+            config
+              .getReasoningSnapshot()
+              .find((row) => row.id === 'other-model')?.reasoning,
+          ).toMatchObject({ defaultEffort: 'high' });
+        } finally {
+          sceneSpy.mockRestore();
+        }
+      },
+    );
+
     it('reloads the catalog after the login identity changes', async () => {
       const config = await subscriptionConfig();
       vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
@@ -1483,16 +1569,33 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('does not bind a catalog to a login that changed during refresh', async () => {
+      const config = makeConfig({ model: 'qwen3.8-max' });
       vi.mocked(
         QwenSubscriptionSession.prototype.getModels,
       ).mockImplementationOnce(async () => {
         vi.mocked(
           QwenSubscriptionSession.prototype.getIdentity,
         ).mockReturnValue('account-b');
-        return { models: ['qwen3.8-max', 'qwen3.8-flash'], cached: false };
+        return { models: ['qwen3.8-max', 'old-account-only'], cached: false };
       });
-      const config = await subscriptionConfig();
+      await expect(
+        config.refreshAuth(AuthType.QWEN_SUBSCRIPTION),
+      ).rejects.toMatchObject({ code: 'session_changed' });
+      expect(
+        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+      ).toEqual([]);
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeUndefined();
+
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
       await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(config.getContentGeneratorConfig()?.model).toBe('qwen3.8-flash');
+      expect(
+        config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .map((model) => model.id),
+      ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
       expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
         2,
       );
@@ -7226,6 +7329,46 @@ describe('Server Config (config.ts)', () => {
       apiKeyEnv: IMAGE_KEY,
     });
     const dualRole = { supportsImageGeneration: true };
+
+    it('resolves only the explicitly selected subscription image route without envKey', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'getAllConfiguredModels').mockReturnValue([
+        {
+          id: 'shared-image',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+          label: 'Subscription',
+          imageOnly: true,
+          subscriptionScenes: ['image'],
+          subscriptionChatModel: false,
+        },
+        {
+          id: 'shared-image',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: IMAGE_URL,
+          registryBaseUrl: IMAGE_URL,
+          label: 'API Key',
+          imageOnly: true,
+          envKey: IMAGE_KEY,
+        },
+      ]);
+      expect(
+        config.resolveImageGenerationModel('shared-image'),
+      ).toBeUndefined();
+      expect(
+        config.resolveImageGenerationModel('qwen-subscription:shared-image'),
+      ).toEqual({
+        model: 'shared-image',
+        baseUrl: new URL('/api/v1', QWEN_SUBSCRIPTION_BASE_URL).href,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      });
+      expect(config.resolveImageGenerationModel(undefined)).toBeUndefined();
+      expect(
+        config.resolveImageGenerationModel(
+          'qwen-subscription:shared-image\0https://other.example/v1',
+        ),
+      ).toBeUndefined();
+    });
 
     it('registers image_gen when a dual-role model is selected', async () => {
       const config = await initConfig({

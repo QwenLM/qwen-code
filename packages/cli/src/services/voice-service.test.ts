@@ -57,6 +57,19 @@ function expectWorkspaceVoiceError(action: () => unknown, code: string): void {
 }
 
 describe('voice service', () => {
+  it.each(['openai:', 'qwen-subscription:'])(
+    'treats malformed selector %s as an unknown voice model',
+    (selector) => {
+      const settings = makeSettings({});
+      expectWorkspaceVoiceError(
+        () => validateWorkspaceVoiceConfig(settings, selector),
+        'unknown_voice_model',
+      );
+      expect(() => validateWorkspaceVoiceConfig(settings, selector)).toThrow(
+        expect.objectContaining({ status: 400 }),
+      );
+    },
+  );
   const originalDashscopeKey = process.env['DASHSCOPE_API_KEY'];
 
   afterEach(() => {
@@ -361,6 +374,21 @@ describe('voice service', () => {
       () => validateWorkspaceVoiceModel(settings, 'gpt-4o-mini'),
       'unsupported_voice_model',
     );
+
+    const candidates = listAvailableVoiceModels(settings);
+    expect(candidates).toHaveLength(2);
+    expect(candidates.map((model) => model.id)).toEqual([
+      'openai:qwen3-asr-flash\0https://dashscope.aliyuncs.com/compatible-mode/v1',
+      'openai:qwen3-asr-flash\0https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    ]);
+    for (const candidate of candidates) {
+      expect(validateWorkspaceVoiceModel(settings, candidate.id)).toMatchObject(
+        {
+          id: 'qwen3-asr-flash',
+          transport: 'qwen-asr-chat',
+        },
+      );
+    }
   });
 
   it('wraps invalid voice model configuration errors', () => {

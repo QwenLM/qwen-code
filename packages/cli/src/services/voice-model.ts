@@ -4,8 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType, type AvailableModel } from '@qwen-code/qwen-code-core';
+import type { AvailableModel } from '@qwen-code/qwen-code-core';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { resolveModelId } from '@qwen-code/qwen-code-core/utils/modelId.js';
+import { parseVisionModelSetting } from '@qwen-code/qwen-code-core/config/config.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { t } from '../i18n/index.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 
 export type VoiceTransport =
   | 'qwen-asr-chat'
@@ -15,7 +22,14 @@ export type VoiceTransport =
 
 /** Map a model id to the ASR transport it uses, or 'unsupported'. */
 export function resolveVoiceTransport(model: string): VoiceTransport {
-  const id = model.toLowerCase();
+  let selector;
+  try {
+    selector = resolveModelId(model);
+  } catch {
+    return 'unsupported';
+  }
+  if (selector?.authType === AuthType.QWEN_SUBSCRIPTION) return 'qwen-asr-chat';
+  const id = selector?.modelId.toLowerCase() ?? '';
   if (/^qwen3-asr-flash-realtime(?:-|$)/.test(id)) {
     return 'qwen-asr-realtime';
   }
@@ -28,14 +42,73 @@ export function resolveVoiceTransport(model: string): VoiceTransport {
   return 'unsupported';
 }
 
+export function findVoiceModels(
+  models: AvailableModel[],
+  setting: string,
+): AvailableModel[] {
+  const parsed = parseVisionModelSetting(setting);
+  let selector;
+  try {
+    selector = resolveModelId(parsed?.selector);
+  } catch {
+    return [];
+  }
+  if (!selector) return [];
+  return models.filter(
+    (model) =>
+      model.id === selector.modelId &&
+      (!selector.authType || model.authType === selector.authType) &&
+      (!parsed?.baseUrl || model.baseUrl === parsed.baseUrl),
+  );
+}
+
+export function getVoiceModelSelector(model: AvailableModel): string {
+  const selector = `${model.authType}:${model.id}`;
+  return model.authType !== AuthType.QWEN_SUBSCRIPTION && model.baseUrl
+    ? `${selector}\0${model.baseUrl}`
+    : selector;
+}
+
+export function assertVoiceModelSignedIn(setting: string): void {
+  let selector;
+  try {
+    selector = resolveModelId(setting);
+  } catch {
+    return;
+  }
+  if (
+    selector?.authType === AuthType.QWEN_SUBSCRIPTION &&
+    !new QwenSubscriptionSession().isSignedIn()
+  ) {
+    throw new SubscriptionOAuthError(
+      'session_changed',
+      401,
+      SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
+    );
+  }
+}
+
+export function resolveVoiceModelTransport(
+  model: AvailableModel,
+): VoiceTransport {
+  if (model.authType === AuthType.QWEN_SUBSCRIPTION) {
+    return model.subscriptionScenes?.includes('voice')
+      ? 'qwen-asr-chat'
+      : 'unsupported';
+  }
+  return resolveVoiceTransport(model.id);
+}
+
 /**
- * A model that can be used as a voice transcription provider: an OpenAI-compatible,
- * non-runtime model with a baseUrl. Transport-agnostic on purpose — the record-time
+ * A model that can be used as a voice transcription provider: an OpenAI-compatible
+ * or advertised subscription model with a baseUrl. Transport-agnostic — the record-time
  * config resolver also uses this and then enforces the exact baseUrl/transport rules.
  */
 export function isTranscribableVoiceModel(model: AvailableModel): boolean {
   return (
-    model.authType === AuthType.USE_OPENAI &&
+    (model.authType === AuthType.USE_OPENAI ||
+      (model.authType === AuthType.QWEN_SUBSCRIPTION &&
+        model.subscriptionScenes?.includes('voice') === true)) &&
     model.isRuntimeModel !== true &&
     model.imageOnly !== true &&
     typeof model.baseUrl === 'string' &&
@@ -52,7 +125,7 @@ export function isTranscribableVoiceModel(model: AvailableModel): boolean {
 export function isSelectableVoiceModel(model: AvailableModel): boolean {
   return (
     isTranscribableVoiceModel(model) &&
-    resolveVoiceTransport(model.id) !== 'unsupported'
+    resolveVoiceModelTransport(model) !== 'unsupported'
   );
 }
 
@@ -60,7 +133,7 @@ export function formatUnsupportedVoiceModelMessage(modelName: string): string {
   return t(
     "Voice model '{{modelName}}' cannot be used for transcription. Configure an OpenAI-compatible model with baseUrl in settings.modelProviders.",
     {
-      modelName,
+      modelName: formatAuxModelSelectorForDisplay(modelName),
     },
   );
 }

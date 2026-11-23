@@ -20,6 +20,7 @@ import {
   subscriptionModelUnavailable,
 } from '../qwen/subscription-models.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import { refreshModelCatalog } from '../models/model-catalog-refresh.js';
 import {
   captureReasoningSnapshot,
@@ -1884,7 +1885,8 @@ export type TerminalImageRenderSupport =
 export interface ImageGenerationConfig {
   model: string;
   baseUrl: string;
-  apiKeyEnv: string;
+  apiKeyEnv?: string;
+  authType?: AuthType.QWEN_SUBSCRIPTION;
 }
 
 function normalizeConfigOutputFormat(
@@ -6226,6 +6228,29 @@ export class Config {
     this.initialResolvedAuthType = undefined;
   }
 
+  private refreshSubscriptionReasoningSnapshot(): boolean {
+    const current = this.getReasoningSnapshot();
+    const pending = this.latestReasoningSnapshot;
+    const subscription = captureReasoningSnapshot(
+      this.getAllConfiguredModels().filter(
+        (model) => model.authType === AuthType.QWEN_SUBSCRIPTION,
+      ),
+    );
+    const merge = (snapshot: ReasoningSnapshot): ReasoningSnapshot =>
+      Object.freeze([
+        ...snapshot.filter(
+          (row) => row.authType !== AuthType.QWEN_SUBSCRIPTION,
+        ),
+        ...subscription,
+      ]);
+    this.latestReasoningSnapshot = merge(current);
+    const changed = this.applyReasoningOverrides();
+    this.latestReasoningSnapshot = pending
+      ? merge(pending)
+      : this.reasoningSnapshot;
+    return changed;
+  }
+
   async refreshSubscriptionModels(signal?: AbortSignal) {
     const session = new QwenSubscriptionSession();
     const identity = session.getIdentity();
@@ -6240,7 +6265,18 @@ export class Config {
     const previous = this.warnings.indexOf(SUBSCRIPTION_MODELS_CACHED);
     if (previous !== -1) this.warnings.splice(previous, 1);
     if (result.cached) this.warnings.push(SUBSCRIPTION_MODELS_CACHED);
-    this.notifyModelChangeListeners();
+    if (!this.refreshSubscriptionReasoningSnapshot())
+      this.notifyModelChangeListeners();
+    return result;
+  }
+
+  async refreshSubscriptionScenes(signal?: AbortSignal) {
+    const result = await this.modelsConfig.refreshSubscriptionScenes(
+      signal,
+      this.getCliVersion(),
+    );
+    if (!this.refreshSubscriptionReasoningSnapshot())
+      this.notifyModelChangeListeners();
     return result;
   }
 
@@ -6300,6 +6336,7 @@ export class Config {
         : {
             models: this.modelsConfig
               .getAvailableModelsForAuthType(authMethod)
+              .filter((model) => model.subscriptionChatModel !== false)
               .map((model) => model.id),
           };
       const selected = this.modelsConfig.getModel();
@@ -11209,6 +11246,19 @@ export class Config {
     }
     if (!selector) return undefined;
 
+    if (
+      selector.authType === AuthType.QWEN_SUBSCRIPTION &&
+      (!parsedSetting.baseUrl ||
+        parsedSetting.baseUrl === QWEN_SUBSCRIPTION_BASE_URL) &&
+      !new QwenSubscriptionSession().isSignedIn()
+    ) {
+      return {
+        model: selector.modelId,
+        baseUrl: new URL('/api/v1', QWEN_SUBSCRIPTION_BASE_URL).href,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+    }
+
     const routeMatches = this.getAllConfiguredModels().filter(
       (model) =>
         isImageGenerationCapable(model) &&
@@ -11221,6 +11271,14 @@ export class Config {
     if (routeMatches.length !== 1) return undefined;
 
     const match = routeMatches[0]!;
+    if (match.authType === AuthType.QWEN_SUBSCRIPTION) {
+      if (!match.subscriptionScenes?.includes('image')) return undefined;
+      return {
+        model: match.id,
+        baseUrl: new URL('/api/v1', QWEN_SUBSCRIPTION_BASE_URL).href,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      };
+    }
     const apiKeyEnv = match.envKey?.trim();
     const configuredBaseUrl = match.registryBaseUrl?.trim();
     if (!apiKeyEnv || !configuredBaseUrl) return undefined;

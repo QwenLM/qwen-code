@@ -120,11 +120,19 @@ export function ModelDialog({
   const isFastMode = mode === 'fast';
   const isVoiceMode = mode === 'voice';
   const isVisionMode = mode === 'vision';
-  const currentIdx = availableModels.findIndex((m) => m.id === currentModel);
+  const currentIdx = availableModels.findIndex(
+    (m) =>
+      m.id === currentModel ||
+      (isVoiceMode &&
+        currentModel?.split('\0')[0] === `${getAuthType(m)}:${m.id}` &&
+        (!currentModel.includes('\0') ||
+          currentModel.split('\0')[1] === m.baseUrl)),
+  );
   const initialIndex =
     currentIdx >= 0
       ? currentIdx
-      : (isFastMode || mode === 'advisor' || mode === 'image') && currentModel
+      : (isFastMode || isVoiceMode || mode === 'advisor' || mode === 'image') &&
+          currentModel
         ? -1
         : 0;
   const [activeIndex, setActiveIndex] = useState(initialIndex);
@@ -256,7 +264,8 @@ export function ModelDialog({
               label={t('model.contextWindow')}
               value={formatContextWindow(selectedModel.contextWindow, t)}
             />
-            {getAuthType(selectedModel) !== 'qwen-oauth' ? (
+            {getAuthType(selectedModel) !== 'qwen-oauth' &&
+            getAuthType(selectedModel) !== 'qwen-subscription' ? (
               <>
                 <DetailRow
                   label={t('model.baseUrl')}

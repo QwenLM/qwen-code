@@ -10,6 +10,7 @@ import path from 'node:path';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
+import { AuthType } from '../utils/auth-type.js';
 import {
   generateImage as generateConfiguredImage,
   type GenerateImage,
@@ -73,8 +74,10 @@ class ImageGenInvocation extends BaseToolInvocation<
         'Image generation is not configured with a valid endpoint.',
       );
     }
-    const apiKey = process.env[imageConfig.apiKeyEnv]?.trim();
-    if (!apiKey) {
+    const apiKey = imageConfig.apiKeyEnv
+      ? process.env[imageConfig.apiKeyEnv]?.trim()
+      : undefined;
+    if (!apiKey && imageConfig.authType !== AuthType.QWEN_SUBSCRIPTION) {
       return failureResult(
         `Image generation requires the ${imageConfig.apiKeyEnv} environment variable.`,
       );
@@ -97,7 +100,8 @@ class ImageGenInvocation extends BaseToolInvocation<
       signal.throwIfAborted();
       const generated = await this.generateImage({
         baseUrl: imageConfig.baseUrl,
-        apiKey,
+        apiKey: apiKey ?? '',
+        ...(imageConfig.authType && { authType: imageConfig.authType }),
         model: imageConfig.model,
         prompt: this.params.prompt,
         size: this.params.size,

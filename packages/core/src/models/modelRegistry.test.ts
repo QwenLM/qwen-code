@@ -1107,6 +1107,177 @@ describe('providerProtocol mapping (custom provider ids)', () => {
 describe('Qwen Subscription model registry', () => {
   afterEach(() => vi.unstubAllEnvs());
 
+  it('derives reasoning tiers from catalog metadata and keeps budgets only for display', () => {
+    const registry = new ModelRegistry();
+    const thinkingStrength = [
+      { level: 'low' as const, budget_tokens: 4096 },
+      { level: 'medium' as const, budget_tokens: 8192 },
+    ];
+    registry.setSubscriptionModels(
+      ['chat-model', 'legacy'],
+      [{ id: 'chat-model', thinkingStrength }],
+    );
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat-model'),
+    ).toMatchObject({
+      thinkingStrength,
+      capabilities: {
+        reasoning: { efforts: ['low', 'medium'], defaultEffort: 'medium' },
+      },
+    });
+    registry.setSubscriptionScenes({
+      fast: [
+        {
+          id: 'chat-model',
+          thinking_strength: [{ level: 'high', budget_tokens: 16384 }],
+        },
+        {
+          id: 'scene-model',
+          thinking_strength: [{ level: 'high', budget_tokens: 12288 }],
+        },
+      ],
+    });
+    const models = registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION);
+    expect(models.find(({ id }) => id === 'chat-model')).toMatchObject({
+      thinkingStrength: [{ level: 'high', budget_tokens: 16384 }],
+      capabilities: {
+        reasoning: {
+          thinking: true,
+          disableField: 'enable_thinking',
+          efforts: ['high'],
+          defaultEffort: 'high',
+        },
+      },
+    });
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat-model')
+        ?.generationConfig.reasoning,
+    ).toBeUndefined();
+    expect(
+      models.find(({ id }) => id === 'chat-model')?.capabilities?.reasoning,
+    ).not.toHaveProperty('budgetTokens');
+    expect(
+      models.find(({ id }) => id === 'legacy')?.capabilities?.reasoning,
+    ).toBeUndefined();
+    expect(models.find(({ id }) => id === 'scene-model')).toMatchObject({
+      thinkingStrength: [{ level: 'high', budget_tokens: 12288 }],
+      capabilities: { reasoning: { efforts: ['high'], defaultEffort: 'high' } },
+    });
+
+    registry.setSubscriptionModels(['chat-model', 'legacy']);
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat-model')?.capabilities
+        .reasoning,
+    ).toBeUndefined();
+    registry.setSubscriptionScenes({});
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'chat-model')?.capabilities
+        .reasoning,
+    ).toBeUndefined();
+  });
+
+  it('uses a later scene declaration when the same response omits thinking in another scene', () => {
+    const registry = new ModelRegistry();
+    registry.setSubscriptionModels(
+      ['shared'],
+      [
+        {
+          id: 'shared',
+          thinkingStrength: [{ level: 'low', budget_tokens: 1 }],
+        },
+      ],
+    );
+    registry.setSubscriptionScenes({
+      fast: [{ id: 'shared' }],
+      vision: [
+        {
+          id: 'shared',
+          thinking_strength: [{ level: 'high', budget_tokens: 2 }],
+        },
+      ],
+    });
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'shared')?.capabilities
+        .reasoning,
+    ).toMatchObject({ efforts: ['high'] });
+    registry.setSubscriptionScenes({ fast: [{ id: 'shared' }] });
+    expect(
+      registry.getModel(AuthType.QWEN_SUBSCRIPTION, 'shared')?.capabilities
+        .reasoning,
+    ).toBeUndefined();
+  });
+
+  it('merges scene membership without duplicating chat rows or exposing media as defaults', () => {
+    const registry = new ModelRegistry();
+    registry.setSubscriptionModels(['chat-model']);
+    registry.setSubscriptionScenes({
+      fast: [{ id: 'shared-model', display_name: 'Shared' }],
+      compaction: [{ id: 'shared-model' }, { id: 'chat-model' }],
+      image: [{ id: 'image-model', description: 'Image description' }],
+      voice: [{ id: 'voice-model' }],
+    });
+    const models = registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION);
+    expect(models.map((model) => model.id)).toEqual([
+      'chat-model',
+      'shared-model',
+      'image-model',
+      'voice-model',
+    ]);
+    expect(models[0]).toMatchObject({
+      subscriptionChatModel: true,
+      subscriptionScenes: ['compaction'],
+    });
+    expect(models[1]).toMatchObject({
+      label: 'Shared',
+      subscriptionChatModel: false,
+      subscriptionScenes: ['fast', 'compaction'],
+    });
+    expect(models[2]).toMatchObject({
+      imageOnly: true,
+      supportsImageGeneration: true,
+      description: 'Image description',
+    });
+    expect(models[3]).toMatchObject({
+      voiceOnly: true,
+      subscriptionChatModel: false,
+    });
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION)?.id,
+    ).toBe('chat-model');
+    registry.setSubscriptionModels([]);
+    expect(
+      registry.getDefaultModelForAuthType(AuthType.QWEN_SUBSCRIPTION),
+    ).toBeUndefined();
+    expect(
+      registry
+        .getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+        .map((model) => model.id),
+    ).toContain('image-model');
+    registry.setSubscriptionScenes({});
+    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual(
+      [],
+    );
+  });
+
+  it('preserves chat models and metadata when a scene catalog is removed', () => {
+    const registry = new ModelRegistry();
+    registry.setSubscriptionModels(
+      ['chat-model'],
+      [{ id: 'chat-model', name: 'Chat', description: 'From server' }],
+    );
+    registry.setSubscriptionScenes({ image: [{ id: 'image-model' }] });
+    registry.setSubscriptionScenes({});
+    expect(registry.getModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)).toEqual([
+      expect.objectContaining({
+        id: 'chat-model',
+        label: 'Chat',
+        description: 'From server',
+        subscriptionScenes: [],
+        subscriptionChatModel: true,
+      }),
+    ]);
+  });
+
   it('keeps server order and resolves subscription model modalities', () => {
     vi.stubEnv('QWEN_CODE_MODELS_DEV', 'off');
     const registry = new ModelRegistry();

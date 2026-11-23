@@ -140,6 +140,38 @@ function stubConfig(overrides: Partial<Config>): Config {
 }
 
 describe('buildModelEntries', () => {
+  it('only shows subscription models advertised for the requested scene', () => {
+    const catalog: AvailableModel[] = [
+      {
+        id: 'chat',
+        label: 'Chat',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionChatModel: true,
+      },
+      {
+        id: 'audio',
+        label: 'Audio',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionChatModel: false,
+        subscriptionScenes: ['voice'],
+      },
+      {
+        id: 'both',
+        label: 'Both',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionChatModel: true,
+        subscriptionScenes: ['voice'],
+      },
+    ];
+    const config = stubConfig({ getAllConfiguredModels: () => catalog });
+    expect(
+      buildModelEntries(config, 'primary', true).map((m) => m.modelId),
+    ).toEqual(['chat', 'both']);
+    expect(
+      buildModelEntries(config, 'voice', true).map((m) => m.modelId),
+    ).toEqual(['audio', 'both']);
+    expect(buildModelEntries(config, 'fast', true)).toEqual([]);
+  });
   it('keeps subscription models in gateway order in the primary picker', () => {
     const catalog = [
       { id: 'api', label: 'API', authType: AuthType.USE_OPENAI },
@@ -160,7 +192,7 @@ describe('buildModelEntries', () => {
       buildModelEntries(config, 'primary').map(({ label }) => label),
     ).toEqual(['Qwen4', 'Flash', 'Max', 'API', 'API Max']);
     expect(buildModelEntries(config, 'fast').map(({ label }) => label)).toEqual(
-      catalog.map(({ label }) => label),
+      ['API', 'API Max'],
     );
   });
 
@@ -1031,6 +1063,45 @@ describe('applyModelSelection', () => {
       expect(outcome.ok).toBe(true);
     });
 
+    it('image mode persists the account route without a gateway endpoint', async () => {
+      const selector = 'qwen-subscription:qwen-image-3.0';
+      const setImageModel = vi.fn(async () => {});
+      const config = resolvedConfig({
+        setImageModel,
+        resolveImageGenerationModel: ((candidate: string) =>
+          candidate === selector
+            ? {
+                model: 'qwen-image-3.0',
+                baseUrl: 'https://gateway.example/v1',
+                authType: AuthType.QWEN_SUBSCRIPTION,
+              }
+            : undefined) as Config['resolveImageGenerationModel'],
+      });
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({
+          id: 'qwen-image-3.0',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          baseUrl: 'https://gateway.example/v1',
+          subscriptionScenes: ['image'],
+        }),
+      ];
+      const outcome = await applyModelSelection({
+        config,
+        settings,
+        entries,
+        mode: 'image',
+        selectionKey: entries[0].key,
+      });
+      expect(outcome.ok).toBe(true);
+      expect(setImageModel).toHaveBeenCalledWith(selector);
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'imageModel',
+        value: selector,
+      });
+    });
+
     it('image mode applies the runtime image model before persisting imageModel', async () => {
       const setImageModel = vi.fn(async () => {});
       const switchModel = vi.fn(async () => {});
@@ -1120,7 +1191,7 @@ describe('applyModelSelection', () => {
       expect(written).toContainEqual({
         scope: SettingScope.User,
         key: 'voiceModel',
-        value: 'qwen3-asr-flash',
+        value: 'openai:qwen3-asr-flash\0https://asr.example/v1',
       });
       expect(
         written.find((write) => write.key === 'model.name'),
@@ -1150,7 +1221,7 @@ describe('applyModelSelection', () => {
       }
     });
 
-    it('voice mode rejects duplicate model ids across providers', async () => {
+    it('voice mode pins the selected endpoint with duplicate model ids', async () => {
       const config = resolvedConfig({});
       const { settings, written } = createFakeSettings();
       const entries = [
@@ -1172,11 +1243,62 @@ describe('applyModelSelection', () => {
         selectionKey: entries[0].key,
       });
 
-      expect(written).toEqual([]);
-      expect(outcome.ok).toBe(false);
-      if (!outcome.ok) {
-        expect(outcome.error).toContain('configured more than once');
-      }
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'voiceModel',
+        value: 'openai:qwen3-asr-flash\0https://asr-one.example/v1',
+      });
+      expect(outcome.ok).toBe(true);
+    });
+
+    it('voice mode persists a subscription selector without its endpoint', async () => {
+      const { settings, written } = createFakeSettings();
+      const entries = [
+        modelRow({
+          id: 'qwen-audio-3.0-asr-flash',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          baseUrl: 'https://gateway.example/v1',
+          subscriptionScenes: ['voice'],
+        }),
+      ];
+      const outcome = await applyModelSelection({
+        config: resolvedConfig({}),
+        settings,
+        entries,
+        mode: 'voice',
+        selectionKey: entries[0].key,
+      });
+      expect(outcome.ok).toBe(true);
+      expect(written).toContainEqual({
+        scope: SettingScope.User,
+        key: 'voiceModel',
+        value: 'qwen-subscription:qwen-audio-3.0-asr-flash',
+      });
+    });
+
+    it('voice mode strips private endpoints from workspace settings', async () => {
+      const { settings, written } = createFakeSettings({ isTrusted: true });
+      const entries = [
+        modelRow({
+          id: 'qwen3-asr-flash',
+          baseUrl: 'https://user:secret@asr.example/v1',
+        }),
+      ];
+      const outcome = await applyModelSelection({
+        config: resolvedConfig({}),
+        settings,
+        entries,
+        mode: 'voice',
+        selectionKey: entries[0].key,
+        persistScope: 'workspace',
+      });
+      expect(outcome.ok).toBe(true);
+      expect(written).toContainEqual({
+        scope: SettingScope.Workspace,
+        key: 'voiceModel',
+        value: 'openai:qwen3-asr-flash',
+      });
+      expect(JSON.stringify(outcome)).not.toContain('secret');
     });
   });
 });
@@ -1764,6 +1886,42 @@ describe('applyMcpServerAction (real server actions)', () => {
 });
 
 describe('computeModelDialogInitialKey (/model opens on the current model)', () => {
+  it.each([
+    ['openai:shared\0https://second.example/v1', 'second'],
+    ['qwen-subscription:shared', 'subscription'],
+    ['openai:shared\0https://gone.example/v1', undefined],
+    ['shared', undefined],
+  ])(
+    'matches voice routes without falling back for %s',
+    (voiceModel, expected) => {
+      const entries = [
+        {
+          key: 'first',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://first.example/v1',
+        },
+        {
+          key: 'second',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://second.example/v1',
+        },
+        { key: 'subscription', authType: AuthType.QWEN_SUBSCRIPTION },
+      ].map((e) => ({
+        ...e,
+        value: e.key,
+        label: 'Shared',
+        modelId: 'shared',
+      }));
+      expect(
+        computeModelDialogInitialKey({
+          config: stubConfig({}),
+          settings: { merged: { voiceModel } } as unknown as LoadedSettings,
+          entries,
+          mode: 'voice',
+        }),
+      ).toBe(expected);
+    },
+  );
   function entry(overrides: Partial<OpenTuiModelEntry>): OpenTuiModelEntry {
     return {
       key: overrides.key ?? 'key',

@@ -41,6 +41,7 @@
 export const AUX_MODEL_SELECTOR_SETTING_KEYS: ReadonlySet<string> = new Set([
   'visionModel',
   'imageModel',
+  'voiceModel',
   'advisorModel',
   'fastModel',
   'compactionModel',

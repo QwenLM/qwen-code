@@ -5,6 +5,8 @@
  */
 
 import { isPrivateHost } from '../utils/fetch.js';
+import { AuthType } from '../utils/auth-type.js';
+import { fetchSubscriptionInference } from '../qwen/subscription-request.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   resolveNetworkTarget,
@@ -29,6 +31,7 @@ class ResponseSizeLimitError extends Error {}
 export interface ImageGenerationRequest {
   baseUrl: string;
   apiKey: string;
+  authType?: AuthType.QWEN_SUBSCRIPTION;
   model: string;
   prompt: string;
   size?: string;
@@ -79,7 +82,10 @@ export async function generateImage(
       'Image generation baseUrl must be a valid HTTPS URL without credentials, query, or fragment.',
     );
   }
-  if (isMiniMaxImageGenerationBaseUrl(baseUrl)) {
+  if (
+    request.authType !== AuthType.QWEN_SUBSCRIPTION &&
+    isMiniMaxImageGenerationBaseUrl(baseUrl)
+  ) {
     return generateMiniMaxImage({ ...request, baseUrl, fetchFn });
   }
   const generationUrl = baseUrl.endsWith(
@@ -98,7 +104,7 @@ export async function generateImage(
 
   let response: Response;
   try {
-    response = await fetchFn(generationUrl, {
+    const init: RequestInit = {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${request.apiKey}`,
@@ -118,7 +124,11 @@ export async function generateImage(
       }),
       redirect: 'error',
       signal: combineWithTimeout(request.signal, GENERATION_TIMEOUT_MS),
-    });
+    };
+    response =
+      request.authType === AuthType.QWEN_SUBSCRIPTION
+        ? await fetchSubscriptionInference('image', init, fetchFn)
+        : await fetchFn(generationUrl, init);
   } catch (error) {
     throw new Error(
       `Image generation request failed: ${getErrorMessage(error)}`,

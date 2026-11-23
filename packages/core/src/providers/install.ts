@@ -14,7 +14,6 @@ import {
   tryResolveModelProtocol,
   resolveModelSelectionAuthType,
 } from '../models/modelRegistry.js';
-import { ModelsConfig } from '../models/modelsConfig.js';
 import type {
   ModelProvidersConfig,
   ProviderProtocolConfig,
@@ -291,63 +290,6 @@ export async function applyProviderInstallPlan(
           : removesService
             ? 'This install would remove existing service models. Include them in the provider selection, or add the conversation model with Custom Provider.'
             : 'This install would replace a model configured for another purpose. Use a different model ID or endpoint.',
-        'modelPurpose',
-        plan.authType,
-      );
-    }
-  }
-
-  const voiceIds = new Set(
-    [
-      ...Object.values(previousRuntimeProviders).flatMap((models) =>
-        Array.isArray(models) ? models : [],
-      ),
-      ...serviceOnly,
-    ]
-      .filter((model) => model?.voiceOnly)
-      .map((model) => model.id),
-  );
-  const selectedVoice = settings.getValue('voiceModel');
-  if (typeof selectedVoice === 'string' && selectedVoice)
-    voiceIds.add(selectedVoice);
-  const changedVoiceIds = [...voiceIds].filter((id) =>
-    plan.modelProviders?.some((patch) =>
-      patch.models.some((model) => model.id === id),
-    ),
-  );
-  if (changedVoiceIds.length) {
-    let prospective = previousRuntimeProviders;
-    for (const patch of plan.modelProviders ?? []) {
-      prospective = applyModelProvidersPatch(prospective, patch, mapping);
-    }
-    // The registry constructor validates every entry it is handed, so a
-    // hand-edited invalid `wireApi` in a bucket this plan never touches would
-    // refuse the install with a bare Error the daemon cannot map to
-    // `model_purpose_conflict`. Drop only the entries whose protocol does not
-    // resolve: the probe counts a voice id at another endpoint, so buckets
-    // themselves must stay.
-    const configured = new ModelsConfig({
-      modelProvidersConfig: Object.fromEntries(
-        Object.entries(prospective).map(([providerId, models]) => [
-          providerId,
-          Array.isArray(models)
-            ? models.filter(
-                (model) =>
-                  tryResolveModelProtocol(providerId, model, mapping) !==
-                  undefined,
-              )
-            : models,
-        ]),
-      ),
-      providerProtocolConfig: mapping,
-    }).getAllConfiguredModels();
-    if (
-      changedVoiceIds.some(
-        (id) => configured.filter((entry) => entry.id === id).length > 1,
-      )
-    ) {
-      throw new ProviderInstallError(
-        'A voice model with this ID is already configured at another endpoint. Edit that model or use a different model ID.',
         'modelPurpose',
         plan.authType,
       );

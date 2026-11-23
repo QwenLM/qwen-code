@@ -6,7 +6,9 @@
 
 import type { IncomingMessage } from 'node:http';
 import type { RawData, WebSocket } from 'ws';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   loadDaemonVoiceContext,
   type DaemonVoiceContext,
@@ -129,6 +131,7 @@ function defaultTranscribe(
     debugLogger.debug(
       `[voice-ws] batch transcription error: ${errMessage(error)}`,
     );
+    if (error instanceof SubscriptionOAuthError) throw error;
     throw new Error(GENERIC_TRANSCRIPTION_ERROR);
   });
 }
@@ -154,6 +157,8 @@ function voiceLeaseCloseReason(signal: AbortSignal): string {
 }
 
 function voiceConfigErrorMessage(error: unknown): string {
+  if (error instanceof SubscriptionOAuthError)
+    return subscriptionErrorMessage(error);
   const message = errMessage(error);
   return message === NO_VOICE_MODEL_ERROR
     ? message
@@ -509,7 +514,7 @@ export function createVoiceWsConnectionHandler(
         })
         .catch((error: unknown) => {
           debugLogger.debug(`[voice-ws] ${errMessage(error)}`);
-          fail(GENERIC_TRANSCRIPTION_ERROR);
+          fail(voiceConfigErrorMessage(error));
           releaseSlotWhenIdle();
         });
     });

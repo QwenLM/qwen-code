@@ -49809,8 +49809,10 @@ describe('App session callbacks', () => {
 
   it('opens a settings-launched voice picker allowed by the allowlist across rerenders', async () => {
     const { voiceStatus, voiceResult } = armVoiceWorkspacePicker();
+    const onToast = vi.fn();
     const { container, rerender } = renderApp({
       settings: { includeItems: ['setting:voice-model'] },
+      onToast,
     });
     await flush();
     testState.prompt = '/settings';
@@ -49823,11 +49825,21 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
     expect(qualifiedWorkspaceVoice).toHaveBeenCalledOnce();
+    expect(qualifiedWorkspaceVoice).toHaveBeenCalledWith(undefined, {
+      refreshModels: true,
+    });
     await act(async () => {
-      voiceResult.resolve(voiceStatus);
+      voiceResult.resolve({
+        ...voiceStatus,
+        modelCatalogWarning: 'Using cached account models',
+      });
       await Promise.resolve();
     });
     await flush();
+    expect(onToast).toHaveBeenCalledWith(
+      'warning',
+      'Using cached account models',
+    );
     expect(
       container.querySelector('[data-testid="model-select"]'),
     ).not.toBeNull();
@@ -50343,6 +50355,62 @@ describe('App session callbacks', () => {
     qualifiedWorkspaceVoice.mockReturnValue(voiceResult.promise);
     return { voiceStatus, voiceResult };
   }
+
+  it('reports unavailable direct voice selection without fetching or writing', async () => {
+    armVoiceWorkspacePicker();
+    mockWorkspace.capabilities!.features = [];
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    testState.prompt = '/model --voice qwen-subscription:server-asr';
+    await clickSubmit(container);
+    await flush();
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining(
+        'Voice model settings are unavailable for this workspace.',
+      ),
+    );
+    expect(qualifiedWorkspaceVoice).not.toHaveBeenCalled();
+    expect(rootWorkspaceVoice).not.toHaveBeenCalled();
+    expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+    expect(settingsSetValue).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'refreshes models before a direct voice selection and guards workspace changes (%s)',
+    async (changeWorkspace) => {
+      const { voiceStatus, voiceResult } = armVoiceWorkspacePicker();
+      const { container, rerender } = renderApp();
+      await flush();
+      testState.prompt = '/model --voice qwen-subscription:server-asr';
+      await clickSubmit(container);
+      expect(qualifiedWorkspaceVoice).toHaveBeenCalledWith(undefined, {
+        refreshModels: true,
+      });
+      expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+      if (changeWorkspace) {
+        mockConnection.workspaceCwd = '/work/primary';
+        rerender();
+        await flush();
+      }
+      await act(async () => {
+        voiceResult.resolve(voiceStatus);
+        await Promise.resolve();
+      });
+      await flush();
+      if (changeWorkspace) {
+        expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
+      } else {
+        expect(qualifiedSetWorkspaceSetting).toHaveBeenCalledWith(
+          'workspace',
+          'voiceModel',
+          'qwen-subscription:server-asr',
+        );
+      }
+      expect(rootWorkspaceVoice).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['exclusion', 'allowlist'] as const)(
     'closes a settings fallbacks dialog when its item is hidden (%s)',

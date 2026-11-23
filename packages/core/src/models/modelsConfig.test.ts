@@ -16,8 +16,73 @@ import {
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
+import { readCachedSubscriptionCatalog } from '../qwen/subscription-models.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
 
 describe('ModelsConfig', () => {
+  it.each(['models', 'scenes'] as const)(
+    'rejects a late %s refresh after account identity changes',
+    async (catalog) => {
+      const config = new ModelsConfig();
+      vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+        .mockReturnValueOnce('old-account')
+        .mockReturnValue('new-account');
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getModels',
+      ).mockResolvedValue({ models: ['old-chat'], cached: false });
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getScenes',
+      ).mockResolvedValue({
+        scenes: { image: [{ id: 'old-image' }] },
+        cached: false,
+      });
+      try {
+        const pending =
+          catalog === 'models'
+            ? config.refreshSubscriptionModels()
+            : config.refreshSubscriptionScenes();
+        await expect(pending).rejects.toMatchObject({
+          code: 'session_changed',
+        });
+        expect(
+          config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+        ).toEqual([]);
+      } finally {
+        vi.restoreAllMocks();
+      }
+    },
+  );
+  it('keeps scene-only subscription models out of primary selection and auth activation', async () => {
+    vi.mocked(readCachedSubscriptionCatalog).mockReturnValueOnce({
+      models: ['chat-model'],
+      scenes: {
+        fast: [{ id: 'aux-model' }],
+        compaction: [{ id: 'aux-model' }],
+        voice: [{ id: 'asr' }],
+      },
+    });
+    const models = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_SUBSCRIPTION,
+    });
+    expect(
+      models.getAllConfiguredModels().some((model) => model.id === 'aux-model'),
+    ).toBe(true);
+    expect(models.getAvailableModels().map((model) => model.id)).toEqual([
+      'chat-model',
+    ]);
+    await expect(
+      models.switchModel(AuthType.QWEN_SUBSCRIPTION, 'aux-model'),
+    ).rejects.toThrow('not found');
+    expect(() =>
+      models.syncAfterAuthRefresh(AuthType.QWEN_SUBSCRIPTION, 'aux-model'),
+    ).toThrow('not found');
+    models.clearAuth();
+    expect(
+      models.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+    ).toEqual([]);
+  });
   function deepClone<T>(value: T): T {
     if (value === null || typeof value !== 'object') return value;
     if (Array.isArray(value)) return value.map((v) => deepClone(v)) as T;

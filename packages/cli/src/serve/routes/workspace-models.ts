@@ -561,6 +561,7 @@ export function registerWorkspaceModelsRoutes(
             });
           }
           for (const key of [
+            'voiceModel',
             'imageModel',
             'advisorModel',
             'visionModel',
@@ -581,6 +582,12 @@ export function registerWorkspaceModelsRoutes(
             const endpoint =
               separator < 0 ? undefined : value.slice(separator + 1);
             if (
+              key === 'voiceModel' &&
+              !selector?.authType &&
+              endpoint === undefined
+            )
+              continue;
+            if (
               selector?.modelId === removedModelId &&
               (!selector.authType || selector.authType === parsed.authType) &&
               (endpoint === undefined || endpoint === (removedBaseUrl ?? '')) &&
@@ -589,19 +596,21 @@ export function registerWorkspaceModelsRoutes(
                   (!selector.authType || authType === selector.authType) &&
                   (endpoint === undefined ||
                     endpoint === (model.baseUrl ?? '')) &&
-                  (key === 'imageModel'
-                    ? isImageModelConfiguration(model)
-                    : key === 'fastModel'
-                      ? !model.imageOnly &&
-                        !model.voiceOnly &&
-                        !model.realtimeOnly &&
-                        !model.visionOnly
-                      : key === 'visionModel'
+                  (key === 'voiceModel'
+                    ? true
+                    : key === 'imageModel'
+                      ? isImageModelConfiguration(model)
+                      : key === 'fastModel'
                         ? !model.imageOnly &&
                           !model.voiceOnly &&
                           !model.realtimeOnly &&
-                          !model.fastOnly
-                        : isConversationModelConfiguration(model)),
+                          !model.visionOnly
+                        : key === 'visionModel'
+                          ? !model.imageOnly &&
+                            !model.voiceOnly &&
+                            !model.realtimeOnly &&
+                            !model.fastOnly
+                          : isConversationModelConfiguration(model)),
               )
             ) {
               writes.push({ scope: selectionScope, key, value: '' });

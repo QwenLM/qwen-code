@@ -12,6 +12,8 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER } from '../qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { readCachedSubscriptionCatalog } from '../qwen/subscription-models.js';
+import { SubscriptionOAuthError } from '../qwen/subscription-oauth-client.js';
 import { normalizeOpenAiWireBaseUrl } from '../core/openaiContentGenerator/constants.js';
 import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
@@ -285,6 +287,7 @@ export class ModelsConfig {
     this.strictModelProviderSelection = false;
     this.requireCachedQwenCredentialsOnce = false;
     this.modelRegistry.setSubscriptionModels([]);
+    this.modelRegistry.setSubscriptionScenes(undefined);
   }
 
   getCurrentRegistryBaseUrl(): string | null | undefined {
@@ -303,9 +306,13 @@ export class ModelsConfig {
     signal?: AbortSignal,
     cliVersion?: string,
   ): Promise<{ models: string[]; cached: boolean }> {
-    const result = await new QwenSubscriptionSession().getModels(
-      signal,
-      cliVersion,
+    const session = new QwenSubscriptionSession();
+    const identity = session.getIdentity();
+    const result = await session.getModels(signal, cliVersion).finally(() => {
+      this.assertSubscriptionIdentity(session, identity);
+    });
+    this.modelRegistry.setSubscriptionScenes(
+      readCachedSubscriptionCatalog().scenes,
     );
     this.modelRegistry.setSubscriptionModels(
       result.models,
@@ -314,12 +321,37 @@ export class ModelsConfig {
     return result;
   }
 
+  async refreshSubscriptionScenes(signal?: AbortSignal, cliVersion?: string) {
+    const session = new QwenSubscriptionSession();
+    const identity = session.getIdentity();
+    const result = await session.getScenes(signal, cliVersion).finally(() => {
+      this.assertSubscriptionIdentity(session, identity);
+    });
+    const { models, modelMetadata } = readCachedSubscriptionCatalog();
+    this.modelRegistry.setSubscriptionModels(models, modelMetadata);
+    this.modelRegistry.setSubscriptionScenes(result.scenes);
+    return result;
+  }
+
+  private assertSubscriptionIdentity(
+    session: QwenSubscriptionSession,
+    identity: string | undefined,
+  ): void {
+    if (session.getIdentity() !== identity) {
+      this.modelRegistry.setSubscriptionModels([]);
+      this.modelRegistry.setSubscriptionScenes(undefined);
+      throw new SubscriptionOAuthError('session_changed');
+    }
+  }
+
   /**
    * Get available models for current authType
    */
   getAvailableModels(): AvailableModel[] {
     return this.currentAuthType
-      ? this.modelRegistry.getModelsForAuthType(this.currentAuthType)
+      ? this.modelRegistry
+          .getModelsForAuthType(this.currentAuthType)
+          .filter((model) => model.subscriptionChatModel !== false)
       : [];
   }
 
@@ -573,7 +605,7 @@ export class ModelsConfig {
         modelId,
         options?.baseUrl,
       );
-      if (!model) {
+      if (!model || model.subscriptionChatModel === false) {
         throw new Error(
           `Model '${modelId}' not found for authType '${authType}'`,
         );
@@ -1145,6 +1177,11 @@ export class ModelsConfig {
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
+    if (resolved?.subscriptionChatModel === false) {
+      throw new Error(
+        `Model '${modelId}' not found for authType '${authType}'`,
+      );
+    }
     if (wasRegistered && !resolved) {
       throw new Error(
         `Model '${modelId}' is no longer configured for authType '${authType}'. Select an available model.`,

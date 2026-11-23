@@ -19,6 +19,7 @@ import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ImageGenTool } from './image-gen.js';
 import { ToolErrorType } from './tool-error.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const workspaces: string[] = [];
@@ -55,6 +56,31 @@ afterEach(async () => {
 });
 
 describe('ImageGenTool', () => {
+  it('executes a subscription route without an API key environment variable', async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));
+    workspaces.push(workspace);
+    const config = createConfig(workspace, false);
+    config.getImageGenerationConfig = () => ({
+      model: 'qwen-image-3.0',
+      baseUrl: 'https://api.qwen.ai/api/v1',
+      authType: AuthType.QWEN_SUBSCRIPTION,
+    });
+    const generate = vi
+      .fn()
+      .mockResolvedValue({ bytes: PNG_BYTES, mimeType: 'image/png' });
+    const result = await new ImageGenTool(
+      config as Config,
+      generate,
+    ).buildAndExecute({ prompt: 'A cat' }, new AbortController().signal);
+    expect(result.resultFilePaths).toHaveLength(1);
+    expect(generate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        model: 'qwen-image-3.0',
+        apiKey: '',
+        authType: AuthType.QWEN_SUBSCRIPTION,
+      }),
+    );
+  });
   it('persists a workspace image artifact and returns it to an image-capable model', async () => {
     const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));
     workspaces.push(workspace);

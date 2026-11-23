@@ -222,11 +222,15 @@ export function qualifiedWorkspaceClient(
 export async function loadVoiceStatus(
   client: DaemonClient,
   target: VoiceWorkspaceTarget,
+  options?: { refreshModels?: boolean },
 ): Promise<DaemonWorkspaceVoiceStatus> {
   const status =
     target.route === 'legacy-primary'
-      ? await client.workspaceVoice()
-      : await qualifiedWorkspaceClient(client, target)!.workspaceVoice();
+      ? await client.workspaceVoice(undefined, options)
+      : await qualifiedWorkspaceClient(client, target)!.workspaceVoice(
+          undefined,
+          options,
+        );
   if (target.cwd && status.workspaceCwd !== target.cwd) {
     throw new Error(
       'Voice status workspace does not match the selected target.',

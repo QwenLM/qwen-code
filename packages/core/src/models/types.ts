@@ -12,6 +12,10 @@ import type {
 import type { ConfigSources } from '../utils/configResolver.js';
 import type { ModelReasoningOverride } from '../core/reasoning-overrides.js';
 import type { ReasoningEffort } from '../core/reasoning-effort.js';
+import type {
+  SubscriptionScene,
+  SubscriptionThinkingStrength,
+} from '../qwen/subscription-models.js';
 
 export type ModelReasoningCapabilities = (
   | { toggleOnly: true }
@@ -76,6 +80,9 @@ export type ModelWireApi = 'chat-completions' | 'responses';
  * Model configuration for a single model within an authType
  */
 export interface ModelConfig {
+  thinkingStrength?: SubscriptionThinkingStrength;
+  subscriptionScenes?: SubscriptionScene[];
+  subscriptionChatModel?: boolean;
   /** Unique model ID within authType (e.g., "qwen-coder", "gpt-4-turbo") */
   id: string;
   /** OpenAI-compatible request API; omitted inherits the provider protocol. */
@@ -159,6 +166,9 @@ export interface ResolvedModelConfig extends ModelConfig {
  * Model info for UI display
  */
 export interface AvailableModel {
+  thinkingStrength?: SubscriptionThinkingStrength;
+  subscriptionScenes?: SubscriptionScene[];
+  subscriptionChatModel?: boolean;
   id: string;
   label: string;
   description?: string;

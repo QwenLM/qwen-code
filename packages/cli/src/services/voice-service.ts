@@ -4,17 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  createDebugLogger,
-  ModelsConfig,
-  type ModelProvidersConfig,
-} from '@qwen-code/qwen-code-core';
+import type { ModelProvidersConfig } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
 import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
 import { SettingScope, type LoadedSettings } from '../config/settings.js';
 import {
   isSelectableVoiceModel,
-  resolveVoiceTransport,
+  assertVoiceModelSignedIn,
+  findVoiceModels,
+  getVoiceModelSelector,
+  resolveVoiceModelTransport,
   type VoiceTransport,
 } from './voice-model.js';
 import {
@@ -32,6 +34,10 @@ import {
   type RecordedVoiceAudio,
   type VoiceModelSource,
 } from './voice-transcriber.js';
+import {
+  formatAuxModelSelectorForDisplay,
+  publicAuxModelSelectorValue,
+} from '../utils/aux-model-selector.js';
 
 const debugLogger = createDebugLogger('VOICE_SERVICE');
 
@@ -43,6 +49,7 @@ export interface WorkspaceVoiceModelDescriptor {
   baseUrl?: string;
   contextWindow?: number;
   id: string;
+  authType?: string;
   transport: Exclude<VoiceTransport, 'unsupported'>;
 }
 
@@ -162,33 +169,32 @@ export function listAvailableVoiceModels(
   for (const model of models) {
     idCounts.set(model.id, (idCounts.get(model.id) ?? 0) + 1);
   }
-  const duplicateIds = [...idCounts.entries()]
-    .filter(([, count]) => count > 1)
-    .map(([id]) => id);
-  if (duplicateIds.length > 0) {
-    debugLogger.debug(
-      `Skipping duplicate voice model ids: ${duplicateIds.join(', ')}`,
-    );
-  }
-
   return models
-    .filter((model) => (idCounts.get(model.id) ?? 0) === 1)
     .filter(isSelectableVoiceModel)
-    .map((model) => ({
-      id: model.id,
-      ...(model.label ? { name: model.label } : {}),
-      ...(model.baseUrl
-        ? { baseUrl: publicProviderBaseUrl(model.baseUrl) }
-        : {}),
-      ...(model.contextWindowSize
-        ? { contextWindow: model.contextWindowSize }
-        : {}),
-      transport: resolveVoiceTransport(model.id),
-    }))
-    .filter(
-      (model): model is WorkspaceVoiceModelDescriptor =>
-        model.transport !== 'unsupported',
-    );
+    .flatMap((model): WorkspaceVoiceModelDescriptor[] => {
+      const transport = resolveVoiceModelTransport(model);
+      if (transport === 'unsupported') return [];
+      return [
+        {
+          id:
+            model.authType === AuthType.QWEN_SUBSCRIPTION ||
+            (idCounts.get(model.id) ?? 0) > 1
+              ? publicAuxModelSelectorValue(getVoiceModelSelector(model))
+              : model.id,
+          ...(model.authType !== AuthType.USE_OPENAI
+            ? { authType: model.authType }
+            : {}),
+          name: model.label || model.id,
+          ...(model.baseUrl
+            ? { baseUrl: publicProviderBaseUrl(model.baseUrl) }
+            : {}),
+          ...(model.contextWindowSize
+            ? { contextWindow: model.contextWindowSize }
+            : {}),
+          transport,
+        },
+      ];
+    });
 }
 
 export function hasConfiguredBatchVoiceTranscriptionModel(
@@ -217,13 +223,14 @@ export function buildWorkspaceVoiceStatus(
   workspaceCwd: string,
   settings: LoadedSettings,
 ): WorkspaceVoiceStatus {
+  const voiceModel = readVoiceModel(settings);
   return {
     v: 1,
     workspaceCwd,
     enabled: isVoiceEnabled(settings),
     mode: readVoiceMode(settings),
     language: readVoiceLanguage(settings),
-    voiceModel: readVoiceModel(settings) ?? null,
+    voiceModel: voiceModel ? publicAuxModelSelectorValue(voiceModel) : null,
     availableVoiceModels: listAvailableVoiceModels(settings),
   };
 }
@@ -232,20 +239,22 @@ export function validateWorkspaceVoiceModel(
   settings: LoadedSettings,
   voiceModel: string,
 ): WorkspaceVoiceModelDescriptor {
+  assertVoiceModelSignedIn(voiceModel);
   const models = createVoiceModelSource(settings).getAllConfiguredModels();
-  const matches = models.filter((model) => model.id === voiceModel);
+  const matches = findVoiceModels(models, voiceModel);
+  const displayModel = formatAuxModelSelectorForDisplay(voiceModel);
   if (matches.length === 0) {
     throw new WorkspaceVoiceError(
       400,
       'unknown_voice_model',
-      `Voice model '${voiceModel}' is not configured.`,
+      `Voice model '${displayModel}' is not configured.`,
     );
   }
   if (matches.length > 1) {
     throw new WorkspaceVoiceError(
       400,
       'ambiguous_voice_model',
-      `Voice model '${voiceModel}' is ambiguous.`,
+      `Voice model '${displayModel}' is ambiguous.`,
     );
   }
   const [model] = matches;
@@ -253,15 +262,15 @@ export function validateWorkspaceVoiceModel(
     throw new WorkspaceVoiceError(
       400,
       'unsupported_voice_model',
-      `Voice model '${voiceModel}' cannot be used for transcription.`,
+      `Voice model '${displayModel}' cannot be used for transcription.`,
     );
   }
-  const transport = resolveVoiceTransport(model.id);
+  const transport = resolveVoiceModelTransport(model);
   if (transport === 'unsupported') {
     throw new WorkspaceVoiceError(
       400,
       'unsupported_voice_model',
-      `Voice model '${voiceModel}' cannot be used for transcription.`,
+      `Voice model '${displayModel}' cannot be used for transcription.`,
     );
   }
   return { id: model.id, transport };
@@ -296,7 +305,7 @@ export function validateWorkspaceVoiceConfig(
       'invalid_voice_model',
       err instanceof Error
         ? err.message
-        : `Voice model '${voiceModel}' is not configured for transcription.`,
+        : `Voice model '${formatAuxModelSelectorForDisplay(voiceModel)}' is not configured for transcription.`,
     );
   }
   return descriptor;
@@ -348,7 +357,7 @@ export async function transcribeWorkspaceVoiceAudio(
     throw new WorkspaceVoiceError(
       400,
       'unsupported_voice_model',
-      `Voice model '${input.voiceModel}' requires realtime transcription, which is not supported by this daemon endpoint.`,
+      `Voice model '${formatAuxModelSelectorForDisplay(input.voiceModel)}' requires realtime transcription, which is not supported by this daemon endpoint.`,
     );
   }
   const text = await transcribeVoiceAudio(
@@ -363,7 +372,7 @@ export async function transcribeWorkspaceVoiceAudio(
   );
   return {
     text,
-    model: input.voiceModel,
+    model: publicAuxModelSelectorValue(input.voiceModel),
     transport: descriptor.transport,
   };
 }

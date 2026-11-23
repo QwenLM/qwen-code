@@ -8,6 +8,8 @@
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { createVoiceWsConnectionHandler } from './voice-ws.js';
 import { WorkspaceVoiceCoordinator } from './workspace-voice-coordinator.js';
 import type { DaemonVoiceContext } from './resolve-voice-config.js';
@@ -260,6 +262,23 @@ describe('createVoiceWsConnectionHandler', () => {
     expect(ws.frames().at(-1)).toMatchObject({
       type: 'error',
       message: 'Voice transcription failed. Please try again.',
+    });
+    expect(ws.closeCode).toBe(1011);
+  });
+
+  it('preserves the sign-in action after subscription logout', async () => {
+    const ws = new FakeWs();
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      loadContext: () => {
+        throw new SubscriptionOAuthError('session_changed', 401);
+      },
+    });
+    handler(ws as never, {} as never);
+    ws.text({ type: 'start' });
+    await tick();
+    expect(ws.frames().at(-1)).toMatchObject({
+      type: 'error',
+      message: SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
     });
     expect(ws.closeCode).toBe(1011);
   });

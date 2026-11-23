@@ -1837,6 +1837,19 @@ describe('model configuration routes', () => {
   );
 
   it.each([
+    {
+      voiceModel: 'openai:qwen3-asr-flash\0https://voice.example/v1',
+      expected: '',
+    },
+    { voiceModel: 'openai:qwen3-asr-flash', expected: '' },
+    {
+      voiceModel: 'qwen-subscription:qwen3-asr-flash',
+      expected: 'qwen-subscription:qwen3-asr-flash',
+    },
+    {
+      voiceModel: 'openai:qwen3-asr-flash\0https://other.example/v1',
+      expected: 'openai:qwen3-asr-flash\0https://other.example/v1',
+    },
     { voiceModel: ' qwen3-asr-flash ', expected: '' },
     { voiceModel: 'qwen3-asr-flash\n', expected: '' },
     { voiceModel: 5, expected: 5 },

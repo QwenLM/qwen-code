@@ -124,6 +124,7 @@ export function getModelConfigurationKey(
 
 export function isConversationModelConfiguration(model: ProviderModelConfig) {
   return (
+    model.subscriptionChatModel !== false &&
     !model.imageOnly &&
     !model.voiceOnly &&
     !model.fastOnly &&

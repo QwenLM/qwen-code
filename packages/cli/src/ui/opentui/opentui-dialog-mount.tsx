@@ -41,6 +41,7 @@ import type { ExtensionRefreshState } from '../../config/extension-refresh-state
 import { reloadPluginsRuntime } from '../../config/extension-runtime-reload.js';
 import type { StatusLineState } from '../hooks/useStatusLine.js';
 import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
+import { refreshSubscriptionCatalog } from '../../utils/refresh-subscription-catalog.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
@@ -313,6 +314,31 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   // --- model dialog error (kept open on failed selection) -----------------
   const [modelError, setModelError] = useState<string | null>(null);
   const subscriptionSignedIn = useSubscriptionSignedIn();
+  const modelMode = request.dialog === 'model' ? request.mode : undefined;
+  const [catalogLoading, setCatalogLoading] = useState(
+    modelMode !== undefined && subscriptionSignedIn,
+  );
+  useEffect(() => {
+    if (!modelMode || !subscriptionSignedIn) {
+      setCatalogLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setCatalogLoading(true);
+    void refreshSubscriptionCatalog(
+      config,
+      modelMode !== 'primary' && modelMode !== 'advisor',
+      controller.signal,
+    )
+      .then((warning) => {
+        if (!controller.signal.aborted) setModelError(warning ?? null);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!controller.signal.aborted) setCatalogLoading(false);
+      });
+    return () => controller.abort();
+  }, [config, modelMode, subscriptionSignedIn]);
   // ink ModelDialog's three guards: `committed` keeps a successful pick from
   // also announcing the model that survived, and from starting a second switch,
   // while the latch plus in-flight flag keep a second Escape — or a second
@@ -771,6 +797,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           persistScope={request.persistScope}
           initialKey={initialKey}
           errorMessage={modelError}
+          loading={catalogLoading}
           availableTerminalHeight={props.availableTerminalHeight}
           onClose={() => {
             if (
@@ -802,6 +829,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
             // that landed — must not start another, or two switches race and
             // both report.
             if (
+              catalogLoading ||
               modelSelectionInFlightRef.current ||
               modelSelectionCommittedRef.current
             ) {

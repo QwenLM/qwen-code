@@ -7,6 +7,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from '../../models/types.js';
+import * as subscriptionModels from '../../qwen/subscription-models.js';
+import { ModelsConfig } from '../../models/modelsConfig.js';
 import {
   applyProviderInstallPlan,
   buildInstallPlan,
@@ -399,14 +401,55 @@ describe('applyProviderInstallPlan', () => {
   });
 
   it.each([undefined, 'voice'] as const)(
-    'rejects a second endpoint for an existing voice ID before writing (%s)',
+    'keeps both endpoints for an existing voice ID (%s)',
     async (purpose) => {
       const adapter = createAdapter({ openai: [firstVoice()] });
       const plan = asrPlan('https://second.example/v1', purpose && { purpose });
-      await rejectsPurpose(plan, adapter);
-      expectNothingWritten(adapter);
+      const result = await apply(plan, adapter);
+      expect(result.updatedModelProviders['openai']).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'qwen3-asr-flash',
+            baseUrl: 'https://first.example/v1',
+          }),
+          expect.objectContaining({
+            id: 'qwen3-asr-flash',
+            baseUrl: 'https://second.example/v1',
+          }),
+        ]),
+      );
     },
   );
+
+  it('installs an API-key ASR route alongside the same cached subscription model', async () => {
+    vi.spyOn(
+      subscriptionModels,
+      'readCachedSubscriptionCatalog',
+    ).mockReturnValue({
+      models: [],
+      scenes: { voice: [{ id: 'qwen3-asr-flash' }] },
+    });
+    expect(new ModelsConfig().getAllConfiguredModels()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: 'qwen3-asr-flash',
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        }),
+      ]),
+    );
+    const selected = 'qwen-subscription:qwen3-asr-flash';
+    const adapter = createAdapter({}, { voiceModel: selected });
+    const result = await apply(
+      asrPlan(DASHSCOPE, { purpose: 'voice' }),
+      adapter,
+    );
+    expect(result.updatedModelProviders['openai']).toEqual([
+      expect.objectContaining({ id: 'qwen3-asr-flash', baseUrl: DASHSCOPE }),
+    ]);
+    expect(
+      adapter.setValue.mock.calls.some(([key]) => key === 'voiceModel'),
+    ).toBe(false);
+  });
 
   it.each(['image', 'voice'] as const)(
     'reconnects a mixed provider without losing the %s configuration or independent key',
@@ -1130,11 +1173,6 @@ describe('applyProviderInstallPlan', () => {
   });
 
   it('does not let an invalid api elsewhere in settings abort a voice install', async () => {
-    // The voice-conflict probe rebuilds a registry over every bucket of the
-    // prospective providers map, and the registry constructor validates each
-    // entry. An invalid `wireApi` in a bucket the plan never touches must not
-    // refuse the install, least of all with a bare Error the daemon answers as
-    // a 500 instead of the 400 `model_purpose_conflict`.
     const baseUrl = 'https://voice.example/v1';
     const adapter = idealabAdapter({
       openai: [
@@ -1154,17 +1192,17 @@ describe('applyProviderInstallPlan', () => {
     });
   });
 
-  it('keeps the duplicate-voice refusal on its step next to an invalid api elsewhere', async () => {
-    // Same map, but the plan reconnects the voice id at another endpoint: the
-    // refusal must still be the `modelPurpose` ProviderInstallError the daemon
-    // maps to `model_purpose_conflict`, not the registry's validation Error.
+  it('allows another voice endpoint next to an invalid api elsewhere', async () => {
     const adapter = idealabAdapter({ openai: [firstVoice()] });
     const plan = asrPlan('https://second.example/v1', { purpose: 'voice' });
-    await expect(apply(plan, adapter)).rejects.toMatchObject({
-      name: 'ProviderInstallError',
-      step: 'modelPurpose',
+    await expect(apply(plan, adapter)).resolves.toMatchObject({
+      updatedModelProviders: {
+        openai: expect.arrayContaining([
+          expect.objectContaining({ baseUrl: 'https://first.example/v1' }),
+          expect.objectContaining({ baseUrl: 'https://second.example/v1' }),
+        ]),
+      },
     });
-    expect(adapter.setValue).not.toHaveBeenCalled();
   });
 
   it('retires a recorded model-list version when reinstalling on the Responses route', async () => {

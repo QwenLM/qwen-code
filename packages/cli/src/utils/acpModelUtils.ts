@@ -79,6 +79,7 @@ export function buildAcpModelOptions(
   const candidates = models
     .filter(
       (model) =>
+        model.subscriptionChatModel !== false &&
         model.fastOnly !== true &&
         model.voiceOnly !== true &&
         model.imageOnly !== true,
@@ -344,7 +345,13 @@ export function isInlineModelOverrideAllowed(
   const activeEnvKey = contentGeneratorConfig.apiKeyEnvKey;
   return config
     .getAvailableModelsForAuthType(authType)
-    .filter((m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly)
+    .filter(
+      (m) =>
+        m.subscriptionChatModel !== false &&
+        !m.fastOnly &&
+        !m.voiceOnly &&
+        !m.imageOnly,
+    )
     .some(
       (m) =>
         m.id === modelId &&

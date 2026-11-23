@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import express from 'express';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
 import {
   SettingScope,
   resetHomeEnvBootstrapForTesting,
@@ -149,6 +150,7 @@ describe('workspace-qualified Voice routes', () => {
   const originalQwenHome = process.env['QWEN_HOME'];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(
       homes
         .splice(0)
@@ -157,6 +159,38 @@ describe('workspace-qualified Voice routes', () => {
     if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
     else process.env['QWEN_HOME'] = originalQwenHome;
     resetHomeEnvBootstrapForTesting();
+  });
+
+  it('refreshes only the selected runtime picker and never falls back for invalid targets', async () => {
+    const { app, secondary, registry } = await createApp();
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account-a',
+    );
+    const refresh = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+      .mockResolvedValue({ scenes: {}, cached: false });
+    await request(app).get('/workspaces/secondary-id/voice');
+    expect(refresh).not.toHaveBeenCalled();
+    for (let i = 0; i < 2; i++) {
+      const response = await request(app).get(
+        '/workspaces/secondary-id/voice?refreshModels=true',
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.workspaceCwd).toBe(secondary.workspaceCwd);
+    }
+    expect(refresh).toHaveBeenCalledTimes(2);
+    for (const target of ['missing', 'untrusted-id']) {
+      const response = await request(app).get(
+        `/workspaces/${target}/voice?refreshModels=true`,
+      );
+      expect(response.status).toBe(target === 'missing' ? 400 : 403);
+    }
+    registry.beginDrain(secondary);
+    const draining = await request(app).get(
+      '/workspaces/secondary-id/voice?refreshModels=true',
+    );
+    expect(draining.status).toBe(503);
+    expect(refresh).toHaveBeenCalledTimes(2);
   });
 
   it('selects only the trusted target runtime and writes Voice settings in workspace scope', async () => {

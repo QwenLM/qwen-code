@@ -55,6 +55,23 @@ function recordingFetch(
 }
 
 describe('DaemonClient voice helpers', () => {
+  it('requests catalog refresh only when explicitly opening a picker on either route', async () => {
+    const { fetch, calls } = recordingFetch(() => jsonResponse(200, {}));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const qualified = client.workspaceById('secondary id');
+    await client.workspaceVoice();
+    await client.workspaceVoice('client-1', { refreshModels: true });
+    await qualified.workspaceVoice();
+    await qualified.workspaceVoice('client-2', { refreshModels: true });
+    expect(calls.map(({ url }) => url)).toEqual([
+      'http://daemon/workspace/voice',
+      'http://daemon/workspace/voice?refreshModels=true',
+      'http://daemon/workspaces/secondary%20id/voice',
+      'http://daemon/workspaces/secondary%20id/voice?refreshModels=true',
+    ]);
+    expect(calls[1]?.headers['x-qwen-client-id']).toBe('client-1');
+    expect(calls[3]?.headers['x-qwen-client-id']).toBe('client-2');
+  });
   it('GETs workspace voice status', async () => {
     const body = {
       v: 1,

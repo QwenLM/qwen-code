@@ -100,7 +100,7 @@ describe('modelCommand', () => {
     'should keep dual-role models eligible for --%s completion',
     async (mode) => {
       mockContext.services.config = {
-        getAvailableModels: vi.fn().mockReturnValue([
+        getAllConfiguredModels: vi.fn().mockReturnValue([
           {
             id: 'qwen-dual-role',
             authType: AuthType.USE_OPENAI,
@@ -118,9 +118,33 @@ describe('modelCommand', () => {
     },
   );
 
+  it.each(['image', 'voice'] as const)(
+    'completes subscription %s scenes without exposing them as main models',
+    async (scene) => {
+      const model = {
+        id: `qwen-${scene}`,
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        subscriptionChatModel: false,
+        subscriptionScenes: [scene],
+        ...(scene === 'image'
+          ? { imageOnly: true, supportsImageGeneration: true }
+          : { voiceOnly: true }),
+      };
+      mockContext.services.config = {
+        getAvailableModels: vi.fn().mockReturnValue([]),
+        getAllConfiguredModels: vi.fn().mockReturnValue([model]),
+      } as unknown as Config;
+
+      expect(
+        await modelCommand.completion!(mockContext, `--${scene} qwen`),
+      ).toEqual([model.id]);
+      expect(await modelCommand.completion!(mockContext, 'qwen')).toEqual([]);
+    },
+  );
+
   it('should complete compaction-eligible models for --compaction flag', async () => {
     mockContext.services.config = {
-      getAvailableModels: vi.fn().mockReturnValue([
+      getAllConfiguredModels: vi.fn().mockReturnValue([
         {
           id: 'qwen-max',
           authType: AuthType.USE_OPENAI,
@@ -2343,7 +2367,7 @@ describe('modelCommand', () => {
     expect(setValue).toHaveBeenCalledWith(
       expect.any(String),
       'voiceModel',
-      'qwen3-asr-flash',
+      'openai:qwen3-asr-flash\0https://dashscope.example/v1',
     );
     expect(switchModel).not.toHaveBeenCalled();
     expect(setValue).not.toHaveBeenCalledWith(
@@ -2359,8 +2383,37 @@ describe('modelCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Voice Model: qwen3-asr-flash',
+      content:
+        'Voice Model: openai:qwen3-asr-flash (https://dashscope.example/v1)',
     });
+  });
+
+  it('does not write a credential-bearing voice endpoint to project settings', async () => {
+    const setValue = vi.fn();
+    mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen3-asr-flash',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://user:secret@asr.example/v1',
+            },
+          ]),
+        },
+        settings: { ...createMockSettings(setValue), isTrusted: true },
+      },
+    });
+    const result = await modelCommand.action!(
+      mockContext,
+      '--voice --project qwen3-asr-flash',
+    );
+    expect(setValue).toHaveBeenCalledWith(
+      SettingScope.Workspace,
+      'voiceModel',
+      'openai:qwen3-asr-flash',
+    );
+    expect(JSON.stringify(result)).not.toContain('secret');
   });
 
   it('should reject unavailable voice models', async () => {
@@ -2533,7 +2586,7 @@ describe('modelCommand', () => {
     });
   });
 
-  it('should treat colon-containing voice model values as literal ids', async () => {
+  it('accepts an auth-qualified voice selector', async () => {
     const setValue = vi.fn();
     mockContext = createMockCommandContext({
       invocation: {
@@ -2552,6 +2605,7 @@ describe('modelCommand', () => {
               id: 'qwen3-asr-flash',
               label: 'qwen3-asr-flash',
               authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://dashscope.example/v1',
             },
           ]),
         },
@@ -2564,13 +2618,15 @@ describe('modelCommand', () => {
       '--voice openai:qwen3-asr-flash',
     );
 
-    expect(setValue).not.toHaveBeenCalled();
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'voiceModel',
+      'openai:qwen3-asr-flash\0https://dashscope.example/v1',
+    );
     expect(result).toMatchObject({
       type: 'message',
-      messageType: 'error',
-      content: expect.stringContaining(
-        "Voice model 'openai:qwen3-asr-flash' is not configured.",
-      ),
+      messageType: 'info',
+      content: expect.stringContaining('Voice Model: openai:qwen3-asr-flash'),
     });
   });
 

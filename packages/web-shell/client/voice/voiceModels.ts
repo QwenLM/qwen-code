@@ -6,7 +6,7 @@
 
 /** A voice-transcription model option for the `/model --voice` picker. */
 export interface VoiceModelOption {
-  /** Raw model id (no auth suffix) — what gets persisted as `voiceModel`. */
+  /** Model selector persisted as `voiceModel`; may include auth and endpoint. */
   id: string;
   label?: string;
   authType?: string;

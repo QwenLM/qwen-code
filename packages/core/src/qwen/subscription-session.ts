@@ -31,9 +31,13 @@ import {
   subscriptionModelIdsSchema,
   subscriptionModelMetadataSchema,
   subscriptionModelsResponseSchema,
+  subscriptionScenesSchema,
+  subscriptionScenesResponseSchema,
+  synchronizeSubscriptionThinkingStrength,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
   type SubscriptionModelCatalog,
   type SubscriptionModelMetadata,
+  type SubscriptionSceneCatalog,
 } from './subscription-models.js';
 import {
   QwenSubscriptionOAuthClient,
@@ -51,6 +55,7 @@ const credentialSchema = z.object({
   clientId: z.string(),
   models: subscriptionModelIdsSchema.optional(),
   modelMetadata: subscriptionModelMetadataSchema,
+  scenes: subscriptionScenesSchema.optional().catch(undefined),
   tokens: z
     .object({
       access_token: z.string().min(1),
@@ -417,6 +422,94 @@ export class QwenSubscriptionSession {
     signal?: AbortSignal,
     cliVersion?: string,
   ): Promise<SubscriptionModelCatalog & { cached: boolean }> {
+    const result = await this.getCatalog(
+      '/models',
+      (value): SubscriptionModelCatalog => {
+        const { data } = subscriptionModelsResponseSchema.parse(value);
+        const ids = new Set<string>();
+        const modelMetadata: SubscriptionModelMetadata[] = [];
+        for (const model of data) {
+          if (ids.has(model.id)) continue;
+          ids.add(model.id);
+          const entry: SubscriptionModelMetadata = { id: model.id };
+          if (model.input_modalities !== undefined) {
+            entry.modalities = {};
+            for (const modality of model.input_modalities) {
+              if (modality !== 'text') entry.modalities[modality] = true;
+            }
+          }
+          if (model.context_window_tokens !== undefined)
+            entry.contextWindowSize = model.context_window_tokens;
+          if (model.display_name !== undefined) entry.name = model.display_name;
+          if (model.description !== undefined)
+            entry.description = model.description;
+          if (model.thinking_strength !== undefined)
+            entry.thinkingStrength = model.thinking_strength;
+          if (Object.keys(entry).length > 1) modelMetadata.push(entry);
+        }
+        return {
+          models: [...ids],
+          ...(modelMetadata.length ? { modelMetadata } : {}),
+        };
+      },
+      (credentials) =>
+        credentials.models?.length
+          ? {
+              models: credentials.models,
+              ...(credentials.modelMetadata
+                ? { modelMetadata: credentials.modelMetadata }
+                : {}),
+            }
+          : undefined,
+      (credentials, catalog) => {
+        Object.assign(
+          credentials,
+          synchronizeSubscriptionThinkingStrength(
+            { ...catalog, scenes: credentials.scenes },
+            'models',
+          ),
+        );
+      },
+      signal,
+      cliVersion,
+    );
+    return { ...result.catalog, cached: result.cached };
+  }
+
+  async getScenes(
+    signal?: AbortSignal,
+    cliVersion?: string,
+  ): Promise<{ scenes: SubscriptionSceneCatalog; cached: boolean }> {
+    const result = await this.getCatalog(
+      '/models/scenes',
+      (value) => subscriptionScenesResponseSchema.parse(value).data,
+      (credentials) => credentials.scenes,
+      (credentials, scenes) => {
+        const catalog = synchronizeSubscriptionThinkingStrength(
+          {
+            models: credentials.models ?? [],
+            modelMetadata: credentials.modelMetadata,
+            scenes,
+          },
+          'scenes',
+        );
+        credentials.modelMetadata = catalog.modelMetadata;
+        credentials.scenes = catalog.scenes;
+      },
+      signal,
+      cliVersion,
+    );
+    return { scenes: result.catalog, cached: result.cached };
+  }
+
+  private async getCatalog<T>(
+    endpoint: '/models' | '/models/scenes',
+    parse: (value: unknown) => T,
+    cachedCatalog: (credentials: Credentials) => T | undefined,
+    saveCatalog: (credentials: Credentials, catalog: T) => void,
+    signal?: AbortSignal,
+    cliVersion?: string,
+  ): Promise<{ catalog: T; cached: boolean }> {
     const snapshot = await this.locked(async (assertCanCommit) => {
       const credentials = await this.read();
       if (!credentials?.tokens || !this.matches(credentials))
@@ -440,7 +533,7 @@ export class QwenSubscriptionSession {
     };
     try {
       const request = (token: string) =>
-        fetchWithPolicy(`${QWEN_SUBSCRIPTION_BASE_URL}/models`, {
+        fetchWithPolicy(`${QWEN_SUBSCRIPTION_BASE_URL}${endpoint}`, {
           timeoutMs: 5000,
           maxBytes: 1024 * 1024,
           maxRedirects: 0,
@@ -475,40 +568,13 @@ export class QwenSubscriptionSession {
         }
         throw subscriptionHttpError(response.status, body, response.retryAfter);
       }
-      const { data } = subscriptionModelsResponseSchema.parse(
-        JSON.parse(response.body.toString('utf8')),
-      );
-      const ids = new Set<string>();
-      const metadata: SubscriptionModelMetadata[] = [];
-      for (const { id, input_modalities, context_window_tokens } of data) {
-        if (ids.has(id)) continue;
-        ids.add(id);
-        const entry: SubscriptionModelMetadata = { id };
-        if (input_modalities !== undefined) {
-          entry.modalities = {};
-          for (const modality of input_modalities) {
-            if (modality !== 'text') entry.modalities[modality] = true;
-          }
-        }
-        if (context_window_tokens !== undefined) {
-          entry.contextWindowSize = context_window_tokens;
-        }
-        if (
-          entry.modalities !== undefined ||
-          entry.contextWindowSize !== undefined
-        ) {
-          metadata.push(entry);
-        }
-      }
-      const models = [...ids];
-      const modelMetadata = metadata.length ? metadata : undefined;
+      const catalog = parse(JSON.parse(response.body.toString('utf8')));
       await this.locked(async (assertCanCommit) => {
         const credentials = await current();
-        credentials.models = models;
-        credentials.modelMetadata = modelMetadata;
+        saveCatalog(credentials, catalog);
         await this.write(credentials, assertCanCommit);
       }, signal);
-      return { models, cached: false, ...(modelMetadata && { modelMetadata }) };
+      return { catalog, cached: false };
     } catch (error) {
       signal?.throwIfAborted();
       if (
@@ -516,12 +582,12 @@ export class QwenSubscriptionSession {
         (error.stage || !error.status || error.status < 500)
       )
         throw error;
-      const { models, modelMetadata } = await this.locked(current, signal);
-      if (!models?.length)
+      const catalog = cachedCatalog(await this.locked(current, signal));
+      if (catalog === undefined)
         throw error instanceof SubscriptionOAuthError
           ? error
           : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
-      return { models, cached: true, ...(modelMetadata && { modelMetadata }) };
+      return { catalog, cached: true };
     }
   }
 }

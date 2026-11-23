@@ -17,6 +17,14 @@ import express, {
 } from 'express';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import { getQwenOAuthConfig } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import {
+  SUBSCRIPTION_MODELS_CACHED,
+  SUBSCRIPTION_MODELS_UNAVAILABLE,
+} from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
+import { SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   SettingScope,
   resetHomeEnvBootstrapForTesting,
@@ -210,8 +218,99 @@ describe('workspace voice routes', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await teardown(h);
   });
+
+  it('refreshes every picker request from a cold cache while ordinary polling stays local', async () => {
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account-a',
+    );
+    const scenes = { voice: [{ id: 'server-asr' }] };
+    const refresh = vi
+      .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+      .mockImplementation(async () => {
+        const { baseUrl, clientId } = getQwenOAuthConfig();
+        await writeJson(path.join(h.home, 'subscription_credentials.json'), {
+          baseUrl,
+          clientId,
+          tokens: { access_token: 'test-token' },
+          scenes,
+        });
+        return { scenes, cached: false };
+      });
+    const get = (query = '') =>
+      request(h.app)
+        .get(`/workspace/voice${query}`)
+        .set('Host', hostHeader)
+        .set('Authorization', 'Bearer secret');
+    expect((await get()).body.availableVoiceModels).toEqual([]);
+    expect(refresh).not.toHaveBeenCalled();
+    for (let i = 0; i < 2; i++) {
+      const response = await get('?refreshModels=true');
+      expect(response.status).toBe(200);
+      expect(response.body.availableVoiceModels).toEqual([
+        expect.objectContaining({ id: 'qwen-subscription:server-asr' }),
+      ]);
+    }
+    expect(refresh).toHaveBeenCalledTimes(2);
+    await get();
+    expect(refresh).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['offline', 'unavailable', 'cached'] as const)(
+    'keeps local API-key candidates visible with a discovery warning (%s)',
+    async (state) => {
+      const cached = state === 'cached';
+      await writeVoiceModelSettings(h);
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account-a');
+      const refresh = vi.spyOn(QwenSubscriptionSession.prototype, 'getScenes');
+      if (cached) refresh.mockResolvedValue({ scenes: {}, cached: true });
+      else
+        refresh.mockRejectedValue(
+          state === 'unavailable'
+            ? new SubscriptionOAuthError('service_unavailable', 503)
+            : new Error('offline'),
+        );
+      const response = await request(h.app)
+        .get('/workspace/voice?refreshModels=true')
+        .set('Host', hostHeader)
+        .set('Authorization', 'Bearer secret');
+      expect(response.status).toBe(200);
+      expect(response.body.modelCatalogWarning).toBe(
+        cached ? SUBSCRIPTION_MODELS_CACHED : SUBSCRIPTION_MODELS_UNAVAILABLE,
+      );
+      expect(response.body.availableVoiceModels).toEqual([
+        expect.objectContaining({ id: 'qwen3-asr-flash' }),
+      ]);
+    },
+  );
+
+  it.each(['signed-out', 'changed', 'unauthorized'] as const)(
+    'handles account state during picker refresh (%s)',
+    async (state) => {
+      const identity = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getIdentity')
+        .mockReturnValue(state === 'signed-out' ? undefined : 'account-a');
+      const refresh = vi
+        .spyOn(QwenSubscriptionSession.prototype, 'getScenes')
+        .mockImplementation(async () => {
+          if (state === 'changed') identity.mockReturnValue('account-b');
+          if (state === 'unauthorized')
+            throw new SubscriptionOAuthError('invalid_token', 401);
+          return { scenes: {}, cached: false };
+        });
+      const response = await request(h.app)
+        .get('/workspace/voice?refreshModels=true')
+        .set('Host', hostHeader)
+        .set('Authorization', 'Bearer secret');
+      expect(response.status).toBe(state === 'signed-out' ? 200 : 401);
+      expect(refresh).toHaveBeenCalledTimes(state === 'signed-out' ? 0 : 1);
+    },
+  );
 
   it.each([
     'https://dashscope.example/compatible-mode/v1',
@@ -270,6 +369,37 @@ describe('workspace voice routes', () => {
     expect(res.status).toBe(503);
     expect(res.headers['retry-after']).toBe('1');
     expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('rejects a picker response when its workspace generation closes during discovery', async () => {
+    let closed = false;
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getIdentity').mockReturnValue(
+      'account-a',
+    );
+    vi.spyOn(QwenSubscriptionSession.prototype, 'getScenes').mockImplementation(
+      async () => {
+        closed = true;
+        return { scenes: {}, cached: false };
+      },
+    );
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: () => ({}),
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: vi.fn(),
+      captureGenerationAssertion: () => () => {
+        if (closed) throw new WorkspaceGenerationClosedError();
+      },
+    });
+    const response = await request(app).get(
+      '/workspace/voice?refreshModels=true',
+    );
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(response.body.availableVoiceModels).toBeUndefined();
   });
 
   it('GET skips workspace voice settings for an untrusted runtime without an env snapshot', async () => {
@@ -1163,6 +1293,24 @@ describe('workspace voice routes', () => {
     expect(stderrOutput).toContain('[REDACTED]');
     expect(stderrOutput).not.toContain('sk-secret');
     expect(stderrOutput).not.toContain('top-secret');
+  });
+
+  it('POST /workspace/voice/transcribe preserves the subscription sign-in action', async () => {
+    await writeVoiceModelSettings(h);
+    h.transcribe.mockRejectedValueOnce(
+      new SubscriptionOAuthError('session_changed', 401),
+    );
+    const res = await request(h.app)
+      .post('/workspace/voice/transcribe')
+      .set('Host', hostHeader)
+      .set('Authorization', 'Bearer secret')
+      .set('Content-Type', 'audio/wav')
+      .send(Buffer.from([1]));
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({
+      code: 'session_changed',
+      error: SUBSCRIPTION_SIGN_IN_REQUIRED_MESSAGE,
+    });
   });
 
   it('POST /workspace/voice/transcribe reports draining when an active lease is aborted', async () => {

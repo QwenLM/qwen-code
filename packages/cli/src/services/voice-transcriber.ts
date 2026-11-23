@@ -7,16 +7,22 @@
 import process from 'node:process';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
+import { fetchSubscriptionInference } from '@qwen-code/qwen-code-core/qwen/subscription-request.js';
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { buildVoiceKeyterms } from './voice-keyterms.js';
 import {
   formatUnsupportedVoiceModelMessage,
+  assertVoiceModelSignedIn,
+  findVoiceModels,
   isTranscribableVoiceModel,
   resolveVoiceTransport,
 } from './voice-model.js';
 import { readVoiceLanguage } from './voice-settings.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 
 const DEFAULT_OPENAI_API_KEY = 'OPENAI_API_KEY';
 const INFERENCE_TIMEOUT_MS = 60_000;
@@ -50,6 +56,7 @@ export interface VoiceTranscriptionConfig {
   baseUrl: string;
   apiKey?: string;
   allowInsecureBaseUrl?: boolean;
+  subscription?: boolean;
 }
 
 export interface VoiceStreamConfig {
@@ -495,18 +502,18 @@ export function resolveVoiceTranscriptionConfig({
   voiceModel,
   env,
 }: ResolveVoiceTranscriptionConfigArgs): VoiceTranscriptionConfig {
-  const matches = config
-    .getAllConfiguredModels()
-    .filter((model) => model.id === voiceModel);
+  assertVoiceModelSignedIn(voiceModel);
+  const matches = findVoiceModels(config.getAllConfiguredModels(), voiceModel);
+  const displayModel = formatAuxModelSelectorForDisplay(voiceModel);
 
   if (matches.length === 0) {
     throw new Error(
-      `Voice model '${voiceModel}' is not configured. Run /model --voice to choose a configured model.`,
+      `Voice model '${displayModel}' is not configured. Run /model --voice to choose a configured model.`,
     );
   }
 
   if (matches.length > 1) {
-    throw new Error(`Voice model '${voiceModel}' is ambiguous.`);
+    throw new Error(`Voice model '${displayModel}' is ambiguous.`);
   }
 
   const model = matches[0];
@@ -514,11 +521,19 @@ export function resolveVoiceTranscriptionConfig({
     throw new Error(formatUnsupportedVoiceModelMessage(voiceModel));
   }
 
+  if (model.authType === AuthType.QWEN_SUBSCRIPTION) {
+    return {
+      model: model.id,
+      baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+      subscription: true,
+    };
+  }
+
   const baseUrl = model.baseUrl?.trim();
   if (!baseUrl) {
-    throw new Error(`Voice model '${voiceModel}' does not define a baseUrl.`);
+    throw new Error(`Voice model '${displayModel}' does not define a baseUrl.`);
   }
-  const normalizedBaseUrl = normalizeBaseUrl(baseUrl, voiceModel);
+  const normalizedBaseUrl = normalizeBaseUrl(baseUrl, displayModel);
   const parsedBaseUrl = new URL(normalizedBaseUrl);
   const isLocalhost = isLoopbackHost(parsedBaseUrl.hostname);
   const allowInsecureBaseUrl = isInsecureVoiceBaseUrlAllowed(
@@ -530,14 +545,14 @@ export function resolveVoiceTranscriptionConfig({
     parsedBaseUrl.protocol !== 'https:'
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an http or https baseUrl.`,
+      `Voice model '${displayModel}' must use an http or https baseUrl.`,
     );
   }
   if (!isLocalhost && isAlwaysBlockedVoiceAddress(parsedBaseUrl.hostname)) {
     throw new Error(
       isLoopbackVoiceAddress(parsedBaseUrl.hostname)
-        ? `Voice model '${voiceModel}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].`
-        : `Voice model '${voiceModel}' must not use a private-network baseUrl.`,
+        ? `Voice model '${displayModel}' uses a loopback address outside the accepted spellings. To use a local ASR endpoint, set the baseUrl to http://localhost, http://127.0.0.1, or http://[::1].`
+        : `Voice model '${displayModel}' must not use a private-network baseUrl.`,
     );
   }
   if (
@@ -546,7 +561,7 @@ export function resolveVoiceTranscriptionConfig({
     !allowInsecureBaseUrl
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
+      `Voice model '${displayModel}' must use an https baseUrl. Voice audio must not be transmitted in cleartext. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
     );
   }
   if (
@@ -555,17 +570,17 @@ export function resolveVoiceTranscriptionConfig({
     isPrivateNetworkIp(parsedBaseUrl.hostname)
   ) {
     throw new Error(
-      `Voice model '${voiceModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
+      `Voice model '${displayModel}' must not use a private-network baseUrl. To trust this managed endpoint, add its exact complete normalized URL (${normalizedBaseUrl}) to security.allowedInsecureVoiceBaseUrls. This setting is only honored from User, System, or SystemDefaults scope settings; Workspace entries are ignored.`,
     );
   }
 
   const apiKey = readApiKey(settings, model, normalizedBaseUrl, env);
   if (model.envKey && !apiKey) {
-    throw new Error(`Voice model '${voiceModel}' requires ${model.envKey}.`);
+    throw new Error(`Voice model '${displayModel}' requires ${model.envKey}.`);
   }
 
   return {
-    model: voiceModel,
+    model: model.id,
     baseUrl: normalizedBaseUrl,
     ...(apiKey ? { apiKey } : {}),
     ...(allowInsecureBaseUrl ? { allowInsecureBaseUrl: true } : {}),
@@ -586,8 +601,9 @@ export function resolveVoiceStreamConfig(
   const base = resolveVoiceTranscriptionConfig(args);
   const transport = resolveVoiceTransport(base.model);
   if (
-    transport !== 'qwen-asr-realtime' &&
-    transport !== 'dashscope-task-realtime'
+    base.subscription ||
+    (transport !== 'qwen-asr-realtime' &&
+      transport !== 'dashscope-task-realtime')
   ) {
     throw new Error(
       `Voice model '${base.model}' does not support streaming transcription.`,
@@ -798,23 +814,36 @@ async function transcribeViaQwenAsr(
     headers['Authorization'] = `Bearer ${voiceConfig.apiKey}`;
   }
 
+  const body = JSON.stringify({
+    model: voiceConfig.model,
+    messages,
+    asr_options: asrOptions,
+    ...(voiceConfig.subscription
+      ? { modalities: ['text'], stream: false }
+      : {}),
+  });
+  if (voiceConfig.subscription && Buffer.byteLength(body) > 8 * 1024 * 1024) {
+    throw new Error(
+      'Recording is too large for transcription (max 8 MiB request). Try a shorter dictation.',
+    );
+  }
+  const request: RequestInit = {
+    method: 'POST',
+    headers,
+    redirect: 'manual',
+    body,
+    signal: transcriptionAbortSignal(options.abortSignal),
+  };
+
   let response: Response;
   try {
     options.onEgress?.();
-    response = await fetchFn(
-      `${trimTrailingSlashes(voiceConfig.baseUrl)}/chat/completions`,
-      {
-        method: 'POST',
-        headers,
-        redirect: 'manual',
-        body: JSON.stringify({
-          model: voiceConfig.model,
-          messages,
-          asr_options: asrOptions,
-        }),
-        signal: transcriptionAbortSignal(options.abortSignal),
-      },
-    );
+    response = voiceConfig.subscription
+      ? await fetchSubscriptionInference('chat', request, fetchFn)
+      : await fetchFn(
+          `${trimTrailingSlashes(voiceConfig.baseUrl)}/chat/completions`,
+          request,
+        );
   } catch (error) {
     if (error instanceof DOMException && error.name === 'TimeoutError') {
       throw new Error(
@@ -877,7 +906,9 @@ export async function transcribeVoiceAudio(
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext = buildKeytermsContext(args.settings);
 
-  const transport = resolveVoiceTransport(voiceConfig.model);
+  const transport = voiceConfig.subscription
+    ? 'qwen-asr-chat'
+    : resolveVoiceTransport(voiceConfig.model);
   switch (transport) {
     case 'qwen-asr-chat':
       return transcribeViaQwenAsr(

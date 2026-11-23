@@ -5,7 +5,7 @@
  */
 // @vitest-environment jsdom
 
-import { render, cleanup, act } from '@testing-library/react';
+import { render, cleanup, act, waitFor } from '@testing-library/react';
 import process from 'node:process';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
@@ -79,6 +79,8 @@ const renderComponent = (
   const recordSlashCommand = vi.fn();
 
   const mockConfig = {
+    refreshSubscriptionModels: vi.fn().mockResolvedValue({ cached: false }),
+    refreshSubscriptionScenes: vi.fn().mockResolvedValue({ cached: false }),
     // --- Functions used by ModelDialog ---
     getModel: vi.fn(() => DEFAULT_QWEN_MODEL),
     setModel: vi.fn().mockResolvedValue(undefined),
@@ -161,6 +163,29 @@ describe('<ModelDialog />', () => {
     const { getByText } = renderComponent();
     expect(getByText('Select Model')).toBeDefined();
   });
+
+  it.each([
+    [{}, 'refreshSubscriptionModels'],
+    [{ isImageModelMode: true }, 'refreshSubscriptionScenes'],
+    [{ isVoiceModelMode: true }, 'refreshSubscriptionScenes'],
+  ] as const)(
+    'refreshes the catalog on every picker opening: %j',
+    async (props, method) => {
+      const refresh = vi.fn().mockResolvedValue({ cached: false });
+      const overrides = { [method]: refresh };
+      const first = renderComponent(props, overrides);
+      await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(first.queryByText('Loading models from provider…')).toBeNull(),
+      );
+      first.unmount();
+      const second = renderComponent(props, overrides);
+      await waitFor(() => expect(refresh).toHaveBeenCalledTimes(2));
+      await waitFor(() =>
+        expect(second.queryByText('Loading models from provider…')).toBeNull(),
+      );
+    },
+  );
 
   it('hides subscription entries on external logout without changing the selected model and restores them after login', () => {
     const { mockConfig, mockSettings, props } = renderComponent(
@@ -1720,7 +1745,7 @@ describe('<ModelDialog />', () => {
     );
   });
 
-  it('stores the plain model id in voice model mode without switching models', async () => {
+  it('stores the voice route without switching models', async () => {
     const switchModel = vi.fn();
     const setFastModel = vi.fn();
     const { props, mockSettings, recordSlashCommand } = renderComponent(
@@ -1756,7 +1781,7 @@ describe('<ModelDialog />', () => {
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'voiceModel',
-      'qwen3-asr-flash',
+      'openai:qwen3-asr-flash\0https://dashscope.example/v1',
     );
     expect(switchModel).not.toHaveBeenCalled();
     expect(setFastModel).not.toHaveBeenCalled();
@@ -1764,7 +1789,10 @@ describe('<ModelDialog />', () => {
       phase: 'result',
       rawCommand: '/model',
       outputHistoryItems: [
-        { type: 'success', text: 'Voice Model: qwen3-asr-flash' },
+        {
+          type: 'success',
+          text: 'Voice Model: openai:qwen3-asr-flash (https://dashscope.example/v1)',
+        },
       ],
     });
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(

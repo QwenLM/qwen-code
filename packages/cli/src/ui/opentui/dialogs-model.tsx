@@ -237,6 +237,7 @@ export interface OpenTuiModelDialogProps {
   persistScope?: 'workspace' | 'user';
   initialKey?: string;
   errorMessage?: string | null;
+  loading?: boolean;
   onSelect: (selectionKey: string) => void;
   onClose: () => void;
   availableTerminalHeight?: number;
@@ -250,6 +251,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
     persistScope,
     initialKey,
     errorMessage,
+    loading = false,
     onSelect,
     onClose,
     availableTerminalHeight,
@@ -285,7 +287,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
   const list = useDialogSelect({
     items: entries,
     initialIndex,
-    focused: true,
+    focused: !loading,
     numbers: true,
     // The original intentionally omits the ▲/▼ arrows; window only.
     maxItemsToShow,
@@ -308,6 +310,8 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
       <text fg={C.text} attributes={1}>
         {modelDialogTitle(mode, persistScope)}
       </text>
+
+      {loading && <text fg={C.dim}>{t('Loading models from provider…')}</text>}
 
       {!hasModels ? (
         <box flexDirection="column" marginTop={1}>
@@ -333,7 +337,7 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
             scrollOffset={list.scrollOffset}
             maxItemsToShow={maxItemsToShow}
             showNumbers={true}
-            focused={true}
+            focused={!loading}
             onHover={list.setActiveIndex}
             onSelectIndex={list.selectIndex}
             onWheel={(direction) =>
@@ -369,18 +373,19 @@ export function OpenTuiModelDialog(props: OpenTuiModelDialogProps) {
             label={t('Context Window')}
             value={formatContextWindow(highlightedEntry.contextWindowSize)}
           />
-          {!highlightedEntry.isQwenOAuth && (
-            <box flexDirection="column">
-              <DetailRow
-                label="Base URL"
-                value={highlightedEntry.baseUrl ?? t('(default)')}
-              />
-              <DetailRow
-                label="API Key"
-                value={highlightedEntry.envKey ?? t('(not set)')}
-              />
-            </box>
-          )}
+          {!highlightedEntry.isQwenOAuth &&
+            highlightedEntry.authType !== 'qwen-subscription' && (
+              <box flexDirection="column">
+                <DetailRow
+                  label="Base URL"
+                  value={highlightedEntry.baseUrl ?? t('(default)')}
+                />
+                <DetailRow
+                  label="API Key"
+                  value={highlightedEntry.envKey ?? t('(not set)')}
+                />
+              </box>
+            )}
         </box>
       )}
 

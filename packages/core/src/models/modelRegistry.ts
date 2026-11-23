@@ -11,7 +11,10 @@ import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constant
 import { QWEN_SUBSCRIPTION_BASE_URL } from '../qwen/oauth-config.js';
 import {
   readCachedSubscriptionCatalog,
+  synchronizeSubscriptionThinkingStrength,
   type SubscriptionModelMetadata,
+  type SubscriptionScene,
+  type SubscriptionSceneCatalog,
 } from '../qwen/subscription-models.js';
 import {
   type ModelConfig,
@@ -207,6 +210,9 @@ export class ModelRegistry {
 
   /** Raw providers config this registry was last built from. */
   private modelProvidersConfig?: ModelProvidersConfig;
+  private subscriptionModels: string[] = [];
+  private subscriptionMetadata?: SubscriptionModelMetadata[];
+  private subscriptionScenes?: SubscriptionSceneCatalog;
 
   private getDefaultBaseUrl(authType: AuthType): string {
     switch (authType) {
@@ -230,7 +236,8 @@ export class ModelRegistry {
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
-    const { models, modelMetadata } = readCachedSubscriptionCatalog();
+    const { models, modelMetadata, scenes } = readCachedSubscriptionCatalog();
+    this.subscriptionScenes = scenes;
     this.setSubscriptionModels(models, modelMetadata);
 
     // Register user-configured models for other providers
@@ -385,6 +392,9 @@ export class ModelRegistry {
         visionOnly: model.visionOnly,
         supportsImageGeneration: model.supportsImageGeneration,
         imageOnly: model.imageOnly,
+        subscriptionScenes: model.subscriptionScenes,
+        thinkingStrength: model.thinkingStrength,
+        subscriptionChatModel: model.subscriptionChatModel,
       }));
   }
 
@@ -445,7 +455,11 @@ export class ModelRegistry {
     const models = this.modelsByAuthType.get(authType);
     if (!models || models.size === 0) return undefined;
     return Array.from(models.values()).find(
-      (model) => !model.imageOnly && !model.voiceOnly && !model.realtimeOnly,
+      (model) =>
+        !model.imageOnly &&
+        !model.voiceOnly &&
+        !model.realtimeOnly &&
+        model.subscriptionChatModel !== false,
     );
   }
 
@@ -509,24 +523,123 @@ export class ModelRegistry {
     ids: string[],
     modelMetadata?: SubscriptionModelMetadata[],
   ): void {
-    const metadataById = new Map(
-      modelMetadata?.map((entry) => [entry.id, entry]),
+    this.subscriptionModels = ids;
+    this.subscriptionMetadata = modelMetadata;
+    this.synchronizeSubscriptionThinking('models');
+    this.registerSubscriptionModels();
+  }
+
+  setSubscriptionScenes(scenes: SubscriptionSceneCatalog | undefined): void {
+    this.subscriptionScenes = scenes;
+    this.synchronizeSubscriptionThinking('scenes');
+    this.registerSubscriptionModels();
+  }
+
+  private synchronizeSubscriptionThinking(source: 'models' | 'scenes'): void {
+    const catalog = synchronizeSubscriptionThinkingStrength(
+      {
+        models: this.subscriptionModels,
+        modelMetadata: this.subscriptionMetadata,
+        scenes: this.subscriptionScenes,
+      },
+      source,
     );
-    this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
-    this.registerAuthTypeModels(
-      AuthType.QWEN_SUBSCRIPTION,
-      ids.map((id) => {
-        const metadata = metadataById.get(id);
-        return {
-          id,
-          baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
-          generationConfig: {
-            modalities: metadata?.modalities,
-            contextWindowSize: metadata?.contextWindowSize ?? tokenLimit(id),
+    this.subscriptionMetadata = catalog.modelMetadata;
+    this.subscriptionScenes = catalog.scenes;
+  }
+
+  private registerSubscriptionModels(): void {
+    const metadataById = new Map(
+      this.subscriptionMetadata?.map((entry) => [entry.id, entry]),
+    );
+    const configs = new Map<string, ModelConfig>();
+    for (const id of this.subscriptionModels) {
+      const metadata = metadataById.get(id);
+      configs.set(id, {
+        id,
+        name: metadata?.name,
+        description: metadata?.description,
+        thinkingStrength: metadata?.thinkingStrength,
+        baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+        subscriptionChatModel: true,
+        subscriptionScenes:
+          this.subscriptionScenes === undefined ? undefined : [],
+        generationConfig: {
+          modalities: metadata?.modalities,
+          contextWindowSize: metadata?.contextWindowSize ?? tokenLimit(id),
+        },
+      });
+    }
+    for (const scene of [
+      'fast',
+      'compaction',
+      'vision',
+      'image',
+      'voice',
+    ] as const) {
+      for (const model of this.subscriptionScenes?.[scene] ?? []) {
+        let config = configs.get(model.id);
+        if (!config) {
+          const modalities =
+            model.input_modalities === undefined
+              ? undefined
+              : Object.fromEntries(
+                  model.input_modalities
+                    .filter((modality) => modality !== 'text')
+                    .map((modality) => [modality, true]),
+                );
+          config = {
+            id: model.id,
+            name: model.display_name,
+            description: model.description,
+            thinkingStrength: model.thinking_strength,
+            baseUrl: QWEN_SUBSCRIPTION_BASE_URL,
+            subscriptionChatModel: false,
+            subscriptionScenes: [],
+            generationConfig: {
+              modalities,
+              contextWindowSize:
+                model.context_window_tokens ?? tokenLimit(model.id),
+            },
+          };
+          configs.set(model.id, config);
+        }
+        const scenes: SubscriptionScene[] = config.subscriptionScenes ?? [];
+        if (!scenes.includes(scene)) scenes.push(scene);
+        config.subscriptionScenes = scenes;
+        config.name ??= model.display_name;
+        config.description ??= model.description;
+        config.thinkingStrength ??= model.thinking_strength;
+        if (scene === 'image') config.supportsImageGeneration = true;
+      }
+    }
+    for (const config of configs.values()) {
+      if (config.thinkingStrength?.length) {
+        const efforts = config.thinkingStrength.map(({ level }) => level);
+        config.capabilities = {
+          reasoning: {
+            thinking: true,
+            disableField: 'enable_thinking',
+            efforts,
+            defaultEffort: efforts.includes('medium') ? 'medium' : efforts[0],
           },
         };
-      }),
-    );
+      }
+      if (
+        !config.subscriptionChatModel &&
+        config.subscriptionScenes?.length === 1
+      ) {
+        const scene = config.subscriptionScenes[0];
+        if (scene === 'image') config.imageOnly = true;
+        if (scene === 'voice') config.voiceOnly = true;
+        if (scene === 'vision') config.visionOnly = true;
+        if (scene === 'fast') config.fastOnly = true;
+      }
+    }
+    this.modelsByAuthType.delete(AuthType.QWEN_SUBSCRIPTION);
+    this.registerAuthTypeModels(AuthType.QWEN_SUBSCRIPTION, [
+      ...configs.values(),
+    ]);
   }
 
   /**
@@ -551,6 +664,9 @@ export class ModelRegistry {
     this.modelsByAuthType = reloaded.modelsByAuthType;
     this.providerProtocolConfig = reloaded.providerProtocolConfig;
     this.modelProvidersConfig = reloaded.modelProvidersConfig;
+    this.subscriptionModels = reloaded.subscriptionModels;
+    this.subscriptionMetadata = reloaded.subscriptionMetadata;
+    this.subscriptionScenes = reloaded.subscriptionScenes;
   }
 
   /** The raw providers config this registry was last built from. */

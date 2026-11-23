@@ -10,6 +10,12 @@ import {
   normalizeImageGenerationBaseUrl,
 } from './image-generation-service.js';
 import type { ImageGenerationRequest } from './image-generation-service.js';
+import { AuthType } from '../core/contentGenerator.js';
+
+const subscriptionFetch = vi.hoisted(() => vi.fn());
+vi.mock('../qwen/subscription-request.js', () => ({
+  fetchSubscriptionInference: subscriptionFetch,
+}));
 
 const networkPolicyMocks = vi.hoisted(() => ({
   resolveNetworkTarget: vi.fn(),
@@ -78,6 +84,29 @@ const run = (
     fetchFn,
     ...over,
   });
+
+it('uses subscription inference for generation and unauthenticated fetching for the image', async () => {
+  subscriptionFetch.mockResolvedValueOnce(typed(dashscope(CDN_IMAGE)));
+  const fetchFn = fetchSeq(pngResponse());
+  const result = await run(fetchFn, {
+    authType: AuthType.QWEN_SUBSCRIPTION,
+    apiKey: '',
+    model: 'qwen-image-3.0',
+  });
+  expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
+  expect(subscriptionFetch).toHaveBeenCalledWith(
+    'image',
+    expect.objectContaining({ method: 'POST' }),
+    fetchFn,
+  );
+  const body = JSON.parse(subscriptionFetch.mock.calls.at(-1)![1].body);
+  expect(body.model).toBe('qwen-image-3.0');
+  expect(body.stream).toBeUndefined();
+  expect(fetchFn).toHaveBeenCalledTimes(1);
+  expect(
+    new Headers(fetchFn.mock.calls[0]?.[1]?.headers).has('Authorization'),
+  ).toBe(false);
+});
 
 describe('normalizeImageGenerationBaseUrl', () => {
   it('accepts a user-configured HTTPS endpoint', () => {

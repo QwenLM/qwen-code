@@ -4845,6 +4845,7 @@ export interface DaemonVoiceModelDescriptor {
   baseUrl?: string;
   contextWindow?: number;
   id: string;
+  authType?: string;
   transport: DaemonVoiceTransport;
 }
 
@@ -4856,6 +4857,7 @@ export interface DaemonWorkspaceVoiceStatus {
   language: string;
   voiceModel: string | null;
   availableVoiceModels: DaemonVoiceModelDescriptor[];
+  modelCatalogWarning?: string;
 }
 
 export interface DaemonWorkspaceVoiceUpdate {

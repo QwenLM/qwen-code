@@ -305,6 +305,13 @@ describe('Voice target route adapters', () => {
 
     expect(client.workspaceById).toHaveBeenCalledWith(secondary.id);
     expect(workspaceVoice).toHaveBeenCalledTimes(1);
+    expect(workspaceVoice).toHaveBeenLastCalledWith(undefined, undefined);
+    await loadVoiceStatus(client as never, target, { refreshModels: true });
+    await loadVoiceStatus(client as never, target, { refreshModels: true });
+    expect(workspaceVoice).toHaveBeenCalledTimes(3);
+    expect(workspaceVoice).toHaveBeenLastCalledWith(undefined, {
+      refreshModels: true,
+    });
     expect(workspaceProviders).not.toHaveBeenCalled();
     expect(setWorkspaceSetting).toHaveBeenCalledWith(
       'workspace',

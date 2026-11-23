@@ -16031,7 +16031,9 @@ export function App({
         !showFallbacksDialogRef.current &&
         !showAuthDialogRef.current;
       try {
-        const status = await loadVoiceStatus(workspace.client, target);
+        const status = await loadVoiceStatus(workspace.client, target, {
+          refreshModels: true,
+        });
         if (!intentIsCurrent()) {
           if (request === voicePickerRequestRef.current) {
             pendingVoicePickerSourceRef.current = undefined;
@@ -16040,13 +16042,15 @@ export function App({
         }
         pendingVoicePickerSourceRef.current = undefined;
         voicePickerTargetRef.current = target;
+        if (status.modelCatalogWarning)
+          pushToast('warning', status.modelCatalogWarning);
         setVoiceModels(
           status.availableVoiceModels.map((model) => ({
             id: model.id,
             label: model.name,
             baseUrl: model.baseUrl,
             contextWindow: model.contextWindow,
-            authType: 'openai',
+            authType: model.authType ?? 'openai',
             modalities: { audio: true },
           })),
         );
@@ -16063,7 +16067,13 @@ export function App({
         reportError(error, t('model.setVoice'));
       }
     },
-    [reportError, t, workspace.capabilities?.features, workspace.client],
+    [
+      pushToast,
+      reportError,
+      t,
+      workspace.capabilities?.features,
+      workspace.client,
+    ],
   );
   useEffect(() => {
     if (
@@ -20805,8 +20815,37 @@ export function App({
             }
             if (modelArg.startsWith('--voice ')) {
               const voiceModelId = modelArg.replace(/^--voice\s+/, '');
-              void writeVoiceModelForTarget(voiceModelId, 'workspace').catch(
-                (error: unknown) => reportError(error, t('model.setVoice')),
+              const target = mainVoiceTargetRef.current;
+              const update = async () => {
+                if (
+                  !target ||
+                  !supportsVoiceModelSettings(target, voiceFeaturesRef.current)
+                ) {
+                  throw new Error(
+                    'Voice model settings are unavailable for this workspace.',
+                  );
+                }
+                const status = await loadVoiceStatus(workspace.client, target, {
+                  refreshModels: true,
+                });
+                if (
+                  mainVoiceTargetRef.current?.ownerKey !== target.ownerKey ||
+                  !supportsVoiceModelSettings(
+                    mainVoiceTargetRef.current,
+                    voiceFeaturesRef.current,
+                  )
+                )
+                  return;
+                if (status.modelCatalogWarning)
+                  pushToast('warning', status.modelCatalogWarning);
+                await writeVoiceModelForTarget(
+                  voiceModelId,
+                  'workspace',
+                  target,
+                );
+              };
+              void update().catch((error: unknown) =>
+                reportError(error, t('model.setVoice')),
               );
               return true;
             }

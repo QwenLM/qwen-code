@@ -40,6 +40,40 @@ afterEach(() => {
 });
 
 describe('ModelDialog current marker', () => {
+  it('matches an endpoint-qualified voice setting to a legacy API-key row', () => {
+    mount(
+      <ModelDialog
+        mode="voice"
+        onSelect={vi.fn()}
+        currentModelId={'openai:qwen3-asr-flash\0https://voice.example/v1'}
+        models={[
+          {
+            id: 'qwen3-asr-flash',
+            authType: 'openai',
+            baseUrl: 'https://voice.example/v1',
+          },
+        ]}
+      />,
+    );
+    expect(container!.querySelector('[aria-selected="true"]')).not.toBeNull();
+  });
+  it('shows subscription voice identity without an API-key field', () => {
+    mount(
+      <ModelDialog
+        mode="voice"
+        onSelect={vi.fn()}
+        models={[
+          {
+            id: 'qwen-subscription:qwen3-asr-flash',
+            authType: 'qwen-subscription',
+            label: 'Qwen ASR',
+          },
+        ]}
+      />,
+    );
+    expect(container!.textContent).toContain('[qwen-subscription]');
+    expect(container!.textContent).not.toContain('API Key');
+  });
   it('marks exactly one row current when two models share an id', () => {
     // Two providers expose the same model id "qwen"; `currentModel` is only an
     // id, so both used to be flagged. Only the first match should be current.
