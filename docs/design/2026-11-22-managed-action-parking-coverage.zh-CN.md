@@ -56,13 +56,13 @@
 
 - **方案。** 放宽停靠资格与两条恢复臂共用的检查 `hostedOriginalPromptText`。user 记录带文字的 Prompt 不变。没有文字时，通过 `readHostedInput` 读回原始输入：带附件的 `hosted-harness` 输入从空文字重新开始，与它的在线 Turn 一致，因为 `executeHostedTurn` 自己会读回附件。其他来源仍要求有文字，因为它们只能依靠文字回退。恢复臂里所有检查 Prompt 文字的地方都用这个函数，包括原来各带一份副本的保存模型请求检查与 memory、skill 结果检查，所以纯图片 Turn 在这些阶段崩溃后也会恢复。
 - **已确认。** journal 恢复出的 user 记录带有 inline 图片，所以今天已允许停靠的"文字 + 图片"Prompt 不需要收紧。Harness 测试 "resumes a parked approval with the original image still in its history" 让一个"文字 + 图片"Prompt 停靠、冷加载后 Allow，恢复时交给 model 的历史里仍以 inline 数据保留着原图。该测试替换了 model 函数，因此没有执行内存中 `InMemoryImagePayloadStore`（`packages/core/src/services/image-payload-references.ts`）在发请求时的驱逐。已允许停靠的"文字 + 图片"Prompt 也有同样的缺口，所以本切片的测试检查的也是这份历史，而不是请求快照（§7）。
-- **待验证。** 运行选项 `prompt: text`（`hosted-harness-session.ts:4486`）的消费方接受空字符串。
+- **已确认（#18164）。** 运行选项 `prompt: text`（`hosted-harness-session.ts:4486`）的消费方接受空字符串：纯图片 Prompt 的线上 Turn 本来就以空文字运行；恢复时这个选项只用来开启 Turn 的预算，从中解析不出任何指令。S1 的停靠测试和崩溃测试都以空文字恢复。
 - **改动面。** 仅 Harness。
 
 ### 4.2 S2：后台任务 + 审批
 
 - **方案。** seal 同时携带 3b 的 background hold 与 `parkedTurn`，Store 只在新能力位公告时接受这种组合。父设计 §4.9 第 3 点已定义：后台终态被 Broker 暂存后，走既有的 staged-wake 路径并清除停靠字段。本切片补充一点：同一事务里对该 Session 的 `hosted_action_parked` 行执行解除停靠（复用父设计 §4.6 的 store 方法）。这样协调器立即重新分派该 Turn，而不是让被 wake 加载重建出来的常驻 Turn 无人消费事件流，一直等到 `retry_after`。
-- **加载路径。** wake 恢复加载属于 `passiveRecovery`（待验证），因此 `takeoverFlags` 为真，会进入审批恢复臂重建等待者。协调器的驱动加载随后按 #17521 的附着规则与之收敛，并从已消费水位重放。后台通知作为 wake 输入挂起，直到 Turn 结算后才由泵投递。在此期间存在其他待处理输入，所以 Session 不会再次停靠。这是有界的：每个后台终态最多导致一次重载。
+- **加载路径。** wake 恢复加载带接管标志（已确认）：扫描的 `recoverForWake` 只带被动标志，wake 栅栏的 `activateForWake` 带 drive 标志，两者都由 `QwenHostedHarnessConnectorTest` 固定；Harness 测试表明带其中任一标志的加载都会接管停靠的审批 Turn。因此 `takeoverFlags` 为真，会进入审批恢复臂重建等待者。协调器的驱动加载随后按 #17521 的附着规则与之收敛，并从已消费水位重放。后台通知作为 wake 输入挂起，直到 Turn 结算后才由泵投递。在此期间存在其他待处理输入，所以 Session 不会再次停靠。这是有界的：每个后台终态最多导致一次重载。
 - **不变量。** 停靠 CAS 不读 background 字段。background hold 的证明仍由 3b 负责；`parkedTurn` 的证明仍是"唯一的活跃 Turn 处于可停靠等待"。两份证书互不推断。
 - **改动面。** Store 的 seal 校验、staged-wake 事务、grant 能力位；Harness 侧放宽资格中"无后台持有"这一项。
 
@@ -79,8 +79,8 @@
 这一切片最大，分两步：先做 monitor、loop、automation 和子结果通知；channel 与 `pr_event` 另有回复计划和渠道结算，放到 S4b。
 
 - **Harness 恢复臂。** 泵在处理"已尝试的 wake 输入"时，如果其检查点处于 `await_action`，并且共享资格函数认可 continuation，就走审批 continuation 驱动器恢复这次等待，不再调用 `settleCrashedWakeTurnAftermath`。这一步单独上线就有价值：修好等审批的 wake Turn 的崩溃恢复。已在 #18170 实现。它还修好了测试中发现的一个更严重的故障：收尾从不把检查点从 `await_action` 挪开，所以它排入的后续 continuation Turn 无法启动，泵随之失败。泵把 continuation 当作该 Turn 运行，并和正常运行后一样结算、消费输入。覆盖范围是 monitor、automation、loop 和 child 结果 Turn 的原生审批；期间被取消的来源以已中止的信号恢复。仍会走到收尾的路径（已经因别的原因 blocked 的 Session、恢复不覆盖的形态）由 #18172 单独修复：它让收尾以 cancelled 结束请求，并推进 `await_action` 检查点。
-- **证书。** 这类 Turn 没有 `ma_turn` 行，到期唤醒只能由 wake 恢复扫描承担。`parkedTurn` 增加 `owner: 'wake'`；`ma_session_head` 增加可空列 `wake_seal_parked_owner`，与其他停靠列在同一个 seal UPDATE 中写入，并在任何递增 generation 的 writer 获取时清除；若清除证书的 writer 随后崩溃，由既有的"无 writer 持有的已提交输入"wake 恢复路径兜底（待验证）。按本模块的规则直接修改 V1 基线，不加迁移。wake 恢复扫描额外选出 `wake_seal_parked_owner = 'wake'` 且 `wake_seal_parked_until <= now` 的 head。这里的 `wake.pending` 仍为 `false`：该输入已被尝试，不属于 3a 定义的"延迟、未尝试"wake 输入，不能复用它的含义。
-- **唤醒来源。** 决定：`ACTION_RESPONSE` 投递在缓存未命中时会加载 Session（`doResolveAction`），这次加载必须是被动接管加载。对 Workspace Session 确实如此（已确认，见 §4.7）。没有 Workspace 且未开启 verified recovery 的 Session 发出的是普通加载；本设计暂不考虑这种情况。取消、审批模式变更：父设计 §4.6 的解除停靠作用于 `ma_turn` 行，wake 所有的停靠没有这样的行。这两条路径改为在同一事务中把 head 的 `wake_seal_parked_until` 置为当前时间，由扫描在下一轮加载（待验证：wake Turn 今天的取消入口及其事务边界）。到期：由扫描处理。
+- **证书。** 这类 Turn 没有 `ma_turn` 行，到期唤醒只能由 wake 恢复扫描承担。`parkedTurn` 增加 `owner: 'wake'`；`ma_session_head` 增加可空列 `wake_seal_parked_owner`，与其他停靠列在同一个 seal UPDATE 中写入，并在任何递增 generation 的 writer 获取时清除；既有的"无 writer 持有的已提交输入"wake 恢复路径，覆盖不了清除证书后又崩溃的 writer（已确认）。获取 writer 时会清除 seal 标记和停靠列，但保留 `is_wake_pending` 与 `wake_head_revision`；而停靠 seal 写入的是 `is_wake_pending = FALSE`、`wake_head_revision = journal_revision`，所以 head 不再处于待扫描状态，`WakeSealStampTest` 固定了这一点。用户 Turn 的停靠仍能通过它的 `ma_turn` 行恢复，wake 所有的停靠却没有这样的行，所以清除 wake 所有证书的那次获取，还要同时置 `is_wake_pending = TRUE`。之后崩溃的 writer 会把 head 留给既有扫描，扫描回放 journal 时会发现那条已尝试但未结算的 wake 输入。按本模块的规则直接修改 V1 基线，不加迁移。wake 恢复扫描额外选出 `wake_seal_parked_owner = 'wake'` 且 `wake_seal_parked_until <= now` 的 head。这里的 `wake.pending` 仍为 `false`：该输入已被尝试，不属于 3a 定义的"延迟、未尝试"wake 输入，不能复用它的含义。
+- **唤醒来源。** 决定：`ACTION_RESPONSE` 投递在缓存未命中时会加载 Session（`doResolveAction`），这次加载必须是被动接管加载。对 Workspace Session 确实如此（已确认，见 §4.7）。没有 Workspace 且未开启 verified recovery 的 Session 发出的是普通加载；本设计暂不考虑这种情况。取消不需要额外步骤（已确认）：公开 API 与 Web Shell 的 Turn 取消都要求存在 `ma_turn` 行，所以 wake Turn 只能经由其来源自己的 Harness 操作（automation 运行的 `cancel_run`、child 运行的停止）或 Session 关闭来取消，而这些操作都会先做一次自己的加载，正是这次加载唤醒了停靠；普通加载会接上这类 Session，由 Harness 测试 "attaches a Session whose wake Turn died in its approval wait through a plain load" 固定。审批模式变更：策略变更是一个只解除 `ma_turn` 行停靠、不加载任何东西的 SQL 事务（`AgentSessionPolicies`），所以它要在同一事务中把 head 的 `wake_seal_parked_until` 置为当前时间，由扫描在下一轮加载。到期：由扫描处理。
 - **与 3a 的关系。** 若同一 Session 还有延迟的未尝试 wake 输入，首个增量仍不停靠，因为"唯一待处理输入"这一条件不变。
 - **改动面。** Harness 泵、Store seal 与扫描、取消和审批模式变更的事务、grant 能力位。
 
